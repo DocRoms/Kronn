@@ -491,6 +491,8 @@ pub fn create_batch_run(
                 author_avatar_email: input.author_avatar_email.clone(),
                 source_msg_id: None,
                 duration_ms: None,
+                target_agent: None,
+                reply_to_message_id: None,
             };
             // Per-item agent override (Compare-agents mode) falls back
             // to the QP's default agent when None.

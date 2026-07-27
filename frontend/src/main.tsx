@@ -5,6 +5,7 @@ import { App } from './App';
 import { I18nProvider } from './lib/I18nContext';
 import { ThemeProvider } from './lib/ThemeContext';
 import { LayoutDensityProvider } from './lib/LayoutDensityContext';
+import { LocalIdentityProvider } from './lib/LocalIdentityContext';
 import { ThemeEffects } from './components/ThemeEffects';
 import { setApiBase } from './lib/api';
 
@@ -30,8 +31,10 @@ initApiBase().then(() => {
       <ThemeProvider>
         <LayoutDensityProvider>
           <I18nProvider>
-            <ThemeEffects />
-            <App />
+            <LocalIdentityProvider>
+              <ThemeEffects />
+              <App />
+            </LocalIdentityProvider>
           </I18nProvider>
         </LayoutDensityProvider>
       </ThemeProvider>

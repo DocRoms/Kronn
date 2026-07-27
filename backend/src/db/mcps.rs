@@ -233,9 +233,10 @@ pub fn insert_config(conn: &Connection, config: &McpConfig) -> Result<()> {
         .map(serde_json::to_string)
         .transpose()?;
 
+    let preferred_interface = default_plugin_interface(conn, &config.server_id)?;
     conn.execute(
-        "INSERT INTO mcp_configs (id, server_id, label, env_encrypted, env_keys_json, args_override, is_global, config_hash, include_general, host_sync)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        "INSERT INTO mcp_configs (id, server_id, label, env_encrypted, env_keys_json, args_override, is_global, config_hash, include_general, host_sync, preferred_interface)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
             config.id,
             config.server_id,
@@ -247,6 +248,7 @@ pub fn insert_config(conn: &Connection, config: &McpConfig) -> Result<()> {
             config.config_hash,
             config.include_general as i32,
             host_sync_to_str(&config.host_sync),
+            plugin_interface_to_str(preferred_interface),
         ],
     )?;
 
@@ -270,6 +272,7 @@ pub fn update_config(
     config_hash: Option<&str>,
     include_general: Option<bool>,
     host_sync: Option<HostSyncMode>,
+    preferred_interface: Option<PluginInterface>,
 ) -> Result<bool> {
     // Load existing, apply changes, write back
     let existing = match get_config(conn, id)? {
@@ -287,13 +290,14 @@ pub fn update_config(
     let new_include_general = include_general.unwrap_or(existing.include_general);
     let new_hash = config_hash.unwrap_or(&existing.config_hash);
     let new_host_sync = host_sync.unwrap_or(existing.host_sync.clone());
+    let new_preferred_interface = preferred_interface.unwrap_or(get_config_preference(conn, id)?);
 
     let env_keys_json = serde_json::to_string(&new_keys)?;
     let args_json = new_args.as_ref().map(serde_json::to_string).transpose()?;
 
     let affected = conn.execute(
-        "UPDATE mcp_configs SET label = ?1, env_encrypted = ?2, env_keys_json = ?3, args_override = ?4, is_global = ?5, config_hash = ?6, include_general = ?7, host_sync = ?8 WHERE id = ?9",
-        params![new_label, new_enc, env_keys_json, args_json, new_global as i32, new_hash, new_include_general as i32, host_sync_to_str(&new_host_sync), id],
+        "UPDATE mcp_configs SET label = ?1, env_encrypted = ?2, env_keys_json = ?3, args_override = ?4, is_global = ?5, config_hash = ?6, include_general = ?7, host_sync = ?8, preferred_interface = ?9 WHERE id = ?10",
+        params![new_label, new_enc, env_keys_json, args_json, new_global as i32, new_hash, new_include_general as i32, host_sync_to_str(&new_host_sync), plugin_interface_to_str(new_preferred_interface), id],
     )?;
     Ok(affected > 0)
 }
@@ -318,6 +322,57 @@ pub(crate) fn parse_host_sync(s: &str) -> HostSyncMode {
         "MirrorAll" => HostSyncMode::MirrorAll,
         _ => HostSyncMode::None,
     }
+}
+
+pub(crate) fn plugin_interface_to_str(interface: PluginInterface) -> &'static str {
+    match interface {
+        PluginInterface::Api => "api",
+        PluginInterface::Mcp => "mcp",
+        PluginInterface::Cli => "cli",
+    }
+}
+
+pub(crate) fn parse_plugin_interface(value: &str) -> PluginInterface {
+    match value {
+        "api" => PluginInterface::Api,
+        "cli" => PluginInterface::Cli,
+        _ => PluginInterface::Mcp,
+    }
+}
+
+pub fn get_config_preference(conn: &Connection, config_id: &str) -> Result<PluginInterface> {
+    let value: String = conn.query_row(
+        "SELECT preferred_interface FROM mcp_configs WHERE id = ?1",
+        params![config_id],
+        |row| row.get(0),
+    )?;
+    Ok(parse_plugin_interface(&value))
+}
+
+fn default_plugin_interface(conn: &Connection, server_id: &str) -> Result<PluginInterface> {
+    let has_api: bool = conn.query_row(
+        "SELECT api_spec_json IS NOT NULL FROM mcp_servers WHERE id = ?1",
+        params![server_id],
+        |row| row.get(0),
+    )?;
+    Ok(if has_api {
+        PluginInterface::Api
+    } else {
+        PluginInterface::Mcp
+    })
+}
+
+pub fn list_config_preferences(conn: &Connection) -> Result<HashMap<String, PluginInterface>> {
+    let mut statement =
+        conn.prepare("SELECT id, preferred_interface FROM mcp_configs ORDER BY id")?;
+    let preferences = statement
+        .query_map([], |row| {
+            let id: String = row.get(0)?;
+            let value: String = row.get(1)?;
+            Ok((id, parse_plugin_interface(&value)))
+        })?
+        .collect::<std::result::Result<HashMap<_, _>, _>>()?;
+    Ok(preferences)
 }
 
 pub fn delete_config(conn: &Connection, id: &str) -> Result<bool> {
@@ -417,6 +472,7 @@ pub fn list_configs_display(
     secret: Option<&str>,
 ) -> Result<Vec<McpConfigDisplay>> {
     let configs = list_configs(conn)?;
+    let preferences = list_config_preferences(conn)?;
     let servers = list_servers(conn)?;
 
     let projects = crate::db::projects::list_projects(conn)?;
@@ -433,6 +489,7 @@ pub fn list_configs_display(
     Ok(configs
         .into_iter()
         .map(|c| {
+            let preferred_interface = preferences.get(&c.id).copied().unwrap_or_default();
             let env_masked: Vec<McpEnvEntry> = c
                 .env_keys
                 .iter()
@@ -474,6 +531,7 @@ pub fn list_configs_display(
                 project_names,
                 secrets_broken,
                 host_sync: c.host_sync,
+                preferred_interface,
             }
         })
         .collect())
@@ -725,6 +783,7 @@ mod tests {
             &conn,
             "nope",
             Some("X"),
+            None,
             None,
             None,
             None,

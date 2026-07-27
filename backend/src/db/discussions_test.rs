@@ -70,6 +70,8 @@ mod tests {
             author_avatar_email: None,
             source_msg_id: None,
             duration_ms: None,
+            target_agent: None,
+            reply_to_message_id: None,
         }
     }
 
@@ -313,6 +315,38 @@ mod tests {
         assert_eq!(messages[0].id, "m1");
     }
 
+    /// KT-58 — a structured `@agent` mention used to vanish into the dispatch
+    /// job: the message row kept no trace of who it was addressed to, so no
+    /// reader could tell "names @codex" from "awaits @codex". The target is now
+    /// stamped by the same transaction that enqueues the job.
+    #[test]
+    fn targeted_dispatch_records_the_target_on_the_message() {
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("d-target")).unwrap();
+
+        insert_message_with_targeted_dispatch(
+            &conn,
+            "d-target",
+            &make_message("m-mention", MessageRole::User, None),
+            "job-1",
+            &AgentType::Codex,
+        )
+        .unwrap();
+        // An ordinary message must stay untargeted — otherwise every mention
+        // would look pending.
+        insert_message(
+            &conn,
+            "d-target",
+            &make_message("m-plain", MessageRole::User, None),
+        )
+        .unwrap();
+
+        let messages = list_messages(&conn, "d-target").unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].target_agent, Some(AgentType::Codex));
+        assert_eq!(messages[1].target_agent, None);
+    }
+
     #[test]
     fn deleted_tail_does_not_reuse_message_sequence() {
         let conn = test_conn();
@@ -494,6 +528,11 @@ mod tests {
             .timestamp
             .to_rfc3339();
 
+        let targets = [MessageTarget::agent(AgentType::Codex)];
+        let first_dispatches = [UserDispatchSpec {
+            job_id: "dispatch-revise-1",
+            agent_override: Some(&AgentType::Codex),
+        }];
         let first = revise_message_with_dispatch(
             &conn,
             ReviseMessageParams {
@@ -502,9 +541,8 @@ mod tests {
                 content: "after",
                 expected_revision: &expected_revision,
                 idempotency_key: "revise-key-1",
-                target_agent: Some(&AgentType::Codex),
-                needs_local_dispatch: true,
-                dispatch_job_id: "dispatch-revise-1",
+                targets: &targets,
+                dispatches: &first_dispatches,
             },
         )
         .unwrap();
@@ -548,6 +586,10 @@ mod tests {
             .unwrap();
         assert!(summary.is_none());
 
+        let duplicate_dispatches = [UserDispatchSpec {
+            job_id: "dispatch-revise-2",
+            agent_override: Some(&AgentType::Codex),
+        }];
         let duplicate = revise_message_with_dispatch(
             &conn,
             ReviseMessageParams {
@@ -556,9 +598,8 @@ mod tests {
                 content: "after",
                 expected_revision: &expected_revision,
                 idempotency_key: "revise-key-1",
-                target_agent: Some(&AgentType::Codex),
-                needs_local_dispatch: true,
-                dispatch_job_id: "dispatch-revise-2",
+                targets: &targets,
+                dispatches: &duplicate_dispatches,
             },
         )
         .unwrap();
@@ -567,7 +608,7 @@ mod tests {
         let jobs: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM agent_dispatch_jobs
-                 WHERE dedupe_key = 'revision:revise-key-1'",
+                 WHERE dedupe_key = 'revision:revise-key-1:Codex'",
                 [],
                 |row| row.get(0),
             )
@@ -582,6 +623,49 @@ mod tests {
             .unwrap();
         assert_eq!(jobs, 1);
         assert_eq!(events, 1);
+    }
+
+    #[test]
+    fn atomic_revision_accepts_api_utc_timestamp_as_the_same_cas_revision() {
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("d-revise-api-timestamp")).unwrap();
+        let mut user = make_message("u-revise-api-timestamp", MessageRole::User, None);
+        user.content = "before".into();
+        insert_message(&conn, "d-revise-api-timestamp", &user).unwrap();
+
+        let stored_revision: String = conn
+            .query_row(
+                "SELECT timestamp FROM messages WHERE id = 'u-revise-api-timestamp'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(stored_revision.ends_with("+00:00"));
+        let api_revision = chrono::DateTime::parse_from_rfc3339(&stored_revision)
+            .unwrap()
+            .with_timezone(&Utc)
+            .to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true);
+        assert!(api_revision.ends_with('Z'));
+
+        let revised = revise_message_with_dispatch(
+            &conn,
+            ReviseMessageParams {
+                discussion_id: "d-revise-api-timestamp",
+                message_id: "u-revise-api-timestamp",
+                content: "after",
+                expected_revision: &api_revision,
+                idempotency_key: "api-timestamp-revision",
+                targets: &[],
+                dispatches: &[],
+            },
+        )
+        .unwrap();
+
+        assert!(!revised.receipt.duplicate);
+        assert_eq!(
+            list_messages(&conn, "d-revise-api-timestamp").unwrap()[0].content,
+            "after"
+        );
     }
 
     #[test]
@@ -603,9 +687,8 @@ mod tests {
                 content: "first edit",
                 expected_revision: &expected_revision,
                 idempotency_key: "peer-revision-1",
-                target_agent: None,
-                needs_local_dispatch: false,
-                dispatch_job_id: "unused-job",
+                targets: &[],
+                dispatches: &[],
             },
         )
         .unwrap();
@@ -620,9 +703,8 @@ mod tests {
                 content: "divergent edit",
                 expected_revision: &expected_revision,
                 idempotency_key: "peer-revision-2",
-                target_agent: None,
-                needs_local_dispatch: false,
-                dispatch_job_id: "unused-job-2",
+                targets: &[],
+                dispatches: &[],
             },
         )
         .unwrap_err();
@@ -636,6 +718,126 @@ mod tests {
         assert_eq!(
             list_messages(&conn, "d-peer-revise").unwrap()[0].content,
             "first edit"
+        );
+    }
+
+    #[test]
+    fn atomic_revision_replaces_plural_targets_and_enqueues_each_once() {
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("d-plural-revise")).unwrap();
+        let mut user = make_message("u-plural-revise", MessageRole::User, None);
+        user.content = "before".into();
+        insert_message(&conn, "d-plural-revise", &user).unwrap();
+        let expected_revision = list_messages(&conn, "d-plural-revise").unwrap()[0]
+            .timestamp
+            .to_rfc3339();
+        let targets = [
+            MessageTarget::agent(AgentType::Codex),
+            MessageTarget::agent(AgentType::ClaudeCode),
+        ];
+        let dispatches = [
+            UserDispatchSpec {
+                job_id: "plural-revise-codex",
+                agent_override: Some(&AgentType::Codex),
+            },
+            UserDispatchSpec {
+                job_id: "plural-revise-claude",
+                agent_override: Some(&AgentType::ClaudeCode),
+            },
+        ];
+
+        let outcome = revise_message_with_dispatch(
+            &conn,
+            ReviseMessageParams {
+                discussion_id: "d-plural-revise",
+                message_id: "u-plural-revise",
+                content: "@codex after @claude",
+                expected_revision: &expected_revision,
+                idempotency_key: "plural-revision-key",
+                targets: &targets,
+                dispatches: &dispatches,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            outcome.claimed_dispatch.as_ref().map(|job| job.id.as_str()),
+            Some("plural-revise-codex"),
+        );
+        assert_eq!(
+            list_message_targets(&conn, "u-plural-revise").unwrap(),
+            targets,
+        );
+        let jobs: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM agent_dispatch_jobs
+                 WHERE trigger_message_id = 'u-plural-revise'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(jobs, 2);
+        assert_eq!(
+            crate::db::agent_dispatch::get(&conn, "plural-revise-claude")
+                .unwrap()
+                .unwrap()
+                .status,
+            crate::db::agent_dispatch::DispatchStatus::Pending,
+        );
+    }
+
+    #[test]
+    fn stale_revision_dispatch_is_cancelled_when_native_agent_was_disabled() {
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("d-disabled-revise")).unwrap();
+        let mut user = make_message("u-disabled-revise", MessageRole::User, None);
+        user.content = "before".into();
+        insert_message(&conn, "d-disabled-revise", &user).unwrap();
+        conn.execute(
+            "UPDATE discussions SET no_agent = 1 WHERE id = 'd-disabled-revise'",
+            [],
+        )
+        .unwrap();
+        let expected_revision = list_messages(&conn, "d-disabled-revise").unwrap()[0]
+            .timestamp
+            .to_rfc3339();
+
+        let targets = [MessageTarget::agent(AgentType::Codex)];
+        let dispatches = [UserDispatchSpec {
+            job_id: "dispatch-disabled-revise",
+            agent_override: Some(&AgentType::Codex),
+        }];
+        let revised = revise_message_with_dispatch(
+            &conn,
+            ReviseMessageParams {
+                discussion_id: "d-disabled-revise",
+                message_id: "u-disabled-revise",
+                content: "after",
+                expected_revision: &expected_revision,
+                idempotency_key: "disabled-revision",
+                targets: &targets,
+                dispatches: &dispatches,
+            },
+        )
+        .unwrap();
+
+        assert!(revised.claimed_dispatch.is_none());
+        let job = crate::db::agent_dispatch::get(&conn, "dispatch-disabled-revise")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            job.status,
+            crate::db::agent_dispatch::DispatchStatus::Cancelled
+        );
+        assert_eq!(job.last_error.as_deref(), Some("agent_disabled"));
+        assert_eq!(
+            conn.query_row(
+                "SELECT awaiting_agent FROM discussions WHERE id = 'd-disabled-revise'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            0
         );
     }
 
@@ -2070,5 +2272,93 @@ mod tests {
         .unwrap();
         // No set_awaiting_agent → flag stays 0 (default).
         assert!(reconcile_awaiting_agents(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn plural_targets_commit_once_with_one_durable_job_per_agent() {
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("d-plural-targets")).unwrap();
+        let mut message = make_message("u-plural-targets", MessageRole::User, None);
+        message.content = "@codex confronte @claude".into();
+        message.target_agent = Some(AgentType::Codex);
+        let targets = [
+            MessageTarget::agent(AgentType::Codex),
+            MessageTarget::agent(AgentType::ClaudeCode),
+        ];
+        let dispatches = [
+            UserDispatchSpec {
+                job_id: "plural-codex",
+                agent_override: Some(&AgentType::Codex),
+            },
+            UserDispatchSpec {
+                job_id: "plural-claude",
+                agent_override: Some(&AgentType::ClaudeCode),
+            },
+        ];
+
+        let inserted = insert_user_message_with_dispatches(
+            &conn,
+            "d-plural-targets",
+            &message,
+            &targets,
+            &dispatches,
+        )
+        .unwrap();
+        let InsertUserMessageOutcome::Inserted { dispatch_job, .. } = inserted else {
+            panic!("first acceptance must insert");
+        };
+        assert_eq!(
+            dispatch_job.as_ref().map(|job| job.id.as_str()),
+            Some("plural-codex"),
+        );
+        assert_eq!(
+            list_message_targets(&conn, "u-plural-targets").unwrap(),
+            targets,
+        );
+        assert_eq!(
+            crate::db::agent_dispatch::get(&conn, "plural-codex")
+                .unwrap()
+                .unwrap()
+                .status,
+            crate::db::agent_dispatch::DispatchStatus::Running,
+        );
+        assert_eq!(
+            crate::db::agent_dispatch::get(&conn, "plural-claude")
+                .unwrap()
+                .unwrap()
+                .status,
+            crate::db::agent_dispatch::DispatchStatus::Pending,
+        );
+
+        let duplicate = insert_user_message_with_dispatches(
+            &conn,
+            "d-plural-targets",
+            &message,
+            &targets,
+            &[
+                UserDispatchSpec {
+                    job_id: "plural-codex-retry",
+                    agent_override: Some(&AgentType::Codex),
+                },
+                UserDispatchSpec {
+                    job_id: "plural-claude-retry",
+                    agent_override: Some(&AgentType::ClaudeCode),
+                },
+            ],
+        )
+        .unwrap();
+        assert!(matches!(
+            duplicate,
+            InsertUserMessageOutcome::Duplicate { .. }
+        ));
+        let job_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM agent_dispatch_jobs
+             WHERE trigger_message_id = 'u-plural-targets'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(job_count, 2);
     }
 }

@@ -348,7 +348,7 @@ dev_missing_tools() {
 # Pure process pattern shared by native-dev preflight/reaping. Keep it narrow:
 # a bare `watchexec` pattern would kill unrelated watchers owned by the user.
 dev_backend_watcher_pattern() {
-    echo "watchexec.*cargo run"
+    echo "watchexec.*dev-backend-watch-command"
 }
 
 # Wait until a child-owned HTTP endpoint is ready. Returns:
@@ -376,6 +376,47 @@ wait_for_process_http_ready() {
     done
 
     return 1
+}
+
+# Report whether both long-lived native-dev children are still alive after the
+# initial readiness gate. Bash 3.2 has no `wait -n`, so `kronn start-dev` polls
+# this tiny helper instead of leaving Vite alive when the backend watcher dies.
+# Prints one stable state and returns:
+#   0 — both processes are alive
+#   2 — backend watcher exited
+#   3 — frontend exited
+dev_stack_process_state() {
+    local backend_pid="${1:-}" frontend_pid="${2:-}"
+
+    [[ -n "$backend_pid" && -n "$frontend_pid" ]] || {
+        echo "invalid"
+        return 2
+    }
+    if ! kill -0 "$backend_pid" 2>/dev/null; then
+        echo "backend-exited"
+        return 2
+    fi
+    if ! kill -0 "$frontend_pid" 2>/dev/null; then
+        echo "frontend-exited"
+        return 3
+    fi
+    echo "running"
+    return 0
+}
+
+# A watchexec parent deliberately stays alive when its child command fails.
+# Classify the cargo/backend exit so the watched command can leave a durable
+# marker for the outer `kronn start-dev` supervisor. Signal exits produced by
+# an ordinary file-change restart are expected; compile errors and application
+# boot failures are not.
+dev_backend_exit_is_failure() {
+    local status="${1:-}"
+
+    [[ "$status" =~ ^[0-9]+$ ]] || return 0
+    case "$status" in
+        0|130|143) return 1 ;;
+        *) return 0 ;;
+    esac
 }
 
 # Print `url` as an OSC 8 terminal hyperlink (clickable in Terminal.app, iTerm2,

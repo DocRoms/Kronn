@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import '../pages/DiscussionsPage.css';
 import { discussions as discussionsApi } from '../lib/api';
 import type { Project, AgentDetection, Discussion, AgentType } from '../types/generated';
-import { isUsable, isValidationDisc, isBriefingDisc, isBootstrapDisc } from '../lib/constants';
+import { AGENT_MENTIONS, isUsable, isValidationDisc, isBriefingDisc, isBootstrapDisc } from '../lib/constants';
 import type { ToastFn } from '../hooks/useToast';
 import {
   GitBranch,
@@ -11,11 +11,19 @@ import {
   Menu, Lock, Unlock, Star,
   FlaskConical, Info, UserCircle,
   ListTodo,
+  Download,
+  Loader2,
+  Power,
+  PowerOff,
+  Search,
 } from 'lucide-react';
 import { MatrixText } from './MatrixText';
 import { LearningsBadge } from './LearningsBadge';
 import { DiscParticipantsHeader } from './DiscParticipantsHeader';
 import { AgentSwitchPicker } from './AgentSwitchPicker';
+import { DiscussionSessionBinding } from './DiscussionSessionBinding';
+import { triggerDownload } from '../lib/downloadBlob';
+import { ContextHelp } from './ContextHelp';
 
 export interface ChatHeaderProps {
   discussion: Discussion;
@@ -24,6 +32,7 @@ export interface ChatHeaderProps {
   showGitPanel: boolean;
   showPlanPanel?: boolean;
   showSettingsPanel?: boolean;
+  showMessageSearch?: boolean;
   planCompleted?: number;
   planTotal?: number;
   planLater?: number;
@@ -41,6 +50,7 @@ export interface ChatHeaderProps {
   onToggleGitPanel: () => void;
   onTogglePlanPanel?: () => void;
   onToggleSettingsPanel?: () => void;
+  onToggleMessageSearch?: () => void;
   onToggleSidebar: () => void;
   onDelete: (discId: string) => void;
   onDiscussionUpdated: () => void;
@@ -56,6 +66,7 @@ export function ChatHeader({
   showGitPanel,
   showPlanPanel = false,
   showSettingsPanel = false,
+  showMessageSearch = false,
   planCompleted = 0,
   planTotal = 0,
   planLater = 0,
@@ -68,6 +79,7 @@ export function ChatHeader({
   onToggleGitPanel,
   onTogglePlanPanel,
   onToggleSettingsPanel,
+  onToggleMessageSearch,
   onToggleSidebar,
   onDelete,
   onDiscussionUpdated,
@@ -79,11 +91,44 @@ export function ChatHeader({
   const [editingTitleId, setEditingTitleId] = useState<string | null>(null);
   const [editingTitleText, setEditingTitleText] = useState('');
   const [isDiscIdCopied, setIsDiscIdCopied] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [nativeAgentMode, setNativeAgentMode] = useState<{
+    discussionId: string;
+    disabled: boolean;
+  } | null>(null);
+  const [nativeAgentModeSaving, setNativeAgentModeSaving] = useState(false);
+  const exportInFlight = useRef(false);
+  const nativeAgentModeInFlight = useRef(false);
   const discIdResetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => () => {
     if (discIdResetTimer.current) clearTimeout(discIdResetTimer.current);
   }, []);
+
+  useEffect(() => {
+    let current = true;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    const loadNativeAgentMode = () => {
+      void discussionsApi.nativeAgentMode(discussion.id)
+        .then(mode => {
+          if (current) {
+            setNativeAgentMode({ discussionId: discussion.id, disabled: mode.disabled });
+          }
+        })
+        .catch(() => {
+          // Never guess "enabled" after a transient backend failure: that
+          // would make the header contradict the persisted no-agent routing
+          // contract. Keep both actions disabled and retry the authoritative
+          // backend state after reconnect.
+          if (current) retryTimer = setTimeout(loadNativeAgentMode, 5_000);
+        });
+    };
+    loadNativeAgentMode();
+    return () => {
+      current = false;
+      if (retryTimer) clearTimeout(retryTimer);
+    };
+  }, [discussion.id]);
 
   const copyDiscussionId = async () => {
     try {
@@ -103,9 +148,32 @@ export function ChatHeader({
   const skillCount = discussion.skill_ids?.length ?? 0;
   const directiveCount = discussion.directive_ids?.length ?? 0;
   const hasConfiguredContext = profileCount + skillCount + directiveCount > 0;
+  const nativeAgentDisabled = nativeAgentMode?.discussionId === discussion.id
+    ? nativeAgentMode.disabled
+    : null;
+
+  const updateNativeAgentMode = async (disabled: boolean) => {
+    if (nativeAgentModeInFlight.current || sending) return;
+    nativeAgentModeInFlight.current = true;
+    setNativeAgentModeSaving(true);
+    try {
+      await discussionsApi.update(discussion.id, { no_agent: disabled });
+      setNativeAgentMode({ discussionId: discussion.id, disabled });
+      onDiscussionUpdated();
+      toast(
+        t(disabled ? 'disc.nativeAgentDisabledToast' : 'disc.nativeAgentEnabledToast'),
+        'success',
+      );
+    } catch (error) {
+      toast(String(error), 'error');
+    } finally {
+      nativeAgentModeInFlight.current = false;
+      setNativeAgentModeSaving(false);
+    }
+  };
 
   return (
-    <div className="disc-chat-header">
+    <div className="disc-chat-header" data-tour-id="disc-header-controls">
       {isMobile && (
         <button
           className="disc-mobile-sidebar-btn"
@@ -117,7 +185,7 @@ export function ChatHeader({
       )}
       <div className="disc-chat-header-info">
         <div className="disc-chat-header-top">
-          <div className="disc-chat-header-title">
+          <div className="disc-chat-header-title" data-tour-id="disc-identity-controls">
           {/* Pin / favorite toggle — always visible in the header so the user
               can pin from inside the conversation. Outline = not pinned,
               filled yellow = pinned. Sidebar shows the result in its
@@ -193,6 +261,7 @@ export function ChatHeader({
           <button
             type="button"
             className="disc-id-pill"
+            data-tour-id="discussion-id-pill"
             data-copied={isDiscIdCopied}
             onClick={(e) => {
               e.stopPropagation();
@@ -204,6 +273,17 @@ export function ChatHeader({
             {isDiscIdCopied ? <Check size={8} /> : null}
             #{discussion.id.slice(0, 8)}
           </button>
+          <DiscussionSessionBinding discussionId={discussion.id} toast={toast} t={t} />
+          <ContextHelp title={t('contextHelp.discussion.title')}>
+            <p>{t('contextHelp.discussion.intro')}</p>
+            <ul>
+              <li>{t('contextHelp.discussion.mainAgent')}</li>
+              <li>{t('contextHelp.discussion.participants')}</li>
+              <li>{t('contextHelp.discussion.messages')}</li>
+              <li>{t('contextHelp.discussion.outputs')}</li>
+            </ul>
+            <p className="kr-context-help-agent-note">{t('contextHelp.discussion.mcp')}</p>
+          </ContextHelp>
           {!isValidationDisc(discussion.title) && !isBootstrapDisc(discussion.title) && !isBriefingDisc(discussion.title) && (
           <button
             className="disc-icon-btn"
@@ -233,23 +313,59 @@ export function ChatHeader({
               ? (projects.find(p => p.id === discussion.project_id)?.name ?? '?')
               : t('disc.general')}
           </span>
-          <span className="relative flex-row gap-1">
-            <AgentSwitchPicker
-              currentAgent={discussion.agent}
-              availableAgents={installedAgentsList.map(agent => agent.agent_type)}
-              disabled={sending}
-              title={t('disc.switchAgent')}
-              ariaLabel={t('disc.switchAgent')}
-              onChange={async agent => {
-                try {
-                  await discussionsApi.update(discussion.id, { agent });
-                  onAgentSwitch(agent);
-                } catch (err) {
-                  toast(String(err), 'error');
-                  throw err;
-                }
-              }}
-            />
+          <span className="disc-native-agent-control">
+            {nativeAgentDisabled ? (
+              <button
+                type="button"
+                className="kr-agent-switch-btn disc-native-agent-disabled"
+                data-testid="disc-native-agent-disabled"
+                disabled={sending || nativeAgentModeSaving}
+                title={t('disc.nativeAgentEnable')}
+                aria-label={t('disc.nativeAgentEnable')}
+                onClick={() => void updateNativeAgentMode(false)}
+              >
+                {nativeAgentModeSaving
+                  ? <Loader2 size={9} className="spin" />
+                  : <Power size={9} />}
+                <span>{t('disc.nativeAgentDisabled')}</span>
+              </button>
+            ) : (
+              <>
+                <AgentSwitchPicker
+                  currentAgent={discussion.agent}
+                  availableAgents={installedAgentsList.map(agent => agent.agent_type)}
+                  disabled={sending || nativeAgentDisabled === null || nativeAgentModeSaving}
+                  title={t('disc.switchAgent')}
+                  ariaLabel={t('disc.switchAgent')}
+                  suffix={t('disc.targetDiscussionAgent')}
+                  displayName={
+                    AGENT_MENTIONS.find(mention => mention.type === discussion.agent)?.trigger
+                    ?? discussion.agent
+                  }
+                  onChange={async agent => {
+                    try {
+                      await discussionsApi.update(discussion.id, { agent });
+                      onAgentSwitch(agent);
+                    } catch (err) {
+                      toast(String(err), 'error');
+                      throw err;
+                    }
+                  }}
+                />
+                <button
+                  type="button"
+                  className="disc-native-agent-toggle"
+                  disabled={sending || nativeAgentDisabled === null || nativeAgentModeSaving}
+                  title={t('disc.nativeAgentDisable')}
+                  aria-label={t('disc.nativeAgentDisable')}
+                  onClick={() => void updateNativeAgentMode(true)}
+                >
+                  {nativeAgentModeSaving
+                    ? <Loader2 size={9} className="spin" />
+                    : <PowerOff size={9} />}
+                </button>
+              </>
+            )}
           </span>
           {discussion.workspace_mode === 'Isolated' && discussion.worktree_branch && (
             <span className="disc-worktree-badge" data-locked={!!discussion.workspace_path}>
@@ -310,9 +426,22 @@ export function ChatHeader({
           )}
         </div>
       </div>
-      <div className="disc-chat-header-actions">
+      <div className="disc-chat-header-actions" data-tour-id="disc-output-controls">
         {/* 0.10.0 — pending-learnings badge (self-contained; hidden when 0). */}
         <LearningsBadge t={t} toast={toast} />
+        {onToggleMessageSearch && (
+          <button
+            type="button"
+            className="disc-icon-btn"
+            data-active={showMessageSearch}
+            onClick={onToggleMessageSearch}
+            title={t('disc.messageSearch.open')}
+            aria-label={t('disc.messageSearch.open')}
+            aria-expanded={showMessageSearch}
+          >
+            <Search size={13} />
+          </button>
+        )}
         <button
           type="button"
           className="disc-icon-btn"
@@ -323,6 +452,31 @@ export function ChatHeader({
           aria-expanded={showSettingsPanel}
         >
           <Settings size={13} />
+        </button>
+
+        <button
+          type="button"
+          className="disc-icon-btn"
+          disabled={exporting}
+          onClick={async () => {
+            if (exportInFlight.current) return;
+            exportInFlight.current = true;
+            setExporting(true);
+            try {
+              const { filename, blob } = await discussionsApi.exportDiscussion(discussion.id);
+              triggerDownload(filename, blob);
+              toast(t('disc.portability.exportDone'), 'success');
+            } catch (error) {
+              toast(t('disc.portability.exportError', String(error)), 'error');
+            } finally {
+              exportInFlight.current = false;
+              setExporting(false);
+            }
+          }}
+          title={t('disc.portability.exportHint')}
+          aria-label={t('disc.portability.export')}
+        >
+          {exporting ? <Loader2 size={13} className="spin" /> : <Download size={13} />}
         </button>
 
         <button

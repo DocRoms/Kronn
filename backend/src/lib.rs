@@ -657,6 +657,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             get(api::setup::get_agent_access).post(api::setup::set_agent_access),
         )
         .route(
+            "/api/config/agent-mention-color",
+            post(api::setup::set_agent_mention_color),
+        )
+        .route(
             "/api/config/model-tiers",
             get(api::setup::get_model_tiers).post(api::setup::set_model_tiers),
         )
@@ -675,6 +679,8 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/config/db-info", get(api::setup::db_info))
         .route("/api/db/backup", post(api::setup::db_backup))
         .route("/api/config/export", get(api::setup::export_data))
+        // ── Compact opaque-ID resolution (MCP token economy) ──
+        .route("/api/resolve/{id}", get(api::id_resolver::resolve))
         // Whole-DB restore: exports routinely exceed axum's ~2 MB default body
         // limit (a few hundred discussions ≈ 2 MB ZIP). Without this, any
         // non-trivial export fails the upload with "Error parsing
@@ -922,6 +928,24 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             "/api/projects/{id}/git-blame",
             get(api::projects::git_blame),
         )
+        // KT-67 — detail behind an annotated line (metadata + message, no patch).
+        .route(
+            "/api/projects/{id}/git-commit",
+            get(api::projects::git_commit_detail),
+        )
+        // KT-75 — the patch itself, for the temporary commit tab.
+        .route(
+            "/api/projects/{id}/git-commit-patch",
+            get(api::projects::git_commit_patch),
+        )
+        .route(
+            "/api/projects/{id}/git-branches",
+            get(api::projects::git_branches),
+        )
+        .route(
+            "/api/projects/{id}/git-switch",
+            post(api::projects::git_switch),
+        )
         .route(
             "/api/projects/{id}/git-branch",
             post(api::projects::git_branch),
@@ -973,10 +997,27 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/mcps", get(api::mcps::overview))
         .route("/api/mcps/registry", get(api::mcps::list_registry))
         .route("/api/mcps/refresh", post(api::mcps::refresh))
+        .route(
+            "/api/mcps/bundles/preview",
+            post(api::plugin_portability::preview_plugin_bundle),
+        )
+        .route(
+            "/api/mcps/bundles/export",
+            post(api::plugin_portability::export_plugin_bundle),
+        )
+        .route(
+            "/api/mcps/bundles/import",
+            post(api::plugin_portability::import_plugin_bundle)
+                .layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024)),
+        )
         .route("/api/mcps/configs", post(api::mcps::create_config))
         .route(
             "/api/mcps/configs/{id}",
             patch(api::mcps::update_config).delete(api::mcps::delete_config),
+        )
+        .route(
+            "/api/mcps/configs/{id}/probe",
+            post(api::mcps::probe_config),
         )
         // 0.8.6 — Custom API plugin spec edit. Lets the user fix a
         // typo / add endpoints / change docs_url WITHOUT delete+recreate.
@@ -1249,12 +1290,29 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         // ── Discussions ──
         .route("/api/discussions", get(api::discussions::list))
         .route("/api/discussions", post(api::discussions::create))
+        .route(
+            "/api/discussions/import",
+            post(api::disc_portability::import_discussion)
+                .layer(axum::extract::DefaultBodyLimit::max(512 * 1024 * 1024)),
+        )
+        .route(
+            "/api/tour/demo-discussion",
+            post(api::disc_portability::ensure_tour_demo_discussion),
+        )
         // Static segment BEFORE the `{id}` capture so it isn't swallowed by it.
         .route(
             "/api/discussions/running",
             get(api::discussions::running_discussions),
         )
         .route("/api/discussions/{id}", get(api::discussions::get))
+        .route(
+            "/api/discussions/{id}/native-agent",
+            get(api::discussions::native_agent_mode),
+        )
+        .route(
+            "/api/discussions/{id}/export",
+            get(api::disc_portability::export_discussion),
+        )
         .route(
             "/api/discussions/{id}",
             delete(api::discussions::delete).patch(api::discussions::update),
@@ -1356,10 +1414,20 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/disc/link", post(api::disc_source::disc_link))
         .route("/api/disc/unlink", post(api::disc_source::disc_unlink))
         .route(
+            "/api/disc/session-status",
+            get(api::disc_source::disc_session_status),
+        )
+        .route(
             "/api/disc/find_by_session",
             get(api::disc_source::disc_find_by_session),
         )
         .route("/api/disc/search", get(api::disc_source::disc_search))
+        // KT-65 — message-level search: returns the matching turns, not just
+        // the rooms, so a result can open the exact message.
+        .route(
+            "/api/disc/search/messages",
+            get(api::disc_source::message_search),
+        )
         .route(
             "/api/disc/load_other",
             get(api::disc_source::disc_load_other),
@@ -1370,6 +1438,12 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route(
             "/api/disc/sources",
             get(api::disc_source::list_source_bindings),
+        )
+        // Provenance of PORTABLE imports — a different notion from the CLI
+        // binding above (KT-74).
+        .route(
+            "/api/disc/imports",
+            get(api::disc_portability::list_discussion_imports),
         )
         .route(
             "/api/discussions/{id}/source",

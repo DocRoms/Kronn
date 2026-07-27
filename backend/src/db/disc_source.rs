@@ -13,14 +13,19 @@
 //! feature easy to reason about (and audit) end-to-end.
 //!
 //! See `project_cross_agent_memory_0_8_4.md` in memory for the design
-//! rationale (last-link-wins, idempotent appends via `source_msg_id`,
-//! divergence detection via `diverged_at`).
+//! rationale (idempotent appends via `source_msg_id`, divergence detection via
+//! `diverged_at`). NOTE: the original "last-link-wins" rule is GONE (KT-85) —
+//! a discussion carries one open binding per joined session, because a
+//! cross-agent room is the normal case and evicting the other peers made their
+//! resume lookup silently empty.
 
 use anyhow::Result;
 use chrono::Utc;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
+
+pub const SOURCE_BINDING_VERSION: i64 = 1;
 
 /// One row of source-binding history. `unlinked_at IS NULL` ⇒
 /// currently bound. The frontend renders these in a tooltip so the
@@ -29,6 +34,7 @@ use ts_rs::TS;
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct DiscSourceHistoryEntry {
+    pub binding_version: i64,
     pub source_agent: String,
     pub source_session_id: String,
     pub linked_at: String,
@@ -42,10 +48,9 @@ pub struct DiscSourceHistoryEntry {
 /// — re-binding the same session does NOT duplicate the history row
 /// (open row already exists for that pair).
 ///
-/// If the disc is currently bound to a DIFFERENT (agent, session)
-/// pair, the open history row for the previous binding is closed
-/// (unlinked_at = now) before the new binding is recorded — "last
-/// link wins" semantics.
+/// Other sessions bound to the SAME disc are left alone (KT-85): several CLIs
+/// legitimately share one room. Only the calling session's binding on ANOTHER
+/// disc is released, which is the invariant the partial unique index enforces.
 pub fn bind_to_source(
     conn: &Connection,
     disc_id: &str,
@@ -53,6 +58,35 @@ pub fn bind_to_source(
     source_session_id: &str,
 ) -> Result<()> {
     let now = Utc::now().to_rfc3339();
+
+    // A concrete CLI session can resume exactly one Kronn discussion. Close
+    // an older ownership row on another discussion before inserting here.
+    // Migration 092 backs this invariant with a partial unique index.
+    conn.execute(
+        "UPDATE disc_source_history
+         SET unlinked_at = ?4
+         WHERE source_agent = ?1
+           AND source_session_id = ?2
+           AND disc_id != ?3
+           AND unlinked_at IS NULL",
+        params![source_agent, source_session_id, disc_id, now],
+    )?;
+    // The rooms this session just left keep their OTHER bindings, so their
+    // legacy pointer must be recomputed rather than blanked (KT-85).
+    let vacated: Vec<String> = {
+        let mut statement = conn.prepare(
+            "SELECT id FROM discussions
+             WHERE id != ?3 AND source_agent = ?1 AND source_session_id = ?2",
+        )?;
+        let rows = statement
+            .query_map(params![source_agent, source_session_id, disc_id], |row| {
+                row.get::<_, String>(0)
+            })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for vacated_disc in &vacated {
+        refresh_legacy_pointer(conn, vacated_disc)?;
+    }
 
     // Check whether a row for THIS pair is already open (idempotent
     // re-bind). If so, only the disc columns need updating — the
@@ -70,18 +104,24 @@ pub fn bind_to_source(
         .unwrap_or(false);
 
     if !already_open {
-        // Close any other open binding on this disc — only one source
-        // can own a disc at a time.
+        // KT-85 — do NOT close the other sessions bound to this discussion. A
+        // cross-agent room legitimately carries one binding per joined session,
+        // and closing them made the last joiner evict everyone else: their
+        // `disc_find_by_session` went silently empty after an MCP reload, which
+        // is exactly the reconnection this substrate exists to guarantee.
+        // A session bound to ANOTHER discussion is still released above — that
+        // invariant is the one the partial unique index protects.
         conn.execute(
-            "UPDATE disc_source_history
-             SET unlinked_at = ?2
-             WHERE disc_id = ?1 AND unlinked_at IS NULL",
-            params![disc_id, now],
-        )?;
-        conn.execute(
-            "INSERT INTO disc_source_history (disc_id, source_agent, source_session_id, linked_at)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![disc_id, source_agent, source_session_id, now],
+            "INSERT INTO disc_source_history
+                (disc_id, source_agent, source_session_id, linked_at, binding_version)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                disc_id,
+                source_agent,
+                source_session_id,
+                now,
+                SOURCE_BINDING_VERSION
+            ],
         )?;
     }
 
@@ -90,10 +130,85 @@ pub fn bind_to_source(
          SET source_agent = ?2,
              source_session_id = ?3,
              imported_at = COALESCE(imported_at, ?4),
-             diverged_at = NULL
+             diverged_at = NULL,
+             source_binding_version = ?5
          WHERE id = ?1",
-        params![disc_id, source_agent, source_session_id, now],
+        params![
+            disc_id,
+            source_agent,
+            source_session_id,
+            now,
+            SOURCE_BINDING_VERSION
+        ],
     )?;
+    Ok(())
+}
+
+/// The discussion's CURRENT binding — the most recent open one.
+///
+/// KT-85 — the detail endpoint used to scan `list_all_source_bindings()` and take
+/// the first hit; now that a room has several, that scan returned the OLDEST
+/// binding. This reads the pointer `refresh_legacy_pointer` maintains.
+pub fn current_source_binding(
+    conn: &Connection,
+    disc_id: &str,
+) -> Result<Option<DiscSourceBinding>> {
+    let row = conn
+        .query_row(
+            "SELECT id, source_agent, source_session_id, imported_at, diverged_at,
+                    source_binding_version
+             FROM discussions
+             WHERE id = ?1 AND source_agent IS NOT NULL AND source_session_id IS NOT NULL",
+            [disc_id],
+            |row| {
+                Ok(DiscSourceBinding {
+                    disc_id: row.get(0)?,
+                    source_agent: row.get(1)?,
+                    source_session_id: row.get(2)?,
+                    imported_at: row.get(3)?,
+                    diverged_at: row.get(4)?,
+                    binding_version: row.get(5)?,
+                })
+            },
+        )
+        .optional()?;
+    Ok(row)
+}
+
+/// Point `discussions.source_*` at the most recent OPEN binding of this disc,
+/// or clear it when none remains.
+///
+/// KT-85 — those columns predate multi-binding and are still read by the detail
+/// panel and by divergence. With N bindings they are a "latest" pointer, so any
+/// close/move has to recompute them: blanking them while other sessions are
+/// still bound left the UI claiming the room had no source at all.
+fn refresh_legacy_pointer(conn: &Connection, disc_id: &str) -> Result<()> {
+    let latest: Option<(String, String, i64)> = conn
+        .query_row(
+            "SELECT source_agent, source_session_id, binding_version
+             FROM disc_source_history
+             WHERE disc_id = ?1 AND unlinked_at IS NULL
+             ORDER BY linked_at DESC, id DESC
+             LIMIT 1",
+            [disc_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    match latest {
+        Some((agent, session, version)) => conn.execute(
+            "UPDATE discussions
+             SET source_agent = ?2, source_session_id = ?3, source_binding_version = ?4
+             WHERE id = ?1",
+            params![disc_id, agent, session, version],
+        )?,
+        None => conn.execute(
+            "UPDATE discussions
+             SET source_agent = NULL, source_session_id = NULL,
+                 source_binding_version = NULL
+             WHERE id = ?1",
+            [disc_id],
+        )?,
+    };
     Ok(())
 }
 
@@ -101,22 +216,34 @@ pub fn bind_to_source(
 /// the disc's source_* columns. No-op when the disc has no active
 /// binding. The history chain is preserved so the UI can still show
 /// "was previously imported from ClaudeCode session X".
-pub fn unbind_from_source(conn: &Connection, disc_id: &str) -> Result<bool> {
+pub fn unbind_from_source(
+    conn: &Connection,
+    disc_id: &str,
+    // KT-85 — `None` releases EVERY binding of the room, which is only ever a
+    // deliberate human choice. A peer letting go of its own link must pass its
+    // pair, otherwise "release my link" evicted all the other agents.
+    only: Option<(&str, &str)>,
+) -> Result<bool> {
     let now = Utc::now().to_rfc3339();
-    let closed = conn.execute(
-        "UPDATE disc_source_history
-         SET unlinked_at = ?2
-         WHERE disc_id = ?1 AND unlinked_at IS NULL",
-        params![disc_id, now],
-    )?;
+    let closed = match only {
+        Some((agent, session)) => conn.execute(
+            "UPDATE disc_source_history
+             SET unlinked_at = ?4
+             WHERE disc_id = ?1 AND source_agent = ?2 AND source_session_id = ?3
+               AND unlinked_at IS NULL",
+            params![disc_id, agent, session, now],
+        )?,
+        None => conn.execute(
+            "UPDATE disc_source_history
+             SET unlinked_at = ?2
+             WHERE disc_id = ?1 AND unlinked_at IS NULL",
+            params![disc_id, now],
+        )?,
+    };
     if closed > 0 {
-        conn.execute(
-            "UPDATE discussions
-             SET source_agent = NULL,
-                 source_session_id = NULL
-             WHERE id = ?1",
-            params![disc_id],
-        )?;
+        // Fall back to whichever binding is still open, instead of declaring the
+        // room source-less while other peers are still linked.
+        refresh_legacy_pointer(conn, disc_id)?;
     }
     Ok(closed > 0)
 }
@@ -152,6 +279,7 @@ pub fn find_disc_by_source_session(
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct DiscSourceBinding {
+    pub binding_version: i64,
     pub disc_id: String,
     pub source_agent: String,
     pub source_session_id: String,
@@ -162,10 +290,18 @@ pub struct DiscSourceBinding {
 }
 
 pub fn list_all_source_bindings(conn: &Connection) -> Result<Vec<DiscSourceBinding>> {
+    // KT-85 — read the OPEN history rows rather than the discussion's single
+    // `source_*` column pair: a room shared by several CLIs has one binding per
+    // joined session, and the columns can only hold the most recent one. They
+    // stay as that "latest" pointer for the per-disc detail view.
+    // `diverged_at` is a property of the discussion, not of one binding.
     let mut stmt = conn.prepare(
-        "SELECT id, source_agent, source_session_id, imported_at, diverged_at
-         FROM discussions
-         WHERE source_agent IS NOT NULL AND source_session_id IS NOT NULL",
+        "SELECT h.disc_id, h.source_agent, h.source_session_id, h.linked_at,
+                d.diverged_at, h.binding_version
+         FROM disc_source_history h
+         JOIN discussions d ON d.id = h.disc_id
+         WHERE h.unlinked_at IS NULL
+         ORDER BY h.linked_at",
     )?;
     let rows = stmt.query_map([], |row| {
         Ok(DiscSourceBinding {
@@ -174,6 +310,7 @@ pub fn list_all_source_bindings(conn: &Connection) -> Result<Vec<DiscSourceBindi
             source_session_id: row.get(2)?,
             imported_at: row.get(3)?,
             diverged_at: row.get(4)?,
+            binding_version: row.get(5)?,
         })
     })?;
     let mut out = Vec::new();
@@ -191,7 +328,8 @@ pub fn list_source_history(
     disc_id: &str,
 ) -> Result<Vec<DiscSourceHistoryEntry>> {
     let mut stmt = conn.prepare(
-        "SELECT source_agent, source_session_id, linked_at, unlinked_at
+        "SELECT source_agent, source_session_id, linked_at, unlinked_at,
+                binding_version
          FROM disc_source_history
          WHERE disc_id = ?1
          ORDER BY linked_at DESC",
@@ -202,6 +340,7 @@ pub fn list_source_history(
             source_session_id: row.get(1)?,
             linked_at: row.get(2)?,
             unlinked_at: row.get(3)?,
+            binding_version: row.get(4)?,
         })
     })?;
     let mut out = Vec::new();
@@ -233,10 +372,16 @@ pub fn get_diverged_at(conn: &Connection, disc_id: &str) -> Result<Option<String
 /// uses this to render a warning on the import button.
 pub fn mark_diverged(conn: &Connection, disc_id: &str) -> Result<()> {
     let now = Utc::now().to_rfc3339();
+    // KT-85 — keyed on a real open binding rather than the legacy pointer, which
+    // is now only a "latest" hint and can lag behind a move or an unlink.
     conn.execute(
         "UPDATE discussions
          SET diverged_at = COALESCE(diverged_at, ?2)
-         WHERE id = ?1 AND source_session_id IS NOT NULL",
+         WHERE id = ?1
+           AND EXISTS (
+               SELECT 1 FROM disc_source_history
+               WHERE disc_id = ?1 AND unlinked_at IS NULL
+           )",
         params![disc_id, now],
     )?;
     Ok(())
@@ -329,6 +474,150 @@ pub fn search_discussions(conn: &Connection, q: &str, limit: u32) -> Result<Vec<
     Ok(out)
 }
 
+/// KT-65 — one matching MESSAGE, not one matching discussion.
+///
+/// `search_discussions` above answers "which rooms mention X" with a single
+/// snippet; it cannot take the reader to the message that matched. This shape
+/// carries the message identity so the UI can open the exact turn.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct MessageSearchHit {
+    pub disc_id: String,
+    pub disc_title: String,
+    pub message_id: String,
+    pub sort_order: i64,
+    pub role: String,
+    pub timestamp: String,
+    /// Excerpt centred on the match, not the head of the message — a hit 3 000
+    /// characters in is otherwise invisible in the result list.
+    pub snippet: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub author_pseudo: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+}
+
+/// Filters for [`search_messages`]. Every field is optional; combining them
+/// narrows the result set (AND semantics).
+#[derive(Debug, Clone, Default)]
+pub struct MessageSearchFilters<'a> {
+    pub discussion_id: Option<&'a str>,
+    pub project_id: Option<&'a str>,
+    /// Matches `messages.agent_type` OR `messages.author_pseudo`: from the
+    /// reader's point of view "who said it" is one question, whether the author
+    /// was an agent or a federated human.
+    pub author: Option<&'a str>,
+    /// RFC3339 bounds, inclusive. Timestamps are stored as sortable strings.
+    pub since: Option<&'a str>,
+    pub until: Option<&'a str>,
+}
+
+/// Excerpt of `content` around the first case-insensitive hit on `needle`.
+fn snippet_around(content: &str, needle: &str, window: usize) -> String {
+    let lower_content = content.to_lowercase();
+    let hit = lower_content.find(&needle.to_lowercase());
+    let chars: Vec<char> = content.chars().collect();
+    let hit_char = hit
+        .map(|byte_idx| content[..byte_idx].chars().count())
+        .unwrap_or(0);
+    let start = hit_char.saturating_sub(window / 2);
+    let end = (start + window).min(chars.len());
+    let mut out = String::new();
+    if start > 0 {
+        out.push('…');
+    }
+    out.extend(&chars[start..end]);
+    if end < chars.len() {
+        out.push('…');
+    }
+    out
+}
+
+/// Message-level search with combinable filters. The SQL is bounded (LIMIT +
+/// OFFSET, newest first) so a large history can't turn one keystroke into a full
+/// table scan streamed to the client.
+pub fn search_messages(
+    conn: &Connection,
+    q: &str,
+    filters: &MessageSearchFilters<'_>,
+    limit: u32,
+    offset: u32,
+) -> Result<Vec<MessageSearchHit>> {
+    let pattern = format!("%{}%", q.replace('%', "\\%").replace('_', "\\_"));
+    let lim = limit.clamp(1, 50) as i64;
+    let off = offset.min(10_000) as i64;
+
+    let mut sql = String::from(
+        "SELECT m.discussion_id, d.title, m.id, m.sort_order, m.role, m.timestamp,
+                m.content, m.agent_type, m.author_pseudo, d.project_id
+           FROM messages m
+           JOIN discussions d ON d.id = m.discussion_id
+          WHERE m.content LIKE ?1 ESCAPE '\\'",
+    );
+    let mut binds: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(pattern.clone())];
+
+    if let Some(disc) = filters.discussion_id {
+        sql.push_str(" AND m.discussion_id = ?");
+        sql.push_str(&(binds.len() + 1).to_string());
+        binds.push(Box::new(disc.to_string()));
+    }
+    if let Some(project) = filters.project_id {
+        sql.push_str(" AND d.project_id = ?");
+        sql.push_str(&(binds.len() + 1).to_string());
+        binds.push(Box::new(project.to_string()));
+    }
+    if let Some(author) = filters.author {
+        sql.push_str(" AND (m.agent_type = ?");
+        sql.push_str(&(binds.len() + 1).to_string());
+        binds.push(Box::new(author.to_string()));
+        sql.push_str(" OR m.author_pseudo = ?");
+        sql.push_str(&(binds.len() + 1).to_string());
+        binds.push(Box::new(author.to_string()));
+        sql.push(')');
+    }
+    if let Some(since) = filters.since {
+        sql.push_str(" AND m.timestamp >= ?");
+        sql.push_str(&(binds.len() + 1).to_string());
+        binds.push(Box::new(since.to_string()));
+    }
+    if let Some(until) = filters.until {
+        sql.push_str(" AND m.timestamp <= ?");
+        sql.push_str(&(binds.len() + 1).to_string());
+        binds.push(Box::new(until.to_string()));
+    }
+    sql.push_str(" ORDER BY m.timestamp DESC, m.sort_order DESC LIMIT ?");
+    sql.push_str(&(binds.len() + 1).to_string());
+    binds.push(Box::new(lim));
+    sql.push_str(" OFFSET ?");
+    sql.push_str(&(binds.len() + 1).to_string());
+    binds.push(Box::new(off));
+
+    let mut stmt = conn.prepare(&sql)?;
+    let params: Vec<&dyn rusqlite::ToSql> = binds.iter().map(|b| b.as_ref()).collect();
+    let rows = stmt.query_map(params.as_slice(), |row| {
+        let content: String = row.get(6)?;
+        Ok(MessageSearchHit {
+            disc_id: row.get(0)?,
+            disc_title: row.get(1)?,
+            message_id: row.get(2)?,
+            sort_order: row.get(3)?,
+            role: row.get(4)?,
+            timestamp: row.get(5)?,
+            snippet: snippet_around(&content, q, 160),
+            agent_type: row.get(7)?,
+            author_pseudo: row.get(8)?,
+            project_id: row.get(9)?,
+        })
+    })?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -340,10 +629,12 @@ mod tests {
             CREATE TABLE discussions (
                 id TEXT PRIMARY KEY,
                 title TEXT NOT NULL DEFAULT '',
+                project_id TEXT,
                 message_count INTEGER NOT NULL DEFAULT 0,
                 updated_at TEXT NOT NULL DEFAULT (datetime('now')),
                 source_agent TEXT,
                 source_session_id TEXT,
+                source_binding_version INTEGER,
                 imported_at DATETIME,
                 diverged_at DATETIME
             );
@@ -353,7 +644,10 @@ mod tests {
                 role TEXT NOT NULL,
                 content TEXT NOT NULL,
                 sort_order INTEGER NOT NULL,
-                source_msg_id TEXT
+                source_msg_id TEXT,
+                agent_type TEXT,
+                author_pseudo TEXT,
+                timestamp TEXT NOT NULL DEFAULT '2026-05-15T10:00:00Z'
             );
             CREATE INDEX idx_msg_source_dedup ON messages(discussion_id, source_msg_id);
             CREATE TABLE disc_source_history (
@@ -362,10 +656,14 @@ mod tests {
                 source_agent TEXT NOT NULL,
                 source_session_id TEXT NOT NULL,
                 linked_at DATETIME NOT NULL,
-                unlinked_at DATETIME
+                unlinked_at DATETIME,
+                binding_version INTEGER NOT NULL DEFAULT 1
             );
             CREATE INDEX idx_disc_src_hist_lookup ON disc_source_history(source_agent, source_session_id);
             CREATE INDEX idx_disc_src_hist_disc ON disc_source_history(disc_id);
+            CREATE UNIQUE INDEX idx_disc_source_session_one_open
+                ON disc_source_history(source_agent, source_session_id)
+                WHERE unlinked_at IS NULL;
             INSERT INTO discussions (id, title, updated_at) VALUES
                 ('d-alpha', 'First disc', '2026-05-15T10:00:00Z'),
                 ('d-beta',  'Second disc', '2026-05-15T11:00:00Z');
@@ -379,6 +677,181 @@ mod tests {
         conn
     }
 
+    /// KT-85 — found live by @user: in a cross-agent room the last agent to
+    /// bind was closing everyone else's binding, so every other peer's
+    /// `disc_find_by_session` went silently empty after an MCP reload.
+    #[test]
+    fn several_agents_can_own_a_binding_on_the_same_discussion() {
+        let conn = fresh_conn();
+        bind_to_source(&conn, "d-alpha", "Codex", "cli-codex-1").unwrap();
+        bind_to_source(&conn, "d-alpha", "ClaudeCode", "cli-claude-1").unwrap();
+        // A third bind by a NEW Codex bridge, as happens after an MCP reload.
+        bind_to_source(&conn, "d-alpha", "Codex", "cli-codex-2").unwrap();
+
+        // Every session still resolves to the room — none was evicted.
+        for session in ["cli-codex-1", "cli-claude-1", "cli-codex-2"] {
+            let agent = if session.contains("claude") {
+                "ClaudeCode"
+            } else {
+                "Codex"
+            };
+            assert_eq!(
+                find_disc_by_source_session(&conn, agent, session)
+                    .unwrap()
+                    .as_deref(),
+                Some("d-alpha"),
+                "{session} lost its binding",
+            );
+        }
+
+        // And the batch reader exposes all three, not just the latest.
+        let bindings = list_all_source_bindings(&conn).unwrap();
+        let mut seen: Vec<&str> = bindings
+            .iter()
+            .filter(|b| b.disc_id == "d-alpha")
+            .map(|b| b.source_session_id.as_str())
+            .collect();
+        seen.sort_unstable();
+        assert_eq!(seen, ["cli-claude-1", "cli-codex-1", "cli-codex-2"]);
+    }
+
+    /// The invariant that must NOT loosen: one concrete session owns one
+    /// discussion. Moving it releases the previous room.
+    #[test]
+    fn one_session_still_owns_a_single_discussion() {
+        let conn = fresh_conn();
+        bind_to_source(&conn, "d-alpha", "Codex", "cli-codex-1").unwrap();
+        bind_to_source(&conn, "d-beta", "Codex", "cli-codex-1").unwrap();
+
+        assert_eq!(
+            find_disc_by_source_session(&conn, "Codex", "cli-codex-1")
+                .unwrap()
+                .as_deref(),
+            Some("d-beta"),
+        );
+        let open_on_alpha = list_source_history(&conn, "d-alpha")
+            .unwrap()
+            .into_iter()
+            .filter(|h| h.unlinked_at.is_none())
+            .count();
+        assert_eq!(open_on_alpha, 0, "moving a session must free the old room");
+    }
+
+    /// KT-85 review (Codex) — the detail panel reads the CURRENT binding. A scan
+    /// of every open binding returned the oldest once a room could hold several.
+    #[test]
+    fn current_source_binding_is_the_most_recent_one() {
+        let conn = fresh_conn();
+        bind_to_source(&conn, "d-alpha", "Codex", "cli-codex-1").unwrap();
+        bind_to_source(&conn, "d-alpha", "ClaudeCode", "cli-claude-1").unwrap();
+
+        let current = current_source_binding(&conn, "d-alpha")
+            .unwrap()
+            .expect("a shared room still has a current binding");
+        assert_eq!(current.source_session_id, "cli-claude-1");
+        assert_eq!(current.source_agent, "ClaudeCode");
+
+        // The oldest one is what a naive ascending scan would have surfaced.
+        let scanned = list_all_source_bindings(&conn)
+            .unwrap()
+            .into_iter()
+            .find(|b| b.disc_id == "d-alpha")
+            .unwrap();
+        assert_eq!(
+            scanned.source_session_id, "cli-codex-1",
+            "guard: the scan really does hit the oldest, which is why the \
+             endpoint must not use it",
+        );
+
+        // Releasing the current one promotes the survivor.
+        unbind_from_source(&conn, "d-alpha", Some(("ClaudeCode", "cli-claude-1"))).unwrap();
+        assert_eq!(
+            current_source_binding(&conn, "d-alpha")
+                .unwrap()
+                .unwrap()
+                .source_session_id,
+            "cli-codex-1",
+        );
+        // And the last release leaves no current binding at all.
+        unbind_from_source(&conn, "d-alpha", Some(("Codex", "cli-codex-1"))).unwrap();
+        assert!(current_source_binding(&conn, "d-alpha").unwrap().is_none());
+    }
+
+    /// KT-85 review (Codex) — "release MY link" must not evict the other peers.
+    #[test]
+    fn unlinking_one_peer_keeps_the_other_bindings() {
+        let conn = fresh_conn();
+        bind_to_source(&conn, "d-alpha", "Codex", "cli-codex-1").unwrap();
+        bind_to_source(&conn, "d-alpha", "ClaudeCode", "cli-claude-1").unwrap();
+
+        let closed = unbind_from_source(&conn, "d-alpha", Some(("Codex", "cli-codex-1"))).unwrap();
+        assert!(closed);
+        assert!(
+            find_disc_by_source_session(&conn, "Codex", "cli-codex-1")
+                .unwrap()
+                .is_none(),
+            "the caller's own binding is released",
+        );
+        assert_eq!(
+            find_disc_by_source_session(&conn, "ClaudeCode", "cli-claude-1")
+                .unwrap()
+                .as_deref(),
+            Some("d-alpha"),
+            "the peer that did NOT unlink keeps its binding",
+        );
+        // The legacy pointer falls back to the survivor instead of going NULL.
+        let pointer: Option<String> = conn
+            .query_row(
+                "SELECT source_session_id FROM discussions WHERE id = 'd-alpha'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(pointer.as_deref(), Some("cli-claude-1"));
+    }
+
+    /// The legacy `discussions.source_*` pointer must name the MOST RECENT open
+    /// binding — the detail panel reads it, and an ascending scan made it the
+    /// oldest one.
+    #[test]
+    fn the_legacy_pointer_tracks_the_most_recent_open_binding() {
+        let conn = fresh_conn();
+        bind_to_source(&conn, "d-alpha", "Codex", "cli-codex-1").unwrap();
+        bind_to_source(&conn, "d-alpha", "ClaudeCode", "cli-claude-1").unwrap();
+        let pointer: Option<String> = conn
+            .query_row(
+                "SELECT source_session_id FROM discussions WHERE id = 'd-alpha'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(pointer.as_deref(), Some("cli-claude-1"));
+    }
+
+    /// Moving a session away from a SHARED room must not blank that room's
+    /// pointer: other peers are still bound there.
+    #[test]
+    fn moving_a_session_out_of_a_shared_room_keeps_the_room_bound() {
+        let conn = fresh_conn();
+        bind_to_source(&conn, "d-alpha", "Codex", "cli-codex-1").unwrap();
+        bind_to_source(&conn, "d-alpha", "ClaudeCode", "cli-claude-1").unwrap();
+        // Codex takes its session to another discussion.
+        bind_to_source(&conn, "d-beta", "Codex", "cli-codex-1").unwrap();
+
+        let (agent, session): (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT source_agent, source_session_id FROM discussions WHERE id = 'd-alpha'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(agent.as_deref(), Some("ClaudeCode"));
+        assert_eq!(session.as_deref(), Some("cli-claude-1"));
+        // And divergence still applies to the room, which is still bound.
+        mark_diverged(&conn, "d-alpha").unwrap();
+        assert!(get_diverged_at(&conn, "d-alpha").unwrap().is_some());
+    }
+
     #[test]
     fn bind_then_find_round_trip() {
         let conn = fresh_conn();
@@ -388,6 +861,7 @@ mod tests {
         // Sister history row is open.
         let hist = list_source_history(&conn, "d-alpha").unwrap();
         assert_eq!(hist.len(), 1);
+        assert_eq!(hist[0].binding_version, SOURCE_BINDING_VERSION);
         assert_eq!(hist[0].source_agent, "ClaudeCode");
         assert!(hist[0].unlinked_at.is_none());
     }
@@ -407,45 +881,71 @@ mod tests {
     }
 
     #[test]
-    fn rebinding_different_session_closes_previous_chain() {
-        // Last-link-wins: a fresh (agent, session) binding closes the
-        // open row from the previous binding so only ONE row is open
-        // at a time.
+    fn a_second_cli_binding_joins_the_discussion_instead_of_taking_it_over() {
+        // CONTRACT CHANGE (KT-85). This test previously asserted
+        // "last-link-wins": a second (agent, session) closed the first, so a
+        // discussion had exactly one owner. That modelled the 0.8.4 cross-agent
+        // HANDOFF (a thread imported from ClaudeCode, then taken over by
+        // Cursor). It is wrong for the multi-agent rooms of 0.8.6+, where
+        // several CLIs work the same discussion at once: evicting the others
+        // made their reconnection lookup silently empty. A deliberate handoff is
+        // still expressible — `disc_unlink`, or moving the session to another
+        // discussion, both close the old row explicitly.
         let conn = fresh_conn();
         bind_to_source(&conn, "d-alpha", "ClaudeCode", "sess-A").unwrap();
         bind_to_source(&conn, "d-alpha", "Cursor", "sess-B").unwrap();
 
         let hist = list_source_history(&conn, "d-alpha").unwrap();
         assert_eq!(hist.len(), 2);
-        // Newest first: B is open, A is closed.
-        assert_eq!(hist[0].source_session_id, "sess-B");
-        assert!(hist[0].unlinked_at.is_none());
-        assert_eq!(hist[1].source_session_id, "sess-A");
         assert!(
-            hist[1].unlinked_at.is_some(),
-            "previous binding must be closed on re-link"
+            hist.iter().all(|h| h.unlinked_at.is_none()),
+            "both CLIs keep their binding on a shared discussion",
         );
 
-        // find_by_source_session must return d-alpha only for the new pair.
+        // Each pair resolves to the room on its own.
+        for (agent, session) in [("Cursor", "sess-B"), ("ClaudeCode", "sess-A")] {
+            assert_eq!(
+                find_disc_by_source_session(&conn, agent, session)
+                    .unwrap()
+                    .as_deref(),
+                Some("d-alpha"),
+                "{agent}/{session} must still resolve",
+            );
+        }
+    }
+
+    #[test]
+    fn rebinding_same_cli_session_moves_it_to_one_discussion() {
+        let conn = fresh_conn();
+        bind_to_source(&conn, "d-alpha", "Codex", "sess-shared").unwrap();
+        bind_to_source(&conn, "d-beta", "Codex", "sess-shared").unwrap();
+
         assert_eq!(
-            find_disc_by_source_session(&conn, "Cursor", "sess-B")
+            find_disc_by_source_session(&conn, "Codex", "sess-shared")
                 .unwrap()
                 .as_deref(),
-            Some("d-alpha")
+            Some("d-beta"),
         );
-        assert!(
-            find_disc_by_source_session(&conn, "ClaudeCode", "sess-A")
-                .unwrap()
-                .is_none(),
-            "old (closed) binding must not resolve anymore"
-        );
+        let alpha_source: (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT source_agent, source_session_id
+                   FROM discussions WHERE id = 'd-alpha'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(alpha_source, (None, None));
+        let alpha_history = list_source_history(&conn, "d-alpha").unwrap();
+        assert!(alpha_history[0].unlinked_at.is_some());
+        let beta_history = list_source_history(&conn, "d-beta").unwrap();
+        assert!(beta_history[0].unlinked_at.is_none());
     }
 
     #[test]
     fn unbind_clears_columns_and_closes_chain() {
         let conn = fresh_conn();
         bind_to_source(&conn, "d-alpha", "ClaudeCode", "sess-Z").unwrap();
-        let closed = unbind_from_source(&conn, "d-alpha").unwrap();
+        let closed = unbind_from_source(&conn, "d-alpha", None).unwrap();
         assert!(closed);
         // History row preserved but closed.
         let hist = list_source_history(&conn, "d-alpha").unwrap();
@@ -460,7 +960,7 @@ mod tests {
     #[test]
     fn unbind_is_noop_when_nothing_bound() {
         let conn = fresh_conn();
-        let closed = unbind_from_source(&conn, "d-beta").unwrap();
+        let closed = unbind_from_source(&conn, "d-beta", None).unwrap();
         assert!(!closed, "no open binding to close");
     }
 
@@ -486,6 +986,151 @@ mod tests {
         let hits2 = search_discussions(&conn, "Second", 10).unwrap();
         assert_eq!(hits2.len(), 1, "matches the d-beta title");
         assert_eq!(hits2[0].disc_id, "d-beta");
+    }
+
+    // ─── KT-65 — message-level search ───────────────────────────────────────
+
+    /// Seed a richer history than `fresh_conn`: two rooms, two authors, two
+    /// dates, and a long body so the excerpt logic has something to centre on.
+    fn search_conn() -> Connection {
+        let conn = fresh_conn();
+        conn.execute_batch(
+            "UPDATE discussions SET project_id = 'proj-1' WHERE id = 'd-alpha';
+             UPDATE discussions SET project_id = 'proj-2' WHERE id = 'd-beta';
+             INSERT INTO messages
+                 (id, discussion_id, role, content, sort_order, agent_type, author_pseudo, timestamp)
+             VALUES
+                 ('s1', 'd-alpha', 'Agent', 'le probe Fastly répond 200 en authentifié', 10,
+                  'Codex', NULL, '2026-07-01T10:00:00Z'),
+                 ('s2', 'd-alpha', 'User', 'et le probe Fastly côté Docker ?', 11,
+                  NULL, 'Romu - mac', '2026-07-15T10:00:00Z'),
+                 ('s3', 'd-beta', 'Agent', 'aucun rapport avec Fastly ici', 12,
+                  'ClaudeCode', NULL, '2026-07-20T10:00:00Z');",
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn message_search_returns_the_matching_message_not_just_the_room() {
+        let conn = search_conn();
+        let hits = search_messages(&conn, "probe Fastly", &Default::default(), 10, 0).unwrap();
+        assert_eq!(hits.len(), 2, "two messages mention it, in one room");
+        // Newest first, so the reader lands on the most recent mention.
+        assert_eq!(hits[0].message_id, "s2");
+        assert_eq!(hits[0].disc_title, "First disc");
+        assert_eq!(hits[0].author_pseudo.as_deref(), Some("Romu - mac"));
+        assert_eq!(hits[1].message_id, "s1");
+        assert_eq!(hits[1].agent_type.as_deref(), Some("Codex"));
+    }
+
+    #[test]
+    fn message_search_combines_filters_with_and_semantics() {
+        let conn = search_conn();
+
+        let by_room = MessageSearchFilters {
+            discussion_id: Some("d-beta"),
+            ..Default::default()
+        };
+        let hits = search_messages(&conn, "Fastly", &by_room, 10, 0).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].message_id, "s3");
+
+        let by_project = MessageSearchFilters {
+            project_id: Some("proj-1"),
+            ..Default::default()
+        };
+        assert_eq!(
+            search_messages(&conn, "Fastly", &by_project, 10, 0)
+                .unwrap()
+                .len(),
+            2
+        );
+
+        // `author` covers an agent type OR a federated human pseudo.
+        let by_agent = MessageSearchFilters {
+            author: Some("Codex"),
+            ..Default::default()
+        };
+        assert_eq!(
+            search_messages(&conn, "Fastly", &by_agent, 10, 0).unwrap()[0].message_id,
+            "s1"
+        );
+        let by_human = MessageSearchFilters {
+            author: Some("Romu - mac"),
+            ..Default::default()
+        };
+        assert_eq!(
+            search_messages(&conn, "Fastly", &by_human, 10, 0).unwrap()[0].message_id,
+            "s2"
+        );
+
+        let window = MessageSearchFilters {
+            since: Some("2026-07-10T00:00:00Z"),
+            until: Some("2026-07-18T00:00:00Z"),
+            ..Default::default()
+        };
+        let dated = search_messages(&conn, "Fastly", &window, 10, 0).unwrap();
+        assert_eq!(dated.len(), 1, "only the mid-July message is in range");
+        assert_eq!(dated[0].message_id, "s2");
+
+        // Combined: the room AND a window that excludes its only hit → empty.
+        let contradictory = MessageSearchFilters {
+            discussion_id: Some("d-beta"),
+            until: Some("2026-07-01T00:00:00Z"),
+            ..Default::default()
+        };
+        assert!(search_messages(&conn, "Fastly", &contradictory, 10, 0)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn message_search_is_bounded_and_pageable() {
+        let conn = search_conn();
+        let page1 = search_messages(&conn, "Fastly", &Default::default(), 1, 0).unwrap();
+        let page2 = search_messages(&conn, "Fastly", &Default::default(), 1, 1).unwrap();
+        assert_eq!(page1.len(), 1);
+        assert_eq!(page2.len(), 1);
+        assert_ne!(
+            page1[0].message_id, page2[0].message_id,
+            "offset must advance"
+        );
+
+        // An absurd limit is clamped rather than honoured — one keystroke must
+        // never stream the whole history.
+        let huge = search_messages(&conn, "Fastly", &Default::default(), 10_000, 0).unwrap();
+        assert!(huge.len() <= 50);
+    }
+
+    #[test]
+    fn snippet_is_centred_on_the_hit_not_the_start_of_the_message() {
+        let long = format!("{}NEEDLE{}", "a".repeat(400), "b".repeat(400));
+        let snippet = snippet_around(&long, "needle", 60);
+        assert!(snippet.contains("NEEDLE"), "got: {snippet}");
+        assert!(
+            snippet.starts_with('…') && snippet.ends_with('…'),
+            "got: {snippet}"
+        );
+        assert!(snippet.chars().count() <= 62);
+
+        // No match (filters matched, the excerpt still has to render something).
+        let head = snippet_around("court message", "absent", 60);
+        assert!(head.starts_with("court"));
+    }
+
+    #[test]
+    fn message_search_escapes_like_metachars() {
+        let conn = search_conn();
+        conn.execute(
+            "INSERT INTO messages (id, discussion_id, role, content, sort_order, timestamp)
+             VALUES ('pct', 'd-alpha', 'User', 'couverture 100% atteinte', 20, '2026-07-25T10:00:00Z')",
+            [],
+        )
+        .unwrap();
+        let hits = search_messages(&conn, "100%", &Default::default(), 10, 0).unwrap();
+        assert_eq!(hits.len(), 1, "`%` must be literal, not a wildcard");
+        assert_eq!(hits[0].message_id, "pct");
     }
 
     #[test]

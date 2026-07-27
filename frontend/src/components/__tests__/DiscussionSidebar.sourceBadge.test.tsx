@@ -152,6 +152,123 @@ describe('DiscussionSidebar — source badge (0.8.4 #294)', () => {
     expect(screen.queryByText('Native thread (no binding)')).toBeNull();
   });
 
+  // KT-74 — a session binding is not an import. The badge must say "bound to",
+  // because "imported from" told the user a file had been ingested when Kronn
+  // was merely following a live CLI session.
+  it('labels a plain binding as bound, never as imported', async () => {
+    (projectsApi.discSources as ReturnType<typeof vi.fn>).mockResolvedValueOnce([
+      { disc_id: 'd-bound', source_agent: 'Codex', source_session_id: 's1' },
+    ]);
+    render(
+      <DiscussionSidebar {...baseProps} discussions={[mkDisc('d-bound', 'bound thread')]} />
+    );
+    const badge = await screen.findByTestId('disc-source-badge');
+    expect(badge.getAttribute('title')).toMatch(/disc\.source\.boundHint/);
+    expect(badge.getAttribute('title')).not.toMatch(/imported/i);
+    expect(badge.textContent).toContain('disc.source.boundBadge');
+  });
+
+  // KT-74 — the two provenances are independent. A bound disc is not an
+  // import, an import is not a binding, and a disc can carry both.
+  describe('portable import provenance', () => {
+    it('names the exporter when the bundle carried an identity', async () => {
+      (projectsApi.discSources as ReturnType<typeof vi.fn>).mockResolvedValueOnce([]);
+      (projectsApi.discImports as ReturnType<typeof vi.fn>).mockResolvedValueOnce([
+        {
+          disc_id: 'd-imported',
+          provenance_kind: 'portable_bundle',
+          imported_by_pseudo: 'Romu',
+          imported_by_avatar_email: 'romu@example.test',
+          imported_at: '2026-07-28T10:00:00Z',
+        },
+      ]);
+      render(
+        <DiscussionSidebar {...baseProps} discussions={[mkDisc('d-imported', 'from a colleague')]} />
+      );
+      const badge = await screen.findByTestId('disc-import-badge');
+      expect(badge.textContent).toContain('disc.import.byBadge');
+      expect(badge.textContent).toContain('Romu');
+      // No source binding → no bound badge on the same row.
+      expect(screen.queryByTestId('disc-source-badge')).toBeNull();
+    });
+
+    it('renders an authorless import rather than inventing a name', async () => {
+      (projectsApi.discSources as ReturnType<typeof vi.fn>).mockResolvedValueOnce([]);
+      (projectsApi.discImports as ReturnType<typeof vi.fn>).mockResolvedValueOnce([
+        {
+          disc_id: 'd-legacy',
+          provenance_kind: 'portable_bundle',
+          imported_by_pseudo: null,
+          imported_by_avatar_email: null,
+          imported_at: '2026-07-28T10:00:00Z',
+        },
+      ]);
+      render(
+        <DiscussionSidebar {...baseProps} discussions={[mkDisc('d-legacy', 'legacy bundle')]} />
+      );
+      const badge = await screen.findByTestId('disc-import-badge');
+      expect(badge.textContent).toContain('disc.import.anonymousBadge');
+      // Neither a leaked placeholder nor the "imported BY someone" branch.
+      expect(badge.textContent).not.toMatch(/undefined|null/i);
+      expect(badge.textContent).not.toContain('disc.import.byBadge');
+    });
+
+    it('ignores the reserved agent_transcript kind, which is not implemented', async () => {
+      (projectsApi.discSources as ReturnType<typeof vi.fn>).mockResolvedValueOnce([]);
+      (projectsApi.discImports as ReturnType<typeof vi.fn>).mockResolvedValueOnce([
+        {
+          disc_id: 'd-future',
+          provenance_kind: 'agent_transcript',
+          imported_by_pseudo: 'Romu',
+          imported_by_avatar_email: null,
+          imported_at: '2026-07-28T10:00:00Z',
+        },
+      ]);
+      render(
+        <DiscussionSidebar {...baseProps} discussions={[mkDisc('d-future', 'future route')]} />
+      );
+      await waitFor(() => expect(projectsApi.discImports).toHaveBeenCalled());
+      expect(screen.queryByTestId('disc-import-badge')).toBeNull();
+    });
+
+    it('shows both badges when a disc is bound AND imported', async () => {
+      (projectsApi.discSources as ReturnType<typeof vi.fn>).mockResolvedValueOnce([
+        { disc_id: 'd-both', source_agent: 'Codex', source_session_id: 's1' },
+      ]);
+      (projectsApi.discImports as ReturnType<typeof vi.fn>).mockResolvedValueOnce([
+        {
+          disc_id: 'd-both',
+          provenance_kind: 'portable_bundle',
+          imported_by_pseudo: 'Romu',
+          imported_by_avatar_email: null,
+          imported_at: '2026-07-28T10:00:00Z',
+        },
+      ]);
+      render(<DiscussionSidebar {...baseProps} discussions={[mkDisc('d-both', 'both')]} />);
+      expect(await screen.findByTestId('disc-import-badge')).toBeInTheDocument();
+      expect(await screen.findByTestId('disc-source-badge')).toBeInTheDocument();
+    });
+  });
+
+  // KT-85 — a cross-agent room carries one binding per joined session. The
+  // sidebar used to key a single binding per disc, so only one chip appeared.
+  it('renders one chip per agent bound to the same discussion', async () => {
+    (projectsApi.discSources as ReturnType<typeof vi.fn>).mockResolvedValueOnce([
+      { disc_id: 'd-room', source_agent: 'Codex', source_session_id: 'cli-codex-1' },
+      { disc_id: 'd-room', source_agent: 'ClaudeCode', source_session_id: 'cli-claude-1' },
+      // A second session of an agent already shown must not double its chip.
+      { disc_id: 'd-room', source_agent: 'Codex', source_session_id: 'cli-codex-2' },
+    ]);
+    render(<DiscussionSidebar {...baseProps} discussions={[mkDisc('d-room', 'cross-agent room')]} />);
+
+    await waitFor(() => {
+      expect(screen.queryAllByTestId('disc-source-badge')).toHaveLength(2);
+    });
+    const labels = screen.getAllByTestId('disc-source-badge').map(b => b.textContent ?? '');
+    expect(labels.some(l => l.includes('Codex'))).toBe(true);
+    expect(labels.some(l => l.includes('ClaudeCode'))).toBe(true);
+  });
+
   it('diverged binding renders the warning variant', async () => {
     (projectsApi.discSources as ReturnType<typeof vi.fn>).mockResolvedValueOnce([
       {

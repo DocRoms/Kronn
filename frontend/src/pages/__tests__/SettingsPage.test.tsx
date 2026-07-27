@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, act, cleanup, fireEvent } from '@testing-library/react';
 import { I18nProvider } from '../../lib/I18nContext';
+import { TourProvider } from '../../components/tour/TourProvider';
 
 // Mock API
 vi.mock('../../lib/api', () => ({
@@ -162,12 +163,19 @@ const sampleAgent: AgentDetection = {
   runtime_available: false, rtk_available: false, rtk_hook_configured: false,
 };
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  localStorage.clear();
+});
 
 const wrap = async (ui: React.ReactElement) => {
   let result: ReturnType<typeof render>;
   await act(async () => {
-    result = render(<I18nProvider>{ui}</I18nProvider>);
+    result = render(
+      <I18nProvider>
+        <TourProvider setPage={noop}>{ui}</TourProvider>
+      </I18nProvider>,
+    );
   });
   // Wait for async data to settle (useApi hooks resolve in microtasks)
   await act(async () => { await new Promise(r => setTimeout(r, 0)); });
@@ -241,6 +249,20 @@ describe('SettingsPage', () => {
     expect(links[0].href).toBe('https://github.com/DocRoms/Kronn/releases');
     expect(links[1].href).toBe('https://github.com/DocRoms/Kronn');
     expect(links[1].textContent).toBe('Source code (AGPL-3.0)');
+  });
+
+  it('shows a fully-clickable guided-tour progress CTA below the version card', async () => {
+    await wrap(<SettingsPage {...defaultProps} />);
+
+    const nav = screen.getByRole('navigation', { name: 'Sections' });
+    const versionCard = nav.querySelector('[data-testid="settings-nav-version"]');
+    const desktopCta = versionCard?.nextElementSibling
+      ?.querySelector<HTMLButtonElement>('[data-testid="settings-tour-progress"]');
+    expect(desktopCta).toBeTruthy();
+    expect(desktopCta?.querySelector('[role="progressbar"]')).toHaveAttribute('aria-valuenow', '0');
+
+    fireEvent.click(desktopCta!);
+    expect(screen.queryAllByTestId('settings-tour-progress')).toHaveLength(0);
   });
 
   it('renders skill cards after opening accordion', async () => {

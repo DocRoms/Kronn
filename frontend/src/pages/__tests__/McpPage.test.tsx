@@ -12,6 +12,7 @@ vi.mock('../../lib/api', () => ({
     refresh: vi.fn(),
     createConfig: vi.fn(),
     updateConfig: vi.fn(),
+    probeConfig: vi.fn(),
     updateCustomSpec: vi.fn(),
     cleanupOrphanEnv: vi.fn(),
     deleteConfig: vi.fn(),
@@ -29,7 +30,7 @@ vi.mock('../../lib/api', () => ({
 
 import { McpPage } from '../McpPage';
 import { mcps as mcpsApi } from '../../lib/api';
-import type { McpOverview, McpConfigDisplay, McpServer, McpDefinition, Project, AgentType } from '../../types/generated';
+import type { McpOverview, McpConfigDisplay, McpServer, McpDefinition, Project, AgentType, McpProbeResponse } from '../../types/generated';
 
 // Use fake timers to prevent the setTimeout in handleAddDuplicateConfig (50ms
 // scroll animation) from leaking across tests and causing timeout issues.
@@ -67,6 +68,7 @@ const makeConfig = (id: string, serverId: string, serverName: string, opts?: Par
   project_names: opts?.project_names ?? [],
   secrets_broken: opts?.secrets_broken ?? false,
   host_sync: opts?.host_sync ?? 'None',
+  preferred_interface: opts?.preferred_interface ?? 'mcp',
 });
 
 const makeProject = (id: string, name: string): Project => ({
@@ -85,12 +87,11 @@ const makeProject = (id: string, name: string): Project => ({
 const wrap = (ui: React.ReactElement) => render(<I18nProvider>{ui}</I18nProvider>);
 
 describe('McpPage', () => {
-  it('renders empty state when no configs exist', () => {
+  it('keeps the built-in plugin visible when no configurable plugin exists', () => {
     const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [] };
     wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
-    // Empty state message (mcp.empty in FR: "Aucun plugin configure...") should be visible
-    const body = document.body.textContent!;
-    expect(body).toContain('Aucun plugin');
+    expect(screen.getByTestId('mcp-kronn-internal-card')).toHaveTextContent('Intégré');
+    expect(document.body.textContent).not.toContain('Aucun plugin');
   });
 
   it('renders server names as group headers', () => {
@@ -147,6 +148,200 @@ describe('McpPage', () => {
     expect(container.querySelector('[data-config-id="c1"]')).toBe(card);
   });
 
+  it('opens plugin details as a non-blocking side panel and renders the real probe result', async () => {
+    const server = makeServer('mcp-fastly', 'Fastly');
+    const config = makeConfig('fastly-config', 'mcp-fastly', 'Fastly');
+    const overview: McpOverview = {
+      servers: [server],
+      configs: [config],
+      customized_contexts: [],
+      incompatibilities: [],
+      incomplete_configs: [],
+    };
+    const probeResponse: McpProbeResponse = {
+      server_id: 'mcp-fastly',
+      ready: true,
+      checks: [
+        { id: 'cli', label: 'Fastly CLI', ok: true, required: true, detail: 'Fastly CLI version 15.4.0' },
+        { id: 'api', label: 'Fastly API', ok: true, required: true, detail: 'Authenticated API request succeeded' },
+        { id: 'mcp', label: 'Fastly MCP', ok: false, required: false, detail: 'Optional exploratory MCP is unavailable' },
+      ],
+    };
+    let resolveProbe!: (response: McpProbeResponse) => void;
+    const probePromise = new Promise<McpProbeResponse>((resolve) => {
+      resolveProbe = resolve;
+    });
+    (mcpsApi.probeConfig as ReturnType<typeof vi.fn>).mockReturnValueOnce(probePromise);
+
+    wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Fastly — Voir les détails' }));
+
+    // Side panel, not a modal: no backdrop is mounted, and the page reserves
+    // the panel's width instead of letting it cover the cards.
+    expect(document.querySelector('[data-testid="mcp-plugin-panel"]')).not.toBeNull();
+    expect(document.querySelector('.mcp-modal-overlay')).toBeNull();
+    expect(document.querySelector('.mcp-page-with-panel')).not.toBeNull();
+    expect(document.querySelector('[data-testid="mcp-plugin-probe"]')).not.toBeNull();
+
+    const probeButton = screen.getByRole('button', { name: 'Tester' });
+    fireEvent.click(probeButton);
+    fireEvent.click(probeButton);
+    expect(mcpsApi.probeConfig).toHaveBeenCalledTimes(1);
+
+    await act(async () => resolveProbe(probeResponse));
+
+    expect(mcpsApi.probeConfig).toHaveBeenCalledWith('fastly-config');
+    expect(screen.getByTestId('mcp-probe-status')).toHaveTextContent('Prêt');
+    expect(screen.getByText('Fastly CLI version 15.4.0')).toBeTruthy();
+    expect(screen.getByText('Optionnel')).toBeTruthy();
+    expect(screen.getByText('Optional exploratory MCP is unavailable')).toBeTruthy();
+  });
+
+  it('anchors the plugin panel below the list controls boundary', async () => {
+    const rectAt = (bottom: number) => ({
+      x: 0,
+      y: 0,
+      width: 1000,
+      height: bottom,
+      top: 0,
+      right: 1000,
+      bottom,
+      left: 0,
+      toJSON: () => ({}),
+    }) as DOMRect;
+    const rectSpy = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+      .mockImplementation(function measurePluginChrome(this: HTMLElement) {
+        if (this.classList.contains('mcp-list-boundary')) return rectAt(264);
+        if (this.classList.contains('mcp-page-header')) return rectAt(96);
+        return rectAt(0);
+      });
+    const overview: McpOverview = {
+      servers: [makeServer('github', 'GitHub')],
+      configs: [makeConfig('github-config', 'github', 'GitHub')],
+      customized_contexts: [],
+      incompatibilities: [],
+      incomplete_configs: [],
+    };
+
+    try {
+      wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
+      await act(async () => {});
+      fireEvent.click(screen.getByRole('button', { name: 'GitHub — Voir les détails' }));
+
+      expect(screen.getByTestId('mcp-list-boundary')).toBeTruthy();
+      expect(screen.getByTestId('mcp-plugin-panel')).toHaveStyle({ top: '264px' });
+    } finally {
+      rectSpy.mockRestore();
+    }
+  });
+
+  it('shows real plugin capabilities and persists only selectable preferences', async () => {
+    vi.useRealTimers();
+    const server: McpServer = {
+      ...makeServer('mcp-fastly', 'Fastly'),
+      api_spec: {
+        base_url: 'https://api.fastly.com',
+        auth: 'None',
+        endpoints: [],
+        docs_url: null,
+        config_keys: [],
+      },
+    };
+    const definition: McpDefinition = {
+      id: 'mcp-fastly',
+      name: 'Fastly',
+      description: 'Fastly hybrid',
+      transport: server.transport,
+      env_keys: [],
+      tags: ['cli', 'api'],
+      token_url: null,
+      token_help: null,
+      publisher: 'Fastly',
+      official: true,
+      api_spec: server.api_spec,
+    };
+    const config = makeConfig('fastly-config', 'mcp-fastly', 'Fastly', {
+      preferred_interface: 'api',
+    });
+    const overview: McpOverview = {
+      servers: [server],
+      configs: [config],
+      customized_contexts: [],
+      incompatibilities: [],
+      incomplete_configs: [],
+    };
+    const refetch = vi.fn().mockResolvedValue(undefined);
+    (mcpsApi.updateConfig as ReturnType<typeof vi.fn>).mockResolvedValue(config);
+
+    wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[definition]} refetchMcps={refetch} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Fastly — Voir les détails' }));
+
+    const chips = document.querySelectorAll('.mcp-interface-chip[data-available="true"]');
+    expect(Array.from(chips).map(chip => chip.getAttribute('data-interface'))).toEqual([
+      'api',
+      'mcp',
+      'cli',
+    ]);
+    const select = screen.getByTestId('mcp-preferred-interface') as HTMLSelectElement;
+    expect(Array.from(select.options).map(option => option.value)).toEqual(['api', 'mcp', 'cli']);
+
+    fireEvent.change(select, { target: { value: 'cli' } });
+    await act(async () => {});
+    expect(mcpsApi.updateConfig).toHaveBeenCalledWith('fastly-config', {
+      preferred_interface: 'cli',
+    });
+    expect(refetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('collapses preference choices for a single-interface plugin', () => {
+    const server: McpServer = {
+      ...makeServer('api-only', 'API only'),
+      transport: 'ApiOnly',
+      api_spec: {
+        base_url: 'https://example.test',
+        auth: 'None',
+        endpoints: [],
+        docs_url: null,
+        config_keys: [],
+      },
+    };
+    const overview: McpOverview = {
+      servers: [server],
+      configs: [makeConfig('api-config', 'api-only', 'API only', {
+        preferred_interface: 'api',
+      })],
+      customized_contexts: [],
+      incompatibilities: [],
+      incomplete_configs: [],
+    };
+
+    wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
+    fireEvent.click(screen.getByRole('button', { name: 'API only — Voir les détails' }));
+    const select = screen.getByTestId('mcp-preferred-interface') as HTMLSelectElement;
+    expect(select).toBeDisabled();
+    expect(Array.from(select.options).map(option => option.value)).toEqual(['api']);
+  });
+
+  it('swaps the open panel to another plugin in a single click', () => {
+    const overview: McpOverview = {
+      servers: [makeServer('a', 'Alpha'), makeServer('b', 'Bravo')],
+      configs: [makeConfig('cfg-a', 'a', 'Alpha'), makeConfig('cfg-b', 'b', 'Bravo')],
+      customized_contexts: [],
+      incompatibilities: [],
+      incomplete_configs: [],
+    };
+
+    wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Alpha — Voir les détails' }));
+    expect(document.querySelector('[data-testid="mcp-plugin-panel"]')).toHaveAttribute('aria-label', 'Alpha');
+
+    // No close step: the second card is reachable because nothing blocks it.
+    fireEvent.click(screen.getByRole('button', { name: 'Bravo — Voir les détails' }));
+    const panels = document.querySelectorAll('[data-testid="mcp-plugin-panel"]');
+    expect(panels).toHaveLength(1);
+    expect(panels[0]).toHaveAttribute('aria-label', 'Bravo');
+  });
+
   it('combines plugin type filtering with criterion and direction sorting', () => {
     const mcpServer = makeServer('mcp', 'MCP server');
     const apiServer: McpServer = {
@@ -183,7 +378,7 @@ describe('McpPage', () => {
     const cardOrder = () => Array.from(
       container.querySelectorAll<HTMLElement>('.mcp-installed-card'),
       card => card.dataset.configId,
-    );
+    ).filter((id): id is string => id !== undefined);
 
     expect(cardOrder()).toEqual(['api-config', 'cli-config', 'mcp-config']);
     fireEvent.change(screen.getByLabelText('Trier les plugins'), {
@@ -228,7 +423,7 @@ describe('McpPage', () => {
     expect(document.body.textContent).toContain('A test server');
   });
 
-  it('shows the read-only built-in kronn-internal card directly on the main view (no Add click)', () => {
+  it('shows the read-only built-in kronn-internal entry as a standard plugin card', () => {
     // kronn-internal is auto-injected into every project — surfaced as a
     // read-only system card on the MAIN Plugins view (not behind "Ajouter"),
     // visible even with zero configs.
@@ -238,9 +433,30 @@ describe('McpPage', () => {
     // No interaction: the card is present immediately on the default view.
     const card = screen.getByTestId('mcp-kronn-internal-card');
     expect(card).toBeTruthy();
+    expect(card).toHaveClass('mcp-installed-card');
+    expect(card).not.toHaveClass('mcp-card');
     // FR strings: name + built-in badge.
     expect(card.textContent).toContain('Kronn Internal');
     expect(card.textContent).toContain('Intégré');
+  });
+
+  it('uses the real kronn-internal config as the single built-in card when present', () => {
+    const config = makeConfig('kronn-config', 'detected:kronn-internal', 'kronn-internal', {
+      is_global: true,
+    });
+    const overview: McpOverview = {
+      servers: [makeServer('detected:kronn-internal', 'kronn-internal')],
+      configs: [config],
+      customized_contexts: [],
+      incompatibilities: [],
+      incomplete_configs: [],
+    };
+    wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
+
+    const cards = screen.getAllByTestId('mcp-kronn-internal-card');
+    expect(cards).toHaveLength(1);
+    expect(cards[0]).toHaveAttribute('data-config-id', 'kronn-config');
+    expect(cards[0]).toHaveTextContent('Intégré');
   });
 
   it('shows incompatibility badge in detail panel when card is clicked', () => {

@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
     use crate::core::registry::*;
-    use crate::models::McpTransport;
+    use crate::models::{ApiAuthKind, McpTransport, TokenInjection};
 
     // ─── Registry integrity ─────────────────────────────────────────────────────
 
@@ -498,14 +498,39 @@ mod tests {
             "Official Fastly MCP uses CLI profiles, not env vars"
         );
         assert!(m.tags.contains(&"cdn".to_string()));
+        assert!(m.tags.contains(&"api".to_string()));
         assert!(m.token_url.is_some());
         assert!(
-            m.token_help
-                .as_ref()
-                .unwrap()
-                .contains("fastly profile create"),
-            "token_help should guide users to create a Fastly CLI profile"
+            m.token_help.as_ref().unwrap().contains("fastly auth login"),
+            "token_help should guide users through current Fastly CLI auth"
         );
+        assert!(
+            m.alt_packages.is_empty(),
+            "community npm packages must not alias the official Fastly MCP"
+        );
+
+        let api = m.api_spec.as_ref().expect("Fastly must be hybrid");
+        assert_eq!(api.base_url, "https://api.fastly.com");
+        assert!(api
+            .endpoints
+            .iter()
+            .any(|endpoint| endpoint.path == "/current_user"));
+        assert!(api
+            .endpoints
+            .iter()
+            .all(|endpoint| endpoint.method == "GET"));
+        match &api.auth {
+            ApiAuthKind::CliToken {
+                command,
+                args,
+                inject: TokenInjection::CustomHeader { name },
+            } => {
+                assert_eq!(command, "fastly");
+                assert_eq!(args, &["auth".to_string(), "token".to_string()]);
+                assert_eq!(name, "Fastly-Key");
+            }
+            auth => panic!("unexpected Fastly auth: {auth:?}"),
+        }
     }
 
     #[test]

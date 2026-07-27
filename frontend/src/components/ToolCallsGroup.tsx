@@ -46,16 +46,22 @@ interface ToolCallsGroupProps {
   /** Consecutive tool System messages, in chronological order. Caller is
    *  responsible for the grouping — we just render. */
   messages: DiscussionMessage[];
+  /** KT-65 — lets a global message hit target the folded group that owns the
+   *  matching System message instead of landing near an invisible row. */
+  targetMessageId?: string;
   t: (key: string, ...args: (string | number)[]) => string;
 }
 
-export function ToolCallsGroup({ messages, t }: ToolCallsGroupProps) {
+export function ToolCallsGroup({ messages, targetMessageId, t }: ToolCallsGroupProps) {
   // Parse + filter — defensive against messages that look like tool traces
   // but don't match the canonical regex (incomplete writes, future format
   // changes).
   const allCalls: KronnToolCall[] = messages
     .map(m => parseKronnToolMessage(m.content))
     .filter((c): c is KronnToolCall => c !== null);
+  const isSearchTarget = Boolean(
+    targetMessageId && messages.some(message => message.id === targetMessageId),
+  );
 
   if (allCalls.length === 0) return null;
 
@@ -71,7 +77,12 @@ export function ToolCallsGroup({ messages, t }: ToolCallsGroupProps) {
   });
 
   return (
-    <div className="disc-tool-calls-group" data-testid="tool-calls-group">
+    <div
+      className="disc-tool-calls-group"
+      data-testid="tool-calls-group"
+      data-message-id={isSearchTarget ? targetMessageId : undefined}
+      data-search-current={isSearchTarget || undefined}
+    >
       {kronnPairs.length > 0 && (
         <ToolCallsSubBanner
           source="kronn-internal"

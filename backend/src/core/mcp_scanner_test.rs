@@ -1808,6 +1808,47 @@ args = ["@example/old-mcp"]
     }
 
     #[test]
+    fn plugin_invocation_preferences_are_short_and_capability_aware() {
+        use crate::models::{McpServer, McpSource, PluginInterface};
+
+        let definitions = crate::core::registry::builtin_registry();
+        let fastly = definitions
+            .iter()
+            .find(|definition| definition.id == "mcp-fastly")
+            .unwrap();
+        let server = McpServer {
+            id: fastly.id.clone(),
+            name: fastly.name.clone(),
+            description: fastly.description.clone(),
+            transport: fastly.transport.clone(),
+            source: McpSource::Registry,
+            api_spec: fastly.api_spec.clone(),
+        };
+
+        let block = build_plugin_invocation_preferences(&[(
+            server,
+            "Fastly production".into(),
+            PluginInterface::Api,
+        )]);
+        assert_eq!(
+            block,
+            "## Plugin invocation preferences\n\n\
+- Fastly production: API first via `api_call`; MCP for exploration; CLI as fallback.\n"
+        );
+    }
+
+    #[test]
+    fn plugin_invocation_preferences_skip_single_interface_plugins() {
+        let (server, _) = api_server("api-test", "https://api.example.com");
+        let block = build_plugin_invocation_preferences(&[(
+            server,
+            "Only API".into(),
+            crate::models::PluginInterface::Api,
+        )]);
+        assert!(block.is_empty());
+    }
+
+    #[test]
     fn build_api_context_block_is_lean_not_a_full_endpoint_dump() {
         // 2026-06-24 — the block must NOT dump every endpoint (that bloated
         // every agent prompt by tens of KB). It surfaces the count + ONE

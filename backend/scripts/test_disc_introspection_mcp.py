@@ -32,6 +32,7 @@ import io
 import importlib.util
 import json
 import os
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -144,6 +145,46 @@ class CurrentDiscMetaCacheTests(unittest.TestCase):
         self.assertEqual(urlopen.call_count, 1)
 
 
+class ResolveIdTests(unittest.TestCase):
+    def setUp(self):
+        self.mod = _load_module()
+
+    def test_tool_is_discoverable_and_dispatched(self):
+        tool = next(item for item in self.mod.TOOLS if item["name"] == "resolve_id")
+        self.assertEqual(tool["inputSchema"]["required"], ["id"])
+        self.assertIn("resolve_id", self.mod.DISPATCH)
+
+    def test_calls_single_compact_backend_endpoint(self):
+        payload = {
+            "kind": "task",
+            "id": "task/one",
+            "reference": "KT-42",
+            "title": "Compact resolver",
+            "summary": "todo · normal",
+            "parent": None,
+            "suggested_tool": "task_get",
+        }
+        with mock.patch.object(
+            self.mod, "_http", return_value={"success": True, "data": payload}
+        ) as http:
+            result = self.mod.call_resolve_id({"id": "task/one"})
+
+        self.assertEqual(result, payload)
+        http.assert_called_once_with("GET", "/api/resolve/task%2Fone")
+        wire_bytes = len(json.dumps(result, ensure_ascii=False, indent=2).encode("utf-8"))
+        self.assertLessEqual(
+            wire_bytes,
+            512,
+            "representative resolver result must stay below ~128 tokens at 4 bytes/token",
+        )
+
+    def test_rejects_empty_id_without_http(self):
+        with mock.patch.object(self.mod, "_http") as http:
+            with self.assertRaisesRegex(RuntimeError, "id is required"):
+                self.mod.call_resolve_id({"id": "  "})
+        http.assert_not_called()
+
+
 class CallDiscCreateAutoInheritTests(unittest.TestCase):
     """The auto-fill contract on `call_disc_create`.
 
@@ -253,6 +294,40 @@ class CallDiscCreateAutoInheritTests(unittest.TestCase):
         self.assertNotIn("project_id", body)
         self.assertNotIn("source_agent", body)
         self.assertNotIn("source_session_id", body)
+
+
+class DiscSourceBindingToolTests(unittest.TestCase):
+    def setUp(self):
+        self.mod = _load_module()
+        self.fake_http = mock.MagicMock(return_value={
+            "success": True,
+            "data": True,
+        })
+
+    def test_disc_link_is_safe_by_default(self):
+        with mock.patch.object(self.mod, "_http", self.fake_http):
+            self.mod.call_disc_link({
+                "disc_id": "disc-a",
+                "source_agent": "Codex",
+                "source_session_id": "session-1",
+            })
+        self.fake_http.assert_called_once_with("POST", "/api/disc/link", {
+            "disc_id": "disc-a",
+            "source_agent": "Codex",
+            "source_session_id": "session-1",
+            "force_reassign": False,
+        })
+
+    def test_disc_link_forwards_explicit_transfer(self):
+        with mock.patch.object(self.mod, "_http", self.fake_http):
+            self.mod.call_disc_link({
+                "disc_id": "disc-b",
+                "source_agent": "ClaudeCode",
+                "source_session_id": "session-2",
+                "force_reassign": True,
+            })
+        body = self.fake_http.call_args.args[2]
+        self.assertIs(body["force_reassign"], True)
 
 
 class CallDiscGetMessageTests(unittest.TestCase):
@@ -1036,9 +1111,126 @@ class DiscJoinTests(unittest.TestCase):
                     "data": {"disc_id": "d", "session_pk": 1, "peer_count": 1, "disc_title": "x", "recent_messages": []},
                 }
                 mod2.call_disc_join({"token": "kr-join-z"})
-            body = mock_http.call_args[0][2]
+            body = _join_body(mock_http)
             self.assertEqual(body["agent_type"], "Codex")
             self.assertEqual(body["session_id"], "sess-codex-real")
+
+    def test_join_reports_codex_native_conversation_id_separately(self):
+        native_id = "019f8fc7-dd84-7843-abad-162a97ca836b"
+        with mock.patch.dict(os.environ, {
+            "KRONN_AGENT_TYPE": "Codex",
+            "CODEX_THREAD_ID": native_id,
+        }):
+            mod = _load_module()
+            with mock.patch.object(mod, "_http") as mock_http:
+                mock_http.return_value = {
+                    "success": True,
+                    "data": {
+                        "disc_id": "d", "session_pk": 1, "peer_count": 1,
+                        "disc_title": "x", "recent_messages": [],
+                    },
+                }
+                mod.call_disc_join({"token": "kr-join-native"})
+            body = _join_body(mock_http)
+            self.assertEqual(body["conversation_id"], native_id)
+            self.assertNotEqual(
+                body["conversation_id"],
+                body["session_id"],
+                "native CLI conversation id must not replace the bridge binding id",
+            )
+
+    def test_join_omits_missing_or_malformed_native_conversation_id(self):
+        with mock.patch.dict(os.environ, {
+            "KRONN_AGENT_TYPE": "Codex",
+            "CODEX_THREAD_ID": "not-a-uuid",
+        }):
+            mod = _load_module()
+            with mock.patch.object(mod, "_http") as mock_http:
+                mock_http.return_value = {
+                    "success": True,
+                    "data": {
+                        "disc_id": "d", "session_pk": 1, "peer_count": 1,
+                        "disc_title": "x", "recent_messages": [],
+                    },
+                }
+                mod.call_disc_join({"token": "kr-join-native"})
+            self.assertNotIn("conversation_id", _join_body(mock_http))
+
+    def test_codex_native_conversation_id_falls_back_to_resume_ancestor(self):
+        native_id = "019f8fc7-dd84-7843-abad-162a97ca836b"
+        for env in (
+            {"KRONN_AGENT_TYPE": "Codex"},
+            {"KRONN_AGENT_TYPE": "Codex", "CODEX_THREAD_ID": ""},
+        ):
+            with self.subTest(env=env), mock.patch.dict(os.environ, env, clear=True):
+                mod = _load_module()
+                with mock.patch.object(
+                    mod,
+                    "_codex_resume_id_from_ancestors",
+                    return_value=native_id,
+                ):
+                    self.assertEqual(mod._native_conversation_id(), native_id)
+
+    def test_codex_resume_parser_only_accepts_a_real_command_prefix(self):
+        native_id = "019f8fc7-dd84-7843-abad-162a97ca836b"
+        mod = _load_module()
+        for command in (
+            f"/opt/bin/codex resume {native_id}",
+            f"node /opt/homebrew/bin/codex resume {native_id} --full-auto",
+            f"pnpm /opt/bin/codex resume {native_id}",
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(mod._codex_resume_id_from_cmdline(command), native_id)
+        for command in (
+            f"codex exec review codex resume {native_id}",
+            f"echo codex resume {native_id}",
+            f"/opt/bin/claude --resume {native_id}",
+            "codex resume 019f8fc7dd847843abad162a97ca836b",
+        ):
+            with self.subTest(command=command):
+                self.assertIsNone(mod._codex_resume_id_from_cmdline(command))
+
+    def test_claude_native_conversation_id_uses_claude_session_env(self):
+        native_id = "11111111-1111-4111-8111-111111111111"
+        with mock.patch.dict(os.environ, {
+            "KRONN_AGENT_TYPE": "ClaudeCode",
+            "CLAUDE_CODE_SESSION_ID": native_id,
+        }):
+            mod = _load_module()
+            self.assertEqual(mod._native_conversation_id(), native_id)
+
+
+def _append_body(mock_http):
+    """The body of the POST /api/disc/append call.
+
+    KT-43 made `disc_append` chain a wait in the same tool call, so the LAST
+    recorded call is the GET /wait; these assertions are about the append.
+    """
+    return _bodies_for(mock_http, "/api/disc/append")[0]
+
+
+def _bodies_for(mock_http, path):
+    """Every recorded body posted to `path`, in order.
+
+    KT-76 made join and resume also POST /api/disc/link, so `call_args` is no
+    longer the call under test — assert against the path you mean.
+    """
+    bodies = [
+        call.args[2]
+        for call in mock_http.call_args_list
+        if len(call.args) >= 3 and call.args[1] == path
+    ]
+    if not bodies:
+        raise AssertionError(f"no call recorded for {path}")
+    return bodies
+
+
+def _join_body(mock_http):
+    return _bodies_for(mock_http, "/api/discussions/peer-join")[0]
+
+
+def _resume_body(mock_http):
+    return _bodies_for(mock_http, "/api/discussions/peer-resume")[-1]
 
 
 class DiscAppendSimpleModeTests(unittest.TestCase):
@@ -1077,7 +1269,7 @@ class DiscAppendSimpleModeTests(unittest.TestCase):
                 "data": {"appended": 1, "skipped_as_duplicates": 0, "diverged": False},
             }
             result = self.mod.call_disc_append({"content": "ready to play"})
-        body = mock_http.call_args[0][2]
+        body = _append_body(mock_http)
         self.assertEqual(body["disc_id"], "disc-chat")
         self.assertEqual(len(body["messages"]), 1)
         msg = body["messages"][0]
@@ -1096,24 +1288,30 @@ class DiscAppendSimpleModeTests(unittest.TestCase):
                 "role": "User",
                 "agent_type": "ManualOverride",
             })
-        msg = mock_http.call_args[0][2]["messages"][0]
+        msg = _append_body(mock_http)["messages"][0]
         self.assertEqual(msg["role"], "User")
         self.assertEqual(msg["agent_type"], "ManualOverride")
 
     def test_simple_mode_infers_one_structured_agent_target(self):
-        with mock.patch.object(self.mod, "_http") as mock_http:
+        with mock.patch.object(self.mod, "_current_disc_meta", return_value={
+            "agent": "ClaudeCode",
+        }), mock.patch.object(self.mod, "_http") as mock_http:
             mock_http.return_value = {"success": True, "data": {}}
             self.mod.call_disc_append({
                 "content": "Peux-tu continuer, @ollama ?",
             })
-        msg = mock_http.call_args[0][2]["messages"][0]
+        msg = _append_body(mock_http)["messages"][0]
         self.assertEqual(msg["target_agent"], "Ollama")
+        self.assertEqual(msg["targets"], [{
+            "kind": "agent",
+            "agent_type": "Ollama",
+        }])
 
-    def test_code_examples_and_ambiguous_fanout_do_not_infer_a_target(self):
+    def test_code_examples_and_non_mentions_do_not_infer_a_target(self):
         cases = [
             "Documente `@ollama` sans le lancer.",
             "```\ndisc_append({content: '@ollama réponds'})\n```",
-            "@claude et @codex, comparez vos conclusions.",
+            "```md\n@codex-cli exemple sans clôture",
             "contact@ollama.example n'est pas une mention",
         ]
         for content in cases:
@@ -1121,18 +1319,75 @@ class DiscAppendSimpleModeTests(unittest.TestCase):
                  mock.patch.object(self.mod, "_http") as mock_http:
                 mock_http.return_value = {"success": True, "data": {}}
                 self.mod.call_disc_append({"content": content})
-                msg = mock_http.call_args[0][2]["messages"][0]
+                msg = _append_body(mock_http)["messages"][0]
                 self.assertNotIn("target_agent", msg)
+                self.assertNotIn("targets", msg)
+
+    def test_plural_native_mentions_keep_textual_order_and_identity_kind(self):
+        with mock.patch.object(self.mod, "_current_disc_meta", return_value={
+            "agent": "ClaudeCode",
+        }), mock.patch.object(self.mod, "_http") as mock_http:
+            mock_http.return_value = {"success": True, "data": {}}
+            self.mod.call_disc_append({
+                "content": "@codex puis @claude puis @codex, comparez.",
+            })
+        msg = _append_body(mock_http)["messages"][0]
+        self.assertEqual(msg["targets"], [
+            {"kind": "agent", "agent_type": "Codex"},
+            {"kind": "discussion_agent", "agent_type": "ClaudeCode"},
+        ])
+
+    def test_cli_alias_resolves_one_exact_joined_session(self):
+        participants = [
+            {"id": 41, "agent_type": "Codex"},
+            {"id": 42, "agent_type": "Codex"},
+            {"id": 50, "agent_type": "ClaudeCode"},
+        ]
+
+        def http(method, path, body=None):
+            if method == "GET" and path.endswith("/participants"):
+                return {"success": True, "data": participants}
+            return {"success": True, "data": {}}
+
+        with mock.patch.object(self.mod, "_current_disc_meta", return_value={
+            "agent": "ClaudeCode",
+        }), mock.patch.object(self.mod, "_http", side_effect=http) as mock_http:
+            self.mod.call_disc_append({
+                "content": "@codex-cli-2 peux-tu reprendre ?",
+            })
+        msg = _append_body(mock_http)["messages"][0]
+        self.assertEqual(msg["targets"], [{
+            "kind": "cli",
+            "agent_type": "Codex",
+            "cli_session_id": 42,
+        }])
+        self.assertEqual(msg["target_agent"], "Codex")
 
     def test_explicit_target_agent_wins_over_inference(self):
-        with mock.patch.object(self.mod, "_http") as mock_http:
+        with mock.patch.object(self.mod, "_current_disc_meta", return_value={
+            "agent": "ClaudeCode",
+        }), mock.patch.object(self.mod, "_http") as mock_http:
             mock_http.return_value = {"success": True, "data": {}}
             self.mod.call_disc_append({
                 "content": "@ollama is discussed, but Claude owns this turn.",
                 "target_agent": "ClaudeCode",
             })
-        msg = mock_http.call_args[0][2]["messages"][0]
+        msg = _append_body(mock_http)["messages"][0]
         self.assertEqual(msg["target_agent"], "ClaudeCode")
+        self.assertEqual(msg["targets"], [{
+            "kind": "discussion_agent",
+            "agent_type": "ClaudeCode",
+        }])
+
+    def test_simple_mode_carries_a_durable_reply_target(self):
+        with mock.patch.object(self.mod, "_http") as mock_http:
+            mock_http.return_value = {"success": True, "data": {}}
+            self.mod.call_disc_append({
+                "content": "Je réponds précisément.",
+                "reply_to_message_id": "wsl-1726cd13dff6",
+            })
+        msg = _append_body(mock_http)["messages"][0]
+        self.assertEqual(msg["reply_to_message_id"], "wsl-1726cd13dff6")
 
     def test_heavy_mode_messages_array_still_works(self):
         # Back-compat : the 0.8.4 cross-agent-memory transcript import
@@ -1147,7 +1402,7 @@ class DiscAppendSimpleModeTests(unittest.TestCase):
                     {"source_msg_id": "abc-2", "role": "User", "content": "second"},
                 ],
             })
-        body = mock_http.call_args[0][2]
+        body = _append_body(mock_http)
         self.assertEqual(body["disc_id"], "disc-other")
         self.assertEqual(len(body["messages"]), 2)
         self.assertEqual(body["messages"][0]["source_msg_id"], "abc-1")
@@ -1365,7 +1620,7 @@ class ClientInfoAutoDetectTests(unittest.TestCase):
                 "data": {"disc_id": "d", "session_pk": 1, "peer_count": 1, "disc_title": "x", "recent_messages": []},
             }
             self.mod.call_disc_join({"token": "kr-join-test"})
-        body = mock_http.call_args[0][2]
+        body = _join_body(mock_http)
         self.assertEqual(
             body["agent_type"], "Codex",
             "disc_join should derive 'Codex' from clientInfo.name='codex-cli'",
@@ -1471,7 +1726,7 @@ class StableSessionIdAcrossCallsTests(unittest.TestCase):
                     },
                 }
                 mod.call_disc_join({"token": "kr-join-x"})
-                join_sid = mock_http.call_args[0][2]["session_id"]
+                join_sid = _join_body(mock_http)["session_id"]
 
                 mock_http.return_value = {"success": True, "data": {"left": True}}
                 mod.call_disc_leave({})
@@ -1608,6 +1863,7 @@ class DiscWaitForPeerTests(unittest.TestCase):
                             "agent_type": "ClaudeCode",
                             "content": "hello peer",
                             "timestamp": "2026-05-20T10:00:00Z",
+                            "target_agent": "ClaudeCode",
                         }
                     ],
                     "latest_sort_order": 3,
@@ -1622,6 +1878,7 @@ class DiscWaitForPeerTests(unittest.TestCase):
         self.assertEqual(len(result["messages"]), 1)
         self.assertEqual(result["messages"][0]["content"], "hello peer")
         self.assertEqual(result["messages"][0]["agent_type"], "ClaudeCode")
+        self.assertEqual(result["messages"][0]["target_agent"], "ClaudeCode")
 
     def test_happy_path_timed_out_returns_empty_messages(self):
         # The other terminal state : the long-poll fired the timeout
@@ -1651,6 +1908,134 @@ class DiscWaitForPeerTests(unittest.TestCase):
         self.assertIn("hint", result)
         self.assertIn("again", result["hint"].lower())
         self.assertIn("disc_wait_for_peer", result["hint"])
+
+    def test_targeted_message_stays_visible_but_tells_other_peer_to_abstain(self):
+        with mock.patch.object(self.mod, "_http") as mock_http:
+            mock_http.return_value = {
+                "success": True,
+                "data": {
+                    "timed_out": False,
+                    "messages": [{
+                        "sort_order": 8,
+                        "role": "User",
+                        "agent_type": None,
+                        "content": "@claude vérifie ceci",
+                        "timestamp": "2026-07-28T10:00:00Z",
+                        "target_agent": "ClaudeCode",
+                    }],
+                    "latest_sort_order": 8,
+                },
+            }
+            result = self.mod.call_disc_wait_for_peer({"since_sort_order": 7})
+
+        self.assertEqual(len(result["messages"]), 1, "room awareness is preserved")
+        self.assertEqual(result["messages"][0]["target_agent"], "ClaudeCode")
+        self.assertIn("do NOT answer", result["routing_hint"])
+        self.assertIn("ClaudeCode", result["routing_hint"])
+        self.assertIn("target failure", result["routing_hint"])
+
+    def test_plural_target_tells_listed_peer_to_answer_once(self):
+        with mock.patch.object(self.mod, "_http") as mock_http:
+            mock_http.return_value = {
+                "success": True,
+                "data": {
+                    "timed_out": False,
+                    "messages": [{
+                        "sort_order": 9,
+                        "role": "User",
+                        "agent_type": None,
+                        "content": "@codex confronte @claude",
+                        "timestamp": "2026-07-29T10:00:00Z",
+                        "target_agent": "Codex",
+                        "target_agents": ["Codex", "ClaudeCode"],
+                    }],
+                    "latest_sort_order": 9,
+                },
+            }
+            result = self.mod.call_disc_wait_for_peer({"since_sort_order": 8})
+
+        self.assertIn("explicitly listed", result["routing_hint"])
+        self.assertIn("answer this turn once", result["routing_hint"])
+        self.assertIn("ClaudeCode", result["routing_hint"])
+
+    def test_plural_target_tells_unlisted_peer_to_abstain(self):
+        with mock.patch.dict(os.environ, {"KRONN_AGENT_TYPE": "Vibe"}):
+            mod = _load_module()
+            with mock.patch.object(mod, "_http") as mock_http:
+                mock_http.return_value = {
+                    "success": True,
+                    "data": {
+                        "timed_out": False,
+                        "messages": [{
+                            "sort_order": 9,
+                            "role": "User",
+                            "agent_type": None,
+                            "content": "@codex confronte @claude",
+                            "timestamp": "2026-07-29T10:00:00Z",
+                            "target_agents": ["Codex", "ClaudeCode"],
+                        }],
+                        "latest_sort_order": 9,
+                    },
+                }
+                result = mod.call_disc_wait_for_peer({"since_sort_order": 8})
+
+        self.assertIn("do NOT answer", result["routing_hint"])
+        self.assertIn("ClaudeCode", result["routing_hint"])
+        self.assertIn("Codex", result["routing_hint"])
+
+    def test_typed_native_target_never_wakes_same_provider_cli(self):
+        with mock.patch.object(self.mod, "_http") as mock_http:
+            mock_http.return_value = {
+                "success": True,
+                "data": {
+                    "timed_out": False,
+                    "messages": [{
+                        "sort_order": 10,
+                        "role": "Agent",
+                        "agent_type": "Vibe",
+                        "content": "Codex ponctuel est sollicité",
+                        "timestamp": "2026-07-29T10:00:00Z",
+                        "targets": [{
+                            "kind": "agent",
+                            "agent_type": "Codex",
+                            "cli_session_id": None,
+                        }],
+                        "addressed_to_caller": False,
+                    }],
+                    "latest_sort_order": 10,
+                },
+            }
+            result = self.mod.call_disc_wait_for_peer({"since_sort_order": 9})
+
+        self.assertIn("do NOT answer", result["routing_hint"])
+        self.assertIn("Codex punctual agent", result["routing_hint"])
+
+    def test_typed_cli_target_tells_exact_session_to_answer_once(self):
+        with mock.patch.object(self.mod, "_http") as mock_http:
+            mock_http.return_value = {
+                "success": True,
+                "data": {
+                    "timed_out": False,
+                    "messages": [{
+                        "sort_order": 11,
+                        "role": "User",
+                        "agent_type": None,
+                        "content": "@codex-cli vérifie",
+                        "timestamp": "2026-07-29T10:00:00Z",
+                        "targets": [{
+                            "kind": "cli",
+                            "agent_type": "Codex",
+                            "cli_session_id": 42,
+                        }],
+                        "addressed_to_caller": True,
+                    }],
+                    "latest_sort_order": 11,
+                },
+            }
+            result = self.mod.call_disc_wait_for_peer({"since_sort_order": 10})
+
+        self.assertIn("exact Codex CLI session", result["routing_hint"])
+        self.assertIn("answer this turn once", result["routing_hint"])
 
     def test_unbound_disc_raises_before_http(self):
         with mock.patch.dict(os.environ, {
@@ -2709,6 +3094,8 @@ class McpRemoteControlToolListingTests(unittest.TestCase):
         # Must mention NO next_check so an agent migrating from qp_run
         # doesn't blindly look for the field.
         self.assertIn("NO `next_check`", tool["description"])
+        self.assertIn("starts no model", tool["description"])
+        self.assertIn("normal agent tokens", tool["description"])
 
     def test_all_four_tools_dispatched(self):
         # Tools listed in TOOLS must be wired in DISPATCH — else
@@ -4260,8 +4647,10 @@ class OnboardingTests(unittest.TestCase):
         self.assertIn("Kronn en 2 minutes", out["guide"])
         # Les 7 domaines que le tour DOIT couvrir.
         for domain in ("Discussions sauvegardées", "Mode join", "Quick Prompts",
-                       "Workflows", "API configurée", "désagentification", "Audits"):
+                       "Workflows", "APIs déclarées", "désagentification", "Audits"):
             self.assertIn(domain, out["guide"], f"tour incomplet: {domain} absent")
+        self.assertNotIn("je peux tout piloter", out["guide"])
+        self.assertNotIn("N'importe quelle API", out["guide"])
         self.assertEqual(out["onboarding_marked_done_for"], "ClaudeCode")
         self.assertTrue(self.mod._onboarding_done_for("ClaudeCode"))
         # Un autre client garde SON premier contact.
@@ -4339,6 +4728,40 @@ class StableIdentityKeyTests(unittest.TestCase):
         )
         self.assertNotEqual(a, b)
 
+    def test_codex_resume_uuid_survives_a_complete_cli_reboot(self):
+        sid = "019f8fc7-dd84-7843-abad-162a97ca836b"
+        self.mod._CLIENT_INFO["name"] = "Codex"
+        with mock.patch.dict(
+                 self.mod.os.environ, {"CODEX_THREAD_ID": sid}, clear=True
+             ), \
+             mock.patch.object(self.mod, "_cli_ancestor_identity", return_value=(10, "old")):
+            first = self.mod._binding_identity()
+        with mock.patch.dict(
+                 self.mod.os.environ, {"CODEX_THREAD_ID": sid}, clear=True
+             ), \
+             mock.patch.object(self.mod, "_cli_ancestor_identity", return_value=(20, "new")):
+            second = self.mod._binding_identity()
+
+        self.assertEqual(first, ("codex-session", sid))
+        self.assertEqual(first, second)
+        self.assertEqual(
+            self.mod._identity_key_from(first),
+            self.mod._identity_key_from(second),
+            "a real `codex resume` must keep the same durable room binding",
+        )
+
+    def test_codex_without_a_verified_resume_uuid_keeps_the_legacy_ancestor_key(self):
+        ancestor = (4321, "starttok")
+        self.mod._CLIENT_INFO["name"] = "Codex"
+        with mock.patch.dict(self.mod.os.environ, {}, clear=True), \
+             mock.patch.object(
+                 self.mod, "_codex_resume_id_from_ancestors", return_value=None
+             ), \
+             mock.patch.object(
+                 self.mod, "_cli_ancestor_identity", return_value=ancestor
+             ):
+            self.assertEqual(self.mod._binding_identity(), ancestor)
+
     def test_invalid_claude_session_id_falls_back_to_cli_ancestor(self):
         ancestor = (4321, "starttok")
         self.mod._CLIENT_INFO["name"] = "ClaudeCode"
@@ -4360,6 +4783,9 @@ class StableIdentityKeyTests(unittest.TestCase):
         self.mod._CLIENT_INFO["name"] = "Codex"
         with mock.patch.dict(
                  self.mod.os.environ, {"CLAUDE_CODE_SESSION_ID": sid}, clear=True
+             ), \
+             mock.patch.object(
+                 self.mod, "_codex_resume_id_from_ancestors", return_value=None
              ), \
              mock.patch.object(
                  self.mod, "_cli_ancestor_identity", return_value=ancestor
@@ -4470,6 +4896,61 @@ class ResumeBindingTests(unittest.TestCase):
         self.mod._BINDING_DIR = self._tmp.name
         self.mod._BINDING_PATH_CACHE["computed"] = True
         self.mod._BINDING_PATH_CACHE["path"] = os.path.join(self._tmp.name, "binding.json")
+
+    def test_codex_upgrade_reads_the_secure_legacy_pid_binding_once(self):
+        legacy_path = os.path.join(self._tmp.name, "legacy-binding.json")
+        with open(legacy_path, "w", encoding="utf-8") as handle:
+            json.dump(
+                {"disc_id": "d-legacy", "resume_token": "kr-resume-legacy"},
+                handle,
+            )
+        os.chmod(legacy_path, 0o600)
+
+        with mock.patch.object(
+            self.mod, "_legacy_codex_binding_path", return_value=legacy_path
+        ):
+            state = self.mod._read_binding()
+
+        self.assertEqual(state["disc_id"], "d-legacy")
+        self.assertEqual(state["resume_token"], "kr-resume-legacy")
+
+    def test_codex_upgrade_promotes_legacy_pid_binding_to_stable_primary_path(self):
+        legacy_path = os.path.join(self._tmp.name, "legacy-binding.json")
+        with open(legacy_path, "w", encoding="utf-8") as handle:
+            json.dump(
+                {
+                    "disc_id": "d-legacy",
+                    "resume_token": "kr-resume-legacy",
+                    "agent_type": "Codex",
+                },
+                handle,
+            )
+        os.chmod(legacy_path, 0o600)
+        primary_path = self.mod._binding_path()
+        http = mock.MagicMock(side_effect=self._resume_responder("d-legacy"))
+
+        with mock.patch.object(
+            self.mod, "_legacy_codex_binding_path", return_value=legacy_path
+        ), mock.patch.object(self.mod, "_http", http):
+            self.assertEqual(self.mod._attempt_resume(), "d-legacy")
+
+        self.assertTrue(
+            os.path.exists(primary_path),
+            "the first successful reload must promote the credential to the "
+            "conversation-keyed path",
+        )
+        promoted = self.mod._read_binding_path(primary_path)
+        self.assertEqual(promoted["disc_id"], "d-legacy")
+        self.assertEqual(
+            promoted["resume_token"],
+            _resume_body(http)["next_resume_token"],
+        )
+        self.assertNotEqual(promoted["resume_token"], "kr-resume-legacy")
+        self.assertFalse(
+            os.path.exists(legacy_path),
+            "a successfully consumed legacy credential must not survive with "
+            "its now-invalid token",
+        )
 
     def _envelope(self, data):
         return {"success": True, "data": data}
@@ -4586,12 +5067,14 @@ class ResumeBindingTests(unittest.TestCase):
         self.assertEqual(resumed, "d-42")
         self.assertEqual(self.mod._CURRENT_DISC_ID, "d-42")
         # The rotated credential replaced the old one on disk.
-        body = http.call_args.args[2]
+        body = _resume_body(http)
         self.assertEqual(self.mod._read_binding()["resume_token"], body["next_resume_token"])
         self.assertNotIn("pending_resume_token", self.mod._read_binding())
         # The request went to peer-resume with the OLD credential.
-        method, path = http.call_args.args[0], http.call_args.args[1]
-        self.assertEqual((method, path), ("POST", "/api/discussions/peer-resume"))
+        self.assertIn(
+            ("POST", "/api/discussions/peer-resume"),
+            [(c.args[0], c.args[1]) for c in http.call_args_list if len(c.args) >= 2],
+        )
         self.assertEqual(body["resume_token"], "kr-resume-old")
 
     def test_attempt_resume_failure_keeps_binding_and_returns_none(self):
@@ -4614,16 +5097,35 @@ class ResumeBindingTests(unittest.TestCase):
         # reconnect legitimately gives a NEW bridge session id; the resume
         # credential is what re-attaches — _attempt_resume must post the
         # CURRENT (new) session_id and return the SAME room.
-        self.mod._write_binding("d-room", "kr-resume-1", agent_type="Codex")
+        self.mod._write_binding(
+            "d-room",
+            "kr-resume-1",
+            agent_type="Codex",
+            last_read_sort_order=17,
+        )
         http = mock.MagicMock(side_effect=self._resume_responder("d-room", 5))
         with mock.patch.object(self.mod, "_session_id_for_caller", return_value="bridge-after-reload"), \
              mock.patch.object(self.mod, "_http", http):
             resumed = self.mod._attempt_resume()
         self.assertEqual(resumed, "d-room", "re-attaches to the same room across a reload")
-        body = http.call_args.args[2]
+        body = _resume_body(http)
         self.assertEqual(body["session_id"], "bridge-after-reload",
                          "resume posts the NEW bridge id so the backend rebinds the row")
         self.assertEqual(body["resume_token"], "kr-resume-1")
+        self.assertEqual(self.mod._read_cursor("d-room"), 17)
+        self.assertEqual(self.mod._read_binding()["last_read_sort_order"], 17)
+
+    def test_resume_refreshes_the_native_conversation_id_after_rotation(self):
+        native_id = "22222222-2222-4222-8222-222222222222"
+        self.mod._write_binding("d-room", "kr-resume-1", agent_type="Codex")
+        http = mock.MagicMock(side_effect=self._resume_responder("d-room", 5))
+        with mock.patch.dict(self.mod.os.environ, {
+            "KRONN_AGENT_TYPE": "Codex",
+            "CODEX_THREAD_ID": native_id,
+        }, clear=False), \
+             mock.patch.object(self.mod, "_http", http):
+            self.assertEqual(self.mod._attempt_resume(), "d-room")
+        self.assertEqual(_resume_body(http)["conversation_id"], native_id)
 
     def test_disc_id_lazily_resumes_after_reload(self):
         # The end-to-end reload path: unbound + no env, but a binding exists →
@@ -4643,7 +5145,9 @@ class ResumeBindingTests(unittest.TestCase):
     def test_disc_join_persists_binding_and_hides_credential_from_model(self):
         http = mock.MagicMock(return_value=self._envelope(
             {"disc_id": "d-join", "session_pk": 1, "resume_token": "kr-resume-j",
-             "peer_count": 1, "disc_title": "T", "recent_messages": [], "next_steps": ""}))
+             "peer_count": 1, "disc_title": "T",
+             "recent_messages": [{"sort_order": 8}, {"sort_order": 11}],
+             "next_steps": ""}))
         with mock.patch.object(self.mod, "_http", http):
             returned = self.mod.call_disc_join({"token": "kr-join-abc"})
         self.assertEqual(self.mod._CURRENT_DISC_ID, "d-join")
@@ -4651,10 +5155,70 @@ class ResumeBindingTests(unittest.TestCase):
         binding = self.mod._read_binding()
         self.assertEqual(binding["disc_id"], "d-join")
         self.assertEqual(binding["resume_token"], "kr-resume-j")
-        self.assertEqual(binding["agent_type"], http.call_args.args[2]["agent_type"])
+        self.assertEqual(binding["agent_type"], _join_body(http)["agent_type"])
+        self.assertEqual(binding["last_read_sort_order"], -1)
+        self.assertEqual(self.mod._read_cursor("d-join"), -1)
+        self.assertEqual(
+            self.mod._PENDING_READ_SORT_ORDER_BY_DISC["d-join"]["sort_order"],
+            11,
+        )
+        self.mod._ack_pending_read_cursors(1)
+        self.assertEqual(self.mod._read_binding()["last_read_sort_order"], 11)
         # …but stripped from the value handed to the model.
         self.assertNotIn("resume_token", returned,
                          "the resume credential must never reach the model context")
+
+    def test_explicit_rejoin_restores_cursor_instead_of_skipping_preview_gap(self):
+        self.mod._write_binding(
+            "d-rejoin",
+            "kr-resume-old",
+            agent_type="Codex",
+            last_read_sort_order=40,
+        )
+        http = mock.MagicMock(return_value=self._envelope({
+            "disc_id": "d-rejoin",
+            "session_pk": 2,
+            "resume_token": "kr-resume-new",
+            "peer_count": 2,
+            "disc_title": "T",
+            # A bounded preview can omit 41..50. Advancing to 60 here would
+            # silently skip those messages on the next wait.
+            "recent_messages": [{"sort_order": order} for order in range(51, 61)],
+            "next_steps": "",
+        }))
+
+        with mock.patch.object(self.mod, "_http", http):
+            self.mod.call_disc_join({"token": "kr-join-rejoin"})
+
+        self.assertEqual(self.mod._read_cursor("d-rejoin"), 40)
+        self.assertEqual(self.mod._read_binding()["last_read_sort_order"], 40)
+        self.assertNotIn("d-rejoin", self.mod._PENDING_READ_SORT_ORDER_BY_DISC)
+
+    def test_legacy_rejoin_without_cursor_replays_instead_of_seeding_preview(self):
+        self.mod._write_binding(
+            "d-legacy-rejoin",
+            "kr-resume-old",
+            agent_type="Codex",
+        )
+        http = mock.MagicMock(return_value=self._envelope({
+            "disc_id": "d-legacy-rejoin",
+            "session_pk": 2,
+            "resume_token": "kr-resume-new",
+            "peer_count": 2,
+            "disc_title": "T",
+            "recent_messages": [{"sort_order": order} for order in range(51, 61)],
+            "next_steps": "",
+        }))
+
+        with mock.patch.object(self.mod, "_http", http):
+            self.mod.call_disc_join({"token": "kr-join-rejoin"})
+
+        self.assertEqual(self.mod._read_cursor("d-legacy-rejoin"), -1)
+        self.assertEqual(self.mod._read_binding()["last_read_sort_order"], -1)
+        self.assertNotIn(
+            "d-legacy-rejoin",
+            self.mod._PENDING_READ_SORT_ORDER_BY_DISC,
+        )
 
     def test_disc_join_forwards_declared_model_and_omits_when_absent(self):
         # KT-37 — an explicit `model` arg is forwarded to peer-join as a
@@ -4670,7 +5234,7 @@ class ResumeBindingTests(unittest.TestCase):
                 mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop("KRONN_AGENT_MODEL", None)
             self.mod.call_disc_join({"token": "kr-join-x", "model": "  claude-opus-4  "})
-        self.assertEqual(http.call_args.args[2].get("model"), "claude-opus-4")
+        self.assertEqual(_join_body(http).get("model"), "claude-opus-4")
 
         # (b) omitted (and no env) → no `model` key at all.
         http2 = mock.MagicMock(return_value=env)
@@ -4678,14 +5242,14 @@ class ResumeBindingTests(unittest.TestCase):
                 mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop("KRONN_AGENT_MODEL", None)
             self.mod.call_disc_join({"token": "kr-join-y"})
-        self.assertNotIn("model", http2.call_args.args[2])
+        self.assertNotIn("model", _join_body(http2))
 
         # (c) env-declared default used when no arg.
         http3 = mock.MagicMock(return_value=env)
         with mock.patch.object(self.mod, "_http", http3), \
                 mock.patch.dict(os.environ, {"KRONN_AGENT_MODEL": "qwen3:32b"}, clear=False):
             self.mod.call_disc_join({"token": "kr-join-z"})
-        self.assertEqual(http3.call_args.args[2].get("model"), "qwen3:32b")
+        self.assertEqual(_join_body(http3).get("model"), "qwen3:32b")
 
     def test_response_loss_retries_the_exact_durable_successor(self):
         import urllib.error
@@ -4740,7 +5304,8 @@ class ResumeBindingTests(unittest.TestCase):
         final = self.mod._read_binding()
         self.assertEqual(final["resume_token"], pending)
         self.assertNotIn("pending_resume_token", final)
-        self.assertEqual(http.call_args_list[0].args[2], http.call_args_list[1].args[2])
+        resume_bodies = _bodies_for(http, "/api/discussions/peer-resume")
+        self.assertEqual(resume_bodies[0], resume_bodies[1])
 
     def test_persisted_agent_type_wins_over_reload_reinference(self):
         self.mod._write_binding("d-agent", "kr-resume-old", agent_type="Codex")
@@ -4748,7 +5313,7 @@ class ResumeBindingTests(unittest.TestCase):
         with mock.patch.object(self.mod, "_agent_type_for_session", return_value="ClaudeCode"), \
              mock.patch.object(self.mod, "_http", http):
             self.assertEqual(self.mod._attempt_resume(), "d-agent")
-        self.assertEqual(http.call_args.args[2]["agent_type"], "Codex")
+        self.assertEqual(_resume_body(http)["agent_type"], "Codex")
 
     def test_persisted_unknown_agent_type_self_heals_on_resume(self):
         self.mod._write_binding("d-vibe", "kr-resume-old", agent_type="Unknown")
@@ -4756,7 +5321,7 @@ class ResumeBindingTests(unittest.TestCase):
         with mock.patch.object(self.mod, "_agent_type_for_session", return_value="Vibe"), \
              mock.patch.object(self.mod, "_http", http):
             self.assertEqual(self.mod._attempt_resume(), "d-vibe")
-        self.assertEqual(http.call_args.args[2]["agent_type"], "Vibe")
+        self.assertEqual(_resume_body(http)["agent_type"], "Vibe")
         self.assertEqual(self.mod._read_binding()["agent_type"], "Vibe")
 
     def test_legacy_binding_does_not_fossilize_failed_agent_inference(self):
@@ -4815,10 +5380,309 @@ class ResumeBindingTests(unittest.TestCase):
         self.mod._CURRENT_DISC_ID = "d-app"
         http = mock.MagicMock(return_value=self._envelope({"appended": 1}))
         with mock.patch.object(self.mod, "_http", http):
-            self.mod.call_disc_append({"content": "hi peers"})
+            self.mod.call_disc_append({"content": "hi peers", "wait_for_reply": False})
         method, path, body = http.call_args.args[0], http.call_args.args[1], http.call_args.args[2]
         self.assertEqual((method, path), ("POST", "/api/disc/append"))
         self.assertEqual(body["session_id"], self.mod._session_id_for_caller())
+
+    # ─── KT-43 — posting and listening are ONE call ─────────────────────────
+
+    def test_live_append_waits_from_last_read_not_its_write_receipt(self):
+        """The gap between "posted" and "listening again" is where an agent
+        goes offline. A peer can post after our last read but before our own
+        append; resuming from the append receipt would silently skip it."""
+        self.mod._CURRENT_DISC_ID = "d-chain"
+        self.mod._write_binding(
+            "d-chain",
+            "kr-resume-chain",
+            agent_type="Codex",
+            last_read_sort_order=40,
+        )
+        self.mod._set_read_cursor("d-chain", 40)
+        self.mod._CURRENT_RPC_SEQUENCE = 10
+        calls = []
+
+        def fake_http(method, path, body=None):
+            calls.append((method, path))
+            if path == "/api/disc/append":
+                # Two peer messages landed first; our append was assigned 43.
+                return self._envelope({"appended": 1, "last_sort_order": 43})
+            return self._envelope({
+                "timed_out": False,
+                "messages": [
+                    {
+                        "message_id": "msg-41",
+                        "sort_order": 41,
+                        "content": "first unseen peer message",
+                    },
+                    {
+                        "message_id": "msg-42",
+                        "sort_order": 42,
+                        "content": "second unseen peer message",
+                    },
+                ],
+                "latest_sort_order": 43,
+            })
+
+        with mock.patch.object(self.mod, "_http", side_effect=fake_http), \
+             mock.patch.object(self.mod, "_http_transport_retry", side_effect=fake_http):
+            result = self.mod.call_disc_append({"content": "hi peers"})
+
+        self.assertEqual(calls[0], ("POST", "/api/disc/append"))
+        self.assertIn("/wait", calls[1][1])
+        self.assertIn("since_sort_order=40", calls[1][1])
+        self.assertNotIn("since_sort_order=43", calls[1][1])
+        self.assertEqual(result["appended"], 1)
+        self.assertEqual(result["waited"]["messages"][0]["sort_order"], 41)
+        self.assertEqual(result["waited"]["messages"][1]["sort_order"], 42)
+        self.assertEqual(
+            result["waited"]["delivered_message_ids"],
+            ["msg-41", "msg-42"],
+        )
+        self.assertIn("msg-41, msg-42", result["waited"]["delivery_ack_hint"])
+        self.assertEqual(result["pending_read_cursor"], 43)
+        self.assertEqual(
+            self.mod._read_binding()["last_read_sort_order"],
+            40,
+            "the batch stays replayable until a later tool call acknowledges it",
+        )
+        self.mod._ack_pending_read_cursors(11)
+        self.assertEqual(self.mod._read_binding()["last_read_sort_order"], 43)
+
+    def test_reload_then_live_append_delivers_the_entire_unread_gap(self):
+        """Dogfood regression 2026-07-30: three human messages landed while
+        the bridge was disconnected. The first post after reconnect must listen
+        from the persisted READ cursor, not from its own newer write receipt."""
+        self.mod._write_binding(
+            "d-reconnect-gap",
+            "kr-resume-gap",
+            agent_type="Codex",
+            last_read_sort_order=40,
+        )
+        self.mod._LAST_READ_SORT_ORDER_BY_DISC.clear()
+        self.mod._PENDING_READ_SORT_ORDER_BY_DISC.clear()
+        self.mod._CURRENT_DISC_ID = None
+
+        resume_http = mock.MagicMock(
+            side_effect=self._resume_responder("d-reconnect-gap"),
+        )
+        with mock.patch.object(self.mod, "_http", resume_http):
+            self.assertEqual(self.mod._attempt_resume(), "d-reconnect-gap")
+        self.assertEqual(self.mod._read_cursor("d-reconnect-gap"), 40)
+
+        calls = []
+
+        def fake_http(method, path, body=None):
+            calls.append((method, path))
+            if path == "/api/disc/append":
+                return self._envelope({"appended": 1, "last_sort_order": 44})
+            return self._envelope({
+                "timed_out": False,
+                "messages": [
+                    {"message_id": "msg-41", "sort_order": 41, "content": "one"},
+                    {"message_id": "msg-42", "sort_order": 42, "content": "two"},
+                    {"message_id": "msg-43", "sort_order": 43, "content": "three"},
+                ],
+                "latest_sort_order": 44,
+            })
+
+        with mock.patch.object(self.mod, "_http", side_effect=fake_http), \
+             mock.patch.object(self.mod, "_http_transport_retry", side_effect=fake_http):
+            result = self.mod.call_disc_append({"content": "back online"})
+
+        self.assertIn("since_sort_order=40", calls[1][1])
+        self.assertNotIn("since_sort_order=44", calls[1][1])
+        self.assertEqual(
+            result["waited"]["delivered_message_ids"],
+            ["msg-41", "msg-42", "msg-43"],
+        )
+
+    def test_wait_without_explicit_cursor_uses_and_advances_durable_read_cursor(self):
+        self.mod._CURRENT_DISC_ID = "d-wait"
+        self.mod._write_binding(
+            "d-wait",
+            "kr-resume-wait",
+            agent_type="Codex",
+            last_read_sort_order=12,
+        )
+        self.mod._set_read_cursor("d-wait", 12)
+        self.mod._CURRENT_RPC_SEQUENCE = 20
+
+        def fake_retry(method, path, body=None):
+            self.assertEqual(method, "GET")
+            self.assertIn("since_sort_order=12", path)
+            return self._envelope({
+                "timed_out": False,
+                "messages": [{"sort_order": 13}],
+                "latest_sort_order": 13,
+            })
+
+        with mock.patch.object(self.mod, "_http_transport_retry", side_effect=fake_retry):
+            result = self.mod.call_disc_wait_for_peer({})
+
+        self.assertEqual(result["latest_sort_order"], 13)
+        self.assertEqual(self.mod._read_cursor("d-wait"), 12)
+        self.assertEqual(self.mod._read_binding()["last_read_sort_order"], 12)
+        self.mod._ack_pending_read_cursors(21)
+        self.assertEqual(self.mod._read_cursor("d-wait"), 13)
+        self.assertEqual(self.mod._read_binding()["last_read_sort_order"], 13)
+
+    def test_wait_explains_cursor_movement_caused_by_routing(self):
+        self.mod._CURRENT_DISC_ID = "d-routed"
+        self.mod._set_read_cursor("d-routed", 15)
+
+        with mock.patch.object(
+            self.mod,
+            "_http_transport_retry",
+            return_value=self._envelope({
+                "timed_out": True,
+                "messages": [],
+                "latest_sort_order": 17,
+                "withheld_by_routing": 2,
+            }),
+        ):
+            result = self.mod.call_disc_wait_for_peer({})
+
+        self.assertEqual(result["withheld_by_routing"], 2)
+        self.assertIn("intentionally withheld", result["routing_visibility"])
+        self.assertEqual(self.mod._read_cursor("d-routed"), 17)
+
+    def test_unacknowledged_wait_replays_after_bridge_reload(self):
+        self.mod._CURRENT_DISC_ID = "d-replay"
+        self.mod._write_binding(
+            "d-replay",
+            "kr-resume-replay",
+            agent_type="Codex",
+            last_read_sort_order=20,
+        )
+        self.mod._set_read_cursor("d-replay", 20)
+        self.mod._CURRENT_RPC_SEQUENCE = 30
+
+        with mock.patch.object(
+            self.mod,
+            "_http_transport_retry",
+            return_value=self._envelope({
+                "timed_out": False,
+                "messages": [{"sort_order": 21}],
+                "latest_sort_order": 21,
+            }),
+        ):
+            self.mod.call_disc_wait_for_peer({})
+
+        self.assertEqual(self.mod._read_binding()["last_read_sort_order"], 20)
+
+        # A new bridge process has no in-memory pending acknowledgement. Resume
+        # must restore 20, so message 21 is requested again instead of skipped.
+        self.mod._LAST_READ_SORT_ORDER_BY_DISC.clear()
+        self.mod._PENDING_READ_SORT_ORDER_BY_DISC.clear()
+        self.mod._CURRENT_DISC_ID = None
+        http = mock.MagicMock(side_effect=self._resume_responder("d-replay"))
+        with mock.patch.object(self.mod, "_http", http):
+            self.assertEqual(self.mod._attempt_resume(), "d-replay")
+
+        self.assertEqual(self.mod._read_cursor("d-replay"), 20)
+
+    def test_json_rpc_next_call_acknowledges_even_when_client_reuses_its_id(self):
+        self.mod._write_binding(
+            "d-ack",
+            "kr-resume-ack",
+            agent_type="Codex",
+            last_read_sort_order=30,
+        )
+        self.mod._set_read_cursor("d-ack", 30)
+        self.mod._RPC_SEQUENCE = 40
+
+        def stage_batch(_args):
+            self.mod._stage_read_cursor("d-ack", 31)
+            return {"ok": True}
+
+        with mock.patch.dict(
+            self.mod.DISPATCH,
+            {
+                "test_stage": stage_batch,
+                "test_noop": lambda _args: {"ok": True},
+            },
+        ):
+            self.mod._handle({
+                "jsonrpc": "2.0",
+                "id": "reused-id",
+                "method": "tools/call",
+                "params": {"name": "test_stage", "arguments": {}},
+            })
+            self.assertEqual(self.mod._read_cursor("d-ack"), 30)
+            self.assertEqual(
+                self.mod._PENDING_READ_SORT_ORDER_BY_DISC["d-ack"]["rpc_sequence"],
+                41,
+            )
+
+            self.mod._handle({
+                "jsonrpc": "2.0",
+                "id": "reused-id",
+                "method": "tools/call",
+                "params": {"name": "test_noop", "arguments": {}},
+            })
+
+        self.assertEqual(self.mod._read_cursor("d-ack"), 31)
+        self.assertEqual(self.mod._read_binding()["last_read_sort_order"], 31)
+        self.assertNotIn("d-ack", self.mod._PENDING_READ_SORT_ORDER_BY_DISC)
+
+    def test_json_rpc_call_without_id_still_acknowledges_previous_batch(self):
+        self.mod._write_binding(
+            "d-ack-none",
+            "kr-resume-ack-none",
+            agent_type="Codex",
+            last_read_sort_order=50,
+        )
+        self.mod._set_read_cursor("d-ack-none", 50)
+        self.mod._RPC_SEQUENCE = 60
+        self.mod._PENDING_READ_SORT_ORDER_BY_DISC["d-ack-none"] = {
+            "sort_order": 51,
+            "rpc_sequence": 60,
+        }
+
+        with mock.patch.dict(self.mod.DISPATCH, {"test_noop": lambda _args: {"ok": True}}):
+            self.mod._handle({
+                "jsonrpc": "2.0",
+                "method": "tools/call",
+                "params": {"name": "test_noop", "arguments": {}},
+            })
+
+        self.assertEqual(self.mod._read_cursor("d-ack-none"), 51)
+        self.assertEqual(self.mod._read_binding()["last_read_sort_order"], 51)
+
+    def test_bulk_import_never_waits(self):
+        self.mod._CURRENT_DISC_ID = "d-bulk"
+        calls = []
+
+        def fake_http(method, path, body=None):
+            calls.append(path)
+            return self._envelope({"appended": 2, "last_sort_order": 9})
+
+        with mock.patch.object(self.mod, "_http", side_effect=fake_http):
+            self.mod.call_disc_append({"messages": [
+                {"source_msg_id": "a", "role": "User", "content": "x"},
+                {"source_msg_id": "b", "role": "Agent", "content": "y"},
+            ]})
+
+        self.assertEqual(calls, ["/api/disc/append"], "a backfill has nobody waiting on it")
+
+    def test_a_failed_wait_never_reads_as_a_failed_post(self):
+        """The message is already stored. Raising here would tell the agent its
+        post failed and invite a duplicate."""
+        self.mod._CURRENT_DISC_ID = "d-fail"
+
+        def fake_http(method, path, body=None):
+            if path == "/api/disc/append":
+                return self._envelope({"appended": 1, "last_sort_order": 7})
+            raise RuntimeError("backend went away")
+
+        with mock.patch.object(self.mod, "_http", side_effect=fake_http), \
+             mock.patch.object(self.mod, "_http_transport_retry", side_effect=RuntimeError("backend went away")):
+            result = self.mod.call_disc_append({"content": "hi"})
+
+        self.assertEqual(result["appended"], 1)
+        self.assertIn("wait_error", result)
+        self.assertIn("posted", result["hint"])
 
 
 class PlanningToolTests(unittest.TestCase):
@@ -4869,7 +5733,13 @@ class PlanningToolTests(unittest.TestCase):
             + contract["read_tools"]
             + contract["proposal_actions"]
             + contract["aliases"]["en"]
-            + [contract["no_prose_only"]["en"], contract["human_decides"]["en"]]
+            + [
+                contract["no_prose_only"]["en"],
+                contract["human_decides"]["en"],
+                contract["maintain_on_change"]["en"],
+                contract["no_noop_writes"]["en"],
+                contract["stale_surface_fallback"]["en"],
+            ]
         )
         for needle in needles:
             self.assertIn(
@@ -4884,6 +5754,12 @@ class PlanningToolTests(unittest.TestCase):
             set(contract["forbidden_decision_tools"]) & names,
             "proposal decisions must remain human-only — no decision tool in the MCP surface",
         )
+
+    def test_server_version_refreshes_the_planning_tool_surface(self):
+        resp = self.mod._handle(
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}
+        )
+        self.assertEqual(resp["result"]["serverInfo"]["version"], "0.3.0")
 
     def test_plan_get_defaults_to_current_discussion(self):
         with mock.patch.object(self.mod, "_http", self.fake_http):
@@ -4983,6 +5859,389 @@ class PlanningToolTests(unittest.TestCase):
     def test_task_add_blocker_requires_both_references(self):
         with self.assertRaisesRegex(RuntimeError, "task_id and blocker_task_id"):
             self.mod.call_task_add_blocker({"task_id": "KT-1"})
+
+
+class MentionConventionTests(unittest.TestCase):
+    """KT-47 — agents must address the human as `@user` and never invent a
+    pseudo, and joining must not read as the whole job. Both live in prose the
+    model reads, so pin them: a silent rewrite would only surface as an agent
+    misbehaving weeks later."""
+
+    def setUp(self):
+        self.mod = _load_module()
+
+    def _tool(self, name):
+        return next(t for t in self.mod.TOOLS if t["name"] == name)
+
+    def test_disc_append_pins_the_canonical_mentions(self):
+        description = self._tool("disc_append")["description"]
+        self.assertIn("@user", description)
+        self.assertIn("NEVER invent a pseudo", description)
+        for trigger in ("@claude", "@codex", "@vibe", "@gemini", "@kiro", "@copilot", "@ollama"):
+            self.assertIn(trigger, description)
+
+    def test_disc_join_says_to_stay_and_follow_the_room(self):
+        description = self._tool("disc_join")["description"]
+        self.assertIn("JOINING IS NOT THE TASK", description)
+        self.assertIn("disc_wait_for_peer", description)
+        self.assertIn("plan_get", description)
+        self.assertIn("BEFORE", description)
+        self.assertIn("disc_append", description)
+
+    def test_wait_contract_pins_read_cursor_and_exact_ack_ids(self):
+        description = self._tool("disc_wait_for_peer")["description"]
+        self.assertIn("durable cursor", description)
+        self.assertIn("message_id", description)
+        self.assertIn("reply_to_message_id", description)
+        self.assertIn("never `last_sort_order` returned by an append", description)
+
+    def test_retried_append_reuses_the_same_dedup_key(self):
+        """A host that retries the tool call replays the same arguments. With a
+        random id per call that produced a duplicate message; derived from the
+        call, the retry hits the backend's `(disc_id, source_msg_id)` dedup.
+        Chaining a 60 s wait inside the append widened that window ~300×, so
+        this is the mitigation for it."""
+        first = self.mod._live_message_id("d-1", {"content": "même texte"})
+        retry = self.mod._live_message_id("d-1", {"content": "même texte"})
+        self.assertEqual(first, retry, "a replayed call must dedup, not duplicate")
+
+        # Different room, different author, different target → different key.
+        self.assertNotEqual(first, self.mod._live_message_id("d-2", {"content": "même texte"}))
+        self.assertNotEqual(
+            first,
+            self.mod._live_message_id("d-1", {"content": "même texte", "role": "User"}),
+        )
+        self.assertNotEqual(
+            first,
+            self.mod._live_message_id("d-1", {"content": "autre texte"}),
+        )
+        self.assertNotEqual(
+            first,
+            self.mod._live_message_id(
+                "d-1",
+                {"content": "même texte", "reply_to_message_id": "msg-other"},
+            ),
+        )
+
+    def test_an_explicit_source_msg_id_wins(self):
+        """Escape hatch for posting the same text twice on purpose."""
+        self.mod._CURRENT_DISC_ID = "d-explicit"
+        http = mock.MagicMock(return_value={"success": True, "data": {"appended": 1}})
+        with mock.patch.object(self.mod, "_http", http):
+            self.mod.call_disc_append({
+                "content": "ping",
+                "source_msg_id": "chosen-by-the-agent",
+                "wait_for_reply": False,
+            })
+        body = http.call_args.args[2]
+        self.assertEqual(body["messages"][0]["source_msg_id"], "chosen-by-the-agent")
+
+    def test_disc_append_declares_that_posting_also_listens(self):
+        tool = self._tool("disc_append")
+        self.assertIn("POSTING ALSO LISTENS", tool["description"])
+        self.assertIn("wait_for_reply", tool["inputSchema"]["properties"])
+        self.assertIn("reply_to_message_id", tool["inputSchema"]["properties"])
+
+    def test_wait_client_timeout_outlives_the_server_block(self):
+        """KT-43 — the server clamps a wait to 170 s. This bridge reads the
+        response with a fixed client timeout; if that timeout ever drops to or
+        below the server ceiling, a normal long wait surfaces as a transport
+        error instead of a clean `timed_out`, and the agent sees a fake
+        failure. Pin the relationship from this side — the Rust constant
+        carries the same note."""
+        source = Path(self.mod.__file__).read_text(encoding="utf-8")
+        client_timeouts = [
+            int(m)
+            for m in re.findall(r"urlopen\(req, timeout=(\d+)\)", source)
+        ]
+        self.assertTrue(client_timeouts, "no urlopen timeout found — check _http")
+        self.assertGreater(
+            max(client_timeouts),
+            170,
+            "the HTTP client must outlive the 170 s server-side wait",
+        )
+
+
+class DurableSessionLinkTests(unittest.TestCase):
+    """KT-76 — joining links the DURABLE CLI session to the room, so an MCP
+    reload finds it again through `disc_find_by_session` instead of asking the
+    human for another invite token.
+
+    The bridge process id cannot carry that link: it is documented to rotate on
+    reconnect. These tests pin the durable key, the fail-closed behaviour when
+    there is none, and the refusal to steal a session owned elsewhere.
+    """
+
+    def setUp(self):
+        import tempfile
+        self.mod = _load_module()
+        self.mod._CURRENT_DISC_ID = None
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.mod._BINDING_DIR = self._tmp.name
+        self.mod._BINDING_PATH_CACHE["computed"] = True
+        self.mod._BINDING_PATH_CACHE["path"] = os.path.join(self._tmp.name, "binding.json")
+
+    def _join_responder(self, link_result=None):
+        """POST /peer-join then POST /disc/link. `link_result` may be an
+        Exception to simulate a session already owned by another discussion."""
+        def respond(method, path, body=None):
+            if path == "/api/discussions/peer-join":
+                return {"success": True, "data": {
+                    "disc_id": "d-linked", "session_pk": 1, "peer_count": 1,
+                    "disc_title": "Room", "recent_messages": [], "next_steps": "",
+                    "resume_token": "kr-resume-1",
+                }}
+            if path == "/api/disc/link":
+                if isinstance(link_result, Exception):
+                    raise link_result
+                return {"success": True, "data": True}
+            raise AssertionError(f"unexpected call {method} {path}")
+        return respond
+
+    def test_join_links_the_durable_session_not_the_bridge_process_id(self):
+        http = mock.MagicMock(side_effect=self._join_responder())
+        with mock.patch.object(self.mod, "_durable_session_id", return_value="cli-deadbeef"), \
+             mock.patch.object(self.mod, "_agent_type_for_session", return_value="ClaudeCode"), \
+             mock.patch.object(self.mod, "_session_id_for_caller", return_value="adhoc-123-x"), \
+             mock.patch.object(self.mod, "_http", http):
+            result = self.mod.call_disc_join({"token": "kr-join-abc"})
+
+        link = _bodies_for(http, "/api/disc/link")[0]
+        self.assertEqual(link["disc_id"], "d-linked")
+        self.assertEqual(link["source_agent"], "ClaudeCode")
+        self.assertEqual(link["source_session_id"], "cli-deadbeef")
+        self.assertNotEqual(
+            link["source_session_id"], _join_body(http)["session_id"],
+            "the link must NOT use the bridge process id, which rotates on reload",
+        )
+        self.assertNotIn(
+            "force_reassign", link,
+            "an automatic link must never be able to steal another room's session",
+        )
+        self.assertTrue(result["session_bound"])
+        self.assertEqual(result["session_id"], "cli-deadbeef")
+
+    def test_join_reports_when_there_is_no_durable_identity_instead_of_pretending(self):
+        http = mock.MagicMock(side_effect=self._join_responder())
+        with mock.patch.object(self.mod, "_durable_session_id", return_value=None), \
+             mock.patch.object(self.mod, "_agent_type_for_session", return_value="ClaudeCode"), \
+             mock.patch.object(self.mod, "_http", http):
+            result = self.mod.call_disc_join({"token": "kr-join-abc"})
+
+        self.assertFalse(result["session_bound"])
+        self.assertIn("no durable", result["session_bind_skipped"])
+        self.assertEqual(
+            [c.args[1] for c in http.call_args_list if len(c.args) >= 2],
+            ["/api/discussions/peer-join"],
+            "no identity must mean no link call at all",
+        )
+        # The join itself still worked.
+        self.assertEqual(self.mod._CURRENT_DISC_ID, "d-linked")
+
+    def test_a_session_owned_by_another_discussion_is_reported_not_forced(self):
+        owned = RuntimeError("session already linked to discussion d-other")
+        http = mock.MagicMock(side_effect=self._join_responder(link_result=owned))
+        with mock.patch.object(self.mod, "_durable_session_id", return_value="cli-deadbeef"), \
+             mock.patch.object(self.mod, "_agent_type_for_session", return_value="Codex"), \
+             mock.patch.object(self.mod, "_http", http):
+            result = self.mod.call_disc_join({"token": "kr-join-abc"})
+
+        self.assertFalse(result["session_bound"])
+        self.assertIn("d-other", result["session_bind_error"])
+        # A failed link must not fail the join, nor hide the room.
+        self.assertEqual(result["disc_id"], "d-linked")
+        self.assertEqual(self.mod._CURRENT_DISC_ID, "d-linked")
+
+    def test_joining_twice_sends_the_same_identity(self):
+        http = mock.MagicMock(side_effect=self._join_responder())
+        with mock.patch.object(self.mod, "_durable_session_id", return_value="cli-stable"), \
+             mock.patch.object(self.mod, "_agent_type_for_session", return_value="Codex"), \
+             mock.patch.object(self.mod, "_http", http):
+            self.mod.call_disc_join({"token": "kr-join-1"})
+            self.mod.call_disc_join({"token": "kr-join-2"})
+
+        links = _bodies_for(http, "/api/disc/link")
+        self.assertEqual(len(links), 2)
+        self.assertEqual(links[0], links[1], "the same session must map to the same link body")
+
+    def test_disc_link_called_bare_binds_this_session_to_the_bound_disc(self):
+        # An agent cannot know its own durable key, so every field defaults.
+        self.mod._set_current_disc_id("d-current")
+        http = mock.MagicMock(return_value={"success": True, "data": True})
+        with mock.patch.object(self.mod, "_durable_session_id", return_value="cli-bare"), \
+             mock.patch.object(self.mod, "_agent_type_for_session", return_value="ClaudeCode"), \
+             mock.patch.object(self.mod, "_http", http):
+            self.assertTrue(self.mod.call_disc_link({}))
+
+        body = _bodies_for(http, "/api/disc/link")[0]
+        self.assertEqual(body["disc_id"], "d-current")
+        self.assertEqual(body["source_agent"], "ClaudeCode")
+        self.assertEqual(body["source_session_id"], "cli-bare")
+        self.assertFalse(body["force_reassign"])
+
+    def test_disc_link_without_any_identity_says_so_rather_than_posting_junk(self):
+        self.mod._set_current_disc_id("d-current")
+        http = mock.MagicMock(return_value={"success": True, "data": True})
+        with mock.patch.object(self.mod, "_durable_session_id", return_value=None), \
+             mock.patch.object(self.mod, "_http", http):
+            with self.assertRaises(RuntimeError) as ctx:
+                self.mod.call_disc_link({})
+        self.assertIn("no durable CLI session id", str(ctx.exception))
+        http.assert_not_called()
+
+    def test_find_by_session_bare_recovers_the_room_after_a_reload(self):
+        # DoD: after a reload the agent gets the room back WITHOUT a new token.
+        # A server-side link may already exist, but that is not sufficient:
+        # the fresh module must still consume its resume credential to restore
+        # the runtime binding and durable read cursor.
+        reloaded = _load_module()
+        reloaded._CURRENT_DISC_ID = None
+        reloaded._BINDING_DIR = self._tmp.name
+        reloaded._BINDING_PATH_CACHE["computed"] = True
+        reloaded._BINDING_PATH_CACHE["path"] = os.path.join(self._tmp.name, "linked.json")
+        reloaded._write_binding(
+            "d-linked",
+            "kr-resume-1",
+            agent_type="ClaudeCode",
+            last_read_sort_order=41,
+        )
+
+        def respond(method, path, body=None):
+            if path.startswith("/api/disc/find_by_session"):
+                return {"success": True, "data": {"disc_id": "d-linked"}}
+            if path == "/api/discussions/peer-resume":
+                return {"success": True, "data": {
+                    "disc_id": "d-linked", "session_pk": 3,
+                    "resume_token": body["next_resume_token"],
+                }}
+            if path == "/api/disc/link":
+                return {"success": True, "data": True}
+            raise AssertionError(f"unexpected call {method} {path}")
+
+        http = mock.MagicMock(side_effect=respond)
+        with mock.patch.object(reloaded, "_durable_session_id", return_value="cli-stable"), \
+             mock.patch.object(reloaded, "_agent_type_for_session", return_value="ClaudeCode"), \
+             mock.patch.object(reloaded, "_http", http):
+            found = reloaded.call_disc_find_by_session({})
+
+        self.assertEqual(found["disc_id"], "d-linked")
+        self.assertEqual(reloaded._CURRENT_DISC_ID, "d-linked")
+        self.assertEqual(reloaded._read_cursor("d-linked"), 41)
+        paths = [call.args[1] for call in http.call_args_list]
+        self.assertIn("/api/discussions/peer-resume", paths)
+        lookup_paths = [path for path in paths if path.startswith("/api/disc/find_by_session")]
+        self.assertEqual(len(lookup_paths), 2)
+        self.assertIn("source_session_id=cli-stable", lookup_paths[-1])
+        self.assertIn("source_agent=ClaudeCode", lookup_paths[-1])
+
+    def test_find_by_session_surfaces_legacy_link_without_resume_credential(self):
+        # Live upgrade case: the pre-fix bridge wrote a server link but never
+        # persisted the new local credential/cursor. Reporting only disc_id
+        # falsely claimed that append was safe, then append failed unbound.
+        reloaded = _load_module()
+        reloaded._CURRENT_DISC_ID = None
+        reloaded._BINDING_DIR = self._tmp.name
+        reloaded._BINDING_PATH_CACHE["computed"] = True
+        reloaded._BINDING_PATH_CACHE["path"] = os.path.join(self._tmp.name, "missing.json")
+        http = mock.MagicMock(return_value={
+            "success": True,
+            "data": {"disc_id": "d-legacy-link"},
+        })
+        with mock.patch.object(reloaded, "_durable_session_id", return_value="cli-stable"), \
+             mock.patch.object(reloaded, "_agent_type_for_session", return_value="Codex"), \
+             mock.patch.object(reloaded, "_http", http):
+            found = reloaded.call_disc_find_by_session({})
+
+        self.assertEqual(found["disc_id"], "d-legacy-link")
+        self.assertFalse(found["runtime_bound"])
+        self.assertTrue(found["rejoin_required"])
+        self.assertIn("fresh kr-join token", found["hint"])
+        self.assertIsNone(reloaded._CURRENT_DISC_ID)
+
+    def test_a_bare_lookup_resumes_when_the_link_is_not_written_yet(self):
+        # The gap a live MCP reload exposed: resume is lazy, so the very first
+        # call after a reload saw no link and the agent would ask for a token.
+        reloaded = _load_module()
+        reloaded._CURRENT_DISC_ID = None
+        reloaded._BINDING_DIR = self._tmp.name
+        reloaded._BINDING_PATH_CACHE["computed"] = True
+        reloaded._BINDING_PATH_CACHE["path"] = os.path.join(self._tmp.name, "b2.json")
+        reloaded._write_binding("d-linked", "kr-resume-1", agent_type="ClaudeCode")
+
+        lookups = {"count": 0}
+
+        def respond(method, path, body=None):
+            if path.startswith("/api/disc/find_by_session"):
+                lookups["count"] += 1
+                # Empty before the resume, populated after it.
+                if lookups["count"] == 1:
+                    return {"success": True, "data": {}}
+                return {"success": True, "data": {"disc_id": "d-linked"}}
+            if path == "/api/discussions/peer-resume":
+                return {"success": True, "data": {
+                    "disc_id": "d-linked", "session_pk": 3,
+                    "resume_token": body["next_resume_token"],
+                }}
+            if path == "/api/disc/link":
+                return {"success": True, "data": True}
+            raise AssertionError(f"unexpected call {method} {path}")
+
+        http = mock.MagicMock(side_effect=respond)
+        with mock.patch.object(reloaded, "_durable_session_id", return_value="cli-stable"), \
+             mock.patch.object(reloaded, "_agent_type_for_session", return_value="ClaudeCode"), \
+             mock.patch.object(reloaded, "_http", http):
+            found = reloaded.call_disc_find_by_session({})
+
+        self.assertEqual(found["disc_id"], "d-linked", "a bare lookup must not give up on the first empty answer")
+        self.assertEqual(lookups["count"], 2, "it must retry after resuming")
+
+    def test_an_explicit_third_party_lookup_stays_a_pure_read(self):
+        reloaded = _load_module()
+        reloaded._CURRENT_DISC_ID = None
+        http = mock.MagicMock(return_value={"success": True, "data": {}})
+        with mock.patch.object(reloaded, "_http", http):
+            found = reloaded.call_disc_find_by_session({
+                "source_agent": "Codex", "source_session_id": "someone-else",
+            })
+        self.assertEqual(found, {})
+        paths = [c.args[1] for c in http.call_args_list if len(c.args) >= 2]
+        self.assertTrue(all(p.startswith("/api/disc/find_by_session") for p in paths),
+                        f"asking about another session must not resume ours: {paths}")
+
+    def test_unlink_releases_only_this_session_not_the_whole_room(self):
+        # KT-85 review: the bridge used to post `{disc_id}` alone, which takes the
+        # global path and detaches every other agent joined to the room.
+        self.mod._set_current_disc_id("d-room")
+        http = mock.MagicMock(return_value={"success": True, "data": True})
+        with mock.patch.object(self.mod, "_durable_session_id", return_value="cli-mine"), \
+             mock.patch.object(self.mod, "_agent_type_for_session", return_value="ClaudeCode"), \
+             mock.patch.object(self.mod, "_http", http):
+            self.assertTrue(self.mod.call_disc_unlink({}))
+
+        body = _bodies_for(http, "/api/disc/unlink")[0]
+        self.assertEqual(body["disc_id"], "d-room")
+        self.assertEqual(body["source_agent"], "ClaudeCode")
+        self.assertEqual(body["source_session_id"], "cli-mine")
+
+    def test_unlink_refuses_rather_than_falling_back_to_a_room_wide_detach(self):
+        self.mod._set_current_disc_id("d-room")
+        http = mock.MagicMock(return_value={"success": True, "data": True})
+        with mock.patch.object(self.mod, "_durable_session_id", return_value=None), \
+             mock.patch.object(self.mod, "_http", http):
+            with self.assertRaises(RuntimeError) as ctx:
+                self.mod.call_disc_unlink({})
+        self.assertIn("no durable identity", str(ctx.exception))
+        http.assert_not_called()
+
+    def test_durable_id_is_stable_and_absent_without_identity(self):
+        with mock.patch.object(self.mod, "_binding_identity", return_value=("claude-session", "u-1")):
+            first = self.mod._durable_session_id()
+            second = self.mod._durable_session_id()
+        self.assertEqual(first, second)
+        self.assertTrue(first.startswith("cli-"))
+        with mock.patch.object(self.mod, "_binding_identity", return_value=None):
+            self.assertIsNone(self.mod._durable_session_id())
 
 
 if __name__ == "__main__":

@@ -1,7 +1,17 @@
-import { useState, useRef, useMemo, useEffect, memo, type ReactNode } from 'react';
+import {
+  createContext,
+  useContext,
+  useState,
+  useRef,
+  useMemo,
+  useEffect,
+  memo,
+  type ReactNode,
+} from 'react';
 import ReactMarkdown from 'react-markdown';
 import { useTheme } from '../lib/ThemeContext';
 import { useT } from '../lib/I18nContext';
+import { useLocalIdentity } from '../lib/LocalIdentityContext';
 import { MatrixText } from './MatrixText';
 import { DocPreview } from './DocPreview';
 import { DocDataExport } from './DocDataExport';
@@ -13,12 +23,13 @@ import remarkEmoji from 'remark-emoji';
 import '../pages/DiscussionsPage.css';
 import type { DiscussionMessage, AgentType, QuickPrompt, ContextFile } from '../types/generated';
 import { MessageAttachments } from './MessageAttachments';
-import { AGENT_MENTIONS, agentColor } from '../lib/constants';
+import { AGENT_LABELS, AGENT_MENTIONS, USER_MENTION_TRIGGER, agentColor } from '../lib/constants';
 import { gravatarUrl } from '../lib/gravatar';
 import {
   Cpu, AlertTriangle, Zap, Loader2, Pause, Play,
   Key, Settings, Send, Pencil, RotateCcw, Check, Copy, Clock, ShieldCheck,
-  ChevronRight, ListTodo,
+  ChevronRight, ListTodo, User, Users,
+  Reply,
 } from 'lucide-react';
 
 // Hoisted regexes (avoid creating new RegExp objects per message per render)
@@ -35,9 +46,16 @@ interface MentionMdNode {
 const AGENT_MENTION_BY_TRIGGER = new Map(
   AGENT_MENTIONS.map(mention => [mention.trigger.toLowerCase(), mention]),
 );
-const AGENT_MENTION_TRIGGERS = AGENT_MENTIONS
-  .map(({ trigger }) => trigger.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
-  .join('|');
+const AGENT_MENTION_TRIGGERS = [
+  ...AGENT_MENTIONS.flatMap(({ trigger }) => {
+    const escaped = trigger.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return [escaped, `${escaped}-cli(?:-\\d+)?`];
+  }),
+  '@all',
+  USER_MENTION_TRIGGER.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
+].join('|');
+const USER_MENTION_URL = '#kronn-user';
+const MentionDiscussionAgentContext = createContext<AgentType | null>(null);
 
 function splitAgentMentionText(value: string): MentionMdNode[] {
   const pattern = new RegExp(
@@ -49,16 +67,31 @@ function splitAgentMentionText(value: string): MentionMdNode[] {
   for (const match of value.matchAll(pattern)) {
     const leading = match[1] ?? '';
     const trigger = match[2];
-    const mention = AGENT_MENTION_BY_TRIGGER.get(trigger.toLowerCase());
-    if (!mention) continue;
+    const lower = trigger.toLowerCase();
+    const cliMatch = /^(@[\w-]+?)-cli(?:-(\d+))?$/.exec(lower);
+    const mention = AGENT_MENTION_BY_TRIGGER.get(cliMatch?.[1] ?? lower);
+    const isUser = lower === USER_MENTION_TRIGGER;
+    const isAll = lower === '@all';
+    if (!mention && !isUser && !isAll) continue;
     const mentionStart = (match.index ?? 0) + leading.length;
     if (mentionStart > last) {
       nodes.push({ type: 'text', value: value.slice(last, mentionStart) });
     }
     nodes.push({
       type: 'link',
-      url: `#kronn-agent-${mention.type}`,
-      children: [{ type: 'text', value: trigger }],
+      url: isUser
+        ? USER_MENTION_URL
+        : isAll
+          ? '#kronn-all'
+          : `#kronn-agent-${mention!.type}${cliMatch ? '-cli' : ''}`,
+      children: [{
+        type: 'text',
+        value: isAll
+          ? '@all'
+          : cliMatch
+          ? `${mention!.trigger} · CLI${cliMatch[2] ? ` ${cliMatch[2]}` : ''}`
+          : trigger,
+      }],
     });
     last = mentionStart + trigger.length;
   }
@@ -221,16 +254,49 @@ export interface MessageBubbleProps {
   /** F15+ — a federated attachment is announced but its binary hasn't been
    *  fetched/linked yet → show a "downloading…" placeholder until it lands. */
   pendingAttachment?: boolean;
+  /** Current-discussion search state. The row attributes provide the
+   * visual fallback when the CSS Custom Highlight API is unavailable. */
+  isSearchMatch?: boolean;
+  isSearchCurrent?: boolean;
+  replyTarget?: DiscussionMessage | null;
+  /** Messages that durably answer this one. Rendered as compact backlinks in
+   * the footer so the original keeps visible follow-up context. */
+  replies?: DiscussionMessage[];
+  onReply?: (message: DiscussionMessage) => void;
+  onReplyNavigate?: (messageId: string) => void;
   t: (key: string, ...args: (string | number)[]) => string;
 }
 
 export const MessageBubble = memo(function MessageBubble(props: MessageBubbleProps) {
   const { msg, isLastUser, isLastAgent, isEditing, isCopied, isTtsActive, ttsState: tts, isExpandedSummary,
     prevUserTs, defaultAgent, summaryCache, language, sending, editingText, hasFullAccess,
-    onCopy, onTts, onEditStart, onEditCancel, onEditSubmit, onEditTextChange, onRetry, onExpandSummary, onNavigate, discussionId, projectId, chainableQPs, onLaunchQp, attachments, pendingAttachment, t } = props;
+    onCopy, onTts, onEditStart, onEditCancel, onEditSubmit, onEditTextChange, onRetry, onExpandSummary, onNavigate, discussionId, projectId, chainableQPs, onLaunchQp, attachments, pendingAttachment, isSearchMatch, isSearchCurrent, replyTarget, replies = [], onReply, onReplyNavigate, t } = props;
   const isUser = msg.role === 'User';
   const visibleContent = isUser ? stripAgentHandoff(msg.content) : msg.content;
   const agentType = msg.agent_type ?? defaultAgent;
+  const isTourDemo = msg.role === 'Agent'
+    && msg.source_msg_id === 'kronn-guided-tour-demo-preview';
+  const agentTrigger = isTourDemo
+    ? t('disc.tourDemoAuthor')
+    : AGENT_MENTIONS.find(mention => mention.type === agentType)?.trigger
+      ?? AGENT_LABELS[agentType]
+      ?? agentType;
+  const agentIdentityLabel = isTourDemo
+    ? t('disc.tourDemoKind')
+    : msg.source_msg_id
+      ? t('disc.targetCli')
+      : agentType === defaultAgent
+        ? t('disc.targetDiscussionAgent')
+        : t('disc.targetPunctualAgent');
+  const replyAuthor = useMemo(() => {
+    if (!replyTarget) return '';
+    if (replyTarget.agent_type) {
+      return AGENT_MENTIONS.find(mention => mention.type === replyTarget.agent_type)?.trigger
+        ?? replyTarget.agent_type;
+    }
+    return replyTarget.author_pseudo || t('disc.humanAuthor');
+  }, [replyTarget, t]);
+  const { mentionColors } = useLocalIdentity();
   const [isMessageIdCopied, setIsMessageIdCopied] = useState(false);
   const messageIdResetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -354,7 +420,17 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
     : null;
 
   return (
-    <div className="disc-msg-row" data-role={isUser ? 'user' : msg.role === 'System' ? 'system' : 'agent'}>
+    // KT-58 — `data-target-agent` carries the message's durable dispatch
+    // target, so CSS can single out the mention actually awaiting a reply
+    // instead of giving every mention the same weight.
+    <div
+      className="disc-msg-row"
+      data-role={isUser ? 'user' : msg.role === 'System' ? 'system' : 'agent'}
+      data-target-agent={msg.target_agent ?? undefined}
+      data-message-id={msg.id}
+      data-search-match={isSearchMatch || undefined}
+      data-search-current={isSearchCurrent || undefined}
+    >
       <div
         className="disc-msg-bubble"
         data-role={isUser ? 'user' : msg.role === 'System' ? 'system' : 'agent'}
@@ -364,6 +440,9 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
           : msg.content.startsWith('summary cached') ? 'summary'
           : 'error'
         ) : undefined}
+        style={msg.role === 'Agent'
+          ? { borderLeftColor: agentColor(agentType, mentionColors) }
+          : undefined}
       >
         <div className="disc-msg-header-row">
           <div className="disc-msg-header-main">
@@ -392,14 +471,15 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
               </div>
             )}
             {msg.role === 'Agent' && (
-              <div className="disc-msg-agent-label" style={{ color: agentColor(agentType), justifyContent: 'space-between' }}>
+              <div className="disc-msg-agent-label" style={{ color: agentColor(agentType, mentionColors), justifyContent: 'space-between' }}>
                 <span className="flex-row gap-2">
                   {/* "<agent>[ · <model>][ · <owner>]" — answers WHO + WHAT at a
                    *  glance. model_tier is present on local agent messages; a
                    *  federated agent reply also carries its owner's pseudo
                    *  (handle_incoming_chat_message) so "ClaudeCode · reasoning · Romu"
                    *  reads as "Romu's ClaudeCode on the other instance". */}
-                  <Cpu size={10} /> {agentType}
+                  <Cpu size={10} /> {agentTrigger}
+                  <span className="disc-msg-agent-kind"> · {agentIdentityLabel}</span>
                   {/* Prefer the CONCRETE model ("qwen3:32b", "sonnet") — a disc can
                    *  switch models mid-thread, so this is per-message. Fall back to
                    *  the tier when the model wasn't recorded (legacy rows / a
@@ -500,6 +580,7 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
           <button
             type="button"
             className="disc-id-pill disc-message-id-pill"
+            data-tour-id="message-id-pill"
             data-copied={isMessageIdCopied}
             onClick={copyMessageId}
             title={t('disc.idPillTooltip', msg.id)}
@@ -509,11 +590,27 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
             {messageShortLabel(msg.id)}
           </button>
         </div>
+        {msg.reply_to_message_id && (
+          <button
+            type="button"
+            className="disc-reply-header"
+            data-missing={!replyTarget || undefined}
+            onClick={() => replyTarget && onReplyNavigate?.(msg.reply_to_message_id!)}
+            disabled={!replyTarget || !onReplyNavigate}
+            title={replyTarget ? t('disc.openReplyTarget') : t('disc.replyTargetMissing')}
+          >
+            <Reply size={11} aria-hidden="true" />
+            <span>{replyTarget ? t('disc.inReplyTo') : t('disc.replyTargetMissing')}</span>
+            <code>#{msg.reply_to_message_id.slice(0, 8)}</code>
+            {replyTarget && <span>{t('disc.byAuthor', replyAuthor)}</span>}
+          </button>
+        )}
         {msg.role === 'System' && msg.content.startsWith('summary cached') && isExpandedSummary && summaryCache && (
           <div className="disc-summary-expanded">
             {summaryCache}
           </div>
         )}
+        <div data-message-search-content>
         {isEditing ? (
           <div className="flex-col gap-4">
             <textarea
@@ -564,11 +661,13 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
               <>
                 {isUser || msg.role === 'Agent'
                   ? (
-                      <MentionAwareMessageBody
-                        content={cleaned}
-                        discussionId={discussionId}
-                        sourceMessageId={msg.role === 'Agent' ? msg.id : undefined}
-                      />
+                      <MentionDiscussionAgentContext.Provider value={defaultAgent}>
+                        <MentionAwareMessageBody
+                          content={cleaned}
+                          discussionId={discussionId}
+                          sourceMessageId={msg.role === 'Agent' ? msg.id : undefined}
+                        />
+                      </MentionDiscussionAgentContext.Provider>
                     )
                   : <MessageBody content={cleaned} discussionId={discussionId} />}
                 {seed && <KronnSeedToggle seed={seed} />}
@@ -576,6 +675,7 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
             );
           })()
         )}
+        </div>
         {attachments && attachments.length > 0 && discussionId && (
           <MessageAttachments files={attachments} discussionId={discussionId} t={t} />
         )}
@@ -711,6 +811,41 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
             )}
           </div>
           <div className="disc-msg-footer-right">
+            {replies.map(reply => {
+              const agentMention = reply.agent_type
+                ? AGENT_MENTIONS.find(mention => mention.type === reply.agent_type)?.trigger
+                : null;
+              const humanMention = reply.author_pseudo
+                ? `@${reply.author_pseudo.replace(/^@/, '')}`
+                : '@user';
+              const author = agentMention ?? humanMention;
+              const excerpt = stripAgentHandoff(reply.content).replace(/\s+/g, ' ').trim();
+              return (
+                <button
+                  key={reply.id}
+                  type="button"
+                  className="disc-reply-backlink"
+                  onClick={() => onReplyNavigate?.(reply.id)}
+                  disabled={!onReplyNavigate}
+                  title={t('disc.openReply', excerpt.slice(0, 120))}
+                >
+                  <Check size={8} aria-hidden="true" />
+                  {t('disc.repliedBy', author)}
+                </button>
+              );
+            })}
+            {msg.role !== 'System' && !isEditing && onReply && (
+              <button
+                type="button"
+                className="disc-icon-btn disc-reply-action"
+                onClick={() => onReply(msg)}
+                title={t('disc.reply')}
+                aria-label={t('disc.reply')}
+              >
+                <Reply size={10} />
+                <span>{t('disc.reply')}</span>
+              </button>
+            )}
             {msg.role === 'Agent' && copyBtn(9, true)}
             {msg.role === 'Agent' && hasFullAccess && (
               <span className="disc-full-access-badge">
@@ -872,15 +1007,63 @@ type MdProps = {
   href?: string;
 };
 
+function UserMentionChip() {
+  // Show WHO is addressed: the configured Kronn pseudo and Gravatar. Falling
+  // back to the canonical "@user" label keeps the chip meaningful on an
+  // instance where no identity was set.
+  const { pseudo, avatarEmail } = useLocalIdentity();
+  return (
+    <span
+      className="disc-user-mention-chip"
+      data-mention="user"
+      title={pseudo ?? undefined}
+    >
+      {avatarEmail ? (
+        <img
+          src={gravatarUrl(avatarEmail, 20)}
+          alt=""
+          className="disc-user-mention-avatar"
+        />
+      ) : (
+        <User size={10} aria-hidden="true" />
+      )}
+      {pseudo ? `@${pseudo}` : USER_MENTION_TRIGGER}
+    </span>
+  );
+}
+
 function MarkdownLink({ href, children }: MdProps) {
-  const agentType = href?.startsWith('#kronn-agent-')
-    ? href.slice('#kronn-agent-'.length) as AgentType
+  const { mentionColors } = useLocalIdentity();
+  const { t } = useT();
+  const discussionAgent = useContext(MentionDiscussionAgentContext);
+  if (href === USER_MENTION_URL) {
+    return <UserMentionChip />;
+  }
+  if (href === '#kronn-all') {
+    return (
+      <span className="disc-agent-mention-chip disc-all-mention-chip">
+        <Users size={10} aria-hidden="true" />
+        {children}
+      </span>
+    );
+  }
+  const encodedAgent = href?.startsWith('#kronn-agent-')
+    ? href.slice('#kronn-agent-'.length)
+    : null;
+  const agentType = encodedAgent
+    ? encodedAgent.replace(/-cli$/, '') as AgentType
     : null;
   const mention = agentType
     ? AGENT_MENTIONS.find(candidate => candidate.type === agentType)
     : null;
   if (mention) {
-    const color = agentColor(mention.type);
+    const color = agentColor(mention.type, mentionColors);
+    const isCli = encodedAgent?.endsWith('-cli') ?? false;
+    const identityKind = !isCli && discussionAgent
+      ? t(mention.type === discussionAgent
+          ? 'disc.targetDiscussionAgent'
+          : 'disc.targetPunctualAgent')
+      : null;
     return (
       <span
         className="disc-agent-mention-chip"
@@ -889,6 +1072,9 @@ function MarkdownLink({ href, children }: MdProps) {
       >
         <Cpu size={10} aria-hidden="true" />
         {children}
+        {identityKind && (
+          <span className="disc-agent-mention-kind"> · {identityKind}</span>
+        )}
       </span>
     );
   }

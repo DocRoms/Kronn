@@ -99,7 +99,33 @@ RUN ARCH=$(dpkg --print-architecture) && \
     curl -fsSL "https://gitlab.com/gitlab-org/cli/-/releases/v1.52.0/downloads/glab_1.52.0_linux_${ARCH}.deb" -o /tmp/glab.deb && \
     dpkg -i /tmp/glab.deb && rm /tmp/glab.deb
 
-# Install Bun (needed by some MCP servers like fastly-mcp-server)
+# Fastly's official MCP server shells out to the Fastly CLI. Bake both pinned
+# Go binaries so the registry entry works in Docker without user-side installs.
+# The wrapper below points the Linux CLI at the host's read-only Fastly profile;
+# the API token never becomes a Docker env var or a Kronn config value.
+ARG FASTLY_CLI_VERSION=15.4.0
+ARG FASTLY_MCP_VERSION=0.1.11
+RUN ARCH=$(dpkg --print-architecture) && \
+    case "$ARCH" in \
+      amd64|arm64) FASTLY_ARCH="$ARCH" ;; \
+      *) echo "Unsupported arch for Fastly: $ARCH" && exit 1 ;; \
+    esac && \
+    cd /tmp && \
+    curl -fsSLO "https://github.com/fastly/cli/releases/download/v${FASTLY_CLI_VERSION}/fastly_v${FASTLY_CLI_VERSION}_linux-${FASTLY_ARCH}.tar.gz" && \
+    curl -fsSLo fastly-cli-checksums "https://github.com/fastly/cli/releases/download/v${FASTLY_CLI_VERSION}/fastly_v${FASTLY_CLI_VERSION}_SHA256SUMS" && \
+    sha256sum --ignore-missing --check fastly-cli-checksums && \
+    curl -fsSLO "https://github.com/fastly/mcp/releases/download/v${FASTLY_MCP_VERSION}/fastly-mcp_v${FASTLY_MCP_VERSION}_linux-${FASTLY_ARCH}.tar.gz" && \
+    curl -fsSLo fastly-mcp-checksums "https://github.com/fastly/mcp/releases/download/v${FASTLY_MCP_VERSION}/fastly-mcp_v${FASTLY_MCP_VERSION}_SHA256SUMS" && \
+    sha256sum --ignore-missing --check fastly-mcp-checksums && \
+    tar -xzf "fastly_v${FASTLY_CLI_VERSION}_linux-${FASTLY_ARCH}.tar.gz" fastly && \
+    install -m 0755 fastly /usr/local/bin/fastly-real && \
+    tar -xzf "fastly-mcp_v${FASTLY_MCP_VERSION}_linux-${FASTLY_ARCH}.tar.gz" fastly-mcp && \
+    install -m 0755 fastly-mcp /usr/local/bin/fastly-mcp && \
+    rm -f fastly fastly-mcp fastly-*-checksums fastly_*.tar.gz fastly-mcp_*.tar.gz
+COPY scripts/fastly-docker-wrapper.sh /usr/local/bin/fastly
+RUN chmod 0755 /usr/local/bin/fastly
+
+# Install Bun for MCP servers and agent tooling that require it.
 RUN BUN_ARCH=$(dpkg --print-architecture | sed 's/amd64/x64/' | sed 's/arm64/aarch64/') && \
     curl -fsSL "https://github.com/oven-sh/bun/releases/latest/download/bun-linux-${BUN_ARCH}.zip" -o /tmp/bun.zip && \
     unzip -o /tmp/bun.zip -d /tmp/bun && \
@@ -195,7 +221,6 @@ EXPOSE 3140
 USER kronn
 ENTRYPOINT ["entrypoint.sh"]
 CMD ["kronn"]
-
 
 
 

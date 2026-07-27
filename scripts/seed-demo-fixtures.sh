@@ -93,7 +93,7 @@ echo
 # `[scan].ignore`) are required at deserialization time, so we mirror
 # what `default_config()` produces in core/config.rs with just the
 # port + scan paths overridden for the sandbox.
-echo "▸ Pre-seeding config.toml with port $PORT…"
+echo "▸ Pre-seeding config.toml with port ${PORT}…"
 cat > "$DATA_DIR/config.toml" <<EOF
 [server]
 host = "127.0.0.1"
@@ -114,7 +114,7 @@ paths = ["$REPOS_DIR"]
 ignore = ["node_modules", ".git", "target", "vendor", "dist", "build", ".cache"]
 scan_depth = 4
 
-# `agents.claude_code` and `agents.codex` are required at the
+# agents.claude_code and agents.codex are required at the
 # AgentsConfig level (no #[serde(default)] on them). Empty subsections
 # satisfy the schema since AgentConfig derives Default.
 [agents.claude_code]

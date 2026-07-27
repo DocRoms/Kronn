@@ -2,6 +2,7 @@ import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, act, cleanup, fireEvent, waitFor } from '@testing-library/react';
 import { I18nProvider } from '../../lib/I18nContext';
 import { loadDraft } from '../../lib/chat-drafts';
+import { clearReplyDraft, loadReplyDraft } from '../../lib/chat-reply-drafts';
 
 // Mock SpeechSynthesis API
 const mockCancel = vi.fn();
@@ -40,14 +41,20 @@ vi.mock('../../lib/api', () => ({
     create: vi.fn(),
     delete: vi.fn(),
     update: vi.fn(),
+    nativeAgentMode: vi.fn().mockResolvedValue({ disabled: false }),
     sendMessage: vi.fn(),
     sendMessageStream: vi.fn().mockResolvedValue(undefined),
     run: vi.fn(),
     runAgent: vi.fn().mockResolvedValue(undefined),
+    orchestrate: vi.fn().mockResolvedValue(undefined),
     stop: vi.fn(),
+    searchMessages: vi.fn().mockResolvedValue([]),
     _streamSSE: vi.fn(),
     worktreeUnlock: vi.fn().mockResolvedValue('ok'),
     worktreeLock: vi.fn().mockResolvedValue('ok'),
+    dismissPartial: vi.fn().mockResolvedValue({ recovered: false }),
+    // 0.9.2 — the composer lists joined CLI sessions to offer their `-cli` aliases.
+    participants: vi.fn().mockResolvedValue([]),
   },
   projects: {
     list: vi.fn().mockResolvedValue([]),
@@ -60,9 +67,11 @@ vi.mock('../../lib/api', () => ({
     // audit). Tests that need the running state override per-test.
     auditStatus: vi.fn().mockResolvedValue(null),
     // 0.8.4 (#294) — sidebar fetches this once per mount to decorate
-    // disc rows with the "imported from X" badge. Empty = no
-    // bindings, badge stays hidden.
+    // disc rows with the "bound to X" badge. Empty = no bindings,
+    // badge stays hidden.
     discSources: vi.fn().mockResolvedValue([]),
+    // KT-74 — same for portable-import provenance.
+    discImports: vi.fn().mockResolvedValue([]),
   },
   skills: {
     list: vi.fn().mockResolvedValue([]),
@@ -142,6 +151,7 @@ import {
   projects as projectsApi,
 } from '../../lib/api';
 import { DiscussionsPage } from '../DiscussionsPage';
+import { findRenderedTextRanges } from '../../lib/discussionMessageSearch';
 import type { AgentDetection, AiAuditStatus, Discussion, Project } from '../../types/generated';
 import type { ToastFn } from '../../hooks/useToast';
 
@@ -150,6 +160,8 @@ const toastFn: ToastFn = vi.fn();
 
 beforeEach(() => {
   vi.mocked(discussionsApi.get).mockReset();
+  vi.mocked(discussionsApi.searchMessages).mockReset();
+  vi.mocked(discussionsApi.searchMessages).mockResolvedValue([]);
   vi.mocked(planningApi.proposals).mockReset();
   vi.mocked(planningApi.proposals).mockResolvedValue({
     proposals: [],
@@ -205,6 +217,19 @@ const makeListDiscussion = (id: string, msgCount: number): Discussion => ({
 });
 
 describe('DiscussionsPage', () => {
+  it('finds a rendered occurrence even when Markdown splits it across text nodes', () => {
+    const root = document.createElement('div');
+    root.append('foo ');
+    const strong = document.createElement('strong');
+    strong.textContent = 'bar';
+    root.append(strong, ' baz');
+
+    const ranges = findRenderedTextRanges(root, 'foo bar');
+
+    expect(ranges).toHaveLength(1);
+    expect(ranges[0].toString()).toBe('foo bar');
+  });
+
   it('renders without crashing with minimal props', async () => {
     await wrap(
       <DiscussionsPage
@@ -1143,6 +1168,63 @@ describe('DiscussionsPage', () => {
     expect(mockSpeak).toHaveBeenCalledWith(expect.any(SpeechSynthesisUtterance));
   });
 
+  it('reaches the real bottom in a single click while the list is still growing', async () => {
+    // Reported bug 2026-07-27: "on clique 3/4 fois sur la flèche pour arriver
+    // tout en bas". A single scrollIntoView aims at the height measured when it
+    // fires, so late layout (markdown, mermaid, media) leaves it short.
+    const messages = Array.from({ length: 30 }, (_, i) => ({
+      id: `m${i}`,
+      role: (i % 2 === 0 ? 'User' : 'Agent') as 'User' | 'Agent',
+      content: `message ${i}`,
+      agent_type: i % 2 === 0 ? null : ('ClaudeCode' as const),
+      timestamp: '2026-01-01T00:00:00Z',
+      tokens_used: 0,
+      auth_mode: null,
+    }));
+
+    const disc = { ...makeListDiscussion('d1', messages.length), messages };
+    vi.mocked(discussionsApi.get).mockResolvedValue(disc);
+
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[disc]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        initialActiveDiscussionId="d1"
+        {...liftedProps()}
+      />
+    );
+
+    // jsdom performs no layout, so the scroll metrics are driven by hand.
+    const container = document.querySelector('.disc-messages') as HTMLElement;
+    let scrollHeight = 5000;
+    Object.defineProperty(container, 'scrollHeight', { configurable: true, get: () => scrollHeight });
+    Object.defineProperty(container, 'clientHeight', { configurable: true, get: () => 800 });
+    container.scrollTop = 0;
+    await act(async () => { fireEvent.scroll(container); });
+
+    const button = document.querySelector('[data-testid="disc-scroll-to-bottom"]') as HTMLButtonElement;
+    expect(button).not.toBeNull();
+
+    // The list keeps growing for a few frames after the click, then settles.
+    const grow = setInterval(() => { if (scrollHeight < 9000) scrollHeight += 1000; }, 16);
+    await act(async () => { fireEvent.click(button); });
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 300)); });
+    clearInterval(grow);
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 200)); });
+
+    // One click, and the container sits at the final height — not the one
+    // measured when the click happened.
+    expect(scrollHeight).toBe(9000);
+    expect(container.scrollTop).toBe(9000);
+  });
+
   it('optimistically promotes the streaming buffer to a real Agent message on stream end (no scroll jump)', async () => {
     // Reported bug: "quand le stream se termine, ça remonte au début du
     // message et ça redescend". Root cause — `cleanupStream` flipped
@@ -1370,6 +1452,339 @@ describe('DiscussionsPage', () => {
       `button[title*="${sentPayload?.client_message_id}"]`,
     );
     expect(optimisticIdPill).toBeTruthy();
+  });
+
+  it('sends the selected durable reply target from the composer', async () => {
+    const sourceId = '12345678-1234-4234-8234-123456789abc';
+    const fullDisc: Discussion = {
+      ...makeListDiscussion('d1', 1),
+      messages: [
+        {
+          id: sourceId,
+          role: 'Agent',
+          content: 'Original answer',
+          agent_type: 'Codex',
+          timestamp: '2026-01-01T00:00:00Z',
+          tokens_used: 0,
+          auth_mode: null,
+        },
+      ],
+    };
+    vi.mocked(discussionsApi.get).mockResolvedValue(fullDisc);
+    let sentPayload: {
+      content: string;
+      reply_to_message_id?: string | null;
+    } | undefined;
+    vi.mocked(discussionsApi.sendMessageStream).mockImplementation(
+      async (_discId: any, payload: any) => {
+        sentPayload = payload;
+      },
+    );
+
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[{ ...makeListDiscussion('d1', 1), messages: fullDisc.messages }]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        initialActiveDiscussionId="d1"
+        {...liftedProps()}
+      />,
+    );
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+
+    fireEvent.click(screen.getByRole('button', { name: /Reply|Répondre/ }));
+    expect(document.querySelector('.disc-reply-composer-preview'))
+      .toHaveTextContent('#12345678');
+    expect(document.querySelector('.disc-messages-col'))
+      .toHaveAttribute('data-replying', 'true');
+    const chatInput = document.querySelector('textarea') as HTMLTextAreaElement;
+    fireEvent.change(chatInput, { target: { value: 'Follow-up answer' } });
+    const sendBtn = document.querySelector(
+      'button[aria-label="Send message"]',
+    ) as HTMLButtonElement;
+    await act(async () => { fireEvent.click(sendBtn); });
+
+    expect(sentPayload?.reply_to_message_id).toBe(sourceId);
+  });
+
+  it('restores the reply target when a send is refused by a 502', async () => {
+    const sourceId = '87654321-1234-4234-8234-123456789abc';
+    clearReplyDraft('d1');
+    const fullDisc: Discussion = {
+      ...makeListDiscussion('d1', 1),
+      messages: [{
+        id: sourceId,
+        role: 'Agent',
+        content: 'Original answer',
+        agent_type: 'Codex',
+        timestamp: '2026-01-01T00:00:00Z',
+        tokens_used: 0,
+        auth_mode: null,
+      }],
+    };
+    vi.mocked(discussionsApi.get).mockResolvedValue(fullDisc);
+    vi.mocked(discussionsApi.sendMessageStream).mockImplementation(
+      async (_discId: any, _payload: any, _onText: any, _onDone: any, onError: any) => {
+        onError('502 Bad Gateway');
+      },
+    );
+
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[{ ...makeListDiscussion('d1', 1), messages: fullDisc.messages }]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        initialActiveDiscussionId="d1"
+        {...liftedProps()}
+      />,
+    );
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+
+    fireEvent.click(screen.getByRole('button', { name: /Reply|Répondre/ }));
+    const chatInput = document.querySelector('textarea') as HTMLTextAreaElement;
+    fireEvent.change(chatInput, { target: { value: 'Retry after reconnect' } });
+    await act(async () => {
+      fireEvent.click(document.querySelector(
+        'button[aria-label="Send message"]',
+      ) as HTMLButtonElement);
+    });
+
+    expect(document.querySelector('.disc-reply-composer-preview'))
+      .toHaveTextContent('#87654321');
+    expect(loadReplyDraft('d1')?.messageId).toBe(sourceId);
+  });
+
+  // ── KT-113 — a send refused while the previous run is still recovering ─────
+
+  const renderForPartialPending = async () => {
+    const fullDisc: Discussion = {
+      ...makeListDiscussion('d1', 1),
+      messages: [{
+        id: 'm1', role: 'User', content: 'Hello', agent_type: null,
+        timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null,
+      }],
+    };
+    vi.mocked(discussionsApi.get).mockResolvedValue(fullDisc);
+    const lifted = liftedProps();
+    // Mirror Dashboard's real cleanupStream, which drops the abort controller.
+    // With the default no-op stub the refused send would still look in-flight and
+    // the resend would silently take the queue path instead.
+    lifted.cleanupStream = vi.fn((discId: string) => {
+      delete lifted.abortControllers.current[discId];
+    });
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[{ ...makeListDiscussion('d1', 1), messages: fullDisc.messages }]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        initialActiveDiscussionId="d1"
+        {...lifted}
+      />,
+    );
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+    const textarea = document.querySelector('textarea') as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: 'Message pendant la récupération' } });
+    await act(async () => {
+      fireEvent.click(document.querySelector(
+        'button[aria-label="Send message"]',
+      ) as HTMLButtonElement);
+    });
+    return textarea;
+  };
+
+  it('shows a non-blocking banner instead of freezing the tab, and keeps the text', async () => {
+    // `confirm()` blocks the whole tab; recovery can last minutes, so the user
+    // could not even copy their message while waiting. happy-dom has no native
+    // confirm, so install one and assert nothing ever reaches it.
+    const confirmSpy = vi.fn(() => true);
+    vi.stubGlobal('confirm', confirmSpy);
+    vi.mocked(discussionsApi.sendMessageStream).mockImplementation(
+      async (_discId: any, _payload: any, _onText: any, _onDone: any, onError: any) => {
+        onError('partial_pending: previous run still recovering');
+      },
+    );
+
+    const textarea = await renderForPartialPending();
+
+    expect(confirmSpy).not.toHaveBeenCalled();
+    expect(screen.getByTestId('disc-partial-pending')).toBeInTheDocument();
+    // The refused settlement puts the text back, so nothing has to be retyped.
+    expect(textarea.value).toContain('Message pendant la récupération');
+    expect(loadDraft('d1')?.text).toContain('Message pendant la récupération');
+    vi.unstubAllGlobals();
+  });
+
+  it('forces the recovery and resends the refused message exactly once', async () => {
+    const payloads: Array<{ content: string }> = [];
+    vi.mocked(discussionsApi.sendMessageStream).mockImplementation(
+      async (_discId: any, payload: any, _onText: any, _onDone: any, onError: any) => {
+        payloads.push(payload);
+        // Only the FIRST attempt is refused: the resend must go through.
+        if (payloads.length === 1) {
+          onError('partial_pending: previous run still recovering');
+        }
+      },
+    );
+
+    await renderForPartialPending();
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('disc-partial-pending-force'));
+    });
+
+    expect(discussionsApi.dismissPartial).toHaveBeenCalledWith('d1');
+    // Two calls total: the refused one, then a single resend — not three.
+    expect(payloads).toHaveLength(2);
+    expect(payloads[1].content).toBe('Message pendant la récupération');
+    expect(screen.queryByTestId('disc-partial-pending')).toBeNull();
+  });
+
+  it('sends the held message by itself once the recovery finishes', async () => {
+    // The user asked for the queue's contract: it fires on its own when the run
+    // ends. Here the end-of-recovery WS event is that edge.
+    const payloads: Array<{ content: string }> = [];
+    vi.mocked(discussionsApi.sendMessageStream).mockImplementation(
+      async (_discId: any, payload: any, _onText: any, _onDone: any, onError: any) => {
+        payloads.push(payload);
+        if (payloads.length === 1) {
+          onError('partial_pending: previous run still recovering');
+        }
+      },
+    );
+    const { useWebSocket } = await import('../../hooks/useWebSocket');
+    let fireRecovered: (() => void) | null = null;
+    vi.mocked(useWebSocket).mockImplementation((onMessage) => {
+      fireRecovered = () => onMessage(
+        { type: 'partial_response_recovered', discussion_ids: ['d1'] } as any,
+      );
+      return { connected: true };
+    });
+
+    await renderForPartialPending();
+    expect(payloads).toHaveLength(1);
+
+    await act(async () => { fireRecovered?.(); await new Promise(r => setTimeout(r, 0)); });
+
+    // Sent without any click, and only once.
+    expect(payloads).toHaveLength(2);
+    expect(payloads[1].content).toBe('Message pendant la récupération');
+    expect(screen.queryByTestId('disc-partial-pending')).toBeNull();
+  });
+
+  it('cancelling the auto-send stops it even when the recovery finishes later', async () => {
+    const payloads: Array<{ content: string }> = [];
+    vi.mocked(discussionsApi.sendMessageStream).mockImplementation(
+      async (_discId: any, payload: any, _onText: any, _onDone: any, onError: any) => {
+        payloads.push(payload);
+        if (payloads.length === 1) {
+          onError('partial_pending: previous run still recovering');
+        }
+      },
+    );
+    const { useWebSocket } = await import('../../hooks/useWebSocket');
+    let fireRecovered: (() => void) | null = null;
+    vi.mocked(useWebSocket).mockImplementation((onMessage) => {
+      fireRecovered = () => onMessage(
+        { type: 'partial_response_recovered', discussion_ids: ['d1'] } as any,
+      );
+      return { connected: true };
+    });
+
+    const textarea = await renderForPartialPending();
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('disc-partial-pending-dismiss'));
+    });
+    await act(async () => { fireRecovered?.(); await new Promise(r => setTimeout(r, 0)); });
+
+    // Cancel wins over the automatic edge, and the text is still there to resend.
+    expect(payloads).toHaveLength(1);
+    expect(textarea.value).toContain('Message pendant la récupération');
+  });
+
+  it('dismissing the banner leaves the message in the composer', async () => {
+    vi.mocked(discussionsApi.sendMessageStream).mockImplementation(
+      async (_discId: any, _payload: any, _onText: any, _onDone: any, onError: any) => {
+        onError('partial_pending: previous run still recovering');
+      },
+    );
+
+    const textarea = await renderForPartialPending();
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('disc-partial-pending-dismiss'));
+    });
+
+    expect(screen.queryByTestId('disc-partial-pending')).toBeNull();
+    expect(textarea.value).toContain('Message pendant la récupération');
+  });
+
+  it('navigates from a reply header to the original message', async () => {
+    const sourceId = 'aaaaaaaa-1234-4234-8234-123456789abc';
+    const replyId = 'bbbbbbbb-1234-4234-8234-123456789abc';
+    const fullDisc: Discussion = {
+      ...makeListDiscussion('d1', 2),
+      messages: [
+        {
+          id: sourceId,
+          role: 'Agent',
+          content: 'Original answer',
+          agent_type: 'Codex',
+          timestamp: '2026-01-01T00:00:00Z',
+          tokens_used: 0,
+          auth_mode: null,
+        },
+        {
+          id: replyId,
+          role: 'User',
+          content: 'A reply',
+          agent_type: null,
+          timestamp: '2026-01-01T00:01:00Z',
+          tokens_used: 0,
+          auth_mode: null,
+          reply_to_message_id: sourceId,
+        },
+      ],
+    };
+    vi.mocked(discussionsApi.get).mockResolvedValue(fullDisc);
+
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[{ ...makeListDiscussion('d1', 2), messages: fullDisc.messages }]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        initialActiveDiscussionId="d1"
+        {...liftedProps()}
+      />,
+    );
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+
+    fireEvent.click(screen.getByTitle(/Show original message|Afficher le message d’origine/));
+
+    expect(
+      document.querySelector(`[data-message-id="${sourceId}"]`),
+    ).toHaveAttribute('data-search-current', 'true');
   });
 
   it('reverts the optimistic row when the send errors before acceptance', async () => {
@@ -1606,6 +2021,94 @@ describe('DiscussionsPage', () => {
     }, { timeout: 1000 });
   });
 
+  it('launches every agent mentioned in a new-discussion prompt through one orchestration round', async () => {
+    const createdDisc: Discussion = {
+      ...makeListDiscussion('prompt-agents-1', 1),
+      agent: 'Codex',
+      participants: ['Codex'],
+      messages: [{
+        id: 'prompt-agents-message',
+        role: 'User',
+        content: '@codex @claude comparez vos approches',
+        agent_type: null,
+        timestamp: '2026-07-28T00:00:00Z',
+        tokens_used: 0,
+        auth_mode: null,
+      }],
+    };
+    vi.mocked(discussionsApi.create).mockReset();
+    vi.mocked(discussionsApi.create).mockResolvedValue(createdDisc);
+    vi.mocked(discussionsApi.get).mockResolvedValue(createdDisc);
+    vi.mocked(discussionsApi.runAgent).mockClear();
+    vi.mocked(discussionsApi.orchestrate).mockClear();
+
+    const codexAgent: AgentDetection = {
+      name: 'Codex',
+      agent_type: 'Codex',
+      installed: true,
+      enabled: true,
+      path: '/usr/bin/codex',
+      version: '1.0.0',
+      latest_version: null,
+      origin: 'host',
+      install_command: null,
+      host_managed: false,
+      host_label: null,
+      runtime_available: false,
+      rtk_available: false,
+      rtk_hook_configured: false,
+    };
+    const claudeAgent: AgentDetection = {
+      ...codexAgent,
+      name: 'Claude Code',
+      agent_type: 'ClaudeCode',
+      path: '/usr/bin/claude',
+    };
+
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[codexAgent, claudeAgent]}
+        allDiscussions={[]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={vi.fn()}
+        {...liftedProps()}
+      />,
+    );
+
+    await act(async () => { fireEvent.click(screen.getAllByText(/Nouvelle/)[0]); });
+    const prompt = document.querySelector(
+      'textarea[aria-label="Prompt initial"]',
+    ) as HTMLTextAreaElement;
+    expect(prompt).toBeTruthy();
+    await act(async () => {
+      fireEvent.change(prompt, {
+        target: { value: '@codex @claude comparez vos approches' },
+      });
+    });
+    expect(screen.getByText('Agents définis par le prompt')).toBeTruthy();
+
+    await act(async () => {
+      fireEvent.click(screen.getByText(/Démarrer la discussion/));
+    });
+    await waitFor(() => {
+      expect(vi.mocked(discussionsApi.orchestrate)).toHaveBeenCalledWith(
+        'prompt-agents-1',
+        expect.objectContaining({
+          agents: ['Codex', 'ClaudeCode'],
+          max_rounds: 1,
+        }),
+        expect.any(Object),
+        expect.any(AbortSignal),
+      );
+    });
+    expect(vi.mocked(discussionsApi.runAgent)).not.toHaveBeenCalled();
+  });
+
   it('shows copy button on agent messages', async () => {
     const fullDisc: Discussion = {
       ...makeListDiscussion('d-copy', 2),
@@ -1635,6 +2138,149 @@ describe('DiscussionsPage', () => {
     // Should find copy buttons (title attribute)
     const copyBtns = document.querySelectorAll('[title="Copier le message"]');
     expect(copyBtns.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('searches rendered message bodies and navigates every occurrence', async () => {
+    const fullDisc: Discussion = {
+      ...makeListDiscussion('d-search-messages', 2),
+      messages: [
+        {
+          id: 'search-user',
+          role: 'User',
+          content: `${'contenu long '.repeat(1_000)}Alpha dans le premier message.`,
+          agent_type: null,
+          timestamp: '2026-01-01T00:00:00Z',
+          tokens_used: 0,
+          auth_mode: null,
+        },
+        {
+          id: 'search-agent',
+          role: 'Agent',
+          content: 'alpha puis **alpha** dans la réponse',
+          agent_type: 'ClaudeCode',
+          timestamp: '2026-01-01T00:00:05Z',
+          tokens_used: 20,
+          auth_mode: null,
+        },
+      ],
+    };
+    vi.mocked(discussionsApi.get).mockResolvedValue(fullDisc);
+
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[makeListDiscussion('d-search-messages', 2)]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        initialActiveDiscussionId="d-search-messages"
+        {...liftedProps()}
+      />,
+    );
+
+    const openSearch = await screen.findByRole('button', { name: 'Rechercher dans les messages' });
+    fireEvent.click(openSearch);
+    const input = await screen.findByRole('searchbox', { name: 'Rechercher dans cette discussion…' });
+    fireEvent.change(input, { target: { value: 'alpha' } });
+
+    await waitFor(() => expect(screen.getByText('1 / 3')).toBeTruthy());
+    expect(document.querySelector('[data-message-id="search-user"]')?.getAttribute('data-search-current')).toBe('true');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Occurrence suivante' }));
+    await waitFor(() => expect(screen.getByText('2 / 3')).toBeTruthy());
+    expect(document.querySelector('[data-message-id="search-agent"]')?.getAttribute('data-search-current')).toBe('true');
+
+    fireEvent.keyDown(input, { key: 'Enter' });
+    await waitFor(() => expect(screen.getByText('3 / 3')).toBeTruthy());
+    fireEvent.keyDown(input, { key: 'Enter' });
+    await waitFor(() => expect(screen.getByText('1 / 3')).toBeTruthy());
+
+    fireEvent.change(input, { target: { value: 'aucune occurrence ici' } });
+    await waitFor(() => expect(screen.getByText('Aucun résultat')).toBeTruthy());
+    expect(document.querySelector('[data-search-current="true"]')).toBeNull();
+  });
+
+  it('opens a global result at the exact message in its discussion', async () => {
+    const sourceList = makeListDiscussion('d-global-source', 1);
+    const targetList = makeListDiscussion('d-global-target', 1);
+    const sourceFull: Discussion = {
+      ...sourceList,
+      messages: [{
+        id: 'source-message',
+        role: 'User',
+        content: 'Départ',
+        agent_type: null,
+        timestamp: '2026-01-01T00:00:00Z',
+        tokens_used: 0,
+        auth_mode: null,
+      }],
+    };
+    const targetFull: Discussion = {
+      ...targetList,
+      messages: [{
+        id: 'global-target-message',
+        role: 'Agent',
+        content: 'Le résultat Fastly recherché',
+        agent_type: 'Codex',
+        timestamp: '2026-01-02T00:00:00Z',
+        tokens_used: 10,
+        auth_mode: null,
+      }],
+    };
+    vi.mocked(discussionsApi.get).mockImplementation(async id => (
+      id === targetList.id ? targetFull : sourceFull
+    ));
+    vi.mocked(discussionsApi.searchMessages).mockResolvedValue([{
+      disc_id: targetList.id,
+      disc_title: targetList.title,
+      message_id: 'global-target-message',
+      sort_order: 1,
+      role: 'Agent',
+      timestamp: '2026-01-02T00:00:00Z',
+      snippet: '…résultat Fastly recherché…',
+      agent_type: 'Codex',
+      author_pseudo: null,
+      project_id: null,
+    }]);
+
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[sourceList, targetList]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        initialActiveDiscussionId={sourceList.id}
+        {...liftedProps()}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole('button', {
+      name: 'Recherche avancée dans tous les messages',
+    }));
+    const input = await screen.findByTestId('global-search-input');
+    fireEvent.change(input, { target: { value: 'Fastly' } });
+    await act(async () => {
+      fireEvent.submit(input.closest('form')!);
+      await Promise.resolve();
+    });
+    fireEvent.click(await screen.findByRole('button', { name: /Discussion d-global-target/ }));
+
+    await waitFor(() => {
+      expect(discussionsApi.get).toHaveBeenCalledWith(targetList.id);
+      expect(
+        document.querySelector('[data-message-id="global-target-message"]')
+          ?.getAttribute('data-search-current'),
+      ).toBe('true');
+    });
   });
 
   it('shows response duration on agent messages', async () => {
@@ -1728,10 +2374,13 @@ describe('DiscussionsPage', () => {
       />
     );
 
-    // Agent switch button should be visible with the current agent name
+    // The button carries the configured agent under its canonical mention plus its
+    // role, so the same identity reads the same way here, in the composer and in
+    // the participant list.
     const switchBtn = document.querySelector('[title="Changer d\'agent"]');
     expect(switchBtn).toBeTruthy();
-    expect(switchBtn?.textContent).toContain('Claude Code');
+    expect(switchBtn?.textContent).toContain('@claude');
+    expect(switchBtn?.textContent).toContain('agent de discussion');
   });
 
   // ─── Discussion search filter tests ──────────────────────────────────

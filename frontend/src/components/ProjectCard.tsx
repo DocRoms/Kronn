@@ -28,7 +28,9 @@ import {
 import { BriefingForm } from './BriefingForm';
 import { CopyIdPill } from './CopyIdPill';
 import { ProjectCodePanel } from './ProjectCodePanel';
+import { ProjectGitPanel } from './ProjectGitPanel';
 import { ProjectTasksPanel } from './ProjectTasksPanel';
+import { ContextHelp } from './ContextHelp';
 
 const STATUS_COLORS: Record<string, string> = {
   Pending: 'var(--kr-warning)', Running: 'var(--kr-cyan)', Success: 'var(--kr-success)',
@@ -112,7 +114,8 @@ export function ProjectCard({
 }: ProjectCardProps) {
   const { t, locale } = useT();
   const isMobile = useIsMobile();
-  const [detailView, setDetailView] = useState<'overview' | 'discussions' | 'tasks' | 'docs' | 'code' | 'resources'>('overview');
+  const [detailView, setDetailView] = useState<'overview' | 'discussions' | 'tasks' | 'docs' | 'code' | 'git' | 'resources'>('overview');
+  const [gitRevision, setGitRevision] = useState(0);
   const [projectTaskCount, setProjectTaskCount] = useState<number | null>(null);
   const [visibleDiscussionCount, setVisibleDiscussionCount] = useState(10);
   const [discussionLoadAmount, setDiscussionLoadAmount] = useState<'10' | '50' | 'all'>('10');
@@ -1133,6 +1136,15 @@ export function ProjectCard({
                 <div className="project-detail-title-row">
                   <h2>{proj.name}</h2>
                   <CopyIdPill id={proj.id} title={t('projects.master.copyId', proj.name)} />
+                  <ContextHelp title={t('contextHelp.project.title')}>
+                    <p>{t('contextHelp.project.intro')}</p>
+                    <ul>
+                      <li>{t('contextHelp.project.code')}</li>
+                      <li>{t('contextHelp.project.work')}</li>
+                      <li>{t('contextHelp.project.resources')}</li>
+                    </ul>
+                    <p className="kr-context-help-agent-note">{t('contextHelp.project.mcp')}</p>
+                  </ContextHelp>
                   {(auditActive || validationInProgress) && (
                     <Loader2 size={13} className="spin text-accent" aria-label={t('audit.activityInProgress')} />
                   )}
@@ -1180,6 +1192,7 @@ export function ProjectCard({
               ['tasks', t('projects.master.tab.tasks'), ListTodo, projectTaskCount],
               ['docs', t('projects.master.tab.docs'), BookOpen, undefined],
               ['code', t('projects.master.tab.code'), Code2, undefined],
+              ['git', t('projects.master.tab.git'), GitBranch, undefined],
               ['resources', t('projects.master.tab.resources'), Puzzle, undefined],
             ] as const).map(([view, label, Icon, count]) => (
               <button
@@ -1528,6 +1541,25 @@ export function ProjectCard({
                     </button>
                   )}
                 </div>
+                {/* KT-94 follow-up — the bar now arrives ~20 s AFTER the git
+                    status (background computation). Rendering nothing until then
+                    made the whole card jump when it landed; keep the slot at its
+                    final height with a pending shimmer instead (CLS ≈ 0). */}
+                {languageStats.length === 0 && (
+                  <div className="project-overview-languages" aria-hidden="true">
+                    <div className="project-overview-languages-title">
+                      <strong>{t('projects.master.overview.languages')}</strong>
+                      <span>{t('projects.master.overview.languagesPending')}</span>
+                    </div>
+                    <div className="project-overview-language-bar project-overview-language-bar--pending" />
+                    <div className="project-overview-language-legend">
+                      <span>
+                        <i style={{ background: 'var(--kr-text-faint)' }} />
+                        <strong>…</strong>
+                      </span>
+                    </div>
+                  </div>
+                )}
                 {languageStats.length > 0 && languageTotalBytes > 0 && (
                   <div className="project-overview-languages">
                     <div className="project-overview-languages-title">
@@ -1759,7 +1791,19 @@ export function ProjectCard({
           )}
           {detailMode && detailView === 'code' && (
             <section className="project-detail-section project-detail-source" data-project-view="code">
-              <ProjectCodePanel projectId={proj.id} />
+              <ProjectCodePanel key={`${proj.id}:${gitRevision}`} projectId={proj.id} />
+            </section>
+          )}
+          {detailMode && detailView === 'git' && (
+            <section className="project-detail-section project-detail-git" data-project-view="git">
+              <ProjectGitPanel
+                projectId={proj.id}
+                onBranchChanged={() => {
+                  setGitRevision(revision => revision + 1);
+                  setOverviewGit(null);
+                  onRefetch();
+                }}
+              />
             </section>
           )}
           {detailMode && detailView === 'tasks' && (

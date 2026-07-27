@@ -20,6 +20,7 @@ vi.mock('../../lib/api', () => ({
     setSourceExclusions: vi.fn(),
     gitStatus: vi.fn(),
     gitBlame: vi.fn(),
+    gitCommitDetail: vi.fn(),
   },
 }));
 
@@ -73,6 +74,20 @@ describe('SourceCodeViewer', () => {
         author: 'Ada Lovelace',
         author_time: 1710000000,
       }],
+    });
+    vi.mocked(projects.gitCommitDetail).mockResolvedValue({
+      sha: '0123456789abcdef0123456789abcdef01234567',
+      short_sha: '0123456',
+      author_name: 'Ada Lovelace',
+      author_email: 'ada@example.com',
+      author_time: 1710000000,
+      committer_name: 'Ada Lovelace',
+      commit_time: 1710000000,
+      subject: 'Réécrit la boucle principale',
+      body: 'Le corps du message\nsur deux lignes',
+      branches: ['main', 'feature/source-browser'],
+      branches_truncated: false,
+      files_changed: 3,
     });
   });
 
@@ -188,5 +203,93 @@ describe('SourceCodeViewer', () => {
     await waitFor(() => {
       expect(projects.setSourceExclusions).toHaveBeenLastCalledWith('project-1', []);
     });
+  });
+  // ─── KT-67 — from an annotated line to its commit ────────────────────────
+
+  it('opens the commit behind an annotated line and shows its story', async () => {
+    render(<SourceCodeViewer projectId="project-1" />);
+    await screen.findByText('main.rs');
+    fireEvent.click(screen.getByRole('button', { name: 'projects.source.annotate' }));
+    await screen.findByText(/Ada Lovelace/);
+
+    fireEvent.click(screen.getByTestId('source-blame-button'));
+
+    await waitFor(() => {
+      // The sha comes from blame, not from anything typed by the user.
+      expect(projects.gitCommitDetail).toHaveBeenCalledWith('project-1', '0123456789abcdef');
+    });
+    const panel = await screen.findByTestId('source-commit-detail');
+    expect(panel).toHaveTextContent('Réécrit la boucle principale');
+    expect(panel).toHaveTextContent('ada@example.com');
+    expect(panel).toHaveTextContent('main, feature/source-browser');
+    // Full hash available for copy/paste, not just the short one.
+    expect(panel).toHaveTextContent('0123456789abcdef0123456789abcdef01234567');
+  });
+
+  it('says so when the branch list was truncated', async () => {
+    vi.mocked(projects.gitCommitDetail).mockResolvedValue({
+      sha: 'abc1234abc1234abc1234abc1234abc1234abc12',
+      short_sha: 'abc1234',
+      author_name: 'Ada',
+      author_email: 'ada@example.com',
+      author_time: 1710000000,
+      committer_name: 'Ada',
+      commit_time: 1710000000,
+      subject: 'sujet',
+      body: '',
+      branches: ['main'],
+      branches_truncated: true,
+      files_changed: 1,
+    });
+    render(<SourceCodeViewer projectId="project-1" />);
+    await screen.findByText('main.rs');
+    fireEvent.click(screen.getByRole('button', { name: 'projects.source.annotate' }));
+    await screen.findByText(/Ada/);
+    fireEvent.click(screen.getByTestId('source-blame-button'));
+
+    const panel = await screen.findByTestId('source-commit-detail');
+    // A capped list must never look complete.
+    expect(panel).toHaveTextContent('projects.source.commitBranchesMore');
+  });
+
+  // ─── KT-75 — from the commit's story to the change itself ────────────────
+
+  it('hands the full sha to the host so the patch opens in its own tab', async () => {
+    const onOpenCommit = vi.fn();
+    render(<SourceCodeViewer projectId="project-1" onOpenCommit={onOpenCommit} />);
+    await screen.findByText('main.rs');
+    fireEvent.click(screen.getByRole('button', { name: 'projects.source.annotate' }));
+    await screen.findByText(/Ada Lovelace/);
+    fireEvent.click(screen.getByTestId('source-blame-button'));
+
+    fireEvent.click(await screen.findByTestId('source-commit-open-patch'));
+    // The FULL sha, not the abbreviated one blame reported.
+    expect(onOpenCommit).toHaveBeenCalledWith('0123456789abcdef0123456789abcdef01234567');
+  });
+
+  it('hides the patch action when the host cannot open a tab', async () => {
+    render(<SourceCodeViewer projectId="project-1" />);
+    await screen.findByText('main.rs');
+    fireEvent.click(screen.getByRole('button', { name: 'projects.source.annotate' }));
+    await screen.findByText(/Ada Lovelace/);
+    fireEvent.click(screen.getByTestId('source-blame-button'));
+
+    await screen.findByTestId('source-commit-detail');
+    expect(screen.queryByTestId('source-commit-open-patch')).toBeNull();
+  });
+
+  it('reports a failed lookup instead of an empty panel, and closes on Escape', async () => {
+    vi.mocked(projects.gitCommitDetail).mockRejectedValue(new Error('bad object'));
+    render(<SourceCodeViewer projectId="project-1" />);
+    await screen.findByText('main.rs');
+    fireEvent.click(screen.getByRole('button', { name: 'projects.source.annotate' }));
+    await screen.findByText(/Ada Lovelace/);
+    fireEvent.click(screen.getByTestId('source-blame-button'));
+
+    const panel = await screen.findByTestId('source-commit-detail');
+    await waitFor(() => expect(panel).toHaveTextContent('bad object'));
+
+    await act(async () => { fireEvent.keyDown(window, { key: 'Escape' }); });
+    expect(screen.queryByTestId('source-commit-detail')).toBeNull();
   });
 });

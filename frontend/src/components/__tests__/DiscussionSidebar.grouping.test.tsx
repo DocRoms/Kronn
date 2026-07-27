@@ -319,6 +319,82 @@ describe('DiscussionSidebar — search filter', () => {
     });
   });
 
+  it('uses one query when switching from quick to advanced search', async () => {
+    const onOpenGlobalSearch = vi.fn();
+    const { rerender } = render(
+      <DiscussionSidebar
+        {...baseProps}
+        discussions={discussions}
+        onOpenGlobalSearch={onOpenGlobalSearch}
+      />,
+    );
+    await waitFor(() => expect(projectsApi.discSources).toHaveBeenCalled());
+
+    const quickInput = document.querySelector('.disc-search-input') as HTMLInputElement;
+    fireEvent.change(quickInput, { target: { value: 'banana' } });
+    expect(screen.getAllByRole('textbox')).toHaveLength(1);
+    expect(screen.getByTestId('disc-open-global-search')).toBeVisible();
+    fireEvent.keyDown(quickInput, { key: 'Enter' });
+    expect(onOpenGlobalSearch).toHaveBeenCalledTimes(1);
+
+    rerender(
+      <DiscussionSidebar
+        {...baseProps}
+        discussions={discussions}
+        onOpenGlobalSearch={onOpenGlobalSearch}
+        globalSearchOpen
+        globalSearchAuthors={['Codex']}
+        onCloseGlobalSearch={noop}
+        onOpenGlobalSearchResult={noop}
+      />,
+    );
+
+    const advancedInput = screen.getByTestId('global-search-input') as HTMLInputElement;
+    expect(advancedInput.value).toBe('banana');
+    expect(screen.getByPlaceholderText('disc.searchPlaceholder')).not.toBeVisible();
+  });
+
+  it('clears the shared query when advanced search is closed', async () => {
+    const onCloseGlobalSearch = vi.fn();
+    const { rerender } = render(
+      <DiscussionSidebar
+        {...baseProps}
+        discussions={discussions}
+        onOpenGlobalSearch={noop}
+      />,
+    );
+    await waitFor(() => expect(projectsApi.discSources).toHaveBeenCalled());
+
+    const quickInput = document.querySelector('.disc-search-input') as HTMLInputElement;
+    fireEvent.change(quickInput, { target: { value: 'banana' } });
+
+    rerender(
+      <DiscussionSidebar
+        {...baseProps}
+        discussions={discussions}
+        onOpenGlobalSearch={noop}
+        globalSearchOpen
+        globalSearchAuthors={['Codex']}
+        onCloseGlobalSearch={onCloseGlobalSearch}
+        onOpenGlobalSearchResult={noop}
+      />,
+    );
+    fireEvent.click(screen.getByLabelText('disc.globalSearch.close'));
+    expect(onCloseGlobalSearch).toHaveBeenCalledTimes(1);
+
+    rerender(
+      <DiscussionSidebar
+        {...baseProps}
+        discussions={discussions}
+        onOpenGlobalSearch={noop}
+      />,
+    );
+    expect((screen.getByPlaceholderText('disc.searchPlaceholder') as HTMLInputElement).value)
+      .toBe('');
+    expect(screen.getByText('Apple pie recipe')).toBeInTheDocument();
+    expect(screen.getByText('Banana bread')).toBeInTheDocument();
+  });
+
   it('matches on an id prefix (paste-an-id-to-jump)', async () => {
     render(<DiscussionSidebar {...baseProps} discussions={discussions} />);
     await waitFor(() => expect(projectsApi.discSources).toHaveBeenCalled());

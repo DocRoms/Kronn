@@ -41,6 +41,42 @@ export const AGENT_MENTIONS: ReadonlyArray<{
   { trigger: '@ollama', type: 'Ollama', label: 'Ollama' },
 ];
 
+/** Return every canonical agent mention found in text, once each and in the
+ * order the human wrote them.
+ *
+ * Shared by every composer that launches explicitly mentioned agents. Keeping
+ * the boundary rule here prevents discussion creation, send, and edit/resend
+ * from drifting.
+ */
+export function mentionedAgents(text: string): AgentType[] {
+  const matches: Array<{ type: AgentType; index: number }> = [];
+  for (const mention of AGENT_MENTIONS) {
+    const escaped = mention.trigger.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const matcher = new RegExp(
+      `(^|[\\s([{])${escaped}(?=$|[\\s\\])},.!?;:])`,
+      'gi',
+    );
+    let match: RegExpExecArray | null;
+    while ((match = matcher.exec(text)) !== null) {
+      matches.push({
+        type: mention.type,
+        index: match.index + match[1].length,
+      });
+    }
+  }
+  matches.sort((left, right) => left.index - right.index);
+  return matches
+    .filter((match, index, all) => (
+      all.findIndex(candidate => candidate.type === match.type) === index
+    ))
+    .map(match => match.type);
+}
+
+/** Canonical mention for the human of this Kronn instance. Agents must use
+ *  this exact trigger instead of inventing a pseudo, so a message addressed to
+ *  the human renders like any other mention. */
+export const USER_MENTION_TRIGGER = '@user';
+
 /** Agents RTK can hook to compress shell output (token savings). Kiro/Copilot/
  *  Vibe/Ollama are out of scope (not in RTK's list / no shell to hook / local).
  *  Single source of truth — shared by the RTK Settings card and the
@@ -56,8 +92,45 @@ export function isRtkActive(agent: { rtk_available: boolean; rtk_hook_configured
   return agent.rtk_available && agent.rtk_hook_configured;
 }
 
-export const agentColor = (agentType: string | null | undefined): string =>
-  AGENT_COLORS[agentType ?? ''] ?? '#8b5cf6';
+export type AgentMentionColors = Partial<Record<AgentType, string>>;
+
+const AGENT_CONFIG_KEY: Partial<Record<AgentType, keyof AgentsConfig>> = {
+  ClaudeCode: 'claude_code',
+  Codex: 'codex',
+  Vibe: 'vibe',
+  GeminiCli: 'gemini_cli',
+  Kiro: 'kiro',
+  CopilotCli: 'copilot_cli',
+  Ollama: 'ollama',
+};
+
+const isRgbHex = (value: string | null | undefined): value is string =>
+  typeof value === 'string' && /^#[0-9a-f]{6}$/i.test(value);
+
+/** Extract validated per-agent mention colors from persisted config. Invalid
+ *  hand-edited TOML values are ignored and fall back to the built-in palette. */
+export function agentMentionColors(agentAccess: AgentsConfig | null | undefined): AgentMentionColors {
+  if (!agentAccess) return {};
+  const colors: AgentMentionColors = {};
+  for (const agentType of ALL_AGENT_TYPES) {
+    const key = AGENT_CONFIG_KEY[agentType];
+    if (!key || key === 'model_tiers') continue;
+    const config = agentAccess[key];
+    if (config && typeof config === 'object' && 'mention_color' in config) {
+      const color = config.mention_color;
+      if (isRgbHex(color)) colors[agentType] = color;
+    }
+  }
+  return colors;
+}
+
+export const agentColor = (
+  agentType: string | null | undefined,
+  overrides?: AgentMentionColors,
+): string => {
+  const override = agentType ? overrides?.[agentType as AgentType] : undefined;
+  return isRgbHex(override) ? override : AGENT_COLORS[agentType ?? ''] ?? '#8b5cf6';
+};
 
 /** Check if an agent has full_access disabled (restricted mode). */
 export function isAgentRestricted(agentAccess: AgentsConfig | undefined, agentType: AgentType): boolean {
@@ -132,9 +205,13 @@ export function hasAgentFullAccess(agentAccess: AgentsConfig | undefined, agentT
 /** Check if a path contains a hidden segment (starts with '.') */
 export const isHiddenPath = (path: string) => path.split('/').some(s => s.startsWith('.'));
 
-/** Agent is usable: locally installed OR available via npx/uvx runtime fallback */
-export const isUsable = (a: { installed: boolean; runtime_available: boolean; enabled: boolean }) =>
-  (a.installed || a.runtime_available) && a.enabled;
+/** Agent is usable: runnable, enabled, and not known to be missing auth. */
+export const isUsable = (a: {
+  installed: boolean;
+  runtime_available: boolean;
+  enabled: boolean;
+  auth_ready?: boolean;
+}) => (a.installed || a.runtime_available) && a.enabled && a.auth_ready !== false;
 
 /** Check if a discussion title matches the validation audit title */
 export const isValidationDisc = (title: string) => title === 'Validation audit AI';

@@ -4,9 +4,7 @@
     "color-contrast": 51,
     "nested-interactive": 2
   },
-  "Discussions": {
-    "color-contrast": 2
-  },
+  "Discussions": {},
   "Plugins": {
     "color-contrast": 2
   },

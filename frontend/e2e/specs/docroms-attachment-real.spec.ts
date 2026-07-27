@@ -94,7 +94,10 @@ test.describe('DOCROMS_WEB — attached image renders in the real message bubble
     await page.getByRole('button', { name: new RegExp(TITLE.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')) }).click();
 
     // 3. Attach a real PNG through the (hidden) composer file input.
-    await page.locator('input[type="file"]').setInputFiles({
+    // Scoped to the composer: the sidebar now carries its own hidden file input
+    // for bundle import, so a bare `input[type="file"]` matches two elements and
+    // fails strict mode.
+    await page.locator('.disc-composer-wrap input[type="file"]').setInputFiles({
       name: 'capture.png',
       mimeType: 'image/png',
       buffer: PNG_1x1,

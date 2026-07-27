@@ -561,6 +561,8 @@ fn handle_incoming_chat_message(
     timestamp: i64,
     role: crate::models::MessageRole,
     agent_type: Option<crate::models::AgentType>,
+    targets: Vec<crate::models::MessageTarget>,
+    reply_to_message_id: Option<&str>,
 ) -> anyhow::Result<bool> {
     // Find local discussion by shared_id
     let Some(disc_id) =
@@ -590,6 +592,27 @@ fn handle_incoming_chat_message(
     // as an Agent message carrying its CLI name, not a generic User. Frames
     // from an older peer carry no fields → serde defaults (User / None), i.e.
     // the historical behaviour.
+    let reply_to_message_id = reply_to_message_id.and_then(|target_id| {
+        let target_exists = conn
+            .query_row(
+                "SELECT COUNT(*) > 0
+                 FROM messages
+                 WHERE id = ?1 AND discussion_id = ?2",
+                rusqlite::params![target_id, disc_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .unwrap_or(false);
+        if target_exists {
+            Some(target_id.to_string())
+        } else {
+            tracing::warn!(
+                "WS: reply target {} is unavailable in shared disc {}, preserving message without relation",
+                target_id,
+                shared_discussion_id
+            );
+            None
+        }
+    });
     let msg = crate::models::DiscussionMessage {
         model: None,
         lint_report: None,
@@ -606,9 +629,12 @@ fn handle_incoming_chat_message(
         author_avatar_email: from_avatar_email.map(|s| s.to_string()),
         source_msg_id: None,
         duration_ms: None,
+        target_agent: targets.first().map(|target| target.agent_type.clone()),
+        reply_to_message_id,
     };
 
     crate::db::discussions::insert_message(conn, &disc_id, &msg)?;
+    crate::db::discussions::replace_message_targets(conn, message_id, &targets)?;
     tracing::info!(
         "WS: inserted remote message from {} in shared disc {}",
         from_pseudo,
@@ -678,9 +704,21 @@ pub(crate) async fn ingest_relayable_frame(state: &AppState, msg: &WsMessage) ->
             timestamp,
             role,
             agent_type,
+            target_agents,
+            targets,
+            reply_to_message_id,
             ..
         } => {
-            let (sid, mid, pseudo, avatar, text, ts, r, at) = (
+            let resolved_targets = if targets.is_empty() {
+                target_agents
+                    .iter()
+                    .cloned()
+                    .map(crate::models::MessageTarget::agent)
+                    .collect()
+            } else {
+                targets.clone()
+            };
+            let (sid, mid, pseudo, avatar, text, ts, r, at, targets, reply_to) = (
                 shared_discussion_id.clone(),
                 message_id.clone(),
                 from_pseudo.clone(),
@@ -689,6 +727,8 @@ pub(crate) async fn ingest_relayable_frame(state: &AppState, msg: &WsMessage) ->
                 *timestamp,
                 role.clone(),
                 agent_type.clone(),
+                resolved_targets,
+                reply_to_message_id.clone(),
             );
             state
                 .db
@@ -703,6 +743,8 @@ pub(crate) async fn ingest_relayable_frame(state: &AppState, msg: &WsMessage) ->
                         ts,
                         r,
                         at,
+                        targets,
+                        reply_to.as_deref(),
                     )
                 })
                 .await
@@ -717,6 +759,8 @@ pub(crate) async fn ingest_relayable_frame(state: &AppState, msg: &WsMessage) ->
             revision,
             content,
             target_agent,
+            target_agents,
+            targets,
             idempotency_key,
             ..
         } => {
@@ -728,6 +772,21 @@ pub(crate) async fn ingest_relayable_frame(state: &AppState, msg: &WsMessage) ->
             let revision_value = revision.clone();
             let revised_content = content.clone();
             let agent = target_agent.clone();
+            let targets = if !targets.is_empty() {
+                targets.clone()
+            } else if target_agents.is_empty() {
+                target_agent
+                    .iter()
+                    .cloned()
+                    .map(crate::models::MessageTarget::agent)
+                    .collect()
+            } else {
+                target_agents
+                    .iter()
+                    .cloned()
+                    .map(crate::models::MessageTarget::agent)
+                    .collect()
+            };
             let key = idempotency_key.clone();
             state
                 .db
@@ -740,7 +799,7 @@ pub(crate) async fn ingest_relayable_frame(state: &AppState, msg: &WsMessage) ->
                     let created_at = chrono::DateTime::parse_from_rfc3339(&revision_value)
                         .map(|value| value.with_timezone(&Utc))
                         .unwrap_or_else(|_| Utc::now());
-                    crate::db::discussions::apply_remote_message_revision(
+                    crate::db::discussions::apply_remote_message_revision_with_targets(
                         conn,
                         &crate::models::MessageRevisionEvent {
                             id: eid,
@@ -756,6 +815,7 @@ pub(crate) async fn ingest_relayable_frame(state: &AppState, msg: &WsMessage) ->
                             dispatch_job_id: None,
                             created_at,
                         },
+                        &targets,
                     )
                 })
                 .await
@@ -930,6 +990,9 @@ mod handshake_tests {
             timestamp: 1,
             role: crate::models::MessageRole::User,
             agent_type: None,
+            target_agents: vec![],
+            targets: vec![],
+            reply_to_message_id: None,
         };
         assert_eq!(classify_pre_presence(&m), PrePresenceAction::Drop);
     }
@@ -1097,7 +1160,9 @@ mod relay_dedup_tests {
             "hi",
             0,
             MessageRole::User,
-            None
+            None,
+            vec![],
+            None,
         )
         .unwrap());
         // Create the shared disc, then the same chat inserts once → new…
@@ -1111,7 +1176,9 @@ mod relay_dedup_tests {
             "hi",
             0,
             MessageRole::User,
-            None
+            None,
+            vec![],
+            None,
         )
         .unwrap());
         // …and a duplicate message_id is NOT new (idempotent + loop-safe).
@@ -1124,8 +1191,56 @@ mod relay_dedup_tests {
             "hi",
             0,
             MessageRole::User,
-            None
+            None,
+            vec![],
+            None,
         )
         .unwrap());
+
+        assert!(handle_incoming_chat_message(
+            &c,
+            "shared-2",
+            "m2",
+            "Romu",
+            None,
+            "reply",
+            1,
+            MessageRole::User,
+            None,
+            vec![],
+            Some("m1"),
+        )
+        .unwrap());
+        let linked_target: Option<String> = c
+            .query_row(
+                "SELECT reply_to_message_id FROM messages WHERE id = 'm2'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(linked_target.as_deref(), Some("m1"));
+
+        assert!(handle_incoming_chat_message(
+            &c,
+            "shared-2",
+            "m3",
+            "Romu",
+            None,
+            "reply to missing",
+            2,
+            MessageRole::User,
+            None,
+            vec![],
+            Some("missing"),
+        )
+        .unwrap());
+        let missing_target: Option<String> = c
+            .query_row(
+                "SELECT reply_to_message_id FROM messages WHERE id = 'm3'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(missing_target.is_none());
     }
 }

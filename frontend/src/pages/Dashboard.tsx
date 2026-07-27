@@ -17,6 +17,13 @@ import { TourOverlay } from '../components/tour/TourOverlay';
 import { TourHelpButton } from '../components/tour/TourHelpButton';
 import { fetchSttModelId } from '../lib/stt-models';
 import { ErrorBoundary } from '../components/ErrorBoundary';
+import {
+  readActiveDiscussionId,
+  readDashboardPage,
+  writeActiveDiscussionId,
+  writeDashboardPage,
+  type DashboardPage,
+} from '../lib/dashboard-navigation';
 // Heavy page components lazy-loaded so the initial Dashboard chunk stays
 // under 500 KB. Each one is its own chunk and only fetched when the user
 // switches to that tab. Dropped Dashboard chunk from 949 KB → ~430 KB,
@@ -37,7 +44,7 @@ import {
   Rocket, Check, Workflow, FileText, ListTodo,
 } from 'lucide-react';
 
-type Page = 'projects' | 'mcps' | 'workflows' | 'discussions' | 'planning' | 'settings';
+type Page = DashboardPage;
 
 interface DashboardProps {
   onReset: () => void;
@@ -58,7 +65,7 @@ export function Dashboard({ onReset }: DashboardProps) {
   const { t } = useT();
   const isMobile = useIsMobile();
   const { toast, ToastContainer } = useToast();
-  const [page, setPage] = useState<Page>('projects');
+  const [page, setPage] = useState<Page>(readDashboardPage);
   const [mcpSelectedConfigId, setMcpSelectedConfigId] = useState<string | null>(null);
   const [planningSelectedTaskId, setPlanningSelectedTaskId] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
@@ -68,7 +75,9 @@ export function Dashboard({ onReset }: DashboardProps) {
   const [lastSeenMsgCount, setLastSeenMsgCount] = useState<Record<string, number>>(() => {
     try { return JSON.parse(localStorage.getItem('kronn:lastSeenMsgCount') ?? '{}'); } catch { return {}; }
   });
-  const [activeDiscussionId, setActiveDiscussionId] = useState<string | null>(null);
+  const [activeDiscussionId, setActiveDiscussionId] = useState<string | null>(
+    readActiveDiscussionId,
+  );
   // Auto-run agent on a discussion (after full audit creates validation discussion)
   const [autoRunDiscussionId, setAutoRunDiscussionId] = useState<string | null>(null);
   // Open a specific discussion without triggering agent (e.g. Resume Validation button)
@@ -179,6 +188,34 @@ export function Dashboard({ onReset }: DashboardProps) {
   const { data: agentAccess, refetch: refetchAgentAccess } = useApi(() => configApi.getAgentAccess(), []);
   const { data: workflowList, refetch: refetchWorkflows } = useApi(() => workflowsApi.list(), []);
   const { data: skillList, refetch: refetchSkills } = useApi(() => skillsApi.list(), []);
+
+  // KT-77 — a Vite full reload/HMR must not throw the user back to Projects.
+  // Keep this tab-local: it restores an interrupted dev session without
+  // turning the SPA state into a long-lived or shareable routing contract.
+  useEffect(() => {
+    writeDashboardPage(page);
+  }, [page]);
+
+  useEffect(() => {
+    writeActiveDiscussionId(activeDiscussionId);
+  }, [activeDiscussionId]);
+
+  // Validate a restored id against backend truth before handing it to the
+  // Discussions page. A deleted/inaccessible discussion falls back to the
+  // list and clears the checkpoint instead of opening a broken detail pane.
+  useEffect(() => {
+    if (!discussionList || !activeDiscussionId) return;
+    if (!discussionList.some(discussion => discussion.id === activeDiscussionId)) {
+      setActiveDiscussionId(null);
+    }
+  }, [activeDiscussionId, discussionList]);
+
+  const restorableDiscussionId = useMemo(() => {
+    if (!activeDiscussionId || !discussionList) return null;
+    return discussionList.some(discussion => discussion.id === activeDiscussionId)
+      ? activeDiscussionId
+      : null;
+  }, [activeDiscussionId, discussionList]);
 
   // Hydrate user-preference caches from backend once at mount.
   // Tauri WebView2 can wipe localStorage across app updates, so the backend
@@ -1443,7 +1480,7 @@ export function Dashboard({ onReset }: DashboardProps) {
             markDiscussionSeen={markDiscussionSeen}
             markAllDiscussionsSeen={markAllDiscussionsSeen}
             onActiveDiscussionChange={setActiveDiscussionId}
-            initialActiveDiscussionId={openDiscussionId ?? activeDiscussionId}
+            initialActiveDiscussionId={openDiscussionId ?? restorableDiscussionId}
             lastSeenMsgCount={lastSeenMsgCount}
             mcpConfigs={mcpOverview.configs}
             mcpIncompatibilities={mcpOverview.incompatibilities}

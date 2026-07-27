@@ -390,6 +390,10 @@ pub struct AgentConfig {
     pub version: Option<String>,
     #[serde(default)]
     pub full_access: bool,
+    /// Optional UI color used for this agent's canonical `@mention`.
+    /// `None` keeps the built-in frontend color.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mention_color: Option<String>,
 }
 
 // ─── Model tiers ──────────────────────────────────────────────────────────
@@ -490,6 +494,16 @@ pub struct AgentDetection {
     /// Agent is runnable via npx/uvx fallback even when no local binary is found
     #[serde(default)]
     pub runtime_available: bool,
+    /// Whether Kronn has the authentication material required by this runner.
+    /// `None` is the backward-compatible wire value for older detection paths;
+    /// API responses produced by the current backend always set it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub auth_ready: Option<bool>,
+    /// Local command that prepares authentication when `auth_ready == false`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub auth_setup_command: Option<String>,
     /// `rtk` binary found on the host (PATH). Same value for every agent
     /// detection in a given sweep, but kept per-agent so the frontend can
     /// render the state inline without a separate endpoint.
@@ -555,6 +569,14 @@ pub struct SetScanPathsRequest {
 pub struct SetAgentAccessRequest {
     pub agent: AgentType,
     pub full_access: bool,
+}
+
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
+pub struct SetAgentMentionColorRequest {
+    pub agent: AgentType,
+    /// `None` or an empty string restores the built-in color.
+    pub color: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, TS)]

@@ -550,6 +550,8 @@ async fn finish_dispatch_turn(
             author_avatar_email: None,
             source_msg_id: None,
             duration_ms: None,
+            target_agent: None,
+            reply_to_message_id: None,
         };
         let advance_id = job.id.clone();
         match state

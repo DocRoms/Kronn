@@ -73,17 +73,42 @@ pub(super) fn is_decoder_loop(text: &str, last: &mut String, count: &mut u32) ->
 /// silent on stdout for the whole run; applying the stall to them killed
 /// slow-but-healthy runs and left an empty discussion (2026-06-23: every Codex
 /// batch child died this way while the same workflow worked on Claude). For
-/// those we drop the stall and rely solely on the absolute global deadline.
-/// Pure — unit-tested.
+/// those we apply the configured timeout with a 15-minute safety floor, while
+/// the absolute 30-minute global deadline remains the final ceiling. Pure —
+/// unit-tested.
 pub(super) fn effective_stall_timeout(
     is_stream_json: bool,
     configured: std::time::Duration,
-    global: std::time::Duration,
+    non_streaming_floor: std::time::Duration,
 ) -> std::time::Duration {
     if is_stream_json {
         configured
     } else {
-        global
+        configured.max(non_streaming_floor)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentTimeoutReason {
+    Stall(Duration),
+    Global(Duration),
+}
+
+fn timeout_notice(reason: AgentTimeoutReason) -> String {
+    let duration = match reason {
+        AgentTimeoutReason::Stall(duration) | AgentTimeoutReason::Global(duration) => duration,
+    };
+    let minutes = duration.as_secs().div_ceil(60);
+    match reason {
+        AgentTimeoutReason::Stall(_) => format!(
+            "⚠️ **Agent interrupted by Kronn after {minutes} min without output.** \
+             Retry the turn, or increase **Config > Server > Agent inactivity timeout** \
+             before retrying. Non-streaming agents keep a 15-minute safety floor."
+        ),
+        AgentTimeoutReason::Global(_) => format!(
+            "⚠️ **Agent interrupted by Kronn after reaching the {minutes}-minute global execution limit.** \
+             Retry the turn to resume from the durable discussion context."
+        ),
     }
 }
 
@@ -333,6 +358,36 @@ async fn make_agent_stream_inner(
         }
     };
     let agent_type = agent_override.unwrap_or_else(|| disc.agent.clone());
+    let auth_status = {
+        let config = state.config.read().await;
+        crate::agents::agent_auth_status(&agent_type, &config)
+    };
+    if !auth_status.ready {
+        let persisted_error =
+            auth_required_system_message(&agent_type, &disc.language, auth_status.setup_command);
+        let safe_error = persisted_error.content.clone();
+        let did = discussion_id.clone();
+        if let Err(db_error) = state
+            .db
+            .with_conn(move |conn| {
+                let inserted = crate::db::discussions::insert_message(conn, &did, &persisted_error);
+                let cleared = crate::db::discussions::set_awaiting_agent(conn, &did, false);
+                inserted.and(cleared)
+            })
+            .await
+        {
+            tracing::error!("Failed to persist agent auth preflight error: {db_error}");
+        }
+        let stream: SseStream = Box::pin(futures::stream::once(async move {
+            Ok::<_, Infallible>(
+                Event::default()
+                    .event("error")
+                    .data(serde_json::json!({ "error": safe_error }).to_string()),
+            )
+        }));
+        finish_tracked_preflight(&mut completion_tx);
+        return Sse::new(prepend_initial_event(stream, initial_event.take()));
+    }
     let disc_tier = disc.tier;
     // 0.8.10 — explicit per-discussion model (e.g. inherited from a launching
     // Quick Prompt) wins over the tier; None → resolve from tier as before.
@@ -419,6 +474,8 @@ async fn make_agent_stream_inner(
                         author_avatar_email: None,
                         source_msg_id: None,
                         duration_ms: None,
+                        target_agent: None,
+                        reply_to_message_id: None,
                     };
                     let did = discussion_id.clone();
                     if let Err(db_err) = state
@@ -495,6 +552,8 @@ async fn make_agent_stream_inner(
                         author_avatar_email: None,
                         source_msg_id: None,
                         duration_ms: None,
+                        target_agent: None,
+                        reply_to_message_id: None,
                     };
                     let did = discussion_id.clone();
                     if let Err(db_error) = state
@@ -545,6 +604,8 @@ async fn make_agent_stream_inner(
                     author_avatar_email: None,
                     source_msg_id: None,
                     duration_ms: None,
+                    target_agent: None,
+                    reply_to_message_id: None,
                 };
                 let did = discussion_id.clone();
                 if let Err(db_error) = state
@@ -666,7 +727,7 @@ async fn make_agent_stream_inner(
         // disk-read MCP context so both reach the agent via
         // `mcp_context_override`. Without this, API plugins never surface
         // because `.mcp.json` doesn't carry them by design.
-        let api_block = if let Some(ref pid) = disc.project_id {
+        let plugin_block = if let Some(ref pid) = disc.project_id {
             let secret = {
                 let cfg = state.config.read().await;
                 cfg.encryption_secret.clone()
@@ -679,12 +740,18 @@ async fn make_agent_stream_inner(
                     // by the broker metadata block (tenant id, workspace
                     // slug, …). Auth values stay in this backend process and
                     // are never rendered into agent context.
-                    let plugins = state
+                    let (api_plugins, preference_plugins) = state
                         .db
                         .with_conn(move |conn| {
-                            crate::core::mcp_scanner::collect_active_api_plugins(
+                            let api_plugins = crate::core::mcp_scanner::collect_active_api_plugins(
                                 conn, &pid, &secret_c,
-                            )
+                            )?;
+                            let preference_plugins =
+                                crate::core::mcp_scanner::collect_active_plugin_preferences(
+                                    conn,
+                                    Some(&pid),
+                                )?;
+                            Ok::<_, anyhow::Error>((api_plugins, preference_plugins))
                         })
                         .await
                         .unwrap_or_default();
@@ -693,7 +760,12 @@ async fn make_agent_stream_inner(
                     // request time. Resolving it here used to put the bearer
                     // in `--append-system-prompt`, argv and logs even when the
                     // agent never called the API.
-                    crate::core::mcp_scanner::build_api_context_block(&plugins)
+                    let api_block = crate::core::mcp_scanner::build_api_context_block(&api_plugins);
+                    let preference_block =
+                        crate::core::mcp_scanner::build_plugin_invocation_preferences(
+                            &preference_plugins,
+                        );
+                    format!("{api_block}{preference_block}")
                 }
                 None => String::new(),
             }
@@ -701,20 +773,20 @@ async fn make_agent_stream_inner(
             String::new()
         };
 
-        if api_block.is_empty() {
-            // No API plugins active — let runner.rs fall back to reading
-            // MCP contexts from disk (unchanged legacy path).
+        if plugin_block.is_empty() {
+            // No API metadata or multi-interface preference is active — let
+            // runner.rs fall back to reading MCP contexts from disk.
             None
         } else {
-            // At least one API plugin active — we must pre-combine the
-            // disk-read MCP context with the API block, since
+            // We must pre-combine the disk-read MCP context with the generated
+            // plugin block, since
             // `mcp_context_override = Some(...)` short-circuits the
             // disk read in runner.rs.
             let disk_ctx = crate::core::mcp_scanner::read_all_mcp_contexts(&project_path);
             let combined = if disk_ctx.is_empty() {
-                api_block
+                plugin_block
             } else {
-                format!("{}\n{}", disk_ctx, api_block)
+                format!("{}\n{}", disk_ctx, plugin_block)
             };
             Some(combined)
         }
@@ -1056,6 +1128,7 @@ async fn make_agent_stream_inner(
                     NON_STREAMING_STALL_TIMEOUT,
                 );
                 let mut was_interrupted = false;
+                let mut timeout_reason: Option<AgentTimeoutReason> = None;
                 // Set when we break the loop because the agent emitted a
                 // terminal signal (KRONN:ARCHITECTURE_READY, etc.). Used to
                 // distinguish from a stall timeout when killing the process
@@ -1101,6 +1174,7 @@ async fn make_agent_stream_inner(
                     _ = tokio::time::sleep_until(global_deadline) => {
                         tracing::warn!("Agent stream global timeout ({:?}) exceeded", AGENT_GLOBAL_TIMEOUT);
                         was_interrupted = true;
+                        timeout_reason = Some(AgentTimeoutReason::Global(AGENT_GLOBAL_TIMEOUT));
                         None
                     }
                     _ = async {
@@ -1108,6 +1182,7 @@ async fn make_agent_stream_inner(
                     } => {
                         tracing::warn!("Agent stream stall timeout ({:?}) — no output", stall_timeout);
                         was_interrupted = true;
+                        timeout_reason = Some(AgentTimeoutReason::Stall(stall_timeout));
                         None
                     }
                 } {
@@ -1325,16 +1400,17 @@ async fn make_agent_stream_inner(
                 let stderr_lines = process.captured_stderr_flushed().await;
                 let stderr_text = stderr_lines.join("\n");
 
-                // Mark partial responses with actionable hint. `stopped_on_loop`
-                // also sets `was_interrupted`, but its dedicated footer below
-                // is more specific — skip the generic stall footer when a
-                // loop was detected.
-                if was_interrupted && !stopped_on_loop && !full_response.is_empty() {
-                    full_response.push_str(&format!(
-                        "\n\n---\n⚠️ **Partial response** — the agent was interrupted after {} min without output. \
-                        You can increase the timeout in **Config > Server > Agent inactivity timeout**.",
-                        stall_timeout_min
-                    ));
+                // A timeout must be explicit even when the agent produced no
+                // stdout. Previously that exact case fell through to
+                // `exit code: None`, hiding that Kronn deliberately killed the
+                // process at its watchdog deadline.
+                if let Some(reason) = timeout_reason {
+                    let notice = timeout_notice(reason);
+                    if full_response.is_empty() {
+                        full_response = notice;
+                    } else {
+                        full_response.push_str(&format!("\n\n---\n{notice}"));
+                    }
                 }
                 if stopped_on_loop {
                     full_response.push_str(&format!(
@@ -1529,6 +1605,8 @@ async fn make_agent_stream_inner(
                     // duration per QP version.
                     duration_ms: Some(run_started_at.elapsed().as_millis() as u64),
                     lint_report,
+                    target_agent: None,
+                    reply_to_message_id: None,
                 };
 
                 let did = disc_id.clone();
@@ -1593,6 +1671,8 @@ async fn make_agent_stream_inner(
                         author_avatar_email: None,
                         source_msg_id: None,
                         duration_ms: None,
+                        target_agent: None,
+                        reply_to_message_id: None,
                     };
                     let did_ref = disc_id.clone();
                     let m = refusal.clone();
@@ -1645,6 +1725,8 @@ async fn make_agent_stream_inner(
                             author_avatar_email: None,
                             source_msg_id: None,
                             duration_ms: None,
+                            target_agent: None,
+                            reply_to_message_id: None,
                         };
                         let did_sys = disc_id.clone();
                         let m = sys_msg.clone();
@@ -1693,6 +1775,8 @@ async fn make_agent_stream_inner(
                             author_avatar_email: None,
                             source_msg_id: None,
                             duration_ms: None,
+                            target_agent: None,
+                            reply_to_message_id: None,
                         };
                         let did_sys = disc_id.clone();
                         let m = sys_msg.clone();
@@ -1740,6 +1824,8 @@ async fn make_agent_stream_inner(
                             author_avatar_email: None,
                             source_msg_id: None,
                             duration_ms: None,
+                            target_agent: None,
+                            reply_to_message_id: None,
                         };
                         let did_sys = disc_id.clone();
                         let m = sys_msg.clone();
@@ -1953,6 +2039,8 @@ async fn make_agent_stream_inner(
                     author_avatar_email: None,
                     source_msg_id: None,
                     duration_ms: None,
+                    target_agent: None,
+                    reply_to_message_id: None,
                 };
 
                 let did = disc_id.clone();
@@ -2025,6 +2113,47 @@ async fn make_agent_stream_inner(
     Sse::new(crate::core::sse_limits::bounded(stream))
 }
 
+fn auth_required_system_message(
+    agent_type: &AgentType,
+    language: &str,
+    setup_command: Option<&str>,
+) -> DiscussionMessage {
+    let agent = format!("{agent_type:?}");
+    let setup = setup_command
+        .map(|command| format!(" `{command}`"))
+        .unwrap_or_default();
+    let content = match language {
+        "fr" => format!(
+            "Configuration requise : {agent} est installé, mais son authentification n’est pas prête. Lancez{setup} ou ajoutez sa clé dans Config → Agents, puis réessayez."
+        ),
+        "es" => format!(
+            "Configuración necesaria: {agent} está instalado, pero su autenticación no está lista. Ejecuta{setup} o añade su clave en Config → Agentes y vuelve a intentarlo."
+        ),
+        _ => format!(
+            "Configuration required: {agent} is installed, but its authentication is not ready. Run{setup} or add its key in Config → Agents, then try again."
+        ),
+    };
+    DiscussionMessage {
+        model: None,
+        lint_report: None,
+        id: Uuid::new_v4().to_string(),
+        role: MessageRole::System,
+        content,
+        agent_type: None,
+        timestamp: Utc::now(),
+        tokens_used: 0,
+        auth_mode: None,
+        model_tier: None,
+        cost_usd: None,
+        author_pseudo: None,
+        author_avatar_email: None,
+        source_msg_id: None,
+        duration_ms: None,
+        target_agent: None,
+        reply_to_message_id: None,
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // Orchestration helpers — extracted from orchestrate() to reduce duplication
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -2060,6 +2189,10 @@ pub(super) async fn run_agent_streaming(
     let deadline = tokio::time::Instant::now() + AGENT_GLOBAL_TIMEOUT;
 
     let mut signal_stop = false;
+    // KT-80 — an orchestration round killed at its deadline must say so too.
+    // Without this the round fell through to `exit code: None`, the same opaque
+    // message the send path stopped producing.
+    let mut timeout_reason: Option<AgentTimeoutReason> = None;
     // Shared decoder-loop detector (`is_decoder_loop`, module top). Orchestration
     // runs use the same Claude model and can exhibit the same failure mode; we
     // break out and return whatever text arrived before the loop started.
@@ -2142,6 +2275,7 @@ pub(super) async fn run_agent_streaming(
             }
             _ = tokio::time::sleep_until(deadline) => {
                 tracing::warn!("Agent {:?} timed out (round: {})", agent_type, meta.round_label);
+                timeout_reason = Some(AgentTimeoutReason::Global(AGENT_GLOBAL_TIMEOUT));
                 process.kill().await;
                 break;
             }
@@ -2157,7 +2291,17 @@ pub(super) async fn run_agent_streaming(
     let stderr = process.captured_stderr_flushed().await;
     let stderr_text = stderr.join("\n");
 
-    if full_response.is_empty() && !success {
+    // KT-80 — a deliberate kill at the deadline is explained first: an exit code
+    // of `None` describes the signal, not the cause, and the reader cannot tell
+    // a crash from a watchdog.
+    if let Some(reason) = timeout_reason {
+        let notice = timeout_notice(reason);
+        full_response = if full_response.is_empty() {
+            notice
+        } else {
+            format!("{full_response}\n\n---\n{notice}")
+        };
+    } else if full_response.is_empty() && !success {
         let exit_info = match &status {
             Some(s) => format!("exit code: {:?}", s.code),
             None => "exit status unavailable".to_string(),
@@ -2387,11 +2531,22 @@ mod pretty_kronn_args_tests {
 #[cfg(test)]
 mod agent_lifecycle_tests {
     use super::{
-        agent_start_failure_outcome, cap_agent_response, child_run_counts_as_success,
-        effective_stall_timeout, AgentExecutionOutcome, AGENT_GLOBAL_TIMEOUT,
-        NON_STREAMING_STALL_TIMEOUT,
+        agent_start_failure_outcome, auth_required_system_message, cap_agent_response,
+        child_run_counts_as_success, effective_stall_timeout, AgentExecutionOutcome,
+        AGENT_GLOBAL_TIMEOUT, NON_STREAMING_STALL_TIMEOUT,
     };
+    use crate::models::{AgentType, MessageRole};
     use std::time::Duration;
+
+    #[test]
+    fn missing_sdk_auth_is_an_actionable_system_message_not_an_agent_reply() {
+        let message = auth_required_system_message(&AgentType::Vibe, "fr", Some("vibe --setup"));
+        assert_eq!(message.role, MessageRole::System);
+        assert_eq!(message.agent_type, None);
+        assert!(message.content.contains("Configuration requise"));
+        assert!(message.content.contains("vibe --setup"));
+        assert!(!message.content.contains("MISTRAL_API_KEY"));
+    }
 
     // ── #1 — stall watchdog must not apply to non-streaming agents ──
     // (2026-06-23: Codex `exec` is silent on stdout until the very end; the
@@ -2426,6 +2581,26 @@ mod agent_lifecycle_tests {
             NON_STREAMING_STALL_TIMEOUT < AGENT_GLOBAL_TIMEOUT,
             "must be SHORTER than the global, else a hung run squats its slot too long"
         );
+    }
+
+    #[test]
+    fn non_streaming_agent_timeout_can_be_increased_above_the_floor() {
+        let configured = Duration::from_secs(20 * 60);
+        assert_eq!(
+            effective_stall_timeout(false, configured, NON_STREAMING_STALL_TIMEOUT),
+            configured,
+        );
+    }
+
+    #[test]
+    fn empty_timeout_notice_names_the_deadline_instead_of_exit_code_none() {
+        let notice = super::timeout_notice(super::AgentTimeoutReason::Stall(
+            NON_STREAMING_STALL_TIMEOUT,
+        ));
+        assert!(notice.contains("15 min"));
+        assert!(notice.contains("Agent inactivity timeout"));
+        assert!(!notice.contains("exit code"));
+        assert!(!notice.contains("None"));
     }
 
     // ── #2 — empty-but-clean-exit child is NOT a batch success ──
@@ -2682,6 +2857,28 @@ mod run_agent_streaming_tests {
             out.push(ev);
         }
         out
+    }
+
+    /// KT-80 — the orchestration loop had the same hole as the send path: a
+    /// round killed at the 30-minute global deadline produced
+    /// `[Agent exited with error] (exit code: None)`, which describes the signal
+    /// and hides the cause. Paused clock so the deadline is reached instantly.
+    #[tokio::test(start_paused = true)]
+    async fn an_orchestration_round_killed_at_the_deadline_says_so() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let proc = ScriptedProcess::hanging();
+        let res = run_agent_streaming(proc, &tx, &meta(), &AgentType::ClaudeCode).await;
+
+        assert!(
+            res.response.contains("30-minute global execution limit"),
+            "the round must name the deadline it hit, got {:?}",
+            res.response
+        );
+        assert!(
+            !res.response.contains("exit code"),
+            "an exit code must not stand in for the explanation: {:?}",
+            res.response
+        );
     }
 
     #[tokio::test]

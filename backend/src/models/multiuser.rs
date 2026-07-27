@@ -82,6 +82,18 @@ pub enum WsMessage {
         role: crate::models::MessageRole,
         #[serde(default)]
         agent_type: Option<crate::models::AgentType>,
+        /// Every explicitly addressed agent, in author text order. Empty on
+        /// older peers; receivers then fall back to the legacy single target.
+        #[serde(default)]
+        target_agents: Vec<crate::models::AgentType>,
+        /// Durable target identities. Empty on older peers; receivers derive
+        /// one-shot targets from `target_agents` in that case.
+        #[serde(default)]
+        targets: Vec<crate::models::MessageTarget>,
+        /// Durable link to the message this one replies to. Optional for wire
+        /// compatibility with peers older than migration 095.
+        #[serde(default)]
+        reply_to_message_id: Option<String>,
     },
     /// Atomic edit/resend event for a shared discussion. This is distinct from
     /// `ChatMessage`: it updates an existing User projection and tombstones
@@ -96,6 +108,10 @@ pub enum WsMessage {
         content: String,
         #[serde(default)]
         target_agent: Option<crate::models::AgentType>,
+        #[serde(default)]
+        target_agents: Vec<crate::models::AgentType>,
+        #[serde(default)]
+        targets: Vec<crate::models::MessageTarget>,
         idempotency_key: String,
         from_pseudo: String,
         from_invite_code: String,
@@ -310,6 +326,9 @@ mod tests {
             timestamp: 0,
             role: crate::models::MessageRole::User,
             agent_type: None,
+            target_agents: vec![],
+            targets: vec![],
+            reply_to_message_id: None,
         }
     }
 
@@ -350,6 +369,30 @@ mod tests {
         assert_eq!(chat("m1").relay_dedup_key().as_deref(), Some("c:m1"));
         assert_ne!(chat("m1").relay_dedup_key(), chat("m2").relay_dedup_key());
         assert!(presence("x").relay_dedup_key().is_none());
+    }
+
+    #[test]
+    fn legacy_chat_message_without_reply_target_still_decodes() {
+        let json = serde_json::json!({
+            "type": "chat_message",
+            "shared_discussion_id": "d",
+            "message_id": "m",
+            "from_pseudo": "p",
+            "from_avatar_email": null,
+            "from_invite_code": "kronn:p@h:1",
+            "content": "hi",
+            "timestamp": 0,
+            "role": "User",
+            "agent_type": null
+        });
+
+        assert!(matches!(
+            serde_json::from_value::<WsMessage>(json).expect("legacy frame"),
+            WsMessage::ChatMessage {
+                reply_to_message_id: None,
+                ..
+            }
+        ));
     }
 
     #[test]

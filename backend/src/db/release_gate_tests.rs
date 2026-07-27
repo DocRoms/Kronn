@@ -51,6 +51,8 @@ fn message(id: &str, role: MessageRole, agent: Option<AgentType>) -> DiscussionM
         author_avatar_email: None,
         source_msg_id: None,
         duration_ms: None,
+        target_agent: None,
+        reply_to_message_id: None,
     }
 }
 
@@ -181,6 +183,10 @@ fn revise_dispatch_survives_restart() {
             r.get(0)
         })
         .unwrap();
+    let dispatches = [discussions::UserDispatchSpec {
+        job_id: "jr1",
+        agent_override: None,
+    }];
     discussions::revise_message_with_dispatch(
         &conn,
         discussions::ReviseMessageParams {
@@ -189,9 +195,8 @@ fn revise_dispatch_survives_restart() {
             content: "revised body",
             expected_revision: &expected_revision,
             idempotency_key: "idem-revise-1",
-            target_agent: None,
-            needs_local_dispatch: true,
-            dispatch_job_id: "jr1",
+            targets: &[],
+            dispatches: &dispatches,
         },
     )
     .unwrap();
@@ -425,6 +430,260 @@ fn migration_088_adds_decision_columns_to_an_existing_087_db() {
         "planning_proposal_items",
         "receipt_message_id"
     ));
+}
+
+#[test]
+fn migration_092_versions_and_deduplicates_open_cli_session_bindings() {
+    let conn = Connection::open_in_memory().unwrap();
+    migrations::run_through(&conn, "091_mcp_preferred_interface").unwrap();
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO discussions (id, title, created_at, updated_at, source_agent, source_session_id)
+         VALUES ('source-a', 'A', ?1, ?1, 'Codex', 'shared-session')",
+        params![now],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO discussions (id, title, created_at, updated_at, source_agent, source_session_id)
+         VALUES ('source-b', 'B', ?1, ?1, 'Codex', 'shared-session')",
+        params![now],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO disc_source_history
+            (disc_id, source_agent, source_session_id, linked_at)
+         VALUES ('source-a', 'Codex', 'shared-session', '2026-01-01T00:00:00Z')",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO disc_source_history
+            (disc_id, source_agent, source_session_id, linked_at)
+         VALUES ('source-b', 'Codex', 'shared-session', '2026-01-02T00:00:00Z')",
+        [],
+    )
+    .unwrap();
+
+    migrations::run(&conn).unwrap();
+
+    assert!(column_exists(
+        &conn,
+        "discussions",
+        "source_binding_version"
+    ));
+    assert!(column_exists(
+        &conn,
+        "disc_source_history",
+        "binding_version"
+    ));
+    let open_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM disc_source_history
+              WHERE source_agent = 'Codex'
+                AND source_session_id = 'shared-session'
+                AND unlinked_at IS NULL",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(open_count, 1);
+    let current_disc: String = conn
+        .query_row(
+            "SELECT disc_id FROM disc_source_history
+              WHERE source_agent = 'Codex'
+                AND source_session_id = 'shared-session'
+                AND unlinked_at IS NULL",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(current_disc, "source-b", "the newest open binding wins");
+    let cleared: (Option<String>, Option<i64>) = conn
+        .query_row(
+            "SELECT source_agent, source_binding_version
+               FROM discussions WHERE id = 'source-a'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(cleared, (None, None));
+    let current_version: i64 = conn
+        .query_row(
+            "SELECT source_binding_version FROM discussions WHERE id = 'source-b'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(current_version, 1);
+}
+
+#[test]
+fn migration_093_adds_an_idempotent_discussion_import_ledger() {
+    let conn = Connection::open_in_memory().unwrap();
+    migrations::run_through(&conn, "092_disc_source_binding_contract").unwrap();
+    assert!(!table_exists(&conn, "discussion_imports"));
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO discussions (id, title, created_at, updated_at)
+         VALUES ('import-target', 'Imported', ?1, ?1)",
+        params![now],
+    )
+    .unwrap();
+
+    migrations::run(&conn).unwrap();
+    assert!(table_exists(&conn, "discussion_imports"));
+    conn.execute(
+        "INSERT INTO discussion_imports
+         (source_discussion_id, content_sha256, imported_discussion_id, imported_at)
+         VALUES ('source-disc', 'abc123', 'import-target', ?1)",
+        params![now],
+    )
+    .unwrap();
+    let duplicate = conn.execute(
+        "INSERT INTO discussion_imports
+         (source_discussion_id, content_sha256, imported_discussion_id, imported_at)
+         VALUES ('source-disc', 'different', 'import-target', ?1)",
+        params![now],
+    );
+    assert!(duplicate.is_err(), "a source discussion imports only once");
+
+    conn.execute("DELETE FROM discussions WHERE id = 'import-target'", [])
+        .unwrap();
+    let ledger_rows: i64 = conn
+        .query_row("SELECT COUNT(*) FROM discussion_imports", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(
+        ledger_rows, 0,
+        "deleting the imported copy clears its ledger"
+    );
+}
+
+#[test]
+fn migration_094_adds_secret_free_plugin_bundle_audit_and_import_ledger() {
+    let conn = Connection::open_in_memory().unwrap();
+    migrations::run_through(&conn, "093_discussion_imports").unwrap();
+    assert!(!table_exists(&conn, "plugin_bundle_events"));
+    assert!(!table_exists(&conn, "plugin_bundle_imports"));
+
+    migrations::run(&conn).unwrap();
+    assert!(table_exists(&conn, "plugin_bundle_events"));
+    assert!(table_exists(&conn, "plugin_bundle_imports"));
+    conn.execute(
+        "INSERT INTO plugin_bundle_events
+         (id, action, bundle_id, config_ids_json, includes_values, success, detail_json)
+         VALUES ('event-1', 'export', 'bundle-1', '[\"config-1\"]', 1, 1, '{\"count\":1}')",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO plugin_bundle_imports
+         (source_bundle_id, content_sha256, report_json)
+         VALUES ('bundle-1', 'sha256', '{\"imported\":1}')",
+        [],
+    )
+    .unwrap();
+    let duplicate = conn.execute(
+        "INSERT INTO plugin_bundle_imports
+         (source_bundle_id, content_sha256, report_json)
+         VALUES ('bundle-1', 'different', '{}')",
+        [],
+    );
+    assert!(
+        duplicate.is_err(),
+        "one import ledger row per source bundle"
+    );
+
+    let mut statement = conn
+        .prepare("PRAGMA table_info(plugin_bundle_events)")
+        .unwrap();
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    for forbidden in ["passphrase", "secret", "env", "ciphertext", "payload"] {
+        assert!(
+            !columns.iter().any(|column| column.contains(forbidden)),
+            "audit schema must not contain `{forbidden}`"
+        );
+    }
+}
+
+/// KT-74 — a discussion imported before 096 must still read as a portable
+/// bundle afterwards, with no author rather than an invented one.
+#[test]
+fn migration_096_backfills_import_provenance_without_inventing_an_author() {
+    let conn = Connection::open_in_memory().unwrap();
+    migrations::run_through(&conn, "095_message_replies").unwrap();
+    assert!(!column_exists(
+        &conn,
+        "discussion_imports",
+        "provenance_kind"
+    ));
+
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO discussions (id, title, created_at, updated_at)
+         VALUES ('legacy-target', 'Imported before 096', ?1, ?1)",
+        params![now],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO discussion_imports
+         (source_discussion_id, content_sha256, imported_discussion_id, imported_at)
+         VALUES ('legacy-source', 'sha-legacy', 'legacy-target', ?1)",
+        params![now],
+    )
+    .unwrap();
+
+    migrations::run(&conn).unwrap();
+    for column in [
+        "provenance_kind",
+        "imported_by_pseudo",
+        "imported_by_avatar_email",
+    ] {
+        assert!(column_exists(&conn, "discussion_imports", column));
+    }
+
+    let (kind, pseudo, avatar): (String, Option<String>, Option<String>) = conn
+        .query_row(
+            "SELECT provenance_kind, imported_by_pseudo, imported_by_avatar_email
+             FROM discussion_imports WHERE source_discussion_id = 'legacy-source'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(kind, "portable_bundle");
+    assert_eq!(pseudo, None, "an unknown exporter stays unknown");
+    assert_eq!(avatar, None);
+
+    // The reserved route is a distinct value, not a reinterpretation of the
+    // rows above.
+    conn.execute(
+        "INSERT INTO discussions (id, title, created_at, updated_at)
+         VALUES ('transcript-target', 'Future', ?1, ?1)",
+        params![now],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO discussion_imports
+         (source_discussion_id, content_sha256, imported_discussion_id, imported_at,
+          provenance_kind, imported_by_pseudo, imported_by_avatar_email)
+         VALUES ('transcript-source', 'sha-t', 'transcript-target', ?1,
+                 'agent_transcript', 'Romu', 'romu@example.test')",
+        params![now],
+    )
+    .unwrap();
+    let kinds: Vec<String> = conn
+        .prepare("SELECT provenance_kind FROM discussion_imports ORDER BY source_discussion_id")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(kinds, vec!["portable_bundle", "agent_transcript"]);
 }
 
 /// KT-37 — the provenance columns MUST live in their own migration (089): 088

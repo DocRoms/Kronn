@@ -3,7 +3,7 @@
 ## What this is
 
 A workflow step type that hits a Kronn-configured API plugin directly
-from the Rust engine (zero tokens), extracts a field from the JSON
+from the Rust engine (without starting a model), extracts a field from the JSON
 response via JSONPath, and pipes the value to the next step (another
 ApiCall, an Agent, or a BatchQuickPrompt that fans out).
 

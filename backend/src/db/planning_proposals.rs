@@ -695,6 +695,8 @@ mod ingest_tests {
             author_avatar_email: None,
             source_msg_id: None,
             duration_ms: None,
+            target_agent: None,
+            reply_to_message_id: None,
         };
         let result = crate::db::discussions::insert_message(&conn, "d1", &msg);
         assert!(result.is_err(), "ingestion failure must fail the insert");
@@ -1061,6 +1063,8 @@ fn decide_item_inner(
         author_avatar_email: None,
         source_msg_id: None,
         duration_ms: None,
+        target_agent: None,
+        reply_to_message_id: None,
     };
     crate::db::discussions::insert_message(conn, &discussion_id, &receipt)
         .map_err(DecisionError::Failed)?;

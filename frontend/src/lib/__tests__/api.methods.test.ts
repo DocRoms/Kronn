@@ -221,6 +221,32 @@ describe('api.projects (rest)', () => {
 // ════════════════════════════════════════════════════════════════════════════
 describe('api.mcps (rest)', () => {
   it('refresh', async () => { await exec(mcps.refresh(), 'POST', '/mcps/refresh'); });
+  it('previewBundle', async () => {
+    const body = await exec(
+      mcps.previewBundle({ config_ids: ['config-1'] }),
+      'POST',
+      '/mcps/bundles/preview',
+    );
+    expect(body).toEqual({ config_ids: ['config-1'] });
+  });
+  it('exportBundle downloads the selected bundle', async () => {
+    const result = await mcps.exportBundle({
+      config_ids: ['config-1'],
+      include_values: false,
+    });
+    const body = await expectFetch('POST', '/mcps/bundles/export');
+    expect(body).toEqual({ config_ids: ['config-1'], include_values: false });
+    expect(result.filename).toBe('plugins.kronn-plugins.json');
+    expect(result.blob).toBeInstanceOf(Blob);
+  });
+  it('importBundle', async () => {
+    const body = await exec(
+      mcps.importBundle({ content: '{"kind":"kronn.plugins"}', passphrase: null }),
+      'POST',
+      '/mcps/bundles/import',
+    );
+    expect(body).toEqual({ content: '{"kind":"kronn.plugins"}', passphrase: null });
+  });
   it('registry with q encodes the query', async () => {
     await mcps.registry('git lab');
     const [url] = fetchMock.mock.calls[0];
@@ -339,6 +365,30 @@ describe('api.discussions (rest)', () => {
   it('editLastUserMessage', async () => {
     const b = await exec(discussions.editLastUserMessage('d-1', 'new text'), 'PATCH', '/discussions/d-1/messages/last');
     expect(b).toEqual({ content: 'new text' });
+  });
+  it('exportDiscussion downloads the versioned bundle', async () => {
+    const out = await discussions.exportDiscussion('disc/a');
+    const [url, options] = fetchMock.mock.calls[0];
+    expect(url).toBe('/api/discussions/disc%2Fa/export');
+    expect(options).toMatchObject({ credentials: 'same-origin' });
+    expect(out.filename).toBe('discussion-disc/a.kronn-discussion.json');
+    expect(out.blob).toBeInstanceOf(Blob);
+  });
+  it('importDiscussion posts the selected bundle', async () => {
+    const body = await exec(
+      discussions.importDiscussion({ content: '{"kind":"kronn.discussion"}', project_id: null }),
+      'POST',
+      '/discussions/import',
+    );
+    expect(body).toEqual({ content: '{"kind":"kronn.discussion"}', project_id: null });
+  });
+  it('ensureTourDemo seeds the agentless guided-tour discussion', async () => {
+    const body = await exec(
+      discussions.ensureTourDemo(),
+      'POST',
+      '/tour/demo-discussion',
+    );
+    expect(body).toEqual({});
   });
 });
 

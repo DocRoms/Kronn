@@ -73,6 +73,21 @@ function renderHeader(
 }
 
 describe('ChatHeader — pending files badge', () => {
+  it('exposes stable grouped tour anchors and durable discussion help', () => {
+    const { container } = renderHeader(0);
+
+    expect(container.querySelector('[data-tour-id="disc-header-controls"]')).not.toBeNull();
+    expect(container.querySelector('[data-tour-id="disc-identity-controls"]')).not.toBeNull();
+    expect(container.querySelector('[data-tour-id="disc-output-controls"]')).not.toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'contextHelp.discussion.title' }));
+    expect(screen.getByText('contextHelp.discussion.mainAgent')).toBeInTheDocument();
+    expect(screen.getByText('contextHelp.discussion.participants')).toBeInTheDocument();
+    expect(screen.getByText('contextHelp.discussion.messages')).toBeInTheDocument();
+    expect(screen.getByText('contextHelp.discussion.outputs')).toBeInTheDocument();
+    expect(screen.getByText('contextHelp.discussion.mcp')).toBeInTheDocument();
+  });
+
   it('shows copied feedback on the discussion ID pill while copying the full ID', async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, 'clipboard', {

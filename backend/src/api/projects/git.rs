@@ -52,6 +52,87 @@ async fn resolve_project_path(state: &AppState, id: &str) -> Result<std::path::P
     Ok(resolved)
 }
 
+/// Return the active discussions that currently use the project's root
+/// worktree.
+///
+/// The cancellation registry also contains workflow run ids, so its keys
+/// cannot be treated as discussion ids blindly. Snapshot it without holding
+/// the mutex across the database await, then resolve only real discussions.
+///
+/// NOTE (KT-89): this snapshot NARROWS the race, it is not mutual exclusion — a
+/// run can still start between the check and the `git switch`. Closing it would
+/// need a per-project lock held across a git invocation, which trades this defect
+/// for a worse class of stall. The dirty-tree refusal inside
+/// `run_git_switch_branch` remains the layer underneath.
+async fn running_direct_discussions(
+    state: &AppState,
+    project_id: &str,
+) -> Result<Vec<(String, String)>, String> {
+    let running_ids: Vec<String> = match state.cancel_registry.lock() {
+        Ok(registry) => registry.keys().cloned().collect(),
+        Err(poisoned) => poisoned.into_inner().keys().cloned().collect(),
+    };
+    if running_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let project_id = project_id.to_string();
+    state
+        .db
+        .with_read_conn(move |conn| {
+            let mut discussions = Vec::new();
+            for discussion_id in running_ids {
+                let Some(discussion) =
+                    crate::db::discussions::get_discussion(conn, &discussion_id)?
+                else {
+                    continue;
+                };
+                if discussion.project_id.as_deref() == Some(project_id.as_str())
+                    && discussion.workspace_mode == "Direct"
+                {
+                    discussions.push((discussion.id, discussion.title));
+                }
+            }
+            discussions.sort_by(|left, right| left.1.cmp(&right.1).then(left.0.cmp(&right.0)));
+            Ok(discussions)
+        })
+        .await
+        .map_err(|error| format!("DB error checking active discussions: {error}"))
+}
+
+/// Discussions of this project whose branch is currently swapped INTO the root
+/// checkout by test mode.
+///
+/// KT-89 — a second kind of root occupancy that `workspace_mode` cannot see:
+/// entering test mode REQUIRES a worktree branch ("switch to Isolated mode
+/// first"), so such a discussion is always `Isolated` and is excluded by the
+/// running-run filter by construction. Switching the branch underneath it moves
+/// the current branch out from under `test_mode_restore_branch`, so leaving test
+/// mode would restore the wrong state and pop its auto-stash onto the wrong
+/// branch. Read from the durable column rather than a memory snapshot: no race,
+/// and it also catches a test mode left active hours ago.
+async fn test_mode_discussions(
+    state: &AppState,
+    project_id: &str,
+) -> Result<Vec<(String, String)>, String> {
+    let project_id = project_id.to_string();
+    state
+        .db
+        .with_read_conn(move |conn| {
+            let mut statement = conn.prepare(
+                "SELECT id, title FROM discussions
+                 WHERE project_id = ?1 AND test_mode_restore_branch IS NOT NULL
+                 ORDER BY title, id",
+            )?;
+            let rows = statement.query_map([&project_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+        .await
+        .map_err(|error| format!("DB error checking test mode: {error}"))
+}
+
 /// GET /api/projects/:id/git-status
 pub async fn git_status(
     State(state): State<AppState>,
@@ -81,6 +162,13 @@ pub async fn git_status(
         )));
     }
 
+    // KT-94 — the language bar is decorative, yet computing it inline made this
+    // endpoint take 50.8 s cold on a loaded repo, which the user reads as "the
+    // Code tab is broken". Only `?refresh=true` (the explicit re-check button)
+    // still blocks on it: the user asked for fresh numbers and gets them. The
+    // default path serves the cache — fresh or STALE — and recomputes off the
+    // response path; with no cache at all it returns the status immediately
+    // with an honest `languages_checked_at: null`.
     let cached_languages = if query.refresh {
         None
     } else {
@@ -89,48 +177,129 @@ pub async fn git_status(
             .lock()
             .await
             .get(&id)
-            .filter(|cached| {
-                cached.inserted_at.elapsed() < LANGUAGE_CACHE_TTL && cached.exclusions == exclusions
+            .filter(|cached| cached.exclusions == exclusions)
+            .map(|cached| {
+                (
+                    cached.checked_at,
+                    cached.languages.clone(),
+                    cached.inserted_at.elapsed() < LANGUAGE_CACHE_TTL,
+                )
             })
-            .map(|cached| (cached.checked_at, cached.languages.clone()))
     };
-    let exclusions_for_cache = exclusions.clone();
-    let id_for_cache = id.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        let mut status = crate::api::git_ops::run_git_status(&repo_path)?;
-        if let Some((checked_at, languages)) = cached_languages {
-            status.languages = languages;
-            status.languages_checked_at = Some(checked_at);
-            status.languages_cached = true;
-        } else {
-            status.languages =
-                crate::api::ai_docs::compute_source_language_stats(&repo_path, &exclusions);
+
+    if query.refresh {
+        // Explicit re-check: compute inline, as before.
+        let exclusions_for_compute = exclusions.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            let mut status = crate::api::git_ops::run_git_status(&repo_path)?;
+            status.languages = crate::api::ai_docs::compute_source_language_stats(
+                &repo_path,
+                &exclusions_for_compute,
+            );
             status.languages_checked_at = Some(chrono::Utc::now());
-        }
-        Ok::<_, String>(status)
+            Ok::<_, String>(status)
+        })
+        .await
+        .unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
+        return match result {
+            Ok(status) => {
+                if let Some(checked_at) = status.languages_checked_at {
+                    state.git_language_cache.lock().await.insert(
+                        id,
+                        CachedProjectLanguages {
+                            inserted_at: Instant::now(),
+                            checked_at,
+                            exclusions,
+                            languages: status.languages.clone(),
+                        },
+                    );
+                }
+                Json(ApiResponse::ok(status))
+            }
+            Err(e) => Json(ApiResponse::err(e)),
+        };
+    }
+
+    let repo_path_for_status = repo_path.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        crate::api::git_ops::run_git_status(&repo_path_for_status)
     })
     .await
     .unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
 
     match result {
-        Ok(status) => {
-            if !status.languages_cached {
-                if let Some(checked_at) = status.languages_checked_at {
-                    state.git_language_cache.lock().await.insert(
-                        id_for_cache,
-                        CachedProjectLanguages {
-                            inserted_at: Instant::now(),
-                            checked_at,
-                            exclusions: exclusions_for_cache,
-                            languages: status.languages.clone(),
-                        },
-                    );
+        Ok(mut status) => {
+            let fresh = match cached_languages {
+                Some((checked_at, languages, is_fresh)) => {
+                    status.languages = languages;
+                    status.languages_checked_at = Some(checked_at);
+                    status.languages_cached = true;
+                    is_fresh
                 }
+                // No cache yet: an empty bar with a null timestamp, never a wait.
+                None => false,
+            };
+            if !fresh {
+                spawn_language_refresh(&state, id, repo_path, exclusions);
             }
             Json(ApiResponse::ok(status))
         }
         Err(e) => Json(ApiResponse::err(e)),
     }
+}
+
+/// Recompute a project's language stats off the response path (KT-94).
+///
+/// At most one computation per project at a time: three open tabs polling
+/// git-status must not scan the same repository three times in parallel. The
+/// in-flight set is module-local because this is the only spawner.
+fn spawn_language_refresh(
+    state: &AppState,
+    project_id: String,
+    repo_path: std::path::PathBuf,
+    exclusions: Vec<String>,
+) {
+    static IN_FLIGHT: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+
+    {
+        let mut in_flight = match IN_FLIGHT.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if !in_flight.insert(project_id.clone()) {
+            return; // already computing for this project
+        }
+    }
+
+    let cache = state.git_language_cache.clone();
+    tokio::spawn(async move {
+        let repo_for_compute = repo_path.clone();
+        let exclusions_for_compute = exclusions.clone();
+        let languages = tokio::task::spawn_blocking(move || {
+            crate::api::ai_docs::compute_source_language_stats(
+                &repo_for_compute,
+                &exclusions_for_compute,
+            )
+        })
+        .await;
+        if let Ok(languages) = languages {
+            cache.lock().await.insert(
+                project_id.clone(),
+                CachedProjectLanguages {
+                    inserted_at: Instant::now(),
+                    checked_at: chrono::Utc::now(),
+                    exclusions,
+                    languages,
+                },
+            );
+        }
+        let mut in_flight = match IN_FLIGHT.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        in_flight.remove(&project_id);
+    });
 }
 
 /// GET /api/projects/:id/git-diff?path=src/foo.rs
@@ -197,6 +366,137 @@ pub async fn git_blame(
 
     match result {
         Ok(blame) => Json(ApiResponse::ok(blame)),
+        Err(error) => Json(ApiResponse::err(error)),
+    }
+}
+
+/// GET /api/projects/:id/git-commit?sha=abc1234
+///
+/// KT-67 — the commit behind an annotated line. Metadata + message + bounded
+/// containing branches; never the patch (see `run_git_commit_detail`).
+pub async fn git_commit_detail(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<crate::models::git::GitCommitQuery>,
+) -> Json<ApiResponse<crate::models::git::GitCommitDetail>> {
+    let repo_path = match resolve_project_path(&state, &id).await {
+        Ok(path) => path,
+        Err(error) => return Json(ApiResponse::err(error)),
+    };
+    let sha = query.sha;
+    let result = tokio::task::spawn_blocking(move || {
+        crate::api::git_ops::run_git_commit_detail(&repo_path, &sha)
+    })
+    .await
+    .unwrap_or_else(|error| Err(format!("Task failed: {error}")));
+
+    match result {
+        Ok(detail) => Json(ApiResponse::ok(detail)),
+        Err(error) => Json(ApiResponse::err(error)),
+    }
+}
+
+/// GET /api/projects/:id/git-commit-patch?sha=abc1234
+///
+/// KT-75 — the commit's own patch, for the temporary tab opened from an
+/// annotated line. Separate from `git-commit-detail`, which stays cheap enough
+/// to answer a hover.
+pub async fn git_commit_patch(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<crate::models::git::GitCommitQuery>,
+) -> Json<ApiResponse<crate::models::git::GitCommitPatch>> {
+    let repo_path = match resolve_project_path(&state, &id).await {
+        Ok(path) => path,
+        Err(error) => return Json(ApiResponse::err(error)),
+    };
+    let sha = query.sha;
+    let result = tokio::task::spawn_blocking(move || {
+        crate::api::git_ops::run_git_commit_patch(&repo_path, &sha)
+    })
+    .await
+    .unwrap_or_else(|error| Err(format!("Task failed: {error}")));
+
+    match result {
+        Ok(patch) => Json(ApiResponse::ok(patch)),
+        Err(error) => Json(ApiResponse::err(error)),
+    }
+}
+
+/// GET /api/projects/:id/git-branches
+pub async fn git_branches(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<ApiResponse<GitBranchesResponse>> {
+    let repo_path = match resolve_project_path(&state, &id).await {
+        Ok(path) => path,
+        Err(error) => return Json(ApiResponse::err(error)),
+    };
+    let result =
+        tokio::task::spawn_blocking(move || crate::api::git_ops::run_git_branches(&repo_path))
+            .await
+            .unwrap_or_else(|error| Err(format!("Task failed: {error}")));
+
+    match result {
+        Ok(branches) => Json(ApiResponse::ok(branches)),
+        Err(error) => Json(ApiResponse::err(error)),
+    }
+}
+
+/// POST /api/projects/:id/git-switch
+pub async fn git_switch(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<GitSwitchBranchRequest>,
+) -> Json<ApiResponse<GitBranchResponse>> {
+    let repo_path = match resolve_project_path(&state, &id).await {
+        Ok(path) => path,
+        Err(error) => return Json(ApiResponse::err(error)),
+    };
+    // Durable occupancy first: it cannot race, and its consequence (a broken test
+    // mode restore point) is worse than an interrupted run.
+    let in_test_mode = match test_mode_discussions(&state, &id).await {
+        Ok(discussions) => discussions,
+        Err(error) => return Json(ApiResponse::err(error)),
+    };
+    if !in_test_mode.is_empty() {
+        let discussions = in_test_mode
+            .iter()
+            .map(|(discussion_id, title)| format!("\"{title}\" ({discussion_id})"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Json(ApiResponse::err(format!(
+            "Cannot switch branch while test mode is holding this project's root \
+             checkout: {discussions}. Leave test mode from that discussion first — \
+             it restores the previous branch and pops its stash for you."
+        )));
+    }
+
+    let running = match running_direct_discussions(&state, &id).await {
+        Ok(discussions) => discussions,
+        Err(error) => return Json(ApiResponse::err(error)),
+    };
+    if !running.is_empty() {
+        let discussions = running
+            .iter()
+            .map(|(discussion_id, title)| format!("\"{title}\" ({discussion_id})"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Json(ApiResponse::err(format!(
+            "Cannot switch branch while an agent run is using this project's root worktree: \
+             {discussions}. Wait for it to finish or stop it explicitly first."
+        )));
+    }
+
+    let branch = request.branch;
+    let result = tokio::task::spawn_blocking(move || {
+        crate::api::git_ops::run_git_switch_branch(&repo_path, &branch)
+    })
+    .await
+    .unwrap_or_else(|error| Err(format!("Task failed: {error}")));
+
+    match result {
+        Ok(branch) => Json(ApiResponse::ok(branch)),
         Err(error) => Json(ApiResponse::err(error)),
     }
 }
@@ -417,4 +717,66 @@ pub async fn pr_template(
         "template": template,
         "source": source,
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::config::default_config;
+    use crate::db::Database;
+    use crate::{CancelGuard, DEFAULT_MAX_CONCURRENT_AGENTS};
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    #[tokio::test]
+    async fn running_direct_discussions_ignores_workflow_keys_isolated_and_other_projects() {
+        let state = AppState::new_defaults(
+            Arc::new(RwLock::new(default_config())),
+            Arc::new(Database::open_in_memory().expect("in-memory DB")),
+            DEFAULT_MAX_CONCURRENT_AGENTS,
+        );
+        state
+            .db
+            .with_conn(|connection| {
+                for (id, name, path) in [
+                    ("project-a", "Project A", "/tmp/kronn-project-a"),
+                    ("project-b", "Project B", "/tmp/kronn-project-b"),
+                ] {
+                    connection.execute(
+                        "INSERT INTO projects
+                         (id, name, path, ai_config_json, created_at, updated_at)
+                         VALUES (?1, ?2, ?3, '{}', 'now', 'now')",
+                        [id, name, path],
+                    )?;
+                }
+                for (id, project_id, title, workspace_mode) in [
+                    ("direct-a", "project-a", "Direct A", "Direct"),
+                    ("isolated-a", "project-a", "Isolated A", "Isolated"),
+                    ("direct-b", "project-b", "Direct B", "Direct"),
+                ] {
+                    connection.execute(
+                        "INSERT INTO discussions
+                         (id, project_id, title, agent, language, created_at, updated_at,
+                          workspace_mode)
+                         VALUES (?1, ?2, ?3, 'Codex', 'en', 'now', 'now', ?4)",
+                        [id, project_id, title, workspace_mode],
+                    )?;
+                }
+                Ok(())
+            })
+            .await
+            .expect("seed projects and discussions");
+
+        let _direct = CancelGuard::insert(&state.cancel_registry, "direct-a".to_string());
+        let _isolated = CancelGuard::insert(&state.cancel_registry, "isolated-a".to_string());
+        let _other = CancelGuard::insert(&state.cancel_registry, "direct-b".to_string());
+        let _workflow = CancelGuard::insert(&state.cancel_registry, "workflow-run-123".to_string());
+
+        assert_eq!(
+            running_direct_discussions(&state, "project-a")
+                .await
+                .expect("active direct discussions"),
+            vec![("direct-a".to_string(), "Direct A".to_string())]
+        );
+    }
 }

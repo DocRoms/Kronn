@@ -1646,17 +1646,26 @@ Suite de la réponse.";
 
     #[test]
     #[serial]
-    fn codex_full_access_uses_danger_sandbox() {
-        std::env::set_var("KRONN_HOST_HOME", "/home/testuser");
-        std::env::set_var("KRONN_HOST_OS", "Linux");
+    fn codex_native_full_access_uses_danger_sandbox() {
+        std::env::remove_var("KRONN_HOST_HOME");
         let (_, _, args, _, _, _) =
             super::super::agent_command(&AgentType::Codex, "prompt", true, "", None);
         assert!(
             args.contains(&"--sandbox=danger-full-access".to_string()),
-            "full_access=true should use danger-full-access sandbox"
+            "native full_access=true should use danger-full-access sandbox"
         );
+    }
+
+    #[test]
+    #[serial]
+    fn codex_native_restricted_access_keeps_default_sandbox() {
         std::env::remove_var("KRONN_HOST_HOME");
-        std::env::remove_var("KRONN_HOST_OS");
+        let (_, _, args, _, _, _) =
+            super::super::agent_command(&AgentType::Codex, "prompt", false, "", None);
+        assert!(
+            !args.iter().any(|arg| arg.starts_with("--sandbox=")),
+            "native full_access=false should keep Codex's restricted default sandbox"
+        );
     }
 
     // ─── StreamJsonEvent: ToolStart / ToolInputDelta / ToolEnd ──────────────
@@ -1765,6 +1774,29 @@ Suite de la réponse.";
             prompt.contains("hello"),
             "Prompt should contain user prompt"
         );
+    }
+
+    #[test]
+    fn plugin_invocation_rule_reaches_every_supported_agent_command() {
+        let rule = "Fastly production: API first via `api_call`";
+        let agents = [
+            AgentType::ClaudeCode,
+            AgentType::Codex,
+            AgentType::Vibe,
+            AgentType::GeminiCli,
+            AgentType::Kiro,
+            AgentType::CopilotCli,
+            AgentType::Ollama,
+        ];
+
+        for agent in agents {
+            let (_, _, args, _, _, _) =
+                super::super::agent_command(&agent, "user prompt", false, rule, None);
+            assert!(
+                args.join("\n").contains(rule),
+                "{agent:?} dropped the shared plugin invocation rule"
+            );
+        }
     }
 
     // ─── Cross-platform: model tier resolution ─────────────────────────────

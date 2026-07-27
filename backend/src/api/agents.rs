@@ -29,31 +29,7 @@ pub(crate) async fn resync_mcp_configs_after_install(state: &AppState) {
 pub async fn detect(State(state): State<AppState>) -> Json<ApiResponse<Vec<AgentDetection>>> {
     let mut detected = agents::detect_all_cached(false).await;
     let config = state.config.read().await;
-    for agent in &mut detected {
-        // Apply explicit disable/enable from config
-        agent.enabled = !config.disabled_agents.contains(&agent.agent_type);
-
-        // If not installed locally and only runtime_available,
-        // additionally require an API key to be considered usable
-        if !agent.installed && agent.runtime_available && agent.enabled {
-            let env_var = match agent.agent_type {
-                AgentType::ClaudeCode => Some(("anthropic", "ANTHROPIC_API_KEY")),
-                AgentType::Codex => Some(("openai", "OPENAI_API_KEY")),
-                AgentType::GeminiCli => Some(("google", "GEMINI_API_KEY")),
-                AgentType::Kiro => None, // Uses AWS Builder ID, not API key
-                _ => None,
-            };
-            let has_key = env_var.is_some_and(|(provider, env)| {
-                // Check multi-key system first
-                config.tokens.active_key_for(provider).is_some()
-                // Then check environment variable
-                || std::env::var(env).is_ok()
-            });
-            if !has_key {
-                agent.enabled = false;
-            }
-        }
-    }
+    agents::apply_configured_status(&mut detected, &config);
     Json(ApiResponse::ok(detected))
 }
 

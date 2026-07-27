@@ -21,7 +21,7 @@ import { parseAgentQuestions } from '../lib/agent-question-parse';
 import { userError } from '../lib/userError';
 import { getDeployedVersion, setDeployedVersion } from '../lib/qp-improver-banner';
 import { sanitizeQpImproverPayload } from '../lib/qp-improver-sanitize';
-import type { Project, AgentDetection, Discussion, AgentType, AgentsConfig, Skill, AgentProfile, Directive, McpConfigDisplay, McpIncompatibility, Contact, WsMessage, ContextFile, BatchRunSummary, DiscussionPlan, ProposalListResponse } from '../types/generated';
+import type { Project, AgentDetection, Discussion, DiscussionMessage, AgentType, AgentsConfig, Skill, AgentProfile, Directive, McpConfigDisplay, McpIncompatibility, Contact, WsMessage, ContextFile, BatchRunSummary, DiscussionPlan, ProposalListResponse, MessageSearchHit, MessageTarget, ParticipantView } from '../types/generated';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { useQpChain } from '../hooks/useQpChain';
 import { useMessageQueue } from '../hooks/useMessageQueue';
@@ -29,18 +29,21 @@ import { useRafBatchedStream } from '../hooks/useRafBatchedStream';
 import { buildStreamingFlush } from '../lib/stream-flush';
 import { findLastAgentMessage } from '../lib/discussionHelpers';
 import { saveDraft } from '../lib/chat-drafts';
+import { clearReplyDraft, loadReplyDraft, saveReplyDraft } from '../lib/chat-reply-drafts';
 import { publishMessageSendSettled } from '../lib/messageSendLifecycle';
+import { findRenderedTextRanges } from '../lib/discussionMessageSearch';
 import { buildBatchTriageRows, buildContinuationDraft, type BatchTriageRow } from '../lib/batchTriage';
 import { useT } from '../lib/I18nContext';
-import { AGENT_LABELS, AGENT_MENTIONS, agentColor, isAgentRestricted as isAgentRestrictedUtil, hasAgentFullAccess, getProjectGroup, isUsable, isBriefingDisc, isBootstrapDisc, isValidationDisc } from '../lib/constants';
+import { AGENT_LABELS, agentColor, isAgentRestricted as isAgentRestrictedUtil, hasAgentFullAccess, getProjectGroup, isUsable, isBriefingDisc, isBootstrapDisc, isValidationDisc } from '../lib/constants';
 import type { ToastFn } from '../hooks/useToast';
 import {
   ChevronRight, Cpu, Loader2,
   MessageSquare, AlertTriangle,
   ShieldCheck, Check, Rocket, Play, Zap,
-  Menu, X, Clock, ExternalLink,
+  Menu, X, Clock, ExternalLink, Search, ChevronUp, ChevronDown,
 } from 'lucide-react';
 import { useIsMobile } from '../hooks/useMediaQuery';
+import { composerMentions, targetsFromComposerText } from '../lib/messageTargets';
 
 function newClientMessageId(): string {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
@@ -60,14 +63,32 @@ function newClientMessageId(): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
-function mentionedAgent(text: string): AgentType | undefined {
-  for (const mention of AGENT_MENTIONS) {
-    const escaped = mention.trigger.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    if (new RegExp(`(^|[\\s([{])${escaped}(?=$|[\\s\\])},.!?;:])`, 'i').test(text)) {
-      return mention.type;
-    }
-  }
-  return undefined;
+interface MessageSearchMatch {
+  messageId: string;
+}
+
+interface GlobalSearchTarget {
+  discussionId: string;
+  messageId: string;
+}
+
+type HighlightRegistry = {
+  set: (name: string, value: unknown) => void;
+  delete: (name: string) => void;
+};
+
+const SEARCH_HIGHLIGHT_NAME = 'kronn-message-search';
+const SEARCH_CURRENT_HIGHLIGHT_NAME = 'kronn-message-search-current';
+
+function cssHighlightRegistry(): HighlightRegistry | null {
+  const css = globalThis.CSS as typeof CSS & { highlights?: HighlightRegistry };
+  return css?.highlights ?? null;
+}
+
+function highlightConstructor(): (new (...ranges: Range[]) => unknown) | null {
+  return (globalThis as typeof globalThis & {
+    Highlight?: new (...ranges: Range[]) => unknown;
+  }).Highlight ?? null;
 }
 
 export interface DiscussionsPageProps {
@@ -143,6 +164,7 @@ import { speakText, stopTts, pauseTts, resumeTts, isTtsPaused } from '../lib/tts
 // Stable empty array so messages with no attachments keep the same prop
 // reference across renders (don't bust MessageBubble's memo).
 const EMPTY_ATTACHMENTS: ContextFile[] = [];
+const EMPTY_MESSAGES: DiscussionMessage[] = [];
 
 let ttsWorker: Worker | null = null;
 function getTtsWorker(): Worker {
@@ -208,6 +230,17 @@ export function DiscussionsPage({
   const [gitPanelExpanded, setGitPanelExpanded] = useState(false);
   const [showPlanPanel, setShowPlanPanel] = useState(false);
   const [showSettingsPanel, setShowSettingsPanel] = useState(false);
+  const [showMessageSearch, setShowMessageSearch] = useState(false);
+  const [showGlobalSearch, setShowGlobalSearch] = useState(false);
+  const [globalSearchTarget, setGlobalSearchTarget] = useState<GlobalSearchTarget | null>(null);
+  const globalSearchTargetRef = useRef<GlobalSearchTarget | null>(null);
+  const [replyToMessageId, setReplyToMessageId] = useState<string | null>(null);
+  const [messageSearchQuery, setMessageSearchQuery] = useState('');
+  const deferredMessageSearchQuery = useDeferredValue(messageSearchQuery.trim());
+  const [messageSearchMatches, setMessageSearchMatches] = useState<MessageSearchMatch[]>([]);
+  const [messageSearchIndex, setMessageSearchIndex] = useState(0);
+  const messageSearchInputRef = useRef<HTMLInputElement>(null);
+  const messageSearchRangesRef = useRef<Range[]>([]);
   const [discussionPlan, setDiscussionPlan] = useState<DiscussionPlan | null>(null);
   const [proposalInbox, setProposalInbox] = useState<ProposalListResponse | null>(null);
   const [proposalInboxDiscussionId, setProposalInboxDiscussionId] = useState<string | null>(null);
@@ -223,6 +256,32 @@ export function DiscussionsPage({
     window.addEventListener('keydown', closePanel);
     return () => window.removeEventListener('keydown', closePanel);
   }, [showGitPanel, showPlanPanel, showSettingsPanel]);
+
+  const clearMessageSearchHighlights = useCallback(() => {
+    const registry = cssHighlightRegistry();
+    registry?.delete(SEARCH_HIGHLIGHT_NAME);
+    registry?.delete(SEARCH_CURRENT_HIGHLIGHT_NAME);
+    messageSearchRangesRef.current = [];
+  }, []);
+
+  const closeMessageSearch = useCallback(() => {
+    setShowMessageSearch(false);
+    setMessageSearchQuery('');
+    setMessageSearchMatches([]);
+    setMessageSearchIndex(0);
+    clearMessageSearchHighlights();
+  }, [clearMessageSearchHighlights]);
+
+  useEffect(() => {
+    const frame = requestAnimationFrame(closeMessageSearch);
+    return () => cancelAnimationFrame(frame);
+  }, [activeDiscussionId, closeMessageSearch]);
+
+  useEffect(() => {
+    if (!showMessageSearch) return;
+    const frame = requestAnimationFrame(() => messageSearchInputRef.current?.focus());
+    return () => cancelAnimationFrame(frame);
+  }, [showMessageSearch]);
   // 0.8.3 (#280) — flag set when an audit is running on the same
   // project as the active discussion. Drives the banner that warns
   // the user "MCPs are temporarily filtered for audit perf — re-run
@@ -281,6 +340,28 @@ export function DiscussionsPage({
   const [availableDirectives, setAvailableDirectives] = useState<Directive[]>([]);
   const [expandedSummaryMsgId, setExpandedSummaryMsgId] = useState<string | null>(null);
   const [worktreeError, setWorktreeError] = useState<string | null>(null);
+  // A send refused because the previous run is still being recovered. Held as
+  // state (not a blocking `confirm`) because recovery can take minutes: the tab
+  // must stay usable. The submitted text is already back in the composer via
+  // the `refused` settlement, so this only carries what a resend needs.
+  const [partialPending, setPartialPending] = useState<{
+    discId: string;
+    message: string;
+    targets: MessageTarget[];
+    targetAll: boolean;
+    replyTargetId?: string;
+  } | null>(null);
+  const [partialForcing, setPartialForcing] = useState(false);
+  const partialForcingRef = useRef(false);
+  // Mirrors `partialPending` for the WebSocket handler, which reads it from a
+  // closure created before the refusal happened.
+  const partialPendingRef = useRef<typeof partialPending>(null);
+  partialPendingRef.current = partialPending;
+  // Held in a ref because the WS handler is built earlier in this render than the
+  // resend function it needs — same reason `useMessageQueue` keeps `onFire` in one.
+  const resendPartialRef = useRef<
+    ((pending: NonNullable<typeof partialPending>) => void) | null
+  >(null);
 
   const [contextFilesMap, setContextFilesMap] = useState<Record<string, ContextFile[]>>({});
   const [uploadingFiles, setUploadingFiles] = useState(false);
@@ -336,6 +417,7 @@ export function DiscussionsPage({
   const resetAgentLogs = useCallback(() => { setAgentLogs([]); setShowLogs(false); }, []);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
+  const optimisticMessageIdsRef = useRef<Set<string>>(new Set());
   // True when the user is reading higher up in the message log. We freeze
   // the auto-scroll behavior so the streaming output doesn't yank the
   // scroll position back to the bottom every chunk. Re-enabled the moment
@@ -347,6 +429,39 @@ export function DiscussionsPage({
   // an arrow when the user actually *can* go further in that direction —
   // the buttons stay out of the way on short discussions.
   const [scrolledFromTop, setScrolledFromTop] = useState(false);
+
+  useEffect(() => {
+    const registry = cssHighlightRegistry();
+    const HighlightCtor = highlightConstructor();
+    registry?.delete(SEARCH_CURRENT_HIGHLIGHT_NAME);
+    const range = messageSearchRangesRef.current[messageSearchIndex];
+    if (registry && HighlightCtor && range) {
+      registry.set(SEARCH_CURRENT_HIGHLIGHT_NAME, new HighlightCtor(range));
+    }
+    const match = messageSearchMatches[messageSearchIndex];
+    if (!match) return;
+    const row = messagesContainerRef.current?.querySelector<HTMLElement>(
+      `[data-message-id="${match.messageId}"]`,
+    );
+    if (row && typeof row.scrollIntoView === 'function') {
+      try {
+        row.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      } catch {
+        // jsdom and a few embedded webviews expose the method without
+        // implementing it. The current-row highlight remains sufficient.
+      }
+    }
+  }, [messageSearchIndex, messageSearchMatches]);
+
+  useEffect(() => () => clearMessageSearchHighlights(), [clearMessageSearchHighlights]);
+
+  const moveMessageSearch = useCallback((direction: 1 | -1) => {
+    setStickToBottom(false);
+    setMessageSearchIndex(previous => {
+      if (messageSearchMatches.length === 0) return 0;
+      return (previous + direction + messageSearchMatches.length) % messageSearchMatches.length;
+    });
+  }, [messageSearchMatches.length]);
 
   // Persist sidebar collapse state to localStorage
   useEffect(() => {
@@ -415,6 +530,149 @@ export function DiscussionsPage({
   const activeDiscussion = (activeDiscussionId && loadedDiscussions[activeDiscussionId])
     ? loadedDiscussions[activeDiscussionId]
     : allDiscussions.find(d => d.id === activeDiscussionId) ?? null;
+  const replyTarget = useMemo(
+    () => activeDiscussion?.messages.find(message => message.id === replyToMessageId) ?? null,
+    [activeDiscussion, replyToMessageId],
+  );
+  useEffect(() => {
+    setReplyToMessageId(
+      activeDiscussionId ? loadReplyDraft(activeDiscussionId)?.messageId ?? null : null,
+    );
+  }, [activeDiscussionId]);
+  useEffect(() => {
+    if (!activeDiscussionId || !activeDiscussion) return;
+    const saved = loadReplyDraft(activeDiscussionId);
+    if (!saved?.pendingClientMessageId) return;
+    if (optimisticMessageIdsRef.current.has(saved.pendingClientMessageId)) return;
+    if (!activeDiscussion.messages.some(message => message.id === saved.pendingClientMessageId)) {
+      return;
+    }
+    if (clearReplyDraft(activeDiscussionId, saved.pendingClientMessageId)) {
+      setReplyToMessageId(current => current === saved.messageId ? null : current);
+    }
+  }, [activeDiscussion, activeDiscussionId]);
+  const globalSearchAuthors = useMemo(() => {
+    const names = new Set<string>();
+    agents.forEach(agent => names.add(agent.agent_type));
+    contactsList.forEach(contact => names.add(contact.pseudo));
+    const collect = (discussion: Discussion) => {
+      discussion.messages.forEach(message => {
+        if (message.agent_type) names.add(message.agent_type);
+        if (message.author_pseudo) names.add(message.author_pseudo);
+      });
+    };
+    allDiscussions.forEach(collect);
+    if (activeDiscussion) collect(activeDiscussion);
+    return [...names].sort((left, right) => left.localeCompare(right));
+  }, [activeDiscussion, agents, allDiscussions, contactsList]);
+
+  useEffect(() => {
+    if (!globalSearchTarget || activeDiscussion?.id !== globalSearchTarget.discussionId) return;
+    if ((activeDiscussion.messages?.length ?? 0) === 0) return;
+    const container = messagesContainerRef.current;
+    if (!container) return;
+    let frame: number | null = null;
+    let clearTimer: number | null = null;
+    let settleDeadline: number | null = null;
+    const lookupDeadline = performance.now() + 1_500;
+    const stop = () => {
+      if (frame !== null) cancelAnimationFrame(frame);
+      frame = null;
+      container.removeEventListener('wheel', abortByUser);
+      container.removeEventListener('touchstart', abortByUser);
+    };
+    const abortByUser = () => {
+      stop();
+      globalSearchTargetRef.current = null;
+      setGlobalSearchTarget(null);
+    };
+    container.addEventListener('wheel', abortByUser, { passive: true });
+    container.addEventListener('touchstart', abortByUser, { passive: true });
+    const step = () => {
+      const now = performance.now();
+      const row = messagesContainerRef.current?.querySelector<HTMLElement>(
+        `[data-message-id="${globalSearchTarget.messageId}"]`,
+      );
+      if (!row) {
+        if (now < lookupDeadline) {
+          frame = requestAnimationFrame(step);
+        } else {
+          globalSearchTargetRef.current = null;
+          setGlobalSearchTarget(null);
+        }
+        return;
+      }
+      setStickToBottom(false);
+      settleDeadline ??= now + 700;
+      const rowRect = row.getBoundingClientRect();
+      const containerRect = container.getBoundingClientRect();
+      container.scrollTop += (
+        (rowRect.top + rowRect.bottom) / 2
+        - (containerRect.top + containerRect.bottom) / 2
+      );
+      if (now <= settleDeadline) {
+        frame = requestAnimationFrame(step);
+        return;
+      }
+      stop();
+      clearTimer = window.setTimeout(() => {
+        globalSearchTargetRef.current = null;
+        setGlobalSearchTarget(null);
+      }, 3_000);
+    };
+    frame = requestAnimationFrame(step);
+    return () => {
+      stop();
+      if (clearTimer !== null) window.clearTimeout(clearTimer);
+    };
+  }, [activeDiscussion?.id, activeDiscussion?.messages.length, globalSearchTarget]);
+
+  // Search the rendered message bodies rather than the raw Markdown source:
+  // `foo **bar**` is displayed as "foo bar" and must be found as such. The
+  // Custom Highlight API paints matches without replacing React-owned DOM.
+  useEffect(() => {
+    clearMessageSearchHighlights();
+    if (!showMessageSearch || !deferredMessageSearchQuery) {
+      const clearFrame = requestAnimationFrame(() => {
+        setMessageSearchMatches([]);
+        setMessageSearchIndex(0);
+      });
+      return () => cancelAnimationFrame(clearFrame);
+    }
+
+    const container = messagesContainerRef.current;
+    if (!container) return;
+    const ranges: Range[] = [];
+    const matches: MessageSearchMatch[] = [];
+    container.querySelectorAll<HTMLElement>('[data-message-id]').forEach(row => {
+      const messageId = row.dataset.messageId;
+      const content = row.querySelector<HTMLElement>('[data-message-search-content]');
+      if (!messageId || !content) return;
+      const rowRanges = findRenderedTextRanges(content, deferredMessageSearchQuery);
+      rowRanges.forEach(range => {
+        ranges.push(range);
+        matches.push({ messageId });
+      });
+    });
+
+    messageSearchRangesRef.current = ranges;
+    const stateFrame = requestAnimationFrame(() => {
+      setMessageSearchMatches(matches);
+      setMessageSearchIndex(previous => Math.min(previous, Math.max(matches.length - 1, 0)));
+    });
+
+    const registry = cssHighlightRegistry();
+    const HighlightCtor = highlightConstructor();
+    if (registry && HighlightCtor && ranges.length > 0) {
+      registry.set(SEARCH_HIGHLIGHT_NAME, new HighlightCtor(...ranges));
+    }
+    return () => cancelAnimationFrame(stateFrame);
+  }, [
+    activeDiscussion?.messages,
+    clearMessageSearchHighlights,
+    deferredMessageSearchQuery,
+    showMessageSearch,
+  ]);
 
   useEffect(() => {
     if (!activeDiscussionId) return;
@@ -679,6 +937,12 @@ export function DiscussionsPage({
         setSendingMap(prev => ({ ...prev, [id]: false }));
         delete abortControllers.current[id];
         reloadDiscussion(id);
+        // Recovery is over, so the send that was refused can go through. Fire it
+        // automatically — the same contract as a follow-up queued while an agent
+        // is thinking. The banner's Cancel clears this entry, which is what makes
+        // "auto by default" safe.
+        const held = partialPendingRef.current;
+        if (held?.discId === id) resendPartialRef.current?.(held);
       }
       toast(t('disc.partialRecoveredToast', msg.discussion_ids.length), 'info');
     }
@@ -856,7 +1120,49 @@ export function DiscussionsPage({
     // first viewport. 80 px hysteresis at the top to avoid flicker.
     setScrolledFromTop(el.scrollTop > 80);
   }, []);
+  // Jump to the real last message in ONE click. A single `scrollIntoView`
+  // aims at the height measured when it fires; on a long discussion the list
+  // is still growing under it (lazy markdown, mermaid, media, plan blocks), so
+  // the animation lands short and the user has to click again — user feedback
+  // 2026-07-27: "on clique 3/4 fois sur la flèche pour arriver tout en bas".
+  // We instead re-assert the bottom on every frame for a short window. A
+  // "stop once the height looks stable" heuristic isn't enough: late content
+  // can land hundreds of ms after the click, well past a few quiet frames. Any
+  // real user gesture aborts the pin so we never fight the mouse wheel.
+  const bottomSettleRafRef = useRef<number | null>(null);
+  const bottomSettleStopRef = useRef<(() => void) | null>(null);
+  const scrollToBottomSettled = useCallback(() => {
+    bottomSettleStopRef.current?.();
+    const container = messagesContainerRef.current;
+    if (!container) return;
+    // Start the settling window on the first frame that can actually run.
+    // When the main thread is busy, measuring from the click can otherwise
+    // consume the whole deadline before this callback gets CPU time.
+    let deadline: number | null = null;
+    const stop = () => {
+      if (bottomSettleRafRef.current !== null) cancelAnimationFrame(bottomSettleRafRef.current);
+      bottomSettleRafRef.current = null;
+      container.removeEventListener('wheel', stop);
+      container.removeEventListener('touchstart', stop);
+      bottomSettleStopRef.current = null;
+    };
+    bottomSettleStopRef.current = stop;
+    container.addEventListener('wheel', stop, { passive: true });
+    container.addEventListener('touchstart', stop, { passive: true });
+    const step = () => {
+      const el = messagesContainerRef.current;
+      if (!el) { stop(); return; }
+      const now = performance.now();
+      deadline ??= now + 700;
+      el.scrollTop = el.scrollHeight;
+      if (now > deadline) { stop(); return; }
+      bottomSettleRafRef.current = requestAnimationFrame(step);
+    };
+    bottomSettleRafRef.current = requestAnimationFrame(step);
+  }, []);
+  useEffect(() => () => bottomSettleStopRef.current?.(), []);
   useEffect(() => {
+    if (globalSearchTargetRef.current?.discussionId === activeDiscussion?.id) return;
     if (!stickToBottomRef.current) {
       setHasNewWhileScrolledUp(true);
       return;
@@ -901,14 +1207,16 @@ export function DiscussionsPage({
   const lastSettledDiscIdRef = useRef<string | null>(null);
   useEffect(() => {
     if (!activeDiscussion?.id) return;
+    if (globalSearchTargetRef.current?.discussionId === activeDiscussion.id) return;
     const isFirstSettle = lastSettledDiscIdRef.current !== activeDiscussion.id;
     if (!isFirstSettle) return;
     if ((activeDiscussion.messages?.length ?? 0) === 0) return;
     lastSettledDiscIdRef.current = activeDiscussion.id;
-    requestAnimationFrame(() => {
-      chatEndRef.current?.scrollIntoView({ behavior: 'instant' as ScrollBehavior });
-    });
-  }, [activeDiscussion?.id, activeDiscussion?.messages.length]);
+    // Same late-layout problem as the jump arrow: on a long discussion a
+    // one-shot scroll lands a few thousand pixels short (measured: 2 684 px on
+    // a 570-message room), so we pin the bottom until the height settles.
+    scrollToBottomSettled();
+  }, [activeDiscussion?.id, activeDiscussion?.messages.length, scrollToBottomSettled]);
 
   // Refresh the pending-files count on the git-panel icon for Isolated
   // discussions. Fires on: discussion switch, every new message (typically
@@ -1219,6 +1527,22 @@ export function DiscussionsPage({
       return;
     }
 
+    // Prompt-driven multi-agent launch reuses the existing orchestration
+    // contract: one shared discussion, every mentioned agent contributes to
+    // the first round, and Kronn persists the participant list + synthesis.
+    // A single mention stays on the cheaper legacy run path because the form
+    // already made that agent the discussion's primary.
+    if (config.targetAgents.length > 1) {
+      await handleOrchestrate(
+        config.targetAgents,
+        1,
+        config.skillIds,
+        config.directiveIds,
+        discId,
+      );
+      return;
+    }
+
     const controller = new AbortController();
     abortControllers.current[discId] = controller;
     setSendingMap(prev => ({ ...prev, [discId]: true }));
@@ -1234,7 +1558,12 @@ export function DiscussionsPage({
     );
   };
 
-  const handleSendMessage = async (msg: string, targetAgent?: AgentType) => {
+  const handleSendMessage = async (
+    msg: string,
+    targets: MessageTarget[] = [],
+    targetAll = false,
+    replyTargetId?: string,
+  ) => {
     if (!activeDiscussionId || !msg.trim()) return;
     const discId = activeDiscussionId;
     // Synchronous re-entry guard: `sending` is derived from `sendingMap`
@@ -1256,7 +1585,9 @@ export function DiscussionsPage({
     // synchronously, so a fast second click within the same tick enqueues
     // rather than launching a parallel run.
     if (sendingMap[discId] || abortControllers.current[discId]) {
-      enqueueMessage(msg, targetAgent);
+      enqueueMessage(msg, targets, targetAll, replyTargetId);
+      setReplyToMessageId(null);
+      clearReplyDraft(discId);
       // The in-memory queue now owns this submission. It is not a backend
       // receipt, but the composer may safely advance to the next draft.
       publishMessageSendSettled(discId, msg, 'accepted');
@@ -1264,6 +1595,8 @@ export function DiscussionsPage({
     }
     stopTts();
     const clientMessageId = newClientMessageId();
+    optimisticMessageIdsRef.current.add(clientMessageId);
+    if (replyTargetId) saveReplyDraft(discId, replyTargetId, clientMessageId);
 
     // Optimistically add user message to loadedDiscussions so it appears immediately
     setLoadedDiscussions(prev => {
@@ -1281,6 +1614,8 @@ export function DiscussionsPage({
             timestamp: new Date().toISOString(),
             tokens_used: 0,
             auth_mode: null,
+            target_agent: targets[0]?.agent_type ?? null,
+            reply_to_message_id: replyTargetId ?? null,
           }],
           message_count: disc.message_count + 1,
           non_system_message_count: disc.non_system_message_count + 1,
@@ -1289,6 +1624,7 @@ export function DiscussionsPage({
     });
 
     const controller = new AbortController();
+    setReplyToMessageId(null);
     abortControllers.current[discId] = controller;
     setStreamingMap(prev => ({ ...prev, [discId]: '' }));
     // Track the pinged agent so the streaming placeholder ("Codex · Agent
@@ -1296,8 +1632,9 @@ export function DiscussionsPage({
     // chunk. Without this the placeholder always shows the discussion's
     // default agent — the user pings @codex but sees Claude Code spinning,
     // which makes the @-mention feel broken.
-    if (targetAgent) {
-      setStreamingTargetMap(prev => ({ ...prev, [discId]: targetAgent }));
+    const primaryTarget = targets[0]?.agent_type;
+    if (primaryTarget) {
+      setStreamingTargetMap(prev => ({ ...prev, [discId]: primaryTarget }));
     } else {
       setStreamingTargetMap(prev => {
         const { [discId]: _drop, ...rest } = prev;
@@ -1340,24 +1677,28 @@ export function DiscussionsPage({
       sendErrorHandled = true;
       console.error('Agent error:', error);
       if (!acceptedReceipt) {
+        optimisticMessageIdsRef.current.delete(clientMessageId);
         revertOptimisticUserRow();
+        if (replyTargetId) {
+          saveReplyDraft(discId, replyTargetId);
+          setReplyToMessageId(current => current ?? replyTargetId);
+        }
         publishSettlement('refused');
       }
       const errStr = userError(error);
       if (errStr.includes('checked out') || errStr.includes('worktree')) {
         setWorktreeError(errStr);
       } else if (errStr.includes('partial_pending')) {
-        // Backend refused: previous run still in recovery. Offer one-click
-        // dismiss so the user can retype without waiting for the WS event.
-        if (confirm(t('disc.partialPendingPrompt'))) {
-          discussionsApi.dismissPartial(discId)
-            .then(() => {
-              refetchDiscussions();
-              reloadDiscussion(discId);
-              toast(t('disc.partialDismissed'), 'success');
-            })
-            .catch(e => toast(userError(e), 'error'));
-        }
+        // Backend refused: previous run still in recovery. Surface a banner with
+        // a one-click force instead of a modal — `confirm()` freezes the whole
+        // tab, and the user cannot even copy their text while waiting.
+        setPartialPending({
+          discId,
+          message: msg,
+          targets,
+          targetAll,
+          replyTargetId,
+        });
       } else {
         toast(errStr, 'error');
       }
@@ -1366,7 +1707,16 @@ export function DiscussionsPage({
     try {
       await discussionsApi.sendMessageStream(
         discId,
-        { content: msg, target_agent: targetAgent, client_message_id: clientMessageId },
+        {
+          content: msg,
+          targets,
+          target_all: targetAll,
+          // Compatibility projection for older peers during rolling upgrades.
+          target_agents: targets.map(target => target.agent_type),
+          target_agent: primaryTarget,
+          client_message_id: clientMessageId,
+          reply_to_message_id: replyTargetId,
+        },
         (text) => appendStreamChunk(discId, text),
         () => {
           // A cleanly closed stream without an acceptance receipt must not
@@ -1386,6 +1736,10 @@ export function DiscussionsPage({
         onAgentLog,
         () => {
           acceptedReceipt = true;
+          optimisticMessageIdsRef.current.delete(clientMessageId);
+          if (clearReplyDraft(discId, clientMessageId)) {
+            setReplyToMessageId(current => current === replyTargetId ? null : current);
+          }
           publishSettlement('accepted');
           refetchDiscussions();
           // The durable receipt is emitted only after the message commit and
@@ -1464,6 +1818,50 @@ export function DiscussionsPage({
       setWorktreeError(String(err));
     }
   }, [activeDiscussionId, reloadDiscussion, toast, t]);
+
+  // Send the held message once. Clearing the entry FIRST is what makes it
+  // exactly-once: the resend may be refused again and re-arm the banner, and a
+  // stale entry would let the WS edge and a click both fire.
+  const resendPartialPending = async (pending: NonNullable<typeof partialPending>) => {
+    if (partialForcingRef.current) return;
+    partialForcingRef.current = true;
+    setPartialForcing(true);
+    try {
+      partialPendingRef.current = null;
+      setPartialPending(null);
+      await handleSendMessage(
+        pending.message,
+        pending.targets,
+        pending.targetAll,
+        pending.replyTargetId,
+      );
+    } catch (err) {
+      toast(userError(err), 'error');
+    } finally {
+      partialForcingRef.current = false;
+      setPartialForcing(false);
+    }
+  };
+
+  resendPartialRef.current = pending => { void resendPartialPending(pending); };
+
+  // Impatience path: abandon the stuck recovery now instead of waiting for it.
+  // This discards the partial answer, so it stays behind an explicit click.
+  const handlePartialPendingForce = async () => {
+    const pending = partialPending;
+    // Synchronous guard, same reason as `abortControllers` on the send path: two
+    // fast clicks both read `partialForcing === false` from one render closure.
+    if (!pending || partialForcingRef.current) return;
+    try {
+      await discussionsApi.dismissPartial(pending.discId);
+      refetchDiscussions();
+      reloadDiscussion(pending.discId);
+    } catch (err) {
+      toast(userError(err), 'error');
+      return;
+    }
+    await resendPartialPending(pending);
+  };
 
   // ── Context files ──────────────────────────────────────────────────────────
   const loadContextFiles = useCallback(async (discId: string) => {
@@ -1584,6 +1982,17 @@ export function DiscussionsPage({
   const handleMsgExpandSummary = useCallback((msgId: string) => {
     setExpandedSummaryMsgId(prev => prev === msgId ? null : msgId);
   }, []);
+  const handleMsgReply = useCallback((message: DiscussionMessage) => {
+    if (activeDiscussionId) saveReplyDraft(activeDiscussionId, message.id);
+    setReplyToMessageId(message.id);
+  }, [activeDiscussionId]);
+  const handleReplyNavigate = useCallback((messageId: string) => {
+    if (!activeDiscussionId) return;
+    const target = { discussionId: activeDiscussionId, messageId };
+    globalSearchTargetRef.current = target;
+    setGlobalSearchTarget(target);
+    setStickToBottom(false);
+  }, [activeDiscussionId]);
 
   // Stable sidebar callbacks (avoid breaking SwipeableDiscItem memo)
   const handleDiscSelect = useCallback((discId: string, msgCount: number) => {
@@ -1787,7 +2196,7 @@ export function DiscussionsPage({
   }, [toast, t]);
 
   const handleEditMessage = async () => {
-    if (!activeDiscussionId || !editingMsgId || !editingText.trim()) return;
+    if (!activeDiscussionId || !activeDiscussion || !editingMsgId || !editingText.trim()) return;
     if (editingMsgInFlightRef.current) return;
     if (sending || abortControllers.current[activeDiscussionId]) return;
     const targetMessage = activeDiscussion?.messages.find(message => message.id === editingMsgId);
@@ -1801,7 +2210,25 @@ export function DiscussionsPage({
     editingRevisionKeyRef.current = idempotencyKey;
     const controller = new AbortController();
     abortControllers.current[discId] = controller;
-    const targetAgent = mentionedAgent(editingText);
+    let participants: ParticipantView[] = [];
+    try {
+      participants = await discussionsApi.participants(discId) as ParticipantView[];
+    } catch (error) {
+      console.warn('[DiscussionsPage] participants fetch before revision failed:', error);
+    }
+    const mentionOptions = composerMentions(
+      activeDiscussion.agent,
+      agents.filter(isUsable).map(agent => agent.agent_type),
+      participants,
+      {
+        discussionAgent: t('disc.targetDiscussionAgent'),
+        punctualAgent: t('disc.targetPunctualAgent'),
+        cli: t('disc.targetCli'),
+        all: t('disc.targetAll'),
+      },
+    );
+    const { targets, targetAll } = targetsFromComposerText(editingText, mentionOptions);
+    const targetAgent = targets[0]?.agent_type;
     setStreamingTargetMap(prev => {
       if (targetAgent) return { ...prev, [discId]: targetAgent };
       const { [discId]: _drop, ...rest } = prev;
@@ -1818,7 +2245,10 @@ export function DiscussionsPage({
           content: editingText.trim(),
           expected_revision: targetMessage.timestamp,
           idempotency_key: idempotencyKey,
+          targets,
+          target_all: targetAll,
           target_agent: targetAgent,
+          target_agents: targets.map(target => target.agent_type),
         },
         (text) => appendStreamChunk(discId, text),
         () => cleanupStream(discId),
@@ -1848,15 +2278,21 @@ export function DiscussionsPage({
     }
   };
 
-  const handleOrchestrate = async (orchAgents: AgentType[], orchRounds: number, orchSkillIds: string[], orchDirectiveIds: string[]) => {
-    if (!activeDiscussionId || orchAgents.length < 2) return;
-    const discId = activeDiscussionId;
+  const handleOrchestrate = async (
+    orchAgents: AgentType[],
+    orchRounds: number,
+    orchSkillIds: string[],
+    orchDirectiveIds: string[],
+    discussionId?: string,
+  ) => {
+    const discId = discussionId ?? activeDiscussionId;
+    if (!discId || orchAgents.length < 2) return;
     const controller = new AbortController();
     abortControllers.current[discId] = controller;
     setSendingMap(prev => ({ ...prev, [discId]: true }));
     setOrchState(prev => ({
       ...prev,
-      [discId]: { active: true, round: 0, totalRounds: 3, currentAgent: null, agentStreams: [], systemMessages: [] },
+      [discId]: { active: true, round: 0, totalRounds: orchRounds, currentAgent: null, agentStreams: [], systemMessages: [] },
     }));
 
     await discussionsApi.orchestrate(discId, { agents: orchAgents, max_rounds: orchRounds, skill_ids: orchSkillIds, ...(orchDirectiveIds.length > 0 ? { directive_ids: orchDirectiveIds } : {}) }, {
@@ -1953,6 +2389,21 @@ export function DiscussionsPage({
           queuedMap={queuedMap}
           lastSeenMsgCount={lastSeenMsgCount}
           onMarkAllRead={markAllDiscussionsSeen}
+          onOpenGlobalSearch={() => setShowGlobalSearch(true)}
+          globalSearchOpen={showGlobalSearch}
+          globalSearchAuthors={globalSearchAuthors}
+          onCloseGlobalSearch={() => setShowGlobalSearch(false)}
+          onOpenGlobalSearchResult={(hit: MessageSearchHit) => {
+            const target = { discussionId: hit.disc_id, messageId: hit.message_id };
+            globalSearchTargetRef.current = target;
+            setGlobalSearchTarget(target);
+            setShowGlobalSearch(false);
+            setShowNewDiscussion(false);
+            setActiveDiscussionId(hit.disc_id);
+            ensureDiscussionVisible(hit.disc_id);
+            setStickToBottom(false);
+            if (isMobile) setSidebarOpen(false);
+          }}
           contacts={contactsList}
           contactsOnline={contactsOnline}
           wsConnected={wsConnected}
@@ -1972,6 +2423,29 @@ export function DiscussionsPage({
             }
           }}
           onNewDiscussion={() => setShowNewDiscussion(true)}
+          onImportDiscussion={async file => {
+            const content = await file.text();
+            const report = await discussionsApi.importDiscussion({
+              content,
+              project_id: null,
+            });
+            setShowNewDiscussion(false);
+            setActiveDiscussionId(report.discussion_id);
+            refetchDiscussions();
+            if (report.already_imported) {
+              toast(t('disc.portability.importAlready'), 'info');
+            } else {
+              toast(
+                t(
+                  'disc.portability.importDone',
+                  report.imported_messages,
+                  report.imported_attachments,
+                  report.imported_tasks,
+                ),
+                report.conflicts.length > 0 ? 'warning' : 'success',
+              );
+            }
+          }}
           onClose={() => setSidebarOpen(false)}
           onContactAdd={handleContactAdd}
           onJoinByCode={handleJoinByCode}
@@ -2215,6 +2689,14 @@ export function DiscussionsPage({
                 setShowPlanPanel(false);
                 setShowSettingsPanel(prev => !prev);
               }}
+              showMessageSearch={showMessageSearch}
+              onToggleMessageSearch={() => {
+                if (showMessageSearch) {
+                  closeMessageSearch();
+                } else {
+                  setShowMessageSearch(true);
+                }
+              }}
               onToggleSidebar={() => setSidebarOpen(true)}
               onDelete={async (discId) => {
                 if (!confirm(t('disc.confirmDelete'))) return;
@@ -2230,7 +2712,7 @@ export function DiscussionsPage({
 
             {/* Messages + one shared utility panel side by side */}
             <div className="disc-messages-git-row">
-            <div className="disc-messages-col">
+            <div className="disc-messages-col" data-replying={!!replyTarget}>
 
             {/* 0.8.3 (#280) — Audit-running warning. When an audit
                 is in progress on the same project, Kronn has filtered
@@ -2336,6 +2818,68 @@ export function DiscussionsPage({
               </div>
             )}
 
+            {showMessageSearch && (
+              <div className="disc-message-search" role="search" data-testid="disc-message-search">
+                <Search size={14} aria-hidden="true" />
+                <input
+                  ref={messageSearchInputRef}
+                  type="search"
+                  value={messageSearchQuery}
+                  onChange={event => {
+                    setMessageSearchQuery(event.target.value);
+                    setMessageSearchIndex(0);
+                    setStickToBottom(false);
+                  }}
+                  onKeyDown={event => {
+                    if (event.key === 'Escape') {
+                      event.preventDefault();
+                      closeMessageSearch();
+                    } else if (event.key === 'Enter') {
+                      event.preventDefault();
+                      moveMessageSearch(event.shiftKey ? -1 : 1);
+                    }
+                  }}
+                  placeholder={t('disc.messageSearch.placeholder')}
+                  aria-label={t('disc.messageSearch.placeholder')}
+                />
+                <span className="disc-message-search-position" aria-live="polite">
+                  {deferredMessageSearchQuery
+                    ? messageSearchMatches.length > 0
+                      ? `${messageSearchIndex + 1} / ${messageSearchMatches.length}`
+                      : t('disc.messageSearch.empty')
+                    : t('disc.messageSearch.hint')}
+                </span>
+                <div className="disc-message-search-nav">
+                  <button
+                    type="button"
+                    onClick={() => moveMessageSearch(-1)}
+                    disabled={messageSearchMatches.length === 0}
+                    title={t('disc.messageSearch.previous')}
+                    aria-label={t('disc.messageSearch.previous')}
+                  >
+                    <ChevronUp size={14} />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => moveMessageSearch(1)}
+                    disabled={messageSearchMatches.length === 0}
+                    title={t('disc.messageSearch.next')}
+                    aria-label={t('disc.messageSearch.next')}
+                  >
+                    <ChevronDown size={14} />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={closeMessageSearch}
+                    title={t('disc.messageSearch.close')}
+                    aria-label={t('disc.messageSearch.close')}
+                  >
+                    <X size={14} />
+                  </button>
+                </div>
+              </div>
+            )}
+
             {/* Messages */}
             <div
               className="disc-messages"
@@ -2378,6 +2922,14 @@ export function DiscussionsPage({
                 // The algorithm itself lives in `groupMessagesWithToolFold`
                 // (pure fn, unit-tested in discussionMessageGrouping.test.ts) ;
                 // here we just map render items to React elements.
+                const messagesById = new Map(msgs.map(message => [message.id, message]));
+                const repliesByTarget = new Map<string, DiscussionMessage[]>();
+                for (const message of msgs) {
+                  if (!message.reply_to_message_id) continue;
+                  const replies = repliesByTarget.get(message.reply_to_message_id) ?? [];
+                  replies.push(message);
+                  repliesByTarget.set(message.reply_to_message_id, replies);
+                }
                 const items = groupMessagesWithToolFold(msgs, { isAutoPrompt });
                 return items.map(item => {
                   if (item.kind === 'tool-group') {
@@ -2385,6 +2937,7 @@ export function DiscussionsPage({
                       <ToolCallsGroup
                         key={`tools-${item.messages[0].id}`}
                         messages={item.messages}
+                        targetMessageId={globalSearchTarget?.messageId}
                         t={t}
                       />
                     );
@@ -2424,6 +2977,17 @@ export function DiscussionsPage({
                       projectId={activeDiscussion.project_id ?? null}
                       chainableQPs={chainableQPs}
                       onLaunchQp={qp => handleSendMessage(qp.prompt_template)}
+                      isSearchMatch={messageSearchMatches.some(match => match.messageId === msg.id)}
+                      isSearchCurrent={
+                        messageSearchMatches[messageSearchIndex]?.messageId === msg.id
+                        || globalSearchTarget?.messageId === msg.id
+                      }
+                      replyTarget={msg.reply_to_message_id
+                        ? messagesById.get(msg.reply_to_message_id) ?? null
+                        : null}
+                      replies={repliesByTarget.get(msg.id) ?? EMPTY_MESSAGES}
+                      onReply={handleMsgReply}
+                      onReplyNavigate={handleReplyNavigate}
                       t={t}
                     />
                   );
@@ -3068,7 +3632,7 @@ export function DiscussionsPage({
                 onClick={() => {
                   setStickToBottom(true);
                   setHasNewWhileScrolledUp(false);
-                  chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+                  scrollToBottomSettled();
                 }}
                 aria-label="Jump to latest message"
               >
@@ -3108,8 +3672,9 @@ export function DiscussionsPage({
                   onClick={() => {
                     setStickToBottom(true);
                     setHasNewWhileScrolledUp(false);
-                    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+                    scrollToBottomSettled();
                   }}
+                  data-testid="disc-scroll-to-bottom"
                 >
                   ↓
                 </button>
@@ -3184,7 +3749,19 @@ export function DiscussionsPage({
                   </div>
                   {queuedMessages.map(qm => (
                     <div key={qm.id} className="disc-queued-line">
-                      {qm.targetAgent && <span className="disc-queued-agent">@{qm.targetAgent}</span>}
+                      {qm.targets?.map(target => (
+                        <span
+                          key={`${target.kind}:${target.agent_type}:${target.cli_session_id ?? ''}`}
+                          className="disc-queued-agent"
+                        >
+                          @{target.agent_type}
+                        </span>
+                      ))}
+                      {qm.replyToMessageId && (
+                        <span className="disc-queued-agent">
+                          {t('disc.reply')} #{qm.replyToMessageId.slice(0, 8)}
+                        </span>
+                      )}
                       <span className="disc-queued-text">{qm.content}</span>
                       <button
                         type="button"
@@ -3218,6 +3795,10 @@ export function DiscussionsPage({
               ttsEnabled={ttsEnabled}
               ttsState={ttsState}
               worktreeError={worktreeError}
+              partialPending={partialPending?.discId === activeDiscussion.id}
+              partialForcing={partialForcing}
+              onPartialPendingForce={handlePartialPendingForce}
+              onPartialPendingDismiss={() => setPartialPending(null)}
               availableSkills={availableSkills}
               availableDirectives={availableDirectives}
               onSend={handleSendMessage}
@@ -3235,6 +3816,11 @@ export function DiscussionsPage({
               queuedQP={queuedQP}
               onQueueQP={queueQP}
               onCancelQueuedQP={cancelQueuedQP}
+              replyTarget={replyTarget}
+              onCancelReply={() => {
+                clearReplyDraft(activeDiscussion.id);
+                setReplyToMessageId(null);
+              }}
               toast={toast}
               t={t}
             />

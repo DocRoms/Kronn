@@ -50,8 +50,8 @@ describe('DiscParticipantsHeader — 0.8.6 phase 2', () => {
     });
     const chips = document.querySelectorAll('.disc-participant-chip');
     expect(chips.length).toBe(2);
-    expect(chips[0].textContent).toContain('ClaudeCode');
-    expect(chips[1].textContent).toContain('Codex');
+    expect(chips[0].textContent).toContain('@claude · disc.targetCli');
+    expect(chips[1].textContent).toContain('@codex · disc.targetCli');
   });
 
   it('shows only an explicitly declared JOIN model and labels it as join metadata', async () => {
@@ -79,6 +79,68 @@ describe('DiscParticipantsHeader — 0.8.6 phase 2', () => {
     expect(document.body.textContent).not.toContain('undefined');
   });
 
+  it('copies the exact native resume command only when the CLI exposes an id', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    });
+    (discussionsApi.participants as ReturnType<typeof vi.fn>).mockResolvedValue([
+      {
+        id: 1, agent_type: 'ClaudeCode',
+        conversation_id: '11111111-1111-4111-8111-111111111111',
+        session_id: 'bridge-A', role: 'peer', status: 'active',
+      },
+      {
+        id: 2, agent_type: 'Codex',
+        conversation_id: '22222222-2222-4222-8222-222222222222',
+        session_id: 'bridge-B', role: 'peer', status: 'active',
+      },
+      {
+        id: 3, agent_type: 'GeminiCli',
+        conversation_id: null,
+        session_id: 'bridge-C', role: 'peer', status: 'active',
+      },
+    ]);
+    await act(async () => {
+      render(<DiscParticipantsHeader discId="d-resume" toast={toast} t={t} />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const resumeButtons = Array.from(
+      document.querySelectorAll('button.disc-participant-resume'),
+    ) as HTMLButtonElement[];
+    expect(resumeButtons).toHaveLength(2);
+
+    await act(async () => {
+      fireEvent.click(resumeButtons[0]);
+      fireEvent.click(resumeButtons[1]);
+      await Promise.resolve();
+    });
+    expect(writeText).toHaveBeenNthCalledWith(
+      1,
+      'claude --resume 11111111-1111-4111-8111-111111111111',
+    );
+    expect(writeText).toHaveBeenNthCalledWith(
+      2,
+      'codex resume 22222222-2222-4222-8222-222222222222',
+    );
+  });
+
+  it('does not invent a resume button for unsupported agents or a missing id', async () => {
+    (discussionsApi.participants as ReturnType<typeof vi.fn>).mockResolvedValue([
+      { id: 1, agent_type: 'ClaudeCode', conversation_id: null, session_id: 'a', role: 'peer', status: 'active' },
+      { id: 2, agent_type: 'GeminiCli', conversation_id: '33333333-3333-4333-8333-333333333333', session_id: 'b', role: 'peer', status: 'active' },
+    ]);
+    await act(async () => {
+      render(<DiscParticipantsHeader discId="d-no-resume" toast={toast} t={t} />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(document.querySelector('.disc-participant-resume')).toBeNull();
+  });
+
   it('renders paused participants with the paused style attribute', async () => {
     // Visual differentiation : the chip has `data-status="paused"`,
     // CSS turns it grey. The test checks the attribute rather than
@@ -103,7 +165,8 @@ describe('DiscParticipantsHeader — 0.8.6 phase 2', () => {
       disc_id: 'd-4',
       expires_at: '2026-05-21T10:00:00Z',
       ttl_seconds: 600,
-      instruction_text: 'Join Kronn discussion: disc_join({token: "kr-join-abc"})',
+      instruction_text: 'Join Kronn discussion: disc_join({token: "kr-join-abc"})\nlis le plan avec plan_get',
+      instruction_text_minimal: 'Join Kronn discussion: disc_join({token: "kr-join-abc"})',
     });
     await act(async () => {
       render(<DiscParticipantsHeader discId="d-4" toast={toast} t={t} />);
@@ -124,6 +187,42 @@ describe('DiscParticipantsHeader — 0.8.6 phase 2', () => {
     expect(pre!.textContent).toContain('kr-join-abc');
     expect(pre!.textContent).toContain('disc_join');
     expect(discussionsApi.invitePeer).toHaveBeenCalledWith('d-4');
+  });
+
+  /// KT-52 — the enriched handoff must be what the human copies by default;
+  /// dropping to the bare call is a deliberate, reversible choice.
+  it('offers the enriched handoff by default and can fall back to the bare call', async () => {
+    (discussionsApi.participants as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+    (discussionsApi.invitePeer as ReturnType<typeof vi.fn>).mockResolvedValue({
+      token: 'kr-join-xyz',
+      disc_id: 'd-5',
+      expires_at: '2026-05-21T10:00:00Z',
+      ttl_seconds: 600,
+      instruction_text: 'disc_join({token: "kr-join-xyz"})\nlis le plan avec plan_get\nreste en écoute',
+      instruction_text_minimal: 'disc_join({token: "kr-join-xyz"})',
+    });
+    await act(async () => {
+      render(<DiscParticipantsHeader discId="d-5" toast={toast} t={t} />);
+      await Promise.resolve();
+    });
+    await act(async () => {
+      fireEvent.click(document.querySelector('.disc-participants-invite-btn') as HTMLButtonElement);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const shown = () => document.querySelector('[data-testid="disc-invite-instruction"]')!.textContent!;
+    const toggle = document.querySelector('[data-testid="disc-invite-handoff-toggle"]') as HTMLInputElement;
+    expect(toggle.checked).toBe(true);
+    expect(shown()).toContain('plan_get');
+
+    await act(async () => { fireEvent.click(toggle); });
+    expect(shown()).not.toContain('plan_get');
+    expect(shown()).toContain('kr-join-xyz');
+
+    // And back: the choice isn't a one-way door.
+    await act(async () => { fireEvent.click(toggle); });
+    expect(shown()).toContain('plan_get');
   });
 
   it('toasts an error when the invite-peer call fails', async () => {

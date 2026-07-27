@@ -1,10 +1,10 @@
 /**
  * Guided tour ("présentation mode") — E2E coverage.
  *
- * The tour is the first-run onboarding overlay: 17 steps spanning Projects →
+ * The tour is the first-run onboarding overlay: 24 steps spanning Projects →
  * Plugins → Discussions → Automation → Config. It auto-launches 800 ms after
- * mount when `localStorage['kronn:tour-completed']` is unset, and persists
- * the current step under `kronn:tour-step` so a refresh resumes mid-flow.
+ * mount for a genuinely new user and persists versioned progress so an
+ * interrupted walkthrough can be resumed explicitly from Settings.
  *
  * The default kronn-fixture pre-marks the tour as completed so other specs
  * are not intercepted by the welcome modal. This file deliberately uses the
@@ -13,18 +13,19 @@
  *
  * Coverage targets:
  *   - Auto-launch on first visit (no flag) and welcome step renders.
- *   - Skip persists the completion flag → no re-launch on refresh.
+ *   - Skip persists resumable progress → no unsolicited re-launch on refresh.
  *   - Forward navigation via the Next button advances the step counter.
  *   - Escape key dismisses the overlay.
  *   - Help button (?) replays the tour from step 0 even after completion.
- *   - Resume from a saved step when the completion flag is missing.
+ *   - Legacy partial progress migrates and resumes from the Settings CTA.
  */
 
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
 import { stubBootEndpoints } from '../fixtures/api-stubs';
 
-const STORAGE_KEY = 'kronn:tour-completed';
-const STEP_KEY = 'kronn:tour-step';
+const PROGRESS_KEY = 'kronn:tour-progress:v1';
+const LEGACY_COMPLETED_KEY = 'kronn:tour-completed';
+const LEGACY_STEP_KEY = 'kronn:tour-step';
 const AUTO_START_DELAY = 800;
 
 test.beforeEach(async ({ page }) => {
@@ -36,14 +37,19 @@ test.beforeEach(async ({ page }) => {
 // re-runs on every navigation, which causes the Skip-then-reload test to
 // fail (the post-Skip flag gets wiped on reload). page.evaluate is one-shot
 // and survives reloads within the same context.
-async function freshTourState(page: import('@playwright/test').Page) {
+async function freshTourState(page: Page) {
   await page.goto('/');
-  await page.evaluate(({ doneKey, stepKey }) => {
+  await page.evaluate(({ progressKey, doneKey, stepKey }) => {
     try {
+      window.localStorage.removeItem(progressKey);
       window.localStorage.removeItem(doneKey);
       window.localStorage.removeItem(stepKey);
     } catch { /* incognito / disabled storage */ }
-  }, { doneKey: STORAGE_KEY, stepKey: STEP_KEY });
+  }, {
+    progressKey: PROGRESS_KEY,
+    doneKey: LEGACY_COMPLETED_KEY,
+    stepKey: LEGACY_STEP_KEY,
+  });
   await page.reload();
 }
 
@@ -54,7 +60,7 @@ async function freshTourState(page: import('@playwright/test').Page) {
 // to be visible (= Dashboard mounted) before we start counting.
 const TOOLTIP_TIMEOUT = AUTO_START_DELAY + 4_000;
 
-async function waitForDashboardMounted(page: import('@playwright/test').Page) {
+async function waitForDashboardMounted(page: Page) {
   await page.locator('[data-tour-id="nav-projects"]').waitFor({ state: 'visible', timeout: 10_000 });
 }
 
@@ -70,7 +76,7 @@ test.describe('Guided tour — first launch', () => {
     await expect(tooltip.locator('.tour-step-counter')).toContainText('1 / ');
   });
 
-  test('Skip button persists kronn:tour-completed and prevents re-launch', async ({ page }) => {
+  test('Skip preserves resumable progress and prevents unsolicited re-launch', async ({ page }) => {
     await freshTourState(page);
     await waitForDashboardMounted(page);
     const tooltip = page.getByRole('dialog').filter({ has: page.locator('.tour-step-counter') });
@@ -79,11 +85,18 @@ test.describe('Guided tour — first launch', () => {
     await tooltip.locator('.tour-btn-skip').click();
     await expect(tooltip).toBeHidden();
 
-    // Flag set in localStorage.
-    const flag = await page.evaluate((k) => window.localStorage.getItem(k), STORAGE_KEY);
-    expect(flag).toBe('true');
+    const progress = await page.evaluate((k) => {
+      const raw = window.localStorage.getItem(k);
+      return raw ? JSON.parse(raw) : null;
+    }, PROGRESS_KEY);
+    expect(progress).toMatchObject({
+      completedStepIds: [],
+      currentStepId: 'welcome',
+      hasStarted: true,
+    });
 
-    // Reload — the auto-launch effect must short-circuit on the flag.
+    // Reload — an interruption remains available from Settings, but must not
+    // unexpectedly take over the application again.
     await page.reload();
     await waitForDashboardMounted(page);
     await page.waitForTimeout(AUTO_START_DELAY + 500);
@@ -116,7 +129,7 @@ test.describe('Guided tour — first launch', () => {
 test.describe('Guided tour — replay', () => {
   test('Help button (?) replays the tour from step 0 even after completion', async ({ page }) => {
     // Pre-mark completed so auto-launch is suppressed.
-    await page.addInitScript((k) => { window.localStorage.setItem(k, 'true'); }, STORAGE_KEY);
+    await page.addInitScript((k) => { window.localStorage.setItem(k, 'true'); }, LEGACY_COMPLETED_KEY);
     await page.goto('/');
     await page.waitForTimeout(AUTO_START_DELAY + 200);
 
@@ -134,19 +147,24 @@ test.describe('Guided tour — replay', () => {
     await expect(tooltip.locator('.tour-step-counter')).toContainText('1 / ');
   });
 
-  test('resumes from a saved step when the completion flag is missing', async ({ page }) => {
-    // The provider's auto-resume picks up `kronn:tour-step` when the
-    // completion flag is absent. We seed step 2 (welcome=0, concept=1,
-    // scan=2) and let the auto-launch read it.
+  test('migrates legacy partial progress and resumes it from Settings', async ({ page }) => {
+    // Seed the old step-index format. The provider must migrate it without
+    // auto-opening the overlay, then expose the explicit resume CTA.
     await page.addInitScript(([key]) => {
       window.localStorage.setItem(key, '2');
-    }, [STEP_KEY]);
+    }, [LEGACY_STEP_KEY]);
 
     await page.goto('/');
     const tooltip = page.getByRole('dialog').filter({ has: page.locator('.tour-step-counter') });
-    await expect(tooltip).toBeVisible({ timeout: AUTO_START_DELAY + 4_000 });
-    // After the resume kick (300 ms page wait + 2 s waitForElement), the
-    // counter should reach the resume step (3 / 17 = 1-indexed of step 2).
+    await page.waitForTimeout(AUTO_START_DELAY + 500);
+    await expect(tooltip).toHaveCount(0);
+
+    await page.locator('[data-tour-id="nav-settings"]').click();
+    const cta = page.locator('[data-testid="settings-tour-progress"]:visible');
+    await expect(cta).toBeVisible();
+    await cta.click();
+
+    await expect(tooltip).toBeVisible({ timeout: 5_000 });
     await expect(tooltip.locator('.tour-step-counter')).toContainText('3 / ', { timeout: 5_000 });
   });
 });

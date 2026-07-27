@@ -111,6 +111,8 @@ pub async fn start_briefing(
         author_avatar_email: None,
         source_msg_id: None,
         duration_ms: None,
+        target_agent: None,
+        reply_to_message_id: None,
     };
 
     let title = match language.as_str() {

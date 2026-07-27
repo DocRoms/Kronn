@@ -65,7 +65,9 @@ pub async fn get_status(State(state): State<AppState>) -> Json<ApiResponse<Setup
         // Cached: the boot hits this on every dashboard load and the frontend
         // blocks on it — an uncached sweep spawns `<binary> --version` per
         // agent and froze the app under concurrent-agent load.
-        let agents_detected = agents::detect_all_cached(false).await;
+        let mut agents_detected = agents::detect_all_cached(false).await;
+        let config = state.config.read().await;
+        agents::apply_configured_status(&mut agents_detected, &config);
         return Json(ApiResponse::ok(SetupStatus {
             is_first_run: false,
             current_step: SetupStep::Complete,
@@ -99,13 +101,16 @@ pub async fn get_status(State(state): State<AppState>) -> Json<ApiResponse<Setup
     let scan_timeout = if has_wsl_paths { 15 } else { 5 };
 
     // Parallel: detect agents + scan repos simultaneously
-    let (agents_detected, repos_result) = tokio::join!(
+    let (mut agents_detected, repos_result) = tokio::join!(
         agents::detect_all_cached(false),
         tokio::time::timeout(
             std::time::Duration::from_secs(scan_timeout),
             scanner::scan_paths_with_depth(&scan_paths, &scan_ignore, scan_depth),
         )
     );
+    let config = state.config.read().await;
+    agents::apply_configured_status(&mut agents_detected, &config);
+    drop(config);
 
     let repos_detected = repos_result
         .unwrap_or_else(|_| {
@@ -685,6 +690,51 @@ pub async fn set_agent_access(
     match config::save(&config).await {
         Ok(_) => Json(ApiResponse::ok(())),
         Err(e) => Json(ApiResponse::err(format!("Failed to save: {}", e))),
+    }
+}
+
+fn normalize_mention_color(color: Option<&str>) -> Result<Option<String>, &'static str> {
+    let Some(color) = color.map(str::trim).filter(|color| !color.is_empty()) else {
+        return Ok(None);
+    };
+    if color.len() != 7
+        || !color.starts_with('#')
+        || !color[1..].bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err("Mention color must use the #RRGGBB format");
+    }
+    Ok(Some(color.to_ascii_lowercase()))
+}
+
+/// POST /api/config/agent-mention-color
+/// Set (or reset) the color used by the UI for a canonical agent mention.
+pub async fn set_agent_mention_color(
+    State(state): State<AppState>,
+    Json(req): Json<SetAgentMentionColorRequest>,
+) -> Json<ApiResponse<()>> {
+    let color = match normalize_mention_color(req.color.as_deref()) {
+        Ok(color) => color,
+        Err(message) => return Json(ApiResponse::err(message)),
+    };
+    let mut config = state.config.write().await;
+    let agent = match req.agent {
+        AgentType::ClaudeCode => &mut config.agents.claude_code,
+        AgentType::Codex => &mut config.agents.codex,
+        AgentType::GeminiCli => &mut config.agents.gemini_cli,
+        AgentType::Kiro => &mut config.agents.kiro,
+        AgentType::Vibe => &mut config.agents.vibe,
+        AgentType::CopilotCli => &mut config.agents.copilot_cli,
+        AgentType::Ollama => &mut config.agents.ollama,
+        AgentType::Custom => {
+            return Json(ApiResponse::err(
+                "Custom agents do not have a configurable mention color",
+            ))
+        }
+    };
+    agent.mention_color = color;
+    match config::save(&config).await {
+        Ok(_) => Json(ApiResponse::ok(())),
+        Err(error) => Json(ApiResponse::err(format!("Failed to save: {error}"))),
     }
 }
 
@@ -3051,5 +3101,26 @@ debug_mode = false
             "middle bytes must NOT appear in mask"
         );
         assert!(masked.contains("tail"), "last 4 must be visible");
+    }
+
+    #[test]
+    fn mention_color_accepts_and_normalizes_rgb_hex() {
+        assert_eq!(
+            normalize_mention_color(Some("  #A1b2C3  ")),
+            Ok(Some("#a1b2c3".into()))
+        );
+    }
+
+    #[test]
+    fn mention_color_empty_or_absent_restores_default() {
+        assert_eq!(normalize_mention_color(None), Ok(None));
+        assert_eq!(normalize_mention_color(Some("  ")), Ok(None));
+    }
+
+    #[test]
+    fn mention_color_rejects_non_rgb_css_values() {
+        for invalid in ["red", "#fff", "#12345678", "123456", "#12gg56"] {
+            assert!(normalize_mention_color(Some(invalid)).is_err(), "{invalid}");
+        }
     }
 }

@@ -1167,9 +1167,14 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, on
                                       ? <button
                                           type="button"
                                           className="wf-subrun-link"
-                                          onClick={() => onNavigateToRun
-                                            ? onNavigateToRun(childWorkflowId, it.child_run_id!)
-                                            : onNavigateToWorkflow!(childWorkflowId)}
+                                          onClick={() => {
+                                            const childRunId = it.child_run_id;
+                                            if (onNavigateToRun && childRunId) {
+                                              onNavigateToRun(childWorkflowId, childRunId);
+                                            } else {
+                                              onNavigateToWorkflow?.(childWorkflowId);
+                                            }
+                                          }}
                                           title={t('wf.openSubRun')}
                                         >{it.child_run_id.slice(0, 8)}… ↗</button>
                                       : `${it.child_run_id.slice(0, 8)}…`)

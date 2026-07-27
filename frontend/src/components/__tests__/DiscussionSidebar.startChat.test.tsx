@@ -58,14 +58,23 @@ const baseProps = {
 describe('DiscussionSidebar — click contact to start chat', () => {
   beforeEach(() => vi.clearAllMocks());
 
-  it('clicking the contact row fires onStartChat with that contact', () => {
+  it('clicking the contact identity fires onStartChat with that contact', () => {
     const onStartChat = vi.fn();
     render(<DiscussionSidebar {...baseProps} onStartChat={onStartChat} />);
-    const row = document.querySelector('.disc-contact-row') as HTMLElement;
-    expect(row).not.toBeNull();
-    act(() => { fireEvent.click(row); });
+    const open = document.querySelector('.disc-contact-open') as HTMLElement;
+    expect(open).not.toBeNull();
+    // A real button, so it is focusable and Enter/Space work — the previous
+    // `div role="button"` announced a button it could not deliver.
+    expect(open.tagName).toBe('BUTTON');
+    act(() => { fireEvent.click(open); });
     expect(onStartChat).toHaveBeenCalledTimes(1);
     expect(onStartChat).toHaveBeenCalledWith(expect.objectContaining({ id: 'c-romu', pseudo: 'Romu' }));
+  });
+
+  it('the delete button is not nested inside the identity button', () => {
+    render(<DiscussionSidebar {...baseProps} onStartChat={vi.fn()} />);
+    const del = document.querySelector('.disc-contact-del-btn') as HTMLElement;
+    expect(del.closest('.disc-contact-open')).toBeNull();
   });
 
   it('clicking the delete (X) button does NOT start a chat', () => {
@@ -83,5 +92,8 @@ describe('DiscussionSidebar — click contact to start chat', () => {
     render(<DiscussionSidebar {...baseProps} />);
     const row = document.querySelector('.disc-contact-row') as HTMLElement;
     expect(row.getAttribute('role')).toBeNull();
+    // No button at all rather than an inert one: nothing to focus, nothing to
+    // announce as actionable.
+    expect(document.querySelector('.disc-contact-open')!.tagName).toBe('SPAN');
   });
 });

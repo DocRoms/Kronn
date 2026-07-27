@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { AgentType } from '../types/generated';
+import type { MessageTarget } from '../types/generated';
 
 /** A free-text message the user typed while the agent was still streaming. */
 export interface QueuedMessage {
   id: string;
   content: string;
-  targetAgent?: AgentType;
+  targets?: MessageTarget[];
+  targetAll?: boolean;
+  replyToMessageId?: string;
 }
 
 let _seq = 0;
@@ -41,7 +43,12 @@ export function useMessageQueue({
 }: {
   discId: string | null;
   sending: boolean;
-  onFire: (content: string, targetAgent?: AgentType) => void;
+  onFire: (
+    content: string,
+    targets?: MessageTarget[],
+    targetAll?: boolean,
+    replyToMessageId?: string,
+  ) => void;
 }) {
   const [queue, setQueue] = useState<QueuedMessage[]>([]);
   const queueRef = useRef<QueuedMessage[]>([]);
@@ -73,20 +80,41 @@ export function useMessageQueue({
     const q = queueRef.current;
     if (q.length === 0) return;
     // Parts are sent TOGETHER (one turn → one response). Blank-line separator
-    // so the agent reads them as a clear multi-point message. The target agent
-    // is the first explicit @mention among the parts (falls back to the disc
-    // default when none).
+    // so the agent reads them as a clear multi-point message. Preserve every
+    // explicit target in queue order, once each.
     const merged = q.map(m => m.content).join('\n\n');
-    const targetAgent = q.find(m => m.targetAgent)?.targetAgent;
+    const targets = q
+      .flatMap(message => message.targets ?? [])
+      .filter((target, index, all) => {
+        const identity = `${target.kind}:${target.agent_type}:${target.cli_session_id ?? ''}`;
+        return all.findIndex(candidate =>
+          `${candidate.kind}:${candidate.agent_type}:${candidate.cli_session_id ?? ''}` === identity
+        ) === index;
+      });
+    const targetAll = q.some(message => message.targetAll);
+    const replyToMessageId = q.find(m => m.replyToMessageId)?.replyToMessageId;
     // Clear BEFORE firing so the next run's edge doesn't re-read these parts.
     setBoth([]);
-    onFireRef.current?.(merged, targetAgent);
+    onFireRef.current?.(
+      merged,
+      targets.length > 0 ? targets : undefined,
+      targetAll || undefined,
+      replyToMessageId,
+    );
   }, [sending, setBoth]);
 
-  const enqueue = useCallback((content: string, targetAgent?: AgentType) => {
+  const enqueue = useCallback((
+    content: string,
+    targets?: MessageTarget[],
+    targetAll?: boolean,
+    replyToMessageId?: string,
+  ) => {
     const trimmed = content.trim();
     if (!trimmed) return;
-    setBoth([...queueRef.current, { id: nextId(), content: trimmed, targetAgent }]);
+    setBoth([
+      ...queueRef.current,
+      { id: nextId(), content: trimmed, targets, targetAll, replyToMessageId },
+    ]);
   }, [setBoth]);
 
   const removeQueued = useCallback((id: string) => {

@@ -261,6 +261,9 @@ pub struct ScriptedProcess {
     pub killed: bool,
     /// Pre-canned stderr returned by `captured_stderr_flushed`.
     stderr: Vec<String>,
+    /// `next_line` never resolves — the only way to reach a deadline branch in a
+    /// test, since a drained scripted stream ends the loop normally.
+    hangs_forever: bool,
 }
 
 #[cfg(test)]
@@ -276,6 +279,7 @@ impl ScriptedProcess {
             },
             killed: false,
             stderr: Vec::new(),
+            hangs_forever: false,
         }
     }
 
@@ -290,6 +294,7 @@ impl ScriptedProcess {
             },
             killed: false,
             stderr: Vec::new(),
+            hangs_forever: false,
         }
     }
 
@@ -304,12 +309,27 @@ impl ScriptedProcess {
         self.stderr = lines.into_iter().map(Into::into).collect();
         self
     }
+
+    /// A process that produces nothing and never exits, so the caller's deadline
+    /// is the only thing that can end the loop. Pair with a paused Tokio clock.
+    pub fn hanging() -> Self {
+        let mut process = Self::raw(Vec::<String>::new());
+        process.hangs_forever = true;
+        process.exit = AgentExit {
+            success: false,
+            code: None,
+        };
+        process
+    }
 }
 
 #[cfg(test)]
 #[async_trait::async_trait]
 impl AgentIo for ScriptedProcess {
     async fn next_line(&mut self) -> Option<String> {
+        if self.hangs_forever {
+            std::future::pending::<()>().await;
+        }
         self.lines.pop_front()
     }
     fn output_mode(&self) -> OutputMode {
@@ -323,11 +343,12 @@ impl AgentIo for ScriptedProcess {
     }
     fn try_wait(&mut self) -> Option<AgentExit> {
         // Mirror real semantics: "exited" only once the scripted stream is
-        // drained ; otherwise "still running" (None).
-        if self.lines.is_empty() {
-            Some(self.exit)
-        } else {
+        // drained ; otherwise "still running" (None). A hanging fake is still
+        // running by definition, drained queue or not.
+        if self.hangs_forever || !self.lines.is_empty() {
             None
+        } else {
+            Some(self.exit)
         }
     }
     fn child_id(&self) -> Option<u32> {
@@ -1837,7 +1858,7 @@ fn agent_command(
             // causing "Permission denied" on CWD listing with default sandbox.
             // On macOS Docker, workspace-write can block shell/apply_patch writes
             // despite rw mounts; prefer danger-full-access there.
-            if std::env::var("KRONN_HOST_HOME").is_ok() {
+            if std::env::var("KRONN_HOST_HOME").is_ok() || full_access {
                 // Inside the Docker container, Codex's bwrap sandbox can NEVER
                 // initialize: unprivileged user namespaces are blocked
                 // (`bwrap: No permissions to create new namespace`, verified
@@ -1845,8 +1866,10 @@ fn agent_command(
                 // emitted a false NEEDS_RETRIAGE). workspace-write is therefore
                 // structurally broken in Docker on every OS, not just macOS;
                 // the container + git worktree ARE the isolation boundary.
+                // On native installs, honour the user's explicit full-access
+                // setting instead of silently leaving Codex in its default
+                // read-only sandbox.
                 args.push("--sandbox=danger-full-access".into());
-                let _ = full_access; // access level is enforced by the container
             }
             // Codex has no system prompt flag — prepend context to the prompt
             let full_prompt = if mcp_context.is_empty() {

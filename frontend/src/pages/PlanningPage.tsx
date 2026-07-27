@@ -19,6 +19,7 @@ import { planning } from '../lib/api';
 import { useT } from '../lib/I18nContext';
 import { userError } from '../lib/userError';
 import { CopyIdPill } from '../components/CopyIdPill';
+import { ContextHelp } from '../components/ContextHelp';
 import type { ToastFn } from '../hooks/useToast';
 import type {
   Discussion,
@@ -271,7 +272,18 @@ export function PlanningPage({
     <div className="planning-page">
       <header className="planning-header">
         <div>
-          <h1><Target size={20} /> {t('planning.title')}</h1>
+          <div className="kr-context-help-title-row">
+            <h1><Target size={20} /> {t('planning.title')}</h1>
+            <ContextHelp title={t('contextHelp.planning.title')}>
+              <p>{t('contextHelp.planning.intro')}</p>
+              <ul>
+                <li>{t('contextHelp.planning.global')}</li>
+                <li>{t('contextHelp.planning.discussions')}</li>
+                <li>{t('contextHelp.planning.priority')}</li>
+              </ul>
+              <p className="kr-context-help-agent-note">{t('contextHelp.planning.mcp')}</p>
+            </ContextHelp>
+          </div>
           <p>{t('planning.subtitle')}</p>
         </div>
         <div className="planning-summary">
@@ -422,7 +434,7 @@ export function PlanningPage({
         </main>
 
         {(selectedId || detailLoading) && (
-          <aside className="planning-detail">
+          <aside className="planning-detail" aria-label={t('planning.taskActions')}>
             <header>
               {detail && (
                 <CopyIdPill
@@ -431,11 +443,11 @@ export function PlanningPage({
                   title={t('planning.copyTaskId', detail.reference)}
                 />
               )}
-              <button type="button" onClick={() => {
+              <button type="button" className="planning-detail-close" onClick={() => {
                 setSelectedId(null);
                 setDetail(null);
                 setDetailLoading(false);
-              }}><X size={16} /></button>
+              }} aria-label={t('common.close')}><X size={16} /></button>
             </header>
             {detailLoading && <div className="planning-state"><Loader2 size={16} className="spin" /></div>}
             {detail && (

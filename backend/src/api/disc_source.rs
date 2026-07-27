@@ -35,6 +35,9 @@ use uuid::Uuid;
 use crate::models::*;
 use crate::AppState;
 
+use super::discussions::messaging::canonical_targets;
+use super::discussions::routing::{route_human_turn, route_joined_peer_turn, DispatchRoute};
+
 /// Body of `POST /api/disc/create`. The triple `(source_agent,
 /// source_session_id, project_id)` is enough to disambiguate: if a
 /// disc already exists for the (agent, session) pair, we return its
@@ -190,11 +193,20 @@ pub struct DiscAppendMessage {
     pub content: String,
     #[serde(default)]
     pub agent_type: Option<AgentType>,
+    /// Authoritative responder identities for this live peer turn. This is the
+    /// same typed model as human messages, so `@codex` (native) and one exact
+    /// joined Codex CLI session are never conflated.
+    #[serde(default)]
+    pub targets: Vec<MessageTarget>,
     /// Explicit one-shot responder requested by a structured `@agent`
-    /// mention. The append transaction consumes this as a durable dispatch
-    /// override; ordinary prose must leave it unset.
+    /// mention. Compatibility projection for older bridges; new callers use
+    /// `targets`.
     #[serde(default)]
     pub target_agent: Option<AgentType>,
+    /// Durable id of an existing message in this same discussion. Message ids
+    /// are opaque (federated peers may use non-UUID ids).
+    #[serde(default)]
+    pub reply_to_message_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, TS)]
@@ -232,10 +244,9 @@ pub struct DiscAppendResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub lint: Option<AppendLintSummary>,
-    /// `sort_order` of the LAST appended message (stab-1). Long-polling
-    /// callers must pass it as `since_sort_order` instead of estimating
-    /// their position — estimates drift under concurrent posters and made
-    /// agents silently skip messages. `None` when nothing was appended.
+    /// `sort_order` of the LAST appended message (stab-1). This is a write
+    /// receipt, not a read cursor: another message may have landed between
+    /// the caller's last read and this append. `None` when nothing was appended.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub last_sort_order: Option<i64>,
@@ -261,6 +272,46 @@ pub async fn disc_append(
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
 
+    // Validate every reply before inserting anything so a malformed bulk call
+    // cannot partially append. The relation always targets an already durable
+    // local message; bulk transcript remapping belongs to portable import.
+    let reply_targets = req
+        .messages
+        .iter()
+        .filter_map(|message| message.reply_to_message_id.clone())
+        .collect::<Vec<_>>();
+    if !reply_targets.is_empty() {
+        let did = req.disc_id.clone();
+        let missing = state
+            .db
+            .with_conn(move |conn| {
+                let mut statement = conn.prepare(
+                    "SELECT EXISTS(
+                         SELECT 1 FROM messages
+                         WHERE id = ?1 AND discussion_id = ?2
+                     )",
+                )?;
+                for target in reply_targets {
+                    let exists = statement
+                        .query_row(rusqlite::params![target, did], |row| row.get::<_, bool>(0))?;
+                    if !exists {
+                        return Ok(Some(target));
+                    }
+                }
+                Ok(None)
+            })
+            .await;
+        match missing {
+            Ok(Some(target)) => {
+                return Json(ApiResponse::err(format!(
+                    "Reply target `{target}` not found in this discussion"
+                )));
+            }
+            Ok(None) => {}
+            Err(error) => return Json(ApiResponse::err(format!("DB error: {error}"))),
+        }
+    }
+
     // 0.8.4 (#294) — `diverged_at` lives on the table but NOT on the
     // `Discussion` struct (see migration 054 + the model comment).
     // Read the column directly so we can warn the caller their import
@@ -280,68 +331,92 @@ pub async fn disc_append(
     // so the posting agent can self-correct.
     let live_agent_append =
         req.messages.len() == 1 && matches!(req.messages[0].role, MessageRole::Agent);
-    let live_peer_should_dispatch = if live_agent_append && req.session_id.is_some() {
-        let did = req.disc_id.clone();
-        let native_agent = format!("{:?}", disc.agent);
-        state
-            .db
-            .with_conn(move |conn| {
-                let no_agent = crate::db::discussions::disc_is_no_agent(conn, &did)?;
-                let native_agent_live =
-                    crate::db::discussion_sessions::count_live_participants_for_agent(
-                        conn,
-                        &did,
-                        &native_agent,
-                    )?;
-                Ok(!no_agent && native_agent_live == 0)
-            })
-            .await
-            // A presence lookup failure must not create a duplicate native
-            // responder. The joined peer's message is still persisted.
-            .unwrap_or(false)
+    // KT-116 — live peer turns now carry the same durable identities as human
+    // turns. The compatibility `target_agent` field is projected to one native
+    // target only when an older bridge did not send `targets`.
+    let routing_candidate = live_agent_append && req.session_id.is_some();
+    let requested_targets = if routing_candidate && !req.messages[0].targets.is_empty() {
+        match canonical_targets(&state, &req.disc_id, req.messages[0].targets.clone(), false).await
+        {
+            Ok(targets) => targets,
+            Err(error) => return Json(ApiResponse::err(error)),
+        }
     } else {
-        false
+        Vec::new()
     };
-    // Structured `@agent` mention (0.9.2-G): a live peer append carrying an
-    // explicit `target_agent` requests THAT agent. Anti-loop: the field is set
-    // by the bridge from a structured mention, never inferred from prose, and
-    // a self-mention is dropped.
-    let requested_target: Option<AgentType> = if live_agent_append && req.session_id.is_some() {
+    let legacy_requested_target = if routing_candidate && requested_targets.is_empty() {
         req.messages[0]
             .target_agent
             .clone()
-            .filter(|t| req.messages[0].agent_type.as_ref() != Some(t))
+            .filter(|target| req.messages[0].agent_type.as_ref() != Some(target))
     } else {
         None
     };
-    // A target that already has a joined peer must answer through that peer:
-    // spawning a second native runtime would create the exact double-responder
-    // the sticky gate prevents. Only an ABSENT target gets the durable one-shot
-    // obligation (so @ollama still works when no Ollama peer is present).
-    // Lookup failures fail closed to peer ownership — duplicate replies are
-    // worse than leaving an explicit mention for the existing room members.
-    let targeted_agent = if let Some(target) = requested_target.clone() {
-        let did = req.disc_id.clone();
-        let target_name = format!("{target:?}");
-        let target_is_live = state
-            .db
-            .with_conn(move |conn| {
-                crate::db::discussion_sessions::count_live_participants_for_agent(
-                    conn,
-                    &did,
-                    &target_name,
-                )
-            })
-            .await
-            .map(|count| count > 0)
-            .unwrap_or(true);
-        (!target_is_live).then_some(target)
+    // Resolve the whole presence snapshot in one DB turn, then feed the pure
+    // shared routing policy. On lookup failure we fail closed as a no-agent
+    // room: this live MCP caller is already a proven peer, so duplicate native
+    // responders are worse than leaving the turn to peers that have the
+    // message. This is deliberately asymmetric with the human HTTP path, where
+    // no proven peer owner means falling back to the durable local runner.
+    let (no_agent_room, native_principal_is_eligible, legacy_target_is_eligible) =
+        if routing_candidate {
+            let did = req.disc_id.clone();
+            let native_agent = format!("{:?}", disc.agent);
+            let legacy_target = legacy_requested_target
+                .as_ref()
+                .map(|target| format!("{target:?}"));
+            state
+                .db
+                .with_conn(move |conn| {
+                    let no_agent = crate::db::discussions::disc_is_no_agent(conn, &did)?;
+                    let native_eligible =
+                        crate::db::discussion_sessions::count_eligible_responders_for_agent(
+                            conn,
+                            &did,
+                            &native_agent,
+                        )? > 0;
+                    let target_eligible = match legacy_target {
+                        Some(target) => {
+                            crate::db::discussion_sessions::count_eligible_responders_for_agent(
+                                conn, &did, &target,
+                            )? > 0
+                        }
+                        None => false,
+                    };
+                    Ok((no_agent, native_eligible, target_eligible))
+                })
+                .await
+                .unwrap_or((true, false, true))
+        } else {
+            (true, false, false)
+        };
+    let dispatch_routes = if requested_targets.is_empty() {
+        vec![route_joined_peer_turn(
+            routing_candidate,
+            no_agent_room,
+            legacy_requested_target.as_ref(),
+            legacy_target_is_eligible,
+            native_principal_is_eligible,
+        )]
     } else {
-        None
+        requested_targets
+            .iter()
+            .map(|target| route_human_turn(no_agent_room, Some(target)))
+            .collect::<Vec<_>>()
     };
-    // Any explicit target supersedes the native-principal fallback, including
-    // when its live peer owns the reply and no dispatch row is needed.
-    let native_should_dispatch = live_peer_should_dispatch && requested_target.is_none();
+    let mut dispatch_agents = Vec::<Option<AgentType>>::new();
+    for route in &dispatch_routes {
+        let agent = match route {
+            DispatchRoute::NativePrincipal => Some(None),
+            DispatchRoute::TargetedNative(agent) => Some(Some(agent.clone())),
+            DispatchRoute::NoNativeResponder | DispatchRoute::JoinedPeers => None,
+        };
+        if let Some(agent) = agent {
+            if !dispatch_agents.contains(&agent) {
+                dispatch_agents.push(agent);
+            }
+        }
+    }
     let mut live_lint_report: Option<crate::core::anti_halluc::LintReport> = None;
     let mut lint_summary: Option<AppendLintSummary> = None;
     if live_agent_append && crate::core::anti_halluc::current_mode().is_active() {
@@ -436,28 +511,40 @@ pub async fn disc_append(
             // it). Always NULL on import; metrics aggregator excludes
             // NULLs from the AVG so this doesn't skew per-version data.
             duration_ms: None,
+            // Compatibility projection for readers that predate
+            // `message_targets`. The authoritative identity (including an
+            // exact CLI session) is persisted below.
+            target_agent: requested_targets
+                .first()
+                .map(|target| target.agent_type.clone())
+                .or_else(|| legacy_requested_target.clone()),
+            reply_to_message_id: incoming.reply_to_message_id.clone(),
         };
         let did_insert = did_for_loop.clone();
         let msg_clone = msg.clone();
-        let dispatch_job_id = Uuid::new_v4().to_string();
-        let targeted = targeted_agent.clone();
+        let typed_targets = requested_targets.clone();
+        let dispatch_jobs = dispatch_agents
+            .iter()
+            .cloned()
+            .map(|agent| (Uuid::new_v4().to_string(), agent))
+            .collect::<Vec<_>>();
         let insert_result = state
             .db
             .with_conn(move |conn| {
-                if let Some(ref target) = targeted {
-                    crate::db::discussions::insert_message_with_targeted_dispatch(
+                if !typed_targets.is_empty() || !dispatch_jobs.is_empty() {
+                    let dispatches = dispatch_jobs
+                        .iter()
+                        .map(|(job_id, agent)| crate::db::discussions::UserDispatchSpec {
+                            job_id,
+                            agent_override: agent.as_ref(),
+                        })
+                        .collect::<Vec<_>>();
+                    crate::db::discussions::insert_message_with_targets_and_dispatches(
                         conn,
                         &did_insert,
                         &msg_clone,
-                        &dispatch_job_id,
-                        target,
-                    )
-                } else if native_should_dispatch {
-                    crate::db::discussions::insert_message_with_dispatch(
-                        conn,
-                        &did_insert,
-                        &msg_clone,
-                        &dispatch_job_id,
+                        &typed_targets,
+                        &dispatches,
                     )
                 } else {
                     crate::db::discussions::insert_message(conn, &did_insert, &msg_clone)
@@ -554,24 +641,15 @@ pub async fn disc_append(
     //
     // A session id distinguishes a live joined peer from historical imports.
     // Bulk appends, duplicates and no-agent rooms never trigger execution.
-    let native_dispatched =
-        is_live_peer_turn(live_agent_append, req.session_id.as_deref(), appended)
-            && native_should_dispatch;
-    let targeted_dispatched = targeted_agent.is_some() && appended == 1;
-    if native_dispatched || targeted_dispatched {
+    let appended_live_turn =
+        is_live_peer_turn(live_agent_append, req.session_id.as_deref(), appended);
+    if appended_live_turn && !dispatch_agents.is_empty() {
         state.agent_dispatch_notify.notify_one();
-        if let Some(ref target) = targeted_agent.filter(|_| targeted_dispatched) {
-            tracing::info!(
-                "disc_append: live peer mentioned {:?} on {} — queued durable targeted turn",
-                target,
-                req.disc_id
-            );
-        } else {
-            tracing::info!(
-                "disc_append: live peer replied on {} — queued durable native-agent turn",
-                req.disc_id
-            );
-        }
+        tracing::info!(
+            "disc_append: live peer turn on {} queued {} durable native target(s)",
+            req.disc_id,
+            dispatch_agents.len()
+        );
     }
 
     Json(ApiResponse::ok(DiscAppendResponse {
@@ -589,6 +667,10 @@ pub struct DiscLinkRequest {
     pub disc_id: String,
     pub source_agent: String,
     pub source_session_id: String,
+    /// Reassign a session that is already owned by another discussion.
+    /// Defaults to false so the UI/MCP cannot steal a live thread silently.
+    #[serde(default)]
+    pub force_reassign: bool,
 }
 
 /// `POST /api/disc/link`
@@ -596,14 +678,40 @@ pub async fn disc_link(
     State(state): State<AppState>,
     Json(req): Json<DiscLinkRequest>,
 ) -> Json<ApiResponse<bool>> {
+    let source_agent = req.source_agent.trim().to_string();
+    let source_session_id = req.source_session_id.trim().to_string();
+    if source_agent.is_empty() || source_session_id.is_empty() {
+        return Json(ApiResponse::err(
+            "source_agent and source_session_id are required",
+        ));
+    }
+    if source_agent.chars().count() > 80 || source_session_id.chars().count() > 512 {
+        return Json(ApiResponse::err(
+            "source_agent or source_session_id exceeds the supported length",
+        ));
+    }
+
     let result = state
         .db
         .with_conn(move |conn| {
+            let existing = crate::db::disc_source::find_disc_by_source_session(
+                conn,
+                &source_agent,
+                &source_session_id,
+            )?;
+            if existing.as_deref().is_some_and(|id| id != req.disc_id)
+                && !req.force_reassign
+            {
+                anyhow::bail!(
+                    "session already linked to discussion {} — pass force_reassign=true to transfer it",
+                    existing.expect("checked as Some")
+                );
+            }
             crate::db::disc_source::bind_to_source(
                 conn,
                 &req.disc_id,
-                &req.source_agent,
-                &req.source_session_id,
+                &source_agent,
+                &source_session_id,
             )
         })
         .await;
@@ -615,8 +723,78 @@ pub async fn disc_link(
 
 #[derive(Debug, Clone, Deserialize, TS)]
 #[ts(export)]
+pub struct DiscSessionStatusQuery {
+    pub source_agent: String,
+    pub source_session_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct DiscSessionStatusResponse {
+    pub binding_version: i64,
+    pub bound_disc_id: Option<String>,
+    /// Discussion currently carrying a non-left live peer with this identity.
+    pub connected_disc_id: Option<String>,
+    /// Native session state when connected (`active` / `paused`), otherwise null.
+    pub connection_status: Option<String>,
+}
+
+/// `GET /api/disc/session-status?source_agent=…&source_session_id=…`
+///
+/// Source ownership and live peer presence are deliberately separate: an
+/// imported Claude/Codex session may remain a valid resume key while its CLI is
+/// currently offline.
+pub async fn disc_session_status(
+    State(state): State<AppState>,
+    Query(query): Query<DiscSessionStatusQuery>,
+) -> Json<ApiResponse<DiscSessionStatusResponse>> {
+    let source_agent = query.source_agent.trim().to_string();
+    let source_session_id = query.source_session_id.trim().to_string();
+    if source_agent.is_empty() || source_session_id.is_empty() {
+        return Json(ApiResponse::err(
+            "source_agent and source_session_id are required",
+        ));
+    }
+    let result = state
+        .db
+        .with_read_conn(move |conn| {
+            let bound_disc_id = crate::db::disc_source::find_disc_by_source_session(
+                conn,
+                &source_agent,
+                &source_session_id,
+            )?;
+            let connected = crate::db::discussion_sessions::find_active_session(
+                conn,
+                &source_agent,
+                &source_session_id,
+            )?;
+            Ok::<_, anyhow::Error>(DiscSessionStatusResponse {
+                binding_version: crate::db::disc_source::SOURCE_BINDING_VERSION,
+                bound_disc_id,
+                connected_disc_id: connected.as_ref().map(|session| session.disc_id.clone()),
+                connection_status: connected.map(|session| session.status),
+            })
+        })
+        .await;
+    match result {
+        Ok(status) => Json(ApiResponse::ok(status)),
+        Err(error) => Json(ApiResponse::err(format!(
+            "DB error resolving session status: {error}"
+        ))),
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, TS)]
+#[ts(export)]
 pub struct DiscUnlinkRequest {
     pub disc_id: String,
+    /// KT-85 — release only THIS session's binding. Omitting both fields
+    /// releases every binding of the discussion, which a shared room must never
+    /// do implicitly: it is reserved for an explicit human "detach this thread".
+    #[serde(default)]
+    pub source_agent: Option<String>,
+    #[serde(default)]
+    pub source_session_id: Option<String>,
 }
 
 /// `POST /api/disc/unlink`
@@ -626,7 +804,19 @@ pub async fn disc_unlink(
 ) -> Json<ApiResponse<bool>> {
     let result = state
         .db
-        .with_conn(move |conn| crate::db::disc_source::unbind_from_source(conn, &req.disc_id))
+        .with_conn(move |conn| {
+            // Half a pair is a caller bug, not an instruction to detach the whole
+            // room: falling through to the global unlink would evict every peer.
+            let only = match (
+                req.source_agent.as_deref(),
+                req.source_session_id.as_deref(),
+            ) {
+                (Some(agent), Some(session)) => Some((agent, session)),
+                (None, None) => None,
+                _ => anyhow::bail!("source_agent and source_session_id must be provided together"),
+            };
+            crate::db::disc_source::unbind_from_source(conn, &req.disc_id, only)
+        })
         .await;
     match result {
         Ok(closed) => Json(ApiResponse::ok(closed)),
@@ -696,6 +886,64 @@ pub async fn disc_search(
     }
 }
 
+/// KT-65 — filters for the message-level search. Every field is optional and
+/// they combine with AND, so the caller narrows instead of paging blindly.
+#[derive(Debug, Clone, Deserialize, TS)]
+#[ts(export)]
+pub struct MessageSearchQuery {
+    pub q: String,
+    #[serde(default)]
+    pub discussion_id: Option<String>,
+    #[serde(default)]
+    pub project_id: Option<String>,
+    /// Agent type ("Codex") or federated human pseudo ("Romu - mac").
+    #[serde(default)]
+    pub author: Option<String>,
+    /// Inclusive RFC3339 bounds.
+    #[serde(default)]
+    pub since: Option<String>,
+    #[serde(default)]
+    pub until: Option<String>,
+    #[serde(default)]
+    pub limit: Option<u32>,
+    #[serde(default)]
+    pub offset: Option<u32>,
+}
+
+/// `GET /api/disc/search/messages?q=…&discussion_id=…&author=…&since=…`
+///
+/// Unlike `/api/disc/search` (which answers "which rooms mention X"), this
+/// returns the matching MESSAGES so the UI can open the exact turn. The query is
+/// bounded server-side — limit clamped, offset capped — so a large history can't
+/// turn one keystroke into a full scan streamed to the client.
+pub async fn message_search(
+    State(state): State<AppState>,
+    Query(q): Query<MessageSearchQuery>,
+) -> Json<ApiResponse<Vec<crate::db::disc_source::MessageSearchHit>>> {
+    if q.q.trim().is_empty() {
+        return Json(ApiResponse::err("query string `q` must not be empty"));
+    }
+    let limit = q.limit.unwrap_or(20);
+    let offset = q.offset.unwrap_or(0);
+    let result = state
+        .db
+        .with_conn(move |conn| {
+            let filters = crate::db::disc_source::MessageSearchFilters {
+                discussion_id: q.discussion_id.as_deref(),
+                project_id: q.project_id.as_deref(),
+                author: q.author.as_deref(),
+                since: q.since.as_deref(),
+                until: q.until.as_deref(),
+            };
+            crate::db::disc_source::search_messages(conn, &q.q, &filters, limit, offset)
+        })
+        .await;
+    match result {
+        Ok(hits) => Json(ApiResponse::ok(hits)),
+        Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, TS)]
 #[ts(export)]
 pub struct DiscLoadOtherQuery {
@@ -738,9 +986,12 @@ pub struct DiscLoadOtherResponse {
 ///
 /// 0.8.4 (#294) — batch endpoint that returns every currently-bound
 /// disc with its source binding. The frontend sidebar calls this
-/// once per mount to decorate disc rows with an "imported from X"
-/// badge + drive the source-filter dropdown. Returns `[]` when no
-/// disc has a binding (the common case on fresh installs).
+/// once per mount to decorate disc rows with a "bound to X" badge +
+/// drive the source-filter dropdown. Returns `[]` when no disc has a
+/// binding (the common case on fresh installs).
+///
+/// A binding is NOT an import (KT-74): a portable bundle's provenance lives in
+/// `discussion_imports` and is served by `GET /api/disc/imports`.
 pub async fn list_source_bindings(
     State(state): State<AppState>,
 ) -> Json<ApiResponse<Vec<crate::db::disc_source::DiscSourceBinding>>> {
@@ -772,13 +1023,17 @@ pub async fn disc_source_detail(
     State(state): State<AppState>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Json<ApiResponse<DiscSourceDetail>> {
+    // KT-85 — read the discussion's CURRENT binding. Scanning the full list and
+    // taking the first hit returned the OLDEST binding once a room could hold
+    // several, so the panel named a session the user had long since replaced.
     let id_for_bindings = id.clone();
-    let bindings = state
+    let current = state
         .db
-        .with_conn(crate::db::disc_source::list_all_source_bindings)
+        .with_conn(move |conn| {
+            crate::db::disc_source::current_source_binding(conn, &id_for_bindings)
+        })
         .await
         .unwrap_or_default();
-    let current = bindings.into_iter().find(|b| b.disc_id == id_for_bindings);
 
     let id_for_hist = id.clone();
     let history = state
@@ -918,7 +1173,9 @@ mod tests {
             role: MessageRole::Agent,
             content: content.into(),
             agent_type: Some(AgentType::Codex),
+            targets: Vec::new(),
             target_agent: None,
+            reply_to_message_id: None,
         }
     }
 
@@ -941,6 +1198,72 @@ mod tests {
 
     async fn append(state: &crate::AppState, msgs: Vec<DiscAppendMessage>) -> DiscAppendResponse {
         append_as(state, msgs, None).await
+    }
+
+    #[tokio::test]
+    async fn append_persists_an_opaque_same_discussion_reply_target() {
+        let (state, _tmp) = lint_state(false).await;
+        state
+            .db
+            .with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO messages
+                     (id, discussion_id, role, content, timestamp, sort_order)
+                     VALUES ('wsl-original', 'd-lint', 'User', 'Question', datetime('now'), 1)",
+                    [],
+                )?;
+                conn.execute(
+                    "UPDATE discussions
+                     SET next_message_seq = 2, message_count = 1
+                     WHERE id = 'd-lint'",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let mut reply = agent_msg("reply-source", "Precise answer");
+        reply.reply_to_message_id = Some("wsl-original".into());
+        let response = append(&state, vec![reply]).await;
+        assert_eq!(response.appended, 1);
+
+        let messages = state
+            .db
+            .with_conn(|conn| crate::db::discussions::list_messages(conn, "d-lint"))
+            .await
+            .unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(
+            messages[1].reply_to_message_id.as_deref(),
+            Some("wsl-original")
+        );
+    }
+
+    #[tokio::test]
+    async fn append_rejects_a_reply_target_outside_the_discussion() {
+        let (state, _tmp) = lint_state(false).await;
+        let response = disc_append(
+            axum::extract::State(state.clone()),
+            Json(DiscAppendRequest {
+                disc_id: "d-lint".into(),
+                messages: vec![DiscAppendMessage {
+                    reply_to_message_id: Some("missing-message".into()),
+                    ..agent_msg("reply-source", "Precise answer")
+                }],
+                session_id: None,
+            }),
+        )
+        .await;
+        let error = response.0.error.expect("invalid target rejected");
+        assert!(error.contains("not found in this discussion"));
+
+        let messages = state
+            .db
+            .with_conn(|conn| crate::db::discussions::list_messages(conn, "d-lint"))
+            .await
+            .unwrap();
+        assert!(messages.is_empty());
     }
 
     #[tokio::test]
@@ -1083,6 +1406,14 @@ mod tests {
                     Some("joined-session"),
                     "peer",
                 )?;
+                crate::db::discussion_sessions::set_session_activity(
+                    conn,
+                    "d-lint",
+                    "Codex",
+                    Some("joined-session"),
+                    "reading",
+                    300,
+                )?;
                 Ok(())
             })
             .await
@@ -1143,6 +1474,14 @@ mod tests {
                     Some("joined-session"),
                     "peer",
                 )?;
+                crate::db::discussion_sessions::set_session_activity(
+                    conn,
+                    "d-lint",
+                    "Codex",
+                    Some("joined-session"),
+                    "reading",
+                    300,
+                )?;
                 Ok(())
             })
             .await
@@ -1180,6 +1519,111 @@ mod tests {
 
     #[tokio::test]
     #[serial]
+    async fn typed_cli_target_is_durable_and_never_spawns_a_native_agent() {
+        crate::core::anti_halluc::set_mode("off");
+        let (state, _tmp) = lint_state(false).await;
+        let cli_session_id = state
+            .db
+            .with_conn(|conn| {
+                conn.execute(
+                    "UPDATE discussions
+                     SET no_agent = 0, agent = 'ClaudeCode'
+                     WHERE id = 'd-lint'",
+                    [],
+                )?;
+                crate::db::discussion_sessions::create_session(
+                    conn,
+                    "d-lint",
+                    "Vibe",
+                    Some("vibe-author"),
+                    "peer",
+                )?;
+                crate::db::discussion_sessions::create_session(
+                    conn,
+                    "d-lint",
+                    "Codex",
+                    Some("codex-exact"),
+                    "peer",
+                )
+            })
+            .await
+            .unwrap();
+
+        let mut msg = agent_msg("typed-exact-cli", "@codex-cli confirme");
+        msg.agent_type = Some(AgentType::Vibe);
+        msg.targets = vec![MessageTarget::cli(AgentType::Codex, cli_session_id)];
+        append_as(&state, vec![msg], Some("vibe-author")).await;
+
+        let (job, targets) = state
+            .db
+            .with_conn(move |conn| {
+                let job = crate::db::agent_dispatch::find_active_for_discussion(conn, "d-lint")?;
+                let message_id = conn.query_row(
+                    "SELECT id FROM messages WHERE source_msg_id = 'typed-exact-cli'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )?;
+                let targets = crate::db::discussions::list_message_targets(conn, &message_id)?;
+                Ok((job, targets))
+            })
+            .await
+            .unwrap();
+        assert!(job.is_none(), "an exact CLI owns its turn through polling");
+        assert_eq!(
+            targets,
+            vec![MessageTarget::cli(AgentType::Codex, cli_session_id)]
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn typed_native_target_never_wakes_a_same_provider_cli_by_coincidence() {
+        crate::core::anti_halluc::set_mode("off");
+        let (state, _tmp) = lint_state(false).await;
+        state
+            .db
+            .with_conn(|conn| {
+                conn.execute(
+                    "UPDATE discussions
+                     SET no_agent = 0, agent = 'ClaudeCode'
+                     WHERE id = 'd-lint'",
+                    [],
+                )?;
+                crate::db::discussion_sessions::create_session(
+                    conn,
+                    "d-lint",
+                    "Vibe",
+                    Some("vibe-author"),
+                    "peer",
+                )?;
+                crate::db::discussion_sessions::create_session(
+                    conn,
+                    "d-lint",
+                    "Codex",
+                    Some("codex-cli"),
+                    "peer",
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let mut msg = agent_msg("typed-native-codex", "@codex confirme");
+        msg.agent_type = Some(AgentType::Vibe);
+        msg.targets = vec![MessageTarget::agent(AgentType::Codex)];
+        append_as(&state, vec![msg], Some("vibe-author")).await;
+
+        let job = state
+            .db
+            .with_conn(|conn| crate::db::agent_dispatch::find_active_for_discussion(conn, "d-lint"))
+            .await
+            .unwrap()
+            .expect("the typed native identity must own a durable job");
+        assert_eq!(job.agent_override, Some(AgentType::Codex));
+    }
+
+    #[tokio::test]
+    #[serial]
     async fn live_peer_mention_does_not_spawn_duplicate_native_target() {
         // Regression (live room 0.9.2): Vibe mentioned @codex while a joined
         // Codex peer was actively watching. The targeted path bypassed every
@@ -1203,12 +1647,28 @@ mod tests {
                     Some("vibe-session"),
                     "peer",
                 )?;
+                crate::db::discussion_sessions::set_session_activity(
+                    conn,
+                    "d-lint",
+                    "Vibe",
+                    Some("vibe-session"),
+                    "reading",
+                    300,
+                )?;
                 crate::db::discussion_sessions::create_session(
                     conn,
                     "d-lint",
                     "Codex",
                     Some("codex-session"),
                     "peer",
+                )?;
+                crate::db::discussion_sessions::set_session_activity(
+                    conn,
+                    "d-lint",
+                    "Codex",
+                    Some("codex-session"),
+                    "listening",
+                    300,
                 )?;
                 Ok(())
             })
@@ -1241,6 +1701,157 @@ mod tests {
             !awaiting,
             "no native response is owed while the peer is live"
         );
+
+        // KT-58 — no dispatch job, but the addressee must still be recorded:
+        // this is the common case in a populated room, and it is exactly when a
+        // reader needs to see WHO is expected to answer.
+        let stored = state
+            .db
+            .with_conn(|conn| crate::db::discussions::list_messages(conn, "d-lint"))
+            .await
+            .unwrap();
+        let mention = stored
+            .iter()
+            .find(|m| m.source_msg_id.as_deref() == Some("vibe-mentions-live-codex"))
+            .expect("the mention must be persisted");
+        assert_eq!(
+            mention.target_agent,
+            Some(AgentType::Codex),
+            "the addressee must survive even when a live peer owns the reply"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn expired_target_peer_falls_back_to_a_durable_targeted_dispatch() {
+        crate::core::anti_halluc::set_mode("off");
+        let (state, _tmp) = lint_state(false).await;
+        state
+            .db
+            .with_conn(|conn| {
+                conn.execute(
+                    "UPDATE discussions
+                     SET no_agent = 0, agent = 'ClaudeCode'
+                     WHERE id = 'd-lint'",
+                    [],
+                )?;
+                crate::db::discussion_sessions::create_session(
+                    conn,
+                    "d-lint",
+                    "Vibe",
+                    Some("vibe-session"),
+                    "peer",
+                )?;
+                crate::db::discussion_sessions::set_session_activity(
+                    conn,
+                    "d-lint",
+                    "Vibe",
+                    Some("vibe-session"),
+                    "reading",
+                    300,
+                )?;
+                crate::db::discussion_sessions::create_session(
+                    conn,
+                    "d-lint",
+                    "Codex",
+                    Some("stale-codex-session"),
+                    "peer",
+                )?;
+                crate::db::discussion_sessions::set_session_activity(
+                    conn,
+                    "d-lint",
+                    "Codex",
+                    Some("stale-codex-session"),
+                    "listening",
+                    -100,
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let mut msg = agent_msg("vibe-mentions-stale-codex", "@codex peux-tu confirmer ?");
+        msg.agent_type = Some(AgentType::Vibe);
+        msg.target_agent = Some(AgentType::Codex);
+        append_as(&state, vec![msg], Some("vibe-session")).await;
+
+        let (job, sticky_target_count) = state
+            .db
+            .with_conn(|conn| {
+                let job = crate::db::agent_dispatch::find_active_for_discussion(conn, "d-lint")?;
+                let sticky_target_count =
+                    crate::db::discussion_sessions::count_live_participants_for_agent(
+                        conn, "d-lint", "Codex",
+                    )?;
+                Ok((job, sticky_target_count))
+            })
+            .await
+            .unwrap();
+        let job = job.expect("an expired target peer must not swallow the turn");
+        assert_eq!(job.agent_override, Some(AgentType::Codex));
+        assert_eq!(
+            sticky_target_count, 1,
+            "routing freshness must not detach the stale participant"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn no_agent_room_never_spawns_an_absent_mentioned_agent() {
+        crate::core::anti_halluc::set_mode("off");
+        let (state, _tmp) = lint_state(false).await;
+        state
+            .db
+            .with_conn(|conn| {
+                conn.execute(
+                    "UPDATE discussions
+                     SET no_agent = 1, agent = 'ClaudeCode'
+                     WHERE id = 'd-lint'",
+                    [],
+                )?;
+                crate::db::discussion_sessions::create_session(
+                    conn,
+                    "d-lint",
+                    "Vibe",
+                    Some("vibe-session"),
+                    "peer",
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let mut msg = agent_msg("vibe-mentions-absent-codex", "@codex peux-tu confirmer ?");
+        msg.agent_type = Some(AgentType::Vibe);
+        msg.target_agent = Some(AgentType::Codex);
+        append_as(&state, vec![msg], Some("vibe-session")).await;
+
+        let (job, awaiting, stored_target) = state
+            .db
+            .with_conn(|conn| {
+                let job = crate::db::agent_dispatch::find_active_for_discussion(conn, "d-lint")?;
+                let awaiting = conn.query_row(
+                    "SELECT awaiting_agent FROM discussions WHERE id = 'd-lint'",
+                    [],
+                    |row| row.get::<_, bool>(0),
+                )?;
+                let stored_target = crate::db::discussions::list_messages(conn, "d-lint")?
+                    .into_iter()
+                    .find(|message| {
+                        message.source_msg_id.as_deref() == Some("vibe-mentions-absent-codex")
+                    })
+                    .and_then(|message| message.target_agent);
+                Ok((job, awaiting, stored_target))
+            })
+            .await
+            .unwrap();
+        assert!(job.is_none(), "no-agent rooms never start native runners");
+        assert!(!awaiting);
+        assert_eq!(
+            stored_target,
+            Some(AgentType::Codex),
+            "the intended addressee remains visible even without a dispatch"
+        );
     }
 
     #[tokio::test]
@@ -1266,6 +1877,14 @@ mod tests {
                     "Codex",
                     Some("joined-session"),
                     "peer",
+                )?;
+                crate::db::discussion_sessions::set_session_activity(
+                    conn,
+                    "d-lint",
+                    "Codex",
+                    Some("joined-session"),
+                    "reading",
+                    300,
                 )?;
                 Ok(())
             })
@@ -1387,7 +2006,9 @@ mod tests {
             role: MessageRole::User,
             content: "look at [src: file: src/ghost.rs:1]".into(),
             agent_type: None,
+            targets: Vec::new(),
             target_agent: None,
+            reply_to_message_id: None,
         };
         let out = append(&state, vec![user]).await;
         assert!(out.lint.is_none(), "user messages must not lint");
@@ -1510,6 +2131,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(without_target.target_agent, None);
+        assert!(without_target.targets.is_empty());
 
         let targeted = serde_json::from_str::<DiscAppendMessage>(
             r#"{
@@ -1522,6 +2144,25 @@ mod tests {
         )
         .unwrap();
         assert_eq!(targeted.target_agent, Some(AgentType::Ollama));
+
+        let typed = serde_json::from_str::<DiscAppendMessage>(
+            r#"{
+                "source_msg_id": "source-3",
+                "role": "Agent",
+                "content": "@codex-cli réponds",
+                "agent_type": "ClaudeCode",
+                "targets": [{
+                    "kind": "cli",
+                    "agent_type": "Codex",
+                    "cli_session_id": 42
+                }]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            typed.targets,
+            vec![MessageTarget::cli(AgentType::Codex, 42)]
+        );
     }
 
     #[test]

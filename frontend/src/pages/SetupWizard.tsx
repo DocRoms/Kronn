@@ -4,7 +4,7 @@ import type { SetupStatus, AgentDetection, DetectedRepo } from '../types/generat
 import { useT } from '../lib/I18nContext';
 import {
   Cpu, FolderSearch, Scan, ChevronRight, Check, Download, Loader2, RefreshCw,
-  GitBranch, FolderOpen, Eye,
+  GitBranch, FolderOpen, Eye, Copy,
 } from 'lucide-react';
 import './SetupWizard.css';
 
@@ -221,7 +221,15 @@ export function SetupWizard({ initialStatus, onComplete, inDocker = false }: Pro
               <div className="setup-agent-list">
                 {agents.map((agent) => (
                   <div key={agent.name} className="setup-agent-row" data-disabled={agent.installed && !agent.enabled}>
-                    <div className={`dot ${agent.installed ? (agent.enabled ? 'dot-on' : 'dot-off') : agent.runtime_available ? 'dot-warn' : 'dot-off'}`} />
+                    <div className={`dot ${
+                      agent.auth_ready === false && agent.enabled
+                        ? 'dot-warn'
+                        : agent.installed
+                          ? (agent.enabled ? 'dot-on' : 'dot-off')
+                          : agent.runtime_available
+                            ? 'dot-warn'
+                            : 'dot-off'
+                    }`} />
                     <div className="flex-1">
                       <div className="flex-row gap-4">
                         <span className="setup-agent-name">{agent.name}</span>
@@ -245,6 +253,27 @@ export function SetupWizard({ initialStatus, onComplete, inDocker = false }: Pro
                       ) : (
                         <div className="setup-agent-meta">
                           <code className="code">{agent.install_command}</code>
+                        </div>
+                      )}
+                      {agent.auth_ready === false && agent.enabled && (
+                        <div className="setup-auth-warning" role="note">
+                          <span>
+                            <strong>{t('config.agentAuthRequired')}</strong>
+                            {' — '}
+                            {t('config.agentAuthRequiredHint')}
+                          </span>
+                          {agent.auth_setup_command && (
+                            <button
+                              type="button"
+                              className="setup-auth-command"
+                              onClick={() => navigator.clipboard
+                                .writeText(agent.auth_setup_command ?? '')
+                                .catch(() => {})}
+                            >
+                              <Copy size={11} aria-hidden="true" />
+                              <code>{agent.auth_setup_command}</code>
+                            </button>
+                          )}
                         </div>
                       )}
                     </div>

@@ -51,6 +51,7 @@ const mkConfig = (id: string, server_id: string): McpConfigDisplay => ({
   project_names: [],
   secrets_broken: false,
   host_sync: 'None',
+  preferred_interface: 'api',
 });
 
 const chartbeatServer = mkServer('chartbeat', 'Chartbeat', {

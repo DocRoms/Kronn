@@ -233,6 +233,33 @@
   border: 1px solid rgba(var(--kr-warning-rgb), 0.25);
 }
 
+.setup-auth-warning {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-3);
+  margin-top: var(--kr-sp-3);
+  padding: 5px 7px;
+  border-radius: var(--kr-r-sm);
+  font-size: var(--kr-fs-xs);
+  line-height: 1.35;
+  color: var(--kr-warning);
+  background: rgba(var(--kr-warning-rgb), 0.10);
+  border: 1px solid rgba(var(--kr-warning-rgb), 0.25);
+}
+
+.setup-auth-command {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  margin-left: auto;
+  padding: 3px 6px;
+  border: 1px solid rgba(var(--kr-warning-rgb), 0.35);
+  border-radius: var(--kr-r-sm);
+  color: inherit;
+  background: transparent;
+  cursor: pointer;
+}
+
 .setup-badge-hidden {
   font-size: var(--kr-fs-2xs);
   padding: 1px 5px;

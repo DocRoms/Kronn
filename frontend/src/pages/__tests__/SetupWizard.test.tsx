@@ -197,6 +197,23 @@ describe('SetupWizard — step 0 (agents detection)', () => {
     expect(body).toContain('1 agent détecté');
   });
 
+  it('distinguishes an installed runner whose authentication is not ready', async () => {
+    vi.mocked(agentsApi.detect).mockResolvedValue([makeAgent({
+      name: 'Vibe',
+      agent_type: 'Vibe',
+      installed: true,
+      runtime_available: true,
+      auth_ready: false,
+      auth_setup_command: 'vibe --setup',
+    })]);
+
+    await wrap(<SetupWizard initialStatus={null} onComplete={vi.fn()} />);
+
+    expect(document.body.textContent).toContain('Authentification requise');
+    expect(document.body.textContent).toContain('vibe --setup');
+    expect(document.body.querySelector('.dot-warn')).toBeTruthy();
+  });
+
   it('shows agent version when available', async () => {
     const agent = makeAgent({ version: '2.3.1', installed: true });
     vi.mocked(agentsApi.detect).mockResolvedValue([agent]);

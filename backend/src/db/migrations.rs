@@ -333,6 +333,46 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "089_agent_model_provenance",
         include_str!("sql/089_agent_model_provenance.sql"),
     ),
+    (
+        "090_message_target_agent",
+        include_str!("sql/090_message_target_agent.sql"),
+    ),
+    (
+        "091_mcp_preferred_interface",
+        include_str!("sql/091_mcp_preferred_interface.sql"),
+    ),
+    (
+        "092_disc_source_binding_contract",
+        include_str!("sql/092_disc_source_binding_contract.sql"),
+    ),
+    (
+        "093_discussion_imports",
+        include_str!("sql/093_discussion_imports.sql"),
+    ),
+    (
+        "094_plugin_bundle_audit",
+        include_str!("sql/094_plugin_bundle_audit.sql"),
+    ),
+    (
+        "095_message_replies",
+        include_str!("sql/095_message_replies.sql"),
+    ),
+    (
+        "096_import_provenance",
+        include_str!("sql/096_import_provenance.sql"),
+    ),
+    (
+        "097_discussion_session_conversation_id",
+        include_str!("sql/097_discussion_session_conversation_id.sql"),
+    ),
+    (
+        "098_message_targets",
+        include_str!("sql/098_message_targets.sql"),
+    ),
+    (
+        "099_typed_message_targets",
+        include_str!("sql/099_typed_message_targets.sql"),
+    ),
 ];
 
 /// Run all migrations, optionally backing up the database file first.
@@ -516,6 +556,47 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         run_with_backup(&conn, None).expect("run_with_backup with None path should succeed");
         // No assertion on files — just ensure it doesn't panic
+    }
+
+    #[test]
+    fn preferred_interface_migration_backfills_api_and_mcp_configs() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_through(&conn, "089_agent_model_provenance").unwrap();
+        conn.execute_batch(
+            "INSERT INTO mcp_servers
+                (id, name, transport, source, api_spec_json)
+             VALUES
+                ('api', 'API', 'api_only', 'registry', '{}'),
+                ('mcp', 'MCP', 'stdio', 'registry', NULL);
+             INSERT INTO mcp_configs (id, server_id, label)
+             VALUES ('cfg-api', 'api', 'API'), ('cfg-mcp', 'mcp', 'MCP');",
+        )
+        .unwrap();
+
+        run(&conn).unwrap();
+
+        let api: String = conn
+            .query_row(
+                "SELECT preferred_interface FROM mcp_configs WHERE id = 'cfg-api'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let mcp: String = conn
+            .query_row(
+                "SELECT preferred_interface FROM mcp_configs WHERE id = 'cfg-mcp'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(api, "api");
+        assert_eq!(mcp, "mcp");
+        assert!(conn
+            .execute(
+                "UPDATE mcp_configs SET preferred_interface = 'invalid' WHERE id = 'cfg-mcp'",
+                [],
+            )
+            .is_err());
     }
 
     #[test]
@@ -717,6 +798,83 @@ mod tests {
             )
             .unwrap();
         assert!(!legacy_index_exists);
+    }
+
+    #[test]
+    fn message_replies_migration_registers_column_and_lookup_index() {
+        let conn = Connection::open_in_memory().unwrap();
+        run(&conn).unwrap();
+
+        let has_column: bool = conn
+            .query_row(
+                "SELECT EXISTS(
+                     SELECT 1 FROM pragma_table_info('messages')
+                     WHERE name = 'reply_to_message_id'
+                 )",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let has_index: bool = conn
+            .query_row(
+                "SELECT EXISTS(
+                     SELECT 1 FROM sqlite_master
+                     WHERE type = 'index' AND name = 'idx_messages_reply_to'
+                 )",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert!(has_column);
+        assert!(has_index);
+    }
+
+    #[test]
+    fn discussion_session_conversation_id_migration_adds_nullable_column() {
+        let conn = Connection::open_in_memory().unwrap();
+        run(&conn).unwrap();
+
+        let has_nullable_column: bool = conn
+            .query_row(
+                "SELECT EXISTS(
+                     SELECT 1 FROM pragma_table_info('discussion_sessions')
+                     WHERE name = 'conversation_id' AND \"notnull\" = 0
+                 )",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(has_nullable_column);
+    }
+
+    #[test]
+    fn typed_message_targets_upgrade_an_already_applied_plural_schema() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_through(&conn, "098_message_targets").unwrap();
+        conn.execute_batch(
+            "PRAGMA foreign_keys = OFF;
+             INSERT INTO message_targets (message_id, agent_type, position)
+             VALUES ('legacy-message', 'Codex', 0);",
+        )
+        .unwrap();
+
+        run(&conn).unwrap();
+
+        let upgraded: (String, String, Option<i64>, i64) = conn
+            .query_row(
+                "SELECT target_kind, agent_type, cli_session_id, position
+                 FROM message_targets
+                 WHERE message_id = 'legacy-message'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            upgraded,
+            ("agent".into(), "Codex".into(), None, 0),
+            "099 must preserve 098 rows while assigning their legacy punctual-agent identity"
+        );
     }
 
     #[test]

@@ -414,6 +414,17 @@ select.input option {
   white-space: nowrap;
 }
 
+.disc-participant-kind {
+  color: var(--kr-text-tertiary);
+  font-weight: 500;
+}
+
+.disc-participant-resume {
+  padding: 1px 6px;
+  font-family: inherit;
+  font-size: 0.9em;
+}
+
 .disc-participant-write-failed {
   padding-left: 4px;
   font-size: 0.85em;
@@ -522,7 +533,26 @@ select.input option {
 .disc-invite-modal-actions {
   display: flex;
   gap: 8px;
-  justify-content: flex-end;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+/* Handoff form picker — enriched by default, bare call on demand (KT-52). */
+.disc-invite-handoff-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-secondary);
+  cursor: pointer;
+}
+
+.disc-invite-handoff-hint {
+  margin: 6px 0 0;
+  font-size: var(--kr-fs-2xs);
+  color: var(--kr-text-muted);
+  line-height: 1.45;
 }
 
 .disc-invite-copy-btn {

@@ -12,6 +12,7 @@ import { ChatInput } from '../ChatInput';
 import type { AgentDetection, Discussion } from '../../types/generated';
 import { loadDraft, saveDraft, CHAT_DRAFT_CONFIG } from '../../lib/chat-drafts';
 import { publishMessageSendSettled } from '../../lib/messageSendLifecycle';
+import { discussions as discussionsApi } from '../../lib/api';
 
 // ─── Mocks: heavy dependencies ChatInput transitively loads ─────────────
 
@@ -85,6 +86,8 @@ describe('ChatInput draft persistence', () => {
     localStorage.clear();
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-04-15T09:00:00Z'));
+    vi.spyOn(discussionsApi, 'participants').mockResolvedValue([]);
+    vi.spyOn(discussionsApi, 'nativeAgentMode').mockResolvedValue({ disabled: false });
   });
 
   it('saves typed text to localStorage (debounced) under kronn:draft:<disc_id>', () => {
@@ -179,7 +182,12 @@ describe('ChatInput draft persistence', () => {
 
     expect(textarea.value).toBe('peux-tu @codex ');
     fireEvent.keyDown(textarea, { key: 'Enter', shiftKey: false });
-    expect(onSend).toHaveBeenCalledWith('peux-tu @codex', 'Codex');
+    expect(onSend).toHaveBeenCalledWith(
+      'peux-tu @codex',
+      [{ kind: 'agent', agent_type: 'Codex', cli_session_id: null }],
+      false,
+      undefined,
+    );
   });
 
   it('offers and routes @ollama when the local agent is usable', () => {
@@ -222,7 +230,12 @@ describe('ChatInput draft persistence', () => {
 
     expect(textarea.value).toBe('@ollama ');
     fireEvent.keyDown(textarea, { key: 'Enter', shiftKey: false });
-    expect(onSend).toHaveBeenCalledWith('@ollama', 'Ollama');
+    expect(onSend).toHaveBeenCalledWith(
+      '@ollama',
+      [{ kind: 'agent', agent_type: 'Ollama', cli_session_id: null }],
+      false,
+      undefined,
+    );
   });
 
   it('restores the draft into the textarea on remount (the reported bug)', () => {
@@ -275,7 +288,7 @@ describe('ChatInput draft persistence', () => {
     // Enter → send (no shift).
     fireEvent.keyDown(textarea, { key: 'Enter', shiftKey: false });
 
-    expect(onSend).toHaveBeenCalledWith('about to send', undefined);
+    expect(onSend).toHaveBeenCalledWith('about to send', undefined, false, undefined);
     expect(loadDraft('d-1')?.text).toBe('about to send');
     publishMessageSendSettled('d-1', 'about to send', 'accepted');
     expect(loadDraft('d-1')).toBeNull();

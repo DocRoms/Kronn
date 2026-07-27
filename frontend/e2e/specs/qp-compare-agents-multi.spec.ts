@@ -69,14 +69,18 @@ async function discoverInstalledAgents(request: APIRequestContext): Promise<stri
   const sanitised = Array.from(raw)
     .filter(c => c.charCodeAt(0) >= 32 || c === '\n' || c === '\r' || c === '\t')
     .join('');
-  let parsed: { data?: Array<{ agent_type: string; installed?: boolean; runtime_available?: boolean; enabled?: boolean }> };
+  let parsed: { data?: Array<{ agent_type: string; installed?: boolean; runtime_available?: boolean; enabled?: boolean; auth_ready?: boolean }> };
   try {
     parsed = JSON.parse(sanitised);
   } catch {
     return [];
   }
+  // Mirror `isUsable` (frontend/src/lib/constants.ts): since KT-42 the UI also
+  // requires auth to be ready, so an installed-but-unauthenticated agent
+  // (e.g. Vibe awaiting `vibe --setup`) renders NO chip. Without the auth clause
+  // this helper expected a chip the product deliberately does not draw.
   return (parsed.data ?? [])
-    .filter(a => (a.installed || a.runtime_available) && a.enabled)
+    .filter(a => (a.installed || a.runtime_available) && a.enabled && a.auth_ready !== false)
     .map(a => a.agent_type);
 }
 

@@ -36,6 +36,11 @@
   opacity: 0.65;
 }
 
+.kr-agent-switch-suffix {
+  color: var(--kr-text-tertiary);
+  font-weight: 500;
+}
+
 .kr-agent-switch[data-compact='true'] .kr-agent-switch-btn {
   gap: 3px;
   padding: 0;
@@ -45,10 +50,8 @@
 }
 
 .kr-agent-switch-popover {
-  position: absolute;
-  z-index: 20;
-  top: calc(100% + 5px);
-  left: 0;
+  position: fixed;
+  z-index: var(--kr-z-modal);
   display: flex;
   flex-direction: column;
   width: max-content;

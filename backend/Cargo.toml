@@ -105,6 +105,9 @@ utoipa = { version = "5", features = ["chrono", "uuid", "axum_extras"] }
 utoipa-swagger-ui = { version = "9", features = ["axum", "vendored"] }
 
 [dev-dependencies]
+# `test-util` only: it lets a test reach a 30-minute agent deadline on a paused
+# clock instead of waiting for it (KT-80). Dev-only, no production feature change.
+tokio = { version = "1", features = ["test-util"] }
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 serial_test = "3"

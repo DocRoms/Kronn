@@ -1,7 +1,7 @@
 use crate::core::cmd::async_cmd;
 #[cfg(target_os = "windows")]
 use crate::core::cmd::sync_cmd;
-use crate::models::{AgentDetection, AgentType};
+use crate::models::{AgentDetection, AgentType, AppConfig, TokensConfig};
 use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -347,6 +347,8 @@ async fn detect_agent(def: &AgentDef) -> AgentDetection {
             host_managed: loc.host_managed,
             host_label,
             runtime_available: true,
+            auth_ready: None,
+            auth_setup_command: None,
             rtk_available,
             rtk_hook_configured,
             runtime_warning,
@@ -368,10 +370,63 @@ async fn detect_agent(def: &AgentDef) -> AgentDetection {
             host_managed: false,
             host_label: None,
             runtime_available,
+            auth_ready: None,
+            auth_setup_command: None,
             rtk_available,
             rtk_hook_configured,
             runtime_warning,
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentAuthStatus {
+    pub ready: bool,
+    pub setup_command: Option<&'static str>,
+}
+
+fn vibe_auth_ready(tokens: &TokensConfig, env_key_present: bool, file_key_present: bool) -> bool {
+    let kronn_key_enabled = !tokens
+        .disabled_overrides
+        .iter()
+        .any(|provider| provider == "mistral")
+        && tokens
+            .active_key_for("mistral")
+            .is_some_and(|key| !key.trim().is_empty());
+    kronn_key_enabled || env_key_present || file_key_present
+}
+
+/// Report whether the selected runner can authenticate before Kronn queues it.
+///
+/// Most CLI agents own a local login session that Kronn cannot inspect
+/// reliably. Vibe is different: both its SDK path and direct API fallback
+/// require `MISTRAL_API_KEY`, so readiness is deterministic.
+pub fn agent_auth_status(agent_type: &AgentType, config: &AppConfig) -> AgentAuthStatus {
+    match agent_type {
+        AgentType::Vibe => {
+            let env_key_present = std::env::var("MISTRAL_API_KEY")
+                .ok()
+                .is_some_and(|key| !key.trim().is_empty());
+            let file_key_present = crate::core::key_discovery::read_vibe_key().is_some();
+            AgentAuthStatus {
+                ready: vibe_auth_ready(&config.tokens, env_key_present, file_key_present),
+                setup_command: Some("vibe --setup"),
+            }
+        }
+        _ => AgentAuthStatus {
+            ready: true,
+            setup_command: None,
+        },
+    }
+}
+
+/// Apply persisted enablement and auth readiness to a cached binary sweep.
+pub fn apply_configured_status(agents: &mut [AgentDetection], config: &AppConfig) {
+    for agent in agents {
+        agent.enabled = !config.disabled_agents.contains(&agent.agent_type);
+        let auth = agent_auth_status(&agent.agent_type, config);
+        agent.auth_ready = Some(auth.ready);
+        agent.auth_setup_command = auth.setup_command.map(str::to_string);
     }
 }
 
@@ -817,6 +872,50 @@ pub async fn uninstall_agent(agent_type: &AgentType) -> Result<String> {
 mod tests {
     use super::*;
     use serial_test::serial;
+
+    #[test]
+    fn vibe_auth_requires_one_effective_source() {
+        let mut config = crate::core::config::default_config();
+        assert!(!vibe_auth_ready(&config.tokens, false, false));
+        assert!(vibe_auth_ready(&config.tokens, true, false));
+        assert!(vibe_auth_ready(&config.tokens, false, true));
+
+        config.tokens.keys.push(crate::models::ApiKey {
+            id: "mistral-test".into(),
+            name: "test".into(),
+            provider: "mistral".into(),
+            value: "secret".into(),
+            active: true,
+        });
+        assert!(vibe_auth_ready(&config.tokens, false, false));
+
+        config.tokens.disabled_overrides.push("mistral".into());
+        assert!(
+            !vibe_auth_ready(&config.tokens, false, false),
+            "a disabled Kronn override is not effective auth"
+        );
+        assert!(
+            vibe_auth_ready(&config.tokens, true, false),
+            "local environment auth remains valid when the override is disabled"
+        );
+    }
+
+    #[test]
+    fn non_sdk_agents_do_not_claim_a_setup_requirement() {
+        let config = crate::core::config::default_config();
+        for agent in [
+            AgentType::ClaudeCode,
+            AgentType::Codex,
+            AgentType::GeminiCli,
+            AgentType::Kiro,
+            AgentType::CopilotCli,
+            AgentType::Ollama,
+        ] {
+            let status = agent_auth_status(&agent, &config);
+            assert!(status.ready, "{agent:?}");
+            assert_eq!(status.setup_command, None, "{agent:?}");
+        }
+    }
 
     #[test]
     #[serial]

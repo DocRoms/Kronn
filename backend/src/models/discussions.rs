@@ -173,6 +173,17 @@ pub struct DiscussionMessage {
     /// User/System messages, when the feature is off, or when nothing flagged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lint_report: Option<crate::core::anti_halluc::LintReport>,
+    /// 0.9.2 (KT-58) — the agent this message was explicitly dispatched to via a
+    /// structured `@agent` mention. Written by the same transaction that
+    /// enqueues the dispatch job, so the read model can distinguish "names an
+    /// agent" from "awaits that agent's reply". `None` = ordinary prose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_agent: Option<AgentType>,
+    /// 0.9.2 (KT-73) — durable message this one answers. The referenced
+    /// message must belong to the same discussion. Portable imports remap the
+    /// identifier alongside message ids.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to_message_id: Option<String>,
 }
 
 /// Per-discussion summary strategy. Pre-fix the auto-summary loop fired
@@ -314,16 +325,86 @@ pub struct UpdateDiscussionRequest {
     /// Change the auto-summary policy. Persists in `discussions.summary_strategy`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary_strategy: Option<SummaryStrategy>,
+    /// Disable or restore Kronn's native fallback for this discussion. Joined
+    /// peers remain participants and continue receiving turns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_agent: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct DiscussionNativeAgentMode {
+    pub disabled: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum MessageTargetKind {
+    DiscussionAgent,
+    Agent,
+    Cli,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct MessageTarget {
+    pub kind: MessageTargetKind,
+    pub agent_type: AgentType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cli_session_id: Option<i64>,
+}
+
+impl MessageTarget {
+    pub fn discussion_agent(agent_type: AgentType) -> Self {
+        Self {
+            kind: MessageTargetKind::DiscussionAgent,
+            agent_type,
+            cli_session_id: None,
+        }
+    }
+
+    pub fn agent(agent_type: AgentType) -> Self {
+        Self {
+            kind: MessageTargetKind::Agent,
+            agent_type,
+            cli_session_id: None,
+        }
+    }
+
+    pub fn cli(agent_type: AgentType, cli_session_id: i64) -> Self {
+        Self {
+            kind: MessageTargetKind::Cli,
+            agent_type,
+            cli_session_id: Some(cli_session_id),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, TS)]
 #[ts(export)]
 pub struct SendMessageRequest {
     pub content: String,
+    /// Durable target identities selected by current clients. Unlike the
+    /// compatibility `target_agents` projection, this distinguishes the
+    /// configured discussion agent, a one-shot agent, and a joined CLI.
+    #[serde(default)]
+    pub targets: Vec<MessageTarget>,
+    /// Expand to every responder already visible in the discussion: the
+    /// configured agent, previously-addressed one-shot agents, and non-left
+    /// joined CLI sessions. It never means every installed agent.
+    #[serde(default)]
+    pub target_all: bool,
+    /// Every explicit `@agent` addressee, deduplicated in textual order.
+    /// `target_agent` below remains accepted for older clients.
+    #[serde(default)]
+    pub target_agents: Vec<AgentType>,
     #[serde(default)]
     pub target_agent: Option<AgentType>,
     #[serde(default)]
     pub client_message_id: Option<String>,
+    #[serde(default)]
+    pub reply_to_message_id: Option<String>,
 }
 
 /// Atomic edit/resend request. `expected_revision` is the opaque timestamp
@@ -337,7 +418,14 @@ pub struct ReviseMessageRequest {
     pub expected_revision: String,
     pub idempotency_key: String,
     #[serde(default)]
+    pub targets: Vec<MessageTarget>,
+    #[serde(default)]
+    pub target_all: bool,
+    #[serde(default)]
     pub target_agent: Option<AgentType>,
+    /// Plural replacement for `target_agent`; empty preserves legacy clients.
+    #[serde(default)]
+    pub target_agents: Vec<AgentType>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, TS)]

@@ -68,6 +68,59 @@ mod tests {
         (status, json)
     }
 
+    // ─── GET /api/resolve/:id ───────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn resolve_id_returns_compact_message_context() {
+        let state = test_state();
+        state
+            .db
+            .with_conn(|connection| {
+                connection.execute(
+                    "INSERT INTO discussions
+                     (id, title, agent, language, created_at, updated_at)
+                     VALUES ('disc-resolve', 'Resolver room', 'Codex', 'fr', 'now', 'now')",
+                    [],
+                )?;
+                connection.execute(
+                    "INSERT INTO messages
+                     (id, discussion_id, role, content, timestamp, sort_order)
+                     VALUES ('message-resolve', 'disc-resolve', 'User',
+                             'Which Kronn object is this?', 'now', 1)",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let request = Request::builder()
+            .uri("/api/resolve/message-resolve")
+            .body(Body::empty())
+            .unwrap();
+        let (status, json) = send(state, false, request).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["success"], true);
+        assert_eq!(json["data"]["kind"], "message");
+        assert_eq!(json["data"]["parent"]["id"], "disc-resolve");
+        assert_eq!(json["data"]["suggested_tool"], "disc_get_message");
+        assert_eq!(json["data"]["summary"], "Which Kronn object is this?");
+    }
+
+    #[tokio::test]
+    async fn resolve_id_returns_typed_not_found_envelope() {
+        let request = Request::builder()
+            .uri("/api/resolve/unknown-object")
+            .body(Body::empty())
+            .unwrap();
+        let (status, json) = send(test_state(), false, request).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["success"], false);
+        assert_eq!(json["error_code"], "not_found");
+    }
+
     // ─── GET /api/discussions/running (2026-06-24) ────────────────────────────
 
     /// Surfaces in-flight runs so a background/batch agent still working after
@@ -113,6 +166,239 @@ mod tests {
             0,
             "CancelGuard Drop must clear the running entry"
         );
+    }
+
+    #[tokio::test]
+    async fn git_switch_refuses_an_active_direct_discussion_and_names_it() {
+        let state = test_state();
+        let project_dir = tempfile::TempDir::new().expect("temporary project directory");
+        let project_path = project_dir.path().to_string_lossy().into_owned();
+        state
+            .db
+            .with_conn(move |connection| {
+                connection.execute(
+                    "INSERT INTO projects
+                     (id, name, path, ai_config_json, created_at, updated_at)
+                     VALUES ('project-git-switch', 'Switch guard project', ?1, '{}', 'now', 'now')",
+                    [&project_path],
+                )?;
+                connection.execute(
+                    "INSERT INTO discussions
+                     (id, project_id, title, agent, language, created_at, updated_at,
+                      workspace_mode)
+                     VALUES ('disc-direct-running', 'project-git-switch',
+                             'Release preparation', 'Codex', 'en', 'now', 'now', 'Direct')",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .expect("seed project and discussion");
+
+        let _run =
+            crate::CancelGuard::insert(&state.cancel_registry, "disc-direct-running".to_string());
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/projects/project-git-switch/git-switch")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"branch":"feature/unsafe-switch"}"#))
+            .unwrap();
+
+        let (status, json) = send(state, false, request).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["success"], false);
+        let error = json["error"].as_str().expect("explicit switch error");
+        assert!(error.contains("Release preparation"), "{error}");
+        assert!(error.contains("disc-direct-running"), "{error}");
+        assert!(error.contains("stop it explicitly"), "{error}");
+    }
+
+    /// KT-89 — test mode is a SECOND kind of root occupancy. It requires a
+    /// worktree, so the discussion is `Isolated` and the running-run filter of
+    /// KT-71 cannot see it; switching underneath it would move the branch out
+    /// from under `test_mode_restore_branch`. No active run here on purpose: the
+    /// durable state alone must be enough to refuse.
+    #[tokio::test]
+    async fn git_switch_refuses_while_test_mode_holds_the_root() {
+        let state = test_state();
+        let project_dir = tempfile::TempDir::new().expect("temporary project directory");
+        let project_path = project_dir.path().to_string_lossy().into_owned();
+        state
+            .db
+            .with_conn(move |connection| {
+                connection.execute(
+                    "INSERT INTO projects
+                     (id, name, path, ai_config_json, created_at, updated_at)
+                     VALUES ('project-test-mode', 'Test mode project', ?1, '{}', 'now', 'now')",
+                    [&project_path],
+                )?;
+                connection.execute(
+                    "INSERT INTO discussions
+                     (id, project_id, title, agent, language, created_at, updated_at,
+                      workspace_mode, worktree_branch, test_mode_restore_branch)
+                     VALUES ('disc-in-test-mode', 'project-test-mode',
+                             'Fastly drawer review', 'ClaudeCode', 'fr', 'now', 'now',
+                             'Isolated', 'feat/drawer', 'main')",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .expect("seed project and test-mode discussion");
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/projects/project-test-mode/git-switch")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"branch":"feature/unsafe-switch"}"#))
+            .unwrap();
+
+        let (status, json) = send(state, false, request).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["success"], false);
+        let error = json["error"].as_str().expect("explicit switch error");
+        assert!(error.contains("test mode"), "must name the cause: {error}");
+        assert!(error.contains("Fastly drawer review"), "{error}");
+        assert!(error.contains("disc-in-test-mode"), "{error}");
+        assert!(
+            error.contains("Leave test mode"),
+            "must say how to get out: {error}"
+        );
+    }
+
+    /// The guard must not fire on a discussion that merely HAS a worktree: only
+    /// an active test mode holds the root.
+    #[tokio::test]
+    async fn git_switch_ignores_an_isolated_discussion_not_in_test_mode() {
+        let state = test_state();
+        let project_dir = tempfile::TempDir::new().expect("temporary project directory");
+        let project_path = project_dir.path().to_string_lossy().into_owned();
+        state
+            .db
+            .with_conn(move |connection| {
+                connection.execute(
+                    "INSERT INTO projects
+                     (id, name, path, ai_config_json, created_at, updated_at)
+                     VALUES ('project-isolated', 'Isolated project', ?1, '{}', 'now', 'now')",
+                    [&project_path],
+                )?;
+                connection.execute(
+                    "INSERT INTO discussions
+                     (id, project_id, title, agent, language, created_at, updated_at,
+                      workspace_mode, worktree_branch)
+                     VALUES ('disc-isolated-idle', 'project-isolated',
+                             'Background refactor', 'Codex', 'en', 'now', 'now',
+                             'Isolated', 'feat/refactor')",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .expect("seed project and isolated discussion");
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/projects/project-isolated/git-switch")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"branch":"feature/whatever"}"#))
+            .unwrap();
+
+        let (status, json) = send(state, false, request).await;
+        assert_eq!(status, StatusCode::OK);
+        // The switch itself fails (the temp dir is not a git repo), but it must
+        // NOT fail with the test-mode refusal.
+        if let Some(error) = json["error"].as_str() {
+            assert!(
+                !error.contains("test mode"),
+                "an idle worktree must not be mistaken for test mode: {error}"
+            );
+        }
+    }
+
+    /// KT-94 — the Git status must not wait for the language statistics. Cold
+    /// cache: the response arrives with an honest empty bar, and the languages
+    /// land in the cache afterwards, off the response path.
+    #[tokio::test]
+    async fn git_status_answers_before_the_language_stats_are_computed() {
+        let state = test_state();
+        let project_dir = tempfile::TempDir::new().expect("temporary project directory");
+        // A real file, so the background computation has something to find.
+        std::fs::write(project_dir.path().join("main.rs"), "fn main() {}\n").unwrap();
+        let project_path = project_dir.path().to_string_lossy().into_owned();
+        state
+            .db
+            .with_conn(move |connection| {
+                connection.execute(
+                    "INSERT INTO projects
+                     (id, name, path, ai_config_json, created_at, updated_at)
+                     VALUES ('project-lang-async', 'Lang async', ?1, '{}', 'now', 'now')",
+                    [&project_path],
+                )?;
+                Ok(())
+            })
+            .await
+            .expect("seed project");
+
+        for args in [
+            vec!["init", "-b", "main"],
+            vec!["config", "user.email", "t@t.t"],
+            vec!["config", "user.name", "T"],
+            vec!["add", "."],
+            vec!["commit", "-m", "seed"],
+        ] {
+            let out = std::process::Command::new("git")
+                .args(&args)
+                .current_dir(project_dir.path())
+                .output()
+                .expect("git command");
+            assert!(out.status.success(), "git {args:?} failed");
+        }
+
+        let request = Request::builder()
+            .method("GET")
+            .uri("/api/projects/project-lang-async/git-status")
+            .body(Body::empty())
+            .unwrap();
+        let (status, json) = send(state.clone(), false, request).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["success"], true, "{json}");
+        // The first answer must NOT have waited for the scan: empty bar, null
+        // timestamp — an honest "not computed yet", never a block.
+        // The serializer omits empty vecs, so absent == empty.
+        assert!(
+            json["data"]["languages"]
+                .as_array()
+                .is_none_or(|languages| languages.is_empty()),
+            "{json}"
+        );
+        assert!(json["data"]["languages_checked_at"].is_null(), "{json}");
+
+        // The background task then fills the cache without any further request
+        // blocking on it.
+        let mut cached = false;
+        for _ in 0..50 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            if state
+                .git_language_cache
+                .lock()
+                .await
+                .get("project-lang-async")
+                .is_some()
+            {
+                cached = true;
+                break;
+            }
+        }
+        assert!(cached, "the language stats must land in the cache off-path");
+
+        // And the next call serves them as cached.
+        let request = Request::builder()
+            .method("GET")
+            .uri("/api/projects/project-lang-async/git-status")
+            .body(Body::empty())
+            .unwrap();
+        let (_, json) = send(state, false, request).await;
+        assert_eq!(json["data"]["languages_cached"], true, "{json}");
     }
 
     // ─── Q1: Workflow execution integration test ──────────────────────────────
@@ -1014,6 +1300,431 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn source_session_binding_is_versioned_visible_and_not_stolen_silently() {
+        let state = test_state();
+        insert_test_discussion(&state, "disc-source-a", "Source A").await;
+        insert_test_discussion(&state, "disc-source-b", "Source B").await;
+
+        let link = |disc_id: &str, force_reassign: bool| {
+            Request::builder()
+                .method("POST")
+                .uri("/api/disc/link")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "disc_id": disc_id,
+                        "source_agent": "Codex",
+                        "source_session_id": "codex-session-42",
+                        "force_reassign": force_reassign,
+                    })
+                    .to_string(),
+                ))
+                .unwrap()
+        };
+
+        let (status, body) = send(state.clone(), false, link("disc-source-a", false)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["success"], true, "{body}");
+
+        let status_request = || {
+            Request::builder()
+                .uri(
+                    "/api/disc/session-status?source_agent=Codex&source_session_id=codex-session-42",
+                )
+                .body(Body::empty())
+                .unwrap()
+        };
+        let (_, body) = send(state.clone(), false, status_request()).await;
+        assert_eq!(body["data"]["binding_version"], 1);
+        assert_eq!(body["data"]["bound_disc_id"], "disc-source-a");
+        assert!(body["data"]["connected_disc_id"].is_null());
+
+        let (_, conflict) = send(state.clone(), false, link("disc-source-b", false)).await;
+        assert_eq!(conflict["success"], false);
+        assert!(conflict["error"]
+            .as_str()
+            .unwrap()
+            .contains("already linked to discussion disc-source-a"));
+
+        state
+            .db
+            .with_conn(|connection| {
+                crate::db::discussion_sessions::create_session(
+                    connection,
+                    "disc-source-a",
+                    "Codex",
+                    Some("codex-session-42"),
+                    "peer",
+                )
+            })
+            .await
+            .unwrap();
+        let (_, connected) = send(state.clone(), false, status_request()).await;
+        assert_eq!(connected["data"]["connected_disc_id"], "disc-source-a");
+        assert_eq!(connected["data"]["connection_status"], "active");
+
+        let (_, transferred) = send(state.clone(), false, link("disc-source-b", true)).await;
+        assert_eq!(transferred["success"], true, "{transferred}");
+        let (_, body) = send(state, false, status_request()).await;
+        assert_eq!(body["data"]["bound_disc_id"], "disc-source-b");
+        assert_eq!(
+            body["data"]["connected_disc_id"], "disc-source-a",
+            "source ownership may transfer while the old CLI peer is still live"
+        );
+    }
+
+    #[tokio::test]
+    async fn discussion_export_import_is_versioned_idempotent_and_conflict_aware() {
+        let state = test_state();
+        insert_test_discussion(&state, "disc-portability-http", "Portable HTTP").await;
+        state
+            .db
+            .with_conn(|connection| {
+                crate::db::discussions::insert_message(
+                    connection,
+                    "disc-portability-http",
+                    &crate::models::DiscussionMessage {
+                        id: "portable-http-message".into(),
+                        role: crate::models::MessageRole::User,
+                        content: "Export me".into(),
+                        agent_type: None,
+                        timestamp: chrono::Utc::now(),
+                        tokens_used: 0,
+                        auth_mode: None,
+                        model_tier: None,
+                        model: None,
+                        cost_usd: None,
+                        author_pseudo: Some("Tester".into()),
+                        author_avatar_email: None,
+                        source_msg_id: None,
+                        duration_ms: None,
+                        lint_report: None,
+                        target_agent: None,
+                        reply_to_message_id: None,
+                    },
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let export_request = || {
+            Request::builder()
+                .uri("/api/discussions/disc-portability-http/export")
+                .body(Body::empty())
+                .unwrap()
+        };
+        let (status, bundle) = send(state.clone(), false, export_request()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(bundle["kind"], "kronn.discussion");
+        assert_eq!(bundle["version"], 1);
+        assert_eq!(bundle["messages"].as_array().unwrap().len(), 1);
+
+        let import_request = |content: &Value| {
+            Request::builder()
+                .method("POST")
+                .uri("/api/discussions/import")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "content": content.to_string(),
+                        "project_id": null,
+                    })
+                    .to_string(),
+                ))
+                .unwrap()
+        };
+        let (_, imported) = send(state.clone(), false, import_request(&bundle)).await;
+        assert_eq!(imported["success"], true, "{imported}");
+        assert_eq!(imported["data"]["already_imported"], false);
+        assert_eq!(imported["data"]["imported_messages"], 1);
+        let imported_id = imported["data"]["discussion_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let (_, replay) = send(state.clone(), false, import_request(&bundle)).await;
+        assert_eq!(replay["success"], true, "{replay}");
+        assert_eq!(replay["data"]["already_imported"], true);
+        assert_eq!(replay["data"]["discussion_id"], imported_id);
+
+        let mut changed = bundle;
+        changed["discussion"]["title"] = Value::String("Changed".into());
+        let (_, conflict) = send(state, false, import_request(&changed)).await;
+        assert_eq!(conflict["success"], false);
+        assert_eq!(conflict["error_code"], "conflict");
+    }
+
+    #[tokio::test]
+    async fn guided_tour_demo_is_idempotent_agentless_and_reopened() {
+        let state = test_state();
+        let request = || {
+            Request::builder()
+                .method("POST")
+                .uri("/api/tour/demo-discussion")
+                .body(Body::empty())
+                .unwrap()
+        };
+
+        let (status, first) = send(state.clone(), false, request()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(first["success"], true, "{first}");
+        assert_eq!(first["data"]["created"], true);
+        assert_eq!(
+            first["data"]["prompt"],
+            "Crée une courte page HTML présentant Kronn dans le viewer de documents."
+        );
+        let discussion_id = first["data"]["discussion_id"]
+            .as_str()
+            .expect("tour demo id")
+            .to_string();
+
+        let archived_id = discussion_id.clone();
+        state
+            .db
+            .with_conn(move |connection| {
+                connection.execute(
+                    "UPDATE discussions SET archived = 1 WHERE id = ?1",
+                    [&archived_id],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        state.config.write().await.ui_language = "es".into();
+        let (_, replay) = send(state.clone(), false, request()).await;
+        assert_eq!(replay["success"], true, "{replay}");
+        assert_eq!(replay["data"]["created"], false);
+        assert_eq!(replay["data"]["discussion_id"], discussion_id);
+        assert_eq!(
+            replay["data"]["prompt"],
+            "Crea una breve página HTML sobre Kronn en el visor de documentos."
+        );
+
+        let inspected_id = discussion_id.clone();
+        let (
+            discussion_count,
+            message_count,
+            reply_count,
+            import_count,
+            provenance_kind,
+            no_agent,
+            archived,
+            language,
+            preview_content,
+        ) = state
+            .db
+            .with_conn(move |connection| {
+                let discussion_count: i64 = connection.query_row(
+                    "SELECT COUNT(*) FROM discussions WHERE id = ?1",
+                    [&inspected_id],
+                    |row| row.get(0),
+                )?;
+                let message_count: i64 = connection.query_row(
+                    "SELECT COUNT(*) FROM messages WHERE discussion_id = ?1",
+                    [&inspected_id],
+                    |row| row.get(0),
+                )?;
+                let reply_count: i64 = connection.query_row(
+                    "SELECT COUNT(*) FROM messages
+                         WHERE discussion_id = ?1
+                           AND reply_to_message_id IS NOT NULL
+                           AND content LIKE '%kronn-doc-preview%'",
+                    [&inspected_id],
+                    |row| row.get(0),
+                )?;
+                let import_count: i64 = connection.query_row(
+                    "SELECT COUNT(*) FROM discussion_imports
+                         WHERE imported_discussion_id = ?1",
+                    [&inspected_id],
+                    |row| row.get(0),
+                )?;
+                let provenance_kind: String = connection.query_row(
+                    "SELECT provenance_kind FROM discussion_imports
+                         WHERE imported_discussion_id = ?1",
+                    [&inspected_id],
+                    |row| row.get(0),
+                )?;
+                let no_agent: i64 = connection.query_row(
+                    "SELECT no_agent FROM discussions WHERE id = ?1",
+                    [&inspected_id],
+                    |row| row.get(0),
+                )?;
+                let archived: i64 = connection.query_row(
+                    "SELECT archived FROM discussions WHERE id = ?1",
+                    [&inspected_id],
+                    |row| row.get(0),
+                )?;
+                let language: String = connection.query_row(
+                    "SELECT language FROM discussions WHERE id = ?1",
+                    [&inspected_id],
+                    |row| row.get(0),
+                )?;
+                let preview_content: String = connection.query_row(
+                    "SELECT content FROM messages
+                     WHERE discussion_id = ?1 AND source_msg_id = ?2",
+                    [&inspected_id, "kronn-guided-tour-demo-preview"],
+                    |row| row.get(0),
+                )?;
+                Ok((
+                    discussion_count,
+                    message_count,
+                    reply_count,
+                    import_count,
+                    provenance_kind,
+                    no_agent,
+                    archived,
+                    language,
+                    preview_content,
+                ))
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(discussion_count, 1);
+        assert_eq!(message_count, 2);
+        assert_eq!(reply_count, 1);
+        assert_eq!(import_count, 1);
+        assert_eq!(provenance_kind, "guided_tour_demo");
+        assert_eq!(no_agent, 1);
+        assert_eq!(archived, 0, "replaying the tour reopens its demo");
+        assert_eq!(language, "es");
+        assert!(preview_content.contains("Vista previa del documento"));
+        assert!(preview_content.contains("<html lang=\"es\">"));
+    }
+
+    #[tokio::test]
+    async fn plugin_bundle_http_round_trip_requires_passphrase_for_values() {
+        use std::collections::HashMap;
+
+        let source = test_state();
+        let source_secret = source
+            .config
+            .read()
+            .await
+            .encryption_secret
+            .clone()
+            .unwrap();
+        source
+            .db
+            .with_conn(move |connection| {
+                let server = crate::models::McpServer {
+                    id: "custom-http-portable".into(),
+                    name: "HTTP Portable".into(),
+                    description: "HTTP test".into(),
+                    transport: crate::models::McpTransport::ApiOnly,
+                    source: crate::models::McpSource::Manual,
+                    api_spec: Some(crate::models::ApiSpec {
+                        base_url: "https://example.test".into(),
+                        auth: crate::models::ApiAuthKind::Bearer {
+                            env_key: "API_TOKEN".into(),
+                        },
+                        endpoints: vec![],
+                        docs_url: None,
+                        config_keys: vec![],
+                    }),
+                };
+                crate::db::mcps::upsert_server(connection, &server)?;
+                let env = HashMap::from([("API_TOKEN".into(), "portable-secret".into())]);
+                let encrypted = crate::db::mcps::encrypt_env(&env, &source_secret)
+                    .map_err(anyhow::Error::msg)?;
+                crate::db::mcps::insert_config(
+                    connection,
+                    &crate::models::McpConfig {
+                        id: "config-http-portable".into(),
+                        server_id: server.id.clone(),
+                        label: "HTTP Portable".into(),
+                        env_keys: vec!["API_TOKEN".into()],
+                        env_encrypted: encrypted,
+                        args_override: None,
+                        is_global: false,
+                        include_general: true,
+                        config_hash: crate::db::mcps::compute_config_hash(&server, &env, None),
+                        project_ids: vec![],
+                        host_sync: crate::models::HostSyncMode::None,
+                    },
+                )?;
+                Ok::<_, anyhow::Error>(())
+            })
+            .await
+            .unwrap();
+
+        let preview = Request::builder()
+            .method("POST")
+            .uri("/api/mcps/bundles/preview")
+            .header("Content-Type", "application/json")
+            .body(Body::from(
+                serde_json::json!({"config_ids": ["config-http-portable"]}).to_string(),
+            ))
+            .unwrap();
+        let (_, preview_body) = send(source.clone(), false, preview).await;
+        assert_eq!(preview_body["success"], true, "{preview_body}");
+        assert_eq!(preview_body["data"]["sensitive_value_count"], 1);
+
+        let export = Request::builder()
+            .method("POST")
+            .uri("/api/mcps/bundles/export")
+            .header("Content-Type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "config_ids": ["config-http-portable"],
+                    "include_values": true,
+                    "passphrase": "portable passphrase",
+                    "confirmation": "EXPORTER LES SECRETS"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let (status, bundle) = send(source, false, export).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(bundle["kind"], "kronn.plugins");
+        assert_eq!(bundle["encrypted"], true);
+        assert!(bundle.get("payload").is_none());
+        assert!(
+            !bundle.to_string().contains("portable-secret"),
+            "encrypted bundle must not leak a value"
+        );
+
+        let target = test_state();
+        let import_request = |passphrase: Option<&str>| {
+            Request::builder()
+                .method("POST")
+                .uri("/api/mcps/bundles/import")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "content": bundle.to_string(),
+                        "passphrase": passphrase,
+                    })
+                    .to_string(),
+                ))
+                .unwrap()
+        };
+        let (_, refused) = send(target.clone(), false, import_request(None)).await;
+        assert_eq!(refused["success"], false);
+        assert_eq!(refused["error_code"], "validation");
+
+        let (_, imported) = send(
+            target.clone(),
+            false,
+            import_request(Some("portable passphrase")),
+        )
+        .await;
+        assert_eq!(imported["success"], true, "{imported}");
+        assert_eq!(
+            imported["data"]["imported_config_ids"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        let (_, replay) = send(target, false, import_request(Some("portable passphrase"))).await;
+        assert_eq!(replay["success"], true, "{replay}");
+        assert_eq!(replay["data"]["already_imported"], true);
+    }
+
     // ─── Q9: Agents API integration tests ─────────────────────────────────────
 
     #[tokio::test]
@@ -1164,6 +1875,70 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
+    async fn config_agent_mention_color_validates_and_persists() {
+        isolate_config_dir();
+        let state = test_state();
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/config/agent-mention-color")
+            .header("Content-Type", "application/json")
+            .body(Body::from(
+                serde_json::json!({ "agent": "Codex", "color": "#A1b2C3" }).to_string(),
+            ))
+            .unwrap();
+        let (status, body) = send(state.clone(), false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["success"], true, "{body}");
+        assert_eq!(
+            state
+                .config
+                .read()
+                .await
+                .agents
+                .codex
+                .mention_color
+                .as_deref(),
+            Some("#a1b2c3")
+        );
+
+        let persisted = crate::core::config::load()
+            .await
+            .expect("load persisted config")
+            .expect("saved config exists");
+        assert_eq!(
+            persisted.agents.codex.mention_color.as_deref(),
+            Some("#a1b2c3")
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn config_agent_mention_color_rejects_invalid_css_values() {
+        isolate_config_dir();
+        let state = test_state();
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/config/agent-mention-color")
+            .header("Content-Type", "application/json")
+            .body(Body::from(
+                serde_json::json!({ "agent": "Codex", "color": "red" }).to_string(),
+            ))
+            .unwrap();
+        let (status, body) = send(state.clone(), false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["success"], false, "{body}");
+        assert!(state
+            .config
+            .read()
+            .await
+            .agents
+            .codex
+            .mention_color
+            .is_none());
+    }
+
+    #[tokio::test]
     async fn config_scan_paths_get() {
         let state = test_state();
         let req = Request::builder()
@@ -1288,6 +2063,8 @@ mod tests {
                         author_avatar_email: None,
                         source_msg_id: None,
                         duration_ms: None,
+                        target_agent: None,
+                        reply_to_message_id: None,
                     };
                     crate::db::discussions::insert_message(conn, &disc_id, &msg)?;
                     Ok(())

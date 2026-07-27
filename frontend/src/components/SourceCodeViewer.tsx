@@ -1,19 +1,23 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ChevronDown, ChevronRight, ChevronUp, Code2, FileCode2, Folder, FolderX, GitBranch, History,
+  ChevronDown, ChevronRight, ChevronUp, Code2, FileCode2, Folder, FolderX, GitBranch,
+  GitCompareArrows, History,
   Loader2, Search, X,
 } from 'lucide-react';
 import { projects as projectsApi } from '../lib/api';
-import type { GitBlameLine, SourceFileNode } from '../types/generated';
+import type { GitBlameLine, GitCommitDetail, SourceFileNode } from '../types/generated';
 import { useT } from '../lib/I18nContext';
 import { highlightLine as highlightSourceLine, languageForPath } from '../lib/diff-syntax';
 import './SourceCodeViewer.css';
 
 interface SourceCodeViewerProps {
   projectId: string;
+  /** KT-75 — open the full patch of a commit in the panel's temporary tab.
+   *  Absent when the host has no tab to open it in. */
+  onOpenCommit?: (sha: string) => void;
 }
 
-export function SourceCodeViewer({ projectId }: SourceCodeViewerProps) {
+export function SourceCodeViewer({ projectId, onOpenCommit }: SourceCodeViewerProps) {
   const { t } = useT();
   const [tree, setTree] = useState<SourceFileNode[]>([]);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
@@ -31,6 +35,12 @@ export function SourceCodeViewer({ projectId }: SourceCodeViewerProps) {
   const [blameLines, setBlameLines] = useState<GitBlameLine[]>([]);
   const [blameLoading, setBlameLoading] = useState(false);
   const [blameError, setBlameError] = useState(false);
+  // KT-67 — the commit an annotated line points at. `sha` drives the fetch
+  // so a click is enough; the detail arrives asynchronously.
+  const [commitSha, setCommitSha] = useState<string | null>(null);
+  const [commitDetail, setCommitDetail] = useState<GitCommitDetail | null>(null);
+  const [commitLoading, setCommitLoading] = useState(false);
+  const [commitError, setCommitError] = useState<string | null>(null);
   const [exclusions, setExclusions] = useState<string[]>([]);
   const [exclusionSaving, setExclusionSaving] = useState<string | null>(null);
   const [exclusionError, setExclusionError] = useState(false);
@@ -150,6 +160,36 @@ export function SourceCodeViewer({ projectId }: SourceCodeViewerProps) {
       });
     return () => { alive = false; };
   }, [annotate, projectId, selectedPath]);
+
+  // KT-67 — load the clicked commit. Keyed on the sha so re-clicking the same
+  // line is free, and a stale response can't overwrite a newer one.
+  useEffect(() => {
+    if (!commitSha) {
+      setCommitDetail(null);
+      setCommitError(null);
+      setCommitLoading(false);
+      return;
+    }
+    let alive = true;
+    setCommitDetail(null);
+    setCommitError(null);
+    setCommitLoading(true);
+    projectsApi.gitCommitDetail(projectId, commitSha)
+      .then(detail => { if (alive) setCommitDetail(detail); })
+      .catch(error => { if (alive) setCommitError(String(error)); })
+      .finally(() => { if (alive) setCommitLoading(false); });
+    return () => { alive = false; };
+  }, [commitSha, projectId]);
+
+  // Escape closes the commit detail before anything else reacts to it.
+  useEffect(() => {
+    if (!commitSha) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setCommitSha(null);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [commitSha]);
 
   useEffect(() => {
     if (searchTimer.current) clearTimeout(searchTimer.current);
@@ -408,8 +448,25 @@ export function SourceCodeViewer({ projectId }: SourceCodeViewerProps) {
                 return (
                   <span className="source-line" key={`${index}-${line.slice(0, 12)}`}>
                     {annotate && (
-                      <span className="source-blame" title={blameLabel}>
-                        {blameLabel}
+                      // Keep the table cell as the layout owner and the button as
+                      // its interactive child. The cell has an explicit width:
+                      // a percentage width combined with this 100%-wide button
+                      // has no intrinsic minimum and can otherwise collapse to
+                      // ~1px, clipping the author and date.
+                      <span className="source-blame" title={blame ? undefined : blameLabel}>
+                        {blame ? (
+                          <button
+                            type="button"
+                            className="source-blame-btn"
+                            title={t('projects.source.blameOpenCommit', blameLabel)}
+                            onClick={() => setCommitSha(blame.commit)}
+                            data-testid="source-blame-button"
+                          >
+                            {blameLabel}
+                          </button>
+                        ) : (
+                          blameLabel
+                        )}
                       </span>
                     )}
                     <span className="source-line-number" aria-hidden="true">{index + 1}</span>
@@ -426,6 +483,63 @@ export function SourceCodeViewer({ projectId }: SourceCodeViewerProps) {
           ) : (
             <div className="source-state">
               <Code2 size={18} /> {t('projects.source.select')}
+            </div>
+          )}
+          {commitSha && (
+            <div className="source-commit-detail" data-testid="source-commit-detail" role="dialog" aria-label={t('projects.source.commitTitle')}>
+              <header>
+                <strong>{commitDetail?.short_sha ?? commitSha.slice(0, 8)}</strong>
+                <button
+                  type="button"
+                  onClick={() => setCommitSha(null)}
+                  aria-label={t('projects.source.commitClose')}
+                >
+                  <X size={13} />
+                </button>
+              </header>
+              {commitLoading && (
+                <p className="source-commit-state"><Loader2 size={12} className="spin" /> {t('projects.source.commitLoading')}</p>
+              )}
+              {commitError && (
+                <p className="source-commit-error">{t('projects.source.commitFailed', commitError)}</p>
+              )}
+              {commitDetail && (
+                <>
+                  <p className="source-commit-subject">{commitDetail.subject}</p>
+                  {commitDetail.body && <pre className="source-commit-body">{commitDetail.body}</pre>}
+                  <dl className="source-commit-meta">
+                    <dt>{t('projects.source.commitAuthor')}</dt>
+                    <dd>{commitDetail.author_name} &lt;{commitDetail.author_email}&gt;</dd>
+                    <dt>{t('projects.source.commitDate')}</dt>
+                    <dd>{formatCommitTime(commitDetail.author_time)}</dd>
+                    <dt>{t('projects.source.commitFiles')}</dt>
+                    <dd>{commitDetail.files_changed}</dd>
+                    {commitDetail.branches.length > 0 && (
+                      <>
+                        <dt>{t('projects.source.commitBranches')}</dt>
+                        <dd>
+                          {commitDetail.branches.join(', ')}
+                          {/* Say the list was cut rather than implying it is complete. */}
+                          {commitDetail.branches_truncated && ` ${t('projects.source.commitBranchesMore')}`}
+                        </dd>
+                      </>
+                    )}
+                  </dl>
+                  <code className="source-commit-sha">{commitDetail.sha}</code>
+                  {onOpenCommit && (
+                    // KT-75 — the popover answers "what was this commit about";
+                    // this opens the change itself, parent → commit.
+                    <button
+                      type="button"
+                      className="source-commit-open-patch"
+                      onClick={() => onOpenCommit(commitDetail.sha)}
+                      data-testid="source-commit-open-patch"
+                    >
+                      <GitCompareArrows size={12} /> {t('projects.source.commitOpenPatch')}
+                    </button>
+                  )}
+                </>
+              )}
             </div>
           )}
         </div>
@@ -573,6 +687,16 @@ function flattenSourcePaths(nodes: SourceFileNode[], paths: string[]) {
     if (node.is_dir) flattenSourcePaths(node.children ?? [], paths);
     else paths.push(node.path);
   });
+}
+
+/** Full date+time for a commit detail — the gutter shows a short date, but
+ *  "which commit exactly" often hinges on the hour. */
+function formatCommitTime(epochSeconds: number): string {
+  if (epochSeconds <= 0) return '—';
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+  }).format(new Date(epochSeconds * 1000));
 }
 
 function formatBlame(line: GitBlameLine): string {

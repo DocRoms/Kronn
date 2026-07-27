@@ -70,6 +70,7 @@ const sampleConfig: McpConfigDisplay = {
   project_names: ['ProjectAlpha'],
   secrets_broken: false,
   host_sync: 'None',
+  preferred_interface: 'api',
 } as McpConfigDisplay;
 
 const samplePlugins: ApiPluginOption[] = [

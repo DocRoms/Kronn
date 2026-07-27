@@ -175,3 +175,151 @@
     border-bottom: 1px solid var(--kr-border);
   }
 }
+
+/* ── KT-75 — temporary commit tab ─────────────────────────────────────────
+   Sits inside the same segmented control as Sources and Git changes, so it
+   reads as a peer view rather than a modal. Its close button is a sibling of
+   the tab button, not nested inside it: a button inside a button is invalid
+   and unreachable by keyboard. */
+.project-code-commit-tab {
+  display: inline-flex;
+  align-items: center;
+}
+
+.project-code-commit-tab > button:first-child {
+  font-family: var(--kr-font-mono);
+}
+
+.project-code-commit-close {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 6px !important;
+  color: var(--kr-text-faint) !important;
+}
+
+.project-code-commit-close:hover {
+  color: var(--kr-error) !important;
+}
+
+.project-code-commit-view {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+}
+
+.project-code-commit-view > header {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  min-height: 38px;
+  padding: 0 var(--kr-sp-3);
+  border-bottom: 1px solid var(--kr-border);
+  color: var(--kr-text-dim);
+  font-size: var(--kr-fs-xs);
+}
+
+.project-code-commit-view > header > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-code-commit-view > header small {
+  flex: 0 0 auto;
+  margin-left: auto;
+  color: var(--kr-text-faint);
+  font-size: var(--kr-fs-2xs);
+}
+
+.project-code-commit-view .git-diff-container {
+  min-height: 0;
+  flex: 1;
+}
+
+/* KT-87 — one file at a time inside the commit tab. Mirrors the Git-changes
+   layout so the two diff surfaces behave the same way. */
+.project-code-commit-layout {
+  display: grid;
+  height: min(620px, calc(100dvh - 340px));
+  min-height: 420px;
+  flex: 0 0 auto;
+  grid-template-columns: minmax(0, 1fr) minmax(200px, 26%);
+  grid-template-rows: minmax(0, 1fr);
+  overflow: hidden;
+}
+
+.project-code-commit-file {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  border-right: 1px solid var(--kr-border);
+}
+
+.project-code-commit-file .git-diff-container {
+  min-height: 0;
+  flex: 1;
+}
+
+.project-code-commit-files {
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--kr-sp-2);
+}
+
+.project-code-commit-files button {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  padding: 5px 7px;
+  border: 0;
+  border-radius: var(--kr-r-sm);
+  background: transparent;
+  color: var(--kr-text-dim);
+  font-size: var(--kr-fs-2xs);
+  text-align: left;
+  cursor: pointer;
+}
+
+.project-code-commit-files button:hover {
+  background: var(--kr-bg-hover);
+}
+
+.project-code-commit-files button[data-active='true'] {
+  background: var(--kr-accent-bg);
+  color: var(--kr-accent-ink);
+}
+
+.project-code-commit-files button > span {
+  overflow: hidden;
+  direction: rtl;            /* keep the file name visible, clip the directories */
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-code-commit-files button > small {
+  flex: 0 0 auto;
+  margin-left: auto;
+  color: var(--kr-text-faint);
+  font-family: var(--kr-font-mono);
+}
+
+@media (max-width: 900px) {
+  .project-code-commit-layout {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(240px, 1fr) auto;
+  }
+
+  .project-code-commit-file {
+    border-right: 0;
+    border-bottom: 1px solid var(--kr-border);
+  }
+
+  .project-code-commit-files {
+    max-height: 180px;
+  }
+}

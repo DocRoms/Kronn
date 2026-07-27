@@ -25,14 +25,19 @@ use crate::AppState;
 /// than a generic "User").
 pub async fn federate_message(state: &AppState, disc_id: &str, msg: &DiscussionMessage) {
     let did = disc_id.to_string();
-    let shared_id = state
+    let message_id = msg.id.clone();
+    let routing = state
         .db
         .with_conn(move |conn| {
-            crate::db::discussions::get_discussion(conn, &did).map(|d| d.and_then(|d| d.shared_id))
+            let shared_id =
+                crate::db::discussions::get_discussion(conn, &did)?.and_then(|d| d.shared_id);
+            let targets = crate::db::discussions::list_message_targets(conn, &message_id)?;
+            Ok((shared_id, targets))
         })
         .await
         .ok()
-        .flatten();
+        .unwrap_or_default();
+    let (shared_id, targets) = routing;
     let Some(shared_id) = shared_id else {
         return; // not a shared disc — nothing to federate
     };
@@ -53,6 +58,12 @@ pub async fn federate_message(state: &AppState, disc_id: &str, msg: &DiscussionM
         timestamp: msg.timestamp.timestamp_millis(),
         role: msg.role.clone(),
         agent_type: msg.agent_type.clone(),
+        target_agents: targets
+            .iter()
+            .map(|target| target.agent_type.clone())
+            .collect(),
+        targets,
+        reply_to_message_id: msg.reply_to_message_id.clone(),
     });
 
     // F8 — also announce any files pinned to this message so the peer can fetch
@@ -65,14 +76,19 @@ pub async fn federate_message(state: &AppState, disc_id: &str, msg: &DiscussionM
 /// fresh local cursor event; duplicates converge on `idempotency_key`.
 pub async fn federate_message_revision(state: &AppState, event: &MessageRevisionEvent) {
     let did = event.discussion_id.clone();
-    let shared_id = state
+    let target_message_id = event.target_message_id.clone();
+    let routing = state
         .db
         .with_conn(move |conn| {
-            crate::db::discussions::get_discussion(conn, &did).map(|d| d.and_then(|d| d.shared_id))
+            let shared_id =
+                crate::db::discussions::get_discussion(conn, &did)?.and_then(|d| d.shared_id);
+            let targets = crate::db::discussions::list_message_targets(conn, &target_message_id)?;
+            Ok((shared_id, targets))
         })
         .await
         .ok()
-        .flatten();
+        .unwrap_or_default();
+    let (shared_id, targets) = routing;
     let Some(shared_id) = shared_id else {
         return;
     };
@@ -91,6 +107,11 @@ pub async fn federate_message_revision(state: &AppState, event: &MessageRevision
         revision: event.revision.clone(),
         content: event.content.clone(),
         target_agent: event.target_agent.clone(),
+        target_agents: targets
+            .iter()
+            .map(|target| target.agent_type.clone())
+            .collect(),
+        targets,
         idempotency_key: event.idempotency_key.clone(),
         from_pseudo,
         from_invite_code,
@@ -176,6 +197,12 @@ pub async fn respond_to_sync_request(state: &AppState, shared_id: &str, since_ti
     // a catching-up peer can insert the new Agent reply first, then tombstone
     // it while applying the earlier revision event.
     for event in revision_events {
+        let target_id = event.target_message_id.clone();
+        let targets = state
+            .db
+            .with_conn(move |conn| crate::db::discussions::list_message_targets(conn, &target_id))
+            .await
+            .unwrap_or_default();
         let _ = state.ws_broadcast.send(WsMessage::MessageRevised {
             shared_discussion_id: shared_id.to_string(),
             event_id: event.id,
@@ -185,6 +212,11 @@ pub async fn respond_to_sync_request(state: &AppState, shared_id: &str, since_ti
             revision: event.revision,
             content: event.content,
             target_agent: event.target_agent,
+            target_agents: targets
+                .iter()
+                .map(|target| target.agent_type.clone())
+                .collect(),
+            targets,
             idempotency_key: event.idempotency_key,
             from_pseudo: our_pseudo.clone(),
             from_invite_code: our_invite_code.clone(),
@@ -195,6 +227,12 @@ pub async fn respond_to_sync_request(state: &AppState, shared_id: &str, since_ti
         .into_iter()
         .filter(|m| m.timestamp.timestamp_millis() > since_timestamp)
     {
+        let message_id = m.id.clone();
+        let targets = state
+            .db
+            .with_conn(move |conn| crate::db::discussions::list_message_targets(conn, &message_id))
+            .await
+            .unwrap_or_default();
         let from_pseudo = m
             .author_pseudo
             .clone()
@@ -210,6 +248,12 @@ pub async fn respond_to_sync_request(state: &AppState, shared_id: &str, since_ti
             timestamp: m.timestamp.timestamp_millis(),
             role: m.role.clone(),
             agent_type: m.agent_type.clone(),
+            target_agents: targets
+                .iter()
+                .map(|target| target.agent_type.clone())
+                .collect(),
+            targets,
+            reply_to_message_id: m.reply_to_message_id.clone(),
         });
         // Re-announce attachments too, so a catching-up peer also recovers files.
         emit_attachments(state, shared_id, &m.id, &our_invite_code).await;
@@ -445,6 +489,31 @@ mod tests {
                     author_avatar_email: None,
                     source_msg_id: None,
                     duration_ms: None,
+                    target_agent: None,
+                    reply_to_message_id: None,
+                },
+            )?;
+            crate::db::discussions::insert_message(
+                conn,
+                "d-sync-revision",
+                &DiscussionMessage {
+                    id: "agent-sync-reply".into(),
+                    role: MessageRole::Agent,
+                    content: "reply projection".into(),
+                    timestamp: now + chrono::Duration::milliseconds(1),
+                    model: None,
+                    lint_report: None,
+                    agent_type: Some(crate::models::AgentType::Codex),
+                    tokens_used: 0,
+                    auth_mode: None,
+                    model_tier: None,
+                    cost_usd: None,
+                    author_pseudo: None,
+                    author_avatar_email: None,
+                    source_msg_id: None,
+                    duration_ms: None,
+                    target_agent: None,
+                    reply_to_message_id: Some("user-sync-revision".into()),
                 },
             )?;
             conn.execute(
@@ -477,8 +546,18 @@ mod tests {
             WsMessage::MessageRevised { .. }
         ));
         assert!(matches!(
-            receiver.try_recv().expect("projection frame"),
-            WsMessage::ChatMessage { .. }
+            receiver.try_recv().expect("first projection frame"),
+            WsMessage::ChatMessage {
+                reply_to_message_id: None,
+                ..
+            }
+        ));
+        assert!(matches!(
+            receiver.try_recv().expect("reply projection frame"),
+            WsMessage::ChatMessage {
+                reply_to_message_id: Some(target),
+                ..
+            } if target == "user-sync-revision"
         ));
     }
 }
