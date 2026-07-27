@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
-import { render, screen, act, cleanup, fireEvent } from '@testing-library/react';
+import { render, screen, act, cleanup, fireEvent, waitFor } from '@testing-library/react';
+import { createMemoryRouter, RouterProvider } from 'react-router';
 import { I18nProvider } from '../../lib/I18nContext';
+import { ProjectsRoute } from '../../routes/ProjectsRoute';
 
 // Dashboard now opens its own WS (audit_finished toast) — never a real
 // socket in tests.
@@ -85,10 +87,20 @@ afterEach(() => {
   document.title = 'Kronn';
 });
 
-const wrap = async (ui: React.ReactElement) => {
+const wrap = async (dashboardEl: React.ReactElement, initialPath = '/projects') => {
+  const router = createMemoryRouter([
+    {
+      path: '/',
+      element: dashboardEl,
+      children: [
+        { path: 'projects', element: <ProjectsRoute /> },
+        { path: 'projects/:projectId', element: <ProjectsRoute /> },
+      ],
+    },
+  ], { initialEntries: [initialPath] });
   let result: ReturnType<typeof render>;
   await act(async () => {
-    result = render(<I18nProvider>{ui}</I18nProvider>);
+    result = render(<I18nProvider><RouterProvider router={router} /></I18nProvider>);
   });
   await act(async () => { await new Promise(r => setTimeout(r, 0)); });
   return result!;
@@ -380,5 +392,44 @@ describe('Dashboard — audit_finished toast (0.9.0)', () => {
     });
     const toast = await screen.findByText(/Audit terminé avec avertissements/);
     expect(toast.textContent).toContain('6, 8');
+  });
+});
+
+describe('Dashboard — legacy #project-<id> hash deep-link', () => {
+  // The CLI opens http://localhost:3140/#project-<id>. Since URL routing,
+  // the hash is a legacy alias: once the project list loads, Dashboard
+  // redirects it to the canonical /projects/:id route.
+  const wrapWithRouter = async (initialPath = '/projects') => {
+    const router = createMemoryRouter([
+      {
+        path: '/',
+        element: <Dashboard onReset={vi.fn()} />,
+        children: [
+          { path: 'projects', element: <ProjectsRoute /> },
+          { path: 'projects/:projectId', element: <ProjectsRoute /> },
+        ],
+      },
+    ], { initialEntries: [initialPath] });
+    await act(async () => {
+      render(<I18nProvider><RouterProvider router={router} /></I18nProvider>);
+    });
+    await act(async () => { await new Promise(r => setTimeout(r, 0)); });
+    return router;
+  };
+
+  afterEach(() => { window.location.hash = ''; });
+
+  it('redirects the CLI hash to the canonical /projects/:id route', async () => {
+    vi.mocked(projectsApi.list).mockResolvedValue([makeProject('p1', 'kronn')]);
+    window.location.hash = '#project-p1';
+    const router = await wrapWithRouter();
+    await waitFor(() => expect(router.state.location.pathname).toBe('/projects/p1'));
+  });
+
+  it('ignores a hash naming a project that does not exist', async () => {
+    vi.mocked(projectsApi.list).mockResolvedValue([makeProject('p1', 'kronn')]);
+    window.location.hash = '#project-ghost';
+    const router = await wrapWithRouter();
+    expect(router.state.location.pathname).toBe('/projects');
   });
 });

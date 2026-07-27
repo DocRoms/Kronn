@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, act, cleanup, fireEvent, waitFor } from '@testing-library/react';
 import { I18nProvider } from '../../lib/I18nContext';
+import { TestRouter } from '../../test/routerWrapper';
 import { WorkflowsPage } from '../WorkflowsPage';
 import type { AgentsConfig, QuickPrompt } from '../../types/generated';
 
@@ -111,10 +112,10 @@ const sampleQpNoVar: QuickPrompt = {
   updated_at: '2026-01-01T00:00:00Z',
 };
 
-const wrap = async (ui: React.ReactElement) => {
+const wrap = async (ui: React.ReactElement, initialPath?: string) => {
   let result: ReturnType<typeof render>;
   await act(async () => {
-    result = render(<I18nProvider>{ui}</I18nProvider>);
+    result = render(<TestRouter initialPath={initialPath}><I18nProvider>{ui}</I18nProvider></TestRouter>);
   });
   await act(async () => { await new Promise(r => setTimeout(r, 0)); });
   return result!;
@@ -329,14 +330,11 @@ describe('WorkflowsPage — QP launch double-click race', () => {
       return Promise.resolve(new Response('{"success":true,"data":null,"error":null}', { status: 200 }));
     });
 
-    const onBatchLaunched = vi.fn();
-
     await wrap(
       <WorkflowsPage
         projects={[]}
         installedAgentTypes={['ClaudeCode', 'Codex', 'GeminiCli']}
         agentAccess={fullConfig}
-        onBatchLaunched={onBatchLaunched}
       />
     );
 
@@ -362,14 +360,6 @@ describe('WorkflowsPage — QP launch double-click race', () => {
       '/api/discussions/d-c2/run',
       '/api/discussions/d-c3/run',
     ]));
-
-    // onBatchLaunched is what tells Dashboard to (a) mark every disc as
-    // sending so the sidebar spinners light up, AND (b) set focusBatchId
-    // so DiscussionsPage auto-expands the batch group ("regrouped under
-    // the project" — the user's UX complaint).
-    expect(onBatchLaunched).toHaveBeenCalledTimes(1);
-    expect(onBatchLaunched.mock.calls[0][0]).toEqual(['d-c1', 'd-c2', 'd-c3']);
-    expect(onBatchLaunched.mock.calls[0][1]).toBe('run-fanout-1');
 
     fetchSpy.mockRestore();
   });
@@ -438,6 +428,31 @@ describe('WorkflowsPage — QP launch double-click race', () => {
     // The textarea label uses qp.variables[0].label = 'Ticket'.
     await waitFor(() => {
       expect(document.body.textContent).toContain('Ticket');
+    });
+  });
+});
+
+describe('WorkflowsPage — QP deep-link via initialQpId', () => {
+  it('renders QP tab and targets the matching card via data-qp-id', async () => {
+    mockQuickPromptsApi.list.mockResolvedValue([sampleQpWithVar, sampleQpNoVar]);
+    await wrap(
+      <WorkflowsPage
+        projects={[]}
+        installedAgentTypes={['ClaudeCode']}
+        agentAccess={fullConfig}
+        initialTab="quickPrompts"
+        initialQpId="qp-1"
+      />,
+      '/workflows/qp/qp-1',
+    );
+    // The QP tab should be active (initialTab = quickPrompts)
+    await waitFor(() => {
+      const qpTab = screen.getByRole('button', { name: /Quick Prompts/ });
+      expect(qpTab.getAttribute('data-active')).toBe('true');
+    });
+    // The target card should be rendered with the matching data attribute
+    await waitFor(() => {
+      expect(document.querySelector('[data-qp-id="qp-1"]')).not.toBeNull();
     });
   });
 });

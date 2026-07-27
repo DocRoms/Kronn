@@ -21,6 +21,7 @@ vi.mock('../../lib/api', async () => {
 
 import { projects as projectsApi } from '../../lib/api';
 import { DiscussionSidebar } from '../DiscussionSidebar';
+import { TestRouter } from '../../test/routerWrapper';
 import type { Discussion } from '../../types/generated';
 
 const noop = () => {};
@@ -74,10 +75,10 @@ describe('DiscussionSidebar — source badge (0.8.4 #294)', () => {
     ]);
 
     render(
-      <DiscussionSidebar
+      <TestRouter><DiscussionSidebar
         {...baseProps}
         discussions={[mkDisc('d-bound', 'Imported thread'), mkDisc('d-free', 'Native thread')]}
-      />
+      /></TestRouter>
     );
 
     await waitFor(() => {
@@ -90,10 +91,10 @@ describe('DiscussionSidebar — source badge (0.8.4 #294)', () => {
   it('hides the filter dropdown when there are no bindings', async () => {
     (projectsApi.discSources as ReturnType<typeof vi.fn>).mockResolvedValueOnce([]);
     render(
-      <DiscussionSidebar
+      <TestRouter><DiscussionSidebar
         {...baseProps}
         discussions={[mkDisc('d-free', 'Native')]}
-      />
+      /></TestRouter>
     );
     await waitFor(() => expect(projectsApi.discSources).toHaveBeenCalled());
     expect(screen.queryByTestId('disc-source-filter')).toBeNull();
@@ -107,10 +108,10 @@ describe('DiscussionSidebar — source badge (0.8.4 #294)', () => {
       { disc_id: 'd-cc2', source_agent: 'ClaudeCode', source_session_id: 's3' },
     ]);
     render(
-      <DiscussionSidebar
+      <TestRouter><DiscussionSidebar
         {...baseProps}
         discussions={[mkDisc('d-cc', 'a'), mkDisc('d-cur', 'b'), mkDisc('d-cc2', 'c')]}
-      />
+      /></TestRouter>
     );
 
     const select = await screen.findByTestId('disc-source-filter') as HTMLSelectElement;
@@ -126,14 +127,14 @@ describe('DiscussionSidebar — source badge (0.8.4 #294)', () => {
     ]);
 
     render(
-      <DiscussionSidebar
+      <TestRouter><DiscussionSidebar
         {...baseProps}
         discussions={[
           mkDisc('d-cc',   'Imported from CC'),
           mkDisc('d-cur',  'Imported from Cursor'),
           mkDisc('d-free', 'Native thread (no binding)'),
         ]}
-      />
+      /></TestRouter>
     );
 
     // All three render initially (one filter = all sources).
@@ -162,10 +163,10 @@ describe('DiscussionSidebar — source badge (0.8.4 #294)', () => {
       },
     ]);
     render(
-      <DiscussionSidebar
+      <TestRouter><DiscussionSidebar
         {...baseProps}
         discussions={[mkDisc('d-diverged', 'edited locally')]}
-      />
+      /></TestRouter>
     );
     const badge = await screen.findByTestId('disc-source-badge');
     // Diverged uses the `divergedHint` i18n key (carries the agent).

@@ -154,6 +154,11 @@
   margin: 0 auto;
   padding: var(--kr-sp-9) var(--kr-sp-8);
 }
+.route-fallback {
+  padding: var(--kr-sp-8);
+  opacity: 0.6;
+  font-size: 13px;
+}
 html[data-density="medium"] .dash-main {
   max-width: 1400px;
 }

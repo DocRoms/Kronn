@@ -14,6 +14,7 @@ vi.mock('../../hooks/useMediaQuery', () => ({
   useIsMobile: () => false,
 }));
 
+import { TestRouter } from '../../test/routerWrapper';
 import { ChatInput } from '../ChatInput';
 import { ProjectCard } from '../ProjectCard';
 
@@ -57,27 +58,26 @@ describe('Smoke tests — large components', () => {
       created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z',
     };
     render(
-      <ProjectCard
-        project={proj as any}
-        isOpen={false}
-        onToggleOpen={noop}
-        discussions={[]}
-        driftStatus={undefined}
-        agents={[]}
-        allSkills={[]}
-        mcpConfigs={[]}
-        workflows={[]}
-        configLanguage="fr"
-        toast={vi.fn()}
-        onNavigate={noop}
-        onSetDiscPrefill={noop}
-        onAutoRunDiscussion={noop}
-        onOpenDiscussion={noop}
-        onRefetch={noop}
-        onRefetchDiscussions={noop}
-        onRefetchSkills={noop}
-        onRefetchDrift={noop}
-      />
+      <TestRouter>
+        <ProjectCard
+          project={proj as any}
+          isOpen={false}
+          onToggleOpen={noop}
+          discussions={[]}
+          driftStatus={undefined}
+          agents={[]}
+          allSkills={[]}
+          mcpConfigs={[]}
+          workflows={[]}
+          configLanguage="fr"
+          toast={vi.fn()}
+          onSetDiscPrefill={noop}
+          onRefetch={noop}
+          onRefetchDiscussions={noop}
+          onRefetchSkills={noop}
+          onRefetchDrift={noop}
+        />
+      </TestRouter>
     );
     expect(screen.getByText('TestProject')).toBeInTheDocument();
   });

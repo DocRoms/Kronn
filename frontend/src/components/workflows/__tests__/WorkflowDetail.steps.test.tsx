@@ -11,6 +11,7 @@
 
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { TestRouter } from '../../../test/routerWrapper';
 import { buildApiMock } from '../../../test/apiMock';
 
 vi.mock('../../../lib/api', () => buildApiMock());
@@ -75,18 +76,20 @@ type DetailProps = React.ComponentProps<typeof WorkflowDetail>;
 
 const renderDetail = (steps: WorkflowStep[], overrides: Partial<DetailProps> = {}) =>
   render(
-    <WorkflowDetail
-      workflow={mkWorkflow(steps)}
-      runs={[]}
-      liveRun={null}
-      onTrigger={() => {}}
-      onRefresh={() => {}}
-      onEdit={() => {}}
-      onDeleteRun={() => {}}
-      onDeleteAllRuns={() => {}}
-      triggering={false}
-      {...overrides}
-    />
+    <TestRouter>
+      <WorkflowDetail
+        workflow={mkWorkflow(steps)}
+        runs={[]}
+        liveRun={null}
+        onTrigger={() => {}}
+        onRefresh={() => {}}
+        onEdit={() => {}}
+        onDeleteRun={() => {}}
+        onDeleteAllRuns={() => {}}
+        triggering={false}
+        {...overrides}
+      />
+    </TestRouter>
   );
 
 describe('WorkflowDetail — collapsed steps pipeline', () => {

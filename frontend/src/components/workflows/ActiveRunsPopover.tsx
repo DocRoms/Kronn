@@ -3,13 +3,12 @@ import { Loader2, Square, X, ChevronRight } from 'lucide-react';
 import type { WorkflowSummary } from '../../types/generated';
 import { workflows as workflowsApi } from '../../lib/api';
 import { useT } from '../../lib/I18nContext';
+import { useKronnNavigate } from '../../hooks/useKronnNavigate';
 import './ActiveRunsPopover.css';
 
 export interface ActiveRunsPopoverProps {
   workflows: WorkflowSummary[];
   onClose: () => void;
-  onNavigateToWorkflow: (workflowId: string) => void;
-  onViewAllWorkflows: () => void;
   onAfterCancel?: () => void;
 }
 
@@ -25,11 +24,10 @@ function formatElapsed(ms: number, t: (k: string, ...a: (string | number)[]) => 
 export function ActiveRunsPopover({
   workflows,
   onClose,
-  onNavigateToWorkflow,
-  onViewAllWorkflows,
   onAfterCancel,
 }: ActiveRunsPopoverProps) {
   const { t } = useT();
+  const nav = useKronnNavigate();
   const rootRef = useRef<HTMLDivElement>(null);
   const [cancellingIds, setCancellingIds] = useState<Set<string>>(new Set());
   const [nowTick, setNowTick] = useState(() => Date.now());
@@ -114,7 +112,7 @@ export function ActiveRunsPopover({
                 <button
                   type="button"
                   className="wf-active-runs-item-body"
-                  onClick={() => onNavigateToWorkflow(wf.id)}
+                  onClick={() => { nav.toWorkflow(wf.id); onClose(); }}
                 >
                   <Loader2 size={12} className="spin text-accent" />
                   <div className="wf-active-runs-item-text">
@@ -152,7 +150,7 @@ export function ActiveRunsPopover({
       <button
         type="button"
         className="wf-active-runs-footer"
-        onClick={onViewAllWorkflows}
+        onClick={() => { nav.toWorkflows(); onClose(); }}
       >
         <span>{t('wf.viewAllWorkflows')}</span>
         <ChevronRight size={12} />

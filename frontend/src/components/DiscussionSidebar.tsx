@@ -6,6 +6,7 @@ import { projects as projectsApi } from '../lib/api';
 import { getProjectGroup, isHiddenPath } from '../lib/constants';
 import { gravatarUrl } from '../lib/gravatar';
 import { formatRelativeTime } from '../lib/relativeTime';
+import { useKronnNavigate } from '../hooks/useKronnNavigate';
 import type { ToastFn } from '../hooks/useToast';
 import {
   Folder, ChevronLeft, ChevronRight, Plus, X, MessageSquare, Archive, Search, Users2, Trash2, Star, CheckCheck, ListChecks, LogIn, Loader2,
@@ -55,10 +56,6 @@ export interface DiscussionSidebarProps {
    *  in the sidebar can show a clickable pastille pointing back to the
    *  workflow run that spawned it. */
   batchSummaries?: BatchRunSummary[];
-  /** Called when the user clicks the "↗ run #N · {workflow}" pastille on a
-   *  batch group. Parent is expected to switch to the workflows tab + open
-   *  the detail panel for that workflow. */
-  onNavigateWorkflow?: (workflowId: string) => void;
   /** Called when the user clicks "🗑" on a batch group header and confirms.
    *  Parent calls the DELETE /api/workflow-runs/:run_id endpoint, then
    *  refetches discussions + batchSummaries so the group disappears live. */
@@ -74,7 +71,8 @@ export interface DiscussionSidebarProps {
   /** Opens the batch review cockpit. Parent loads the child messages on
    *  demand so the sidebar list stays cheap. */
   onReviewBatch?: (runId: string, label: string, discIds: string[]) => void;
-  /** Ref-setter so parent can expand groups when navigating to a discussion */
+  /** Collapsed sidebar group keys — lifted to the parent so cross-page
+   *  navigation can expand the groups containing the target discussion. */
   collapsedGroups: Set<string>;
   onToggleGroup: (key: string) => void;
   /** Desktop only: collapse sidebar into a thin rail */
@@ -133,7 +131,6 @@ export function DiscussionSidebar({
   t,
   lang = 'fr',
   batchSummaries = [],
-  onNavigateWorkflow,
   onDeleteBatch,
   onRetryBatch,
   onReviewBatch,
@@ -150,6 +147,7 @@ export function DiscussionSidebar({
   // lower-priority render that React can interrupt if the user keeps typing.
   // Measured before fix on a 250-projects / 500-discussions seed: 2233 ms
   // per keystroke. Goal: <100 ms perceived latency.
+  const nav = useKronnNavigate();
   const [discSearchFilter, setDiscSearchFilter] = useState('');
   const deferredSearch = useDeferredValue(discSearchFilter);
   const searchLower = deferredSearch.toLowerCase();
@@ -996,7 +994,7 @@ export function DiscussionSidebar({
                                       </button>
                                     )}
                                   </div>
-                                  {parentLabel && parentWorkflowId && onNavigateWorkflow && (
+                                  {parentLabel && parentWorkflowId && (
                                     <button
                                       type="button"
                                       className="disc-batch-parent-pill"
@@ -1007,7 +1005,7 @@ export function DiscussionSidebar({
                                         // could move this inside the group button — keeping
                                         // it defensive.
                                         e.stopPropagation();
-                                        onNavigateWorkflow(parentWorkflowId);
+                                        nav.toWorkflow(parentWorkflowId);
                                       }}
                                       title={t('disc.batchParentClickHint')}
                                     >

@@ -10,7 +10,8 @@
 //     counter instead of the static "running…" placeholder.
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, act, fireEvent, within } from '@testing-library/react';
+import { render as baseRender, screen, act, fireEvent, within } from '@testing-library/react';
+import { createMemoryRouter, RouterProvider } from 'react-router';
 import { buildApiMock } from '../../../test/apiMock';
 import type { WorkflowRun, WorkflowStep, StepResult } from '../../../types/generated';
 
@@ -94,6 +95,15 @@ const mkStep = (over: Partial<WorkflowStep>): WorkflowStep => ({
   exec_timeout_secs: null,
   ...over,
 });
+
+function render(ui: React.ReactElement, initialPath = '/') {
+  const router = createMemoryRouter(
+    [{ path: '*', element: ui }],
+    { initialEntries: [initialPath] },
+  );
+  const result = baseRender(<RouterProvider router={router} />);
+  return { router, ...result };
+}
 
 describe('RunDetail — step_kind snapshot badges (run history honesty)', () => {
   beforeEach(() => {
@@ -183,7 +193,7 @@ describe('RunDetail — step_kind snapshot badges (run history honesty)', () => 
     expect(within(scssRow).getAllByText('—').length).toBeGreaterThanOrEqual(2);
   });
 
-  it('per-task child_run_id links to the child sub-workflow when nav + steps provided', async () => {
+  it('per-task child_run_id links to the child sub-workflow when steps provided', async () => {
     const envelope = JSON.stringify({
       data: { mode: 'foreach', total: 1, succeeded: 1, failed: 0,
         items: [{ item: 0, id: 'brand-enum', status: 'Success', child_run_id: 'aaaabbbb-1111' }] },
@@ -194,15 +204,14 @@ describe('RunDetail — step_kind snapshot badges (run history honesty)', () => 
         output: `---STEP_OUTPUT---\n${envelope}\n---END_STEP_OUTPUT---` })],
     });
     const steps = [mkStep({ name: 'feasibility_impl', step_type: { type: 'SubWorkflow' }, sub_workflow_id: 'child-wf-99' })];
-    const onNav = vi.fn();
-    render(<RunDetail run={run} workflowSteps={steps} onNavigateToWorkflow={onNav} onDelete={() => {}} />);
+    const { router } = render(<RunDetail run={run} workflowSteps={steps} onDelete={() => {}} />);
     await act(async () => { screen.getByText('feasibility_impl').click(); });
     const link = screen.getByTitle('wf.openSubRun');
     link.click();
-    expect(onNav).toHaveBeenCalledWith('child-wf-99');
+    expect(router.state.location.pathname).toBe('/workflows/child-wf-99/runs/aaaabbbb-1111');
   });
 
-  it('#11 — child_run_id link drills to the EXACT child run when onNavigateToRun is provided', async () => {
+  it('#11 — child_run_id link drills to the EXACT child run', async () => {
     const envelope = JSON.stringify({
       data: { mode: 'foreach', total: 1, succeeded: 1, failed: 0,
         items: [{ item: 0, id: 'brand-enum', status: 'Success', child_run_id: 'aaaabbbb-1111' }] },
@@ -213,14 +222,10 @@ describe('RunDetail — step_kind snapshot badges (run history honesty)', () => 
         output: `---STEP_OUTPUT---\n${envelope}\n---END_STEP_OUTPUT---` })],
     });
     const steps = [mkStep({ name: 'feasibility_impl', step_type: { type: 'SubWorkflow' }, sub_workflow_id: 'child-wf-99' })];
-    const onNavRun = vi.fn();
-    const onNavWf = vi.fn();
-    render(<RunDetail run={run} workflowSteps={steps} onNavigateToWorkflow={onNavWf} onNavigateToRun={onNavRun} onDelete={() => {}} />);
+    const { router } = render(<RunDetail run={run} workflowSteps={steps} onDelete={() => {}} />);
     await act(async () => { screen.getByText('feasibility_impl').click(); });
     screen.getByTitle('wf.openSubRun').click();
-    // onNavigateToRun wins over onNavigateToWorkflow and carries the run id.
-    expect(onNavRun).toHaveBeenCalledWith('child-wf-99', 'aaaabbbb-1111');
-    expect(onNavWf).not.toHaveBeenCalled();
+    expect(router.state.location.pathname).toBe('/workflows/child-wf-99/runs/aaaabbbb-1111');
   });
 
   it('shows no foreach chip for a single-child SubWorkflow envelope', () => {
@@ -886,10 +891,11 @@ describe('RunDetail — ProducedBranches panel', () => {
 
   it('does NOT render the panel when produced_branches is empty/undefined', () => {
     const runEmpty = mkRun({ status: 'Success', produced_branches: [] });
-    const { rerender } = render(<RunDetail run={runEmpty} onDelete={() => {}} />);
+    const { unmount } = render(<RunDetail run={runEmpty} onDelete={() => {}} />);
     expect(screen.queryByText(/wf\.produced\.title/)).not.toBeInTheDocument();
     // Same for missing field (legacy run row).
-    rerender(<RunDetail run={mkRun({ status: 'Success' })} onDelete={() => {}} />);
+    unmount();
+    render(<RunDetail run={mkRun({ status: 'Success' })} onDelete={() => {}} />);
     expect(screen.queryByText(/wf\.produced\.title/)).not.toBeInTheDocument();
   });
 
@@ -909,7 +915,6 @@ describe('RunDetail — ProducedBranches panel', () => {
 
 describe('RunDetail — sub-workflow provenance', () => {
   it('shows a clickable provenance pill resolving to the parent workflow', () => {
-    const onNav = vi.fn();
     const run = mkRun({
       run_type: 'subworkflow',
       parent_run_id: 'parent-run-9',
@@ -917,29 +922,28 @@ describe('RunDetail — sub-workflow provenance', () => {
       parent_workflow_name: 'PR Review cron v2',
       parent_run_started_at: '2026-07-06T06:13:00Z',
     });
-    render(<RunDetail run={run} onDelete={() => {}} onNavigateToWorkflow={onNav} />);
+    const { router } = render(<RunDetail run={run} onDelete={() => {}} />);
     const pill = screen.getByText('PR Review cron v2');
     expect(pill).toBeInTheDocument();
     fireEvent.click(pill);
-    expect(onNav).toHaveBeenCalledWith('cron-wf');
+    expect(router.state.location.pathname).toBe('/workflows/cron-wf');
   });
 
   it('renders no provenance pill for a top-level run', () => {
     const run = mkRun({ run_type: 'linear' });
-    render(<RunDetail run={run} onDelete={() => {}} onNavigateToWorkflow={() => {}} />);
+    render(<RunDetail run={run} onDelete={() => {}} />);
     expect(screen.queryByText(/PR Review cron/)).not.toBeInTheDocument();
   });
 
   it('shows the pill but disables navigation when parent workflow id is absent', () => {
-    const onNav = vi.fn();
     const run = mkRun({
       run_type: 'subworkflow',
       parent_workflow_name: 'Orphan Parent',
       parent_workflow_id: null,
     });
-    render(<RunDetail run={run} onDelete={() => {}} onNavigateToWorkflow={onNav} />);
+    const { router } = render(<RunDetail run={run} onDelete={() => {}} />);
     const pill = screen.getByText('Orphan Parent');
     fireEvent.click(pill);
-    expect(onNav).not.toHaveBeenCalled();
+    expect(router.state.location.pathname).toBe('/');
   });
 });

@@ -18,6 +18,7 @@ vi.mock('../../lib/api', async () => {
 });
 import { render, fireEvent, act } from '@testing-library/react';
 import { DiscussionSidebar } from '../DiscussionSidebar';
+import { TestRouter } from '../../test/routerWrapper';
 
 const noop = () => {};
 
@@ -62,7 +63,7 @@ describe('DiscussionSidebar — join by code', () => {
   it('calls onJoinByCode with the pasted token and shows a resolving state', async () => {
     let resolveJoin: (() => void) | undefined;
     const onJoinByCode = vi.fn(() => new Promise<void>(r => { resolveJoin = r; }));
-    render(<DiscussionSidebar {...baseProps} onJoinByCode={onJoinByCode} />);
+    render(<TestRouter><DiscussionSidebar {...baseProps} onJoinByCode={onJoinByCode} /></TestRouter>);
 
     const submit = openJoinAndType('kr-join-abc123');
     act(() => { fireEvent.click(submit); });
@@ -80,7 +81,7 @@ describe('DiscussionSidebar — join by code', () => {
   it('does not double-fire while a join is already resolving', async () => {
     let resolveJoin: (() => void) | undefined;
     const onJoinByCode = vi.fn(() => new Promise<void>(r => { resolveJoin = r; }));
-    render(<DiscussionSidebar {...baseProps} onJoinByCode={onJoinByCode} />);
+    render(<TestRouter><DiscussionSidebar {...baseProps} onJoinByCode={onJoinByCode} /></TestRouter>);
 
     const submit = openJoinAndType('kr-join-xyz');
     await act(async () => {
@@ -94,7 +95,7 @@ describe('DiscussionSidebar — join by code', () => {
   it('toasts the backend error message when the join fails', async () => {
     const toast = vi.fn();
     const onJoinByCode = vi.fn().mockRejectedValue(new Error('invite token expired'));
-    render(<DiscussionSidebar {...baseProps} toast={toast} onJoinByCode={onJoinByCode} />);
+    render(<TestRouter><DiscussionSidebar {...baseProps} toast={toast} onJoinByCode={onJoinByCode} /></TestRouter>);
 
     const submit = openJoinAndType('kr-join-dead');
     await act(async () => { fireEvent.click(submit); });
@@ -103,7 +104,7 @@ describe('DiscussionSidebar — join by code', () => {
   });
 
   it('hides the join button entirely when onJoinByCode is not provided', () => {
-    render(<DiscussionSidebar {...baseProps} />);
+    render(<TestRouter><DiscussionSidebar {...baseProps} /></TestRouter>);
     expect(document.querySelector('button[title="contacts.joinByCode"]')).toBeNull();
   });
 });

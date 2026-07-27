@@ -209,7 +209,9 @@ Project-specific terms. For deep dives, follow the linked `docs/architecture/` f
 
 ## UI
 
-**Dashboard** — Main UI shell (~1625 lines, `Dashboard.tsx`) with tabs: Projets, Discussions, MCPs, Workflows, Config. Each tab delegates to a sub-page. Project cards have collapsible accordion sections (Discussions, Doc AI, MCPs, Workflows, Skills, AI Context) with smart defaults based on audit status. Bootstrap modal for creating new projects from scratch.
+**Dashboard** — Main UI layout shell (~1220 lines, `Dashboard.tsx`): nav bar + lifted streaming state, rendering the current page through React Router's `<Outlet>`. Pages are routes — `/projects`, `/discussions`, `/planning`, `/plugins`, `/workflows`, `/config` — each delegating to a sub-page via a wrapper in `frontend/src/routes/`. Project cards have collapsible accordion sections (Discussions, Doc AI, MCPs, Workflows, Skills, AI Context) with smart defaults based on audit status. Bootstrap modal for creating new projects from scratch.
+
+**Router** — `frontend/src/router.tsx`, the React Router v8 (Data mode) route table; pure — components live in `routes/lazyRoutes.tsx` so the table stays a valid fast-refresh boundary. `useKronnNavigate()` (`hooks/useKronnNavigate.ts`) is the typed navigation hook every component uses; `lib/routeConstants.ts` holds `PAGE_PATHS` + `pathToPage()`. Selected resources are URL params (`/projects/:id`, `/planning/:taskId`, …); one-shot intents (auto-run, batch focus, workflow presets) travel as location state so refresh never re-triggers them.
 
 **SettingsPage** — Settings page (~1830 lines, `SettingsPage.tsx`): UI/output language, voice (STT model + TTS voice selection), agents config, multi-key token management, usage stats, DB management. Sticky section navigation with anchor pills.
 
@@ -219,7 +221,7 @@ Project-specific terms. For deep dives, follow the linked `docs/architecture/` f
 
 **Setup Wizard** — First-run flow (`SetupWizard.tsx`) for configuring scan paths, detecting agents, and API tokens.
 
-**Config** — Unified config tab, delegates to `SettingsPage.tsx`. (Agents tab merged into Config.)
+**Config** — Unified config page at `/config`, delegates to `SettingsPage.tsx`. (The old Agents tab was merged into Config.)
 
 **@mention** — Chat feature to target a specific agent (e.g., `@claude`) with autocomplete.
 

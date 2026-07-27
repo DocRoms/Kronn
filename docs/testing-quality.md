@@ -50,10 +50,11 @@
 | `src/lib/__tests__/regression.test.ts` | 12 | Non-regression for all audit fixes (GeminiCli, constants, i18n, trigger_context, output languages) |
 | `src/lib/__tests__/access-warnings.test.ts` | 41 | i18n keys for access warnings (all locales), checkAgentRestricted, hasFullAccess, isAgentDisabled |
 | `src/hooks/__tests__/useApi.test.ts` | 5 | Fetch on mount, errors, refetch, race condition protection |
-| `src/__tests__/App.test.tsx` | 4 | Loading screen, SetupWizard vs Dashboard routing, API down fallback |
+| `src/__tests__/App.test.tsx` | 4 | Loading screen, SetupWizard vs Dashboard boot branch, API down fallback |
+| `src/pages/__tests__/Dashboard.test.tsx` | 15 | Unseen badge + document.title, WS audit toasts, legacy #project-<id> hash redirect to /projects/:id (valid + unknown id) |
 | `src/__tests__/ErrorBoundary.test.tsx` | 2 | Error catch + display, normal render |
-| `src/pages/__tests__/WorkflowsPage.test.tsx` | 3 | Render with undefined/restricted/full agentAccess |
-| `src/pages/__tests__/DiscussionsPage.test.tsx` | 26 | Render, prefill, sidebar (message_count, titles, archives, org groups, collapse, search filter), streaming (thinking loader, tab restore, SSE abort, refetch), TTS (toggle, persist, play, speech cancel), discussion creation, copy button, response time, overflow-wrap, agent switch (button, dropdown) |
+| `src/pages/__tests__/WorkflowsPage.test.tsx` | 33 | Render with agentAccess variants, tabs + URL sync (/workflows/qp, /workflows/qa), deep-linked workflow via initialWorkflowId, QP/QA sort-filter, AI-assisted creation (asserts navigation to /discussions/:id) |
+| `src/pages/__tests__/DiscussionsPage.test.tsx` | 56 | Render, prefill, sidebar (message_count, titles, archives, org groups, collapse, search filter), streaming (thinking loader, tab restore, SSE abort, refetch), TTS (toggle, persist, play, speech cancel), discussion creation, copy button, response time, overflow-wrap, agent switch (button, dropdown) |
 | `src/pages/__tests__/SettingsPage.test.tsx` | 13 | Render, agents config, scan sections, API key management, model tiers, Usage section nav + filter buttons |
 | `src/pages/__tests__/McpPage.test.tsx` | 3 | Render with minimal props, configs, agents |
 | `src/lib/__tests__/agent-question-parse.test.ts` | 15 | Structured agent question parser: {{var}}: question extraction, edge cases, multi-var |
@@ -91,7 +92,7 @@
 
 ### What's NOT tested
 
-- **Page components**: Dashboard.tsx (~650 lines), SetupWizard.tsx — basic render tests exist for 4 sub-pages but deeper interaction/state tests still needed.
+- **Page components**: Dashboard.tsx (~1220 lines), SetupWizard.tsx — basic render tests exist for the sub-pages but deeper interaction/state tests still needed. Since the React Router v8 migration, page/component tests need router context: wrap renders in `src/test/routerWrapper.tsx` (`TestRouter`), or use a local `createMemoryRouter` and assert navigation via `router.state.location.pathname`.
 - **SSE streaming logic** in api.ts — requires mocking ReadableStream, complex setup.
 - **Backend Rust**: **1187 tests** (1040 lib + 147 integration). Key test suites: `discussions_test.rs` (21 tests: CRUD, archive, title editing, message management, AgentType round-trip for all 6 agents, DB string stability), `runner_test.rs` (agent commands, model tiers, token parsing, stream parsing for all agents), `pricing.rs` (cost estimation for all 6 providers), `key_discovery.rs` (cross-platform HOME resolution), `mod.rs` (agent detection with .cmd/.exe extensions, WSL_DISTRO_NAME detection), `env.rs` (is_docker, host_os_label), `scanner.rs` (shellexpand ~/, UNC paths), `db/tests.rs` (partial_response set/recover/idempotency + `partial_response_started_at` preservation + `has_pending_partial`), `tests/api_tests.rs` HTTP integration: dismiss-partial + WS broadcast, partial_pending guard on send_message, boot recovery simulation, workflow_cancel_run cascade to child discs via parent_run_id + idempotent on finished run. Run with `cargo test`.
 - **Shell interactive functions**: menu systems, agent installation/uninstall, terminal animation (require terminal I/O, tested indirectly via non-interactive helpers).

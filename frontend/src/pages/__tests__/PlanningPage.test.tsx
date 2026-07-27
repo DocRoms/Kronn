@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { createMemoryRouter, RouterProvider, useParams } from 'react-router';
 
 const mocks = vi.hoisted(() => ({
   list: vi.fn(),
@@ -92,15 +93,35 @@ describe('PlanningPage', () => {
     mocks.update.mockImplementation(async (_id, patch) => detail({ ...summary(), ...patch }));
   });
 
-  it('renders active work by priority and keeps completed work collapsed', async () => {
-    const { container } = render(
+  // Selection is URL-driven (/planning/:taskId), so tests render through a
+  // real route: the param loops back into `selectedTaskId` exactly like
+  // PlanningRoute does in the app.
+  const Harness = (props: Partial<React.ComponentProps<typeof PlanningPage>>) => {
+    const { taskId } = useParams<{ taskId?: string }>();
+    return (
       <PlanningPage
+        selectedTaskId={taskId ?? null}
         projects={[]}
         discussions={[]}
         toast={vi.fn()}
         onNavigateDiscussion={vi.fn()}
-      />,
+        {...props}
+      />
     );
+  };
+  const wrap = (initialPath = '/planning', props: Partial<React.ComponentProps<typeof PlanningPage>> = {}) => {
+    const router = createMemoryRouter(
+      [
+        { path: '/planning', element: <Harness {...props} /> },
+        { path: '/planning/:taskId', element: <Harness {...props} /> },
+      ],
+      { initialEntries: [initialPath] },
+    );
+    return { router, ...render(<RouterProvider router={router} />) };
+  };
+
+  it('renders active work by priority and keeps completed work collapsed', async () => {
+    const { container } = wrap();
     expect(await screen.findByText('Upgrade PHP')).toBeInTheDocument();
     expect(container.querySelector('[data-priority="high"]')).not.toBeNull();
     expect(screen.queryByText('Old task')).toBeNull();
@@ -109,14 +130,7 @@ describe('PlanningPage', () => {
   });
 
   it('quick creation defaults to an idea and preserves the selected priority', async () => {
-    render(
-      <PlanningPage
-        projects={[]}
-        discussions={[]}
-        toast={vi.fn()}
-        onNavigateDiscussion={vi.fn()}
-      />,
-    );
+    wrap();
     const input = await screen.findByPlaceholderText('planning.newIdea');
     fireEvent.change(input, { target: { value: 'New idea' } });
     const selects = screen.getAllByRole('combobox');
@@ -131,29 +145,23 @@ describe('PlanningPage', () => {
   });
 
   it('opens the full detail only after a task is selected', async () => {
-    render(
-      <PlanningPage
-        projects={[]}
-        discussions={[]}
-        toast={vi.fn()}
-        onNavigateDiscussion={vi.fn()}
-      />,
-    );
+    const { router } = wrap();
     fireEvent.click(await screen.findByText('Upgrade PHP'));
+    expect(router.state.location.pathname).toBe('/planning/task-1');
     await waitFor(() => expect(mocks.get).toHaveBeenCalledWith('task-1'));
     expect(await screen.findByDisplayValue('Move the runtime forward.')).toBeInTheDocument();
   });
 
+  it('closing the detail returns to /planning', async () => {
+    const { router, container } = wrap('/planning/task-1');
+    await screen.findByDisplayValue('Move the runtime forward.');
+    fireEvent.click(container.querySelector('.planning-detail header button[type="button"]:last-child')!);
+    expect(router.state.location.pathname).toBe('/planning');
+    await waitFor(() => expect(container.querySelector('.planning-detail')).toBeNull());
+  });
+
   it('opens a directly linked task detail on mount', async () => {
-    render(
-      <PlanningPage
-        initialSelectedTaskId="task-1"
-        projects={[]}
-        discussions={[]}
-        toast={vi.fn()}
-        onNavigateDiscussion={vi.fn()}
-      />,
-    );
+    wrap('/planning/task-1');
 
     await waitFor(() => expect(mocks.get).toHaveBeenCalledWith('task-1'));
     expect(await screen.findByDisplayValue('Move the runtime forward.')).toBeInTheDocument();
@@ -173,14 +181,7 @@ describe('PlanningPage', () => {
       parent_title: 'Upgrade PHP',
       title: 'Update CI image',
     })));
-    render(
-      <PlanningPage
-        projects={[]}
-        discussions={[]}
-        toast={vi.fn()}
-        onNavigateDiscussion={vi.fn()}
-      />,
-    );
+    wrap();
     fireEvent.click(await screen.findByText('Upgrade PHP'));
     const input = await screen.findByPlaceholderText('planning.addSubtask');
     fireEvent.change(input, { target: { value: 'Update CI image' } });

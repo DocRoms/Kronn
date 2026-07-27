@@ -20,7 +20,8 @@
 // source-filter dropdown stays hidden and the useEffect resolves cleanly.
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
+import { render as baseRender, screen, fireEvent, waitFor, within } from '@testing-library/react';
+import { createMemoryRouter, RouterProvider } from 'react-router';
 
 vi.mock('../../lib/api', async () => {
   const { buildApiMock } = await import('../../test/apiMock');
@@ -103,6 +104,15 @@ const mkBatchSummary = (over: Partial<BatchRunSummary> & { run_id: string }): Ba
   parent_run_sequence: null,
   ...over,
 });
+
+function render(ui: React.ReactElement, initialPath = '/') {
+  const router = createMemoryRouter(
+    [{ path: '*', element: ui }],
+    { initialEntries: [initialPath] },
+  );
+  const result = baseRender(<RouterProvider router={router} />);
+  return { router, ...result };
+}
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -458,8 +468,7 @@ describe('DiscussionSidebar — batch groups', () => {
     expect(pill.getAttribute('data-batch-status')).toBe('running');
   });
 
-  it('parent-workflow pill navigates via onNavigateWorkflow', async () => {
-    const onNavigateWorkflow = vi.fn();
+  it('parent-workflow pill navigates to the workflow', async () => {
     const summaries = [mkBatchSummary({
       run_id: runId,
       quick_prompt_name: 'Compare agents',
@@ -467,13 +476,12 @@ describe('DiscussionSidebar — batch groups', () => {
       parent_workflow_name: 'Nightly Audit',
       parent_run_sequence: 5,
     })];
-    render(
+    const { router } = render(
       <DiscussionSidebar
         {...baseProps}
         projects={projects}
         discussions={batchDiscs}
         batchSummaries={summaries}
-        onNavigateWorkflow={onNavigateWorkflow}
       />
     );
     await waitFor(() => expect(projectsApi.discSources).toHaveBeenCalled());
@@ -481,7 +489,7 @@ describe('DiscussionSidebar — batch groups', () => {
     const pill = document.querySelector('.disc-batch-parent-pill') as HTMLButtonElement;
     expect(pill).not.toBeNull();
     fireEvent.click(pill);
-    expect(onNavigateWorkflow).toHaveBeenCalledWith('wf-99');
+    expect(router.state.location.pathname).toBe('/workflows/wf-99');
   });
 
   it('delete-batch button confirms then calls onDeleteBatch with run id + count', async () => {

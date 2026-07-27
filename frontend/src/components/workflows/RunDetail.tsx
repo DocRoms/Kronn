@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useT } from '../../lib/I18nContext';
+import { useKronnNavigate } from '../../hooks/useKronnNavigate';
 import { workflows as workflowsApi } from '../../lib/api';
 import type { WorkflowRun, WorkflowStep, DecideRunRequest, ProducedBranch } from '../../types/generated';
 import { Trash2, ChevronRight, Square, Loader2, Plug, Send, Layers, Shield, Hand, Check, X, RotateCcw, Terminal, GitBranch, Copy, FlaskConical, AlertTriangle, CornerDownRight } from 'lucide-react';
@@ -79,12 +80,6 @@ export interface RunDetailProps {
   onResume?: () => void;
   /** 0.7.0 Phase 4 — submit a gate decision (approve / request_changes / reject). */
   onDecide?: (payload: DecideRunRequest) => Promise<void> | void;
-  /** 2026-06-13 — jump to a (sub-)workflow's run list, e.g. from a fan-out
-   *  per-task row to the child sub-workflow that ran that task. */
-  onNavigateToWorkflow?: (workflowId: string) => void;
-  /** #11 — jump to a SPECIFIC child run (workflow + run id). Falls back to
-   *  onNavigateToWorkflow when not provided. */
-  onNavigateToRun?: (workflowId: string, runId: string) => void;
 }
 
 /** Live counter for the step that's currently running. The exact start
@@ -725,8 +720,9 @@ function ProducedBranchesPanel({
   );
 }
 
-export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, onDecide, onNavigateToWorkflow, onNavigateToRun }: RunDetailProps) {
+export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, onDecide }: RunDetailProps) {
   const { t } = useT();
+  const nav = useKronnNavigate();
   const [expandedStep, setExpandedStep] = useState<number | null>(null);
   const statusTimeline = runStatusTimeline(run);
 
@@ -785,8 +781,8 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, on
           <button
             type="button"
             className="wf-run-provenance"
-            disabled={!run.parent_workflow_id || !onNavigateToWorkflow}
-            onClick={() => run.parent_workflow_id && onNavigateToWorkflow?.(run.parent_workflow_id)}
+            disabled={!run.parent_workflow_id}
+            onClick={() => run.parent_workflow_id && nav.toWorkflow(run.parent_workflow_id)}
             title={t('wf.run.provenanceHint', run.parent_workflow_name)}
           >
             <CornerDownRight size={11} />
@@ -1163,13 +1159,11 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, on
                               </td>
                               <td className="text-ghost" style={{ fontFamily: 'var(--kr-font-mono)' }} title={it.child_run_id ?? undefined}>
                                 {it.child_run_id
-                                  ? (childWorkflowId && (onNavigateToRun || onNavigateToWorkflow)
+                                  ? (childWorkflowId
                                       ? <button
                                           type="button"
                                           className="wf-subrun-link"
-                                          onClick={() => onNavigateToRun
-                                            ? onNavigateToRun(childWorkflowId, it.child_run_id!)
-                                            : onNavigateToWorkflow!(childWorkflowId)}
+                                          onClick={() => nav.toWorkflowRun(childWorkflowId, it.child_run_id!)}
                                           title={t('wf.openSubRun')}
                                         >{it.child_run_id.slice(0, 8)}… ↗</button>
                                       : `${it.child_run_id.slice(0, 8)}…`)

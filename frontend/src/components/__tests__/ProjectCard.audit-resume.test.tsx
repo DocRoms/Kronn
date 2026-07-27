@@ -35,6 +35,7 @@ vi.mock('../../lib/I18nContext', () => ({
 }));
 vi.mock('../../hooks/useMediaQuery', () => ({ useIsMobile: () => false }));
 
+import { TestRouter } from '../../test/routerWrapper';
 import { ProjectCard } from '../ProjectCard';
 import { projects as projectsApi } from '../../lib/api';
 import type { Project, AgentDetection } from '../../types/generated';
@@ -71,27 +72,26 @@ const AGENT: AgentDetection = {
 
 function renderCard(onRefetch = noop) {
   return render(
-    <ProjectCard
-      project={PROJECT}
-      isOpen={true}
-      onToggleOpen={noop}
-      discussions={[]}
-      driftStatus={undefined}
-      agents={[AGENT]}
-      allSkills={[]}
-      mcpConfigs={[]}
-      workflows={[]}
-      configLanguage="fr"
-      toast={vi.fn()}
-      onNavigate={noop}
-      onSetDiscPrefill={noop}
-      onAutoRunDiscussion={noop}
-      onOpenDiscussion={noop}
-      onRefetch={onRefetch}
-      onRefetchDiscussions={noop}
-      onRefetchSkills={noop}
-      onRefetchDrift={noop}
-    />
+    <TestRouter>
+      <ProjectCard
+        project={PROJECT}
+        isOpen={true}
+        onToggleOpen={noop}
+        discussions={[]}
+        driftStatus={undefined}
+        agents={[AGENT]}
+        allSkills={[]}
+        mcpConfigs={[]}
+        workflows={[]}
+        configLanguage="fr"
+        toast={vi.fn()}
+        onSetDiscPrefill={noop}
+        onRefetch={onRefetch}
+        onRefetchDiscussions={noop}
+        onRefetchSkills={noop}
+        onRefetchDrift={noop}
+      />
+    </TestRouter>
   );
 }
 

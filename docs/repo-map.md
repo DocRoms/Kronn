@@ -144,14 +144,25 @@ Kronn/
 │   ├── vite.config.ts          # Build config + test config (vitest) + code splitting
 │   ├── eslint.config.js        # ESLint 10 flat config (typescript-eslint strict)
 │   └── src/
-│       ├── main.tsx            # React DOM entry
-│       ├── App.tsx             # Router (setup wizard vs dashboard) + ErrorBoundary + React.lazy code splitting
+│       ├── main.tsx            # React DOM entry + RouterProvider (react-router v8)
+│       ├── App.tsx             # Layout shell (setup wizard vs dashboard) + ErrorBoundary
+│       ├── router.tsx          # createBrowserRouter route tree — lazy-loaded pages, ErrorBoundary per route
+│       ├── routes/             # Route wrappers bridging outlet context + URL params to page props
+│       │   ├── lazyRoutes.tsx  # Lazy route components + PageFallback/LazyRoute (fast-refresh boundary; keeps router.tsx pure)
+│       │   ├── ProjectsRoute.tsx    # /projects/:projectId? → ProjectList
+│       │   ├── DiscussionsRoute.tsx # /discussions/:discussionId? → DiscussionsPage
+│       │   ├── PlanningRoute.tsx    # /planning/:taskId? → PlanningPage
+│       │   ├── PluginsRoute.tsx     # /plugins/:configId? → McpPage
+│       │   ├── WorkflowsRoute.tsx   # /workflows(/qp/:qpId?|/qa/:qaId?|/:workflowId/runs/:runId?) → WorkflowsPage
+│       │   └── SettingsRoute.tsx    # /config → SettingsPage
 │       ├── pages/
-│       │   ├── Dashboard.tsx   # Main UI shell (~674L) — nav bar, page routing, shared state. Project list extracted to components/ProjectList + ProjectCard
-│       │   ├── SettingsPage.tsx # Settings (~1870 lines) — language, voice (TTS/STT model selection), agents config, tokens, usage stats, DB management
-│       │   ├── DiscussionsPage.tsx # Discussions orchestrator (~1218L) — state, streaming, callbacks. Split into components below.
+│       │   ├── Dashboard.tsx   # Main UI shell — nav bar, <Outlet> for routed pages, shared state. Project list extracted to components/ProjectList + ProjectCard
+│       │   ├── SettingsPage.tsx # Settings (~1790 lines) — language, voice (TTS/STT model selection), agents config, tokens, usage stats, DB management
+│       │   ├── DiscussionsPage.tsx # Discussions orchestrator (~3300L) — state, streaming, callbacks. Split into components below.
 │       │   ├── McpPage.tsx     # MCP management (registry, configs, inline secret editing with per-field visibility, context files, project toggles)
-│       │   ├── WorkflowsPage.tsx # Workflow management (~1780L, list, wizard, detail, runs, access warnings)
+│       │   ├── WorkflowsPage.tsx # Workflow management (~2900L, list, wizard, detail, runs, access warnings)
+│       │   ├── PlanningPage.tsx # Shared tasks backlog (~900L) — ranked tasks/subtasks, filters, detail panel driven by /planning/:taskId
+│       │   ├── ApiCallLogsPage.tsx # API-call audit log viewer (Settings sub-section)
 │       │   ├── SetupWizard.tsx # First-run setup flow
 │       │   └── *.css           # Per-page CSS files (tokens + utilities in src/styles/)
 │       ├── components/
@@ -192,6 +203,7 @@ Kronn/
 │       │   ├── components.css    # Shared component classes (.btn, .card, .input, .badge, .dot, .code, .label)
 │       │   └── index.css         # Barrel import for all CSS files
 │       ├── hooks/
+│       │   ├── useKronnNavigate.ts # Typed navigation hook wrapping react-router's useNavigate() — single isolation point
 │       │   ├── useApi.ts       # Generic fetch hook with loading/error/refetch + race condition protection
 │       │   ├── useToast.ts     # Toast notifications (success/error/info, auto-dismiss 4s, max 3 visible)
 │       │   ├── useWebSocket.ts # WebSocket subscription with auto-reconnect
@@ -199,6 +211,8 @@ Kronn/
 │       │   ├── useQpChain.ts   # QP Chain Phase 1 — queue a Quick Prompt mid-stream, auto-fire on sending true→false edge (0.4.2)
 │       │   └── useRafBatchedStream.ts # Generic rAF-batched chunk streaming — collapses SSE deltas into one setState/frame (0.4.2)
 │       ├── lib/
+│       │   ├── routeConstants.ts # PAGE_PATHS mapping + pathToPage() utility for nav tabs and tour
+│       │   ├── dashboardContext.ts # DashboardOutletContext type + useDashboardContext() hook for route wrappers
 │       │   ├── api.ts          # API client (typed wrappers + SSE streaming helpers)
 │       │   ├── i18n.ts         # Lightweight i18n system (fr/en/es). Translation dictionaries + locale persistence (localStorage)
 │       │   ├── I18nContext.tsx  # React context provider for UI locale (useT() hook)
@@ -218,7 +232,8 @@ Kronn/
 │       ├── test/
 │       │   ├── setup.ts        # Test setup (@testing-library/jest-dom)
 │       │   ├── apiMock.ts      # Shared buildApiMock() factory — exhaustive default mock (13 namespaces + 5 flat fns), deep-merge overrides. Use via vi.mock + vi.hoisted
-│       │   └── apiMock.complete.test.ts # Completeness guard: fails if lib/api.ts gains a namespace not covered by buildApiMock
+│       │   ├── apiMock.complete.test.ts # Completeness guard: fails if lib/api.ts gains a namespace not covered by buildApiMock
+│       │   └── routerWrapper.tsx # TestRouter wrapper for tests needing react-router context (accepts initialPath)
 │       ├── __tests__/          # App-level tests (App.tsx, ErrorBoundary)
 │       ├── hooks/__tests__/    # Hook tests (useApi)
 │       ├── lib/__tests__/      # Lib tests (i18n, api, constants, types, regression, access-warnings)
@@ -267,7 +282,7 @@ Kronn/
 ## Notes
 - `README.md` is not guaranteed to be up-to-date; prefer actual config files as source of truth.
 - `frontend/src/types/generated.ts` is auto-generated — never edit manually.
-- Dashboard.tsx (~1017L) is the main UI shell. Sub-pages: SettingsPage (~1106L), DiscussionsPage (~1736L after 2026-04-17 hook split into useQpChain + useRafBatchedStream), McpPage (~791L), WorkflowsPage (~810L). Projects: ProjectList (~234L) + ProjectCard (~707L).
+- Dashboard.tsx (~1220L) is the main UI layout shell (nav + <Outlet>). Pages: SettingsPage (~1790L), DiscussionsPage (~3300L after 2026-04-17 hook split into useQpChain + useRafBatchedStream), McpPage (~2720L), WorkflowsPage (~2900L), PlanningPage (~900L).
 - Hot files still above the TD watermark: `backend/src/models/mod.rs` (~2225L), `backend/src/api/audit.rs` (~1966L), `backend/src/api/projects.rs` (~1819L). `backend/src/api/discussions.rs` was 3400L; now 2880L after 2026-04-17 extraction of 9 pure helpers (`disc_helpers.rs`) and 3 prompt builders (`disc_prompts.rs`).
 - DiscussionsPage split (2026-03-28): ChatHeader, ChatInput (~1063L — mentions + STT + debate + QP chain picker), DiscussionSidebar, NewDiscussionForm, MessageBubble, SwipeableDiscItem, AgentQuestionForm. ChatInput is the biggest outlier.
 - CSS system: `src/styles/` (tokens, utilities, components) + per-page CSS. ~319 inline styles remain (dynamic only).

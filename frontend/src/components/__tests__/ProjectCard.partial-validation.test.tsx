@@ -10,6 +10,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, act, fireEvent, screen } from '@testing-library/react';
 import { buildApiMock } from '../../test/apiMock';
+import { TestRouter } from '../../test/routerWrapper';
 
 vi.mock('../../lib/api', () => buildApiMock());
 vi.mock('../../lib/I18nContext', () => ({
@@ -61,13 +62,12 @@ function renderCard(overrides: Partial<Record<string, unknown>> = {}) {
     project: PROJECT, isOpen: true, onToggleOpen: noop, discussions: [],
     driftStatus: DRIFT, agents: [AGENT], allSkills: [], mcpConfigs: [],
     workflows: [], configLanguage: 'fr',
-    toast: vi.fn(), onNavigate: vi.fn(), onSetDiscPrefill: noop,
-    onAutoRunDiscussion: vi.fn(), onOpenDiscussion: vi.fn(),
+    toast: vi.fn(), onSetDiscPrefill: noop,
     onRefetch: vi.fn(), onRefetchDiscussions: vi.fn(), onRefetchSkills: noop,
     onRefetchDrift: vi.fn(),
     ...overrides,
   };
-  return { ...render(<ProjectCard {...(props as any)} />), props };
+  return { ...render(<TestRouter><ProjectCard {...(props as any)} /></TestRouter>), props };
 }
 
 beforeEach(() => {
@@ -96,9 +96,6 @@ describe('ProjectCard — partial refresh validation UX', () => {
     await clickUpdate();
     expect(props.onRefetchDiscussions).toHaveBeenCalled();
     expect(props.toast).toHaveBeenCalledWith(expect.stringContaining('audit.partialValidationCreated'), 'success');
-    expect(props.onOpenDiscussion).toHaveBeenCalledWith('d-scoped');
-    expect(props.onNavigate).toHaveBeenCalledWith('discussions');
-    expect(props.onAutoRunDiscussion).not.toHaveBeenCalled();
   });
 
   it('interrupted: honest error toast, never a green one', async () => {
@@ -114,7 +111,6 @@ describe('ProjectCard — partial refresh validation UX', () => {
     const greens = (props.toast as ReturnType<typeof vi.fn>).mock.calls
       .filter(([, kind]) => kind === 'success');
     expect(greens).toHaveLength(0);
-    expect(props.onOpenDiscussion).not.toHaveBeenCalled();
   });
 
   it('no_change: honest stale toast, no discussion, no relaunch nudge as success', async () => {
@@ -127,7 +123,6 @@ describe('ProjectCard — partial refresh validation UX', () => {
     const { props } = renderCard();
     await clickUpdate();
     expect(props.toast).toHaveBeenCalledWith(expect.stringContaining('audit.partialNoChange'), 'error');
-    expect(props.onOpenDiscussion).not.toHaveBeenCalled();
     const greens = (props.toast as ReturnType<typeof vi.fn>).mock.calls
       .filter(([, kind]) => kind === 'success');
     expect(greens).toHaveLength(0);
@@ -146,7 +141,6 @@ describe('ProjectCard — partial refresh validation UX', () => {
     expect(props.toast).toHaveBeenCalledWith(expect.stringContaining('audit.streamWarning'), 'error');
     // The warning did not eat the terminal: the complete flow still runs.
     expect(props.toast).toHaveBeenCalledWith(expect.stringContaining('audit.partialValidationCreated'), 'success');
-    expect(props.onOpenDiscussion).toHaveBeenCalledWith('d-scoped');
   });
 
   it('a user cancel never falls into the interrupted branch', async () => {

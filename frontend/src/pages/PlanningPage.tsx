@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useNavigate } from 'react-router';
 import {
   Archive,
   Check,
@@ -31,7 +32,8 @@ import type {
 import './PlanningPage.css';
 
 interface Props {
-  initialSelectedTaskId?: string | null;
+  /** Selected task, driven by the /planning/:taskId URL param. */
+  selectedTaskId?: string | null;
   projects: Project[];
   discussions: Discussion[];
   toast: ToastFn;
@@ -52,13 +54,14 @@ function titleTokens(value: string): Set<string> {
 }
 
 export function PlanningPage({
-  initialSelectedTaskId,
+  selectedTaskId,
   projects,
   discussions,
   toast,
   onNavigateDiscussion,
 }: Props) {
   const { t } = useT();
+  const rawNavigate = useNavigate();
   const [tasks, setTasks] = useState<PlanningTaskSummary[]>([]);
   const [nextCursor, setNextCursor] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
@@ -73,9 +76,9 @@ export function PlanningPage({
   const [quickTitle, setQuickTitle] = useState('');
   const [quickPriority, setQuickPriority] = useState<PlanningTaskPriority>('normal');
   const [creating, setCreating] = useState(false);
-  const [selectedId, setSelectedId] = useState<string | null>(initialSelectedTaskId ?? null);
+  const selectedId = selectedTaskId ?? null;
   const [detail, setDetail] = useState<PlanningTaskDetail | null>(null);
-  const [detailLoading, setDetailLoading] = useState(Boolean(initialSelectedTaskId));
+  const [detailLoading, setDetailLoading] = useState(Boolean(selectedTaskId));
   const [saving, setSaving] = useState(false);
   const [draggedId, setDraggedId] = useState<string | null>(null);
   const [filtersOpen, setFiltersOpen] = useState(false);
@@ -111,8 +114,14 @@ export function PlanningPage({
   }, [fetchTasks]);
 
   useEffect(() => {
-    if (!selectedId) return;
+    if (!selectedId) {
+      setDetail(null);
+      setDetailLoading(false);
+      return;
+    }
     let cancelled = false;
+    setDetail(null);
+    setDetailLoading(true);
     planning.get(selectedId)
       .then(item => {
         if (!cancelled) setDetail(item);
@@ -147,9 +156,7 @@ export function PlanningPage({
   }, [quickTitle, tasks]);
 
   const selectTask = (taskId: string) => {
-    setDetail(null);
-    setDetailLoading(true);
-    setSelectedId(taskId);
+    rawNavigate(`/planning/${taskId}`, { replace: true });
   };
 
   const createQuickTask = async () => {
@@ -432,9 +439,7 @@ export function PlanningPage({
                 />
               )}
               <button type="button" onClick={() => {
-                setSelectedId(null);
-                setDetail(null);
-                setDetailLoading(false);
+                rawNavigate('/planning', { replace: true });
               }}><X size={16} /></button>
             </header>
             {detailLoading && <div className="planning-state"><Loader2 size={16} className="spin" /></div>}

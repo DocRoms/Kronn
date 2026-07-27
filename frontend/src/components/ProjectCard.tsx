@@ -1,5 +1,6 @@
 import '../pages/Dashboard.css';
 import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
+import { useKronnNavigate } from '../hooks/useKronnNavigate';
 import { planning, projects as projectsApi } from '../lib/api';
 import { useT } from '../lib/I18nContext';
 import { useIsMobile } from '../hooks/useMediaQuery';
@@ -78,10 +79,7 @@ export interface ProjectCardProps {
   workflows: WorkflowSummary[];
   configLanguage: string | null;
   toast: (msg: string, type: 'success' | 'error' | 'warning' | 'info') => void;
-  onNavigate: (page: string) => void;
   onSetDiscPrefill: (prefill: { projectId: string; title: string; prompt: string; locked?: boolean }) => void;
-  onAutoRunDiscussion: (discId: string) => void;
-  onOpenDiscussion: (discId: string) => void;
   onRefetch: () => void;
   onRefetchDiscussions: () => void;
   onRefetchSkills: () => void;
@@ -101,16 +99,14 @@ export function ProjectCard({
   mcpConfigs,
   workflows,
   toast,
-  onNavigate,
   onSetDiscPrefill,
-  onAutoRunDiscussion,
-  onOpenDiscussion,
   onRefetch,
   onRefetchDiscussions,
   onRefetchSkills,
   onRefetchDrift,
 }: ProjectCardProps) {
   const { t, locale } = useT();
+  const nav = useKronnNavigate();
   const isMobile = useIsMobile();
   const [detailView, setDetailView] = useState<'overview' | 'discussions' | 'tasks' | 'docs' | 'code' | 'resources'>('overview');
   const [projectTaskCount, setProjectTaskCount] = useState<number | null>(null);
@@ -826,8 +822,7 @@ export function ProjectCard({
           onRefetchDiscussions();
           if (discussionId) {
             toast(t('audit.fullAuditDone'), 'success');
-            onAutoRunDiscussion(discussionId);
-            onNavigate('discussions');
+            nav.toDiscussion(discussionId, { autoRun: true });
           }
         },
         onError: (error) => {
@@ -855,7 +850,7 @@ export function ProjectCard({
     } finally {
       setAuditAbortController(null);
     }
-  }, [auditAgentChoice, agents, proj.id, t, toast, onRefetch, onRefetchDiscussions, onAutoRunDiscussion, onNavigate, resumableAudit]);
+  }, [auditAgentChoice, agents, proj.id, t, toast, onRefetch, onRefetchDiscussions, nav, resumableAudit]);
 
   const startPartialAudit = useCallback(async (drift: DriftCheckResponse) => {
     if (auditActiveRef.current) return;
@@ -915,8 +910,7 @@ export function ProjectCard({
             toast(t('audit.partialValidationCreated', String(info.succeededSteps.length)), 'success');
             // Open AND navigate — same UX as the Full validation flow; no
             // auto-run (the backend already spawned the agent post-commit).
-            onOpenDiscussion(info.discussionId);
-            onNavigate('discussions');
+            nav.toDiscussion(info.discussionId);
           } else if (info?.status === 'no_change') {
             // Honest: nothing was rewritten, sections stay stale — and NO
             // "just relaunch" nudge (manual review/acceptance is a future
@@ -948,7 +942,7 @@ export function ProjectCard({
     } finally {
       setAuditAbortController(null);
     }
-  }, [auditAgentChoice, agents, proj.id, t, toast, onRefetch, onRefetchDrift, onRefetchDiscussions, onOpenDiscussion, onNavigate]);
+  }, [auditAgentChoice, agents, proj.id, t, toast, onRefetch, onRefetchDrift, onRefetchDiscussions, nav]);
 
   // ─── Audit resume on mount ───────────────────────────────────────────────
   // When a local checkpoint indicates an audit was in-flight (tab switch, page
@@ -1166,7 +1160,7 @@ export function ProjectCard({
                 className="dash-icon-btn"
                 onClick={() => {
                   onSetDiscPrefill({ projectId: proj.id, title: '', prompt: '' });
-                  onNavigate('discussions');
+                  nav.toDiscussions();
                 }}
               >
                 <Plus size={12} /> {t('disc.newTitle')}
@@ -1262,7 +1256,7 @@ export function ProjectCard({
             {!auditActive && proj.audit_status === 'Validated' ? (
               <span className="dash-badge-green"><ShieldCheck size={9} /> Validated</span>
             ) : !auditActive && validationInProgress ? (
-              <span className="dash-badge-orange cursor-pointer" onClick={(e) => { e.stopPropagation(); if (validationDisc) onOpenDiscussion(validationDisc.id); onNavigate('discussions'); }}>
+              <span className="dash-badge-orange cursor-pointer" onClick={(e) => { e.stopPropagation(); if (validationDisc) nav.toDiscussion(validationDisc.id); }}>
                 <Loader2 size={9} style={{ animation: 'spin 1s linear infinite' }} /> Validation
               </span>
             ) : !auditActive && (proj.audit_status === 'Audited' || proj.audit_status === 'TemplateInstalled') ? (
@@ -1767,7 +1761,7 @@ export function ProjectCard({
               <ProjectTasksPanel
                 projectId={proj.id}
                 onOpenPlanning={(taskId) =>
-                  onNavigate(taskId ? `planning:${taskId}` : 'planning')
+                  taskId ? nav.toPlanningTask(taskId) : nav.toPlanning()
                 }
                 onCountChange={setProjectTaskCount}
                 toast={toast}
@@ -1847,7 +1841,7 @@ export function ProjectCard({
                     {t('config.enabled')}
                   </span>
                 </div>
-                <div className="flex-1 cursor-pointer" onClick={() => { onOpenDiscussion(disc.id); onNavigate('discussions'); }}>
+                <div className="flex-1 cursor-pointer" onClick={() => nav.toDiscussion(disc.id)}>
                   <span className="dash-row-disc-title">
                     {isValidationDisc(disc.title) && <ShieldCheck size={10} className="text-accent" />}
                     {disc.title}
@@ -1856,7 +1850,7 @@ export function ProjectCard({
                     {unseenBasis(disc)} msg · {disc.agent}
                   </span>
                 </div>
-                <button className="dash-icon-btn" onClick={() => { onOpenDiscussion(disc.id); onNavigate('discussions'); }} aria-label="Open discussion">
+                <button className="dash-icon-btn" onClick={() => nav.toDiscussion(disc.id)} aria-label="Open discussion">
                   <ChevronRight size={12} />
                 </button>
               </div>
@@ -1902,7 +1896,7 @@ export function ProjectCard({
               <button
                 type="button"
                 className="dash-icon-btn"
-                onClick={() => { onSetDiscPrefill({ projectId: proj.id, title: '', prompt: '' }); onNavigate('discussions'); }}
+                onClick={() => { onSetDiscPrefill({ projectId: proj.id, title: '', prompt: '' }); nav.toDiscussions(); }}
               >
                 <Plus size={12} /> {t('disc.newTitle')}
               </button>
@@ -1986,7 +1980,7 @@ export function ProjectCard({
                         ? t('projects.docAi.fixThisPrompt', filePath)
                         : t('projects.docAi.discussPrompt', filePath),
                     });
-                    onNavigate('discussions');
+                    nav.toDiscussions();
                   }}
                 />
                   </>
@@ -2013,7 +2007,7 @@ export function ProjectCard({
                 <button
                   type="button"
                   className="dash-mcp-hint-cta"
-                  onClick={() => onNavigate('mcps')}
+                  onClick={() => nav.toPlugins()}
                 >
                   {t('projects.mcpHint.cta')}
                 </button>
@@ -2022,7 +2016,7 @@ export function ProjectCard({
             {isSectionOpen('mcps') && (
               <>
                 {projMcps.map(cfg => (
-                  <div key={cfg.id} className="dash-row" style={{ cursor: 'pointer' }} onClick={() => onNavigate(`mcps:${cfg.id}`)}>
+                  <div key={cfg.id} className="dash-row" style={{ cursor: 'pointer' }} onClick={() => nav.toPlugin(cfg.id)}>
                     <div className="relative">
                       <div aria-hidden="true" className="dash-dot" data-on="true" />
                       <span className="dash-sr-only">
@@ -2039,7 +2033,7 @@ export function ProjectCard({
                 ))}
                 {projMcps.length === 0 && !shouldPulseMcpHint && (
                   <div className="dash-row-empty">
-                    {t('projects.noMcp').split(' — ')[0]} — <button className="dash-icon-btn" style={{ fontSize: 11, color: 'var(--kr-accent-ink)', display: 'inline-flex' }} onClick={() => onNavigate('mcps')}>{t('projects.noMcp').split(' — ')[1]}</button>
+                    {t('projects.noMcp').split(' — ')[0]} — <button className="dash-icon-btn" style={{ fontSize: 11, color: 'var(--kr-accent-ink)', display: 'inline-flex' }} onClick={() => nav.toPlugins()}>{t('projects.noMcp').split(' — ')[1]}</button>
                   </div>
                 )}
               </>
@@ -2076,7 +2070,7 @@ export function ProjectCard({
                     </div>
                     <button
                       className="dash-icon-btn"
-                      onClick={() => onNavigate('workflows')}
+                      onClick={() => nav.toWorkflows()}
                       title={t('projects.workflows')}
                       aria-label={t('projects.workflows')}
                     >
@@ -2086,7 +2080,7 @@ export function ProjectCard({
                 ))}
                 {projWorkflows.length === 0 && (
                   <div className="dash-row-empty">
-                    {t('projects.noWorkflows').split(' — ')[0]} — <button className="dash-icon-btn" style={{ fontSize: 11, color: 'var(--kr-accent-ink)', display: 'inline-flex' }} onClick={() => onNavigate('workflows')}>{t('projects.noWorkflows').split(' — ')[1]}</button>
+                    {t('projects.noWorkflows').split(' — ')[0]} — <button className="dash-icon-btn" style={{ fontSize: 11, color: 'var(--kr-accent-ink)', display: 'inline-flex' }} onClick={() => nav.toWorkflows()}>{t('projects.noWorkflows').split(' — ')[1]}</button>
                   </div>
                 )}
               </>
@@ -2175,8 +2169,7 @@ export function ProjectCard({
                           onRefetch();
                           onRefetchDiscussions();
                           if (discId) {
-                            onAutoRunDiscussion(discId);
-                            onNavigate('discussions');
+                            nav.toDiscussion(discId, { autoRun: true });
                           }
                         }}
                         toast={toast}
@@ -2186,7 +2179,7 @@ export function ProjectCard({
                       {briefingDisc && !briefingDone ? (
                         <button
                           className="dash-icon-btn dash-btn-info"
-                          onClick={() => { onOpenDiscussion(briefingDisc.id); onNavigate('discussions'); }}
+                          onClick={() => nav.toDiscussion(briefingDisc.id)}
                         >
                           <MessageSquare size={12} /> {t('audit.resumeBriefing')}
                         </button>
@@ -2229,7 +2222,7 @@ export function ProjectCard({
                           💡 {t('audit.trackerHint')}
                         </span>
                         <div className="dash-tracker-hint-actions">
-                          <button className="dash-icon-btn" onClick={() => onNavigate('mcps')}>
+                          <button className="dash-icon-btn" onClick={() => nav.toPlugins()}>
                             <Plug size={12} /> {t('audit.trackerHintConfigure')}
                           </button>
                           <button
@@ -2361,7 +2354,7 @@ export function ProjectCard({
                     </p>
                     <button
                       className="dash-icon-btn dash-btn-accent-border"
-                      onClick={() => { onOpenDiscussion(bootstrapDisc.id); onNavigate('discussions'); }}
+                      onClick={() => nav.toDiscussion(bootstrapDisc.id)}
                     >
                       <MessageSquare size={12} /> {t('audit.resumeBootstrap')}
                     </button>
@@ -2429,7 +2422,7 @@ export function ProjectCard({
                         </p>
                         <button
                           className="dash-icon-btn dash-btn-accent-border"
-                          onClick={() => { onOpenDiscussion(validationDisc.id); onNavigate('discussions'); }}
+                          onClick={() => nav.toDiscussion(validationDisc.id)}
                         >
                           <MessageSquare size={12} /> {t('audit.resumeValidation')}
                         </button>
@@ -2448,7 +2441,7 @@ export function ProjectCard({
                               prompt: t('audit.validationPrompt'),
                               locked: true,
                             });
-                            onNavigate('discussions');
+                            nav.toDiscussions();
                           }}
                         >
                           <ShieldCheck size={12} /> {t('audit.validate')}

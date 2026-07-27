@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useMemo, Fragment } from 'react';
+import { useKronnNavigate } from '../../hooks/useKronnNavigate';
 import { useT } from '../../lib/I18nContext';
 import { workflows as workflowsApi, quickPrompts as quickPromptsApi } from '../../lib/api';
 import type { BatchPreview } from '../../lib/api';
@@ -161,15 +162,6 @@ export interface WorkflowDetailProps {
   onDeleteAllRuns: () => void;
   triggering: boolean;
   agentAccess?: AgentsConfig;
-  /** Click on a "📋 N conversations" chip → jump to the discussions tab and
-   *  expand+scroll to the matching batch group. */
-  onNavigateToBatch?: (batchRunId: string) => void;
-  /** 2026-06-13 — open another workflow's detail (e.g. jump from a fan-out
-   *  per-task row to the child sub-workflow that ran it). */
-  onNavigateToWorkflow?: (workflowId: string) => void;
-  /** #11 — jump to a SPECIFIC child run (workflow + run id): opens that
-   *  workflow's detail and focuses the exact run. */
-  onNavigateToRun?: (workflowId: string, runId: string) => void;
   /** 0.8.11 UX — one-click enable/disable from the detail header (a disabled
    *  workflow's launch button is inert; this is the visible way out). */
   onToggleEnabled?: (enabled: boolean) => void;
@@ -1397,8 +1389,9 @@ function SubWorkflowOverview({
   );
 }
 
-export function WorkflowDetail({ workflow, runs, availableAgentTypes, onChangeStepAgent, totalRuns, hasMoreRuns = false, loadingMoreRuns = false, onLoadMoreRuns, liveRun, onTrigger, onRefresh, onEdit, onDeleteRun, onDeleteAllRuns, triggering, agentAccess, onNavigateToBatch, onNavigateToWorkflow, onNavigateToRun, focusRunId, onExport, onGateDecided, onToggleEnabled, toast }: WorkflowDetailProps) {
+export function WorkflowDetail({ workflow, runs, availableAgentTypes, onChangeStepAgent, totalRuns, hasMoreRuns = false, loadingMoreRuns = false, onLoadMoreRuns, liveRun, onTrigger, onRefresh, onEdit, onDeleteRun, onDeleteAllRuns, triggering, agentAccess, focusRunId, onExport, onGateDecided, onToggleEnabled, toast }: WorkflowDetailProps) {
   const { t } = useT();
+  const nav = useKronnNavigate();
   const [showRuns, setShowRuns] = useState(true);
   const [isWorkflowIdCopied, setIsWorkflowIdCopied] = useState(false);
   const workflowIdResetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -2207,8 +2200,6 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, onChangeSt
             <RunDetail
               run={run}
               workflowSteps={workflow.steps}
-              onNavigateToWorkflow={onNavigateToWorkflow}
-              onNavigateToRun={onNavigateToRun}
               onDelete={() => onDeleteRun(run.id)}
               onCancel={async () => {
                 try {
@@ -2231,7 +2222,7 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, onChangeSt
                   await workflowsApi.resumeRun(resumeRunId);
                   onRefresh();
                   if (run.parent_run_id && run.parent_workflow_id) {
-                    onNavigateToRun?.(run.parent_workflow_id, resumeRunId);
+                    nav.toWorkflowRun(run.parent_workflow_id, resumeRunId);
                   }
                 } catch (e) {
                   // Claim lost (double-click, benign: the other click won) or
@@ -2250,11 +2241,11 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, onChangeSt
                 onGateDecided?.();
               }}
             />
-            {childBatch && onNavigateToBatch && (
+            {childBatch && (
               <button
                 type="button"
                 className="wf-run-batch-chip"
-                onClick={() => onNavigateToBatch(childBatch.run_id)}
+                onClick={() => nav.toDiscussions({ focusBatchId: childBatch.run_id })}
                 title={t('wf.runBatchChipHint')}
               >
                 <MessageSquare size={11} />

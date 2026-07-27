@@ -1,4 +1,6 @@
 import { Fragment, useState, useRef, useMemo, useEffect, useCallback } from 'react';
+import { useLocation, useNavigate } from 'react-router';
+import { useKronnNavigate } from '../hooks/useKronnNavigate';
 import { useIsMobile } from '../hooks/useMediaQuery';
 import { useT } from '../lib/I18nContext';
 import { workflows as workflowsApi, discussions as discussionsApi, quickPrompts as quickPromptsApi, quickApis as quickApisApi, mcps as mcpsApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi } from '../lib/api';
@@ -46,29 +48,18 @@ interface WorkflowsPageProps {
   installedAgentTypes?: AgentType[];
   agentAccess?: AgentsConfig;
   configLanguage?: string;
-  onNavigateDiscussion?: (discId: string) => void;
-  /** Called after a batch launch — parent marks every returned disc id as
-   * "sending" in the shared sendingMap so the sidebar spinner lights up for
-   * all of them, not just the one we navigate to. Without this prop the
-   * batch still works but only the navigated disc looks like it's running. */
-  onBatchLaunched?: (discIds: string[], batchRunId: string) => void;
-  /** When the user clicks a batch pastille in the discussion sidebar, the
-   * Dashboard switches to this tab and sets this prop to the parent workflow
-   * id. We auto-open its detail panel + switch to the 'workflows' sub-tab
-   * so the user lands exactly on the run that spawned their batch. */
-  initialSelectedWorkflowId?: string | null;
-  /** Ack callback — Dashboard clears the id after we've consumed it so the
-   * same click doesn't re-open on every render. */
-  onInitialSelectionConsumed?: () => void;
-  /** Reverse direction: when "📋 N conversations" is clicked on a workflow run,
-   * jump to the discussions tab and focus that batch group. */
-  onNavigateToBatch?: (batchRunId: string) => void;
+  initialWorkflowId?: string | null;
+  initialRunId?: string | null;
+  initialTab?: 'workflows' | 'quickPrompts' | 'quickApis';
+  initialQpId?: string;
+  initialQaId?: string;
+  /** Marks batch-child disc IDs as "sending" in the shared sendingMap so
+   * the sidebar spinner lights up. Navigation is handled internally via
+   * useKronnNavigate; only the sendingMap mutation needs the parent. */
+  onBatchSendingMark?: (discIds: string[]) => void;
+  /** Force a discussions refetch after batch launch. */
+  refetchDiscussions?: () => void;
   toast?: (msg: string, type?: 'success' | 'error' | 'info') => void;
-  /** 0.8.2 — Deep-link from the audit-validation CTA: opens the create
-   * wizard with a preset pre-applied (e.g. `ticket-to-pr` for AutoPilot)
-   * and the project pre-selected. Ack via `onPendingPresetConsumed`. */
-  pendingPreset?: { presetId: string; projectId: string } | null;
-  onPendingPresetConsumed?: () => void;
 }
 
 const TRIGGER_LABELS: Record<string, string> = {
@@ -92,13 +83,16 @@ export function appendLiveBuffer(prev: string, chunks: string, max: number): str
 const RUN_FETCH_PAGE_SIZE = 10;
 const RUN_FETCH_MAX_PAGE_SIZE = 500;
 
-export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, configLanguage, onNavigateDiscussion, onBatchLaunched, initialSelectedWorkflowId, onInitialSelectionConsumed, onNavigateToBatch, toast: toastProp, pendingPreset, onPendingPresetConsumed }: WorkflowsPageProps) {
+export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, configLanguage, initialWorkflowId, initialRunId, initialTab = 'workflows', initialQpId, initialQaId, onBatchSendingMark, refetchDiscussions, toast: toastProp }: WorkflowsPageProps) {
   const { t } = useT();
+  const nav = useKronnNavigate();
+  const location = useLocation();
+  const rawNavigate = useNavigate();
   // The 380px workflow list plus the detail panel needs substantially more
   // room than a phone-only breakpoint. Switch to the existing single-pane
   // navigation on tablets too, before the detail content becomes cramped.
   const isMobile = useIsMobile(1024);
-  const [tab, setTab] = useState<'workflows' | 'quickPrompts' | 'quickApis'>('workflows');
+  const [tab, setTab] = useState<'workflows' | 'quickPrompts' | 'quickApis'>(initialTab);
   const [quickPromptSort, setQuickPromptSort] = useState<QuickPromptSort>('name');
   const [quickPromptSortReversed, setQuickPromptSortReversed] = useState(false);
   const [quickPromptAgentFilter, setQuickPromptAgentFilter] = useState<string>('all');
@@ -222,18 +216,18 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     return sortQuickApis(filtered, quickApiSort, quickApiSortReversed);
   }, [quickApiList, quickApiPluginFilter, quickApiSort, quickApiSortReversed]);
   const [showCreate, setShowCreate] = useState(false);
-  // 0.8.2 — Local snapshot of the pending preset, captured at the moment
-  // `pendingPreset` arrives. We can't pass `pendingPreset` directly to
-  // WorkflowWizard because Dashboard clears it on consume (causing the
-  // wizard to remount without the preset). Snapshot survives the ack.
+  // Read pending preset from location state (set by DiscussionsPage's CTA).
+  // Snapshot locally so navigation away doesn't clear it mid-wizard.
   const [pendingPresetLocal, setPendingPresetLocal] = useState<{ presetId: string; projectId: string } | null>(null);
   useEffect(() => {
-    if (!pendingPreset) return;
-    setPendingPresetLocal(pendingPreset);
+    const state = location.state as { pendingPreset?: { presetId: string; projectId: string } } | null;
+    if (!state?.pendingPreset) return;
+    setPendingPresetLocal(state.pendingPreset);
     setShowCreate(true);
-    onPendingPresetConsumed?.();
+    // Clear location state so a back-nav doesn't re-trigger
+    rawNavigate(location.pathname, { replace: true, state: {} });
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pendingPreset]);
+  }, [location.state]);
 
   // 0.8.5 — post-deploy QP focus. Read the sessionStorage flag set by
   // the DiscussionsPage "Deploy improved QP" CTA, switch to the Quick
@@ -244,12 +238,14 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     try { qpId = sessionStorage.getItem('kronn:postQpImproved'); } catch { /* private mode */ }
     if (!qpId) return;
     setTab('quickPrompts');
+    rawNavigate(`/workflows/qp/${qpId}`, { replace: true });
     setPostImprovedQpId(qpId);
     try { sessionStorage.removeItem('kronn:postQpImproved'); } catch { /* ignore */ }
     // The list might not be loaded yet; the scroll+flash effect below
     // re-fires when quickPromptList resolves. No dependency on quickPromptList here —
     // running once on mount is enough because state mutates trigger the next effect.
-  }, []);
+    // `rawNavigate` is stable in Data mode, so listing it keeps this mount-only.
+  }, [rawNavigate]);
 
   // Scroll + flash highlight the deep-linked QP card once the list is
   // available. Uses a 1.4s CSS animation (defined in WorkflowsPage.css)
@@ -275,6 +271,41 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     });
     return () => cancelAnimationFrame(raf1);
   }, [postImprovedQpId, quickPromptList]);
+
+  // Deep-link to a specific QP from URL param — reuse the flash+scroll pattern.
+  const initialQpConsumed = useRef(false);
+  useEffect(() => {
+    if (initialQpConsumed.current || !initialQpId) return;
+    initialQpConsumed.current = true;
+    setPostImprovedQpId(initialQpId);
+  }, [initialQpId]);
+
+  // Deep-link to a specific QA from URL param — scroll+flash like QP.
+  const initialQaConsumed = useRef(false);
+  const [flashQaId, setFlashQaId] = useState<string | null>(null);
+  useEffect(() => {
+    if (initialQaConsumed.current || !initialQaId) return;
+    initialQaConsumed.current = true;
+    setFlashQaId(initialQaId);
+  }, [initialQaId]);
+  useEffect(() => {
+    if (!flashQaId) return;
+    if (!quickApiList || quickApiList.length === 0) return;
+    const raf1 = requestAnimationFrame(() => {
+      const raf2 = requestAnimationFrame(() => {
+        const el = document.querySelector(`[data-qa-id="${flashQaId}"]`) as HTMLElement | null;
+        if (el) {
+          el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          el.classList.add('qp-card-flash');
+          window.setTimeout(() => el.classList.remove('qp-card-flash'), 1500);
+        }
+        setFlashQaId(null);
+      });
+      return () => cancelAnimationFrame(raf2);
+    });
+    return () => cancelAnimationFrame(raf1);
+  }, [flashQaId, quickApiList]);
+
   const [editingWorkflow, setEditingWorkflow] = useState<Workflow | null>(null);
   // 0.7.0 UX pass — import drawer state. Set when the user clicks the
   // "Importer" button on either tab. Carries the parsed JSON content +
@@ -417,6 +448,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     setFocusRunId(runId ?? null);
     setLoadingDetail(true);
     setHasMoreDetailRuns(false);
+    rawNavigate(runId ? `/workflows/${id}/runs/${runId}` : `/workflows/${id}`, { replace: true });
     // Out-of-order guard: click A (slow fetch) then B (fast) — A's response
     // landing last must not repaint the panel with A while selectedId is B.
     const seq = ++detailSeqRef.current;
@@ -476,22 +508,15 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     }
   };
 
-  // Cross-page navigation: when the sidebar's batch pastille is clicked, the
-  // Dashboard passes the parent workflow id here. We auto-switch to the
-  // "workflows" sub-tab, open its detail panel, then ack so the same click
-  // doesn't re-fire on every render.
+  // Open a workflow from URL param (direct link / bookmark).
+  const initialWfConsumed = useRef(false);
   useEffect(() => {
-    if (!initialSelectedWorkflowId) return;
-    const timeoutId = window.setTimeout(() => {
-      setTab('workflows');
-      void openDetail(initialSelectedWorkflowId);
-      onInitialSelectionConsumed?.();
-    }, 0);
-    return () => {
-      window.clearTimeout(timeoutId);
-    };
+    if (initialWfConsumed.current || !initialWorkflowId) return;
+    initialWfConsumed.current = true;
+    setTab('workflows');
+    openDetail(initialWorkflowId, initialRunId ?? undefined);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [initialSelectedWorkflowId]);
+  }, [initialWorkflowId]);
 
   // 0.8.2 — Live workflow-run updates. The SSE stream is tab-local: if the
   // user opens the workflow detail in a *different* tab while a run is in
@@ -792,6 +817,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
       if (selectedId === id) {
         setSelectedId(null);
         setDetailWorkflow(null);
+        rawNavigate('/workflows', { replace: true });
       }
       refetch();
     } catch (e) {
@@ -1001,7 +1027,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
       });
       setLaunchingQP(null);
       setLaunchVars({});
-      onNavigateDiscussion?.(disc.id);
+      nav.toDiscussion(disc.id, { autoRun: true });
     } catch (e) {
       console.warn('Launch failed:', e);
     } finally {
@@ -1092,7 +1118,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
         // protocol every time, even if no other context is wired in.
         skill_ids: ['qp-improver'],
       });
-      onNavigateDiscussion?.(disc.id);
+      nav.toDiscussion(disc.id, { autoRun: true });
     } catch (e) {
       console.warn('QP improve failed:', e);
       if (toastProp) toastProp(userError(e), 'error');
@@ -1162,10 +1188,11 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
         }).catch(() => { /* aborted or net blip — backend run is detached */ });
         setTimeout(() => controller.abort(), 500);
       });
-      // Use `onBatchLaunched` (NOT `onNavigateDiscussion`) so the
-      // sibling spinners light up in the sidebar AND we don't re-fire
-      // a second `/run` on top of the fan-out we just dispatched.
-      onBatchLaunched?.(result.discussion_ids, result.run_id);
+      onBatchSendingMark?.(result.discussion_ids);
+      refetchDiscussions?.();
+      if (result.discussion_ids.length > 0) {
+        nav.batchLaunched(result.discussion_ids[0], result.run_id);
+      }
     } catch (e) {
       console.warn('Compare-agents launch failed:', e);
     } finally {
@@ -1273,16 +1300,11 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
         // make_agent_stream has already captured the work.
         setTimeout(() => controller.abort(), 500);
       });
-      // Tell the parent (Dashboard) to mark all these disc ids as
-      // sending AND to open the first one — this is what lights up
-      // the spinner in the sidebar and routes the user to the live
-      // batch view. We deliberately do NOT call onNavigateDiscussion
-      // here: that path triggers an auto-run on the navigated disc,
-      // which would create a second POST /run on top of the one we
-      // already fired in the fan-out loop, doubling its response.
-      // `onBatchLaunched` in Dashboard uses `setOpenDiscussionId`
-      // which opens without auto-running.
-      onBatchLaunched?.(res.discussion_ids, res.run_id);
+      onBatchSendingMark?.(res.discussion_ids);
+      refetchDiscussions?.();
+      if (res.discussion_ids.length > 0) {
+        nav.batchLaunched(res.discussion_ids[0], res.run_id);
+      }
       setBatchingQP(null);
       setBatchInputLines('');
     } catch (e) {
@@ -1316,7 +1338,6 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
         };
 
   const handleCreateWithAI = async () => {
-    if (!onNavigateDiscussion) return;
     try {
       // Compact project lookup: enough context to attach the draft without
       // spending a tool round-trip or filling the agent context needlessly.
@@ -1336,7 +1357,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
         directive_ids: [],
         tier: 'reasoning',
       });
-      onNavigateDiscussion(disc.id);
+      nav.toDiscussion(disc.id, { autoRun: true });
     } catch (e) {
       console.warn('Failed to create AI discussion:', e);
     }
@@ -1350,11 +1371,9 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
         </div>
         {tab === 'workflows' ? (
         <div className="flex-row gap-3 automation-header-actions">
-          {onNavigateDiscussion && (
-            <button className="wf-create-ai-btn" title={aiCreation.hint} onClick={handleCreateWithAI}>
-              <Zap size={14} /> {t('wf.createWithAI')}
-            </button>
-          )}
+          <button className="wf-create-ai-btn" title={aiCreation.hint} onClick={handleCreateWithAI}>
+            <Zap size={14} /> {t('wf.createWithAI')}
+          </button>
           {/* 0.7.0 UX pass — Import workflow JSON. Drag-and-drop or
               file picker. Sister button to "Nouveau workflow". */}
           <button
@@ -1375,11 +1394,9 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
         </div>
         ) : tab === 'quickPrompts' ? (
         <div className="flex-row gap-3 automation-header-actions">
-          {onNavigateDiscussion && (
-            <button className="wf-create-ai-btn" title={aiCreation.hint} onClick={handleCreateWithAI}>
-              <Zap size={14} /> {t('wf.createWithAI')}
-            </button>
-          )}
+          <button className="wf-create-ai-btn" title={aiCreation.hint} onClick={handleCreateWithAI}>
+            <Zap size={14} /> {t('wf.createWithAI')}
+          </button>
           <button
             className="wf-create-btn wf-create-btn-secondary"
             title={t('qp.importHint')}
@@ -1400,11 +1417,9 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
         // Quick APIs mirror the other tabs. Manual creation still needs a
         // wired plugin; import and AI-assisted setup remain useful without one.
         <div className="flex-row gap-3 automation-header-actions">
-          {onNavigateDiscussion && (
-            <button className="wf-create-ai-btn" title={aiCreation.hint} onClick={handleCreateWithAI}>
-              <Zap size={14} /> {t('wf.createWithAI')}
-            </button>
-          )}
+          <button className="wf-create-ai-btn" title={aiCreation.hint} onClick={handleCreateWithAI}>
+            <Zap size={14} /> {t('wf.createWithAI')}
+          </button>
           <button
             className="wf-create-btn wf-create-btn-secondary"
             title={t('qa.importHint')}
@@ -1428,13 +1443,13 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
 
       {/* Tab bar */}
       <div className="dash-tab-bar mb-6">
-        <button className="dash-tab" data-active={tab === 'workflows'} onClick={() => setTab('workflows')}>
+        <button className="dash-tab" data-active={tab === 'workflows'} onClick={() => { setTab('workflows'); rawNavigate('/workflows', { replace: true }); }}>
           {t('wf.tabWorkflows')} {workflowList ? `(${workflowList.length})` : ''}
         </button>
-        <button className="dash-tab" data-active={tab === 'quickPrompts'} onClick={() => setTab('quickPrompts')}>
+        <button className="dash-tab" data-active={tab === 'quickPrompts'} onClick={() => { setTab('quickPrompts'); rawNavigate('/workflows/qp', { replace: true }); }}>
           {t('wf.tabQuickPrompts')} {quickPromptList ? `(${quickPromptList.length})` : ''}
         </button>
-        <button className="dash-tab" data-active={tab === 'quickApis'} onClick={() => setTab('quickApis')}>
+        <button className="dash-tab" data-active={tab === 'quickApis'} onClick={() => { setTab('quickApis'); rawNavigate('/workflows/qa', { replace: true }); }}>
           {t('wf.tabQuickApis')} {quickApiList ? `(${quickApiList.length})` : ''}
         </button>
       </div>
@@ -1660,7 +1675,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
             {isMobile && selectedId && (
               <button
                 className="wf-back-btn"
-                onClick={() => setSelectedId(null)}
+                onClick={() => { setSelectedId(null); rawNavigate('/workflows', { replace: true }); }}
               >
                 <ChevronLeft size={14} /> {t('wf.back') ?? 'Back'}
               </button>
@@ -1703,9 +1718,6 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                 }}
                 triggering={triggering === detailWorkflow.id}
                 agentAccess={agentAccess}
-                onNavigateToBatch={onNavigateToBatch}
-                onNavigateToWorkflow={(wfId) => openDetail(wfId)}
-                onNavigateToRun={(wfId, runId) => openDetail(wfId, runId)}
                 focusRunId={focusRunId}
                 toast={toastProp}
                 onToggleEnabled={async (enabled) => {

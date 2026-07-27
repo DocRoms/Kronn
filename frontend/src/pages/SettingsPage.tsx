@@ -124,7 +124,6 @@ interface SettingsPageProps {
   refetchProjects: () => void;
   refetchDiscussions: () => void;
   onReset: () => void;
-  onNavigateDiscussion?: (discussionId: string) => void;
   toast: ToastFn;
   // 0.8.6 — render the API audit section only if at least one API
   // plugin has a config in this instance. Avoids surfacing a debug
@@ -142,7 +141,6 @@ export function SettingsPage({
   refetchProjects,
   refetchDiscussions,
   onReset,
-  onNavigateDiscussion,
   toast,
   hasConfiguredApi = false,
 }: SettingsPageProps) {
@@ -1425,7 +1423,7 @@ export function SettingsPage({
       </div>
 
       {/* Usage — moved before Server so non-dev users see their consumption first */}
-      <UsageSection onNavigateDiscussion={onNavigateDiscussion} />
+      <UsageSection />
 
       <div id="settings-server" className="set-card">
         <div className="set-section">

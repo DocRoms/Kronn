@@ -2,6 +2,7 @@ import { useState, useRef, useMemo, useEffect, memo, type ReactNode } from 'reac
 import ReactMarkdown from 'react-markdown';
 import { useTheme } from '../lib/ThemeContext';
 import { useT } from '../lib/I18nContext';
+import { useKronnNavigate } from '../hooks/useKronnNavigate';
 import { MatrixText } from './MatrixText';
 import { DocPreview } from './DocPreview';
 import { DocDataExport } from './DocDataExport';
@@ -196,7 +197,6 @@ export interface MessageBubbleProps {
   onEditTextChange: (text: string) => void;
   onRetry: () => void;
   onExpandSummary: (msgId: string) => void;
-  onNavigate: (page: string, opts?: { scrollTo?: string }) => void;
   /** Discussion id, threaded through to MarkdownContent so the
    *  `kronn-doc-preview` fence handler knows which generated-files
    *  directory to target when the user clicks "Export PDF". */
@@ -227,7 +227,8 @@ export interface MessageBubbleProps {
 export const MessageBubble = memo(function MessageBubble(props: MessageBubbleProps) {
   const { msg, isLastUser, isLastAgent, isEditing, isCopied, isTtsActive, ttsState: tts, isExpandedSummary,
     prevUserTs, defaultAgent, summaryCache, language, sending, editingText, hasFullAccess,
-    onCopy, onTts, onEditStart, onEditCancel, onEditSubmit, onEditTextChange, onRetry, onExpandSummary, onNavigate, discussionId, projectId, chainableQPs, onLaunchQp, attachments, pendingAttachment, t } = props;
+    onCopy, onTts, onEditStart, onEditCancel, onEditSubmit, onEditTextChange, onRetry, onExpandSummary, discussionId, projectId, chainableQPs, onLaunchQp, attachments, pendingAttachment, t } = props;
+  const nav = useKronnNavigate();
   const isUser = msg.role === 'User';
   const visibleContent = isUser ? stripAgentHandoff(msg.content) : msg.content;
   const agentType = msg.agent_type ?? defaultAgent;
@@ -601,7 +602,7 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
         )}
         {RE_AUTH_ERROR.test(msg.content) && (
           <div className="disc-auth-error-cta">
-            <button className="disc-scan-btn" style={{ fontSize: 11, padding: '5px 12px' }} onClick={() => onNavigate('settings')}>
+            <button className="disc-scan-btn" style={{ fontSize: 11, padding: '5px 12px' }} onClick={() => nav.toConfig()}>
               <Key size={11} /> {t('disc.overrideKey')}
             </button>
             <span className="disc-auth-error-hint">{t('disc.orCheckAgent')}</span>
@@ -609,7 +610,7 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
         )}
         {RE_PARTIAL_RESPONSE.test(msg.content) && (
           <div className="disc-auth-error-cta">
-            <button className="disc-scan-btn" style={{ fontSize: 11, padding: '5px 12px', borderColor: 'rgba(var(--kr-warning-amber-rgb), 0.3)', background: 'rgba(var(--kr-warning-amber-rgb), 0.08)', color: 'var(--kr-warning-amber)' }} onClick={() => onNavigate('settings', { scrollTo: 'settings-server' })}>
+            <button className="disc-scan-btn" style={{ fontSize: 11, padding: '5px 12px', borderColor: 'rgba(var(--kr-warning-amber-rgb), 0.3)', background: 'rgba(var(--kr-warning-amber-rgb), 0.08)', color: 'var(--kr-warning-amber)' }} onClick={() => nav.toConfig('settings-server')}>
               <Settings size={11} /> {t('disc.editTimeout')}
             </button>
           </div>
@@ -618,9 +619,9 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
             KRONN:VALIDATION_COMPLETE in a project-bound discussion,
             surface a one-click jump to the TD index. Pattern: same
             as the auth-error / timeout CTAs above (button below the
-            bubble, before the footer). The hash + onNavigate combo
-            re-uses Dashboard's existing `#project-<id>` deep-link so
-            we don't need new plumbing in the Dashboard state machine. */}
+            bubble, before the footer). The jump re-uses the
+            `/projects/:id` route (formerly the `#project-<id>` hash)
+            so no extra navigation plumbing is needed. */}
         {projectId && /KRONN:VALIDATION_COMPLETE/i.test(msg.content) && (
           <div className="disc-auth-error-cta">
             <button
@@ -638,8 +639,7 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
                 try {
                   sessionStorage.setItem(`kronn:postValidation:${projectId}`, 'docs/tech-debt');
                 } catch { /* private-mode / quota — fall through */ }
-                window.location.hash = `#project-${projectId}`;
-                onNavigate('projects');
+                nav.toProject(projectId!);
               }}
             >
               <ShieldCheck size={11} /> {t('audit.viewTechDebtsAfterValidation')}

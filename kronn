@@ -468,8 +468,8 @@ _project_action_menu() {
 }
 
 # Open the web dashboard on the right project. Uses the API to resolve
-# the project ID from its name, then opens `/#project-<id>` so the
-# Dashboard auto-expands and scrolls to the matching card.
+# the project ID from its name, then opens the canonical `/projects/<id>`
+# route (the old `/#project-<id>` hash still works as a legacy redirect).
 _open_project_in_browser() {
     local repo_name="$1" action="$2"
     local base_url="http://localhost:3140"
@@ -493,7 +493,7 @@ for p in json.load(sys.stdin):
 " 2>/dev/null)
         fi
         if [[ -n "$project_id" ]]; then
-            url="${base_url}/#project-${project_id}"
+            url="${base_url}/projects/${project_id}"
         fi
     fi
 
