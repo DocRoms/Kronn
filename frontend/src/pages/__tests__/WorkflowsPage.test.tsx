@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, act, cleanup, fireEvent, waitFor, within } from '@testing-library/react';
+import { createMemoryRouter, RouterProvider } from 'react-router';
 import { I18nProvider } from '../../lib/I18nContext';
+import { TestRouter } from '../../test/routerWrapper';
 import {
   discussions as discussionsApi,
   quickApis as quickApisApi,
@@ -129,10 +131,10 @@ const fullConfig: AgentsConfig = {
 
 afterEach(cleanup);
 
-const wrap = async (ui: React.ReactElement) => {
+const wrap = async (ui: React.ReactElement, initialPath?: string) => {
   let result: ReturnType<typeof render>;
   await act(async () => {
-    result = render(<I18nProvider>{ui}</I18nProvider>);
+    result = render(<TestRouter initialPath={initialPath}><I18nProvider>{ui}</I18nProvider></TestRouter>);
   });
   await act(async () => { await new Promise(r => setTimeout(r, 0)); });
   return result!;
@@ -676,7 +678,6 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
     mockWorkflowsApi.get.mockResolvedValue(labWorkflow());
     mockWorkflowsApi.listRuns.mockResolvedValue([]);
     mockWorkflowsApi.countRuns.mockResolvedValue(0);
-    const onInitialSelectionConsumed = vi.fn();
     const page = await wrap(
       <WorkflowsPage
         projects={[]}
@@ -688,22 +689,19 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
     fireEvent.click(screen.getByRole('button', { name: /Quick Prompts/ }));
     expect(screen.getByRole('button', { name: /Quick Prompts/ })).toHaveAttribute('data-active', 'true');
 
-    await act(async () => {
-      page.rerender(
-        <I18nProvider>
-          <WorkflowsPage
-            projects={[]}
-            installedAgentTypes={['ClaudeCode']}
-            agentAccess={fullConfig}
-            initialSelectedWorkflowId="wf-lab"
-            onInitialSelectionConsumed={onInitialSelectionConsumed}
-          />
-        </I18nProvider>
-      );
-    });
+    // External selection now arrives through the URL param (deep link):
+    // remount with `initialWorkflowId`, as WorkflowsRoute does from useParams.
+    page.unmount();
+    await wrap(
+      <WorkflowsPage
+        projects={[]}
+        installedAgentTypes={['ClaudeCode']}
+        agentAccess={fullConfig}
+        initialWorkflowId="wf-lab"
+      />
+    );
 
     await waitFor(() => expect(mockWorkflowsApi.get).toHaveBeenCalledWith('wf-lab'));
-    await waitFor(() => expect(onInitialSelectionConsumed).toHaveBeenCalledTimes(1));
     expect(screen.getByRole('button', { name: /Workflows/ })).toHaveAttribute('data-active', 'true');
     expect(screen.getByText('Éditer')).toBeInTheDocument();
   });
@@ -1049,18 +1047,28 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
   });
 
   it('offers AI-assisted creation and JSON import from the Quick APIs tab', async () => {
-    const onNavigateDiscussion = vi.fn();
     vi.mocked(discussionsApi.create).mockResolvedValueOnce({ id: 'disc-qa-architect' } as never);
     vi.mocked(quickApisApi.importQa).mockResolvedValueOnce({ id: 'qa-imported' } as never);
 
-    const { container } = await wrap(
-      <WorkflowsPage
-        projects={[]}
-        installedAgentTypes={['ClaudeCode']}
-        agentAccess={fullConfig}
-        onNavigateDiscussion={onNavigateDiscussion}
-      />
+    const router = createMemoryRouter(
+      [{
+        path: '*',
+        element: (
+          <I18nProvider>
+            <WorkflowsPage
+              projects={[]}
+              installedAgentTypes={['ClaudeCode']}
+              agentAccess={fullConfig}
+            />
+          </I18nProvider>
+        ),
+      }],
+      { initialEntries: ['/workflows'] },
     );
+    let rendered: ReturnType<typeof render>;
+    await act(async () => { rendered = render(<RouterProvider router={router} />); });
+    await act(async () => { await new Promise(r => setTimeout(r, 0)); });
+    const { container } = rendered!;
     await act(async () => {
       fireEvent.click(screen.getByRole('button', { name: /Quick APIs \(0\)/ }));
     });
@@ -1081,7 +1089,7 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
         tier: 'reasoning',
       }),
     ));
-    expect(onNavigateDiscussion).toHaveBeenCalledWith('disc-qa-architect');
+    expect(router.state.location.pathname).toBe('/discussions/disc-qa-architect');
 
     fireEvent.click(screen.getByRole('button', { name: 'Importer' }));
     const modalTitle = screen.getByRole('heading', { name: 'Importer un Quick API' });
@@ -1193,5 +1201,65 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
     expect(jiraCard?.querySelector('.qp-card-endpoint')).toHaveTextContent('GET/tickets/a');
     expect(jiraCard?.querySelector('.qp-card-tools')).toBeInTheDocument();
     expect(jiraCard?.querySelector('.qp-card-primary-actions')).toHaveTextContent('Lancer');
+  });
+});
+
+// ─── Sub-route tab initialization ──────────────────────────────────────────
+
+describe('WorkflowsPage — initialTab prop (sub-route driven)', () => {
+  it('defaults to Workflows tab when initialTab is omitted', async () => {
+    await wrap(<WorkflowsPage projects={[]} />);
+    const activeTab = screen.getByRole('button', { name: /Workflows/ });
+    expect(activeTab.getAttribute('data-active')).toBe('true');
+  });
+
+  it('opens Quick Prompts tab when initialTab="quickPrompts"', async () => {
+    await wrap(<WorkflowsPage projects={[]} initialTab="quickPrompts" />, '/workflows/qp');
+    const qpTab = screen.getByRole('button', { name: /Quick Prompts/ });
+    expect(qpTab.getAttribute('data-active')).toBe('true');
+    const wfTab = screen.getByRole('button', { name: /^Workflows/ });
+    expect(wfTab.getAttribute('data-active')).toBe('false');
+  });
+
+  it('opens Quick APIs tab when initialTab="quickApis"', async () => {
+    await wrap(<WorkflowsPage projects={[]} initialTab="quickApis" />, '/workflows/qa');
+    const qaTab = screen.getByRole('button', { name: /Quick APIs/ });
+    expect(qaTab.getAttribute('data-active')).toBe('true');
+    const wfTab = screen.getByRole('button', { name: /^Workflows/ });
+    expect(wfTab.getAttribute('data-active')).toBe('false');
+  });
+});
+
+describe('WorkflowsPage — tab click syncs URL', () => {
+  const wrapWithRouter = async (initialPath: string) => {
+    const router = createMemoryRouter(
+      [{ path: '*', element: <I18nProvider><WorkflowsPage projects={[]} /></I18nProvider> }],
+      { initialEntries: [initialPath] },
+    );
+    let result: ReturnType<typeof render>;
+    await act(async () => { result = render(<RouterProvider router={router} />); });
+    await act(async () => { await new Promise(r => setTimeout(r, 0)); });
+    return { result: result!, router };
+  };
+
+  it('clicking Quick Prompts tab navigates to /workflows/qp', async () => {
+    const { router } = await wrapWithRouter('/workflows');
+    const qpTab = screen.getByRole('button', { name: /Quick Prompts/ });
+    await act(async () => { fireEvent.click(qpTab); });
+    expect(router.state.location.pathname).toBe('/workflows/qp');
+  });
+
+  it('clicking Quick APIs tab navigates to /workflows/qa', async () => {
+    const { router } = await wrapWithRouter('/workflows');
+    const qaTab = screen.getByRole('button', { name: /Quick APIs/ });
+    await act(async () => { fireEvent.click(qaTab); });
+    expect(router.state.location.pathname).toBe('/workflows/qa');
+  });
+
+  it('clicking Workflows tab from QP navigates back to /workflows', async () => {
+    const { router } = await wrapWithRouter('/workflows/qp');
+    const wfTab = screen.getByRole('button', { name: /^Workflows/ });
+    await act(async () => { fireEvent.click(wfTab); });
+    expect(router.state.location.pathname).toBe('/workflows');
   });
 });

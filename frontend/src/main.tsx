@@ -1,7 +1,8 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
+import { RouterProvider } from 'react-router';
 import './styles/index.css';
-import { App } from './App';
+import { router } from './router';
 import { I18nProvider } from './lib/I18nContext';
 import { ThemeProvider } from './lib/ThemeContext';
 import { LayoutDensityProvider } from './lib/LayoutDensityContext';
@@ -31,7 +32,7 @@ initApiBase().then(() => {
         <LayoutDensityProvider>
           <I18nProvider>
             <ThemeEffects />
-            <App />
+            <RouterProvider router={router} />
           </I18nProvider>
         </LayoutDensityProvider>
       </ThemeProvider>

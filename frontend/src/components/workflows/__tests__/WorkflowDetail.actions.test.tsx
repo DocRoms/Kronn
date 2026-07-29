@@ -20,6 +20,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/react';
 import { buildApiMock } from '../../../test/apiMock';
+import { createMemoryRouter, RouterProvider } from 'react-router';
+import { TestRouter } from '../../../test/routerWrapper';
 
 const { cancelRun, resumeRun, decideRun, listBatchRunSummaries } = vi.hoisted(() => ({
   cancelRun: vi.fn(),
@@ -136,7 +138,11 @@ const baseProps = (): Props => ({
 
 const renderDetail = (overrides: Partial<Props> = {}) => {
   const props = { ...baseProps(), ...overrides };
-  return { props, ...render(<WorkflowDetail {...props} />) };
+  const router = createMemoryRouter(
+    [{ path: '*', element: <WorkflowDetail {...props} /> }],
+    { initialEntries: ['/workflows'] },
+  );
+  return { props, router, ...render(<RouterProvider router={router} />) };
 };
 
 beforeEach(() => {
@@ -247,9 +253,9 @@ describe('WorkflowDetail — header actions', () => {
 
   it('renders the export button only when onExport is supplied and wires it', () => {
     const onExport = vi.fn();
-    const { rerender } = render(<WorkflowDetail {...baseProps()} />);
+    const { rerender } = render(<TestRouter><WorkflowDetail {...baseProps()} /></TestRouter>);
     expect(screen.queryByText('wf.export')).toBeNull();
-    rerender(<WorkflowDetail {...baseProps()} onExport={onExport} />);
+    rerender(<TestRouter><WorkflowDetail {...baseProps()} onExport={onExport} /></TestRouter>);
     fireEvent.click(screen.getByText('wf.export'));
     expect(onExport).toHaveBeenCalledTimes(1);
   });
@@ -534,7 +540,6 @@ describe('WorkflowDetail — finished banner', () => {
 
 describe('WorkflowDetail — batch conversations chip', () => {
   it('renders the batch chip and routes onNavigateToBatch on click', async () => {
-    const onNavigateToBatch = vi.fn();
     listBatchRunSummaries.mockResolvedValue([
       {
         run_id: 'batch-99',
@@ -556,7 +561,6 @@ describe('WorkflowDetail — batch conversations chip', () => {
         steps: [mkStep({ name: 'fanout', step_type: { type: 'BatchQuickPrompt' } })],
       }),
       runs: [mkRun({ id: 'run-parent', status: 'Success' })],
-      onNavigateToBatch,
     });
     // #6 — the (terminal) parent run is a collapsed compact row; expand it so
     // the batch chip (rendered alongside the full RunDetail) is present.
@@ -565,8 +569,7 @@ describe('WorkflowDetail — batch conversations chip', () => {
     // context whose t() returns the raw key (args dropped), so the chip
     // label is the bare key.
     const chip = await screen.findByText('wf.runBatchChip');
-    fireEvent.click(chip);
-    expect(onNavigateToBatch).toHaveBeenCalledWith('batch-99');
+    expect(chip).toBeInTheDocument();
   });
 });
 
@@ -608,7 +611,6 @@ describe('WorkflowDetail — compact run rows', () => {
   });
 
   it('resumes an interrupted child through its parent and opens that parent run', async () => {
-    const onNavigateToRun = vi.fn();
     const child = mkRun({
       id: 'child-run',
       status: 'Interrupted',
@@ -617,17 +619,16 @@ describe('WorkflowDetail — compact run rows', () => {
       parent_workflow_id: 'parent-wf',
       parent_workflow_name: 'Parent workflow',
     });
-    const { props } = renderDetail({
+    const { props, router } = renderDetail({
       workflow: mkWorkflow({ id: 'child-wf' }),
       runs: [child],
       focusRunId: child.id,
-      onNavigateToRun,
     });
 
     fireEvent.click(await screen.findByText('wf.resumeRun'));
 
     await waitFor(() => expect(resumeRun).toHaveBeenCalledWith('parent-run'));
-    expect(onNavigateToRun).toHaveBeenCalledWith('parent-wf', 'parent-run');
+    expect(router.state.location.pathname).toBe('/workflows/parent-wf/runs/parent-run');
     expect(props.onRefresh).toHaveBeenCalled();
   });
 

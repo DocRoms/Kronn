@@ -15,6 +15,7 @@ vi.mock('../../lib/api', async () => {
 });
 import { render, fireEvent, act } from '@testing-library/react';
 import { DiscussionSidebar } from '../DiscussionSidebar';
+import { TestRouter } from '../../test/routerWrapper';
 import type { Contact } from '../../types/generated';
 
 const noop = () => {};
@@ -60,7 +61,7 @@ describe('DiscussionSidebar — click contact to start chat', () => {
 
   it('clicking the contact row fires onStartChat with that contact', () => {
     const onStartChat = vi.fn();
-    render(<DiscussionSidebar {...baseProps} onStartChat={onStartChat} />);
+    render(<TestRouter><DiscussionSidebar {...baseProps} onStartChat={onStartChat} /></TestRouter>);
     const row = document.querySelector('.disc-contact-row') as HTMLElement;
     expect(row).not.toBeNull();
     act(() => { fireEvent.click(row); });
@@ -71,7 +72,7 @@ describe('DiscussionSidebar — click contact to start chat', () => {
   it('clicking the delete (X) button does NOT start a chat', () => {
     const onStartChat = vi.fn();
     const onContactDelete = vi.fn().mockResolvedValue(undefined);
-    render(<DiscussionSidebar {...baseProps} onStartChat={onStartChat} onContactDelete={onContactDelete} />);
+    render(<TestRouter><DiscussionSidebar {...baseProps} onStartChat={onStartChat} onContactDelete={onContactDelete} /></TestRouter>);
     const del = document.querySelector('.disc-contact-del-btn') as HTMLElement;
     expect(del).not.toBeNull();
     act(() => { fireEvent.click(del); });
@@ -80,7 +81,7 @@ describe('DiscussionSidebar — click contact to start chat', () => {
   });
 
   it('rows are not clickable when onStartChat is not provided', () => {
-    render(<DiscussionSidebar {...baseProps} />);
+    render(<TestRouter><DiscussionSidebar {...baseProps} /></TestRouter>);
     const row = document.querySelector('.disc-contact-row') as HTMLElement;
     expect(row.getAttribute('role')).toBeNull();
   });

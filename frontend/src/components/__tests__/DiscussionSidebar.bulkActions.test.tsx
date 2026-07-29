@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { buildApiMock } from '../../test/apiMock';
+import { TestRouter } from '../../test/routerWrapper';
 
 vi.mock('../../lib/api', () => buildApiMock());
 
@@ -72,7 +73,7 @@ describe('DiscussionSidebar — bulk selection', () => {
     const props = makeProps();
     const confirmStub = vi.fn(() => true);
     vi.stubGlobal('confirm', confirmStub);
-    render(<DiscussionSidebar {...props} />);
+    render(<TestRouter><DiscussionSidebar {...props} /></TestRouter>);
 
     fireEvent.click(screen.getByRole('button', { name: 'disc.bulk.start' }));
     fireEvent.click(screen.getByRole('checkbox', { name: /Discussion disc-a/ }));
@@ -95,7 +96,7 @@ describe('DiscussionSidebar — bulk selection', () => {
     const props = makeProps();
     const confirmStub = vi.fn(() => false);
     vi.stubGlobal('confirm', confirmStub);
-    render(<DiscussionSidebar {...props} />);
+    render(<TestRouter><DiscussionSidebar {...props} /></TestRouter>);
 
     fireEvent.click(screen.getByRole('button', { name: 'disc.bulk.start' }));
     fireEvent.click(screen.getByRole('checkbox', { name: /Discussion disc-a/ }));

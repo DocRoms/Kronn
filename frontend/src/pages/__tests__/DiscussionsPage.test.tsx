@@ -136,6 +136,7 @@ vi.mock('../../hooks/useWebSocket', () => ({
   useWebSocket: vi.fn(() => ({ connected: false })),
 }));
 
+import { TestRouter } from '../../test/routerWrapper';
 import {
   discussions as discussionsApi,
   planning as planningApi,
@@ -163,7 +164,7 @@ afterEach(cleanup);
 const wrap = async (ui: React.ReactElement) => {
   let result: ReturnType<typeof render>;
   await act(async () => {
-    result = render(<I18nProvider>{ui}</I18nProvider>);
+    result = render(<TestRouter><I18nProvider>{ui}</I18nProvider></TestRouter>);
   });
   return result!;
 };
@@ -215,7 +216,6 @@ describe('DiscussionsPage', () => {
         agentAccess={null}
         refetchDiscussions={noop}
         refetchProjects={noop}
-        onNavigate={noop}
         toast={toastFn}
         {...liftedProps()}
       />
@@ -236,7 +236,6 @@ describe('DiscussionsPage', () => {
         agentAccess={null}
         refetchDiscussions={noop}
         refetchProjects={noop}
-        onNavigate={noop}
         toast={toastFn}
         prefill={{ projectId: 'p1', title: 'Test', prompt: 'Hello' }}
         onPrefillConsumed={noop}
@@ -263,7 +262,6 @@ describe('DiscussionsPage', () => {
         agentAccess={null}
         refetchDiscussions={noop}
         refetchProjects={noop}
-        onNavigate={noop}
         toast={toastFn}
         {...liftedProps()}
       />
@@ -297,7 +295,6 @@ describe('DiscussionsPage', () => {
         agentAccess={null}
         refetchDiscussions={noop}
         refetchProjects={noop}
-        onNavigate={noop}
         toast={toastFn}
         initialActiveDiscussionId="d1"
         {...lifted}
@@ -331,7 +328,6 @@ describe('DiscussionsPage', () => {
         agentAccess={null}
         refetchDiscussions={noop}
         refetchProjects={noop}
-        onNavigate={noop}
         toast={toastFn}
         initialActiveDiscussionId="d1"
         {...lifted}
@@ -354,7 +350,6 @@ describe('DiscussionsPage', () => {
         agentAccess={null}
         refetchDiscussions={noop}
         refetchProjects={noop}
-        onNavigate={noop}
         toast={toastFn}
         initialActiveDiscussionId="d1"
         {...lifted}
@@ -397,7 +392,6 @@ describe('DiscussionsPage', () => {
         agentAccess={null}
         refetchDiscussions={refetch}
         refetchProjects={noop}
-        onNavigate={noop}
         toast={toastFn}
         initialActiveDiscussionId="d1"
         {...lifted}
@@ -449,7 +443,6 @@ describe('DiscussionsPage', () => {
         agentAccess={null}
         refetchDiscussions={noop}
         refetchProjects={noop}
-        onNavigate={noop}
         toast={toastFn}
         {...lifted}
       />
@@ -496,7 +489,6 @@ describe('DiscussionsPage', () => {
         agentAccess={null}
         refetchDiscussions={noop}
         refetchProjects={noop}
-        onNavigate={noop}
         toast={toastFn}
         {...lifted}
       />
@@ -536,7 +528,6 @@ describe('DiscussionsPage', () => {
         agentAccess={null}
         refetchDiscussions={refetch}
         refetchProjects={noop}
-        onNavigate={noop}
         toast={toastFn}
         {...lifted}
       />
@@ -579,7 +570,6 @@ describe('DiscussionsPage', () => {
         agentAccess={null}
         refetchDiscussions={noop}
         refetchProjects={noop}
-        onNavigate={noop}
         toast={toastFn}
         {...lifted}
       />
@@ -622,7 +612,6 @@ describe('DiscussionsPage', () => {
         agentAccess={null}
         refetchDiscussions={noop}
         refetchProjects={noop}
-        onNavigate={noop}
         toast={toastFn}
         initialActiveDiscussionId="d1"
         {...lifted}
@@ -635,21 +624,22 @@ describe('DiscussionsPage', () => {
     const updatedLifted = { ...lifted, sendingMap: { d1: false } };
     await act(async () => {
       rerender(
-        <I18nProvider>
-          <DiscussionsPage
-            projects={[]}
-            agents={[]}
-            allDiscussions={[makeListDiscussion('d1', 2)]}
-            configLanguage="fr"
-            agentAccess={null}
-            refetchDiscussions={noop}
-            refetchProjects={noop}
-            onNavigate={noop}
-            toast={toastFn}
-            initialActiveDiscussionId="d1"
-            {...updatedLifted}
-          />
-        </I18nProvider>
+        <TestRouter>
+          <I18nProvider>
+            <DiscussionsPage
+              projects={[]}
+              agents={[]}
+              allDiscussions={[makeListDiscussion('d1', 2)]}
+              configLanguage="fr"
+              agentAccess={null}
+              refetchDiscussions={noop}
+              refetchProjects={noop}
+              toast={toastFn}
+              initialActiveDiscussionId="d1"
+              {...updatedLifted}
+            />
+          </I18nProvider>
+        </TestRouter>
       );
     });
 
@@ -686,7 +676,6 @@ describe('DiscussionsPage', () => {
         agentAccess={null}
         refetchDiscussions={noop}
         refetchProjects={noop}
-        onNavigate={noop}
         toast={toastFn}
         initialActiveDiscussionId="d1"
         {...lifted}
@@ -697,22 +686,23 @@ describe('DiscussionsPage', () => {
 
     await act(async () => {
       rerender(
-        <I18nProvider>
-          <DiscussionsPage
-            projects={[]}
-            agents={[]}
-            allDiscussions={[first]}
-            configLanguage="fr"
-            agentAccess={null}
-            refetchDiscussions={noop}
-            refetchProjects={noop}
-            onNavigate={noop}
-            toast={toastFn}
-            initialActiveDiscussionId="d1"
-            {...lifted}
-            sendingMap={{ d1: false }}
-          />
-        </I18nProvider>,
+        <TestRouter>
+          <I18nProvider>
+            <DiscussionsPage
+              projects={[]}
+              agents={[]}
+              allDiscussions={[first]}
+              configLanguage="fr"
+              agentAccess={null}
+              refetchDiscussions={noop}
+              refetchProjects={noop}
+              toast={toastFn}
+              initialActiveDiscussionId="d1"
+              {...lifted}
+              sendingMap={{ d1: false }}
+            />
+          </I18nProvider>
+        </TestRouter>,
       );
     });
 
@@ -746,7 +736,6 @@ describe('DiscussionsPage', () => {
         agentAccess={null}
         refetchDiscussions={refetchSpy}
         refetchProjects={noop}
-        onNavigate={noop}
         toast={toastFn}
         initialActiveDiscussionId="d1"
         {...lifted}
@@ -778,7 +767,6 @@ describe('DiscussionsPage', () => {
         agentAccess={null}
         refetchDiscussions={noop}
         refetchProjects={noop}
-        onNavigate={noop}
         toast={toastFn}
         prefill={{ projectId: 'p1', title: 'Validation audit AI', prompt: 'Validate this', locked: true }}
         onPrefillConsumed={noop}
@@ -818,7 +806,6 @@ describe('DiscussionsPage', () => {
         agentAccess={null}
         refetchDiscussions={noop}
         refetchProjects={noop}
-        onNavigate={noop}
         toast={toastFn}
         {...liftedProps()}
       />
@@ -858,7 +845,6 @@ describe('DiscussionsPage', () => {
         agentAccess={null}
         refetchDiscussions={noop}
         refetchProjects={noop}
-        onNavigate={noop}
         toast={toastFn}
         {...liftedProps()}
       />
@@ -890,7 +876,6 @@ describe('DiscussionsPage', () => {
         agentAccess={null}
         refetchDiscussions={noop}
         refetchProjects={noop}
-        onNavigate={noop}
         toast={toastFn}
         {...liftedProps()}
       />
@@ -924,7 +909,6 @@ describe('DiscussionsPage', () => {
         agentAccess={null}
         refetchDiscussions={noop}
         refetchProjects={noop}
-        onNavigate={noop}
         toast={toastFn}
         initialActiveDiscussionId="vibe1"
         {...liftedProps()}
@@ -957,7 +941,6 @@ describe('DiscussionsPage', () => {
         agentAccess={null}
         refetchDiscussions={noop}
         refetchProjects={noop}
-        onNavigate={noop}
         toast={toastFn}
         {...liftedProps()}
       />
@@ -988,7 +971,6 @@ describe('DiscussionsPage', () => {
         agentAccess={null}
         refetchDiscussions={noop}
         refetchProjects={noop}
-        onNavigate={noop}
         toast={toastFn}
         {...liftedProps()}
       />
@@ -1020,7 +1002,6 @@ describe('DiscussionsPage', () => {
         agentAccess={null}
         refetchDiscussions={noop}
         refetchProjects={noop}
-        onNavigate={noop}
         toast={toastFn}
         initialActiveDiscussionId="d1"
         {...liftedProps()}
@@ -1052,7 +1033,6 @@ describe('DiscussionsPage', () => {
         agentAccess={null}
         refetchDiscussions={noop}
         refetchProjects={noop}
-        onNavigate={noop}
         toast={toastFn}
         initialActiveDiscussionId="d1"
         {...liftedProps()}
@@ -1093,7 +1073,6 @@ describe('DiscussionsPage', () => {
         agentAccess={null}
         refetchDiscussions={noop}
         refetchProjects={noop}
-        onNavigate={noop}
         toast={toastFn}
         initialActiveDiscussionId="d1"
         {...liftedProps()}
@@ -1127,7 +1106,6 @@ describe('DiscussionsPage', () => {
         agentAccess={null}
         refetchDiscussions={noop}
         refetchProjects={noop}
-        onNavigate={noop}
         toast={toastFn}
         initialActiveDiscussionId="d1"
         {...liftedProps()}
@@ -1232,7 +1210,6 @@ describe('DiscussionsPage', () => {
         agentAccess={null}
         refetchDiscussions={noop}
         refetchProjects={noop}
-        onNavigate={noop}
         toast={toastFn}
         initialActiveDiscussionId="d1"
         {...lifted}
@@ -1303,7 +1280,6 @@ describe('DiscussionsPage', () => {
         agentAccess={null}
         refetchDiscussions={noop}
         refetchProjects={noop}
-        onNavigate={noop}
         toast={toastFn}
         initialActiveDiscussionId="d1"
         {...liftedProps()}
@@ -1348,7 +1324,6 @@ describe('DiscussionsPage', () => {
         agentAccess={null}
         refetchDiscussions={noop}
         refetchProjects={noop}
-        onNavigate={noop}
         toast={toastFn}
         initialActiveDiscussionId="d1"
         {...liftedProps()}
@@ -1400,7 +1375,6 @@ describe('DiscussionsPage', () => {
         agentAccess={null}
         refetchDiscussions={noop}
         refetchProjects={noop}
-        onNavigate={noop}
         toast={toastFn}
         initialActiveDiscussionId="d1"
         {...liftedProps()}
@@ -1459,7 +1433,6 @@ describe('DiscussionsPage', () => {
         agentAccess={null}
         refetchDiscussions={noop}
         refetchProjects={noop}
-        onNavigate={noop}
         toast={toastFn}
         {...lifted}
       />
@@ -1543,7 +1516,6 @@ describe('DiscussionsPage', () => {
         agentAccess={null}
         refetchDiscussions={noop}
         refetchProjects={noop}
-        onNavigate={noop}
         toast={localToast}
         {...lifted}
       />
@@ -1625,7 +1597,6 @@ describe('DiscussionsPage', () => {
         agentAccess={null}
         refetchDiscussions={noop}
         refetchProjects={noop}
-        onNavigate={noop}
         toast={toastFn}
         initialActiveDiscussionId="d-copy"
         {...liftedProps()}
@@ -1656,7 +1627,6 @@ describe('DiscussionsPage', () => {
         agentAccess={null}
         refetchDiscussions={noop}
         refetchProjects={noop}
-        onNavigate={noop}
         toast={toastFn}
         initialActiveDiscussionId="d-time"
         {...liftedProps()}
@@ -1687,7 +1657,6 @@ describe('DiscussionsPage', () => {
         agentAccess={null}
         refetchDiscussions={noop}
         refetchProjects={noop}
-        onNavigate={noop}
         toast={toastFn}
         initialActiveDiscussionId="d-overflow"
         {...liftedProps()}
@@ -1721,7 +1690,6 @@ describe('DiscussionsPage', () => {
         agentAccess={null}
         refetchDiscussions={noop}
         refetchProjects={noop}
-        onNavigate={noop}
         toast={toastFn}
         initialActiveDiscussionId="d-switch"
         {...liftedProps()}
@@ -1749,7 +1717,6 @@ describe('DiscussionsPage', () => {
         agentAccess={null}
         refetchDiscussions={noop}
         refetchProjects={noop}
-        onNavigate={noop}
         toast={toastFn}
         {...liftedProps()}
       />
@@ -1798,7 +1765,6 @@ describe('DiscussionsPage', () => {
         agentAccess={null}
         refetchDiscussions={noop}
         refetchProjects={noop}
-        onNavigate={noop}
         toast={toastFn}
         initialActiveDiscussionId="d-dropdown"
         {...liftedProps()}
@@ -1846,7 +1812,6 @@ describe('DiscussionsPage', () => {
         agentAccess={null}
         refetchDiscussions={noop}
         refetchProjects={noop}
-        onNavigate={noop}
         toast={toastFn}
         {...liftedProps()}
       />
@@ -1875,7 +1840,6 @@ describe('DiscussionsPage', () => {
         agentAccess={null}
         refetchDiscussions={noop}
         refetchProjects={noop}
-        onNavigate={noop}
         toast={toastFn}
         {...liftedProps()}
       />
@@ -1918,7 +1882,6 @@ describe('DiscussionsPage', () => {
         agentAccess={null}
         refetchDiscussions={noop}
         refetchProjects={noop}
-        onNavigate={noop}
         toast={toastFn}
         {...liftedProps()}
       />
@@ -1957,7 +1920,6 @@ describe('DiscussionsPage', () => {
         agentAccess={null}
         refetchDiscussions={noop}
         refetchProjects={noop}
-        onNavigate={noop}
         toast={toastFn}
         {...liftedProps()}
         setSendingMap={setSendingMap}
@@ -1984,7 +1946,6 @@ describe('DiscussionsPage', () => {
         agentAccess={null}
         refetchDiscussions={noop}
         refetchProjects={noop}
-        onNavigate={noop}
         toast={toastFn}
         {...liftedProps()}
       />
@@ -2007,7 +1968,6 @@ describe('DiscussionsPage', () => {
         agentAccess={null}
         refetchDiscussions={noop}
         refetchProjects={noop}
-        onNavigate={noop}
         toast={toastFn}
         {...liftedProps()}
       />
@@ -2040,7 +2000,6 @@ describe('DiscussionsPage', () => {
         agentAccess={null}
         refetchDiscussions={noop}
         refetchProjects={noop}
-        onNavigate={noop}
         toast={toastFn}
         {...liftedProps()}
       />
@@ -2098,7 +2057,7 @@ describe('DiscussionsPage', () => {
     awaiting_agent: false,
   });
 
-  const renderWithDisc = async (proj: Project, disc: Discussion, onNavigateSpy = vi.fn()) => {
+  const renderWithDisc = async (proj: Project, disc: Discussion) => {
     vi.mocked(discussionsApi.get).mockResolvedValue(disc);
     await wrap(
       <DiscussionsPage
@@ -2109,14 +2068,12 @@ describe('DiscussionsPage', () => {
         agentAccess={null}
         refetchDiscussions={noop}
         refetchProjects={noop}
-        onNavigate={onNavigateSpy}
         toast={toastFn}
         initialActiveDiscussionId={disc.id}
         {...liftedProps()}
       />
     );
     await act(async () => { await new Promise(r => setTimeout(r, 30)); });
-    return onNavigateSpy;
   };
 
   it('unaudited banner: shows on NoTemplate with briefing CTA when briefing_notes empty', async () => {
@@ -2195,17 +2152,16 @@ describe('DiscussionsPage', () => {
     expect(body).not.toMatch(/n['']a pas encore d['']audit IA validé/i);
   });
 
-  it('unaudited banner: CTA fires onNavigate with the project_id', async () => {
+  it('unaudited banner: CTA navigates to projects page for the project', async () => {
     const proj = makeProject('p8', 'NoTemplate');
     const disc = makeProjectDisc('d-cta', 'p8');
-    const onNav = vi.fn();
-    await renderWithDisc(proj, disc, onNav);
+    await renderWithDisc(proj, disc);
     // Click the primary CTA (briefing variant since no briefing_notes).
     const btn = Array.from(document.body.querySelectorAll('button'))
       .find(b => b.textContent?.includes('Faire le briefing'));
     expect(btn).toBeTruthy();
+    // Clicking should not throw — the router context handles navigation internally.
     fireEvent.click(btn!);
-    expect(onNav).toHaveBeenCalledWith('projects', { projectId: 'p8' });
   });
 
   // ─── Audit-running MCP filter banner (0.8.3 #280) ────────────────────

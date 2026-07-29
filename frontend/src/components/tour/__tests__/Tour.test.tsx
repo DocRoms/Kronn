@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, act } from '@testing-library/react';
+import { TestRouter } from '../../../test/routerWrapper';
 import { TourProvider, useTour } from '../TourProvider';
 import { TourOverlay } from '../TourOverlay';
 import { TOUR_STEPS } from '../tourSteps';
@@ -13,7 +14,6 @@ vi.mock('../../../hooks/useMediaQuery', () => ({
 }));
 
 const STORAGE_KEY = 'kronn:tour-completed';
-const setPage = vi.fn();
 
 function TestConsumer() {
   const tour = useTour();
@@ -32,16 +32,17 @@ function TestConsumer() {
 
 function renderTour() {
   return render(
-    <TourProvider setPage={setPage}>
-      <TestConsumer />
-      <TourOverlay />
-    </TourProvider>
+    <TestRouter>
+      <TourProvider>
+        <TestConsumer />
+        <TourOverlay />
+      </TourProvider>
+    </TestRouter>
   );
 }
 
 beforeEach(() => {
   localStorage.clear();
-  setPage.mockClear();
 });
 
 describe('Guided Tour', () => {
@@ -115,10 +116,11 @@ describe('Guided Tour', () => {
     expect(screen.getByText(`1 / ${TOUR_STEPS.length}`)).toBeInTheDocument();
   });
 
-  it('start calls setPage with the first step page', () => {
+  it('start activates the tour at step 0', () => {
     renderTour();
     fireEvent.click(screen.getByTestId('start'));
-    expect(setPage).toHaveBeenCalledWith(TOUR_STEPS[0].page);
+    expect(screen.getByTestId('active').textContent).toBe('true');
+    expect(screen.getByTestId('step').textContent).toBe('0');
   });
 
   it('tour steps include pages beyond projects', () => {
@@ -173,10 +175,12 @@ describe('Guided Tour', () => {
       return null;
     };
     render(
-      <TourProvider setPage={setPage}>
-        <TestConsumer />
-        <GrabStart />
-      </TourProvider>
+      <TestRouter>
+        <TourProvider>
+          <TestConsumer />
+          <GrabStart />
+        </TourProvider>
+      </TestRouter>
     );
     act(() => { tourRef.start?.(false); });
     // Wait for navigateToStep to settle (50ms kickoff + 300ms page wait

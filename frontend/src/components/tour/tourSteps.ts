@@ -6,7 +6,8 @@
 // - Ends on Discussions page (action-oriented, not passive Settings)
 // - Max ~2.5 minutes
 
-export type Page = 'projects' | 'discussions' | 'mcps' | 'workflows' | 'settings';
+import type { Page } from '../../lib/routeConstants';
+export type { Page };
 
 export interface TourStep {
   id: string;

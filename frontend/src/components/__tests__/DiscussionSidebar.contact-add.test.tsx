@@ -18,6 +18,7 @@ vi.mock('../../lib/api', async () => {
 });
 import { render, fireEvent, act } from '@testing-library/react';
 import { DiscussionSidebar } from '../DiscussionSidebar';
+import { TestRouter } from '../../test/routerWrapper';
 
 const noop = () => {};
 
@@ -53,7 +54,7 @@ describe('DiscussionSidebar — contact add ref guard', () => {
   it('two synchronous Enter presses fire onContactAdd exactly once', async () => {
     let resolveAdd: (() => void) | undefined;
     const onContactAdd = vi.fn(() => new Promise<void>(r => { resolveAdd = r; }));
-    render(<DiscussionSidebar {...baseProps} onContactAdd={onContactAdd} />);
+    render(<TestRouter><DiscussionSidebar {...baseProps} onContactAdd={onContactAdd} /></TestRouter>);
 
     // Open the add-contact form by clicking the "+" toggle. The toggle
     // sets `showAddContact=true` which mounts the input + submit button.
@@ -109,7 +110,7 @@ describe('DiscussionSidebar — contact add ref guard', () => {
   it('two synchronous submit clicks fire onContactAdd exactly once', async () => {
     let resolveAdd: (() => void) | undefined;
     const onContactAdd = vi.fn(() => new Promise<void>(r => { resolveAdd = r; }));
-    render(<DiscussionSidebar {...baseProps} onContactAdd={onContactAdd} />);
+    render(<TestRouter><DiscussionSidebar {...baseProps} onContactAdd={onContactAdd} /></TestRouter>);
 
     const plusToggle = document.querySelector('.disc-contacts-add-toggle, button[title*="add" i]');
     expect(plusToggle).not.toBeNull();

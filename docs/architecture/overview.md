@@ -124,9 +124,10 @@ Three Docker services behind nginx gateway:
 - `Database` struct wraps `Mutex<Connection>` with `with_conn()` async accessor.
 - Data persisted in `kronn.db` with WAL mode and foreign keys enabled.
 - Migrations run via `backend/src/db/migrations.rs` (versioned SQL files, executed before Mutex wrap to avoid blocking_lock panic).
-- Frontend: `useApi` hook for data fetching. Dashboard.tsx (~750 lines) is the main shell with accordion sections per project, bootstrap modal, and smart section defaults based on audit status; sub-pages (SettingsPage.tsx, DiscussionsPage.tsx, McpPage.tsx, WorkflowsPage.tsx) receive data as props. UI state managed locally with `useState`.
-- `useMemo` for computed values (agent mentions filtering, unread counts). Conditional polling (only active tab).
-- `ErrorBoundary` class component wraps lazy-loaded routes. `React.lazy` + `Suspense` for code splitting (SetupWizard, Dashboard).
+- Frontend: `useApi` hook for data fetching. Client-side routing via React Router v8 Data mode: `router.tsx` is the route table (`/projects/:id?`, `/discussions/:id?`, `/planning/:taskId?`, `/plugins/:configId?`, `/workflows` + qp/qa/run children, `/config`), Dashboard.tsx (~1220 lines) is the layout shell (nav + lifted streaming state) rendering child routes through `<Outlet context={…}>`. Pages (SettingsPage, DiscussionsPage, McpPage, WorkflowsPage, PlanningPage) still receive data as props — the wrappers in `frontend/src/routes/` bridge outlet context + URL params to those props. Navigation goes through the typed `useKronnNavigate()` hook; one-shot intents (auto-run, batch focus, presets) travel as location state.
+- `useMemo` for computed values (agent mentions filtering, unread counts). Conditional polling keyed on the page derived from the URL (`pathToPage(location.pathname)`).
+- `ErrorBoundary` class component wraps lazy-loaded routes. `React.lazy` + `Suspense` per route via `routes/lazyRoutes.tsx` (plus SetupWizard); each route chunk loads on first visit.
+- Deep URLs require a history-API fallback wherever the SPA is served: `frontend/nginx.conf` (`try_files … /index.html`) provides it in Docker, Vite's default SPA fallback in dev. A gateway change that drops this breaks refresh on `/projects/:id`.
 - `AbortController` cleanup on component unmount for SSE streams.
 - Shared constants extracted to `lib/constants.ts` (AGENT_COLORS, AGENT_LABELS, ALL_AGENT_TYPES).
 - Unread badges persisted in localStorage.

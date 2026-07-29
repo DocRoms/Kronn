@@ -1,4 +1,5 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
+import { useNavigate } from 'react-router';
 import { mcps as mcpsApi } from '../lib/api';
 import { useT } from '../lib/I18nContext';
 import { useToast } from '../hooks/useToast';
@@ -143,6 +144,7 @@ interface McpPageProps {
 export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initialSelectedConfigId, installedAgentTypes, configLanguage }: McpPageProps) {
   const { t } = useT();
   const { toast } = useToast();
+  const rawNavigate = useNavigate();
   const [editingLabelId, setEditingLabelId] = useState<string | null>(null);
   const [editingLabelText, setEditingLabelText] = useState('');
   const [showAddMcp, setShowAddMcp] = useState(false);
@@ -256,6 +258,10 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
     } catch { /* localStorage disabled (incognito / quota) — sort defaults to A→Z on next load */ }
   }, [mcpSortReversed]);
   const [selectedConfigId, setSelectedConfigId] = useState<string | null>(initialSelectedConfigId ?? null);
+  const selectConfig = useCallback((id: string | null) => {
+    setSelectedConfigId(id);
+    rawNavigate(id ? `/plugins/${id}` : '/plugins', { replace: true });
+  }, [rawNavigate]);
 
   // Open a specific config when navigated from another page (e.g. ProjectCard)
   useEffect(() => {
@@ -274,14 +280,16 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return;
       if (editingCustomServerId) { resetAddMcp(); return; }
-      setSelectedConfigId(null);
+      selectConfig(null);
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
     // (0.8.11 — the old `eslint-disable react-hooks/exhaustive-deps` here was
-    // dead: with the React-19 ruleset the rule no longer reports on this hook,
-    // so the directive itself warned as unused. Removed rather than restored.)
-  }, [selectedConfigId, editingCustomServerId]);
+    // dead and warned as unused, so it was removed rather than restored. The
+    // rule now asks for `selectConfig`: a useCallback over react-router's
+    // Data-mode navigate, whose reference is stable, so listing it does not
+    // re-register the listener on every render.)
+  }, [selectedConfigId, editingCustomServerId, selectConfig]);
   // "Show more" for project toggles per config
   const [expandedProjectLists, setExpandedProjectLists] = useState<Set<string>>(new Set());
   const PROJECT_TOGGLE_LIMIT = 10;
@@ -1585,7 +1593,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                 <button
                   type="button"
                   className="mcp-warning-banner-item"
-                  onClick={() => setSelectedConfigId(ic.config_id)}
+                  onClick={() => selectConfig(ic.config_id)}
                 >
                   <strong>{ic.label}</strong>
                   <span className="mcp-warning-banner-server"> · {ic.server_name}</span>
@@ -2088,7 +2096,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
       )}
 
       {/* ── Empty-state banner: no MCP exposed in CLI hors Kronn (UX#7) ── */}
-      <CliExposureHint configs={configs} onJumpToConfig={(id) => setSelectedConfigId(id)} />
+      <CliExposureHint configs={configs} onJumpToConfig={(id) => selectConfig(id)} />
 
       {/* ── Built-in system MCP: kronn-internal (discussion introspection) is
              auto-injected into every project, not user-installable. Shown as a
@@ -2139,7 +2147,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                   className={`mcp-installed-card${isSelected ? ' mcp-installed-card-selected' : ''}`}
                   data-kind={cfgKind}
                   data-config-id={cfg.id}
-                  onClick={() => setSelectedConfigId(isSelected ? null : cfg.id)}
+                  onClick={() => selectConfig(isSelected ? null : cfg.id)}
                   aria-label={`${cfg.label} — ${t('mcp.openDetails')}`}
                 >
                   <div className="mcp-plugin-card-header">
@@ -2190,7 +2198,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
               // edit so stale form state can't leak into the next open.
               const closePluginModal = () => {
                 if (editingCustomServerId) resetAddMcp();
-                setSelectedConfigId(null);
+                selectConfig(null);
               };
               const serverIncomp = mcpOverview.incompatibilities.filter(i => i.server_id === cfg.server_id);
 
@@ -2291,7 +2299,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                               <Upload size={12} /> {t('mcp.custom.copyAsJson')}
                             </button>
                           )}
-                          <button className="mcp-btn-action" style={{ color: 'var(--kr-error)', borderColor: 'rgba(var(--kr-error-rgb), 0.3)' }} onClick={() => { handleDeleteMcpConfig(cfg.id); setSelectedConfigId(null); }}><Trash2 size={12} /> {t('mcp.deleteConfig')}</button>
+                          <button className="mcp-btn-action" style={{ color: 'var(--kr-error)', borderColor: 'rgba(var(--kr-error-rgb), 0.3)' }} onClick={() => { handleDeleteMcpConfig(cfg.id); selectConfig(null); }}><Trash2 size={12} /> {t('mcp.deleteConfig')}</button>
                         </>
                       )}
                       <button className="mcp-icon-btn" onClick={closePluginModal} aria-label="Close"><X size={14} /></button>

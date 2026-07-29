@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen, fireEvent, act, waitFor } from '@testing-library/react';
+import { render as baseRender, screen, fireEvent, act, waitFor } from '@testing-library/react';
+import { createMemoryRouter, RouterProvider } from 'react-router';
 import { NewDiscussionForm } from '../NewDiscussionForm';
 import type { Project, AgentDetection } from '../../types/generated';
 
@@ -56,6 +57,15 @@ const AGENT: AgentDetection = {
   runtime_available: false, rtk_available: false, rtk_hook_configured: false,
 };
 
+function render(ui: React.ReactElement, initialPath = '/') {
+  const router = createMemoryRouter(
+    [{ path: '*', element: ui }],
+    { initialEntries: [initialPath] },
+  );
+  const result = baseRender(<RouterProvider router={router} />);
+  return { router, ...result };
+}
+
 const mount = (projects: Project[]) => {
   const onSubmit = vi.fn();
   return render(
@@ -66,7 +76,6 @@ const mount = (projects: Project[]) => {
       agentAccess={null}
       onSubmit={onSubmit}
       onClose={vi.fn()}
-      onNavigate={vi.fn()}
       t={(key: string) => key}
     />
   );
@@ -81,7 +90,6 @@ describe('NewDiscussionForm — no-RTK cost warning', () => {
       agentAccess={null}
       onSubmit={vi.fn()}
       onClose={vi.fn()}
-      onNavigate={vi.fn()}
       t={(key: string) => key}
     />
   );
@@ -178,7 +186,7 @@ describe('NewDiscussionForm — prefill profile auto-select', () => {
         prefill={{ projectId: PROJECT_WITH_REPO.id, title: 'Discuss file', prompt: 'go' }}
         onSubmit={onSubmit}
         onClose={vi.fn()}
-        onNavigate={vi.fn()}
+
         onPrefillConsumed={vi.fn()}
         t={(key: string) => key}
       />,
@@ -205,7 +213,7 @@ describe('NewDiscussionForm — prefill profile auto-select', () => {
         prefill={{ projectId: PROJECT_WITH_REPO.id, title: 'Validation', prompt: 'check', locked: true }}
         onSubmit={onSubmit}
         onClose={vi.fn()}
-        onNavigate={vi.fn()}
+
         onPrefillConsumed={vi.fn()}
         t={(key: string) => key}
       />,
@@ -240,7 +248,7 @@ describe('NewDiscussionForm — Ctrl+Enter submit', () => {
         agentAccess={null}
         onSubmit={onSubmit}
         onClose={vi.fn()}
-        onNavigate={vi.fn()}
+
         t={(key: string) => key}
       />,
     );
@@ -281,7 +289,7 @@ describe('NewDiscussionForm — Ctrl+Enter submit', () => {
         agentAccess={null}
         onSubmit={onSubmit}
         onClose={vi.fn()}
-        onNavigate={vi.fn()}
+
         t={(key: string) => key}
       />,
     );
@@ -325,7 +333,7 @@ describe('NewDiscussionForm — re-entry guard', () => {
         agentAccess={null}
         onSubmit={onSubmit}
         onClose={vi.fn()}
-        onNavigate={vi.fn()}
+
         t={(key: string) => key}
       />,
     );
@@ -362,7 +370,7 @@ describe('NewDiscussionForm — re-entry guard', () => {
         agentAccess={null}
         onSubmit={onSubmit}
         onClose={vi.fn()}
-        onNavigate={vi.fn()}
+
         t={(key: string) => key}
       />,
     );
@@ -453,7 +461,7 @@ describe('NewDiscussionForm — 0.8.6 disc-first refactor', () => {
         agentAccess={null}
         onSubmit={onSubmit}
         onClose={vi.fn()}
-        onNavigate={vi.fn()}
+
         t={(key: string) => key}
       />,
     );
@@ -489,7 +497,7 @@ describe('NewDiscussionForm — 0.8.6 disc-first refactor', () => {
         agentAccess={null}
         onSubmit={onSubmit}
         onClose={vi.fn()}
-        onNavigate={vi.fn()}
+
         t={(key: string) => key}
       />,
     );
@@ -532,7 +540,7 @@ describe('NewDiscussionForm — 0.8.6 disc-first refactor', () => {
         agentAccess={null}
         onSubmit={onSubmit}
         onClose={vi.fn()}
-        onNavigate={vi.fn()}
+
         t={(key: string) => key}
       />,
     );
@@ -599,7 +607,7 @@ describe('NewDiscussionForm — default model tier (0.8.6 phase 4)', () => {
           agentAccess={null}
           onSubmit={onSubmit}
           onClose={vi.fn()}
-          onNavigate={vi.fn()}
+  
           t={(key: string) => key}
         />
       );
@@ -648,7 +656,7 @@ describe('NewDiscussionForm — default model tier (0.8.6 phase 4)', () => {
         agentAccess={null}
         onSubmit={vi.fn()}
         onClose={vi.fn()}
-        onNavigate={vi.fn()}
+
         t={(key: string) => key}
       />
     );

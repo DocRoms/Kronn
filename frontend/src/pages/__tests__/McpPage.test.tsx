@@ -30,6 +30,7 @@ vi.mock('../../lib/api', () => ({
 import { McpPage } from '../McpPage';
 import { mcps as mcpsApi } from '../../lib/api';
 import type { McpOverview, McpConfigDisplay, McpServer, McpDefinition, Project, AgentType } from '../../types/generated';
+import { TestRouter } from '../../test/routerWrapper';
 
 // Use fake timers to prevent the setTimeout in handleAddDuplicateConfig (50ms
 // scroll animation) from leaking across tests and causing timeout issues.
@@ -82,7 +83,7 @@ const makeProject = (id: string, name: string): Project => ({
   updated_at: '2026-01-01T00:00:00Z',
 });
 
-const wrap = (ui: React.ReactElement) => render(<I18nProvider>{ui}</I18nProvider>);
+const wrap = (ui: React.ReactElement) => render(<TestRouter><I18nProvider>{ui}</I18nProvider></TestRouter>);
 
 describe('McpPage', () => {
   it('renders empty state when no configs exist', () => {

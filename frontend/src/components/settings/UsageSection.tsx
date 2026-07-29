@@ -98,12 +98,7 @@ function rollupByAgent(report: UsageReport): AgentTotal[] {
   return [...acc.values()].sort((x, y) => y.cost - x.cost);
 }
 
-interface UsageSectionProps {
-  // Kept for call-site compatibility; unused (ccusage is global, not per-disc).
-  onNavigateDiscussion?: (discussionId: string) => void;
-}
-
-export function UsageSection(_props: UsageSectionProps) {
+export function UsageSection() {
   const { t, locale } = useT();
   const [period, setPeriod] = useState<Period>('daily');
   const [report, setReport] = useState<UsageReport | null>(null);

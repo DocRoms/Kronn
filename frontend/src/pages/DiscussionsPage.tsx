@@ -1,4 +1,6 @@
 import { useState, useRef, useEffect, useCallback, useMemo, useDeferredValue } from 'react';
+import { useLocation, useNavigate } from 'react-router';
+import { useKronnNavigate } from '../hooks/useKronnNavigate';
 import './DiscussionsPage.css';
 import { MessageBubble, MarkdownContent } from '../components/MessageBubble';
 import { unseenBasis } from '../components/SwipeableDiscItem';
@@ -78,7 +80,6 @@ export interface DiscussionsPageProps {
   agentAccess: AgentsConfig | null;
   refetchDiscussions: () => void;
   refetchProjects: () => void;
-  onNavigate: (page: string, opts?: { projectId?: string; scrollTo?: string; workflowId?: string }) => void;
   prefill?: { projectId: string; title: string; prompt: string; locked?: boolean } | null;
   initialActiveDiscussionId?: string | null;
   onPrefillConsumed?: () => void;
@@ -88,18 +89,6 @@ export interface DiscussionsPageProps {
    *  prefilled prompt. Symmetric with the existing path used by the
    *  Projects page audit-validation CTA. */
   onSetDiscPrefill?: (p: { projectId: string; title: string; prompt: string; locked?: boolean }) => void;
-  /** Auto-open an existing discussion and trigger agent run (used after full audit) */
-  autoRunDiscussionId?: string | null;
-  onAutoRunConsumed?: () => void;
-  /** Open a specific discussion without triggering agent (e.g. Resume Validation) */
-  openDiscussionId?: string | null;
-  onOpenDiscConsumed?: () => void;
-  /** When clicking "📋 N conversations" on a workflow run, the parent passes
-   *  the batch run id here. We auto-uncollapse the matching project + batch
-   *  group in the sidebar and scroll to it, then ack via onFocusBatchConsumed
-   *  so the same id doesn't re-trigger on every render. */
-  focusBatchId?: string | null;
-  onFocusBatchConsumed?: () => void;
   toast: ToastFn;
   // Lifted streaming state (lives in Dashboard, survives page changes)
   sendingMap: Record<string, boolean>;
@@ -131,10 +120,6 @@ export interface DiscussionsPageProps {
   lastSeenMsgCount: Record<string, number>;
   mcpConfigs?: McpConfigDisplay[];
   mcpIncompatibilities?: McpIncompatibility[];
-  /** 0.8.2 — Bubbles up "open the workflow wizard with this preset
-   *  pre-applied" from the validation-complete CTA. Dashboard sets the
-   *  pending preset state + flips the page to Workflows. */
-  onLaunchWorkflowFromPreset?: (presetId: string, projectId: string) => void;
 }
 
 // ─── TTS imports ──
@@ -163,16 +148,9 @@ export function DiscussionsPage({
   agentAccess,
   refetchDiscussions,
   refetchProjects,
-  onNavigate,
   prefill,
   onPrefillConsumed,
   onSetDiscPrefill,
-  autoRunDiscussionId,
-  onAutoRunConsumed,
-  openDiscussionId,
-  onOpenDiscConsumed,
-  focusBatchId,
-  onFocusBatchConsumed,
   toast,
   sendingMap,
   setSendingMap,
@@ -192,10 +170,19 @@ export function DiscussionsPage({
   initialActiveDiscussionId,
   mcpConfigs = [],
   mcpIncompatibilities = [],
-  onLaunchWorkflowFromPreset,
 }: DiscussionsPageProps) {
   const { t } = useT();
+  const nav = useKronnNavigate();
+  const location = useLocation();
+  const rawNavigate = useNavigate();
   const isMobile = useIsMobile();
+
+  // Read transient navigation intents from location state (set by callers
+  // via useKronnNavigate). Each is consumed once and cleared.
+  const locState = location.state as {
+    autoRun?: boolean;
+    focusBatchId?: string;
+  } | null;
 
   // ─── Internal state ──────────────────────────────────────────────────────
   const [sidebarOpen, setSidebarOpen] = useState(true); // always start open; mobile auto-closes on select
@@ -480,10 +467,11 @@ export function DiscussionsPage({
     const draft = buildContinuationDraft(row);
     saveDraft(row.discussion.id, draft);
     setActiveDiscussionId(row.discussion.id);
+    rawNavigate(`/discussions/${row.discussion.id}`, { replace: true });
     setBatchReview(null);
     setSidebarOpen(false);
     toast(t('disc.batchReviewDraftReady'), 'success');
-  }, [toast, t]);
+  }, [toast, t, rawNavigate]);
 
   const activeAgentDisabled = useMemo(() => {
     if (!activeDiscussion || agents.length === 0) return false;
@@ -1039,9 +1027,6 @@ export function DiscussionsPage({
     }
   }, [activeDiscussionId, allDiscussions, refetchProjects]);
 
-  // Handle auto-run: open existing discussion and trigger agent (e.g. after full audit)
-  // Uses a ref to track the pending run so that re-renders (from onAutoRunConsumed/refetch)
-  // don't cancel the timeout via effect cleanup.
   // Ensure the sidebar groups containing a discussion are expanded when navigating to it
   const ensureDiscussionVisible = useCallback((discId: string) => {
     const disc = allDiscussions.find(d => d.id === discId);
@@ -1078,12 +1063,15 @@ export function DiscussionsPage({
     }
   }, [activeDiscussionId, allDiscussions.length, ensureDiscussionVisible]);
 
+  // Auto-run from location state (e.g. audit-validation CTA, QP launch)
   const pendingAutoRun = useRef<string | null>(null);
   useEffect(() => {
-    if (!autoRunDiscussionId || pendingAutoRun.current === autoRunDiscussionId) return;
-    const discId = autoRunDiscussionId;
+    if (!locState?.autoRun || !initialActiveDiscussionId) return;
+    const discId = initialActiveDiscussionId;
+    if (pendingAutoRun.current === discId) return;
     pendingAutoRun.current = discId;
-    onAutoRunConsumed?.();
+    // Clear location state so back-nav doesn't re-trigger
+    rawNavigate(location.pathname, { replace: true, state: {} });
 
     // Select the discussion, uncollapse its group, and show loader immediately
     setActiveDiscussionId(discId);
@@ -1108,32 +1096,22 @@ export function DiscussionsPage({
       );
     }, 500);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autoRunDiscussionId]);
-
-  // Handle open-discussion: just select it without triggering agent (e.g. Resume Validation)
-  useEffect(() => {
-    if (!openDiscussionId) return;
-    // Wait until allDiscussions is loaded before trying to ensure visibility
-    if (allDiscussions.length === 0) return;
-    setActiveDiscussionId(openDiscussionId);
-    ensureDiscussionVisible(openDiscussionId);
-    onOpenDiscConsumed?.();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [openDiscussionId, allDiscussions.length]);
+  }, [locState?.autoRun, initialActiveDiscussionId]);
 
   // ── Cross-page navigation: WorkflowDetail "📋 N conversations" → here ──
-  // The chip click sets `focusBatchId` on Dashboard, which lands as a prop here.
-  // We expand the matching project + batch group, then scroll to it. The
-  // sidebar render uses `data-batch-key` on the wrapper so we can target it.
+  // The chip click navigates with `focusBatchId` in location state. We expand
+  // the matching project + batch group, then scroll to it. The sidebar render
+  // uses `data-batch-key` on the wrapper so we can target it.
+  const focusBatchConsumed = useRef<string | null>(null);
   useEffect(() => {
+    const focusBatchId = locState?.focusBatchId;
     if (!focusBatchId || allDiscussions.length === 0) return;
+    if (focusBatchConsumed.current === focusBatchId) return;
+    focusBatchConsumed.current = focusBatchId;
+    rawNavigate(location.pathname, { replace: true, state: {} });
+
     const childDisc = allDiscussions.find(d => d.workflow_run_id === focusBatchId);
-    if (!childDisc) {
-      // Batch not in the current discs list (deleted? still loading?). Ack
-      // anyway so we don't loop on the same id forever.
-      onFocusBatchConsumed?.();
-      return;
-    }
+    if (!childDisc) return;
     const projectKey = childDisc.project_id ?? null;
     const batchKey = `batch::${focusBatchId}`;
     setCollapsedDiscGroups(prev => {
@@ -1149,9 +1127,8 @@ export function DiscussionsPage({
         (el as HTMLElement).scrollIntoView({ behavior: 'smooth', block: 'center' });
       }
     });
-    onFocusBatchConsumed?.();
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [focusBatchId, allDiscussions.length]);
+  }, [locState?.focusBatchId, allDiscussions.length]);
 
   const handleCreateDiscussion = async (config: NewDiscConfig) => {
     let disc;
@@ -1588,14 +1565,21 @@ export function DiscussionsPage({
   // Stable sidebar callbacks (avoid breaking SwipeableDiscItem memo)
   const handleDiscSelect = useCallback((discId: string, msgCount: number) => {
     setActiveDiscussionId(discId);
+    rawNavigate(`/discussions/${discId}`, { replace: true });
     markDiscussionSeen(discId, msgCount);
     if (isMobile) setSidebarOpen(false);
-  }, [isMobile, markDiscussionSeen]);
+  }, [isMobile, markDiscussionSeen, rawNavigate]);
   const handleDiscArchive = useCallback(async (discId: string) => {
     await discussionsApi.update(discId, { archived: true });
-    setActiveDiscussionId(prev => prev === discId ? null : prev);
+    setActiveDiscussionId(prev => {
+      if (prev === discId) {
+        rawNavigate('/discussions', { replace: true });
+        return null;
+      }
+      return prev;
+    });
     refetchDiscussions();
-  }, [refetchDiscussions]);
+  }, [refetchDiscussions, rawNavigate]);
   const handleDiscDelete = useCallback(async (discId: string) => {
     if (!confirm(t('disc.confirmDelete'))) return;
     // Abort any in-flight stream + clear lifted streaming state BEFORE the
@@ -1604,9 +1588,15 @@ export function DiscussionsPage({
     try { abortControllers.current[discId]?.abort(); } catch { /* noop */ }
     cleanupStreamBase(discId);
     await discussionsApi.delete(discId);
-    setActiveDiscussionId(prev => prev === discId ? null : prev);
+    setActiveDiscussionId(prev => {
+      if (prev === discId) {
+        rawNavigate('/discussions', { replace: true });
+        return null;
+      }
+      return prev;
+    });
     refetchDiscussions();
-  }, [refetchDiscussions, abortControllers, cleanupStreamBase, t]);
+  }, [refetchDiscussions, abortControllers, cleanupStreamBase, t, rawNavigate]);
   const handleDiscUnarchive = useCallback(async (discId: string) => {
     await discussionsApi.update(discId, { archived: false });
     refetchDiscussions();
@@ -1739,6 +1729,7 @@ export function DiscussionsPage({
     const existing = allDiscussions.find(d => !d.archived && d.shared_with?.includes(contact.id));
     if (existing) {
       setActiveDiscussionId(existing.id);
+      rawNavigate(`/discussions/${existing.id}`, { replace: true });
       if (isMobile) setSidebarOpen(false);
       return;
     }
@@ -1757,23 +1748,25 @@ export function DiscussionsPage({
       await discussionsApi.share(disc.id, [contact.id]);
       await refetchDiscussions();
       setActiveDiscussionId(disc.id);
+      rawNavigate(`/discussions/${disc.id}`, { replace: true });
       if (isMobile) setSidebarOpen(false);
       toast(t('contacts.chatStarted', contact.pseudo), 'success');
     } catch {
       toast(t('contacts.chatStartError'), 'error');
     }
-  }, [allDiscussions, refetchDiscussions, isMobile, configLanguage, toast, t]);
+  }, [allDiscussions, refetchDiscussions, isMobile, configLanguage, toast, t, rawNavigate]);
 
   const handleJoinByCode = useCallback(async (code: string) => {
     const res = await discussionsApi.peerJoin(code);
     await refetchDiscussions();
     setActiveDiscussionId(res.disc_id);
+    rawNavigate(`/discussions/${res.disc_id}`, { replace: true });
     // Mobile: close the sidebar so the freshly-joined disc is actually shown
     // (mirrors handleDiscSelect — without this the join "succeeds" but the user
     // stays on the contact list and sees nothing happen).
     if (isMobile) setSidebarOpen(false);
     toast(t('contacts.joinSuccess', res.disc_title), 'success');
-  }, [refetchDiscussions, toast, t, isMobile]);
+  }, [refetchDiscussions, toast, t, isMobile, rawNavigate]);
 
   const handleContactDelete = useCallback(async (id: string) => {
     // Pre-fix the X button on a contact pill in the sidebar fired
@@ -1999,7 +1992,6 @@ export function DiscussionsPage({
             }
           }}
           batchSummaries={batchSummaries}
-          onNavigateWorkflow={(workflowId) => onNavigate('workflows', { workflowId })}
           onDeleteBatch={async (runId, count) => {
             try {
               const res = await workflowsApi.deleteBatchRun(runId);
@@ -2099,7 +2091,6 @@ export function DiscussionsPage({
             onSubmit={handleCreateDiscussion}
             onClose={() => setShowNewDiscussion(false)}
             onPrefillConsumed={onPrefillConsumed}
-            onNavigate={(page) => { setShowNewDiscussion(false); onNavigate(page); }}
             t={t}
           />
         )}
@@ -2220,6 +2211,7 @@ export function DiscussionsPage({
                 if (!confirm(t('disc.confirmDelete'))) return;
                 await discussionsApi.delete(discId);
                 setActiveDiscussionId(null);
+                rawNavigate('/discussions', { replace: true });
                 refetchDiscussions();
               }}
               onDiscussionUpdated={handleDiscussionUpdated}
@@ -2308,7 +2300,7 @@ export function DiscussionsPage({
                   <button
                     className="disc-cta-btn"
                     data-variant="warning"
-                    onClick={() => onNavigate('projects', { projectId })}
+                    onClick={() => nav.toProject(projectId)}
                   >
                     {hasBriefing ? (
                       <><Play size={12} /> {t('audit.unauditedCtaLaunch')}</>
@@ -2419,7 +2411,6 @@ export function DiscussionsPage({
                       onEditTextChange={setEditingText}
                       onRetry={handleRetry}
                       onExpandSummary={handleMsgExpandSummary}
-                      onNavigate={onNavigate}
                       discussionId={activeDiscussion.id}
                       projectId={activeDiscussion.project_id ?? null}
                       chainableQPs={chainableQPs}
@@ -2606,7 +2597,7 @@ export function DiscussionsPage({
                       <p className="disc-cta-text" data-variant="warning">
                         <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} /> {t('audit.auditInProgress')}
                       </p>
-                      <button className="disc-cta-btn" data-variant="warning" onClick={() => { if (activeDiscussion.project_id) onNavigate('projects', { projectId: activeDiscussion.project_id }); }}>
+                      <button className="disc-cta-btn" data-variant="warning" onClick={() => { if (activeDiscussion.project_id) nav.toProject(activeDiscussion.project_id); }}>
                         <Play size={12} /> {t('audit.goToProject')}
                       </button>
                     </div>
@@ -2619,7 +2610,7 @@ export function DiscussionsPage({
                     <p className="disc-cta-text" data-variant="info">
                       <Check size={14} /> {t('audit.briefingDone')}
                     </p>
-                    <button className="disc-cta-btn" data-variant="info" onClick={() => { if (activeDiscussion.project_id) onNavigate('projects', { projectId: activeDiscussion.project_id }); }}>
+                    <button className="disc-cta-btn" data-variant="info" onClick={() => { if (activeDiscussion.project_id) nav.toProject(activeDiscussion.project_id); }}>
                       <Play size={12} /> {t('audit.goToProject')}
                     </button>
                   </div>
@@ -2659,7 +2650,6 @@ export function DiscussionsPage({
                 const lastAgentMsg = valAgentMsgs.length > 0 ? valAgentMsgs[valAgentMsgs.length - 1] : null;
                 const isComplete = lastAgentMsg && lastAgentMsg.content.toUpperCase().includes('KRONN:VALIDATION_COMPLETE');
                 if (!isComplete) return null;
-                if (!onLaunchWorkflowFromPreset) return null;
                 const projectId = activeDiscussion.project_id;
                 return (
                   <div className="disc-cta-banner" data-variant="accent">
@@ -2669,19 +2659,7 @@ export function DiscussionsPage({
                     <button
                       className="disc-cta-btn"
                       data-variant="accent"
-                      onClick={() => {
-                        // 0.8.3 — Switched from `ticket-to-pr` to
-                        // `feasibility-autopilot`. The new preset adds
-                        // a triage step that classifies every sub-task
-                        // into doable / decided / mocked / blocked
-                        // BEFORE any code is written, plus a
-                        // drift_check Exec that surfaces every freedom
-                        // the agent took. Required for big tickets
-                        // where silent improvisation breaks the
-                        // implementation (cf. EW-7247 stress test).
-                        onLaunchWorkflowFromPreset('feasibility-autopilot', projectId);
-                        onNavigate('workflows');
-                      }}
+                      onClick={() => nav.launchWorkflowPreset('feasibility-autopilot', projectId)}
                     >
                       <Rocket size={12} /> {t('audit.autopilotCtaBtn')}
                     </button>
@@ -2753,7 +2731,7 @@ export function DiscussionsPage({
                       try {
                         const resp = await workflowsApi.createBundle(payload);
                         console.info('Bundle created:', resp);
-                        onNavigate('workflows');
+                        nav.toWorkflows();
                       } catch (e) {
                         console.warn('Failed to create bundle:', e);
                       }
@@ -2795,7 +2773,7 @@ export function DiscussionsPage({
                     <button className="disc-cta-btn" data-variant="accent" onClick={async () => {
                       try {
                         await workflowsApi.create(payload as unknown as Parameters<typeof workflowsApi.create>[0]);
-                        onNavigate('workflows');
+                        nav.toWorkflows();
                       } catch (e) {
                         console.warn('Failed to create workflow:', e);
                       }
@@ -2901,7 +2879,7 @@ export function DiscussionsPage({
                           try {
                             sessionStorage.setItem('kronn:postQpImproved', qpTargetId);
                           } catch { /* private-mode / quota — fall through */ }
-                          onNavigate('workflows');
+                          nav.toQuickPrompt(qpTargetId);
                         } catch (e) {
                           // 0.8.4 follow-up — pre-fix this was a silent
                           // `console.warn`, so a 400 from the backend
@@ -3037,14 +3015,14 @@ export function DiscussionsPage({
                               // etc.) before firing.
                               locked: false,
                             });
-                            onNavigate('discussions', { projectId: proj.id });
+                            nav.toDiscussions();
                           }}
                         >
                           <Play size={12} /> {t('bootstrap.startDev')}
                         </button>
                       )}
                       <button className="disc-cta-btn" data-variant="accent" onClick={() => {
-                        if (proj) onNavigate('projects', { projectId: proj.id });
+                        if (proj) nav.toProject(proj.id);
                       }}>
                         <Check size={12} /> {t('bootstrap.viewProject')}
                       </button>
@@ -3125,7 +3103,7 @@ export function DiscussionsPage({
                   {' — '}
                   <span
                     style={{ cursor: 'pointer', textDecoration: 'underline' }}
-                    onClick={() => onNavigate('settings')}
+                    onClick={() => nav.toConfig()}
                   >{t('disc.agentDisabledLink')}</span>
                 </span>
               </div>
@@ -3262,13 +3240,14 @@ export function DiscussionsPage({
                 onChanged={setDiscussionPlan}
                 onNavigateDiscussion={(targetDiscussionId) => {
                   setActiveDiscussionId(targetDiscussionId);
+                  rawNavigate(`/discussions/${targetDiscussionId}`, { replace: true });
                   ensureDiscussionVisible(targetDiscussionId);
                   reloadDiscussion(targetDiscussionId);
                   setShowPlanPanel(false);
                 }}
                 onNavigateProject={(projectId) => {
                   setShowPlanPanel(false);
-                  onNavigate('projects', { projectId });
+                  nav.toProject(projectId);
                 }}
                 toast={toast}
               />

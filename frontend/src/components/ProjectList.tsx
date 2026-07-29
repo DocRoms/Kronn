@@ -1,5 +1,6 @@
 import '../pages/Dashboard.css';
 import { useState, useMemo, useDeferredValue, useEffect, useRef, useCallback } from 'react';
+import { useNavigate } from 'react-router';
 import { useT } from '../lib/I18nContext';
 import { getProjectGroup, isHiddenPath, isValidationDisc } from '../lib/constants';
 import { useIsMobile } from '../hooks/useMediaQuery';
@@ -38,10 +39,7 @@ export interface ProjectListProps {
   workflows: WorkflowSummary[];
   configLanguage: string | null;
   toast: (msg: string, type: 'success' | 'error' | 'warning' | 'info') => void;
-  onNavigate: (page: string) => void;
   onSetDiscPrefill: (prefill: { projectId: string; title: string; prompt: string; locked?: boolean }) => void;
-  onAutoRunDiscussion: (discId: string) => void;
-  onOpenDiscussion: (discId: string) => void;
   onRefetch: () => void;
   onRefetchDiscussions: () => void;
   onRefetchSkills: () => void;
@@ -61,10 +59,7 @@ export function ProjectList({
   workflows,
   configLanguage,
   toast,
-  onNavigate,
   onSetDiscPrefill,
-  onAutoRunDiscussion,
-  onOpenDiscussion,
   onRefetch,
   onRefetchDiscussions,
   onRefetchSkills,
@@ -74,6 +69,7 @@ export function ProjectList({
 }: ProjectListProps) {
   const { t } = useT();
   const isMobile = useIsMobile();
+  const rawNavigate = useNavigate();
 
   const [projectSearch, setProjectSearch] = useState('');
   const [projectFilter, setProjectFilter] = useState<ProjectFilter>('visible');
@@ -228,6 +224,7 @@ export function ProjectList({
 
   const selectProject = (projectId: string) => {
     onSetExpandedId(projectId);
+    rawNavigate(`/projects/${projectId}`, { replace: true });
     requestAnimationFrame(() => {
       detailPaneRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
     });
@@ -458,7 +455,7 @@ export function ProjectList({
         {(!isMobile || selectedProject) && (
           <div ref={detailPaneRef} className="project-detail-pane" data-testid="project-detail-pane">
             {isMobile && selectedProject && (
-              <button className="project-back-btn" onClick={() => onSetExpandedId(null)}>
+              <button className="project-back-btn" onClick={() => { onSetExpandedId(null); rawNavigate('/projects', { replace: true }); }}>
                 <ChevronLeft size={14} /> {t('projects.master.back')}
               </button>
             )}
@@ -478,10 +475,7 @@ export function ProjectList({
                 workflows={workflows}
                 configLanguage={configLanguage}
                 toast={toast}
-                onNavigate={onNavigate}
                 onSetDiscPrefill={onSetDiscPrefill}
-                onAutoRunDiscussion={onAutoRunDiscussion}
-                onOpenDiscussion={onOpenDiscussion}
                 onRefetch={onRefetch}
                 onRefetchDiscussions={onRefetchDiscussions}
                 onRefetchSkills={onRefetchSkills}

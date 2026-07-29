@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor, fireEvent } from '@testing-library/react';
+import { createMemoryRouter, RouterProvider } from 'react-router';
 import { App, setRetryDelay, setStatusTimeout } from '../App';
 
 // Mock the lazy-loaded pages to avoid loading the full component trees
@@ -49,6 +50,14 @@ vi.mock('../lib/api', () => ({
 
 import { setup as setupApi, config as configApi } from '../lib/api';
 
+function renderApp() {
+  const router = createMemoryRouter(
+    [{ path: '*', Component: App }],
+    { initialEntries: ['/projects'] },
+  );
+  return render(<RouterProvider router={router} />);
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   setRetryDelay(0); // instant retries in tests
@@ -61,7 +70,7 @@ beforeEach(() => {
 describe('App', () => {
   it('shows loading screen initially', () => {
     (setupApi.getStatus as ReturnType<typeof vi.fn>).mockReturnValue(new Promise(() => {}));
-    render(<App />);
+    renderApp();
     // The splash cycles through hints every 1.5s — the first one always
     // starts with "Entering the grid". The trailing character is a
     // unicode ellipsis (…), not three dots.
@@ -78,7 +87,7 @@ describe('App', () => {
       default_scan_path: null,
     });
 
-    render(<App />);
+    renderApp();
     await waitFor(() => expect(screen.getByTestId('setup-wizard')).toBeDefined());
   });
 
@@ -92,7 +101,7 @@ describe('App', () => {
       default_scan_path: '/home',
     });
 
-    render(<App />);
+    renderApp();
     await waitFor(() => expect(screen.getByTestId('dashboard')).toBeDefined());
   });
 
@@ -115,7 +124,7 @@ describe('App', () => {
     (setupApi.getStatus as ReturnType<typeof vi.fn>).mockReturnValue(new Promise(() => {})); // hang
     (configApi.getLanguage as ReturnType<typeof vi.fn>).mockResolvedValue('fr'); // backend up
 
-    render(<App />);
+    renderApp();
     await waitFor(() => expect(screen.getByTestId('dashboard')).toBeDefined());
     expect(screen.queryByText('Cannot connect to backend')).toBeNull();
   });
@@ -123,7 +132,7 @@ describe('App', () => {
   it('shows the error screen when setup/status hangs AND the backend is unreachable', async () => {
     (setupApi.getStatus as ReturnType<typeof vi.fn>).mockReturnValue(new Promise(() => {})); // hang
     // configApi.getLanguage rejects by default (beforeEach) → backend down.
-    render(<App />);
+    renderApp();
     await waitFor(() => expect(screen.getByText('Cannot connect to backend')).toBeDefined());
     expect(screen.queryByTestId('dashboard')).toBeNull();
   });

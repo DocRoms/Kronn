@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { createMemoryRouter, RouterProvider } from 'react-router';
 import { buildApiMock } from '../../test/apiMock';
 
 vi.mock('../../lib/api', () => buildApiMock({
@@ -81,6 +82,15 @@ import type { Discussion, Project } from '../../types/generated';
 
 const noop = () => {};
 
+const wrap = (ui: React.ReactElement, initialPath = '/projects') => {
+  const router = createMemoryRouter(
+    [{ path: '*', element: ui }],
+    { initialEntries: [initialPath] },
+  );
+  const result = render(<RouterProvider router={router} />);
+  return { router, ...result };
+};
+
 const PROJECT: Project = {
   id: 'p-overview',
   name: 'Demo',
@@ -99,7 +109,7 @@ const PROJECT: Project = {
 
 describe('ProjectCard — repository overview', () => {
   it('shows repository and dependency health, then allows a forced refresh', async () => {
-    render(
+    wrap(
       <ProjectCard
         project={PROJECT}
         detailMode
@@ -113,10 +123,7 @@ describe('ProjectCard — repository overview', () => {
         workflows={[]}
         configLanguage="fr"
         toast={vi.fn()}
-        onNavigate={noop}
         onSetDiscPrefill={noop}
-        onAutoRunDiscussion={noop}
-        onOpenDiscussion={noop}
         onRefetch={noop}
         onRefetchDiscussions={noop}
         onRefetchSkills={noop}
@@ -183,7 +190,7 @@ describe('ProjectCard — repository overview', () => {
       next_cursor: null,
     } as never);
 
-    render(
+    wrap(
       <ProjectCard
         project={PROJECT}
         detailMode
@@ -197,10 +204,7 @@ describe('ProjectCard — repository overview', () => {
         workflows={[]}
         configLanguage="fr"
         toast={vi.fn()}
-        onNavigate={noop}
         onSetDiscPrefill={noop}
-        onAutoRunDiscussion={noop}
-        onOpenDiscussion={noop}
         onRefetch={noop}
         onRefetchDiscussions={noop}
         onRefetchSkills={noop}
@@ -266,9 +270,7 @@ describe('ProjectCard — repository overview', () => {
       }],
       next_cursor: null,
     });
-    const onNavigate = vi.fn();
-
-    render(
+    const { router } = wrap(
       <ProjectCard
         project={PROJECT}
         detailMode
@@ -282,10 +284,7 @@ describe('ProjectCard — repository overview', () => {
         workflows={[]}
         configLanguage="fr"
         toast={vi.fn()}
-        onNavigate={onNavigate}
         onSetDiscPrefill={noop}
-        onAutoRunDiscussion={noop}
-        onOpenDiscussion={noop}
         onRefetch={noop}
         onRefetchDiscussions={noop}
         onRefetchSkills={noop}
@@ -300,6 +299,6 @@ describe('ProjectCard — repository overview', () => {
       name: 'projects.tasks.openTask',
     }));
 
-    expect(onNavigate).toHaveBeenCalledWith('planning:task-42');
+    expect(router.state.location.pathname).toBe('/planning/task-42');
   });
 });

@@ -10,6 +10,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { I18nProvider } from '../../lib/I18nContext';
+import { TestRouter } from '../../test/routerWrapper';
 
 vi.mock('../../lib/api', async () => {
   const real = await vi.importActual<object>('../../lib/api');
@@ -61,15 +62,16 @@ const baseProps = {
   onExpandSummary: () => {},
   discussionId: 'disc-test',
   projectId: null,
-  onNavigate: () => {},
   t: (key: string) => key,
 };
 
 function renderBubble(lint: LintReport | null) {
   return render(
+    <TestRouter>
     <I18nProvider>
       <MessageBubble {...baseProps} msg={makeAgentMessage(lint)} />
     </I18nProvider>
+    </TestRouter>
   );
 }
 
@@ -170,9 +172,11 @@ describe('MessageBubble — anti-hallucination lint pill', () => {
       role: 'User' as const,
     };
     render(
+      <TestRouter>
       <I18nProvider>
         <MessageBubble {...baseProps} msg={userMsg} />
       </I18nProvider>
+      </TestRouter>
     );
     expect(screen.queryByTestId('lint-pill')).toBeNull();
   });
@@ -607,9 +611,11 @@ describe('MessageBubble — anti-hallucination lint pill', () => {
         role: 'System' as const,
       };
       render(
+        <TestRouter>
         <I18nProvider>
           <MessageBubble {...baseProps} msg={sysMsg} />
         </I18nProvider>
+        </TestRouter>
       );
       expect(screen.queryByTestId('lint-pill')).toBeNull();
     });

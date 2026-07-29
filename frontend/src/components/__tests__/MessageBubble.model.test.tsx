@@ -9,6 +9,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import { I18nProvider } from '../../lib/I18nContext';
+import { TestRouter } from '../../test/routerWrapper';
 
 vi.mock('../../lib/api', async () => {
   const real = await vi.importActual<object>('../../lib/api');
@@ -42,15 +43,17 @@ const baseProps = {
   defaultAgent: 'Ollama' as const, summaryCache: null, language: 'fr', sending: false,
   editingText: '', hasFullAccess: false, onCopy: () => {}, onTts: () => {}, onEditStart: () => {},
   onEditCancel: () => {}, onEditSubmit: () => {}, onEditTextChange: () => {}, onRetry: () => {},
-  onExpandSummary: () => {}, discussionId: 'disc-test', projectId: null, onNavigate: () => {},
+  onExpandSummary: () => {}, discussionId: 'disc-test', projectId: null,
   t: (key: string) => key,
 };
 
 function renderBubble(over: Partial<DiscussionMessage>) {
   return render(
+    <TestRouter>
     <I18nProvider>
       <MessageBubble {...baseProps} msg={makeAgentMessage(over)} />
     </I18nProvider>
+    </TestRouter>
   );
 }
 

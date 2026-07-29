@@ -12,6 +12,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, fireEvent, screen, act } from '@testing-library/react';
+import { createMemoryRouter, RouterProvider } from 'react-router';
 import { I18nProvider } from '../../lib/I18nContext';
 
 // vi.mock is hoisted ABOVE imports — `buildApiMock` cannot be a
@@ -47,7 +48,14 @@ const audit = (project_id: string, step = 2, total = 10): AuditProgress => ({
   kind: 'full_audit',
 });
 
-const wrap = (ui: React.ReactElement) => render(<I18nProvider>{ui}</I18nProvider>);
+const wrap = (ui: React.ReactElement, initialPath = '/') => {
+  const router = createMemoryRouter(
+    [{ path: '*', element: <I18nProvider>{ui}</I18nProvider> }],
+    { initialEntries: [initialPath] },
+  );
+  const result = render(<RouterProvider router={router} />);
+  return { router, ...result };
+};
 
 beforeEach(() => { vi.clearAllMocks(); });
 afterEach(() => { vi.useRealTimers(); });
@@ -56,8 +64,6 @@ describe('ActiveAuditsPopover (0.8.3 #288)', () => {
   it('renders empty state when no audits are running', () => {
     wrap(<ActiveAuditsPopover
       audits={[]} projects={[]} onClose={() => {}}
-      onNavigateToProject={() => {}}
-      onViewAllProjects={() => {}}
     />);
     // The FR empty-state copy ships with the default locale.
     expect(screen.getByText(/Aucun audit en cours/)).toBeInTheDocument();
@@ -67,8 +73,7 @@ describe('ActiveAuditsPopover (0.8.3 #288)', () => {
     const { container } = wrap(<ActiveAuditsPopover
       audits={[audit('p1', 3, 10), audit('p2', 5, 10)]}
       projects={[proj('p1', 'kronn'), proj('p2', 'front_api')]}
-      onClose={() => {}} onNavigateToProject={() => {}}
-      onViewAllProjects={() => {}}
+      onClose={() => {}}
     />);
     const items = container.querySelectorAll('.wf-active-runs-item');
     expect(items).toHaveLength(2);
@@ -79,15 +84,13 @@ describe('ActiveAuditsPopover (0.8.3 #288)', () => {
     expect(screen.getByText(/Étape 5\/10/)).toBeInTheDocument();
   });
 
-  it('clicking a row fires onNavigateToProject with the projectId', () => {
-    const onNav = vi.fn();
-    wrap(<ActiveAuditsPopover
+  it('clicking a row navigates to the project', () => {
+    const { router } = wrap(<ActiveAuditsPopover
       audits={[audit('p1')]} projects={[proj('p1', 'kronn')]}
-      onClose={() => {}} onNavigateToProject={onNav}
-      onViewAllProjects={() => {}}
+      onClose={() => {}}
     />);
     fireEvent.click(screen.getByText('kronn').closest('button')!);
-    expect(onNav).toHaveBeenCalledWith('p1');
+    expect(router.state.location.pathname).toBe('/projects/p1');
   });
 
   it('Stop button calls cancelAudit and fires onAfterCancel', async () => {
@@ -95,8 +98,7 @@ describe('ActiveAuditsPopover (0.8.3 #288)', () => {
     vi.mocked(projectsApi.cancelAudit).mockResolvedValue('NoTemplate');
     const { container } = wrap(<ActiveAuditsPopover
       audits={[audit('p1')]} projects={[proj('p1', 'kronn')]}
-      onClose={() => {}} onNavigateToProject={() => {}}
-      onViewAllProjects={() => {}}
+      onClose={() => {}}
       onAfterCancel={onAfter}
     />);
     const stopBtn = container.querySelector('.wf-active-runs-stop-btn') as HTMLButtonElement;
@@ -111,39 +113,33 @@ describe('ActiveAuditsPopover (0.8.3 #288)', () => {
     // the project. Without stopPropagation on the Stop button, the
     // click would both cancel the audit AND navigate the user away
     // from where they wanted to stay (Discussions, Workflows, etc.).
-    const onNav = vi.fn();
     vi.mocked(projectsApi.cancelAudit).mockResolvedValue('NoTemplate');
-    const { container } = wrap(<ActiveAuditsPopover
+    const { router, container } = wrap(<ActiveAuditsPopover
       audits={[audit('p1')]} projects={[proj('p1', 'kronn')]}
-      onClose={() => {}} onNavigateToProject={onNav}
-      onViewAllProjects={() => {}}
+      onClose={() => {}}
     />);
     const stopBtn = container.querySelector('.wf-active-runs-stop-btn') as HTMLButtonElement;
     await act(async () => { fireEvent.click(stopBtn); });
-    expect(onNav).not.toHaveBeenCalled();
+    expect(router.state.location.pathname).toBe('/');
   });
 
   it('Escape closes the popover', () => {
     const onClose = vi.fn();
     wrap(<ActiveAuditsPopover
       audits={[audit('p1')]} projects={[proj('p1', 'kronn')]}
-      onClose={onClose} onNavigateToProject={() => {}}
-      onViewAllProjects={() => {}}
+      onClose={onClose}
     />);
     fireEvent.keyDown(document, { key: 'Escape' });
     expect(onClose).toHaveBeenCalled();
   });
 
-  it('footer click fires onViewAllProjects', () => {
-    const onView = vi.fn();
-    const { container } = wrap(<ActiveAuditsPopover
+  it('footer click navigates to all projects', () => {
+    const { router, container } = wrap(<ActiveAuditsPopover
       audits={[]} projects={[]} onClose={() => {}}
-      onNavigateToProject={() => {}}
-      onViewAllProjects={onView}
     />);
     const footer = container.querySelector('.wf-active-runs-footer') as HTMLButtonElement;
     fireEvent.click(footer);
-    expect(onView).toHaveBeenCalled();
+    expect(router.state.location.pathname).toBe('/projects');
   });
 
   it('row meta uses Math.max-safe elapsed formatting (no NaN on bad timestamps)', () => {
@@ -153,8 +149,7 @@ describe('ActiveAuditsPopover (0.8.3 #288)', () => {
     const broken: AuditProgress = { ...audit('p1'), started_at: 'not-a-date' };
     const { container } = wrap(<ActiveAuditsPopover
       audits={[broken]} projects={[proj('p1', 'kronn')]}
-      onClose={() => {}} onNavigateToProject={() => {}}
-      onViewAllProjects={() => {}}
+      onClose={() => {}}
     />);
     const meta = container.querySelector('.wf-active-runs-item-meta')?.textContent ?? '';
     expect(meta).not.toContain('NaN');
@@ -168,8 +163,7 @@ describe('ActiveAuditsPopover (0.8.3 #288)', () => {
     const { container } = wrap(<ActiveAuditsPopover
       audits={[audit('p-orphan')]}
       projects={[]}   // empty — the lookup falls through
-      onClose={() => {}} onNavigateToProject={() => {}}
-      onViewAllProjects={() => {}}
+      onClose={() => {}}
     />);
     expect(container.textContent).toContain('p-orphan');
   });

@@ -15,6 +15,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import { I18nProvider } from '../../lib/I18nContext';
+import { TestRouter } from '../../test/routerWrapper';
 
 // Mock the boot config call so I18nProvider doesn't try to fetch.
 vi.mock('../../lib/api', async () => {
@@ -67,7 +68,6 @@ const noopProps = {
   onEditTextChange: () => {},
   onRetry: () => {},
   onExpandSummary: () => {},
-  onNavigate: () => {},
   discussionId: 'disc-test',
   // Pass-through stub: identity for the key so tests can match label
   // text in the rendered DOM regardless of locale.
@@ -77,9 +77,11 @@ const noopProps = {
 describe('MessageBubble — kronn-internal tool-call badge', () => {
   it('renders disc_meta call as a tool badge (no args)', () => {
     render(
+      <TestRouter>
       <I18nProvider>
         <MessageBubble {...noopProps} msg={makeSysMessage('[kronn-internal: disc_meta()]')} />
       </I18nProvider>
+      </TestRouter>
     );
     const badge = screen.getByTestId('kronn-tool-badge');
     expect(badge).toBeInTheDocument();
@@ -91,9 +93,11 @@ describe('MessageBubble — kronn-internal tool-call badge', () => {
 
   it('renders disc_get_message with idx argument', () => {
     render(
+      <TestRouter>
       <I18nProvider>
         <MessageBubble {...noopProps} msg={makeSysMessage('[kronn-internal: disc_get_message(4)]')} />
       </I18nProvider>
+      </TestRouter>
     );
     const badge = screen.getByTestId('kronn-tool-badge');
     expect(badge.textContent).toContain('disc_get_message');
@@ -102,9 +106,11 @@ describe('MessageBubble — kronn-internal tool-call badge', () => {
 
   it('renders disc_summarize with range', () => {
     render(
+      <TestRouter>
       <I18nProvider>
         <MessageBubble {...noopProps} msg={makeSysMessage('[kronn-internal: disc_summarize(0..10)]')} />
       </I18nProvider>
+      </TestRouter>
     );
     const badge = screen.getByTestId('kronn-tool-badge');
     expect(badge.textContent).toContain('disc_summarize');
@@ -116,6 +122,7 @@ describe('MessageBubble — kronn-internal tool-call badge', () => {
     // It renders as a `<details>` element, collapsed by default so it
     // doesn't dominate the transcript.
     render(
+      <TestRouter>
       <I18nProvider>
         <MessageBubble
           {...noopProps}
@@ -124,6 +131,7 @@ describe('MessageBubble — kronn-internal tool-call badge', () => {
           )}
         />
       </I18nProvider>
+      </TestRouter>
     );
     const badge = screen.getByTestId('kronn-tool-badge');
     // Result is in the DOM (inside the <details>) but collapsed.
@@ -138,9 +146,11 @@ describe('MessageBubble — kronn-internal tool-call badge', () => {
     // Sanity: error / summary system messages still go through the
     // default `disc-msg-agent-label` path, not the kronn-tool variant.
     render(
+      <TestRouter>
       <I18nProvider>
         <MessageBubble {...noopProps} msg={makeSysMessage('summary cached for last 10 messages')} />
       </I18nProvider>
+      </TestRouter>
     );
     expect(screen.queryByTestId('kronn-tool-badge')).toBeNull();
   });
@@ -150,12 +160,14 @@ describe('MessageBubble — kronn-internal tool-call badge', () => {
     // bubble. The badge still renders (showing the raw text) so the
     // user knows something happened.
     render(
+      <TestRouter>
       <I18nProvider>
         <MessageBubble
           {...noopProps}
           msg={makeSysMessage('[kronn-internal: malformed_no_closing_bracket')}
         />
       </I18nProvider>
+      </TestRouter>
     );
     // Still considered a kronn-tool message by the prefix match — we
     // suppress the markdown render and show the raw fallback in the

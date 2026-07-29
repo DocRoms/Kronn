@@ -7,6 +7,22 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [Unreleased]
+
+### Added
+
+- **Client-side URL routing (React Router v8, Data mode).** Every page and
+  every selectable resource now has its own URL — `/projects/:id`,
+  `/discussions/:id`, `/planning/:taskId`, `/plugins/:configId`,
+  `/workflows/:id/runs/:runId`, `/workflows/qp/:qpId`, `/workflows/qa/:qaId`,
+  `/config` — so refresh keeps the open view, browser back/forward work, and
+  deep-links are bookmarkable. Navigation goes through a typed
+  `useKronnNavigate()` hook; one-shot intents (auto-run, batch focus, workflow
+  presets) travel as location state so a refresh never re-triggers them. The
+  CLI's legacy `#project-<id>` hash link redirects to the canonical route.
+
+---
+
 ## [0.9.2] - 2026-07-27
 
 ### Added

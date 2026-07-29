@@ -5,7 +5,8 @@
 // disabled state after cancel, Esc closes, footer navigates, empty state.
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
+import { render as baseRender, screen, fireEvent, waitFor, act } from '@testing-library/react';
+import { createMemoryRouter, RouterProvider } from 'react-router';
 import { buildApiMock } from '../../../test/apiMock';
 import type { WorkflowSummary } from '../../../types/generated';
 
@@ -66,6 +67,15 @@ const idleWf = (id: string): WorkflowSummary => ({
   created_at: new Date().toISOString(),
 });
 
+function render(ui: React.ReactElement, initialPath = '/') {
+  const router = createMemoryRouter(
+    [{ path: '*', element: ui }],
+    { initialEntries: [initialPath] },
+  );
+  const result = baseRender(<RouterProvider router={router} />);
+  return { router, ...result };
+}
+
 describe('ActiveRunsPopover', () => {
   beforeEach(() => {
     cancelRunMock.mockReset();
@@ -82,8 +92,6 @@ describe('ActiveRunsPopover', () => {
       <ActiveRunsPopover
         workflows={wfs}
         onClose={() => {}}
-        onNavigateToWorkflow={() => {}}
-        onViewAllWorkflows={() => {}}
       />,
     );
     expect(screen.getByText('Alpha')).toBeInTheDocument();
@@ -96,8 +104,6 @@ describe('ActiveRunsPopover', () => {
       <ActiveRunsPopover
         workflows={[idleWf('x'), idleWf('y')]}
         onClose={() => {}}
-        onNavigateToWorkflow={() => {}}
-        onViewAllWorkflows={() => {}}
       />,
     );
     expect(screen.getByText('wf.activeRunsEmpty')).toBeInTheDocument();
@@ -108,8 +114,6 @@ describe('ActiveRunsPopover', () => {
       <ActiveRunsPopover
         workflows={[runningWf({ id: 'wf-42', runId: 'run-99' })]}
         onClose={() => {}}
-        onNavigateToWorkflow={() => {}}
-        onViewAllWorkflows={() => {}}
       />,
     );
     const stopBtn = screen.getByRole('button', { name: /wf.cancelRun/ });
@@ -124,8 +128,6 @@ describe('ActiveRunsPopover', () => {
       <ActiveRunsPopover
         workflows={[runningWf({ id: 'wf-1', runId: 'run-1' })]}
         onClose={() => {}}
-        onNavigateToWorkflow={() => {}}
-        onViewAllWorkflows={() => {}}
       />,
     );
     const stopBtn = screen.getByRole('button', { name: /wf.cancelRun/ });
@@ -139,35 +141,29 @@ describe('ActiveRunsPopover', () => {
   });
 
   it('stop click does not bubble up and trigger the row body navigation', async () => {
-    const onNavigate = vi.fn();
-    render(
+    const { router } = render(
       <ActiveRunsPopover
         workflows={[runningWf({ id: 'wf-1', runId: 'run-1' })]}
         onClose={() => {}}
-        onNavigateToWorkflow={onNavigate}
-        onViewAllWorkflows={() => {}}
       />,
     );
     fireEvent.click(screen.getByRole('button', { name: /wf.cancelRun/ }));
     await waitFor(() => expect(cancelRunMock).toHaveBeenCalled());
-    expect(onNavigate).not.toHaveBeenCalled();
+    expect(router.state.location.pathname).toBe('/');
   });
 
   it('clicking the row body navigates to the workflow', () => {
-    const onNavigate = vi.fn();
-    render(
+    const { router } = render(
       <ActiveRunsPopover
         workflows={[runningWf({ id: 'wf-55', runId: 'run-55' })]}
         onClose={() => {}}
-        onNavigateToWorkflow={onNavigate}
-        onViewAllWorkflows={() => {}}
       />,
     );
     // The row body is the first button inside the item — distinguishable
     // because it contains the workflow name.
     const rowBtn = screen.getByRole('button', { name: /WorkflowAlpha/ });
     fireEvent.click(rowBtn);
-    expect(onNavigate).toHaveBeenCalledWith('wf-55');
+    expect(router.state.location.pathname).toBe('/workflows/wf-55');
   });
 
   it('Escape key closes the popover', () => {
@@ -176,26 +172,21 @@ describe('ActiveRunsPopover', () => {
       <ActiveRunsPopover
         workflows={[runningWf({})]}
         onClose={onClose}
-        onNavigateToWorkflow={() => {}}
-        onViewAllWorkflows={() => {}}
       />,
     );
     fireEvent.keyDown(document, { key: 'Escape' });
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
-  it('footer "view all workflows" button calls onViewAllWorkflows', () => {
-    const onViewAll = vi.fn();
-    render(
+  it('footer "view all workflows" button navigates to workflows', () => {
+    const { router } = render(
       <ActiveRunsPopover
         workflows={[]}
         onClose={() => {}}
-        onNavigateToWorkflow={() => {}}
-        onViewAllWorkflows={onViewAll}
       />,
     );
     fireEvent.click(screen.getByRole('button', { name: /wf.viewAllWorkflows/ }));
-    expect(onViewAll).toHaveBeenCalledTimes(1);
+    expect(router.state.location.pathname).toBe('/workflows');
   });
 
   it('outside mousedown closes the popover', async () => {
@@ -206,8 +197,6 @@ describe('ActiveRunsPopover', () => {
         <ActiveRunsPopover
           workflows={[runningWf({})]}
           onClose={onClose}
-          onNavigateToWorkflow={() => {}}
-          onViewAllWorkflows={() => {}}
         />
       </>,
     );

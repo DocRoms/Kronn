@@ -27,6 +27,7 @@ vi.mock('../../lib/api', async () => {
 });
 import { render, fireEvent, screen } from '@testing-library/react';
 import { DiscussionSidebar } from '../DiscussionSidebar';
+import { TestRouter } from '../../test/routerWrapper';
 import type { Discussion } from '../../types/generated';
 
 const noop = () => {};
@@ -77,12 +78,12 @@ describe('DiscussionSidebar — Mark all as read (0.8.3 #277)', () => {
     // 100 messages, none seen → 100 unread → button must render.
     const discs = [mkDisc('d1', 100, false)];
     render(
-      <DiscussionSidebar
+      <TestRouter><DiscussionSidebar
         {...baseProps}
         discussions={discs}
         lastSeenMsgCount={{}}
         onMarkAllRead={vi.fn()}
-      />
+      /></TestRouter>
     );
     expect(screen.getByLabelText('disc.markAllRead')).toBeInTheDocument();
   });
@@ -92,12 +93,12 @@ describe('DiscussionSidebar — Mark all as read (0.8.3 #277)', () => {
     // clear before clicking. 50 + 30 = 80 across two discs.
     const discs = [mkDisc('d1', 50), mkDisc('d2', 30)];
     render(
-      <DiscussionSidebar
+      <TestRouter><DiscussionSidebar
         {...baseProps}
         discussions={discs}
         lastSeenMsgCount={{}}
         onMarkAllRead={vi.fn()}
-      />
+      /></TestRouter>
     );
     const btn = screen.getByLabelText('disc.markAllRead');
     // Tooltip uses `disc.markAllReadTooltip` with the count param.
@@ -108,12 +109,12 @@ describe('DiscussionSidebar — Mark all as read (0.8.3 #277)', () => {
     const onMarkAllRead = vi.fn();
     const discs = [mkDisc('d1', 100)];
     render(
-      <DiscussionSidebar
+      <TestRouter><DiscussionSidebar
         {...baseProps}
         discussions={discs}
         lastSeenMsgCount={{}}
         onMarkAllRead={onMarkAllRead}
-      />
+      /></TestRouter>
     );
     fireEvent.click(screen.getByLabelText('disc.markAllRead'));
     expect(onMarkAllRead).toHaveBeenCalledTimes(1);
@@ -124,12 +125,12 @@ describe('DiscussionSidebar — Mark all as read (0.8.3 #277)', () => {
     // (otherwise it's clutter on an already-clean inbox).
     const discs = [mkDisc('d1', 50)];
     render(
-      <DiscussionSidebar
+      <TestRouter><DiscussionSidebar
         {...baseProps}
         discussions={discs}
         lastSeenMsgCount={{ d1: 50 }}
         onMarkAllRead={vi.fn()}
-      />
+      /></TestRouter>
     );
     expect(screen.queryByLabelText('disc.markAllRead')).not.toBeInTheDocument();
   });
@@ -139,12 +140,12 @@ describe('DiscussionSidebar — Mark all as read (0.8.3 #277)', () => {
     // and render without breakage — the button simply hides.
     const discs = [mkDisc('d1', 100)];
     render(
-      <DiscussionSidebar
+      <TestRouter><DiscussionSidebar
         {...baseProps}
         discussions={discs}
         lastSeenMsgCount={{}}
         // onMarkAllRead INTENTIONALLY OMITTED
-      />
+      /></TestRouter>
     );
     expect(screen.queryByLabelText('disc.markAllRead')).not.toBeInTheDocument();
   });
@@ -155,12 +156,12 @@ describe('DiscussionSidebar — Mark all as read (0.8.3 #277)', () => {
     // The button must surface even when ALL unread sits in archives.
     const discs = [mkDisc('d1', 0), mkDisc('archived', 559, true)];
     render(
-      <DiscussionSidebar
+      <TestRouter><DiscussionSidebar
         {...baseProps}
         discussions={discs}
         lastSeenMsgCount={{ d1: 0 }}
         onMarkAllRead={vi.fn()}
-      />
+      /></TestRouter>
     );
     const btn = screen.getByLabelText('disc.markAllRead');
     expect(btn.getAttribute('title')).toContain('559');
@@ -173,13 +174,13 @@ describe('DiscussionSidebar — Mark all as read (0.8.3 #277)', () => {
     // even though every OTHER disc is still unread, which is wrong.
     const discs = [mkDisc('active', 200), mkDisc('other', 100)];
     render(
-      <DiscussionSidebar
+      <TestRouter><DiscussionSidebar
         {...baseProps}
         discussions={discs}
         activeId="active"
         lastSeenMsgCount={{}}
         onMarkAllRead={vi.fn()}
-      />
+      /></TestRouter>
     );
     const btn = screen.getByLabelText('disc.markAllRead');
     expect(btn.getAttribute('title')).toContain('300');
@@ -201,12 +202,12 @@ describe('DiscussionSidebar — Mark all as read (0.8.3 #277)', () => {
       non_system_message_count: 75,  // the real to-read count
     };
     render(
-      <DiscussionSidebar
+      <TestRouter><DiscussionSidebar
         {...baseProps}
         discussions={[disc]}
         lastSeenMsgCount={{}}
         onMarkAllRead={vi.fn()}
-      />
+      /></TestRouter>
     );
     const btn = screen.getByLabelText('disc.markAllRead');
     expect(btn.getAttribute('title')).toContain('75');

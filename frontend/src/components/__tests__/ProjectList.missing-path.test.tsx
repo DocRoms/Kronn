@@ -22,6 +22,7 @@ vi.mock('../ProjectCard', () => ({
 }));
 vi.mock('../MatrixText', () => ({ MatrixText: ({ text }: { text: string }) => <span>{text}</span> }));
 
+import { TestRouter } from '../../test/routerWrapper';
 import { ProjectList } from '../ProjectList';
 
 const noop = () => {};
@@ -39,28 +40,27 @@ function proj(id: string, name: string, path: string, path_exists?: boolean): Pr
 
 function renderList(projects: Project[]) {
   render(
-    <ProjectList
-      projects={projects}
-      discussions={[]}
-      discussionsByProject={{}}
-      driftByProject={{}}
-      agents={[]}
-      allSkills={[]}
-      mcpConfigs={[]}
-      workflows={[]}
-      configLanguage="fr"
-      toast={noop}
-      onNavigate={noop}
-      onSetDiscPrefill={noop}
-      onAutoRunDiscussion={noop}
-      onOpenDiscussion={noop}
-      onRefetch={noop}
-      onRefetchDiscussions={noop}
-      onRefetchSkills={noop}
-      onRefetchDrift={noop}
-      expandedId={null}
-      onSetExpandedId={noop}
-    />
+    <TestRouter>
+      <ProjectList
+        projects={projects}
+        discussions={[]}
+        discussionsByProject={{}}
+        driftByProject={{}}
+        agents={[]}
+        allSkills={[]}
+        mcpConfigs={[]}
+        workflows={[]}
+        configLanguage="fr"
+        toast={noop}
+        onSetDiscPrefill={noop}
+        onRefetch={noop}
+        onRefetchDiscussions={noop}
+        onRefetchSkills={noop}
+        onRefetchDrift={noop}
+        expandedId={null}
+        onSetExpandedId={noop}
+      />
+    </TestRouter>
   );
 }
 

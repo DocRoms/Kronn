@@ -195,7 +195,8 @@ offer both “Create only” and “Create and run”. `[src: user: 2026-07-24: 
    tasks, quick creation/completion and direct navigation to each task's global
    Planning detail without duplicating task state.
    `[src: file: frontend/src/components/ProjectTasksPanel.tsx:1-200]`
-   `[src: file: frontend/src/pages/Dashboard.tsx:1260-1310]`
+   `[src: file: frontend/src/components/ProjectCard.tsx:1758-1770]`
+   `[src: file: frontend/src/routes/PlanningRoute.tsx:1-22]`
 7. **Deferred delegation** — task-to-discussion briefing and agent launch only
    after the task workflow is proven manually.
 

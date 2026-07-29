@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import '../pages/DiscussionsPage.css';
 import { ProfileTooltip } from './ProfileTooltip';
 import { Dropdown } from './Dropdown';
+import { useKronnNavigate } from '../hooks/useKronnNavigate';
 import { skills as skillsApi, profiles as profilesApi, directives as directivesApi, config as configApi } from '../lib/api';
 import type { Project, AgentDetection, AgentType, AgentsConfig, Skill, AgentProfile, Directive } from '../types/generated';
 import { AGENT_LABELS, isAgentRestricted as isAgentRestrictedUtil, isUsable, isHiddenPath, RTK_APPLICABLE, isRtkActive } from '../lib/constants';
@@ -42,7 +43,6 @@ export interface NewDiscussionFormProps {
   onSubmit: (config: NewDiscConfig) => void;
   onClose: () => void;
   onPrefillConsumed?: () => void;
-  onNavigate: (page: string) => void;
   t: (key: string, ...args: (string | number)[]) => string;
 }
 
@@ -56,9 +56,9 @@ export function NewDiscussionForm({
   onSubmit,
   onClose,
   onPrefillConsumed,
-  onNavigate,
   t,
 }: NewDiscussionFormProps) {
+  const nav = useKronnNavigate();
   // ─── Internal state ──────────────────────────────────────────────────────
   const [newDiscTitle, setNewDiscTitle] = useState('');
   const [newDiscAgent, setNewDiscAgent] = useState<AgentType | ''>('');
@@ -273,7 +273,7 @@ export function NewDiscussionForm({
               <span className="disc-restricted-warn-text">
                 {t('disc.rtkWarn')}
                 {' — '}
-                <span style={{ cursor: 'pointer', textDecoration: 'underline' }} onClick={() => { onClose(); onNavigate('settings'); }}>{t('disc.rtkWarnLink')}</span>
+                <span style={{ cursor: 'pointer', textDecoration: 'underline' }} onClick={() => { onClose(); nav.toConfig(); }}>{t('disc.rtkWarnLink')}</span>
               </span>
             </div>
           );
@@ -349,7 +349,7 @@ export function NewDiscussionForm({
             <span className="disc-restricted-warn-text">
               {t('config.restrictedAgent', AGENT_LABELS[newDiscAgent] ?? newDiscAgent)}
               {' — '}
-              <span style={{ cursor: 'pointer', textDecoration: 'underline' }} onClick={() => { onClose(); onNavigate('settings'); }}>{t('config.restrictedAgentLink')}</span>
+              <span style={{ cursor: 'pointer', textDecoration: 'underline' }} onClick={() => { onClose(); nav.toConfig(); }}>{t('config.restrictedAgentLink')}</span>
             </span>
           </div>
         )}

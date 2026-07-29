@@ -17,6 +17,7 @@
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, act, cleanup, fireEvent, waitFor } from '@testing-library/react';
+import { createMemoryRouter, RouterProvider } from 'react-router';
 import { I18nProvider } from '../../lib/I18nContext';
 
 // `vi.mock` is hoisted above top-level `const`s, so we use `vi.hoisted`
@@ -102,9 +103,12 @@ afterEach(() => {
   localStorage.clear();
 });
 
-const wrap = async (ui: React.ReactElement) => {
+const wrap = async (dashboardEl: React.ReactElement) => {
+  const router = createMemoryRouter([
+    { path: '/', element: dashboardEl, children: [{ path: 'projects' }] },
+  ], { initialEntries: ['/projects'] });
   let result: ReturnType<typeof render>;
-  await act(async () => { result = render(<I18nProvider>{ui}</I18nProvider>); });
+  await act(async () => { result = render(<I18nProvider><RouterProvider router={router} /></I18nProvider>); });
   await act(async () => { await new Promise(r => setTimeout(r, 0)); });
   return result!;
 };
@@ -147,10 +151,6 @@ const switchToCloneTab = async () => {
 };
 
 const baseProps = {
-  navigate: vi.fn(),
-  onNavigateDiscussion: vi.fn(),
-  onResetWorkspace: vi.fn(),
-  onProjectChange: vi.fn(),
   onReset: vi.fn(),
 };
 

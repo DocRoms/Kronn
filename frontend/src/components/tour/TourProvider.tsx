@@ -1,6 +1,7 @@
 import { createContext, useContext, useState, useCallback, useEffect, useRef } from 'react';
-import { TOUR_STEPS, type Page, type TourStep } from './tourSteps';
+import { TOUR_STEPS, type TourStep } from './tourSteps';
 import { waitForElement } from './useTourPositioning';
+import { useKronnNavigate } from '../../hooks/useKronnNavigate';
 
 const STORAGE_KEY = 'kronn:tour-completed';
 /** Step index where the user left off, persisted so an accidental
@@ -48,11 +49,11 @@ export function useTour(): TourContextValue {
 }
 
 interface TourProviderProps {
-  setPage: (page: Page) => void;
   children: React.ReactNode;
 }
 
-export function TourProvider({ setPage, children }: TourProviderProps) {
+export function TourProvider({ children }: TourProviderProps) {
+  const nav = useKronnNavigate();
   const [active, setActive] = useState(false);
   const [stepIndex, setStepIndex] = useState(0);
   const [waitingForClick, setWaitingForClick] = useState(false);
@@ -108,7 +109,7 @@ export function TourProvider({ setPage, children }: TourProviderProps) {
 
     // Page navigation
     if (toStep.page !== fromStep?.page) {
-      setPage(toStep.page);
+      nav.toPage(toStep.page);
       await new Promise(r => setTimeout(r, 300));
     }
 
@@ -164,7 +165,7 @@ export function TourProvider({ setPage, children }: TourProviderProps) {
     setStepIndex(targetIndex);
     saveResumeStep(targetIndex);
     navigatingRef.current = false;
-  }, [setPage, cleanupClickListener, complete]);
+  }, [nav, cleanupClickListener, complete]);
 
   // Pre-fix: `next` and `prev` bailed out when `waitingForClick === true`,
   // and the TourOverlay also hid the buttons in that state. Effect: on
@@ -204,7 +205,7 @@ export function TourProvider({ setPage, children }: TourProviderProps) {
     setStepIndex(resumeStep);
     saveResumeStep(resumeStep);
     setActive(true);
-    setPage(TOUR_STEPS[resumeStep]?.page ?? TOUR_STEPS[0].page);
+    nav.toPage(TOUR_STEPS[resumeStep]?.page ?? TOUR_STEPS[0].page);
     // If resuming mid-tour, drive the full navigation pipeline so the
     // target step's `beforeStep` hook (and any page switch) runs —
     // otherwise a refresh inside the profiles sub-flow would land on
@@ -212,7 +213,7 @@ export function TourProvider({ setPage, children }: TourProviderProps) {
     if (resumeStep > 0) {
       setTimeout(() => { navigateToStep(resumeStep); }, 50);
     }
-  }, [setPage, cleanupClickListener, navigateToStep]);
+  }, [nav, cleanupClickListener, navigateToStep]);
 
   // Auto-launch on first visit, OR resume a tour the user abandoned
   // before completing it (saved step > 0 and no completion flag).

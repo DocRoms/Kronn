@@ -1,6 +1,10 @@
 import './Dashboard.css';
-import { useState, useCallback, useRef, useEffect, useMemo, lazy, Suspense } from 'react';
+import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
+import { useNavigate, useLocation, Outlet } from 'react-router';
 import { projects as projectsApi, mcps as mcpsApi, agents as agentsApi, discussions as discussionsApi, workflows as workflowsApi, config as configApi, skills as skillsApi } from '../lib/api';
+import { PAGE_PATHS, pathToPage } from '../lib/routeConstants';
+import type { Page } from '../lib/routeConstants';
+import type { DashboardOutletContext } from '../lib/dashboardContext';
 import { useApi } from '../hooks/useApi';
 import { useToast } from '../hooks/useToast';
 import type { RemoteRepo, RepoSource, DiscoverSourceError, DriftCheckResponse, AuditProgress } from '../types/generated';
@@ -16,19 +20,8 @@ import { TourProvider } from '../components/tour/TourProvider';
 import { TourOverlay } from '../components/tour/TourOverlay';
 import { TourHelpButton } from '../components/tour/TourHelpButton';
 import { fetchSttModelId } from '../lib/stt-models';
-import { ErrorBoundary } from '../components/ErrorBoundary';
-// Heavy page components lazy-loaded so the initial Dashboard chunk stays
-// under 500 KB. Each one is its own chunk and only fetched when the user
-// switches to that tab. Dropped Dashboard chunk from 949 KB → ~430 KB,
-// at the cost of a one-time ~100 ms fetch on first tab switch.
-const McpPage = lazy(() => import('./McpPage').then(m => ({ default: m.McpPage })));
-const WorkflowsPage = lazy(() => import('./WorkflowsPage').then(m => ({ default: m.WorkflowsPage })));
-const PlanningPage = lazy(() => import('./PlanningPage').then(m => ({ default: m.PlanningPage })));
-const SettingsPage = lazy(() => import('./SettingsPage').then(m => ({ default: m.SettingsPage })));
-const DiscussionsPage = lazy(() => import('./DiscussionsPage').then(m => ({ default: m.DiscussionsPage })));
 import { ActiveRunsPopover } from '../components/workflows/ActiveRunsPopover';
 import { ActiveAuditsPopover } from '../components/ActiveAuditsPopover';
-import { ProjectList } from '../components/ProjectList';
 import {
   Folder, FolderOpen, Puzzle,
   Plus, Search, Zap, Settings,
@@ -37,8 +30,6 @@ import {
   Rocket, Check, Workflow, FileText, ListTodo,
 } from 'lucide-react';
 
-type Page = 'projects' | 'mcps' | 'workflows' | 'discussions' | 'planning' | 'settings';
-
 interface DashboardProps {
   onReset: () => void;
 }
@@ -46,21 +37,15 @@ interface DashboardProps {
 /** Agents that can run audits/briefings (need filesystem access + CLI mode). Excludes Vibe (API-only). */
 const canAudit = (a: { installed: boolean; runtime_available: boolean; enabled: boolean; agent_type: string }) => isUsable(a) && a.agent_type !== 'Vibe';
 
-// Suspense fallback for the lazy-loaded page chunks. Lightweight on purpose
-// — anything richer (skeleton, spinner) would itself need to be fetched
-// from the page chunk, which defeats the whole point.
-function PageFallback() {
-  return <div style={{ padding: 24, opacity: 0.6, fontSize: 13 }}>Chargement…</div>;
-}
 
-// Sort score for project readiness
 export function Dashboard({ onReset }: DashboardProps) {
   const { t } = useT();
   const isMobile = useIsMobile();
   const { toast, ToastContainer } = useToast();
-  const [page, setPage] = useState<Page>('projects');
-  const [mcpSelectedConfigId, setMcpSelectedConfigId] = useState<string | null>(null);
-  const [planningSelectedTaskId, setPlanningSelectedTaskId] = useState<string | null>(null);
+  const navigate = useNavigate();
+  const location = useLocation();
+  const page: Page = pathToPage(location.pathname) ?? 'projects';
+
   const [expandedId, setExpandedId] = useState<string | null>(null);
   // Cross-page prefill for discussion creation (e.g. "validate audit" from Projects)
   const [discPrefill, setDiscPrefill] = useState<{ projectId: string; title: string; prompt: string; locked?: boolean } | null>(null);
@@ -69,25 +54,7 @@ export function Dashboard({ onReset }: DashboardProps) {
     try { return JSON.parse(localStorage.getItem('kronn:lastSeenMsgCount') ?? '{}'); } catch { return {}; }
   });
   const [activeDiscussionId, setActiveDiscussionId] = useState<string | null>(null);
-  // Auto-run agent on a discussion (after full audit creates validation discussion)
-  const [autoRunDiscussionId, setAutoRunDiscussionId] = useState<string | null>(null);
-  // Open a specific discussion without triggering agent (e.g. Resume Validation button)
-  const [openDiscussionId, setOpenDiscussionId] = useState<string | null>(null);
-  // When the sidebar batch pastille is clicked, we hand the workflow id to
-  // WorkflowsPage via this prop. It's cleared right after consumption so the
-  // navigation only fires once per click.
-  const [openWorkflowId, setOpenWorkflowId] = useState<string | null>(null);
   const [activeRunsPopoverOpen, setActiveRunsPopoverOpen] = useState(false);
-  // Reverse direction: when a "📋 View N discussions" chip on a workflow run
-  // is clicked, we hand the batch run id to DiscussionsPage so the sidebar
-  // expands the matching batch group + scrolls to it.
-  const [focusBatchId, setFocusBatchId] = useState<string | null>(null);
-  // 0.8.2 — Deep-link from the validation-discussion CTA: opens the
-  // workflow wizard pre-loaded with a preset (e.g. `ticket-to-pr` for
-  // AutoPilot) bound to the project of the audit that just completed.
-  // Cleared by WorkflowsPage's onPendingPresetConsumed after the wizard
-  // captures it locally.
-  const [pendingWorkflowPreset, setPendingWorkflowPreset] = useState<{ presetId: string; projectId: string } | null>(null);
 
   // ─── Drift detection state ──────────
   const [driftByProject, setDriftByProject] = useState<Record<string, DriftCheckResponse>>({});
@@ -128,13 +95,14 @@ export function Dashboard({ onReset }: DashboardProps) {
 
   const { data: projectList, initialLoading: projectsLoading, refetch } = useApi(() => projectsApi.list(), []);
 
-  // ─── Deep-link: #project-<id> hash → auto-expand + scroll ──────────
-  // Used by the CLI: `kronn` opens `http://localhost:3140/#project-<id>`
-  // so the dashboard scrolls directly to the right project card.
+  // ─── Deep-link: legacy #project-<id> hash → /projects/:id ──────────
+  // Used by the CLI: `kronn` opens `http://localhost:3140/#project-<id>`.
+  // Predates URL routing — now it redirects to the canonical route (which
+  // selects the project) and scrolls its list row into view.
   //
-  // Timing: consumed AFTER `projectList` is loaded (not on mount) because
-  // the ProjectCard DOM nodes don't exist until the fetch completes. A ref
-  // guards against re-firing on subsequent refetches.
+  // Timing: consumed AFTER `projectList` is loaded (not on mount) so the
+  // id can be validated and the row's DOM node exists. A ref guards
+  // against re-firing on subsequent refetches.
   const hashConsumedRef = useRef(false);
   useEffect(() => {
     if (hashConsumedRef.current) return;
@@ -150,26 +118,18 @@ export function Dashboard({ onReset }: DashboardProps) {
 
     hashConsumedRef.current = true;
 
-    // Ensure we're on the Projects page (not Discussions / MCPs / etc.)
-    setPage('projects');
-    // Expand the card...
-    setExpandedId(projectId);
+    // The redirect also drops the hash, so a refresh lands on the clean URL.
+    navigate(`/projects/${projectId}`, { replace: true });
 
-    // ...then scroll after React re-renders with the card open. Two rAF
-    // frames: one for React to commit the DOM, one for the browser to
-    // layout the expanded card.
+    // Scroll after React re-renders with the row selected. Two rAF
+    // frames: one for React to commit the DOM, one for the browser layout.
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
         const el = document.getElementById(`project-${projectId}`);
         if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
       });
     });
-
-    // Clean the hash so a page refresh doesn't re-trigger.
-    if (window.history.replaceState) {
-      window.history.replaceState(null, '', window.location.pathname);
-    }
-  }, [projectList]);  
+  }, [projectList, navigate]);
 
   const { data: registry } = useApi(() => mcpsApi.registry(), []);
   const { data: mcpOverviewData, refetch: refetchMcps } = useApi(() => mcpsApi.overview(), []);
@@ -413,8 +373,6 @@ export function Dashboard({ onReset }: DashboardProps) {
 
   // Stable callback for prefill consumed
   const handlePrefillConsumed = useCallback(() => setDiscPrefill(null), []);
-  const handleAutoRunConsumed = useCallback(() => setAutoRunDiscussionId(null), []);
-  const handleOpenDiscConsumed = useCallback(() => setOpenDiscussionId(null), []);
 
   // Drift refetch callback for ProjectCard partial audit
   const handleRefetchDrift = useCallback((projectId: string) => {
@@ -533,8 +491,7 @@ export function Dashboard({ onReset }: DashboardProps) {
       setBootstrapTrackerMcp('');
       await refetch();
       // Navigate to discussions with auto-run on the bootstrap discussion
-      setAutoRunDiscussionId(res.discussion_id);
-      setPage('discussions');
+      navigate(`/discussions/${res.discussion_id}`, { state: { autoRun: true } });
       toast(`Projet "${bootstrapName}" cree`, 'success');
     } catch (e) {
       toast(`Erreur: ${e}`, 'error');
@@ -638,10 +595,43 @@ export function Dashboard({ onReset }: DashboardProps) {
     }
   };
 
+  const onBatchSendingMark = useCallback((discIds: string[]) => {
+    setSendingMap(prev => {
+      const next = { ...prev };
+      for (const id of discIds) next[id] = true;
+      return next;
+    });
+    setSendingStartMap(prev => {
+      const next = { ...prev };
+      const now = Date.now();
+      for (const id of discIds) next[id] = now;
+      return next;
+    });
+  }, []);
+
+  const outletContext: DashboardOutletContext = {
+    projects, projectsLoading, agents, allDiscussions, allSkills,
+    workflowList: workflowList ?? [],
+    activeAudits, configLanguage: configLanguage ?? null,
+    agentAccess: agentAccess ?? null,
+    mcpOverview, mcpRegistry: mcpRegistry ?? [],
+    discussionsByProject, driftByProject, lastSeenMsgCount,
+    sendingMap, setSendingMap, queuedMap, setQueuedMap,
+    sendingStartMap, setSendingStartMap, streamingMap, setStreamingMap,
+    noteStreamTick, abortControllers, cleanupStream,
+    expandedId, setExpandedId, discPrefill, setDiscPrefill,
+    handlePrefillConsumed, activeDiscussionId, setActiveDiscussionId,
+    toast, refetch, refetchDiscussions, refetchSkills,
+    refetchAgents, refetchAgentAccess, refetchLanguage,
+    refetchMcps, handleRefetchDrift,
+    markDiscussionSeen, markAllDiscussionsSeen,
+    onReset, onBatchSendingMark,
+  };
+
   return (
     <div className="dash-app">
       <ToastContainer />
-      <TourProvider setPage={setPage as (p: string) => void}>
+      <TourProvider>
       {/* Nav */}
       <nav className="dash-nav">
         <div className="dash-nav-brand" data-mobile={isMobile}>
@@ -713,9 +703,7 @@ export function Dashboard({ onReset }: DashboardProps) {
                   setActiveAuditsPopoverOpen(o => !o);
                   return;
                 }
-                setPage(id as Page);
-                if (id !== 'mcps') setMcpSelectedConfigId(null);
-                setPlanningSelectedTaskId(null);
+                navigate(PAGE_PATHS[id as Page]);
               }}
               title={label}
             >
@@ -773,19 +761,6 @@ export function Dashboard({ onReset }: DashboardProps) {
                     audits={activeAudits}
                     projects={projects}
                     onClose={() => setActiveAuditsPopoverOpen(false)}
-                    onNavigateToProject={(projectId) => {
-                      // 0.8.3 (#288) — same pattern as workflow nav:
-                      // navigate to the page and let the ProjectCard
-                      // resume effect surface the live progress bar
-                      // (poll auditStatus inside the card kicks in).
-                      setExpandedId(projectId);
-                      setPage('projects');
-                      setActiveAuditsPopoverOpen(false);
-                    }}
-                    onViewAllProjects={() => {
-                      setPage('projects');
-                      setActiveAuditsPopoverOpen(false);
-                    }}
                     onAfterCancel={async () => {
                       // Refetch the fleet-wide audit list so the
                       // popover updates instantly when a cancel
@@ -817,15 +792,6 @@ export function Dashboard({ onReset }: DashboardProps) {
                   <ActiveRunsPopover
                     workflows={workflowList ?? []}
                     onClose={() => setActiveRunsPopoverOpen(false)}
-                    onNavigateToWorkflow={(wfId) => {
-                      setOpenWorkflowId(wfId);
-                      setPage('workflows');
-                      setActiveRunsPopoverOpen(false);
-                    }}
-                    onViewAllWorkflows={() => {
-                      setPage('workflows');
-                      setActiveRunsPopoverOpen(false);
-                    }}
                     onAfterCancel={() => { refetchWorkflows(); }}
                   />
                 )}
@@ -841,7 +807,7 @@ export function Dashboard({ onReset }: DashboardProps) {
             type="button"
             className="dash-running-badge"
             title={t('nav.agentsRunningHint')}
-            onClick={() => setPage('discussions')}
+            onClick={() => navigate(PAGE_PATHS.discussions)}
           >
             <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} />
             {!isMobile && <span>{t('nav.agentsRunning', String(runningDiscIds.length))}</span>}
@@ -1253,233 +1219,9 @@ export function Dashboard({ onReset }: DashboardProps) {
         </div>
       )}
 
-      {/* Content */}
+      {/* Content — child routes render via Outlet */}
       <main className="dash-main">
-
-        {/* ════════ PROJETS ════════ */}
-        {page === 'projects' && (<ErrorBoundary mode="zone" label="Projects">
-          {projectsLoading && (
-            <div className="dash-loading-bar">
-              <Loader2 size={14} className="spin" />
-              <span className="text-sm text-muted">{t('projects.loading')}</span>
-            </div>
-          )}
-          <ProjectList
-            projects={projects}
-            activeAudits={activeAudits}
-            discussions={allDiscussions}
-            discussionsByProject={discussionsByProject}
-            driftByProject={driftByProject}
-            agents={agents}
-            allSkills={allSkills}
-            mcpConfigs={mcpOverview.configs}
-            workflows={workflowList ?? []}
-            configLanguage={configLanguage ?? null}
-            toast={toast}
-            onNavigate={(p) => {
-              if (p.startsWith('mcps:')) {
-                setMcpSelectedConfigId(p.split(':')[1]);
-                setPage('mcps');
-              } else if (p.startsWith('planning:')) {
-                setPlanningSelectedTaskId(p.slice('planning:'.length));
-                setPage('planning');
-              } else if (p === 'planning') {
-                setPlanningSelectedTaskId(null);
-                setPage('planning');
-              } else {
-                setPage(p as Page);
-              }
-            }}
-            onSetDiscPrefill={setDiscPrefill}
-            onAutoRunDiscussion={setAutoRunDiscussionId}
-            onOpenDiscussion={setOpenDiscussionId}
-            onRefetch={refetch}
-            onRefetchDiscussions={refetchDiscussions}
-            onRefetchSkills={refetchSkills}
-            onRefetchDrift={handleRefetchDrift}
-            expandedId={expandedId}
-            onSetExpandedId={setExpandedId}
-          />
-        </ErrorBoundary>)}
-
-        {/* ════════ PLANIFICATION ════════ */}
-        {page === 'planning' && (
-          <ErrorBoundary mode="zone" label="Planning">
-            <Suspense fallback={<PageFallback />}>
-              <PlanningPage
-                key={planningSelectedTaskId ?? 'planning'}
-                initialSelectedTaskId={planningSelectedTaskId}
-                projects={projects}
-                discussions={allDiscussions}
-                toast={toast}
-                onNavigateDiscussion={(discussionId) => {
-                  setOpenDiscussionId(discussionId);
-                  setPage('discussions');
-                }}
-              />
-            </Suspense>
-          </ErrorBoundary>
-        )}
-
-        {/* ════════ Plugins ════════ */}
-        {page === 'mcps' && (
-          <ErrorBoundary mode="zone" label="Plugins">
-            <Suspense fallback={<PageFallback />}>
-              <McpPage projects={projects} mcpOverview={mcpOverview} mcpRegistry={mcpRegistry} refetchMcps={refetchMcps} initialSelectedConfigId={mcpSelectedConfigId} installedAgentTypes={agents.filter(isUsable).map(a => a.agent_type)} configLanguage={configLanguage ?? undefined} />
-            </Suspense>
-          </ErrorBoundary>
-        )}
-
-        {/* ════════ WORKFLOWS ════════ */}
-        {page === 'workflows' && (
-          <ErrorBoundary mode="zone" label="Workflows">
-            <Suspense fallback={<PageFallback />}>
-            <WorkflowsPage
-              projects={projects}
-              installedAgentTypes={agents.filter(isUsable).map(a => a.agent_type)}
-              agentAccess={agentAccess ?? undefined}
-              configLanguage={configLanguage ?? undefined}
-              toast={toast}
-              initialSelectedWorkflowId={openWorkflowId}
-              onInitialSelectionConsumed={() => setOpenWorkflowId(null)}
-              pendingPreset={pendingWorkflowPreset}
-              onPendingPresetConsumed={() => setPendingWorkflowPreset(null)}
-              onNavigateToBatch={(batchRunId) => {
-                setFocusBatchId(batchRunId);
-                setPage('discussions');
-              }}
-              onNavigateDiscussion={(discId) => { setAutoRunDiscussionId(discId); setPage('discussions'); }}
-              onBatchLaunched={(discIds, batchRunId) => {
-                // Mark every batch-child disc as sending so the sidebar
-                // spinner lights up for all of them in parallel, not just
-                // the one we navigate to. The parent (Dashboard) owns
-                // sendingMap; WorkflowsPage only lives in the workflow tab.
-                setSendingMap(prev => {
-                  const next = { ...prev };
-                  for (const id of discIds) next[id] = true;
-                  return next;
-                });
-                setSendingStartMap(prev => {
-                  const next = { ...prev };
-                  const now = Date.now();
-                  for (const id of discIds) next[id] = now;
-                  return next;
-                });
-                // Navigate to the discussions tab and focus the batch
-                // group in the sidebar — expand the project group + the
-                // batch group + scroll to it. `focusBatchId` is consumed
-                // by DiscussionsPage's useEffect which handles the expand
-                // + scroll after the refetch settles.
-                if (discIds.length > 0) {
-                  setOpenDiscussionId(discIds[0]);
-                  setFocusBatchId(batchRunId);
-                  setPage('discussions');
-                }
-                // Force a refetch so the new discs show up in the sidebar
-                // grouped under their batch run.
-                refetchDiscussions?.();
-              }}
-            />
-            </Suspense>
-          </ErrorBoundary>
-        )}
-
-        {/* ════════ DISCUSSIONS ════════ */}
-        {page === 'discussions' && (
-          <ErrorBoundary mode="zone" label="Discussions">
-          <Suspense fallback={<PageFallback />}>
-          <DiscussionsPage
-            projects={projects}
-            agents={agents}
-            allDiscussions={allDiscussions}
-            configLanguage={configLanguage ?? null}
-            agentAccess={agentAccess ?? null}
-            refetchDiscussions={refetchDiscussions}
-            refetchProjects={refetch}
-            onNavigate={(p, opts) => {
-              setPage(p as Page);
-              if (opts?.projectId) {
-                setExpandedId(opts.projectId);
-                setTimeout(() => {
-                  document.getElementById(`project-${opts.projectId}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                }, 100);
-              }
-              if (opts?.scrollTo) {
-                const target = opts.scrollTo;
-                setTimeout(() => {
-                  document.getElementById(target)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-                }, 200);
-              }
-              // Sidebar batch pastille → workflows tab + pre-open the parent workflow's detail.
-              if (opts?.workflowId) {
-                setOpenWorkflowId(opts.workflowId);
-              }
-            }}
-            prefill={discPrefill}
-            onPrefillConsumed={handlePrefillConsumed}
-            onSetDiscPrefill={setDiscPrefill}
-            autoRunDiscussionId={autoRunDiscussionId}
-            onAutoRunConsumed={handleAutoRunConsumed}
-            onLaunchWorkflowFromPreset={(presetId, projectId) => {
-              setPendingWorkflowPreset({ presetId, projectId });
-              setPage('workflows');
-            }}
-            openDiscussionId={openDiscussionId}
-            onOpenDiscConsumed={handleOpenDiscConsumed}
-            focusBatchId={focusBatchId}
-            onFocusBatchConsumed={() => setFocusBatchId(null)}
-            toast={toast}
-            sendingMap={sendingMap}
-            setSendingMap={setSendingMap}
-            queuedMap={queuedMap}
-            setQueuedMap={setQueuedMap}
-            sendingStartMap={sendingStartMap}
-            setSendingStartMap={setSendingStartMap}
-            streamingMap={streamingMap}
-            setStreamingMap={setStreamingMap}
-            noteStreamTick={noteStreamTick}
-            abortControllers={abortControllers}
-            cleanupStream={cleanupStream}
-            markDiscussionSeen={markDiscussionSeen}
-            markAllDiscussionsSeen={markAllDiscussionsSeen}
-            onActiveDiscussionChange={setActiveDiscussionId}
-            initialActiveDiscussionId={openDiscussionId ?? activeDiscussionId}
-            lastSeenMsgCount={lastSeenMsgCount}
-            mcpConfigs={mcpOverview.configs}
-            mcpIncompatibilities={mcpOverview.incompatibilities}
-          />
-          </Suspense>
-          </ErrorBoundary>
-        )}
-
-        {/* ════════ CONFIG ════════ */}
-        {page === 'settings' && (
-          <ErrorBoundary mode="zone" label="Settings">
-          <Suspense fallback={<PageFallback />}>
-          <SettingsPage
-            agents={agents}
-            agentAccess={agentAccess ?? null}
-            configLanguage={configLanguage ?? null}
-            projects={projects}
-            refetchAgents={refetchAgents}
-            refetchAgentAccess={refetchAgentAccess}
-            refetchLanguage={refetchLanguage}
-            refetchProjects={refetch}
-            refetchDiscussions={refetchDiscussions}
-            onReset={onReset}
-            onNavigateDiscussion={(id) => { setOpenDiscussionId(id); setPage('discussions'); }}
-            toast={toast}
-            // 0.8.6 — API audit section visibility : only show if at
-            // least one API plugin (registry or custom) has a config
-            // in this Kronn instance. Computed from mcpOverview so the
-            // section disappears for users who don't use APIs yet.
-            hasConfiguredApi={mcpOverview.configs.some(cfg =>
-              mcpOverview.servers.some(s => s.id === cfg.server_id && s.api_spec != null)
-            )}
-          />
-          </Suspense>
-          </ErrorBoundary>
-        )}
+        <Outlet context={outletContext} />
       </main>
       <TourOverlay />
       </TourProvider>

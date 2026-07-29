@@ -19,6 +19,7 @@ import { Loader2, Square, X, ChevronRight } from 'lucide-react';
 import type { AuditProgress, Project } from '../types/generated';
 import { projects as projectsApi } from '../lib/api';
 import { useT } from '../lib/I18nContext';
+import { useKronnNavigate } from '../hooks/useKronnNavigate';
 // CSS class names are shared with the workflows popover (visual parity
 // + zero CSS duplication). We import the workflows stylesheet directly.
 import './workflows/ActiveRunsPopover.css';
@@ -27,8 +28,6 @@ export interface ActiveAuditsPopoverProps {
   audits: AuditProgress[];
   projects: Project[];
   onClose: () => void;
-  onNavigateToProject: (projectId: string) => void;
-  onViewAllProjects: () => void;
   /** Called after a cancel succeeds so the parent can refetch the
    *  fleet-wide audit-status snapshot. */
   onAfterCancel?: () => void;
@@ -51,11 +50,10 @@ export function ActiveAuditsPopover({
   audits,
   projects,
   onClose,
-  onNavigateToProject,
-  onViewAllProjects,
   onAfterCancel,
 }: ActiveAuditsPopoverProps) {
   const { t } = useT();
+  const nav = useKronnNavigate();
   const rootRef = useRef<HTMLDivElement>(null);
   const [cancellingIds, setCancellingIds] = useState<Set<string>>(new Set());
   const [nowTick, setNowTick] = useState(() => Date.now());
@@ -138,7 +136,7 @@ export function ActiveAuditsPopover({
                 <button
                   type="button"
                   className="wf-active-runs-item-body"
-                  onClick={() => onNavigateToProject(a.project_id)}
+                  onClick={() => { nav.toProject(a.project_id); onClose(); }}
                 >
                   <Loader2 size={12} className="spin text-accent" />
                   <div className="wf-active-runs-item-text">
@@ -178,7 +176,7 @@ export function ActiveAuditsPopover({
       <button
         type="button"
         className="wf-active-runs-footer"
-        onClick={onViewAllProjects}
+        onClick={() => { nav.toProjects(); onClose(); }}
       >
         <span>{t('audit.viewAllProjects')}</span>
         <ChevronRight size={12} />

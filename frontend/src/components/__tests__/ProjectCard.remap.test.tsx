@@ -20,6 +20,7 @@ vi.mock('../../lib/I18nContext', () => ({
 }));
 vi.mock('../../hooks/useMediaQuery', () => ({ useIsMobile: () => false }));
 
+import { TestRouter } from '../../test/routerWrapper';
 import { ProjectCard } from '../ProjectCard';
 import { projects as projectsApi } from '../../lib/api';
 import type { Project } from '../../types/generated';
@@ -47,27 +48,26 @@ function project(overrides: Partial<Project> = {}): Project {
 
 function renderCard(p: Project, { isOpen = false, onRefetch = vi.fn() } = {}) {
   render(
-    <ProjectCard
-      project={p}
-      isOpen={isOpen}
-      onToggleOpen={noop}
-      discussions={[]}
-      driftStatus={undefined}
-      agents={[]}
-      allSkills={[]}
-      mcpConfigs={[]}
-      workflows={[]}
-      configLanguage="fr"
-      toast={toast}
-      onNavigate={noop}
-      onSetDiscPrefill={noop}
-      onAutoRunDiscussion={noop}
-      onOpenDiscussion={noop}
-      onRefetch={onRefetch}
-      onRefetchDiscussions={noop}
-      onRefetchSkills={noop}
-      onRefetchDrift={noop}
-    />
+    <TestRouter>
+      <ProjectCard
+        project={p}
+        isOpen={isOpen}
+        onToggleOpen={noop}
+        discussions={[]}
+        driftStatus={undefined}
+        agents={[]}
+        allSkills={[]}
+        mcpConfigs={[]}
+        workflows={[]}
+        configLanguage="fr"
+        toast={toast}
+        onSetDiscPrefill={noop}
+        onRefetch={onRefetch}
+        onRefetchDiscussions={noop}
+        onRefetchSkills={noop}
+        onRefetchDrift={noop}
+      />
+    </TestRouter>
   );
   return { onRefetch };
 }

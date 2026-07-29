@@ -21,6 +21,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, within, waitFor } from '@testing-library/react';
+import { createMemoryRouter, RouterProvider } from 'react-router';
 import { I18nProvider } from '../../lib/I18nContext';
 
 // Mock the boot config call so I18nProvider doesn't try to fetch.
@@ -73,7 +74,6 @@ const baseProps: Omit<MessageBubbleProps, 'msg'> = {
   onEditTextChange: () => {},
   onRetry: () => {},
   onExpandSummary: () => {},
-  onNavigate: () => {},
   discussionId: 'disc-test',
   projectId: null,
   t: (key: string) => key,
@@ -82,12 +82,14 @@ const baseProps: Omit<MessageBubbleProps, 'msg'> = {
 function renderBubble(
   msg: DiscussionMessage,
   props: Partial<typeof baseProps> = {},
+  initialPath = '/',
 ) {
-  return render(
-    <I18nProvider>
-      <MessageBubble {...baseProps} {...props} msg={msg} />
-    </I18nProvider>,
+  const router = createMemoryRouter(
+    [{ path: '*', element: <I18nProvider><MessageBubble {...baseProps} {...props} msg={msg} /></I18nProvider> }],
+    { initialEntries: [initialPath] },
   );
+  const result = render(<RouterProvider router={router} />);
+  return { router, ...result };
 }
 
 describe('MessageBubble — role-based bubble variant', () => {
@@ -334,15 +336,12 @@ describe('MessageBubble — footer chips', () => {
   });
 
   it('renders the token count only when tokens_used > 0', () => {
-    const { container, rerender } = renderBubble(makeMessage({ role: 'Agent', tokens_used: 0 }));
+    const { container, unmount } = renderBubble(makeMessage({ role: 'Agent', tokens_used: 0 }));
     expect(container.querySelector('.disc-msg-token-count')).toBeNull();
+    unmount();
 
-    rerender(
-      <I18nProvider>
-        <MessageBubble {...baseProps} msg={makeMessage({ role: 'Agent', tokens_used: 12345 })} />
-      </I18nProvider>,
-    );
-    const tok = container.querySelector('.disc-msg-token-count');
+    const { container: c2 } = renderBubble(makeMessage({ role: 'Agent', tokens_used: 12345 }));
+    const tok = c2.querySelector('.disc-msg-token-count');
     expect(tok?.textContent).toContain('tok');
     // Locale-grouped number (12,345 / 12 345 / 12.345 depending on locale).
     expect(tok?.textContent).toMatch(/12[\s,.]?345/);
@@ -493,24 +492,21 @@ describe('MessageBubble — edit mode', () => {
 });
 
 describe('MessageBubble — inline CTAs', () => {
-  it('renders the override-key CTA on an auth-error message and navigates to settings', () => {
-    const onNavigate = vi.fn();
-    renderBubble(
+  it('renders the override-key CTA on an auth-error message and navigates to config', () => {
+    const { router } = renderBubble(
       makeMessage({ role: 'Agent', content: 'Error: invalid API key, please authenticate.' }),
-      { onNavigate },
     );
     fireEvent.click(screen.getByText('disc.overrideKey'));
-    expect(onNavigate).toHaveBeenCalledWith('settings');
+    expect(router.state.location.pathname).toBe('/config');
   });
 
-  it('renders the edit-timeout CTA on a partial-response message and scrolls to server config', () => {
-    const onNavigate = vi.fn();
-    renderBubble(
+  it('renders the edit-timeout CTA on a partial-response message and navigates to server config', () => {
+    const { router } = renderBubble(
       makeMessage({ role: 'Agent', content: "Réponse partielle — l'agent a été interrompu." }),
-      { onNavigate },
     );
     fireEvent.click(screen.getByText('disc.editTimeout'));
-    expect(onNavigate).toHaveBeenCalledWith('settings', { scrollTo: 'settings-server' });
+    expect(router.state.location.pathname).toBe('/config');
+    expect(router.state.location.hash).toBe('#settings-server');
   });
 });
 
