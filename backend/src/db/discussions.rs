@@ -935,9 +935,57 @@ pub fn insert_message_with_targets_and_dispatches(
     targets: &[MessageTarget],
     dispatches: &[UserDispatchSpec<'_>],
 ) -> Result<i64> {
+    insert_message_with_targets_dispatches_and_cli_author(
+        conn,
+        discussion_id,
+        msg,
+        targets,
+        dispatches,
+        None,
+    )
+}
+
+/// Persist a live CLI-authored peer turn atomically with its exact local
+/// session provenance. The provider-level `messages.agent_type` is not enough
+/// when two Codex (or ClaudeCode) CLIs are joined to the same room.
+pub fn insert_cli_message_with_targets_and_dispatches(
+    conn: &Connection,
+    discussion_id: &str,
+    msg: &DiscussionMessage,
+    targets: &[MessageTarget],
+    dispatches: &[UserDispatchSpec<'_>],
+    author_cli_session_id: i64,
+) -> Result<i64> {
+    insert_message_with_targets_dispatches_and_cli_author(
+        conn,
+        discussion_id,
+        msg,
+        targets,
+        dispatches,
+        Some(author_cli_session_id),
+    )
+}
+
+fn insert_message_with_targets_dispatches_and_cli_author(
+    conn: &Connection,
+    discussion_id: &str,
+    msg: &DiscussionMessage,
+    targets: &[MessageTarget],
+    dispatches: &[UserDispatchSpec<'_>],
+    author_cli_session_id: Option<i64>,
+) -> Result<i64> {
     let tx = conn.unchecked_transaction()?;
     let sort_order = insert_message(&tx, discussion_id, msg)?;
-    replace_message_targets(&tx, &msg.id, targets)?;
+    if let Some(cli_session_id) = author_cli_session_id {
+        set_message_cli_author(&tx, &msg.id, cli_session_id)?;
+    }
+    // An empty typed list may still carry a legacy `target_agent`
+    // compatibility projection on the freshly inserted message. Replacing it
+    // with an empty list would erase that projection. With typed targets, the
+    // plural table remains authoritative and updates the projection normally.
+    if !targets.is_empty() {
+        replace_message_targets(&tx, &msg.id, targets)?;
+    }
     if !dispatches.is_empty() {
         let empty_chain = Vec::new();
         for dispatch in dispatches {
@@ -1575,6 +1623,56 @@ pub fn list_message_targets(conn: &Connection, message_id: &str) -> Result<Vec<M
         .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(anyhow::Error::from)?;
     Ok(targets)
+}
+
+/// Record which exact joined CLI session authored a live MCP message.
+///
+/// This is deliberately local provenance rather than part of the portable
+/// transcript model: imported/federated messages must never impersonate a
+/// local CLI session.
+pub fn set_message_cli_author(
+    conn: &Connection,
+    message_id: &str,
+    cli_session_id: i64,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO message_cli_authors (message_id, cli_session_id)
+         VALUES (?1, ?2)
+         ON CONFLICT(message_id) DO UPDATE SET
+             cli_session_id = excluded.cli_session_id",
+        params![message_id, cli_session_id],
+    )?;
+    Ok(())
+}
+
+/// Resolve the durable exact CLI identity that should receive a reply to one
+/// local message. Session status is intentionally not filtered: reconnecting a
+/// CLI reuses the durable session row, and introspection must retain the author
+/// even while that peer is temporarily offline.
+pub fn message_cli_author_target(
+    conn: &Connection,
+    discussion_id: &str,
+    message_id: &str,
+) -> Result<Option<MessageTarget>> {
+    conn.query_row(
+        "SELECT ds.agent_type, mca.cli_session_id
+         FROM message_cli_authors mca
+         JOIN messages m ON m.id = mca.message_id
+         JOIN discussion_sessions ds
+           ON ds.id = mca.cli_session_id
+          AND ds.disc_id = m.discussion_id
+         WHERE mca.message_id = ?1
+           AND m.discussion_id = ?2",
+        params![message_id, discussion_id],
+        |row| {
+            Ok(MessageTarget::cli(
+                parse_agent_type(&row.get::<_, String>(0)?),
+                row.get(1)?,
+            ))
+        },
+    )
+    .optional()
+    .map_err(anyhow::Error::from)
 }
 
 /// 0.8.5 — Stamp the QP lineage on a discussion that was spawned by a

@@ -122,7 +122,9 @@ TOOLS = [
             "copyable `MSG-xxxxxxxx` / full UUID (`message_id`). Negative idx "
             "counts from the end (-1 = last). Optional `before` / `after` "
             "return a bounded surrounding window (maximum 10 each). Replies "
-            "expose their durable `reply_to_message_id`. Use this "
+            "expose their durable `reply_to_message_id`; locally-authored CLI "
+            "messages also expose `reply_target`, the exact joined session to "
+            "answer without guessing from the provider name. Use this "
             "when you need verbatim local context without loading or "
             "summarising the whole discussion. Cheap."
         ),
@@ -839,7 +841,7 @@ TOOLS = [
             "Long-poll the current Kronn discussion for new messages "
             "from OTHER agents. Blocks server-side (up to 170 s) until "
             "either a new message appears (newer than `since_sort_order`, "
-            "from an agent type different from this CLI's) or the "
+            "and not authored by this exact CLI session) or the "
             "timeout fires. Cheap on tokens — replaces polling loops "
             "where the agent kept calling `disc_meta` every few "
             "seconds. Returns `{timed_out, messages, "
@@ -857,6 +859,9 @@ TOOLS = [
             "(use `reply_to_message_id` for one transcript message). Current messages carry typed "
             "`targets` that distinguish the configured discussion agent, a "
             "punctual native agent, and one exact joined CLI. A joined CLI "
+            "message also carries `reply_target` when Kronn knows its exact "
+            "author session, so a reply stays attached to that CLI even when "
+            "several peers use the same provider. A joined CLI "
             "receives User turns only when its own CLI identity is selected; "
             "unrelated prompts are omitted to save tokens. Legacy "
             "`target_agents` / `target_agent` remain compatibility projections. IMPORTANT: "
@@ -2703,13 +2708,18 @@ def _session_id_for_caller():
     return _BRIDGE_SESSION_ID
 
 
-def _native_conversation_id():
+def _native_conversation_id(allow_probe=True):
     """Return the CLI's own resume id when the runtime exposes it.
 
     This is intentionally separate from `_session_id_for_caller()`: the latter
     identifies the Kronn bridge process, while this value is what the human can
     pass to the CLI's native resume command. Unknown clients and malformed
     values degrade to `None`; Kronn never fabricates a resumable id.
+
+    `allow_probe=False` restricts resolution to the environment and to an
+    already-cached probe result. The idle wait runs on every poll and sits on
+    the critical path — it must never pay for `ps`/`lsof` walks; those belong
+    to join/resume, which happen once.
     """
     agent_type = _agent_type_for_session()
     env_name = {
@@ -2723,10 +2733,16 @@ def _native_conversation_id():
         # Codex currently exposes CODEX_THREAD_ID to the interactive shell but
         # some MCP launch paths do not forward it to the stdio server. A
         # resumed Codex process still carries the exact native id in its own
-        # `codex resume <uuid>` argv, so recover that verified value from the
-        # CLI ancestor rather than leaving the participant permanently
-        # non-resumable. Claude has no equivalent stable argv contract here.
-        return _codex_resume_id_from_ancestors() if agent_type == "Codex" else None
+        # `codex resume <uuid>` argv; a FRESH session carries nothing in argv,
+        # but keeps its rollout session file open — recover the id from that
+        # open descriptor as a last resort (KT-114). Claude has no equivalent
+        # stable contract on either path.
+        if agent_type != "Codex":
+            return None
+        if not allow_probe:
+            # Cheap path only: reuse a probe that ALREADY ran, never start one.
+            return _CODEX_FD_PROBE_CACHE["uuid"] if _CODEX_FD_PROBE_CACHE["done"] else None
+        return _codex_resume_id_from_ancestors() or _codex_id_from_open_rollouts()
     if not raw or raw != raw.strip() or len(raw) > 512 or not raw.isprintable():
         return None
     try:
@@ -2775,6 +2791,116 @@ def _codex_resume_id_from_ancestors():
             return conversation_id
         cur = _ppid_of(cur)
     return None
+
+
+# ── KT-114 — fresh Codex TUI sessions: recover the native id from open FDs ──
+#
+# A fresh interactive Codex session has neither CODEX_THREAD_ID in the bridge's
+# environment nor a `codex resume <uuid>` argv — so both recoveries above come
+# up empty and the participant stays non-resumable. But the CLI itself holds
+# its session file open for its whole life: `rollout-<ts>-<uuid>.jsonl`, whose
+# FIRST line is a `session_meta` the CLI wrote about itself. Reading which file
+# an ANCESTOR process keeps open is a fact, not an inference — verified live on
+# 2026-07-29 for both a resumed TUI and a fresh `codex exec`.
+
+_ROLLOUT_NAME_RE = re.compile(r"rollout-[0-9T:.-]+-([0-9a-f-]{36})\.jsonl$")
+# Hard cap per subprocess call: the bridge sits on the critical path of every
+# tool call, and `lsof` can hang on dead network mounts. Better no Resume
+# button than a frozen MCP.
+_FD_PROBE_TIMEOUT_SECS = 2
+_CODEX_FD_PROBE_CACHE = {"done": False, "uuid": None}
+# Discs whose backend row already carries this bridge's conversation_id, so the
+# wait loop stops repeating a value that landed.
+_CONVERSATION_ID_DELIVERED = {}
+
+
+def _open_rollout_paths_of(pid):
+    """Rollout session files `pid` holds open. Linux/WSL via /proc/<pid>/fd,
+    macOS via `lsof -p` — the same platform split `_cmdline_of` uses. Any
+    failure degrades to an empty list, never an exception."""
+    paths = []
+    fd_dir = f"/proc/{pid}/fd"
+    if os.path.isdir(fd_dir):
+        try:
+            for entry in os.listdir(fd_dir):
+                try:
+                    target = os.readlink(os.path.join(fd_dir, entry))
+                except OSError:
+                    continue
+                if _ROLLOUT_NAME_RE.search(target):
+                    paths.append(target)
+            return paths
+        except OSError:
+            return []
+    try:
+        out = subprocess.check_output(
+            ["lsof", "-p", str(pid), "-Fn"],
+            stderr=subprocess.DEVNULL, timeout=_FD_PROBE_TIMEOUT_SECS,
+        ).decode("utf-8", errors="replace")
+    except Exception:
+        return []
+    for line in out.splitlines():
+        if line.startswith("n") and _ROLLOUT_NAME_RE.search(line):
+            paths.append(line[1:])
+    return paths
+
+
+def _rollout_session_meta(path):
+    """First line of a rollout file, parsed. `None` on any malformation."""
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            first = fh.readline(64 * 1024)
+        payload = json.loads(first).get("payload")
+        return payload if isinstance(payload, dict) else None
+    except Exception:
+        return None
+
+
+def _codex_id_from_open_rollouts():
+    """UUID of the ONE rollout an ancestor Codex process keeps open.
+
+    Acceptance rule agreed with Codex on 2026-07-29: exactly one distinct
+    rollout across the ancestor chain, whose first line is a valid
+    `session_meta` with a canonical `session_id` matching the filename,
+    `originator == "codex-tui"` and `source == "cli"`. Anything else — zero
+    rollouts, two, a malformed first line, or a `codex_exec` run that also
+    keeps its file open — returns `None`: Kronn never invents provenance.
+    Cached per bridge process; `lsof` is too costly for every tool call.
+    """
+    if _CODEX_FD_PROBE_CACHE["done"]:
+        return _CODEX_FD_PROBE_CACHE["uuid"]
+    resolved = None
+    found = set()
+    cur = os.getppid()
+    seen = set()
+    for _ in range(24):
+        if cur is None or cur <= 1 or cur in seen:
+            break
+        seen.add(cur)
+        for path in _open_rollout_paths_of(cur):
+            match = _ROLLOUT_NAME_RE.search(path)
+            if match:
+                found.add((match.group(1), path))
+        cur = _ppid_of(cur)
+    if len({uuid_ for uuid_, _ in found}) == 1:
+        raw, path = next(iter(found))
+        meta = _rollout_session_meta(path)
+        try:
+            canonical = str(uuid.UUID(raw))
+        except (AttributeError, ValueError):
+            canonical = None
+        if (
+            canonical is not None
+            and raw.lower() == canonical
+            and isinstance(meta, dict)
+            and meta.get("session_id") == canonical
+            and meta.get("originator") == "codex-tui"
+            and meta.get("source") == "cli"
+        ):
+            resolved = canonical
+    _CODEX_FD_PROBE_CACHE["done"] = True
+    _CODEX_FD_PROBE_CACHE["uuid"] = resolved
+    return resolved
 
 
 def _parent_process_cmdline():
@@ -4410,11 +4536,21 @@ def call_disc_wait_for_peer(args):
     # (listening/reading) lands on OUR row only, never on a concurrent
     # session of the same agent type (multi-machine setups).
     params["session_id"] = _session_id_for_caller()
+    # KT-114 — late capture: a fresh Codex TUI has no native id at join time,
+    # but the FD probe can resolve it once the CLI is up. The idle loop calls
+    # this every ≤170 s anyway, so piggyback the id here instead of adding a
+    # round trip; sent until a successful wait confirms delivery, then stopped.
+    if not _CONVERSATION_ID_DELIVERED.get(disc_id):
+        late_conversation_id = _native_conversation_id(allow_probe=False)
+        if late_conversation_id:
+            params["conversation_id"] = late_conversation_id
     qs = urllib.parse.urlencode(params)
     sep = "?" if qs else ""
     # Transport-level retry (bounded): a backend restart mid-poll must not
     # surface as a tool error — the wait is idempotent on since_sort_order.
     result = _unwrap(_http_transport_retry("GET", f"/api/discussions/{disc_id}/wait{sep}{qs}"))
+    if isinstance(result, dict) and params.get("conversation_id"):
+        _CONVERSATION_ID_DELIVERED[disc_id] = True
     if isinstance(result, dict):
         if result.get("messages"):
             _stage_read_cursor(disc_id, result.get("latest_sort_order"))

@@ -304,6 +304,27 @@ pub fn set_session_model(conn: &Connection, session_pk: i64, model: &str) -> Res
     Ok(())
 }
 
+/// KT-114 — late capture, keyed by the session's own identity instead of a pk
+/// the wait handler does not have. Only a live row is touched: a `left`
+/// session must not resurrect with a resume id, and rewriting an unchanged
+/// value would churn the row on every idle poll.
+pub fn set_live_session_conversation_id(
+    conn: &Connection,
+    disc_id: &str,
+    agent_type: &str,
+    session_id: &str,
+    conversation_id: &str,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE discussion_sessions SET conversation_id = ?4
+         WHERE disc_id = ?1 AND agent_type = ?2 AND session_id = ?3
+           AND status = 'active'
+           AND (conversation_id IS NULL OR conversation_id != ?4)",
+        params![disc_id, agent_type, session_id, conversation_id],
+    )?;
+    Ok(())
+}
+
 /// Record a native CLI conversation id without changing the bridge binding.
 /// The caller validates and bounds the opaque value before writing it.
 pub fn set_session_conversation_id(

@@ -373,6 +373,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "099_typed_message_targets",
         include_str!("sql/099_typed_message_targets.sql"),
     ),
+    (
+        "100_message_cli_authors",
+        include_str!("sql/100_message_cli_authors.sql"),
+    ),
 ];
 
 /// Run all migrations, optionally backing up the database file first.
@@ -875,6 +879,37 @@ mod tests {
             ("agent".into(), "Codex".into(), None, 0),
             "099 must preserve 098 rows while assigning their legacy punctual-agent identity"
         );
+    }
+
+    #[test]
+    fn message_cli_authors_migration_adds_durable_exact_session_provenance() {
+        let conn = Connection::open_in_memory().unwrap();
+        run(&conn).unwrap();
+
+        let has_table: bool = conn
+            .query_row(
+                "SELECT EXISTS(
+                     SELECT 1 FROM sqlite_master
+                     WHERE type = 'table' AND name = 'message_cli_authors'
+                 )",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let has_index: bool = conn
+            .query_row(
+                "SELECT EXISTS(
+                     SELECT 1 FROM sqlite_master
+                     WHERE type = 'index'
+                       AND name = 'idx_message_cli_authors_session'
+                 )",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert!(has_table);
+        assert!(has_index);
     }
 
     #[test]

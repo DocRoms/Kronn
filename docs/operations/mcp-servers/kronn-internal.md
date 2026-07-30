@@ -203,8 +203,12 @@ movement is no longer silent or indistinguishable from transport loss.
 Every delivered item also carries a durable `message_id`. The bridge echoes the
 batch as `delivered_message_ids` and tells the caller to acknowledge those exact
 ids; a reply to one transcript message should pass that id as
-`reply_to_message_id`. Revision events use their own durable event id and retain
-the revised transcript id separately in `target_message_id`.
+`reply_to_message_id`. A locally-authored CLI message additionally carries
+`reply_target`, the exact joined session that authored it. With no explicit
+mention/target, `disc_append` routes the reply to that identity automatically;
+an explicit target still takes precedence. Revision events use their own
+durable event id and retain the revised transcript id separately in
+`target_message_id`.
 [src: file: backend/scripts/disc-introspection-mcp.py]
 [src: file: backend/scripts/test_disc_introspection_mcp.py]
 [src: file: backend/src/api/disc_invite.rs]
@@ -212,14 +216,15 @@ the revised transcript id separately in `target_message_id`.
 Human turns use typed identities. `discussion_agent` means the configured
 native agent, `agent` means a punctual native invocation, and `cli` means one
 exact joined session. Provider equality is not ownership: a joined Codex CLI
-must not answer a turn addressed to punctual Codex. Current bridges send their
-durable session id, and the wait endpoint omits unrelated User prompts entirely
-to avoid consuming context tokens; its cursor still advances past those hidden
-turns.
+must not answer a turn addressed to punctual Codex, but it still observes an
+untargeted Agent turn authored by native Codex because that is a different
+identity. Current bridges send their durable session id, and the wait endpoint
+omits unrelated User prompts entirely to avoid consuming context tokens; its
+cursor still advances past those hidden turns.
 
 ## disc_append — two modes
 
-- **Simple (recommended for live chat)** : `disc_append({content: "..."})`. Bridge auto-fills `disc_id` (from `disc_join` binding), generates `source_msg_id`, defaults `role=Agent`, stamps `agent_type` from `clientInfo`, and resolves ordered mentions to typed targets. Canonical `@codex` / `@claude` aliases mean native identities; `@codex-cli`, `@codex-cli-2`, … mean exact joined sessions and are never interchangeable with the native alias. Pass the optional opaque `reply_to_message_id` to create a durable reply to a message in the same discussion.
+- **Simple (recommended for live chat)** : `disc_append({content: "..."})`. Bridge auto-fills `disc_id` (from `disc_join` binding), generates `source_msg_id`, defaults `role=Agent`, stamps `agent_type` from `clientInfo`, and resolves ordered mentions to typed targets. Canonical `@codex` / `@claude` aliases mean native identities; `@codex-cli`, `@codex-cli-2`, … mean exact joined sessions and are never interchangeable with the native alias. Pass the optional opaque `reply_to_message_id` to create a durable reply to a message in the same discussion. Unless the append also carries an explicit target, Kronn sends that reply to the exact local CLI author recorded on the referenced message.
 - Mentions inside inline/fenced code are documentation and never dispatch. Use
   code formatting whenever you need to discuss an alias without invoking it.
 - **Bulk (transcript import)** : `disc_append({disc_id, messages: [{source_msg_id, role, content, agent_type}, …]})`. Idempotent on `(disc_id, source_msg_id)`.

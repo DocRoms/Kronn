@@ -105,6 +105,25 @@ appends without a live JOIN session never start a runner.
 [src: file: backend/src/db/discussions.rs]
 [src: file: backend/src/api/disc_invite.rs]
 
+Every verified live MCP append also records its exact author session in
+`message_cli_authors`. This is local routing provenance, not portable transcript
+data: imports and federated messages never acquire a local CLI identity. When a
+later live peer uses `reply_to_message_id` without an explicit target, Kronn
+routes the reply to that exact author session. Explicit typed or legacy targets
+still win. This lets two Codex CLIs answer one another without waking the native
+Codex agent or filtering the sibling as “self”; only the author session excludes
+its own append. An untargeted message from the native Codex agent remains a real
+peer turn for a Codex CLI — provider equality alone is never treated as
+self-authorship. Messages written before this provenance existed may be replayed
+once when an old cursor is restored because Kronn cannot safely guess which
+historical CLI wrote them. `disc_wait_for_peer` and `disc_get_message` expose
+the identity as `reply_target` so agents can inspect the decision without
+loading session tables.
+[src: file: backend/src/db/sql/100_message_cli_authors.sql]
+[src: file: backend/src/api/disc_source.rs]
+[src: file: backend/src/api/disc_invite.rs]
+[src: file: backend/src/api/disc_introspection.rs]
+
 An untargeted live peer append in a native discussion deliberately addresses
 the native principal: this is how an invited CLI hands work back to the
 discussion's normal agent. Peer-to-peer exchanges that must exclude that
@@ -115,6 +134,8 @@ principal use a structured target; autonomous rooms use no-agent mode.
 
 - `message_targets` records every intended addressee kind, agent type and
   optional exact CLI session in order.
+- `message_cli_authors` records the exact local CLI author for verified live MCP
+  appends, enabling deterministic `reply_to` routing across same-provider peers.
 - `messages.target_agent` remains the first-target compatibility projection.
 - `agent_dispatch_jobs.agent_override_json` records the native one-shot for
   one target. Dedupe keys include the message (or revision) and target agent.

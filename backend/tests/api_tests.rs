@@ -9728,6 +9728,47 @@ mod cold_api_handlers_tests {
     }
 
     #[tokio::test]
+    async fn disc_get_message_exposes_the_exact_cli_reply_target() {
+        let state = test_state();
+        let disc_id = seed_disc_with_messages(&state, 1).await;
+        let did = disc_id.clone();
+        let cli_session_id = state
+            .db
+            .with_conn(move |conn| {
+                let message_id = conn.query_row(
+                    "SELECT id FROM messages
+                     WHERE discussion_id = ?1
+                     ORDER BY sort_order ASC
+                     LIMIT 1",
+                    [&did],
+                    |row| row.get::<_, String>(0),
+                )?;
+                let cli_session_id = kronn::db::discussion_sessions::create_session(
+                    conn,
+                    &did,
+                    "Codex",
+                    Some("codex-introspection"),
+                    "peer",
+                )?;
+                kronn::db::discussions::set_message_cli_author(conn, &message_id, cli_session_id)?;
+                Ok(cli_session_id)
+            })
+            .await
+            .unwrap();
+        let app = build_router_with_auth(state, false);
+
+        let (status, json) = get_json(app, &format!("/api/discussions/{disc_id}/message/0")).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["reply_target"]["kind"], "cli");
+        assert_eq!(json["data"]["reply_target"]["agent_type"], "Codex");
+        assert_eq!(
+            json["data"]["reply_target"]["cli_session_id"],
+            cli_session_id
+        );
+    }
+
+    #[tokio::test]
     async fn disc_get_message_negative_index_resolves_last() {
         let state = test_state();
         let disc_id = seed_disc_with_messages(&state, 3).await;

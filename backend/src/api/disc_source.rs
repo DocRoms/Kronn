@@ -335,7 +335,7 @@ pub async fn disc_append(
     // turns. The compatibility `target_agent` field is projected to one native
     // target only when an older bridge did not send `targets`.
     let routing_candidate = live_agent_append && req.session_id.is_some();
-    let requested_targets = if routing_candidate && !req.messages[0].targets.is_empty() {
+    let mut requested_targets = if routing_candidate && !req.messages[0].targets.is_empty() {
         match canonical_targets(&state, &req.disc_id, req.messages[0].targets.clone(), false).await
         {
             Ok(targets) => targets,
@@ -352,6 +352,68 @@ pub async fn disc_append(
     } else {
         None
     };
+    // KT-127 — bind this live MCP append to the exact durable CLI session that
+    // authored it. Provider identity alone cannot distinguish two Codex CLIs
+    // joined to the same room. A missing/mismatched session fails closed: bulk
+    // imports and unverifiable callers never acquire local CLI provenance.
+    let author_cli_session_id = if routing_candidate {
+        match (req.messages[0].agent_type.as_ref(), req.session_id.as_ref()) {
+            (Some(agent_type), Some(session_id)) => {
+                let did = req.disc_id.clone();
+                let agent = format!("{agent_type:?}");
+                let session = session_id.clone();
+                match state
+                    .db
+                    .with_read_conn(move |conn| {
+                        Ok(crate::db::discussion_sessions::find_active_session(
+                            conn, &agent, &session,
+                        )?
+                        .filter(|row| row.disc_id == did)
+                        .map(|row| row.id))
+                    })
+                    .await
+                {
+                    Ok(session) => session,
+                    Err(error) => {
+                        return Json(ApiResponse::err(format!(
+                            "DB error resolving CLI author: {error}"
+                        )))
+                    }
+                }
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
+    // An explicit typed target or legacy one-shot target always wins. With no
+    // explicit responder, replying to a CLI-authored message targets that
+    // exact session — never the provider's native agent or a sibling CLI.
+    if routing_candidate && requested_targets.is_empty() && legacy_requested_target.is_none() {
+        if let Some(reply_to_message_id) = req.messages[0].reply_to_message_id.clone() {
+            let did = req.disc_id.clone();
+            requested_targets = match state
+                .db
+                .with_read_conn(move |conn| {
+                    Ok(crate::db::discussions::message_cli_author_target(
+                        conn,
+                        &did,
+                        &reply_to_message_id,
+                    )?
+                    .into_iter()
+                    .collect())
+                })
+                .await
+            {
+                Ok(targets) => targets,
+                Err(error) => {
+                    return Json(ApiResponse::err(format!(
+                        "DB error resolving reply target: {error}"
+                    )))
+                }
+            };
+        }
+    }
     // Resolve the whole presence snapshot in one DB turn, then feed the pure
     // shared routing policy. On lookup failure we fail closed as a no-agent
     // room: this live MCP caller is already a proven peer, so duplicate native
@@ -531,14 +593,23 @@ pub async fn disc_append(
         let insert_result = state
             .db
             .with_conn(move |conn| {
-                if !typed_targets.is_empty() || !dispatch_jobs.is_empty() {
-                    let dispatches = dispatch_jobs
-                        .iter()
-                        .map(|(job_id, agent)| crate::db::discussions::UserDispatchSpec {
-                            job_id,
-                            agent_override: agent.as_ref(),
-                        })
-                        .collect::<Vec<_>>();
+                let dispatches = dispatch_jobs
+                    .iter()
+                    .map(|(job_id, agent)| crate::db::discussions::UserDispatchSpec {
+                        job_id,
+                        agent_override: agent.as_ref(),
+                    })
+                    .collect::<Vec<_>>();
+                if let Some(author_cli_session_id) = author_cli_session_id {
+                    crate::db::discussions::insert_cli_message_with_targets_and_dispatches(
+                        conn,
+                        &did_insert,
+                        &msg_clone,
+                        &typed_targets,
+                        &dispatches,
+                        author_cli_session_id,
+                    )
+                } else if !typed_targets.is_empty() || !dispatches.is_empty() {
                     crate::db::discussions::insert_message_with_targets_and_dispatches(
                         conn,
                         &did_insert,
@@ -1573,6 +1644,333 @@ mod tests {
             targets,
             vec![MessageTarget::cli(AgentType::Codex, cli_session_id)]
         );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn reply_to_routes_to_the_exact_cli_author_across_session_resume() {
+        crate::core::anti_halluc::set_mode("off");
+        let (state, _tmp) = lint_state(false).await;
+        let (author_session, author_resume, responder_session) = state
+            .db
+            .with_conn(|conn| {
+                let author = crate::db::discussion_sessions::join_disc_session_resumable(
+                    conn,
+                    "d-lint",
+                    "Codex",
+                    "codex-author-old",
+                )?;
+                let responder = crate::db::discussion_sessions::create_session(
+                    conn,
+                    "d-lint",
+                    "Vibe",
+                    Some("vibe-responder"),
+                    "peer",
+                )?;
+                Ok((author.session_pk, author.resume_token, responder))
+            })
+            .await
+            .unwrap();
+
+        append_as(
+            &state,
+            vec![agent_msg("exact-author", "message from exact Codex CLI")],
+            Some("codex-author-old"),
+        )
+        .await;
+
+        let original_message_id =
+            state
+                .db
+                .with_conn(move |conn| {
+                    let message_id = conn.query_row(
+                        "SELECT id FROM messages WHERE source_msg_id = 'exact-author'",
+                        [],
+                        |row| row.get::<_, String>(0),
+                    )?;
+                    assert_eq!(
+                        crate::db::discussions::message_cli_author_target(
+                            conn,
+                            "d-lint",
+                            &message_id,
+                        )?,
+                        Some(MessageTarget::cli(AgentType::Codex, author_session))
+                    );
+                    let resumed = crate::db::discussion_sessions::resume_disc_session(
+                        conn,
+                        "Codex",
+                        &author_resume,
+                        "codex-author-reloaded",
+                        None,
+                    )?;
+                    assert_eq!(
+                        resumed.session_pk, author_session,
+                        "a bridge reload must preserve the durable exact author identity"
+                    );
+                    Ok(message_id)
+                })
+                .await
+                .unwrap();
+
+        let mut reply = agent_msg("exact-reply", "reply from Vibe");
+        reply.agent_type = Some(AgentType::Vibe);
+        reply.reply_to_message_id = Some(original_message_id);
+        append_as(&state, vec![reply], Some("vibe-responder")).await;
+
+        let (targets, reply_author, job) = state
+            .db
+            .with_conn(move |conn| {
+                let reply_message_id = conn.query_row(
+                    "SELECT id FROM messages WHERE source_msg_id = 'exact-reply'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )?;
+                Ok((
+                    crate::db::discussions::list_message_targets(conn, &reply_message_id)?,
+                    crate::db::discussions::message_cli_author_target(
+                        conn,
+                        "d-lint",
+                        &reply_message_id,
+                    )?,
+                    crate::db::agent_dispatch::find_active_for_discussion(conn, "d-lint")?,
+                ))
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            targets,
+            vec![MessageTarget::cli(AgentType::Codex, author_session)]
+        );
+        assert_eq!(
+            reply_author,
+            Some(MessageTarget::cli(AgentType::Vibe, responder_session))
+        );
+        assert!(
+            job.is_none(),
+            "replying to a CLI must never wake a same-provider native agent"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn explicit_target_overrides_the_reply_to_cli_author() {
+        crate::core::anti_halluc::set_mode("off");
+        let (state, _tmp) = lint_state(false).await;
+        let explicit_session = state
+            .db
+            .with_conn(|conn| {
+                crate::db::discussion_sessions::create_session(
+                    conn,
+                    "d-lint",
+                    "Codex",
+                    Some("codex-original"),
+                    "peer",
+                )?;
+                crate::db::discussion_sessions::create_session(
+                    conn,
+                    "d-lint",
+                    "Vibe",
+                    Some("vibe-responder"),
+                    "peer",
+                )?;
+                crate::db::discussion_sessions::create_session(
+                    conn,
+                    "d-lint",
+                    "Codex",
+                    Some("codex-explicit"),
+                    "peer",
+                )
+            })
+            .await
+            .unwrap();
+
+        append_as(
+            &state,
+            vec![agent_msg("override-author", "original Codex CLI")],
+            Some("codex-original"),
+        )
+        .await;
+        let original_message_id = state
+            .db
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT id FROM messages WHERE source_msg_id = 'override-author'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(anyhow::Error::from)
+            })
+            .await
+            .unwrap();
+
+        let mut reply = agent_msg("override-reply", "explicitly for another CLI");
+        reply.agent_type = Some(AgentType::Vibe);
+        reply.reply_to_message_id = Some(original_message_id);
+        reply.targets = vec![MessageTarget::cli(AgentType::Codex, explicit_session)];
+        append_as(&state, vec![reply], Some("vibe-responder")).await;
+
+        let targets = state
+            .db
+            .with_conn(move |conn| {
+                let reply_message_id = conn.query_row(
+                    "SELECT id FROM messages WHERE source_msg_id = 'override-reply'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )?;
+                crate::db::discussions::list_message_targets(conn, &reply_message_id)
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            targets,
+            vec![MessageTarget::cli(AgentType::Codex, explicit_session)]
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn reply_to_a_native_message_keeps_legacy_untargeted_routing() {
+        crate::core::anti_halluc::set_mode("off");
+        let (state, _tmp) = lint_state(false).await;
+        state
+            .db
+            .with_conn(|conn| {
+                crate::db::discussion_sessions::create_session(
+                    conn,
+                    "d-lint",
+                    "Vibe",
+                    Some("vibe-native-reply"),
+                    "peer",
+                )?;
+                conn.execute(
+                    "INSERT INTO messages (
+                         id, discussion_id, role, content, agent_type,
+                         timestamp, sort_order
+                     ) VALUES (
+                         'native-message', 'd-lint', 'Agent', 'native answer',
+                         'Codex', datetime('now'), 1
+                     )",
+                    [],
+                )?;
+                conn.execute(
+                    "UPDATE discussions
+                     SET next_message_seq = 2, message_count = 1
+                     WHERE id = 'd-lint'",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let mut reply = agent_msg("native-message-reply", "Vibe follows up");
+        reply.agent_type = Some(AgentType::Vibe);
+        reply.reply_to_message_id = Some("native-message".into());
+        append_as(&state, vec![reply], Some("vibe-native-reply")).await;
+
+        let targets = state
+            .db
+            .with_conn(|conn| {
+                let reply_message_id = conn.query_row(
+                    "SELECT id FROM messages
+                     WHERE source_msg_id = 'native-message-reply'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )?;
+                crate::db::discussions::list_message_targets(conn, &reply_message_id)
+            })
+            .await
+            .unwrap();
+        assert!(
+            targets.is_empty(),
+            "a native author has no exact local CLI identity to infer"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn bulk_import_reply_to_never_infers_a_local_cli_target() {
+        crate::core::anti_halluc::set_mode("off");
+        let (state, _tmp) = lint_state(false).await;
+        state
+            .db
+            .with_conn(|conn| {
+                let cli_session_id = crate::db::discussion_sessions::create_session(
+                    conn,
+                    "d-lint",
+                    "Codex",
+                    Some("codex-local-author"),
+                    "peer",
+                )?;
+                conn.execute(
+                    "INSERT INTO messages (
+                         id, discussion_id, role, content, agent_type,
+                         timestamp, sort_order
+                     ) VALUES (
+                         'local-cli-message', 'd-lint', 'Agent', 'local answer',
+                         'Codex', datetime('now'), 1
+                     )",
+                    [],
+                )?;
+                crate::db::discussions::set_message_cli_author(
+                    conn,
+                    "local-cli-message",
+                    cli_session_id,
+                )?;
+                conn.execute(
+                    "UPDATE discussions
+                     SET next_message_seq = 2, message_count = 1
+                     WHERE id = 'd-lint'",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let mut first_imported = agent_msg("bulk-reply", "historical reply");
+        first_imported.reply_to_message_id = Some("local-cli-message".into());
+        append(
+            &state,
+            vec![
+                first_imported,
+                agent_msg("bulk-follow-up", "historical follow-up"),
+            ],
+        )
+        .await;
+
+        let imported = state
+            .db
+            .with_conn(|conn| {
+                let mut statement = conn.prepare(
+                    "SELECT id, target_agent
+                     FROM messages
+                     WHERE source_msg_id IN ('bulk-reply', 'bulk-follow-up')
+                     ORDER BY sort_order",
+                )?;
+                let rows = statement
+                    .query_map([], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                let rows = rows
+                    .into_iter()
+                    .map(|(message_id, target_agent)| {
+                        let targets =
+                            crate::db::discussions::list_message_targets(conn, &message_id)?;
+                        Ok((target_agent, targets))
+                    })
+                    .collect::<anyhow::Result<Vec<_>>>()?;
+                Ok(rows)
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(imported.len(), 2);
+        assert!(imported
+            .iter()
+            .all(|(target_agent, targets)| target_agent.is_none() && targets.is_empty()));
     }
 
     #[tokio::test]

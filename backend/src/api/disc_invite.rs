@@ -734,6 +734,13 @@ pub struct WaitForPeerQuery {
     /// a stale bridge process keep a resumed sibling alive.
     #[serde(default)]
     pub session_id: Option<String>,
+    /// KT-114 — late capture of the CLI's native resume id. A fresh Codex TUI
+    /// has nothing to declare at join time; once its bridge resolves the id
+    /// (from the CLI's own open session file), the idle wait carries it here so
+    /// the Resume button appears without any extra round trip. Validated and
+    /// bounded like the join-time value; ignored without a session identity.
+    #[serde(default)]
+    pub conversation_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -772,6 +779,11 @@ pub struct WaitForPeerMessage {
     /// exact joined CLI session of the same provider.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub targets: Vec<MessageTarget>,
+    /// Exact local CLI identity that authored this message. A caller can use
+    /// it as the durable reply target without guessing from provider names.
+    /// `None` for humans, native agents, imports and revision events.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_target: Option<MessageTarget>,
     /// Server-computed for the calling durable CLI session. A CLI answers only
     /// when this is true; matching the provider name is intentionally
     /// insufficient because `@codex` and `@codex · CLI` are distinct targets.
@@ -935,6 +947,11 @@ pub async fn wait_for_peer(
         let agent_touch = agent_type.clone();
         let sess_touch = caller_session_id.clone();
         let listening_ttl = timeout_secs as i64 + ACTIVITY_LISTENING_MARGIN_SECS;
+        // KT-114 — a bridge that resolved its native resume id AFTER joining
+        // delivers it on this idle loop. Same validation as the join-time
+        // value; a malformed id is dropped, never guessed at.
+        let late_conversation_id =
+            normalize_conversation_id(q.conversation_id.as_deref()).unwrap_or(None);
         if let Err(e) = state
             .db
             .with_conn(move |conn| {
@@ -944,6 +961,15 @@ pub async fn wait_for_peer(
                     &agent_touch,
                     &sess_touch,
                 )?;
+                if let Some(conversation_id) = late_conversation_id.as_deref() {
+                    crate::db::discussion_sessions::set_live_session_conversation_id(
+                        conn,
+                        &disc_id_touch,
+                        &agent_touch,
+                        &sess_touch,
+                        conversation_id,
+                    )?;
+                }
                 crate::db::discussion_sessions::set_session_activity(
                     conn,
                     &disc_id_touch,
@@ -974,7 +1000,7 @@ pub async fn wait_for_peer(
                 let mut stmt = conn.prepare(
                     "SELECT message_id, sort_order, role, agent_type, content, timestamp,
                             author_pseudo, event_type, target_message_id, target_agent,
-                            targets
+                            targets, author_agent_type, author_cli_session_id
                      FROM (
                          SELECT id AS message_id, sort_order, role, agent_type, content, timestamp,
                                 author_pseudo, NULL AS event_type,
@@ -992,7 +1018,20 @@ pub async fn wait_for_peer(
                                         WHERE mt.message_id = messages.id
                                         ORDER BY mt.position ASC
                                     ) AS ordered
-                                ) AS targets
+                                ) AS targets,
+                                (
+                                    SELECT ds.agent_type
+                                    FROM message_cli_authors mca
+                                    JOIN discussion_sessions ds
+                                      ON ds.id = mca.cli_session_id
+                                     AND ds.disc_id = messages.discussion_id
+                                    WHERE mca.message_id = messages.id
+                                ) AS author_agent_type,
+                                (
+                                    SELECT mca.cli_session_id
+                                    FROM message_cli_authors mca
+                                    WHERE mca.message_id = messages.id
+                                ) AS author_cli_session_id
                          FROM messages
                          WHERE discussion_id = ?1 AND sort_order > ?2
                          UNION ALL
@@ -1014,7 +1053,9 @@ pub async fn wait_for_peer(
                                         WHERE mt.message_id = message_revision_events.target_message_id
                                         ORDER BY mt.position ASC
                                     ) AS ordered
-                                ) AS targets
+                                ) AS targets,
+                                NULL AS author_agent_type,
+                                NULL AS author_cli_session_id
                          FROM message_revision_events
                          WHERE discussion_id = ?1 AND sort_order > ?2
                      )
@@ -1048,6 +1089,17 @@ pub async fn wait_for_peer(
                                     .collect::<Vec<_>>()
                             })
                             .unwrap_or_default();
+                        let author_agent_type = r.get::<_, Option<String>>(11)?;
+                        let author_cli_session_id = r.get::<_, Option<i64>>(12)?;
+                        let reply_target =
+                            author_agent_type.zip(author_cli_session_id).map(
+                                |(agent_type, cli_session_id)| {
+                                    MessageTarget::cli(
+                                        crate::db::discussions::parse_agent_type(&agent_type),
+                                        cli_session_id,
+                                    )
+                                },
+                            );
                         Ok(WaitForPeerMessage {
                             message_id: r.get(0)?,
                             sort_order: r.get(1)?,
@@ -1070,6 +1122,7 @@ pub async fn wait_for_peer(
                                 })
                             }),
                             targets,
+                            reply_target,
                         })
                     })?
                     .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1087,9 +1140,26 @@ pub async fn wait_for_peer(
                     // author_pseudo, so a same-agent_type peer (another
                     // ClaudeCode instance across the wire) is NOT filtered —
                     // otherwise two ClaudeCode peers go deaf to each other.
-                    .filter(|m| match (&exclude_clone, &m.agent_type) {
-                        (Some(ex), Some(ag)) if ex == ag => m.author_pseudo.is_some(),
-                        _ => true,
+                    .filter(|message| {
+                        if let Some(session_pk) = caller_session_pk {
+                            // Exact modern callers exclude only the message
+                            // written by their own durable CLI session. A
+                            // sibling Codex CLI is a real peer even though its
+                            // provider-level agent_type is identical.
+                            return message
+                                .reply_target
+                                .as_ref()
+                                .and_then(|target| target.cli_session_id)
+                                != Some(session_pk);
+                        }
+                        // Legacy callers have no exact session identity, so
+                        // retain the historical provider-level best effort.
+                        match (&exclude_clone, &message.agent_type) {
+                            (Some(ex), Some(agent)) if ex == agent => {
+                                message.author_pseudo.is_some()
+                            }
+                            _ => true,
+                        }
                     })
                     .collect();
                 // Counted before the routing filter and after the own-append one,
@@ -2471,6 +2541,7 @@ mod tests {
                 timeout_secs: Some(3),
                 exclude_agent_type: Some("Codex".into()),
                 session_id: None,
+                conversation_id: None,
             }),
         )
         .await;
@@ -2496,6 +2567,7 @@ mod tests {
                 timeout_secs: Some(3),
                 exclude_agent_type: Some("ClaudeCode".into()),
                 session_id: None,
+                conversation_id: None,
             }),
         )
         .await;
@@ -2679,6 +2751,7 @@ mod tests {
                 timeout_secs: Some(5),
                 exclude_agent_type: None,
                 session_id: None,
+                conversation_id: None,
             }),
         )
         .await;
@@ -2711,6 +2784,7 @@ mod tests {
                     timeout_secs: Some(10),
                     exclude_agent_type: None,
                     session_id: None,
+                    conversation_id: None,
                 }),
             )
             .await;
@@ -2785,6 +2859,7 @@ mod tests {
                 timeout_secs: Some(5),
                 exclude_agent_type: None,
                 session_id: None,
+                conversation_id: None,
             }),
         )
         .await;
@@ -2835,6 +2910,7 @@ mod tests {
                 timeout_secs: Some(2),
                 exclude_agent_type: Some("ClaudeCode".to_string()),
                 session_id: None,
+                conversation_id: None,
             }),
         )
         .await;
@@ -2883,6 +2959,7 @@ mod tests {
                 timeout_secs: Some(1),
                 exclude_agent_type: Some("Vibe".to_string()),
                 session_id: None,
+                conversation_id: None,
             }),
         )
         .await
@@ -2911,6 +2988,7 @@ mod tests {
                 timeout_secs: Some(1),
                 exclude_agent_type: Some("Codex".to_string()),
                 session_id: None,
+                conversation_id: None,
             }),
         )
         .await
@@ -2992,6 +3070,7 @@ mod tests {
                 timeout_secs: Some(1),
                 exclude_agent_type: Some("Vibe".to_string()),
                 session_id: Some("vibe-unrelated".to_string()),
+                conversation_id: None,
             }),
         )
         .await
@@ -3018,6 +3097,7 @@ mod tests {
                 timeout_secs: Some(1),
                 exclude_agent_type: Some("Codex".to_string()),
                 session_id: Some("codex-exact".to_string()),
+                conversation_id: None,
             }),
         )
         .await
@@ -3044,6 +3124,97 @@ mod tests {
                 crate::models::AgentType::Codex,
                 codex_session,
             )],
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_for_peer_distinguishes_two_same_provider_cli_authors() {
+        let state = make_state_with_disc("d-wait-same-provider").await;
+        let codex_b = state
+            .db
+            .with_conn(|conn| {
+                let codex_a = crate::db::discussion_sessions::create_session(
+                    conn,
+                    "d-wait-same-provider",
+                    "Codex",
+                    Some("codex-a"),
+                    "peer",
+                )?;
+                let codex_b = crate::db::discussion_sessions::create_session(
+                    conn,
+                    "d-wait-same-provider",
+                    "Codex",
+                    Some("codex-b"),
+                    "peer",
+                )?;
+                let now = chrono::Utc::now().to_rfc3339();
+                conn.execute(
+                    "INSERT INTO messages (
+                         id, discussion_id, role, content, agent_type,
+                         timestamp, sort_order, target_agent
+                     ) VALUES (
+                         'msg-from-codex-b', 'd-wait-same-provider', 'Agent',
+                         'exact reply from B', 'Codex', ?1, 3, 'Codex'
+                     )",
+                    rusqlite::params![now],
+                )?;
+                crate::db::discussions::set_message_cli_author(conn, "msg-from-codex-b", codex_b)?;
+                crate::db::discussions::replace_message_targets(
+                    conn,
+                    "msg-from-codex-b",
+                    &[MessageTarget::cli(crate::models::AgentType::Codex, codex_a)],
+                )?;
+                Ok(codex_b)
+            })
+            .await
+            .unwrap();
+
+        let addressed = wait_for_peer(
+            State(state.clone()),
+            Path("d-wait-same-provider".to_string()),
+            Query(WaitForPeerQuery {
+                since_sort_order: Some(0),
+                timeout_secs: Some(1),
+                exclude_agent_type: Some("Codex".to_string()),
+                session_id: Some("codex-a".to_string()),
+                conversation_id: None,
+            }),
+        )
+        .await
+        .0
+        .data
+        .unwrap();
+        assert!(!addressed.timed_out);
+        assert_eq!(addressed.messages.len(), 1);
+        assert!(addressed.messages[0].addressed_to_caller);
+        assert_eq!(
+            addressed.messages[0].reply_target,
+            Some(MessageTarget::cli(crate::models::AgentType::Codex, codex_b))
+        );
+
+        let author = wait_for_peer(
+            State(state),
+            Path("d-wait-same-provider".to_string()),
+            Query(WaitForPeerQuery {
+                since_sort_order: Some(0),
+                timeout_secs: Some(1),
+                exclude_agent_type: Some("Codex".to_string()),
+                session_id: Some("codex-b".to_string()),
+                conversation_id: None,
+            }),
+        )
+        .await
+        .0
+        .data
+        .unwrap();
+        assert!(
+            author.timed_out,
+            "only the exact author session filters its own append"
+        );
+        assert!(author.messages.is_empty());
+        assert_eq!(
+            author.latest_sort_order, 3,
+            "filtering an own message still advances the durable cursor"
         );
     }
 
@@ -3099,6 +3270,7 @@ mod tests {
                     timeout_secs: Some(1),
                     exclude_agent_type: Some(agent_type.to_string()),
                     session_id: Some(session_id.to_string()),
+                    conversation_id: None,
                 }),
             )
             .await
@@ -3124,6 +3296,7 @@ mod tests {
                 timeout_secs: Some(2),
                 exclude_agent_type: None,
                 session_id: None,
+                conversation_id: None,
             }),
         )
         .await;
@@ -3131,6 +3304,84 @@ mod tests {
         assert!(data.timed_out);
         assert_eq!(data.messages.len(), 0);
         assert_eq!(data.latest_sort_order, 0);
+    }
+
+    // ─── KT-114 — late capture of the native resume id on the idle wait ──
+
+    #[tokio::test]
+    async fn wait_for_peer_persists_a_late_conversation_id_on_the_live_session() {
+        let state = make_state_with_disc("d-wait-late-cid").await;
+        state
+            .db
+            .with_conn(|conn| {
+                crate::db::discussion_sessions::create_session(
+                    conn,
+                    "d-wait-late-cid",
+                    "Codex",
+                    Some("codex-late"),
+                    "peer",
+                )
+            })
+            .await
+            .unwrap();
+
+        let wait = |cid: Option<&str>| {
+            let state = state.clone();
+            let cid = cid.map(str::to_string);
+            async move {
+                wait_for_peer(
+                    State(state),
+                    Path("d-wait-late-cid".to_string()),
+                    Query(WaitForPeerQuery {
+                        since_sort_order: Some(0),
+                        timeout_secs: Some(1),
+                        exclude_agent_type: Some("Codex".to_string()),
+                        session_id: Some("codex-late".to_string()),
+                        conversation_id: cid,
+                    }),
+                )
+                .await
+            }
+        };
+        let stored = |state: &AppState| {
+            let state = state.clone();
+            async move {
+                state
+                    .db
+                    .with_conn(|conn| {
+                        crate::db::discussion_sessions::list_sessions(
+                            conn,
+                            "d-wait-late-cid",
+                            false,
+                        )
+                    })
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .find(|s| s.session_id.as_deref() == Some("codex-late"))
+                    .and_then(|s| s.conversation_id)
+            }
+        };
+
+        // A fresh session joins with nothing to declare.
+        let _ = wait(None).await;
+        assert_eq!(stored(&state).await, None);
+
+        // The bridge resolves the id later and piggybacks it on the idle poll.
+        let _ = wait(Some("019fad80-1c9a-7333-96b1-c06804f91641")).await;
+        assert_eq!(
+            stored(&state).await.as_deref(),
+            Some("019fad80-1c9a-7333-96b1-c06804f91641"),
+            "the Resume button depends on this row being filled late"
+        );
+
+        // A malformed value is dropped, never stored: Kronn does not invent
+        // a resumable identity out of a corrupted parameter.
+        let _ = wait(Some("not-a-uuid")).await;
+        assert_eq!(
+            stored(&state).await.as_deref(),
+            Some("019fad80-1c9a-7333-96b1-c06804f91641"),
+        );
     }
 
     // ─── 0.8.12 PR B — presence phase 1 (server-derived activity) ────
@@ -3173,6 +3424,7 @@ mod tests {
                 timeout_secs: Some(1),
                 exclude_agent_type: Some("ClaudeCode".to_string()),
                 session_id: Some("s-act".to_string()),
+                conversation_id: None,
             }),
         )
         .await;
@@ -3274,6 +3526,7 @@ mod tests {
                 timeout_secs: Some(1),
                 exclude_agent_type: Some("ClaudeCode".to_string()),
                 session_id: None,
+                conversation_id: None,
             }),
         )
         .await;
@@ -3328,6 +3581,7 @@ mod tests {
                 timeout_secs: Some(5),
                 exclude_agent_type: Some("ClaudeCode".to_string()),
                 session_id: Some("s-act2".to_string()),
+                conversation_id: None,
             }),
         )
         .await;
