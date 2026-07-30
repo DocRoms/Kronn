@@ -79,6 +79,10 @@ pub struct DiscussionMessageRead {
     pub agent_type: Option<AgentType>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply_to_message_id: Option<String>,
+    /// Exact joined CLI identity that authored this message, when locally
+    /// verifiable. Use it as the durable target for a reply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_target: Option<MessageTarget>,
     pub timestamp: chrono::DateTime<chrono::Utc>,
     pub tokens_used: u64,
     /// Files attached to this message (0.8.8). Lets an agent that navigates to
@@ -464,14 +468,22 @@ pub async fn disc_get_message(
 
     let msg = &disc.messages[resolved_idx];
     let msg_id = msg.id.clone();
-    let attachments = state
+    let did_for_message_meta = id.clone();
+    let (attachments, reply_target) = state
         .db
         .with_conn(move |conn| {
-            crate::db::discussions::list_context_files_for_message(conn, &msg_id)
-                .map_err(|e| anyhow::anyhow!(e))
+            let attachments =
+                crate::db::discussions::list_context_files_for_message(conn, &msg_id)?;
+            let reply_target = crate::db::discussions::message_cli_author_target(
+                conn,
+                &did_for_message_meta,
+                &msg_id,
+            )?;
+            Ok((attachments, reply_target))
         })
         .await
-        .unwrap_or_default()
+        .unwrap_or_default();
+    let attachments = attachments
         .into_iter()
         .map(|f| MessageAttachment {
             id: f.id,
@@ -500,6 +512,7 @@ pub async fn disc_get_message(
         content: msg.content.clone(),
         agent_type: msg.agent_type.clone(),
         reply_to_message_id: msg.reply_to_message_id.clone(),
+        reply_target,
         timestamp: msg.timestamp,
         tokens_used: msg.tokens_used,
         attachments,

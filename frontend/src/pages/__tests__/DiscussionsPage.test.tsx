@@ -2005,6 +2005,9 @@ describe('DiscussionsPage', () => {
     const createCall = vi.mocked(discussionsApi.create).mock.calls[0][0];
     expect(createCall.title).toBe('RGPD room for later');
     expect(createCall.agent).toBe('ClaudeCode');
+    // KT-128 — the placeholder agent must arrive DISABLED: left active, the
+    // first invited CLI made both it and the CLI answer the same turn.
+    expect(createCall.no_agent).toBe(true);
 
     // No agent run was kicked off — disc-first promise. The
     // assertion runs after waitFor so the handler had time to

@@ -1380,7 +1380,12 @@ export type DiscussionMessageRead = { idx: number, id: string,
 /**
  * Stable compact reference accepted by `disc_get_message`.
  */
-message_ref: string, role: MessageRole, content: string, agent_type: AgentType | null, reply_to_message_id?: string | null, timestamp: string, tokens_used: number,
+message_ref: string, role: MessageRole, content: string, agent_type: AgentType | null, reply_to_message_id?: string | null,
+/**
+ * Exact joined CLI identity that authored this message, when locally
+ * verifiable. Use it as the durable target for a reply.
+ */
+reply_target?: MessageTarget | null, timestamp: string, tokens_used: number,
 /**
  * Files attached to this message (0.8.8). Lets an agent that navigates to
  * an old message see what was uploaded with it instead of being blind to
@@ -3696,6 +3701,12 @@ target_agents?: Array<string>,
  * exact joined CLI session of the same provider.
  */
 targets?: Array<MessageTarget>,
+/**
+ * Exact local CLI identity that authored this message. A caller can use
+ * it as the durable reply target without guessing from provider names.
+ * `None` for humans, native agents, imports and revision events.
+ */
+reply_target?: MessageTarget | null,
 /**
  * Server-computed for the calling durable CLI session. A CLI answers only
  * when this is true; matching the provider name is intentionally

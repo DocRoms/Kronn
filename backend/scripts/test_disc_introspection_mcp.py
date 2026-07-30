@@ -6244,5 +6244,78 @@ class DurableSessionLinkTests(unittest.TestCase):
             self.assertIsNone(self.mod._durable_session_id())
 
 
+
+
+class CodexOpenRolloutProbeTests(unittest.TestCase):
+    """KT-114 — recovering a fresh Codex TUI's native id from its open FDs.
+
+    Acceptance rule: exactly ONE distinct rollout across the ancestor chain,
+    with a valid session_meta (canonical UUID matching the filename,
+    originator=codex-tui, source=cli). Anything else returns None — Kronn
+    never invents provenance.
+    """
+
+    UUID = "019fad80-1c9a-7333-96b1-c06804f91641"
+    PATH = f"/home/user/.codex/sessions/2026/07/30/rollout-2026-07-30T06-00-00-{UUID}.jsonl"
+
+    def setUp(self):
+        self.mod = _load_module()
+        # One fake ancestor, then init.
+        mock.patch.object(self.mod.os, "getppid", return_value=100).start()
+        mock.patch.object(self.mod, "_ppid_of", side_effect=lambda pid: 1).start()
+        self.addCleanup(mock.patch.stopall)
+
+    def _probe(self, paths_by_pid, meta):
+        with mock.patch.object(
+            self.mod, "_open_rollout_paths_of",
+            side_effect=lambda pid: paths_by_pid.get(pid, []),
+        ), mock.patch.object(
+            self.mod, "_rollout_session_meta", return_value=meta,
+        ):
+            return self.mod._codex_id_from_open_rollouts()
+
+    def _valid_meta(self, **overrides):
+        meta = {"session_id": self.UUID, "originator": "codex-tui", "source": "cli"}
+        meta.update(overrides)
+        return meta
+
+    def test_single_valid_rollout_resolves_the_canonical_uuid(self):
+        got = self._probe({100: [self.PATH]}, self._valid_meta())
+        self.assertEqual(got, self.UUID)
+
+    def test_zero_rollouts_resolve_to_none(self):
+        self.assertIsNone(self._probe({}, self._valid_meta()))
+
+    def test_two_distinct_rollouts_resolve_to_none(self):
+        other = self.PATH.replace("91641", "91642")
+        self.assertIsNone(self._probe({100: [self.PATH, other]}, self._valid_meta()))
+
+    def test_malformed_session_meta_resolves_to_none(self):
+        self.assertIsNone(self._probe({100: [self.PATH]}, None))
+
+    def test_codex_exec_originator_resolves_to_none(self):
+        # A `codex exec` run ALSO keeps its rollout open; accepting it would
+        # attach a Kronn-spawned run's id to the human's session.
+        meta = self._valid_meta(originator="codex_exec", source="exec")
+        self.assertIsNone(self._probe({100: [self.PATH]}, meta))
+
+    def test_meta_uuid_mismatch_resolves_to_none(self):
+        meta = self._valid_meta(session_id=self.UUID.replace("91641", "91642"))
+        self.assertIsNone(self._probe({100: [self.PATH]}, meta))
+
+    def test_result_is_cached_per_process(self):
+        first = self._probe({100: [self.PATH]}, self._valid_meta())
+        # Second call must not re-scan: feed it data that would now fail.
+        second = self._probe({}, None)
+        self.assertEqual(first, second)
+
+    def test_lsof_failure_degrades_to_empty_not_raise(self):
+        with mock.patch.object(
+            self.mod.subprocess, "check_output",
+            side_effect=self.mod.subprocess.TimeoutExpired(cmd="lsof", timeout=2),
+        ), mock.patch.object(self.mod.os.path, "isdir", return_value=False):
+            self.assertEqual(self.mod._open_rollout_paths_of(100), [])
+
+
 if __name__ == "__main__":
     unittest.main()

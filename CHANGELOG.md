@@ -305,6 +305,31 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A fresh interactive Codex session now gets its Resume button. Its native id
+  reaches the bridge through neither the environment nor a `codex resume` argv,
+  so the participant stayed permanently non-resumable; the bridge now reads
+  which rollout session file the ancestor CLI itself keeps open — a fact, not an
+  inference — and accepts it only under a strict rule: exactly one open rollout,
+  a valid first-line `session_meta`, canonical UUID matching the filename,
+  `originator=codex-tui`, `source=cli`. Anything else, including a Kronn-spawned
+  `codex exec` holding its own file open, resolves to nothing rather than invent
+  provenance. The id then rides the existing idle wait — no extra round trip —
+  and fills the live session row late; the expensive probe never runs on the
+  wait path itself.
+- **Replies in multi-agent rooms now return to the exact CLI author.** Live MCP
+  messages persist their verified local CLI session separately from the
+  provider name. A `reply_to_message_id` with no explicit target therefore
+  reaches the precise `@codex-cli[-N]` or other joined session that authored the
+  message, even when several peers use the same provider. Explicit targets
+  still win, native same-provider agents are not launched by coincidence, and
+  wait/introspection responses expose the durable `reply_target`.
+
+- A discussion created without launching an agent now starts with its
+  discussion agent disabled. The creation form always sends a placeholder agent
+  for a NOT NULL column, and leaving that placeholder live meant the first
+  invited CLI produced a double answer — the native agent and the CLI both
+  replying to the same turn. The header's existing control re-enables the
+  native agent in one click.
 - The rebuilt guided tour no longer exceeds the strict ESLint warning ratchet:
   its async navigation, DOM measurement, focus handling and resume test now
   follow the React hook/compiler rules without suppressions. Frontend lint and
