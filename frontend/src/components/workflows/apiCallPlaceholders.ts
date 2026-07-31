@@ -21,6 +21,14 @@ const RUNTIME_NAMESPACES = [
   'previous_qp',
   'state',
   'batch',
+  // Per-item fan-out aliases resolved by the runner, NOT launch variables:
+  // `{{item.<field>}}` is the short alias of `{{batch.item.<field>}}`
+  // (BatchApiCall / BatchQuickPrompt), and `{{current_task.<field>}}` is the
+  // SubWorkflow-foreach item. Without these, a BatchApiCall path like
+  // `/repos/{{item.owner}}/{{item.repo}}/pulls/{{item.number}}` made the launch
+  // modal wrongly prompt for item.owner/repo/number on every manual run.
+  'item',
+  'current_task',
   'issue',
   'artifacts',
   'iter',
