@@ -448,9 +448,33 @@ export function Dashboard({ onReset }: DashboardProps) {
     return map;
   }, [allDiscussions]);
 
+  // Tab title reflects background activity so the user knows what's happening
+  // without focusing the tab:
+  //   • unseen discussion messages → `(N)` prefix (unchanged legacy behaviour)
+  //   • running/pending workflows   → animated braille spinner + count `⠋ ▶N`
+  // When no workflow runs, we keep the exact `(N) Kronn` / `Kronn` form (the
+  // adaptive poll at ~3 s while runningWorkflows > 0 keeps the count fresh).
   useEffect(() => {
-    document.title = totalUnseen > 0 ? `(${totalUnseen}) Kronn` : 'Kronn';
-  }, [totalUnseen]);
+    const staticTitle = totalUnseen > 0 ? `(${totalUnseen}) Kronn` : 'Kronn';
+    if (runningWorkflows === 0) {
+      document.title = staticTitle;
+      return;
+    }
+    const FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+    let i = 0;
+    const render = () => {
+      const parts = [FRAMES[i], `▶${runningWorkflows}`];
+      if (totalUnseen > 0) parts.push(`(${totalUnseen})`);
+      parts.push('Kronn');
+      document.title = parts.join(' ');
+    };
+    render();
+    const id = setInterval(() => {
+      i = (i + 1) % FRAMES.length;
+      render();
+    }, 120);
+    return () => clearInterval(id);
+  }, [totalUnseen, runningWorkflows]);
 
   // Stable callback for prefill consumed
   const handlePrefillConsumed = useCallback(() => setDiscPrefill(null), []);

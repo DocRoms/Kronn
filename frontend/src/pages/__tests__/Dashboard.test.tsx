@@ -70,9 +70,9 @@ vi.mock('../../lib/api', () => ({
   },
 }));
 
-import { discussions as discussionsApi, projects as projectsApi } from '../../lib/api';
+import { discussions as discussionsApi, projects as projectsApi, workflows as workflowsApi } from '../../lib/api';
 import { Dashboard } from '../Dashboard';
-import type { Discussion, Project } from '../../types/generated';
+import type { Discussion, Project, WorkflowSummary } from '../../types/generated';
 
 beforeEach(() => {
   vi.useFakeTimers({ shouldAdvanceTime: true });
@@ -124,6 +124,30 @@ const makeProject = (id: string, name: string, org?: string): Project => ({
   updated_at: '2026-01-01T00:00:00Z',
 });
 
+const makeRunningWorkflow = (id: string, name: string): WorkflowSummary => ({
+  id,
+  name,
+  project_id: null,
+  project_name: null,
+  trigger_type: 'manual',
+  step_count: 1,
+  misconfigured_step_count: 0,
+  enabled: true,
+  pinned: false,
+  is_system: false,
+  last_run: {
+    id: `${id}-run`,
+    status: 'Running',
+    started_at: '2026-01-01T00:00:00Z',
+    finished_at: null,
+    tokens_used: 0,
+  },
+  created_at: '2026-01-01T00:00:00Z',
+});
+
+// Any braille spinner frame the running-workflow title may currently show.
+const SPINNER = /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/;
+
 describe('Dashboard — unseen badge & document.title', () => {
   it('shows unseen badge on discussions tab when on another page', async () => {
     const disc = makeDiscussion('d1', 3);
@@ -142,6 +166,42 @@ describe('Dashboard — unseen badge & document.title', () => {
     await wrap(<Dashboard onReset={vi.fn()} />);
 
     expect(document.title).toBe('(5) Kronn');
+  });
+
+  it('shows a spinner + running-workflow count in document.title', async () => {
+    // Mocks persist across tests in this file — pin discussions to empty so no
+    // unseen `(N)` leaks in from a prior case.
+    vi.mocked(discussionsApi.list).mockResolvedValue([]);
+    vi.mocked(workflowsApi.list).mockResolvedValue([
+      makeRunningWorkflow('w1', 'Nightly audit'),
+      makeRunningWorkflow('w2', 'Sync repos'),
+    ]);
+
+    await wrap(<Dashboard onReset={vi.fn()} />);
+
+    // e.g. "⠙ ▶2 Kronn" — the exact spinner frame is time-dependent.
+    expect(document.title).toMatch(SPINNER);
+    expect(document.title).toContain('▶2');
+    expect(document.title).toMatch(/^.{1,2} ▶2 Kronn$/u);
+  });
+
+  it('combines the running-workflow indicator with the unseen count', async () => {
+    vi.mocked(discussionsApi.list).mockResolvedValue([makeDiscussion('d1', 4)]);
+    vi.mocked(workflowsApi.list).mockResolvedValue([makeRunningWorkflow('w1', 'Nightly audit')]);
+
+    await wrap(<Dashboard onReset={vi.fn()} />);
+
+    expect(document.title).toMatch(SPINNER);
+    expect(document.title).toMatch(/^.{1,2} ▶1 \(4\) Kronn$/u);
+  });
+
+  it('drops the spinner back to the plain title when no workflow runs', async () => {
+    vi.mocked(discussionsApi.list).mockResolvedValue([]);
+    vi.mocked(workflowsApi.list).mockResolvedValue([]);
+
+    await wrap(<Dashboard onReset={vi.fn()} />);
+
+    expect(document.title).toBe('Kronn');
   });
 
   it('shows no badge when all messages are seen', async () => {
