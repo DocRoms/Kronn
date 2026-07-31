@@ -960,6 +960,65 @@ fn messages_sort_order() {
     }
 }
 
+/// Regression: a `next_message_seq` counter left BEHIND the real
+/// MAX(sort_order) — a legacy insert path that didn't bump it, or an 082-style
+/// backfill that predated later rows — must not make insert_message re-allocate
+/// an existing sort_order and trip the UNIQUE(discussion_id, sort_order) index.
+/// That collision used to fail the insert and silently block `disc_append` on
+/// the discussion. The allocator now self-heals instead.
+#[test]
+fn insert_message_self_heals_a_stale_sequence_counter() {
+    let conn = test_db();
+    crate::db::discussions::insert_discussion(&conn, &sample_discussion("d1", None)).unwrap();
+
+    // Three normal inserts → sort_order 1,2,3; the counter reaches 4.
+    for i in 1..=3 {
+        crate::db::discussions::insert_message(
+            &conn,
+            "d1",
+            &sample_message(&format!("m{i}"), MessageRole::User),
+        )
+        .unwrap();
+    }
+
+    // Simulate the desync: rewind the counter well behind the real max.
+    conn.execute(
+        "UPDATE discussions SET next_message_seq = 1 WHERE id = 'd1'",
+        [],
+    )
+    .unwrap();
+
+    // The old allocator handed out sort_order 1 → UNIQUE collision. The
+    // self-healing one must succeed and clear the existing max instead.
+    let order = crate::db::discussions::insert_message(
+        &conn,
+        "d1",
+        &sample_message("m4", MessageRole::Agent),
+    )
+    .expect("insert must self-heal past the stale counter, not collide");
+    assert!(
+        order >= 4,
+        "new sort_order must clear the existing max, got {order}"
+    );
+
+    // And it keeps climbing — the counter is healed, not stuck at the collision.
+    let next = crate::db::discussions::insert_message(
+        &conn,
+        "d1",
+        &sample_message("m5", MessageRole::Agent),
+    )
+    .unwrap();
+    assert!(next > order, "counter must keep advancing after the heal");
+
+    // All five messages persisted with distinct positions.
+    assert_eq!(
+        crate::db::discussions::list_messages(&conn, "d1")
+            .unwrap()
+            .len(),
+        5
+    );
+}
+
 #[test]
 fn messages_with_tokens_and_auth_mode() {
     let conn = test_db();

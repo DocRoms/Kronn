@@ -1591,9 +1591,18 @@ fn insert_message_inner(
     discussion_id: &str,
     msg: &DiscussionMessage,
 ) -> Result<i64> {
+    // Allocate this message's sort_order. Self-healing: take
+    // MAX(next_message_seq, real MAX(sort_order)+1) so a counter left behind —
+    // by a legacy insert path that didn't bump it, or an 082-style backfill
+    // that predated later rows — can NEVER re-allocate an existing sort_order
+    // and trip the UNIQUE(discussion_id, sort_order) index. That collision used
+    // to fail insert_message and silently block disc_append on the discussion.
     let next_order: i64 = conn.query_row(
         "UPDATE discussions
-         SET next_message_seq = next_message_seq + 1
+         SET next_message_seq = MAX(
+             next_message_seq,
+             COALESCE((SELECT MAX(sort_order) FROM messages WHERE discussion_id = ?1), 0) + 1
+         ) + 1
          WHERE id = ?1
          RETURNING next_message_seq - 1",
         params![discussion_id],
