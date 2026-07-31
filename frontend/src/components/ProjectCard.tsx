@@ -21,7 +21,7 @@ import {
   Plus, Trash2, Zap,
   Loader2,
   MessageSquare, AlertTriangle,
-  Play, FileCode, ShieldCheck, StopCircle, BookOpen, Rocket, Check, RefreshCw, Puzzle,
+  Play, FileCode, ShieldCheck, StopCircle, BookOpen, GraduationCap, Rocket, Check, RefreshCw, Puzzle,
   FolderInput, Plug, X, FileText, DownloadCloud,
   Code2, ExternalLink, GitBranch, GitPullRequest, Tag, Package, ListTodo,
 } from 'lucide-react';
@@ -1750,6 +1750,19 @@ export function ProjectCard({
                   </strong>
                   <span>{t('projects.master.tab.docs')}</span>
                 </button>
+                {(proj.onboarding_count ?? 0) > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setDetailView('docs');
+                      setDocDeepLink('docs/onboarding.md');
+                    }}
+                  >
+                    <GraduationCap size={16} />
+                    <strong>{proj.onboarding_count}</strong>
+                    <span>{t('projects.master.overview.onboarding')}</span>
+                  </button>
+                )}
                 <button type="button" onClick={() => setDetailView('code')}>
                   <Code2 size={16} />
                   <strong>{t('projects.master.overview.browse')}</strong>
