@@ -15,7 +15,7 @@ import {
   Plus, Trash2, Play, Loader2, ChevronLeft, ChevronRight, ChevronDown,
   Clock, GitBranch, Zap, Eye, Layers, X, Square,
   ToggleLeft, ToggleRight, Star,
-  Upload, Download, AlertTriangle,
+  Upload, Download, AlertTriangle, RotateCcw,
 } from 'lucide-react';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { WorkflowDetail } from '../components/workflows/WorkflowDetail';
@@ -361,11 +361,14 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   }, [collapsedGroups]);
 
   const groupedWorkflows = useMemo(() => {
-    const groups: { key: string; label: string; workflows: WorkflowSummary[] }[] = [];
+    const groups: { key: string; label: string; workflows: WorkflowSummary[]; isSystem?: boolean; defaultCollapsed?: boolean }[] = [];
     const byProject = new Map<string, WorkflowSummary[]>();
     const noProject: WorkflowSummary[] = [];
+    const system: WorkflowSummary[] = [];
     for (const wf of workflows) {
-      if (wf.project_id) {
+      if (wf.is_system) {
+        system.push(wf);
+      } else if (wf.project_id) {
         const arr = byProject.get(wf.project_id) ?? [];
         arr.push(wf);
         byProject.set(wf.project_id, arr);
@@ -390,11 +393,20 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
       const label = wfs[0].project_name ?? pid;
       groups.push({ key: pid, label, workflows: wfs });
     }
+    // Builtin system workflows (Mode Mentor seeds) render LAST, in a group
+    // collapsed by default — inspectable/tweakable if needed, out of the way
+    // otherwise. Cards stay fully editable but swap Delete for "Réinitialiser".
+    if (system.length > 0) {
+      groups.push({ key: '__system__', label: t('wf.systemGroup'), workflows: system, isSystem: true, defaultCollapsed: true });
+    }
     return groups;
   }, [workflows, t]);
 
-  const toggleGroup = (key: string) => {
-    setCollapsedGroups(prev => ({ ...prev, [key]: !prev[key] }));
+  const toggleGroup = (key: string, currentlyCollapsed: boolean) => {
+    // Pass the EFFECTIVE collapsed state (which folds in per-group defaults)
+    // so a default-collapsed group opens on first click instead of writing
+    // `true` over its already-collapsed default.
+    setCollapsedGroups(prev => ({ ...prev, [key]: !currentlyCollapsed }));
   };
 
   const fetchRunPage = async (id: string, offset: number, pageSize: number) => {
@@ -797,6 +809,24 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
       refetch();
     } catch (e) {
       console.warn('Workflow action failed:', e);
+    }
+  };
+
+  const handleResetToSeed = async (id: string) => {
+    // System workflows (Mode Mentor seeds) can't be deleted from the UI — this
+    // restores the bundled seed definition, discarding operator edits. Mildly
+    // destructive (wipes customizations), so it stays behind a confirm.
+    if (!confirm(t('wf.resetToSeedConfirm'))) return;
+    try {
+      await workflowsApi.resetToSeed(id);
+      if (selectedId === id) {
+        const fresh = await workflowsApi.get(id);
+        setDetailWorkflow(fresh);
+      }
+      refetch();
+    } catch (e) {
+      console.warn('Workflow reset failed:', e);
+      if (toastProp) toastProp(userError(e, t('wf.resetToSeedError')), 'error');
     }
   };
 
@@ -1513,15 +1543,20 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
           {/* List — grouped by project */}
           {!(isMobile && selectedId) && (
           <div className="wf-workflow-list-pane" data-testid="workflow-list-pane">
-            {groupedWorkflows.map(group => (
+            {groupedWorkflows.map(group => {
+              // Effective collapsed state: an explicit user choice (persisted)
+              // wins; otherwise fall back to the group's default (system group
+              // starts collapsed, everything else expanded).
+              const isCollapsed = collapsedGroups[group.key] ?? group.defaultCollapsed ?? false;
+              return (
               <div key={group.key} className="mb-6">
                 {/* Group header */}
                 <button
                   className="wf-group-header"
-                  onClick={() => toggleGroup(group.key)}
-                  aria-expanded={!collapsedGroups[group.key]}
+                  onClick={() => toggleGroup(group.key, isCollapsed)}
+                  aria-expanded={!isCollapsed}
                 >
-                  {collapsedGroups[group.key] ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
+                  {isCollapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
                   {group.key === '__favorites__' && (
                     <Star size={11} style={{ color: 'var(--kr-warning)', flexShrink: 0 }} />
                   )}
@@ -1530,7 +1565,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                 </button>
 
                 {/* Workflow cards */}
-                {!collapsedGroups[group.key] && group.workflows.map(wf => {
+                {!isCollapsed && group.workflows.map(wf => {
                   // A workflow is "in flight" if EITHER an SSE-tracked
                   // liveRun is attached to it, OR its persisted last_run
                   // is still Running/Pending. We compute it once and use
@@ -1566,6 +1601,11 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                           />
                         )}
                         <span className="wf-card-title">{wf.name}</span>
+                        {wf.is_system && (
+                          <span className="wf-system-badge" title={t('wf.systemBadgeTip')}>
+                            {t('wf.systemBadge')}
+                          </span>
+                        )}
                       </div>
                       <div className="wf-card-controls">
                         <button
@@ -1660,21 +1700,33 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                           {triggering === wf.id ? <Loader2 size={11} className="spin" /> : <Play size={11} fill="currentColor" />}
                           {t('wf.trigger')}
                         </button>
-                        <button
-                          className="wf-card-delete-btn"
-                          onClick={(e) => { e.stopPropagation(); handleDelete(wf.id); }}
-                          title={t('wf.delete')}
-                          aria-label={`${t('wf.delete')} ${wf.name}`}
-                        >
-                          <Trash2 size={12} />
-                        </button>
+                        {wf.is_system ? (
+                          <button
+                            className="wf-card-delete-btn"
+                            onClick={(e) => { e.stopPropagation(); handleResetToSeed(wf.id); }}
+                            title={t('wf.resetToSeedTip')}
+                            aria-label={t('wf.resetToSeed')}
+                          >
+                            <RotateCcw size={12} />
+                          </button>
+                        ) : (
+                          <button
+                            className="wf-card-delete-btn"
+                            onClick={(e) => { e.stopPropagation(); handleDelete(wf.id); }}
+                            title={t('wf.delete')}
+                            aria-label={`${t('wf.delete')} ${wf.name}`}
+                          >
+                            <Trash2 size={12} />
+                          </button>
+                        )}
                       </div>
                     </div>
                   </div>
                   );
                 })}
               </div>
-            ))}
+              );
+            })}
           </div>
           )}
 

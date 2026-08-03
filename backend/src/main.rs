@@ -237,6 +237,52 @@ async fn main() -> anyhow::Result<()> {
     let config_arc = Arc::new(RwLock::new(app_config));
     let state = AppState::new_defaults(config_arc, database, max_agents);
 
+    // ── Mode Mentor — seed builtin workflows on first run + auto-wire config ──
+    // Every install gets the mentor→censeur turn + parcours-generator workflows
+    // (they reference the builtin personas), and the config points at them
+    // unless the operator set their own. Idempotent. See docs/design/mentor-mode.md.
+    match state
+        .db
+        .with_conn(kronn::db::workflows::ensure_mentor_workflows)
+        .await
+    {
+        Ok(()) => {
+            let mut cfg = state.config.write().await;
+            let mut changed = false;
+            if cfg.server.mentor_turn_workflow_id.is_none() {
+                cfg.server.mentor_turn_workflow_id =
+                    Some(kronn::db::workflows::MENTOR_TURN_WORKFLOW_ID.to_string());
+                changed = true;
+            }
+            if cfg.server.mentor_generator_workflow_id.is_none() {
+                cfg.server.mentor_generator_workflow_id =
+                    Some(kronn::db::workflows::MENTOR_GENERATOR_WORKFLOW_ID.to_string());
+                changed = true;
+            }
+            if cfg.server.mentor_course_workflow_id.is_none() {
+                cfg.server.mentor_course_workflow_id =
+                    Some(kronn::db::workflows::MENTOR_COURSE_WORKFLOW_ID.to_string());
+                changed = true;
+            }
+            if cfg.server.mentor_hint_workflow_id.is_none() {
+                cfg.server.mentor_hint_workflow_id =
+                    Some(kronn::db::workflows::MENTOR_HINT_WORKFLOW_ID.to_string());
+                changed = true;
+            }
+            if cfg.server.mentor_bilan_workflow_id.is_none() {
+                cfg.server.mentor_bilan_workflow_id =
+                    Some(kronn::db::workflows::MENTOR_BILAN_WORKFLOW_ID.to_string());
+                changed = true;
+            }
+            if changed {
+                if let Err(e) = config::save(&cfg).await {
+                    tracing::warn!("Mode Mentor: failed to persist workflow config: {e}");
+                }
+            }
+        }
+        Err(e) => tracing::warn!("Mode Mentor: failed to seed workflows: {e}"),
+    }
+
     // Fire up the kronn-docs sidecar in the background — its start is
     // best-effort (graceful skip if deps are missing) so we don't block
     // the backend boot on it.

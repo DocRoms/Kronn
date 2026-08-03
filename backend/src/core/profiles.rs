@@ -84,6 +84,19 @@ const BUILTIN_PROFILES: &[BuiltinProfile] = &[
         id: "mentor",
         content: include_str!("../profiles/mentor.md"),
     },
+    // Mode Mentor — socratic mentor + its solution-leak censor (see docs/design/mentor-mode.md).
+    BuiltinProfile {
+        id: "mentor-socratique",
+        content: include_str!("../profiles/mentor-socratique.md"),
+    },
+    BuiltinProfile {
+        id: "censeur-mentor",
+        content: include_str!("../profiles/censeur-mentor.md"),
+    },
+    BuiltinProfile {
+        id: "mentor-prof",
+        content: include_str!("../profiles/mentor-prof.md"),
+    },
     // Business
     BuiltinProfile {
         id: "entrepreneur",

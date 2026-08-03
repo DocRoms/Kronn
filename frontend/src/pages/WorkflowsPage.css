@@ -404,6 +404,19 @@
   border: 1px solid rgba(var(--kr-accent-rgb), 0.15);
 }
 
+/* Builtin system workflow (Mode Mentor seed) pill — next to the name. */
+.wf-system-badge {
+  flex-shrink: 0;
+  padding: 1px var(--kr-sp-4);
+  border-radius: var(--kr-r-sm);
+  font-size: var(--kr-fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  background: rgba(var(--kr-purple-rgb), 0.08);
+  color: var(--kr-purple);
+  border: 1px solid rgba(var(--kr-purple-rgb), 0.15);
+}
+
 /* ── Detail panel ──────────────────────────────────────── */
 .wf-detail-panel {
   padding: var(--kr-sp-8) var(--kr-sp-9);

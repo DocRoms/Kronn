@@ -33,6 +33,7 @@ const WorkflowsPage = lazy(() => import('./WorkflowsPage').then(m => ({ default:
 const PlanningPage = lazy(() => import('./PlanningPage').then(m => ({ default: m.PlanningPage })));
 const SettingsPage = lazy(() => import('./SettingsPage').then(m => ({ default: m.SettingsPage })));
 const DiscussionsPage = lazy(() => import('./DiscussionsPage').then(m => ({ default: m.DiscussionsPage })));
+const MentorPage = lazy(() => import('./MentorPage').then(m => ({ default: m.MentorPage })));
 import { ActiveRunsPopover } from '../components/workflows/ActiveRunsPopover';
 import { ActiveAuditsPopover } from '../components/ActiveAuditsPopover';
 import { ProjectList } from '../components/ProjectList';
@@ -42,9 +43,10 @@ import {
   Loader2,
   MessageSquare, X,
   Rocket, Check, Workflow, FileText, ListTodo,
+  GraduationCap,
 } from 'lucide-react';
 
-type Page = DashboardPage;
+type Page = DashboardPage | 'mentor';
 
 interface DashboardProps {
   onReset: () => void;
@@ -193,7 +195,9 @@ export function Dashboard({ onReset }: DashboardProps) {
   // Keep this tab-local: it restores an interrupted dev session without
   // turning the SPA state into a long-lived or shareable routing contract.
   useEffect(() => {
-    writeDashboardPage(page);
+    // `page` may be the Mentor tab (not a persisted DashboardPage); only
+    // checkpoint real dashboard pages for the tab-local HMR restore.
+    if (page !== 'mentor') writeDashboardPage(page);
   }, [page]);
 
   useEffect(() => {
@@ -701,6 +705,7 @@ export function Dashboard({ onReset }: DashboardProps) {
           ['projects', Folder, t('nav.projects')],
           ['discussions', MessageSquare, t('nav.discussions')],
           ['planning', ListTodo, t('nav.planning')],
+          ['mentor', GraduationCap, t('nav.mentor')],
           ['mcps', Puzzle, t('nav.mcps')],
           ['workflows', Workflow, t('nav.workflows')],
           // 0.8.6 (#61 follow-up 2026-05-21) — API call logs moved from a
@@ -1417,6 +1422,15 @@ export function Dashboard({ onReset }: DashboardProps) {
                 refetchDiscussions?.();
               }}
             />
+            </Suspense>
+          </ErrorBoundary>
+        )}
+
+        {/* ════════ MODE MENTOR ════════ */}
+        {page === 'mentor' && (
+          <ErrorBoundary mode="zone" label="Mentor">
+            <Suspense fallback={<PageFallback />}>
+              <MentorPage />
             </Suspense>
           </ErrorBoundary>
         )}

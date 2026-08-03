@@ -1,0 +1,140 @@
+{
+  "id": "mentor-turn",
+  "name": "Mode Mentor — tour mentor→censeur",
+  "project_id": null,
+  "trigger": {
+    "type": "Manual"
+  },
+  "steps": [
+    {
+      "name": "mentor",
+      "step_type": {
+        "type": "Agent"
+      },
+      "agent": "ClaudeCode",
+      "profile_ids": [
+        "mentor-socratique"
+      ],
+      "directive_ids": [
+        "mentor-no-solution"
+      ],
+      "output_format": {
+        "type": "FreeText"
+      },
+      "prompt_template": "Tu accompagnes un apprenti débutant sur un parcours (Mode Mentor). Si un projet est rattaché, tu PEUX explorer ses vrais fichiers et sa doc IA pour ancrer tes questions (« regarde comment X est géré dans tel fichier ») ; sinon appuie-toi sur le contexte ci-dessous.\n\nSUJET / OBJECTIF DU PARCOURS :\n{{subject}}\n\nBLOC EN COURS : {{block}}\n\nÉCHANGES DÉJÀ EUS SUR CE BLOC (du plus ancien au plus récent — vide au premier tour) :\n{{history}}\n\nCE QUE L'APPRENTI VIENT DE SOUMETTRE :\n---\n{{submission}}\n---\n\nRéagis en tant que mentor socratique (tu es Noé) : fais-lui d'abord expliciter son raisonnement / sa stratégie quand c'est pertinent, puis commente sa soumission et pointe UN angle mort par une QUESTION, en orientant vers une ressource ou une sous-étape. TIENS COMPTE DES ÉCHANGES PRÉCÉDENTS : ne repose pas une question déjà posée, rebondis sur ce qu'il a répondu, et s'il tourne en rond, change d'angle ou suggère-lui un coup de pouce. Ne donne JAMAIS la solution ni de code. Réponse courte et ciblée, en français : pose UNE seule question — la plus utile — et au maximum une question de repli si elle est vraiment indispensable. Ne noie pas l'apprenti sous plusieurs questions simultanées : une cible à la fois."
+    },
+    {
+      "name": "censeur",
+      "step_type": {
+        "type": "Agent"
+      },
+      "agent": "ClaudeCode",
+      "profile_ids": [
+        "censeur-mentor"
+      ],
+      "output_format": {
+        "type": "TypedSchema",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "leak": {
+              "type": "boolean"
+            },
+            "severity": {
+              "type": "string",
+              "enum": [
+                "none",
+                "low",
+                "medium",
+                "high"
+              ]
+            },
+            "spans": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "reason": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "leak",
+            "severity",
+            "reason"
+          ]
+        }
+      },
+      "prompt_template": "CONTEXTE : un apprenti débutant doit résoudre lui-même l'exercice suivant, sans recevoir la solution.\n\nSUJET : {{subject}}\nBLOC : {{block}}\n\nRÉPONSE CANDIDATE du mentor à juger :\n---\n{{steps.mentor.output}}\n---\n\nJuge : cette réponse révèle-t-elle tout ou partie de la solution ? Réponds en JSON strict selon ton format."
+    },
+    {
+      "name": "evaluateur",
+      "step_type": {
+        "type": "Agent"
+      },
+      "agent": "ClaudeCode",
+      "directive_ids": [
+        "mentor-no-solution"
+      ],
+      "output_format": {
+        "type": "TypedSchema",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "ready": {
+              "type": "boolean"
+            },
+            "reason": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "ready",
+            "reason"
+          ]
+        }
+      },
+      "prompt_template": "Tu es l'ÉVALUATEUR d'un parcours Mode Mentor (distinct du mentor et du censeur). Un apprenti débutant travaille le bloc « {{block}} » du sujet suivant :\n{{subject}}\n\nCE QU'IL A SOUMIS :\n---\n{{submission}}\n---\n\nJuge si sa soumission permet de VALIDER ce bloc et passer à la suite. Critère clé : ready=true UNIQUEMENT si la soumission montre que l'apprenti COMPREND ce qu'il fait (le POURQUOI de ses choix), pas seulement qu'il a produit quelque chose de correct — un livrable juste mais non justifié, ou visiblement recopié sans compréhension, n'est PAS prêt. Sois exigeant mais juste (on n'attend pas la perfection d'un senior, mais un effort réfléchi qui tient la route). Ne donne AUCUNE solution ni indice de solution, même dans la raison. Réponds en JSON strict selon ton format : ready=true si le bloc peut être validé, sinon ready=false, avec une raison COURTE et ACTIONNABLE qui NOMME LA DIMENSION à travailler (le pourquoi non justifié, un cas non traité, une hypothèse non vérifiée) — ex. « explicite pourquoi tu as choisi cette approche », « il manque la gestion des cas d'erreur » — sans jamais dire QUOI faire ni donner d'indice de solution."
+    }
+  ],
+  "actions": [],
+  "safety": {
+    "sandbox": false,
+    "require_approval": false
+  },
+  "workspace_config": null,
+  "concurrency_limit": null,
+  "guards": {
+    "timeout_seconds": 900
+  },
+  "variables": [
+    {
+      "name": "subject",
+      "label": "Sujet / objectif du parcours",
+      "placeholder": "",
+      "required": true
+    },
+    {
+      "name": "block",
+      "label": "Bloc en cours",
+      "placeholder": "",
+      "required": true
+    },
+    {
+      "name": "submission",
+      "label": "Ce que l'apprenti vient de soumettre",
+      "placeholder": "",
+      "required": true
+    },
+    {
+      "name": "history",
+      "label": "Échanges précédents sur le bloc",
+      "placeholder": "",
+      "required": false
+    }
+  ],
+  "enabled": true,
+  "created_at": "2026-01-01T00:00:00Z",
+  "updated_at": "2026-01-01T00:00:00Z"
+}

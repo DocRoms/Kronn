@@ -26,6 +26,7 @@ import c from 'highlight.js/lib/languages/c';
 import cpp from 'highlight.js/lib/languages/cpp';
 import csharp from 'highlight.js/lib/languages/csharp';
 import css from 'highlight.js/lib/languages/css';
+import gherkin from 'highlight.js/lib/languages/gherkin';
 import go from 'highlight.js/lib/languages/go';
 import ini from 'highlight.js/lib/languages/ini'; // also handles TOML-ish
 import java from 'highlight.js/lib/languages/java';
@@ -49,6 +50,7 @@ hljs.registerLanguage('c', c);
 hljs.registerLanguage('cpp', cpp);
 hljs.registerLanguage('csharp', csharp);
 hljs.registerLanguage('css', css);
+hljs.registerLanguage('gherkin', gherkin);
 hljs.registerLanguage('go', go);
 hljs.registerLanguage('ini', ini);
 hljs.registerLanguage('java', java);
@@ -146,6 +148,46 @@ export function highlightLine(line: string, language: string | null): string {
     // hljs can throw for unregistered languages or internal errors; fall
     // back to a safe escaped string so the diff still renders legibly.
     return escapeHtml(line);
+  }
+}
+
+/** Map a Markdown fence language (```ts, ```py…) to a registered hljs id, or
+ *  null when unknown (caller then auto-detects or renders verbatim). */
+function fenceToLanguage(hint: string | null): string | null {
+  if (!hint) return null;
+  const h = hint.trim().toLowerCase();
+  const alias: Record<string, string> = {
+    ts: 'typescript', tsx: 'typescript', typescript: 'typescript',
+    js: 'typescript', jsx: 'typescript', javascript: 'typescript', mjs: 'typescript', cjs: 'typescript',
+    py: 'python', python: 'python',
+    rs: 'rust', rust: 'rust',
+    go: 'go', golang: 'go',
+    java: 'java',
+    json: 'json', jsonc: 'json',
+    yaml: 'yaml', yml: 'yaml',
+    toml: 'ini', ini: 'ini', conf: 'ini', cfg: 'ini', env: 'ini',
+    md: 'markdown', markdown: 'markdown',
+    css: 'css', scss: 'css', sass: 'css', less: 'css',
+    html: 'xml', htm: 'xml', xml: 'xml', svg: 'xml', vue: 'xml',
+    sh: 'shell', bash: 'shell', zsh: 'shell', shell: 'shell', console: 'shell',
+    sql: 'sql',
+  };
+  return alias[h] ?? (hljs.getLanguage(h) ? h : null);
+}
+
+/**
+ * Highlight a whole code block for `dangerouslySetInnerHTML`. `langHint` is the
+ * Markdown fence language; when it's null/unknown we auto-detect among the
+ * registered languages. Falls back to an escaped verbatim string on any error.
+ */
+export function highlightCode(code: string, langHint: string | null): string {
+  const lang = fenceToLanguage(langHint);
+  try {
+    return lang
+      ? hljs.highlight(code, { language: lang, ignoreIllegals: true }).value
+      : hljs.highlightAuto(code).value;
+  } catch {
+    return escapeHtml(code);
   }
 }
 

@@ -116,6 +116,15 @@ pub fn list_workflows(conn: &Connection) -> Result<Vec<Workflow>> {
     Ok(workflows)
 }
 
+/// True for builtin system workflows — currently the Mode Mentor seeds
+/// (ids prefixed [`MENTOR_WORKFLOW_ID_PREFIX`]). The Workflows page surfaces
+/// these in a collapsed "Système" group and offers "reset to seed" instead of
+/// hiding them outright, so they can be inspected and tweaked without cluttering
+/// the main list. The `WorkflowSummary.is_system` flag is derived from this.
+pub fn is_system_workflow_id(id: &str) -> bool {
+    id.starts_with(MENTOR_WORKFLOW_ID_PREFIX)
+}
+
 pub fn get_workflow(conn: &Connection, id: &str) -> Result<Option<Workflow>> {
     let mut stmt = conn.prepare(
         "SELECT id, name, project_id, trigger_json, steps_json, actions_json,
@@ -159,6 +168,199 @@ pub fn ensure_batch_placeholder_workflow(
         ],
     )?;
     Ok(placeholder_id)
+}
+
+/// Stable ids of the Mode Mentor seed workflows. Referenced by config
+/// (`mentor_turn_workflow_id` / `mentor_generator_workflow_id`) and by the
+/// frontend, so they're constants rather than random UUIDs.
+/// Shared prefix of the builtin Mode Mentor seed workflow ids. Used by
+/// [`is_system_workflow_id`] to flag them (`WorkflowSummary.is_system`) so the
+/// Workflows page groups them under a collapsed "Système" section. All five
+/// `MENTOR_*_WORKFLOW_ID` constants below must start with this — pinned by the
+/// `mentor_seed_ids_share_prefix` test so a future rename can't silently defeat
+/// the classifier.
+pub const MENTOR_WORKFLOW_ID_PREFIX: &str = "mentor-";
+pub const MENTOR_TURN_WORKFLOW_ID: &str = "mentor-turn";
+pub const MENTOR_GENERATOR_WORKFLOW_ID: &str = "mentor-generator";
+pub const MENTOR_COURSE_WORKFLOW_ID: &str = "mentor-course";
+pub const MENTOR_HINT_WORKFLOW_ID: &str = "mentor-hint";
+pub const MENTOR_BILAN_WORKFLOW_ID: &str = "mentor-bilan";
+
+const MENTOR_TURN_SEED: &str = include_str!("../workflows/seeds/mentor-turn.json");
+const MENTOR_GENERATOR_SEED: &str = include_str!("../workflows/seeds/mentor-generator.json");
+const MENTOR_COURSE_SEED: &str = include_str!("../workflows/seeds/mentor-course.json");
+const MENTOR_HINT_SEED: &str = include_str!("../workflows/seeds/mentor-hint.json");
+const MENTOR_BILAN_SEED: &str = include_str!("../workflows/seeds/mentor-bilan.json");
+
+/// Idempotently seed the Mode Mentor workflows (mentor→censeur turn +
+/// parcours generator) so every Kronn install has them out of the box. They
+/// reference the builtin personas (`mentor-socratique` / `censeur-mentor` /
+/// `mentor-no-solution`). Only inserts a workflow whose stable id is ABSENT —
+/// never overwrites an operator's edits. See docs/design/mentor-mode.md.
+pub fn ensure_mentor_workflows(conn: &Connection) -> Result<()> {
+    for raw in [
+        MENTOR_TURN_SEED,
+        MENTOR_GENERATOR_SEED,
+        MENTOR_COURSE_SEED,
+        MENTOR_HINT_SEED,
+        MENTOR_BILAN_SEED,
+    ] {
+        let mut wf: Workflow = serde_json::from_str(raw)?;
+        if get_workflow(conn, &wf.id)?.is_some() {
+            continue; // already present — respect any operator edits
+        }
+        let now = Utc::now();
+        wf.created_at = now;
+        wf.updated_at = now;
+        insert_workflow(conn, &wf)?;
+        tracing::info!("Seeded Mode Mentor workflow '{}'", wf.id);
+    }
+    Ok(())
+}
+
+/// Map a Mode Mentor seed id to its bundled JSON, if `id` is one of the five.
+fn mentor_seed_raw(id: &str) -> Option<&'static str> {
+    match id {
+        MENTOR_TURN_WORKFLOW_ID => Some(MENTOR_TURN_SEED),
+        MENTOR_GENERATOR_WORKFLOW_ID => Some(MENTOR_GENERATOR_SEED),
+        MENTOR_COURSE_WORKFLOW_ID => Some(MENTOR_COURSE_SEED),
+        MENTOR_HINT_WORKFLOW_ID => Some(MENTOR_HINT_SEED),
+        MENTOR_BILAN_WORKFLOW_ID => Some(MENTOR_BILAN_SEED),
+        _ => None,
+    }
+}
+
+/// Re-apply a system workflow's bundled seed definition, discarding any operator
+/// edits — the "Réinitialiser au seed d'origine" action. Unlike
+/// [`ensure_mentor_workflows`] (which respects existing rows via INSERT OR
+/// IGNORE), this OVERWRITES. Returns `Ok(false)` when `id` is not a known seed
+/// so the caller can answer 404 rather than silently no-op. The original
+/// `created_at` is preserved when the row exists.
+pub fn reset_workflow_to_seed(conn: &Connection, id: &str) -> Result<bool> {
+    let Some(raw) = mentor_seed_raw(id) else {
+        return Ok(false);
+    };
+    let mut wf: Workflow = serde_json::from_str(raw)?;
+    let now = Utc::now();
+    wf.updated_at = now;
+    match get_workflow(conn, id)? {
+        Some(existing) => {
+            wf.created_at = existing.created_at;
+            update_workflow(conn, &wf)?;
+        }
+        None => {
+            wf.created_at = now;
+            insert_workflow(conn, &wf)?;
+        }
+    }
+    tracing::info!("Reset system workflow '{}' to bundled seed", id);
+    Ok(true)
+}
+
+#[cfg(test)]
+mod mentor_seed_tests {
+    use super::*;
+
+    #[test]
+    fn mentor_turn_seed_deserializes() {
+        let wf: Workflow =
+            serde_json::from_str(MENTOR_TURN_SEED).expect("mentor-turn.json must deserialize");
+        assert_eq!(wf.id, MENTOR_TURN_WORKFLOW_ID);
+        assert_eq!(wf.steps.len(), 3);
+        assert_eq!(wf.variables.len(), 4);
+        assert_eq!(
+            wf.steps[0].profile_ids,
+            vec!["mentor-socratique".to_string()]
+        );
+        assert_eq!(
+            wf.steps[0].directive_ids,
+            vec!["mentor-no-solution".to_string()]
+        );
+        assert_eq!(wf.steps[1].profile_ids, vec!["censeur-mentor".to_string()]);
+        assert_eq!(wf.steps[2].name, "evaluateur");
+    }
+
+    #[test]
+    fn mentor_hint_seed_deserializes() {
+        let wf: Workflow =
+            serde_json::from_str(MENTOR_HINT_SEED).expect("mentor-hint.json must deserialize");
+        assert_eq!(wf.id, MENTOR_HINT_WORKFLOW_ID);
+        assert_eq!(wf.steps.len(), 2);
+        assert_eq!(wf.variables.len(), 4);
+        assert_eq!(
+            wf.steps[0].profile_ids,
+            vec!["mentor-socratique".to_string()]
+        );
+        assert_eq!(wf.steps[1].profile_ids, vec!["censeur-mentor".to_string()]);
+    }
+
+    #[test]
+    fn mentor_bilan_seed_deserializes() {
+        let wf: Workflow =
+            serde_json::from_str(MENTOR_BILAN_SEED).expect("mentor-bilan.json must deserialize");
+        assert_eq!(wf.id, MENTOR_BILAN_WORKFLOW_ID);
+        assert_eq!(wf.steps.len(), 1);
+        assert_eq!(wf.steps[0].name, "synthese");
+        assert_eq!(wf.steps[0].profile_ids, vec!["mentor-prof".to_string()]);
+        assert_eq!(wf.variables.len(), 3);
+    }
+
+    #[test]
+    fn mentor_generator_seed_deserializes() {
+        let wf: Workflow = serde_json::from_str(MENTOR_GENERATOR_SEED)
+            .expect("mentor-generator.json must deserialize");
+        assert_eq!(wf.id, MENTOR_GENERATOR_WORKFLOW_ID);
+        assert_eq!(wf.steps.len(), 1);
+        assert_eq!(wf.variables.len(), 2);
+    }
+
+    #[test]
+    fn mentor_course_seed_deserializes() {
+        let wf: Workflow =
+            serde_json::from_str(MENTOR_COURSE_SEED).expect("mentor-course.json must deserialize");
+        assert_eq!(wf.id, MENTOR_COURSE_WORKFLOW_ID);
+        assert_eq!(wf.steps.len(), 1);
+        assert_eq!(wf.variables.len(), 2);
+    }
+
+    #[test]
+    fn mentor_seed_ids_share_prefix() {
+        // is_system_workflow_id flags seeds by MENTOR_WORKFLOW_ID_PREFIX. If a
+        // seed id ever stops matching, it would lose its "Système" grouping and
+        // the reset-to-seed guard on the Workflows page.
+        for id in [
+            MENTOR_TURN_WORKFLOW_ID,
+            MENTOR_GENERATOR_WORKFLOW_ID,
+            MENTOR_COURSE_WORKFLOW_ID,
+            MENTOR_HINT_WORKFLOW_ID,
+            MENTOR_BILAN_WORKFLOW_ID,
+        ] {
+            assert!(
+                id.starts_with(MENTOR_WORKFLOW_ID_PREFIX),
+                "mentor seed id '{id}' must start with '{MENTOR_WORKFLOW_ID_PREFIX}' or it leaks into the UI list"
+            );
+        }
+    }
+
+    // M2 safety net: the runner (api/mentor.rs) and the front (MentorPage.tsx)
+    // read step OUTPUT by HARD-CODED step name. Renaming a step in a seed would
+    // break that parsing SILENTLY — this pins the contract so it fails loudly here.
+    #[test]
+    fn mentor_seed_step_names_match_parser_contract() {
+        let names = |seed: &str| {
+            serde_json::from_str::<Workflow>(seed)
+                .unwrap()
+                .steps
+                .iter()
+                .map(|s| s.name.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(MENTOR_TURN_SEED), ["mentor", "censeur", "evaluateur"]);
+        assert_eq!(names(MENTOR_HINT_SEED), ["mentor", "censeur"]);
+        assert_eq!(names(MENTOR_BILAN_SEED), ["synthese"]);
+        assert_eq!(names(MENTOR_GENERATOR_SEED), ["generate"]);
+        assert_eq!(names(MENTOR_COURSE_SEED), ["generate_course"]);
+    }
 }
 
 /// List all batch runs along with their parent workflow name + run sequence.

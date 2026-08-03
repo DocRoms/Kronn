@@ -30,7 +30,9 @@ pub async fn list(
         return match state
             .db
             .with_read_conn(move |conn| {
-                crate::db::discussions::list_discussions_paginated(
+                // `_for_ui` hides Mode Mentor parcours — they live on the Mentor
+                // catalogue, not the general Discussions list (see db::discussions).
+                crate::db::discussions::list_discussions_paginated_for_ui(
                     conn,
                     Some(per_page),
                     Some(offset),
@@ -44,7 +46,7 @@ pub async fn list(
     }
     match state
         .db
-        .with_read_conn(crate::db::discussions::list_discussions)
+        .with_read_conn(crate::db::discussions::list_discussions_for_ui)
         .await
     {
         Ok(discussions) => Json(ApiResponse::ok(discussions)),

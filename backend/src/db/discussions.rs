@@ -426,6 +426,39 @@ pub fn list_discussions_paginated(
     Ok(discussions)
 }
 
+/// Like [`list_discussions_paginated`] but hides Mode Mentor parcours (rows
+/// carrying a `mentor_state`). Those live on the dedicated Mentor catalogue
+/// (see [`list_mentor_parcours`]); surfacing them in the general Discussions
+/// list too just duplicates them. Export / MCP / audit-internal callers keep
+/// using the unfiltered [`list_discussions`].
+pub fn list_discussions_paginated_for_ui(
+    conn: &Connection,
+    limit: Option<u32>,
+    offset: Option<u32>,
+) -> Result<Vec<Discussion>> {
+    let sql = format!(
+        "SELECT {} FROM discussions d WHERE d.mentor_state IS NULL ORDER BY d.updated_at DESC{}",
+        DISC_SELECT_COLS,
+        match (limit, offset) {
+            (Some(l), Some(o)) => format!(" LIMIT {} OFFSET {}", l, o),
+            (Some(l), None) => format!(" LIMIT {}", l),
+            _ => String::new(),
+        }
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let discussions: Vec<Discussion> = stmt
+        .query_map([], map_discussion_row)?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(discussions)
+}
+
+/// UI list of discussions with Mode Mentor parcours hidden. See
+/// [`list_discussions_paginated_for_ui`].
+pub fn list_discussions_for_ui(conn: &Connection) -> Result<Vec<Discussion>> {
+    list_discussions_paginated_for_ui(conn, None, None)
+}
+
 /// Like list_discussions but also loads all messages (used for export).
 pub fn list_discussions_with_messages(conn: &Connection) -> Result<Vec<Discussion>> {
     let mut discussions = list_discussions(conn)?;
@@ -671,6 +704,76 @@ pub fn set_disc_no_agent(conn: &Connection, disc_id: &str, no_agent: bool) -> Re
         }
     }
     transaction.commit()?;
+    Ok(affected > 0)
+}
+
+/// Mode Mentor — read the raw `mentor_state` JSON blob for a parcours disc.
+/// `None` = not a mentor parcours (or the disc is absent); the caller
+/// (`api::mentor`) parses the JSON. Stored directly off the column like
+/// `no_agent`, to avoid threading it through the big `Discussion` struct + all
+/// its query sites.
+pub fn get_mentor_state(conn: &Connection, disc_id: &str) -> Result<Option<String>> {
+    let v: Option<Option<String>> = conn
+        .query_row(
+            "SELECT mentor_state FROM discussions WHERE id = ?1",
+            params![disc_id],
+            |row| row.get(0),
+        )
+        .ok();
+    Ok(v.flatten())
+}
+
+/// Mode Mentor — list every parcours (discussion carrying a `mentor_state`),
+/// newest-first, skipping archived ones. Returns `(disc_id, title,
+/// mentor_state_json, updated_at)`; the API layer parses the JSON into a
+/// `ParcoursSummary`. Powers the Mentor landing list.
+#[allow(clippy::type_complexity)]
+pub fn list_mentor_parcours(
+    conn: &Connection,
+) -> Result<
+    Vec<(
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+    )>,
+> {
+    let mut stmt = conn.prepare(
+        "SELECT d.id, d.title, d.mentor_state, d.updated_at, d.project_id, p.name \
+         FROM discussions d LEFT JOIN projects p ON p.id = d.project_id \
+         WHERE d.mentor_state IS NOT NULL AND d.archived = 0 \
+         ORDER BY d.updated_at DESC",
+    )?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+            ))
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(rows)
+}
+
+/// Mode Mentor — set/replace the `mentor_state` JSON blob for a parcours disc.
+/// Pass `None` to clear it (revert to an ordinary discussion). Returns true if
+/// the row existed.
+pub fn set_mentor_state(
+    conn: &Connection,
+    disc_id: &str,
+    mentor_state: Option<&str>,
+) -> Result<bool> {
+    let affected = conn.execute(
+        "UPDATE discussions SET mentor_state = ?2, updated_at = ?3 WHERE id = ?1",
+        params![disc_id, mentor_state, Utc::now().to_rfc3339()],
+    )?;
     Ok(affected > 0)
 }
 
@@ -1488,9 +1591,18 @@ fn insert_message_inner(
     discussion_id: &str,
     msg: &DiscussionMessage,
 ) -> Result<i64> {
+    // Allocate this message's sort_order. Self-healing: take
+    // MAX(next_message_seq, real MAX(sort_order)+1) so a counter left behind —
+    // by a legacy insert path that didn't bump it, or an 082-style backfill
+    // that predated later rows — can NEVER re-allocate an existing sort_order
+    // and trip the UNIQUE(discussion_id, sort_order) index. That collision used
+    // to fail insert_message and silently block disc_append on the discussion.
     let next_order: i64 = conn.query_row(
         "UPDATE discussions
-         SET next_message_seq = next_message_seq + 1
+         SET next_message_seq = MAX(
+             next_message_seq,
+             COALESCE((SELECT MAX(sort_order) FROM messages WHERE discussion_id = ?1), 0) + 1
+         ) + 1
          WHERE id = ?1
          RETURNING next_message_seq - 1",
         params![discussion_id],

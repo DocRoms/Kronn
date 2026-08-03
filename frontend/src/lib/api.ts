@@ -141,6 +141,12 @@ import type {
   ProposalListResponse,
   UpdatePlanningDodItemRequest,
   UpdatePlanningTaskRequest,
+  MentorState,
+  MentorPhase,
+  GenerateParcoursRequest,
+  CreateParcoursResponse,
+  OnboardingTopic,
+  ParcoursSummary,
 } from '../types/generated';
 import type { DiscoverKeysResponse, TestModeEnterResult, TestModeExitResponse } from '../types/extensions';
 
@@ -873,6 +879,8 @@ export const projects = {
     api<Array<{ id: string; name: string; path: string; proximity_hint: string }>>('GET', `/projects/${id}/linked-repos/candidates`),
   listAiFiles: (id: string) => api<AiFileNode[]>('GET', `/projects/${id}/ai-files`),
   readAiFile: (id: string, path: string) => api<AiFileContent>('GET', `/projects/${id}/ai-file?path=${encodeURIComponent(path)}`),
+  /** Read any text file from the project checkout (Mode Mentor resource preview). */
+  readRepoFile: (id: string, path: string) => api<AiFileContent>('GET', `/projects/${id}/repo-file?path=${encodeURIComponent(path)}`),
   searchAiFiles: (id: string, q: string) => api<AiSearchResult[]>('GET', `/projects/${id}/ai-search?q=${encodeURIComponent(q)}`),
   listSourceFiles: (id: string, shallow = false) => api<SourceFileNode[]>(
     'GET',
@@ -1307,6 +1315,58 @@ function webSessionId(): string {
     return crypto?.randomUUID?.() ?? `web-${Date.now()}`;
   }
 }
+
+/** Mode Mentor — parcours d'apprentissage socratique (voir docs/design/mentor-mode.md).
+ *  Increment 2a : lecture/écriture du state typé porté par la disc. */
+export const mentor = {
+  /** List every parcours (mentor + onboarding), newest-first, for the landing page. */
+  listParcours: () => api<ParcoursSummary[]>('GET', '/mentor/parcours'),
+  /** Read the typed parcours state for a disc. Rejects when the disc isn't a mentor parcours. */
+  getParcours: (discId: string) => api<MentorState>('GET', `/mentor/parcours/${discId}`),
+  /** Delete a parcours (its discussion + state) — e.g. clear a failed generation. */
+  deleteParcours: (discId: string) => api<boolean>('DELETE', `/mentor/parcours/${discId}`),
+  /** Store the learner's submission for a block (2b-i). Returns the updated state. */
+  submit: (discId: string, body: { block: MentorPhase; content: string }) =>
+    api<MentorState>('POST', `/mentor/parcours/${discId}/submit`, body),
+  /** Run a live mentor→censeur→evaluateur turn on a block. The mentor answer is
+   *  generated + censeur-vetted SERVER-SIDE (fail-closed): the raw answer never
+   *  reaches the browser and the client never supplies the verdict. Returns the
+   *  state with `last_turn.status === 'pending'`; poll `getParcours` until it
+   *  settles — the vetted reply then lands in `block.turns`. */
+  runTurn: (discId: string, body: { block: MentorPhase; submission: string }) =>
+    api<MentorState>('POST', `/mentor/parcours/${discId}/turn`, body),
+  /** Request a graded "Coup de pouce" on a block. Bumps the ladder and returns
+   *  the state with `last_hint.status === 'pending'`; the nudge is generated
+   *  server-side (survives navigating away) — poll `getParcours` until it settles. */
+  hint: (discId: string, body: { block: MentorPhase; submission: string }) =>
+    api<MentorState>('POST', `/mentor/parcours/${discId}/hint`, body),
+  /** (Re)generate the mentor's closure synthesis (retry after a failure, or
+   *  refresh). Only meaningful once the parcours is `done`. Returns the state
+   *  with `bilan_synthesis.status === 'pending'`; poll `getParcours` to settle. */
+  regenerateBilan: (discId: string) =>
+    api<MentorState>('POST', `/mentor/parcours/${discId}/bilan`, undefined),
+  /** Validate a block + unlock the next. Gated server-side (resources read /
+   *  mentor approval) unless `force` — the self-serve "Passer outre" override. */
+  advance: (discId: string, body: { block: MentorPhase; force?: boolean }) =>
+    api<MentorState>('POST', `/mentor/parcours/${discId}/advance`, body),
+  /** Persist a resource's read/unread flag (block ② Resources). Returns the updated state. */
+  setResourceRead: (discId: string, body: { index: number; read: boolean }) =>
+    api<MentorState>('POST', `/mentor/parcours/${discId}/resource-read`, body),
+  /** Kick off background AI generation: creates a placeholder parcours (status
+   *  `generating`) and returns at once; the server fills it in. The UI can leave. */
+  generateParcours: (req: GenerateParcoursRequest) =>
+    api<CreateParcoursResponse>('POST', '/mentor/parcours/generate', req),
+  /** Onboarding posture: mark a chapter completed (unlocks the next). `answer`
+   *  persists the learner's open-question response for later review.
+   *  `needsReview` flags a struggled chapter (>1 attempt on a quiz) for the
+   *  end-of-course spaced re-test. */
+  completeChapter: (discId: string, index: number, answer?: string, needsReview = false) =>
+    api<MentorState>('POST', `/mentor/parcours/${discId}/chapter`, { index, answer: answer ?? null, needs_review: needsReview }),
+  /** Onboarding catalogue parsed from a project's docs/onboarding.md registry.
+   *  Empty when the project has no registry yet. */
+  onboardingCatalog: (projectId: string) =>
+    api<OnboardingTopic[]>('GET', `/mentor/onboarding-catalog/${projectId}`),
+};
 
 export const discussions = {
   list: () => api<Discussion[]>('GET', '/discussions'),
@@ -1817,6 +1877,9 @@ export const workflows = {
   createBundle: (req: unknown) => api<BundleResponse>('POST', '/workflows/bundle', req),
   update: (id: string, req: UpdateWorkflowRequest) => api<Workflow>('PUT', `/workflows/${id}`, req),
   delete: (id: string) => api<void>('DELETE', `/workflows/${id}`),
+  /** Restore a builtin system workflow (Mode Mentor seed) to its bundled
+   *  definition, discarding operator edits. Server rejects non-system ids. */
+  resetToSeed: (id: string) => api<Workflow>('POST', `/workflows/${id}/reset-to-seed`),
   trigger: (id: string) => api<WorkflowRun>('POST', `/workflows/${id}/trigger`),
 
   /** Trigger with SSE streaming for real-time progress.
@@ -1841,12 +1904,21 @@ export const workflows = {
      *  `cancelRun(workflow_id, run_id)` — without the run_id the live
      *  view can't address the run it's watching. */
     onRunStart?: (runId: string) => void,
+    /** Optional per-run project anchor. When set, the run executes against
+     *  this project's checkout (cwd + MCP context) instead of the workflow's
+     *  own project — used so a project-less generator (Mode Mentor course /
+     *  parcours) reads the real files of the project the user picked. */
+    projectId?: string,
   ) => {
     const headers: Record<string, string> = { ...authHeaders() };
     let body: string | undefined;
-    if (variables && Object.keys(variables).length > 0) {
+    const hasVars = !!variables && Object.keys(variables).length > 0;
+    if (hasVars || projectId) {
       headers['Content-Type'] = 'application/json';
-      body = JSON.stringify({ variables });
+      body = JSON.stringify({
+        variables: variables ?? {},
+        ...(projectId ? { project_id: projectId } : {}),
+      });
     }
     const res = await fetch(`${_apiBase}/api/workflows/${id}/trigger`, {
       method: 'POST',

@@ -38,6 +38,7 @@ pub fn list_projects(conn: &Connection) -> Result<Vec<Project>> {
                     audit_status: AiAuditStatus::default(), // enriched by API layer
                     ai_todo_count: 0,                       // enriched by API layer
                     tech_debt_count: 0,
+                    onboarding_count: 0,
                     needs_docs_migration: false, // enriched by API layer
                     path_exists: true,
                     default_skill_ids: serde_json::from_str(&skill_ids_str).unwrap_or_default(),
@@ -84,6 +85,7 @@ pub fn get_project(conn: &Connection, id: &str) -> Result<Option<Project>> {
                 audit_status: AiAuditStatus::default(),
                 ai_todo_count: 0,
                 tech_debt_count: 0,
+                onboarding_count: 0,
                 needs_docs_migration: false,
                 path_exists: true,
                 default_skill_ids: serde_json::from_str(&skill_ids_str).unwrap_or_default(),

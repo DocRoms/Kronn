@@ -51,6 +51,11 @@ const BUILTIN_DIRECTIVES: &[BuiltinDirective] = &[
         id: "caveman",
         content: include_str!("../directives/caveman.md"),
     },
+    // Mode Mentor — the strict "never reveal the solution" contract.
+    BuiltinDirective {
+        id: "mentor-no-solution",
+        content: include_str!("../directives/mentor-no-solution.md"),
+    },
 ];
 
 // ─── Frontmatter parsing ────────────────────────────────────────────────────

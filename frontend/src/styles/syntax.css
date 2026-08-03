@@ -1,0 +1,34 @@
+/* highlight.js token colors (One Dark-ish, tuned for the Kronn palette).
+   Shared globally (GitPanel diff view, Mentor course/reveal code blocks, …).
+   Minimal subset — only the token classes highlight.js actually emits for the
+   languages we register (see src/lib/diff-syntax.ts). Emitted markup is
+   `<span class="hljs-…">`; the container carries `.hljs`. */
+/* Base (untokenised) code colour. It must be an explicit LIGHT value, not
+   `inherit`: every `.hljs` consumer renders on an always-dark code surface
+   (`--kr-bg-code` / `--kr-bg-code-panel` stay dark in every theme), so on the
+   light-family themes (light, sakura, …) inheriting `--kr-text-primary` (dark)
+   printed dark text on a dark surface — unreadable. A fixed One-Dark grey reads
+   in every theme. Tokenised spans below override it per class. */
+.hljs { color: #abb2bf; background: transparent; }
+.hljs-comment, .hljs-quote                { color: #7a8899; font-style: italic; }
+.hljs-keyword, .hljs-selector-tag,
+.hljs-addition, .hljs-type, .hljs-built_in { color: #c678dd; }
+.hljs-string, .hljs-regexp,
+.hljs-attr, .hljs-meta                    { color: #98c379; }
+.hljs-number, .hljs-literal, .hljs-doctag,
+.hljs-variable.language_                  { color: #d19a66; }
+.hljs-title, .hljs-title.function_,
+.hljs-section, .hljs-name                 { color: #61afef; }
+.hljs-params, .hljs-variable              { color: #e06c75; }
+.hljs-symbol, .hljs-bullet, .hljs-link,
+.hljs-meta-string                         { color: #56b6c2; }
+.hljs-emphasis                            { font-style: italic; }
+.hljs-strong                              { font-weight: bold; }
+.hljs-deletion                            { color: var(--kr-error); }
+
+/* No per-theme override on purpose. Every `.hljs` consumer (Mentor code blocks,
+   GitPanel diff) renders on an always-dark surface — `--kr-bg-code` and
+   `--kr-bg-code-panel` stay dark in EVERY theme (IDE convention) — so the fixed
+   light base colour + One-Dark token palette above are readable in all themes,
+   including new light themes as they land. Inline `code` is plain (no `.hljs`),
+   so it is unaffected. */

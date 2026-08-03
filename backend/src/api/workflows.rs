@@ -737,6 +737,9 @@ pub async fn list(State(state): State<AppState>) -> Json<ApiResponse<Vec<Workflo
     match state
         .db
         .with_conn(|conn| {
+            // Builtin Mode Mentor seeds are returned too, tagged `is_system` — the
+            // Workflows page groups them under a collapsed "Système" section rather
+            // than hiding them, so they stay inspectable/tweakable.
             let workflows = crate::db::workflows::list_workflows(conn)?;
             // Batch-load last runs and project names (avoids N+1 queries)
             let last_runs = crate::db::workflows::get_last_runs_all(conn)?;
@@ -765,6 +768,8 @@ pub async fn list(State(state): State<AppState>) -> Json<ApiResponse<Vec<Workflo
                     }
                     .to_string();
 
+                    let is_system = crate::db::workflows::is_system_workflow_id(&wf.id);
+
                     WorkflowSummary {
                         id: wf.id,
                         name: wf.name,
@@ -777,6 +782,7 @@ pub async fn list(State(state): State<AppState>) -> Json<ApiResponse<Vec<Workflo
                         pinned: wf.pinned,
                         last_run,
                         created_at: wf.created_at,
+                        is_system,
                     }
                 })
                 .collect();
@@ -1173,6 +1179,42 @@ pub async fn delete(
         .await
     {
         Ok(()) => Json(ApiResponse::ok(())),
+        Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
+    }
+}
+
+/// POST /api/workflows/:id/reset-to-seed
+///
+/// Re-applies a system workflow's bundled seed definition, discarding operator
+/// edits. Only valid for builtin system workflows (Mode Mentor seeds) — any
+/// other id answers 404 so a user workflow can never be silently clobbered.
+/// Returns the restored workflow.
+pub async fn reset_to_seed(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<ApiResponse<Workflow>> {
+    if !crate::db::workflows::is_system_workflow_id(&id) {
+        return Json(ApiResponse::err_coded(
+            ApiErrorCode::NotFound,
+            "Not a system workflow — reset is only available for builtin seeds",
+        ));
+    }
+    let result = state
+        .db
+        .with_conn(move |conn| {
+            let applied = crate::db::workflows::reset_workflow_to_seed(conn, &id)?;
+            if !applied {
+                return Ok(None);
+            }
+            crate::db::workflows::get_workflow(conn, &id)
+        })
+        .await;
+    match result {
+        Ok(Some(wf)) => Json(ApiResponse::ok(wf)),
+        Ok(None) => Json(ApiResponse::err_coded(
+            ApiErrorCode::NotFound,
+            "Unknown system workflow seed",
+        )),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
 }
@@ -1579,7 +1621,7 @@ pub async fn trigger(
     body: Option<Json<TriggerWorkflowRequest>>,
 ) -> Sse<SseStream> {
     let wf_id = id.clone();
-    let wf = match state
+    let mut wf = match state
         .db
         .with_conn(move |conn| crate::db::workflows::get_workflow(conn, &wf_id))
         .await
@@ -1601,9 +1643,29 @@ pub async fn trigger(
     // - Required variable missing/empty → reject with explicit message.
     // - Unknown variables (sent but not declared) → silently dropped
     //   (defensive: don't let a stale form smuggle data in).
-    let provided_vars = body.map(|Json(b)| b.variables).unwrap_or_default();
+    let (provided_vars, project_override) = match body {
+        Some(Json(b)) => (b.variables, b.project_id),
+        None => (Default::default(), None),
+    };
     if let Err(msg) = validate_launch_variables(&wf.variables, &provided_vars) {
         return sse_error(msg);
+    }
+
+    // Per-run project override: anchor an otherwise project-less workflow on a
+    // real checkout (cwd + MCP context). The runner reads `wf.project_id`, so
+    // we validate the id exists then override the in-memory workflow. The DB
+    // row is untouched — this is a one-shot run anchor, not a workflow edit.
+    if let Some(pid) = project_override.filter(|p| !p.trim().is_empty()) {
+        let pid_check = pid.clone();
+        match state
+            .db
+            .with_conn(move |conn| crate::db::projects::get_project(conn, &pid_check))
+            .await
+        {
+            Ok(Some(_)) => wf.project_id = Some(pid),
+            Ok(None) => return sse_error("Project override not found"),
+            Err(e) => return sse_error(format!("DB error: {}", e)),
+        }
     }
     let trigger_obj = build_manual_trigger_obj(&provided_vars, Utc::now());
 
@@ -2400,6 +2462,10 @@ pub async fn cancel_run(
     //    We don't touch discussions — they get their Cancelled/Failed status
     //    from the agent-task finally path on their own tokens.
     let run_id_for_db2 = run_id.clone();
+    // Store finished_at as RFC 3339 (like every other write path) — NOT SQLite's
+    // `datetime('now')`, whose space-separated `YYYY-MM-DD HH:MM:SS` output the
+    // RFC3339 read path can't parse (it warned and fell back to `now()`).
+    let finished_rfc = Utc::now().to_rfc3339();
     let forced_statuses = state
         .db
         .with_conn(move |conn| {
@@ -2407,14 +2473,14 @@ pub async fn cancel_run(
             // paused, token dropped at pause) runs were UNCANCELLABLE before:
             // the token no-ops and this UPDATE only matched 'Running'.
             let parent_n = conn.execute(
-                "UPDATE workflow_runs SET status = 'Cancelled', finished_at = datetime('now') \
+                "UPDATE workflow_runs SET status = 'Cancelled', finished_at = ?2 \
              WHERE id = ?1 AND status IN ('Running', 'Pending', 'WaitingApproval')",
-                rusqlite::params![&run_id_for_db2],
+                rusqlite::params![&run_id_for_db2, &finished_rfc],
             )?;
             let children_n = conn.execute(
-                "UPDATE workflow_runs SET status = 'Cancelled', finished_at = datetime('now') \
+                "UPDATE workflow_runs SET status = 'Cancelled', finished_at = ?2 \
              WHERE parent_run_id = ?1 AND status IN ('Running', 'Pending', 'WaitingApproval')",
-                rusqlite::params![&run_id_for_db2],
+                rusqlite::params![&run_id_for_db2, &finished_rfc],
             )?;
             Ok((parent_n, children_n))
         })

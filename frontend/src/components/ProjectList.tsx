@@ -8,7 +8,7 @@ import { ListControls } from './ListControls';
 import type { Project, AgentDetection, AuditProgress, DriftCheckResponse, Discussion, Skill, McpConfigDisplay, WorkflowSummary } from '../types/generated';
 import {
   Folder, ChevronDown, ChevronRight, ChevronLeft, Search, X, AlertTriangle,
-  MessageSquare, Workflow, Puzzle, ShieldCheck, Loader2, FileCode, Clock,
+  MessageSquare, Workflow, Puzzle, ShieldCheck, Loader2, FileCode, Clock, BookOpen,
 } from 'lucide-react';
 import { MatrixText } from './MatrixText';
 
@@ -411,6 +411,11 @@ export function ProjectList({
                         {(proj.tech_debt_count ?? 0) > 0 && (
                           <span className="project-alert-chip" data-tone="warning">
                             <AlertTriangle size={9} /> {proj.tech_debt_count} TD
+                          </span>
+                        )}
+                        {(proj.onboarding_count ?? 0) > 0 && (
+                          <span className="project-alert-chip" data-tone="info">
+                            <BookOpen size={9} /> {t('projects.master.onboarding', proj.onboarding_count)}
                           </span>
                         )}
                         {staleCount > 0 && (

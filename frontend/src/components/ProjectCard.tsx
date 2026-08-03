@@ -8,7 +8,7 @@ import { canRunAudit, canRunBriefing } from '../lib/agentCapabilities';
 import { AiDocViewer } from './AiDocViewer';
 import { unseenBasis } from './SwipeableDiscItem';
 import AuditRecapPanel from './AuditRecapPanel';
-import type { AuditKind } from '../types/AuditKind';
+import type { AuditKind } from '../types/generated';
 import { ProjectSkills } from './ProjectSkills';
 import { ProjectLinkedRepos } from './ProjectLinkedRepos';
 import {
@@ -21,7 +21,7 @@ import {
   Plus, Trash2, Zap,
   Loader2,
   MessageSquare, AlertTriangle,
-  Play, FileCode, ShieldCheck, StopCircle, BookOpen, Rocket, Check, RefreshCw, Puzzle,
+  Play, FileCode, ShieldCheck, StopCircle, BookOpen, GraduationCap, Rocket, Check, RefreshCw, Puzzle,
   FolderInput, Plug, X, FileText, DownloadCloud,
   Code2, ExternalLink, GitBranch, GitPullRequest, Tag, Package, ListTodo,
 } from 'lucide-react';
@@ -1335,6 +1335,22 @@ export function ProjectCard({
                 <AlertTriangle size={9} /> {proj.tech_debt_count} TD
               </span>
             )}
+            {/* Onboarding badge — N course topics in docs/onboarding.md. Click
+                deep-links the docs viewer to the registry. */}
+            {!auditActive && (proj.onboarding_count ?? 0) > 0 && (
+              <span
+                className="dash-badge-onboarding"
+                title={t('projects.onboardingBadge', proj.onboarding_count!)}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (!isOpen) onToggleOpen();
+                  setExpandedTab('docAi');
+                  setDocDeepLink('docs/onboarding.md');
+                }}
+              >
+                <BookOpen size={9} /> {proj.onboarding_count} onboarding
+              </span>
+            )}
             {/* Drift badge — hidden during active audit (#326 / F6) */}
             {!auditActive && driftStatus && driftStatus.stale_sections.length > 0 && (
               <>
@@ -1734,6 +1750,19 @@ export function ProjectCard({
                   </strong>
                   <span>{t('projects.master.tab.docs')}</span>
                 </button>
+                {(proj.onboarding_count ?? 0) > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setDetailView('docs');
+                      setDocDeepLink('docs/onboarding.md');
+                    }}
+                  >
+                    <GraduationCap size={16} />
+                    <strong>{proj.onboarding_count}</strong>
+                    <span>{t('projects.master.overview.onboarding')}</span>
+                  </button>
+                )}
                 <button type="button" onClick={() => setDetailView('code')}>
                   <Code2 size={16} />
                   <strong>{t('projects.master.overview.browse')}</strong>
@@ -2324,6 +2353,7 @@ export function ProjectCard({
                         <option value="Database" disabled>{t('audit.kind.Database')} {t('audit.kind.afterFull')}</option>
                         <option value="ApiDesign" disabled>{t('audit.kind.ApiDesign')} {t('audit.kind.afterFull')}</option>
                         <option value="CodeQuality" disabled>{t('audit.kind.CodeQuality')} {t('audit.kind.afterFull')}</option>
+                        <option value="Onboarding" disabled>{t('audit.kind.Onboarding')} {t('audit.kind.afterFull')}</option>
                       </select>
                       <button
                         className="dash-icon-btn dash-btn-accent-border"
@@ -2447,6 +2477,7 @@ export function ProjectCard({
                         <option value="Database" disabled>{t('audit.kind.Database')} {t('audit.kind.afterFull')}</option>
                         <option value="ApiDesign" disabled>{t('audit.kind.ApiDesign')} {t('audit.kind.afterFull')}</option>
                         <option value="CodeQuality" disabled>{t('audit.kind.CodeQuality')} {t('audit.kind.afterFull')}</option>
+                        <option value="Onboarding" disabled>{t('audit.kind.Onboarding')} {t('audit.kind.afterFull')}</option>
                       </select>
                       <button
                         className="dash-icon-btn dash-btn-accent-border"
@@ -2534,6 +2565,7 @@ export function ProjectCard({
                           <option value="Database">{t('audit.kind.Database')}</option>
                           <option value="ApiDesign">{t('audit.kind.ApiDesign')}</option>
                           <option value="CodeQuality">{t('audit.kind.CodeQuality')}</option>
+                          <option value="Onboarding">{t('audit.kind.Onboarding')}</option>
                         </select>
                         <button
                           className="dash-icon-btn dash-btn-accent-border"
@@ -2601,7 +2633,8 @@ export function ProjectCard({
                         <option value="Rgaa">{t('audit.kind.Rgaa')}</option>
                         <option value="Database">{t('audit.kind.Database')}</option>
                         <option value="ApiDesign">{t('audit.kind.ApiDesign')}</option>
-                          <option value="CodeQuality">{t('audit.kind.CodeQuality')}</option>
+                        <option value="CodeQuality">{t('audit.kind.CodeQuality')}</option>
+                        <option value="Onboarding">{t('audit.kind.Onboarding')}</option>
                       </select>
                       <button
                         className="dash-icon-btn dash-btn-accent-border"

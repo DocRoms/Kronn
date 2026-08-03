@@ -35,6 +35,14 @@ pub struct Project {
     /// to address. Not persisted in DB.
     #[serde(default)]
     pub tech_debt_count: u32,
+    /// Number of onboarding course topics parsed from the project's
+    /// `docs/onboarding.md` registry (0 = none / no registry). Computed by
+    /// `enrich_audit_status` via `onboarding_registry::parse_registry`. Surfaced
+    /// as an "Onboarding" badge on the project card, and used by the Mentor
+    /// onboarding catalogue to list ONLY projects that actually have onboarding.
+    /// Not persisted in DB.
+    #[serde(default)]
+    pub onboarding_count: u32,
     /// True when the project still uses the legacy `ai/index.md` layout
     /// and no migrated `docs/AGENTS.md` exists. Computed by
     /// `enrich_audit_status` — drives the migration banner on
@@ -466,6 +474,11 @@ pub enum AuditKind {
     /// Born from the DOCROMS_WEB dogfooding: a Full audit surfaces docs &
     /// infra debt but never code-quality findings.
     CodeQuality,
+    /// O4b — proposes onboarding course topics (for newcomers) and appends
+    /// them to `docs/onboarding.md` (the onboarding registry read by the Mode
+    /// Mentor "onboarding" posture). Mirror of tech-debt detection. Not
+    /// validatable: the registry is curated directly by a human.
+    Onboarding,
     Custom,
 }
 
@@ -484,6 +497,7 @@ impl AuditKind {
             AuditKind::Database => "Database",
             AuditKind::ApiDesign => "ApiDesign",
             AuditKind::CodeQuality => "CodeQuality",
+            AuditKind::Onboarding => "Onboarding",
             AuditKind::Custom => "Custom",
         }
     }
@@ -504,6 +518,7 @@ impl AuditKind {
             "Database" => Some(AuditKind::Database),
             "ApiDesign" => Some(AuditKind::ApiDesign),
             "CodeQuality" => Some(AuditKind::CodeQuality),
+            "Onboarding" => Some(AuditKind::Onboarding),
             "Custom" => Some(AuditKind::Custom),
             _ => None,
         }
@@ -530,6 +545,7 @@ impl AuditKind {
             AuditKind::Database => "Base de données",
             AuditKind::ApiDesign => "Design d'API",
             AuditKind::CodeQuality => "Qualité de code",
+            AuditKind::Onboarding => "Onboarding — sujets de cours",
             AuditKind::Custom => "Custom",
         }
     }
