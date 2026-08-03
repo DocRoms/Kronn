@@ -6,7 +6,7 @@ import { useIsMobile } from '../hooks/useMediaQuery';
 import { isValidationDisc, isBriefingDisc, isBootstrapDisc, isTrackerMcp } from '../lib/constants';
 import { canRunAudit, canRunBriefing } from '../lib/agentCapabilities';
 import { AiDocViewer } from './AiDocViewer';
-import { unseenBasis } from './SwipeableDiscItem';
+import { unseenBasis } from '../lib/discussionUiUtils';
 import AuditRecapPanel from './AuditRecapPanel';
 import type { AuditKind } from '../types/AuditKind';
 import { ProjectSkills } from './ProjectSkills';
@@ -126,6 +126,7 @@ export function ProjectCard({
   const [dependencyUpdates, setDependencyUpdates] = useState<DependencyUpdateSummary | null>(null);
   const [dependencyUpdatesLoading, setDependencyUpdatesLoading] = useState(false);
   const [dependencyUpdatesError, setDependencyUpdatesError] = useState(false);
+  const [dependencyMonitoringSaving, setDependencyMonitoringSaving] = useState(false);
   const dependencyRefreshRef = useRef(false);
   const recentProjectDiscussions = useMemo(
     () => [...projDiscussions].sort(
@@ -224,6 +225,19 @@ export function ProjectCard({
       setDependencyUpdatesLoading(false);
     }
   }, [proj.id]);
+
+  const updateDependencyMonitoring = useCallback(async (intervalDays: number | null) => {
+    if (dependencyMonitoringSaving) return;
+    setDependencyMonitoringSaving(true);
+    try {
+      await projectsApi.setDependencyMonitoring(proj.id, intervalDays);
+      setDependencyUpdates(await projectsApi.dependencyUpdates(proj.id));
+    } catch {
+      setDependencyUpdatesError(true);
+    } finally {
+      setDependencyMonitoringSaving(false);
+    }
+  }, [dependencyMonitoringSaving, proj.id]);
 
   // ── Collapsible sections ──
   // 0.8.4 (#323 / F3) — on `Validated` and `Audited`, `aiContext` is
@@ -470,6 +484,18 @@ export function ProjectCard({
       || manager.status === 'Error'
       || manager.status === 'TimedOut',
   ).length ?? 0;
+  const dependencyCheckedAt = dependencyUpdates?.checked_at
+    ? new Date(dependencyUpdates.checked_at).toLocaleString(locale, {
+      dateStyle: 'medium',
+      timeStyle: 'short',
+    })
+    : null;
+  const dependencyNextCheckAt = dependencyUpdates?.next_check_at
+    ? new Date(dependencyUpdates.next_check_at).toLocaleString(locale, {
+      dateStyle: 'medium',
+      timeStyle: 'short',
+    })
+    : null;
   const dependencySummary = (() => {
     if (dependencyUpdatesLoading) {
       return { tone: 'loading', label: t('projects.master.overview.dependenciesChecking') };
@@ -1155,6 +1181,7 @@ export function ProjectCard({
             <div className="project-detail-actions">
               <span
                 className="project-status-chip"
+                data-testid={auditActive ? 'project-audit-progress' : undefined}
                 data-tone={auditActive || validationInProgress
                   ? 'running'
                   : proj.audit_status === 'Validated'
@@ -1164,15 +1191,37 @@ export function ProjectCard({
                       : 'muted'}
               >
                 {auditActive
-                  ? <><Loader2 size={10} className="spin" /> {t('projects.master.status.auditRunning')}</>
+                  ? <><Loader2 size={10} className="spin" /> {t('projects.master.status.auditRunning')} {auditStep}/{auditTotalSteps}</>
                   : validationInProgress
                     ? <><Loader2 size={10} className="spin" /> {t('projects.status.validating')}</>
                     : proj.audit_status === 'Validated'
                       ? <><ShieldCheck size={10} /> {t('projects.master.status.validated')}</>
                       : proj.audit_status === 'Audited'
                         ? <><ShieldCheck size={10} /> {t('projects.master.status.toValidate')}</>
-                        : <><FileCode size={10} /> {t('projects.master.status.toPrepare')}</>}
+                      : <><FileCode size={10} /> {t('projects.master.status.toPrepare')}</>}
               </span>
+              {!auditActive && driftStatus && driftStatus.stale_sections.length > 0 && (
+                <>
+                  <span
+                    className="dash-badge-drift"
+                    data-testid="project-drift-status"
+                    title={driftStatus.stale_sections.map(section => section.ai_file).join(', ')}
+                  >
+                    <AlertTriangle size={9} />
+                    {t('audit.staleSections', String(driftStatus.stale_sections.length))}
+                  </span>
+                  <button
+                    type="button"
+                    className="dash-drift-update-btn"
+                    data-testid="project-drift-update"
+                    onClick={() => startPartialAudit(driftStatus)}
+                    title={t('audit.updateStale', String(driftStatus.stale_sections.length))}
+                  >
+                    <RefreshCw size={9} />
+                    {t('audit.updateStale', String(driftStatus.stale_sections.length))}
+                  </button>
+                </>
+              )}
               <button
                 type="button"
                 className="dash-icon-btn"
@@ -1647,6 +1696,42 @@ export function ProjectCard({
                       {t('projects.master.overview.dependenciesCached')}
                     </span>
                   )}
+                  {dependencyCheckedAt && (
+                    <span className="project-overview-dependencies-date">
+                      {t('projects.master.overview.dependenciesCheckedAt', dependencyCheckedAt)}
+                    </span>
+                  )}
+                  {dependencyNextCheckAt && (
+                    <span className="project-overview-dependencies-date">
+                      {t('projects.master.overview.dependenciesNextCheckAt', dependencyNextCheckAt)}
+                    </span>
+                  )}
+                  <label className="project-overview-dependencies-schedule">
+                    <span>{t('projects.master.overview.dependenciesSchedule')}</span>
+                    <select
+                      value={dependencyUpdates?.monitoring_interval_days ?? 'manual'}
+                      disabled={!dependencyUpdates || dependencyMonitoringSaving}
+                      onChange={event => {
+                        const value = event.currentTarget.value;
+                        void updateDependencyMonitoring(
+                          value === 'manual' ? null : Number(value),
+                        );
+                      }}
+                    >
+                      <option value="manual">
+                        {t('projects.master.overview.dependenciesScheduleManual')}
+                      </option>
+                      <option value="7">
+                        {t('projects.master.overview.dependenciesScheduleWeekly')}
+                      </option>
+                      <option value="14">
+                        {t('projects.master.overview.dependenciesScheduleFortnightly')}
+                      </option>
+                      <option value="30">
+                        {t('projects.master.overview.dependenciesScheduleMonthly')}
+                      </option>
+                    </select>
+                  </label>
                 </div>
                 {!!dependencyUpdates?.managers.length && (
                   <div className="project-overview-dependency-list">

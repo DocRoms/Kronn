@@ -773,6 +773,7 @@ pub async fn get_server_config(
         avatar_email: config.server.avatar_email.clone(),
         bio: config.server.bio.clone(),
         debug_mode: config.server.debug_mode,
+        discussion_notes_enabled: config.server.discussion_notes_enabled,
         default_model_tier: config.server.default_model_tier,
         default_summary_strategy: config.server.default_summary_strategy,
     }))
@@ -821,6 +822,9 @@ pub async fn set_server_config(
                 debug_mode
             );
         }
+    }
+    if let Some(enabled) = req.discussion_notes_enabled {
+        config.server.discussion_notes_enabled = enabled;
     }
     // 0.8.6 phase 4 — default model tier. PATCH-semantic : only update
     // when explicitly passed (None keeps existing). No clamp / validation

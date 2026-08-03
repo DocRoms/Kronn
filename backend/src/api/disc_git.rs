@@ -30,6 +30,7 @@ async fn resolve_github_token_from_state(state: &AppState) -> Option<String> {
 async fn resolve_discussion_work_dir(
     state: &AppState,
     discussion_id: &str,
+    workspace_id: Option<&str>,
 ) -> Result<(std::path::PathBuf, String), String> {
     let did = discussion_id.to_string();
     let disc = state
@@ -51,6 +52,45 @@ async fn resolve_discussion_work_dir(
         .map_err(|e| format!("DB error: {}", e))?;
     let project = project.ok_or_else(|| "Project not found".to_string())?;
 
+    if let Some(workspace_id) = workspace_id {
+        let did = discussion_id.to_string();
+        let wid = workspace_id.to_string();
+        let workspace = state
+            .db
+            .with_read_conn(move |conn| {
+                Ok(
+                    crate::db::discussion_workspaces::list_for_discussion(conn, &did)?
+                        .into_iter()
+                        .find(|workspace| workspace.id == wid),
+                )
+            })
+            .await
+            .map_err(|error| format!("DB error: {error}"))?
+            .ok_or_else(|| "Workspace not found in this discussion".to_string())?;
+        if workspace.state != "attached" {
+            return Err(format!("Workspace is {}", workspace.state));
+        }
+        let path = workspace
+            .canonical_path
+            .or(workspace.workspace_path)
+            .ok_or_else(|| "Workspace has no attached path".to_string())?;
+        let resolved = crate::core::scanner::resolve_host_path(&path);
+        if !resolved.exists() {
+            let did = discussion_id.to_string();
+            let session_pk = workspace.session_pk;
+            if let Some(session_pk) = session_pk {
+                let _ = state
+                    .db
+                    .with_conn(move |conn| {
+                        crate::db::discussion_workspaces::mark_missing(conn, &did, session_pk)
+                    })
+                    .await;
+            }
+            return Err(format!("Worktree path not found: {}", resolved.display()));
+        }
+        return Ok((resolved, project.path));
+    }
+
     if let Some(ref wp) = disc.workspace_path {
         let resolved = crate::core::scanner::resolve_host_path(wp);
         if !resolved.exists() {
@@ -66,15 +106,66 @@ async fn resolve_discussion_work_dir(
     }
 }
 
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct DiscWorkspaceSelection {
+    #[serde(default)]
+    pub workspace_id: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct DiscGitDiffQuery {
+    pub path: String,
+    #[serde(default)]
+    pub committed: Option<bool>,
+    #[serde(default)]
+    pub workspace_id: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct DiscGitCommitRequest {
+    pub files: Vec<String>,
+    pub message: String,
+    #[serde(default)]
+    pub amend: bool,
+    #[serde(default)]
+    pub sign: bool,
+    #[serde(default)]
+    pub workspace_id: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct DiscCreatePrRequest {
+    pub title: String,
+    #[serde(default)]
+    pub body: String,
+    #[serde(default = "default_disc_pr_base")]
+    pub base: String,
+    #[serde(default)]
+    pub workspace_id: Option<String>,
+}
+
+fn default_disc_pr_base() -> String {
+    "main".into()
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct DiscExecRequest {
+    pub command: String,
+    #[serde(default)]
+    pub workspace_id: Option<String>,
+}
+
 /// GET /api/discussions/:id/git-status
 pub async fn disc_git_status(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Query(query): Query<DiscWorkspaceSelection>,
 ) -> Json<ApiResponse<GitStatusResponse>> {
-    let (work_dir, _) = match resolve_discussion_work_dir(&state, &id).await {
-        Ok(v) => v,
-        Err(e) => return Json(ApiResponse::err(e)),
-    };
+    let (work_dir, _) =
+        match resolve_discussion_work_dir(&state, &id, query.workspace_id.as_deref()).await {
+            Ok(v) => v,
+            Err(e) => return Json(ApiResponse::err(e)),
+        };
 
     let result = tokio::task::spawn_blocking(move || super::git_ops::run_git_status(&work_dir))
         .await
@@ -90,16 +181,17 @@ pub async fn disc_git_status(
 pub async fn disc_git_diff(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    Query(query): Query<GitDiffQuery>,
+    Query(query): Query<DiscGitDiffQuery>,
 ) -> Json<ApiResponse<GitDiffResponse>> {
     if query.path.contains("..") {
         return Json(ApiResponse::err("Invalid path"));
     }
 
-    let (work_dir, _) = match resolve_discussion_work_dir(&state, &id).await {
-        Ok(v) => v,
-        Err(e) => return Json(ApiResponse::err(e)),
-    };
+    let (work_dir, _) =
+        match resolve_discussion_work_dir(&state, &id, query.workspace_id.as_deref()).await {
+            Ok(v) => v,
+            Err(e) => return Json(ApiResponse::err(e)),
+        };
 
     let file_path = query.path.clone();
     let committed = query.committed.unwrap_or(false);
@@ -123,7 +215,7 @@ pub async fn disc_git_diff(
 pub async fn disc_git_commit(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    Json(req): Json<GitCommitRequest>,
+    Json(req): Json<DiscGitCommitRequest>,
 ) -> Json<ApiResponse<GitCommitResponse>> {
     if req.files.is_empty() {
         return Json(ApiResponse::err("No files specified"));
@@ -137,10 +229,11 @@ pub async fn disc_git_commit(
         }
     }
 
-    let (work_dir, _) = match resolve_discussion_work_dir(&state, &id).await {
-        Ok(v) => v,
-        Err(e) => return Json(ApiResponse::err(e)),
-    };
+    let (work_dir, _) =
+        match resolve_discussion_work_dir(&state, &id, req.workspace_id.as_deref()).await {
+            Ok(v) => v,
+            Err(e) => return Json(ApiResponse::err(e)),
+        };
 
     let files = req.files.clone();
     let message = req.message.clone();
@@ -162,11 +255,13 @@ pub async fn disc_git_commit(
 pub async fn disc_git_push(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Json(req): Json<DiscWorkspaceSelection>,
 ) -> Json<ApiResponse<GitPushResponse>> {
-    let (work_dir, _) = match resolve_discussion_work_dir(&state, &id).await {
-        Ok(v) => v,
-        Err(e) => return Json(ApiResponse::err(e)),
-    };
+    let (work_dir, _) =
+        match resolve_discussion_work_dir(&state, &id, req.workspace_id.as_deref()).await {
+            Ok(v) => v,
+            Err(e) => return Json(ApiResponse::err(e)),
+        };
 
     let github_token = resolve_github_token_from_state(&state).await;
     let result = tokio::task::spawn_blocking(move || {
@@ -783,7 +878,7 @@ pub async fn test_mode_exit(
 pub async fn disc_exec(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    Json(req): Json<ExecRequest>,
+    Json(req): Json<DiscExecRequest>,
 ) -> Json<ApiResponse<ExecResponse>> {
     let cmd = req.command.trim().to_string();
     if cmd.is_empty() {
@@ -805,10 +900,11 @@ pub async fn disc_exec(
         return Json(ApiResponse::err(msg));
     }
 
-    let (work_dir, _) = match resolve_discussion_work_dir(&state, &id).await {
-        Ok(v) => v,
-        Err(e) => return Json(ApiResponse::err(e)),
-    };
+    let (work_dir, _) =
+        match resolve_discussion_work_dir(&state, &id, req.workspace_id.as_deref()).await {
+            Ok(v) => v,
+            Err(e) => return Json(ApiResponse::err(e)),
+        };
 
     // Rate-limit concurrent exec calls via the shared agent semaphore
     let _permit = match state.agent_semaphore.acquire().await {
@@ -830,12 +926,13 @@ pub async fn disc_exec(
 pub async fn disc_create_pr(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    Json(req): Json<CreatePrRequest>,
+    Json(req): Json<DiscCreatePrRequest>,
 ) -> Json<ApiResponse<serde_json::Value>> {
-    let (work_dir, _) = match resolve_discussion_work_dir(&state, &id).await {
-        Ok(v) => v,
-        Err(e) => return Json(ApiResponse::err(e)),
-    };
+    let (work_dir, _) =
+        match resolve_discussion_work_dir(&state, &id, req.workspace_id.as_deref()).await {
+            Ok(v) => v,
+            Err(e) => return Json(ApiResponse::err(e)),
+        };
 
     let title = req.title;
     let body = req.body;
@@ -857,11 +954,13 @@ pub async fn disc_create_pr(
 pub async fn disc_pr_template(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Query(query): Query<DiscWorkspaceSelection>,
 ) -> Json<ApiResponse<serde_json::Value>> {
-    let (work_dir, _) = match resolve_discussion_work_dir(&state, &id).await {
-        Ok(v) => v,
-        Err(e) => return Json(ApiResponse::err(e)),
-    };
+    let (work_dir, _) =
+        match resolve_discussion_work_dir(&state, &id, query.workspace_id.as_deref()).await {
+            Ok(v) => v,
+            Err(e) => return Json(ApiResponse::err(e)),
+        };
 
     let branch = sync_cmd("git")
         .args(["branch", "--show-current"])

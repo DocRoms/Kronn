@@ -52,7 +52,9 @@ describe('typed composer targets', () => {
       }),
       expect.objectContaining({
         trigger: '@codex-cli',
-        displayTrigger: '@codex',
+        // KT-211: the CLI entry shows its real alias, never the bare
+        // provider trigger it would share with the punctual agent.
+        displayTrigger: '@codex-cli',
         label: 'CLI',
         target: expect.objectContaining({ kind: 'cli', cli_session_id: 42 }),
       }),

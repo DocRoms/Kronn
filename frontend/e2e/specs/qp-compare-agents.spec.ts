@@ -22,6 +22,7 @@
  * by `codex-real-introspection.spec.ts` (1 run, ~$0.05).
  */
 import { test, expect, type APIRequestContext } from '@playwright/test';
+import { DashboardPage } from '../pages/DashboardPage';
 
 const QP_TITLE = `Compare-agents PW ${Date.now()}`;
 const QP_PROMPT = 'Renvoie simplement le mot "noté" pour ce test.';
@@ -162,8 +163,9 @@ test.describe('Compare-agents — fan-out the same prompt across N agents', () =
     await page.addInitScript(() => {
       try { window.localStorage.setItem('kronn:tour-completed', 'true'); } catch { /* incognito */ }
     });
-    await page.goto('/');
-    await page.locator('[data-tour-id="nav-workflows"]').click();
+    const dashboard = new DashboardPage(page);
+    await dashboard.goto();
+    await dashboard.openWorkflows();
     await page.locator('button.dash-tab', { hasText: /Quick Prompts/i }).click();
 
     // The QP we created should appear in the list. Find its compare

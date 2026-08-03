@@ -16,7 +16,8 @@
  * Cost model: ZERO Claude tokens — audit-status/drift/partial-audit are
  * route-mocked; unmocked routes hit the real local backend as usual.
  */
-import { test, expect, type Page, type Route } from '@playwright/test';
+import { test, expect } from '../fixtures/kronn-fixture';
+import type { Page, Route } from '@playwright/test';
 import { DashboardPage } from '../pages/DashboardPage';
 
 interface AuditProgress {
@@ -163,9 +164,6 @@ function mockPartialAuditStream(page: Page, projectId: string) {
 }
 
 test.describe('Audit card & tab states (0.9.0 dogfooding)', () => {
-  test.skip(!!process.env.CI,
-    'route-mocked spec — local-only for now (same rationale as audit-banner-lifecycle).');
-
   test('card adopts an externally-launched audit, locks CTAs, then releases', async ({ page }) => {
     const projectId = 'pw-audit-card-fixture';
     mockProjectsList(page, projectId);
@@ -176,24 +174,25 @@ test.describe('Audit card & tab states (0.9.0 dogfooding)', () => {
     await dashboard.goto();
 
     // Idle: drift affordances visible, no running badge anywhere.
-    await expect(page.getByText('3 section(s) obsolète(s)')).toBeVisible({ timeout: 10_000 });
-    await expect(page.getByText(/AI audit \d+\/\d+/)).toHaveCount(0);
+    await expect(page.getByTestId('project-drift-status')).toContainText('3 section(s) obsolète(s)', { timeout: 10_000 });
+    await expect(page.getByTestId('project-audit-progress')).toHaveCount(0);
 
     // An audit starts OUTSIDE this card (MCP bridge): the fleet poll sees
     // it, the card adopts it — orange badge with the SEQUENTIAL counter,
     // drift-update affordance hidden while running.
     audit.setRunning({ step_index: 2, total_steps: 3 });
-    await expect(page.getByText('AI audit 2/3')).toBeVisible({ timeout: 15_000 });
-    await expect(page.getByText('Mettre à jour (3 sections)')).toHaveCount(0);
+    await expect(page.getByTestId('project-audit-progress')).toContainText('2/3', { timeout: 15_000 });
+    await expect(page.getByTestId('project-drift-update')).toHaveCount(0);
 
     // Projets nav tab carries the fleet badge (1 running audit).
-    await expect(page.locator('nav').getByText('1', { exact: true })).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator('[data-tour-id="nav-projects"] .dash-nav-badge'))
+      .toHaveText('1', { timeout: 10_000 });
 
     // Audit ends server-side: badge and lock must release — no phantom
     // "Audits en cours" leftovers (the drop-guard regression family).
     audit.setIdle();
-    await expect(page.getByText(/AI audit \d+\/\d+/)).toHaveCount(0, { timeout: 15_000 });
-    await expect(page.getByText('Mettre à jour (3 sections)')).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByTestId('project-audit-progress')).toHaveCount(0, { timeout: 15_000 });
+    await expect(page.getByTestId('project-drift-update')).toBeVisible({ timeout: 10_000 });
   });
 
   test('drift refresh cycle: stale badges → update → clean card', async ({ page }) => {
@@ -207,8 +206,8 @@ test.describe('Audit card & tab states (0.9.0 dogfooding)', () => {
     await dashboard.goto();
 
     // Stale state renders both affordances.
-    const updateBtn = page.getByText('Mettre à jour (3 sections)').first();
-    await expect(page.getByText('3 section(s) obsolète(s)')).toBeVisible({ timeout: 10_000 });
+    const updateBtn = page.getByTestId('project-drift-update');
+    await expect(page.getByTestId('project-drift-status')).toContainText('3 section(s) obsolète(s)', { timeout: 10_000 });
     await expect(updateBtn).toBeVisible();
 
     // Launch the refresh; the mocked stream completes instantly and the
@@ -223,13 +222,13 @@ test.describe('Audit card & tab states (0.9.0 dogfooding)', () => {
       page.getByText('3 section(s) mises à jour — discussion de validation créée, on y va'),
     ).toBeVisible({ timeout: 15_000 });
     await expect(page.getByText(/L'audit partiel s'est arrêté sur une erreur/)).toHaveCount(0);
-    await expect(page.locator('.dash-proj-name')).toHaveCount(0, { timeout: 10_000 });
+    await expect(page.locator('.project-detail-card')).toHaveCount(0, { timeout: 10_000 });
 
     // Back on Projets: the card is remounted, clean, with no progress chip.
     await dashboard.clickProjects();
-    await expect(page.locator('.dash-proj-name', { hasText: 'audit-card-fixture' }))
+    await expect(page.getByRole('heading', { name: 'audit-card-fixture' }))
       .toBeVisible({ timeout: 10_000 });
-    await expect(page.getByText('3 section(s) obsolète(s)')).toHaveCount(0, { timeout: 15_000 });
-    await expect(page.getByText(/AI audit \d+\/\d+/)).toHaveCount(0);
+    await expect(page.getByTestId('project-drift-status')).toHaveCount(0, { timeout: 15_000 });
+    await expect(page.getByTestId('project-audit-progress')).toHaveCount(0);
   });
 });

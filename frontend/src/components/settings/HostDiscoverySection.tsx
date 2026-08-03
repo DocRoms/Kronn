@@ -95,7 +95,7 @@ function transportSummary(d: DiscoveredHostMcp): string {
 
 export function HostDiscoverySection({ t: _t }: HostDiscoverySectionProps) {
   const [entries, setEntries] = useState<DiscoveredHostMcp[]>([]);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [loadedAt, setLoadedAt] = useState<Date | null>(null);
   const [adoptTarget, setAdoptTarget] = useState<DiscoveredHostMcp | null>(null);
@@ -139,7 +139,22 @@ export function HostDiscoverySection({ t: _t }: HostDiscoverySectionProps) {
     }
   }, []);
 
-  useEffect(() => { refresh(); }, [refresh]);
+  useEffect(() => {
+    let active = true;
+    mcpsApi.hostDiscovery()
+      .then(data => {
+        if (!active) return;
+        setEntries(data);
+        setLoadedAt(new Date());
+      })
+      .catch(error => {
+        if (active) setError(error instanceof Error ? error.message : String(error));
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => { active = false; };
+  }, []);
 
   // Group entries by scope for display
   const groups = new Map<string, { scope: HostScope; items: DiscoveredHostMcp[] }>();

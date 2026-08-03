@@ -282,6 +282,7 @@ mod tests {
             anti_hallucination_mode: "warn".into(),
             continual_learning_enabled: false,
             debug_mode: false,
+            discussion_notes_enabled: true,
             default_model_tier: crate::models::ModelTier::Default,
             default_summary_strategy: crate::models::SummaryStrategy::Off,
         }

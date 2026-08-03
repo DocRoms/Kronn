@@ -59,6 +59,7 @@ mod tests {
             lint_report: None,
             id: id.into(),
             role,
+            channel: crate::models::MessageChannel::Main,
             content: format!("Content of {}", id),
             agent_type: agent,
             timestamp: Utc::now(),
@@ -1235,6 +1236,68 @@ mod tests {
     }
 
     #[test]
+    fn note_is_idempotent_visible_and_never_consumes_or_dispatches() {
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("note-msg")).unwrap();
+        update_discussion_agent(&conn, "note-msg", &AgentType::Codex).unwrap();
+
+        let mut note = make_message("stable-note-id", MessageRole::User, None);
+        note.channel = crate::models::MessageChannel::Note;
+        note.content = "Décision hors contexte".into();
+
+        let inserted = insert_note_message(&conn, "note-msg", &note).unwrap();
+        assert!(matches!(
+            inserted,
+            InsertUserMessageOutcome::Inserted {
+                sort_order: 1,
+                dispatch_job: None,
+                ..
+            }
+        ));
+        let duplicate = insert_note_message(&conn, "note-msg", &note).unwrap();
+        assert!(matches!(
+            duplicate,
+            InsertUserMessageOutcome::Duplicate { sort_order: 1 }
+        ));
+
+        assert_eq!(count_notes(&conn, "note-msg").unwrap(), 1);
+        let notes = list_notes(&conn, "note-msg", 0, 10).unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].0, 1);
+        assert_eq!(notes[0].1.content, "Décision hors contexte");
+        assert!(matches!(
+            notes[0].1.channel,
+            crate::models::MessageChannel::Note
+        ));
+        assert_eq!(list_messages(&conn, "note-msg").unwrap().len(), 1);
+
+        let pending: Option<String> = conn
+            .query_row(
+                "SELECT pending_agent_handoff_from FROM discussions WHERE id = ?1",
+                ["note-msg"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(pending.as_deref(), Some("ClaudeCode"));
+        let (awaiting_agent, dispatch_count): (bool, i64) = (
+            conn.query_row(
+                "SELECT awaiting_agent FROM discussions WHERE id = 'note-msg'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap(),
+            conn.query_row(
+                "SELECT COUNT(*) FROM agent_dispatch_jobs WHERE discussion_id = 'note-msg'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        );
+        assert!(!awaiting_agent);
+        assert_eq!(dispatch_count, 0);
+    }
+
+    #[test]
     fn user_message_and_dispatch_job_commit_atomically() {
         let conn = test_conn();
         insert_discussion(&conn, &make_discussion("dispatch-msg")).unwrap();
@@ -2302,6 +2365,7 @@ mod tests {
             &message,
             &targets,
             &dispatches,
+            false,
         )
         .unwrap();
         let InsertUserMessageOutcome::Inserted { dispatch_job, .. } = inserted else {
@@ -2345,6 +2409,7 @@ mod tests {
                     agent_override: Some(&AgentType::ClaudeCode),
                 },
             ],
+            false,
         )
         .unwrap();
         assert!(matches!(
@@ -2360,5 +2425,40 @@ mod tests {
             )
             .unwrap();
         assert_eq!(job_count, 2);
+    }
+
+    #[test]
+    fn native_fallback_is_marked_in_the_user_acceptance_transaction() {
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("d-native-fallback")).unwrap();
+        crate::db::discussion_sessions::create_session(
+            &conn,
+            "d-native-fallback",
+            "ClaudeCode",
+            Some("cli-lapsed"),
+            "peer",
+        )
+        .unwrap();
+        let message = make_message("u-native-fallback", MessageRole::User, None);
+
+        let outcome = insert_user_message_with_dispatches(
+            &conn,
+            "d-native-fallback",
+            &message,
+            &[],
+            &[],
+            true,
+        )
+        .unwrap();
+        assert!(matches!(outcome, InsertUserMessageOutcome::Inserted { .. }));
+
+        let marked: i64 = conn
+            .query_row(
+                "SELECT native_fallback FROM messages WHERE id = ?1",
+                [&message.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(marked, 1);
     }
 }

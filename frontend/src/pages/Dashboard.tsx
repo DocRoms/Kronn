@@ -5,7 +5,7 @@ import { useApi } from '../hooks/useApi';
 import { useToast } from '../hooks/useToast';
 import type { RemoteRepo, RepoSource, DiscoverSourceError, DriftCheckResponse, AuditProgress } from '../types/generated';
 import { useT } from '../lib/I18nContext';
-import { unseenBasis } from '../components/SwipeableDiscItem';
+import { unseenBasis } from '../lib/discussionUiUtils';
 import { detectStaleStreams } from '../lib/stream-watchdog';
 import { useIsMobile } from '../hooks/useMediaQuery';
 import { useWebSocket } from '../hooks/useWebSocket';

@@ -22,7 +22,8 @@
  * endpoint via Playwright route interception — no real agent runs.
  * Setup ~1s, runs ~5s, deterministic across machines.
  */
-import { test, expect, type Page, type Route } from '@playwright/test';
+import { test, expect } from '../fixtures/kronn-fixture';
+import type { Page, Route } from '@playwright/test';
 import { DashboardPage } from '../pages/DashboardPage';
 
 interface AuditProgress {
@@ -146,9 +147,6 @@ function mockDiscussionsList(page: Page, discId: string, projectId: string) {
 const BANNER_TEXT_RE = /Audit IA en cours sur ce projet/i;
 
 test.describe('Audit running → MCP filter banner lifecycle (0.8.3 #282)', () => {
-  test.skip(!!process.env.CI,
-    'route-mocked spec — local-only for now. Mocks cover the SSE poll + DOM transition; CI version would need a fake-disc seed.');
-
   test('banner appears when audit starts and disappears when it ends', async ({ page }) => {
     const projectId = 'pw-audit-banner-fixture';
     const discId = 'pw-audit-banner-disc';
@@ -161,12 +159,7 @@ test.describe('Audit running → MCP filter banner lifecycle (0.8.3 #282)', () =
 
     const dashboard = new DashboardPage(page);
     await dashboard.goto();
-    await dashboard.navDiscussions.click();
-
-    // Open the fixture discussion — we click its title from the
-    // sidebar. Real selector: it's just a discussion link in the
-    // sidebar list, accessible by title.
-    await page.getByText('Question about the project').first().click();
+    await dashboard.openDiscussion(discId);
 
     // Phase 1: no audit running → banner must NOT be there.
     // Give the first poll a chance to fire (it's the mount tick).
@@ -199,8 +192,7 @@ test.describe('Audit running → MCP filter banner lifecycle (0.8.3 #282)', () =
 
     const dashboard = new DashboardPage(page);
     await dashboard.goto();
-    await dashboard.navDiscussions.click();
-    await page.getByText('Question about the project').first().click();
+    await dashboard.openDiscussion(discId);
 
     // Wait long enough for at least one poll tick to fire.
     await page.waitForTimeout(1_000);

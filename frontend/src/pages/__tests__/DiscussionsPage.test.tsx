@@ -298,13 +298,51 @@ describe('DiscussionsPage', () => {
     expect(screen.getByText(/5 msg/)).toBeTruthy();
   });
 
+  it('keeps notes interleaved but lets the user hide them globally', async () => {
+    const fullDisc: Discussion = {
+      ...makeListDiscussion('d-notes', 2),
+      messages: [
+        { id: 'main-1', role: 'User', channel: 'main', content: 'Visible main turn', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
+        { id: 'note-2', role: 'User', channel: 'note', content: 'Private timeline note', agent_type: null, timestamp: '2026-01-01T00:00:01Z', tokens_used: 0, auth_mode: null, author_pseudo: 'Romuald' },
+      ],
+    };
+    vi.mocked(discussionsApi.get).mockResolvedValue(fullDisc);
+
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[{ ...makeListDiscussion('d-notes', 2), messages: fullDisc.messages }]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        initialActiveDiscussionId="d-notes"
+        {...liftedProps()}
+      />,
+    );
+
+    await waitFor(() => expect(screen.getAllByText('Private timeline note').length).toBeGreaterThan(0));
+    const hideNotes = screen.getByRole('button', { name: 'Masquer les notes' });
+    expect(hideNotes.closest('.disc-note-tools')).not.toBeNull();
+    expect(document.querySelector('.disc-messages .disc-notes-filter')).toBeNull();
+    fireEvent.click(hideNotes);
+    expect(screen.queryByText('Private timeline note')).not.toBeInTheDocument();
+    expect(screen.getByText('Visible main turn')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Afficher les notes' }));
+    expect(screen.getAllByText('Private timeline note').length).toBeGreaterThan(0);
+  });
+
   // ─── Streaming & tab-switch behavior tests ──────────────────────────────
 
   it('shows thinking loader when sendingMap has active entry', async () => {
     const fullDisc: Discussion = {
       ...makeListDiscussion('d1', 1),
       messages: [
-        { id: 'm1', role: 'User', content: 'Hello', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
+        { id: 'm1', role: 'User', channel: 'main', content: 'Hello', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
       ],
     };
     vi.mocked(discussionsApi.get).mockResolvedValue(fullDisc);
@@ -338,8 +376,8 @@ describe('DiscussionsPage', () => {
     const fullDisc: Discussion = {
       ...makeListDiscussion('d1', 2),
       messages: [
-        { id: 'm1', role: 'User', content: 'My question', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
-        { id: 'm2', role: 'Agent', content: 'My answer', agent_type: 'ClaudeCode', timestamp: '2026-01-01T00:00:01Z', tokens_used: 100, auth_mode: null },
+        { id: 'm1', role: 'User', channel: 'main', content: 'My question', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
+        { id: 'm2', role: 'Agent', channel: 'main', content: 'My answer', agent_type: 'ClaudeCode', timestamp: '2026-01-01T00:00:01Z', tokens_used: 100, auth_mode: null },
       ],
     };
     vi.mocked(discussionsApi.get).mockResolvedValue(fullDisc);
@@ -399,7 +437,7 @@ describe('DiscussionsPage', () => {
     const before: Discussion = {
       ...makeListDiscussion('d1', 1),
       messages: [
-        { id: 'm1', role: 'User', content: 'before reconnect', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
+        { id: 'm1', role: 'User', channel: 'main', content: 'before reconnect', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
       ],
     };
     vi.mocked(discussionsApi.get).mockResolvedValue(before);
@@ -434,8 +472,8 @@ describe('DiscussionsPage', () => {
     const after: Discussion = {
       ...makeListDiscussion('d1', 2),
       messages: [
-        { id: 'm1', role: 'User', content: 'before reconnect', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
-        { id: 'm2', role: 'Agent', content: marker, agent_type: 'ClaudeCode', timestamp: '2026-01-01T00:00:02Z', tokens_used: 0, auth_mode: null },
+        { id: 'm1', role: 'User', channel: 'main', content: 'before reconnect', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
+        { id: 'm2', role: 'Agent', channel: 'main', content: marker, agent_type: 'ClaudeCode', timestamp: '2026-01-01T00:00:02Z', tokens_used: 0, auth_mode: null },
       ],
     };
     vi.mocked(discussionsApi.get).mockResolvedValue(after);
@@ -626,8 +664,8 @@ describe('DiscussionsPage', () => {
     const discWithResponse: Discussion = {
       ...makeListDiscussion('d1', 2),
       messages: [
-        { id: 'm1', role: 'User', content: 'Hello', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
-        { id: 'm2', role: 'Agent', content: 'Response', agent_type: 'ClaudeCode', timestamp: '2026-01-01T00:00:01Z', tokens_used: 50, auth_mode: null },
+        { id: 'm1', role: 'User', channel: 'main', content: 'Hello', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
+        { id: 'm2', role: 'Agent', channel: 'main', content: 'Response', agent_type: 'ClaudeCode', timestamp: '2026-01-01T00:00:01Z', tokens_used: 50, auth_mode: null },
       ],
     };
     vi.mocked(discussionsApi.get).mockResolvedValue(discWithResponse);
@@ -754,7 +792,7 @@ describe('DiscussionsPage', () => {
     const fullDisc: Discussion = {
       ...makeListDiscussion('d1', 1),
       messages: [
-        { id: 'm1', role: 'User', content: 'Hi', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
+        { id: 'm1', role: 'User', channel: 'main', content: 'Hi', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
       ],
     };
     vi.mocked(discussionsApi.get).mockResolvedValue(fullDisc);
@@ -935,7 +973,7 @@ describe('DiscussionsPage', () => {
       agent: 'Vibe',
       participants: ['Vibe'],
       messages: [
-        { id: 'm1', role: 'User', content: 'Hello Vibe', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
+        { id: 'm1', role: 'User', channel: 'main', content: 'Hello Vibe', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
       ],
     };
     vi.mocked(discussionsApi.get).mockResolvedValue(vibeDisc);
@@ -968,7 +1006,7 @@ describe('DiscussionsPage', () => {
     const fullDisc: Discussion = {
       ...makeListDiscussion('d1', 1),
       messages: [
-        { id: 'm1', role: 'User', content: 'Hello', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
+        { id: 'm1', role: 'User', channel: 'main', content: 'Hello', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
       ],
     };
     vi.mocked(discussionsApi.get).mockResolvedValue(fullDisc);
@@ -999,8 +1037,8 @@ describe('DiscussionsPage', () => {
     const proj1 = { id: 'p1', name: 'web-app', path: '/repos/web-app', repo_url: 'git@github.com:acme-org/web-app.git', token_override: null, ai_config: { detected: false, configs: [] }, audit_status: 'NoTemplate' as AiAuditStatus, ai_todo_count: 0, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', path_exists: true, tech_debt_count: 0, needs_docs_migration: false };
     const proj2 = { id: 'p2', name: 'api-server', path: '/repos/api-server', repo_url: 'git@github.com:johndoe/api-server.git', token_override: null, ai_config: { detected: false, configs: [] }, audit_status: 'NoTemplate' as AiAuditStatus, ai_todo_count: 0, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', path_exists: true, tech_debt_count: 0, needs_docs_migration: false };
 
-    const disc1 = { ...makeListDiscussion('d1', 1), project_id: 'p1', messages: [{ id: 'm1', role: 'User' as const, content: 'test', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null }] };
-    const disc2 = { ...makeListDiscussion('d2', 1), project_id: 'p2', messages: [{ id: 'm2', role: 'User' as const, content: 'test', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null }] };
+    const disc1 = { ...makeListDiscussion('d1', 1), project_id: 'p1', messages: [{ id: 'm1', role: 'User' as const, channel: 'main' as const, content: 'test', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null }] };
+    const disc2 = { ...makeListDiscussion('d2', 1), project_id: 'p2', messages: [{ id: 'm2', role: 'User' as const, channel: 'main' as const, content: 'test', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null }] };
 
     vi.mocked(discussionsApi.get).mockResolvedValue(disc1);
 
@@ -1031,7 +1069,7 @@ describe('DiscussionsPage', () => {
     const fullDisc: Discussion = {
       ...makeListDiscussion('d1', 1),
       messages: [
-        { id: 'm1', role: 'User', content: 'Hello', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
+        { id: 'm1', role: 'User', channel: 'main', content: 'Hello', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
       ],
     };
     vi.mocked(discussionsApi.get).mockResolvedValue(fullDisc);
@@ -1063,7 +1101,7 @@ describe('DiscussionsPage', () => {
     const fullDisc: Discussion = {
       ...makeListDiscussion('d1', 1),
       messages: [
-        { id: 'm1', role: 'User', content: 'Hello', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
+        { id: 'm1', role: 'User', channel: 'main', content: 'Hello', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
       ],
     };
     vi.mocked(discussionsApi.get).mockResolvedValue(fullDisc);
@@ -1103,8 +1141,8 @@ describe('DiscussionsPage', () => {
     const fullDisc: Discussion = {
       ...makeListDiscussion('d1', 2),
       messages: [
-        { id: 'm1', role: 'User', content: 'Hello', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
-        { id: 'm2', role: 'Agent', content: 'Bonjour!', agent_type: 'ClaudeCode', timestamp: '2026-01-01T00:00:01Z', tokens_used: 50, auth_mode: null },
+        { id: 'm1', role: 'User', channel: 'main', content: 'Hello', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
+        { id: 'm2', role: 'Agent', channel: 'main', content: 'Bonjour!', agent_type: 'ClaudeCode', timestamp: '2026-01-01T00:00:01Z', tokens_used: 50, auth_mode: null },
       ],
     };
     vi.mocked(discussionsApi.get).mockResolvedValue(fullDisc);
@@ -1137,8 +1175,8 @@ describe('DiscussionsPage', () => {
     const fullDisc: Discussion = {
       ...makeListDiscussion('d1', 2),
       messages: [
-        { id: 'm1', role: 'User', content: 'Hello', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
-        { id: 'm2', role: 'Agent', content: 'Bonjour le monde!', agent_type: 'ClaudeCode', timestamp: '2026-01-01T00:00:01Z', tokens_used: 50, auth_mode: null },
+        { id: 'm1', role: 'User', channel: 'main', content: 'Hello', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
+        { id: 'm2', role: 'Agent', channel: 'main', content: 'Bonjour le monde!', agent_type: 'ClaudeCode', timestamp: '2026-01-01T00:00:01Z', tokens_used: 50, auth_mode: null },
       ],
     };
     vi.mocked(discussionsApi.get).mockResolvedValue(fullDisc);
@@ -1175,6 +1213,7 @@ describe('DiscussionsPage', () => {
     const messages = Array.from({ length: 30 }, (_, i) => ({
       id: `m${i}`,
       role: (i % 2 === 0 ? 'User' : 'Agent') as 'User' | 'Agent',
+      channel: 'main' as const,
       content: `message ${i}`,
       agent_type: i % 2 === 0 ? null : ('ClaudeCode' as const),
       timestamp: '2026-01-01T00:00:00Z',
@@ -1263,7 +1302,7 @@ describe('DiscussionsPage', () => {
     const initialDisc: Discussion = {
       ...makeListDiscussion('d1', 1),
       messages: [
-        { id: 'm1', role: 'User', content: 'Hello', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
+        { id: 'm1', role: 'User', channel: 'main', content: 'Hello', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
       ],
     };
     // The post-stream `reloadDiscussion` fetch — in production the
@@ -1279,7 +1318,7 @@ describe('DiscussionsPage', () => {
       ...initialDisc,
       messages: [
         ...initialDisc.messages,
-        { id: 'persisted-agent', role: 'Agent', content: 'Streamed agent reply.', agent_type: 'ClaudeCode', timestamp: '2026-01-01T00:00:01Z', tokens_used: 12, auth_mode: null },
+        { id: 'persisted-agent', role: 'Agent', channel: 'main', content: 'Streamed agent reply.', agent_type: 'ClaudeCode', timestamp: '2026-01-01T00:00:01Z', tokens_used: 12, auth_mode: null },
       ],
       message_count: 2, non_system_message_count: 2, tier: "default" as const, summary_strategy: "Auto" as const, introspection_call_count: 0,
     };
@@ -1364,7 +1403,7 @@ describe('DiscussionsPage', () => {
     const fullDisc: Discussion = {
       ...makeListDiscussion('d1', 1),
       messages: [
-        { id: 'm1', role: 'User', content: 'Hello', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
+        { id: 'm1', role: 'User', channel: 'main', content: 'Hello', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
       ],
     };
     vi.mocked(discussionsApi.get).mockResolvedValue(fullDisc);
@@ -1410,7 +1449,7 @@ describe('DiscussionsPage', () => {
     const fullDisc: Discussion = {
       ...makeListDiscussion('d1', 1),
       messages: [
-        { id: 'm1', role: 'User', content: 'Hello', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
+        { id: 'm1', role: 'User', channel: 'main', content: 'Hello', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
       ],
     };
     vi.mocked(discussionsApi.get).mockResolvedValue(fullDisc);
@@ -1462,6 +1501,7 @@ describe('DiscussionsPage', () => {
         {
           id: sourceId,
           role: 'Agent',
+          channel: 'main',
           content: 'Original answer',
           agent_type: 'Codex',
           timestamp: '2026-01-01T00:00:00Z',
@@ -1521,6 +1561,7 @@ describe('DiscussionsPage', () => {
       messages: [{
         id: sourceId,
         role: 'Agent',
+        channel: 'main',
         content: 'Original answer',
         agent_type: 'Codex',
         timestamp: '2026-01-01T00:00:00Z',
@@ -1572,7 +1613,7 @@ describe('DiscussionsPage', () => {
     const fullDisc: Discussion = {
       ...makeListDiscussion('d1', 1),
       messages: [{
-        id: 'm1', role: 'User', content: 'Hello', agent_type: null,
+        id: 'm1', role: 'User', channel: 'main', content: 'Hello', agent_type: null,
         timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null,
       }],
     };
@@ -1743,6 +1784,7 @@ describe('DiscussionsPage', () => {
         {
           id: sourceId,
           role: 'Agent',
+          channel: 'main',
           content: 'Original answer',
           agent_type: 'Codex',
           timestamp: '2026-01-01T00:00:00Z',
@@ -1752,6 +1794,7 @@ describe('DiscussionsPage', () => {
         {
           id: replyId,
           role: 'User',
+          channel: 'main',
           content: 'A reply',
           agent_type: null,
           timestamp: '2026-01-01T00:01:00Z',
@@ -1791,7 +1834,7 @@ describe('DiscussionsPage', () => {
     const fullDisc: Discussion = {
       ...makeListDiscussion('d1', 1),
       messages: [
-        { id: 'm1', role: 'User', content: 'Hello', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
+        { id: 'm1', role: 'User', channel: 'main', content: 'Hello', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
       ],
     };
     vi.mocked(discussionsApi.get).mockResolvedValue(fullDisc);
@@ -1842,7 +1885,7 @@ describe('DiscussionsPage', () => {
     const createdDisc: Discussion = {
       ...makeListDiscussion('new-disc', 1),
       messages: [
-        { id: 'm1', role: 'User', content: 'Analyse this code', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
+        { id: 'm1', role: 'User', channel: 'main', content: 'Analyse this code', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
       ],
     };
     vi.mocked(discussionsApi.create).mockResolvedValue(createdDisc);
@@ -2032,6 +2075,7 @@ describe('DiscussionsPage', () => {
       messages: [{
         id: 'prompt-agents-message',
         role: 'User',
+        channel: 'main',
         content: '@codex @claude comparez vos approches',
         agent_type: null,
         timestamp: '2026-07-28T00:00:00Z',
@@ -2116,8 +2160,8 @@ describe('DiscussionsPage', () => {
     const fullDisc: Discussion = {
       ...makeListDiscussion('d-copy', 2),
       messages: [
-        { id: 'u1', role: 'User', content: 'Hello', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
-        { id: 'a1', role: 'Agent', content: 'World', agent_type: 'ClaudeCode', timestamp: '2026-01-01T00:00:05Z', tokens_used: 50, auth_mode: null },
+        { id: 'u1', role: 'User', channel: 'main', content: 'Hello', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
+        { id: 'a1', role: 'Agent', channel: 'main', content: 'World', agent_type: 'ClaudeCode', timestamp: '2026-01-01T00:00:05Z', tokens_used: 50, auth_mode: null },
       ],
     };
     vi.mocked(discussionsApi.get).mockResolvedValue(fullDisc);
@@ -2150,6 +2194,7 @@ describe('DiscussionsPage', () => {
         {
           id: 'search-user',
           role: 'User',
+          channel: 'main',
           content: `${'contenu long '.repeat(1_000)}Alpha dans le premier message.`,
           agent_type: null,
           timestamp: '2026-01-01T00:00:00Z',
@@ -2159,6 +2204,7 @@ describe('DiscussionsPage', () => {
         {
           id: 'search-agent',
           role: 'Agent',
+          channel: 'main',
           content: 'alpha puis **alpha** dans la réponse',
           agent_type: 'ClaudeCode',
           timestamp: '2026-01-01T00:00:05Z',
@@ -2215,6 +2261,7 @@ describe('DiscussionsPage', () => {
       messages: [{
         id: 'source-message',
         role: 'User',
+        channel: 'main',
         content: 'Départ',
         agent_type: null,
         timestamp: '2026-01-01T00:00:00Z',
@@ -2227,6 +2274,7 @@ describe('DiscussionsPage', () => {
       messages: [{
         id: 'global-target-message',
         role: 'Agent',
+        channel: 'main',
         content: 'Le résultat Fastly recherché',
         agent_type: 'Codex',
         timestamp: '2026-01-02T00:00:00Z',
@@ -2290,8 +2338,8 @@ describe('DiscussionsPage', () => {
     const fullDisc: Discussion = {
       ...makeListDiscussion('d-time', 2),
       messages: [
-        { id: 'u1', role: 'User', content: 'Question', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
-        { id: 'a1', role: 'Agent', content: 'Answer', agent_type: 'ClaudeCode', timestamp: '2026-01-01T00:01:23Z', tokens_used: 100, auth_mode: null },
+        { id: 'u1', role: 'User', channel: 'main', content: 'Question', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
+        { id: 'a1', role: 'Agent', channel: 'main', content: 'Answer', agent_type: 'ClaudeCode', timestamp: '2026-01-01T00:01:23Z', tokens_used: 100, auth_mode: null },
       ],
     };
     vi.mocked(discussionsApi.get).mockResolvedValue(fullDisc);
@@ -2321,8 +2369,8 @@ describe('DiscussionsPage', () => {
     const fullDisc: Discussion = {
       ...makeListDiscussion('d-overflow', 2),
       messages: [
-        { id: 'u1', role: 'User', content: 'https://example.com/very-long-url-that-should-not-break-the-bubble-layout/with/many/path/segments/and-no-spaces-at-all', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
-        { id: 'a1', role: 'Agent', content: 'Here is the response', agent_type: 'ClaudeCode', timestamp: '2026-01-01T00:00:05Z', tokens_used: 50, auth_mode: null },
+        { id: 'u1', role: 'User', channel: 'main', content: 'https://example.com/very-long-url-that-should-not-break-the-bubble-layout/with/many/path/segments/and-no-spaces-at-all', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
+        { id: 'a1', role: 'Agent', channel: 'main', content: 'Here is the response', agent_type: 'ClaudeCode', timestamp: '2026-01-01T00:00:05Z', tokens_used: 50, auth_mode: null },
       ],
     };
     vi.mocked(discussionsApi.get).mockResolvedValue(fullDisc);
@@ -2352,8 +2400,8 @@ describe('DiscussionsPage', () => {
     const fullDisc: Discussion = {
       ...makeListDiscussion('d-switch', 2),
       messages: [
-        { id: 'u1', role: 'User', content: 'Hello', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
-        { id: 'a1', role: 'Agent', content: 'Hi', agent_type: 'ClaudeCode', timestamp: '2026-01-01T00:00:05Z', tokens_used: 50, auth_mode: null },
+        { id: 'u1', role: 'User', channel: 'main', content: 'Hello', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
+        { id: 'a1', role: 'Agent', channel: 'main', content: 'Hi', agent_type: 'ClaudeCode', timestamp: '2026-01-01T00:00:05Z', tokens_used: 50, auth_mode: null },
       ],
     };
     vi.mocked(discussionsApi.get).mockResolvedValue(fullDisc);
@@ -2386,9 +2434,9 @@ describe('DiscussionsPage', () => {
     expect(switchBtn?.textContent).toContain('agent de discussion');
   });
 
-  // ─── Discussion search filter tests ──────────────────────────────────
+  // ─── Global discussion search entry point ────────────────────────────
 
-  it('search input exists and filters discussions by title', async () => {
+  it('search input exists and does not remount the local tree while composing', async () => {
     const disc1: Discussion = { ...makeListDiscussion('d-alpha', 1), title: 'Alpha project chat' };
     const disc2: Discussion = { ...makeListDiscussion('d-beta', 2), title: 'Beta refactoring' };
 
@@ -2413,16 +2461,20 @@ describe('DiscussionsPage', () => {
     expect(bodyBefore).toContain('Beta refactoring');
 
     // Find the search input by placeholder
-    const searchInput = document.querySelector('input[placeholder="Rechercher..."]') as HTMLInputElement;
+    const searchInput = document.querySelector(
+      'input[placeholder="Chercher dans tous les messages…"]',
+    ) as HTMLInputElement;
     expect(searchInput).toBeTruthy();
 
     // Type "Alpha" in the search
     await act(async () => { fireEvent.change(searchInput, { target: { value: 'Alpha' } }); });
 
-    // Only the matching discussion should be visible
+    // The primary field runs the bounded backend search on Enter. Merely
+    // composing must keep the canonical tree stable, especially with hundreds
+    // of discussions.
     const bodyAfter = document.body.textContent!;
     expect(bodyAfter).toContain('Alpha project chat');
-    expect(bodyAfter).not.toContain('Beta refactoring');
+    expect(bodyAfter).toContain('Beta refactoring');
   });
 
   // ─── Agent switch dropdown tests ─────────────────────────────────────
@@ -2431,8 +2483,8 @@ describe('DiscussionsPage', () => {
     const fullDisc: Discussion = {
       ...makeListDiscussion('d-dropdown', 2),
       messages: [
-        { id: 'u1', role: 'User', content: 'Hello', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
-        { id: 'a1', role: 'Agent', content: 'Hi', agent_type: 'ClaudeCode', timestamp: '2026-01-01T00:00:05Z', tokens_used: 50, auth_mode: null },
+        { id: 'u1', role: 'User', channel: 'main', content: 'Hello', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
+        { id: 'a1', role: 'Agent', channel: 'main', content: 'Hi', agent_type: 'ClaudeCode', timestamp: '2026-01-01T00:00:05Z', tokens_used: 50, auth_mode: null },
       ],
     };
     vi.mocked(discussionsApi.get).mockResolvedValue(fullDisc);
@@ -2740,7 +2792,7 @@ describe('DiscussionsPage', () => {
     agent: 'ClaudeCode', language: 'fr',
     participants: ['ClaudeCode'],
     messages: [
-      { id: 'm1', role: 'User', content: 'Tell me about my project', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
+      { id: 'm1', role: 'User', channel: 'main', content: 'Tell me about my project', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
     ],
     message_count: 1, non_system_message_count: 1, tier: "default" as const, summary_strategy: "Auto" as const, introspection_call_count: 0,
     archived: false, pinned: false, pin_first_message: false,

@@ -67,7 +67,10 @@ function MermaidDiagramImpl({ source }: MermaidDiagramProps) {
   // namespace internal CSS rules; collisions on the same page would
   // leak styles between diagrams).
   const id = useId().replace(/:/g, '-');
-  const [error, setError] = useState<string | null>(null);
+  const [renderResult, setRenderResult] = useState<{
+    source: string;
+    error: string | null;
+  } | null>(null);
   const [showSource, setShowSource] = useState(false);
   const [fullscreen, setFullscreen] = useState(false);
   // Cached SVG markup. Stored so we can re-inject it into the
@@ -77,7 +80,6 @@ function MermaidDiagramImpl({ source }: MermaidDiagramProps) {
 
   useEffect(() => {
     let cancelled = false;
-    setError(null);
     if (!source.trim()) return;
 
     // Streaming guard: while an agent is still writing the message,
@@ -124,23 +126,29 @@ function MermaidDiagramImpl({ source }: MermaidDiagramProps) {
         // a thrown error (notice + raw source) instead of mermaid's
         // ugly inline error glyph.
         if (svg.includes('aria-roledescription="error"') || /Syntax error in (text|graph)/i.test(svg)) {
-          setError('Mermaid syntax error (returned by mermaid.render — see source below).');
+          setRenderResult({
+            source,
+            error: 'Mermaid syntax error (returned by mermaid.render — see source below).',
+          });
           return;
         }
         svgMarkupRef.current = svg;
         if (containerRef.current) {
           containerRef.current.innerHTML = svg;
         }
+        setRenderResult({ source, error: null });
       } catch (e) {
         if (cancelled) return;
         // Mermaid throws helpful messages with parse error location;
         // surface them so the user can fix the source (or report).
-        setError(e instanceof Error ? e.message : String(e));
+        setRenderResult({ source, error: e instanceof Error ? e.message : String(e) });
       }
     })();
 
     return () => { cancelled = true; };
   }, [source, id]);
+
+  const error = renderResult?.source === source ? renderResult.error : null;
 
   // Inject the cached SVG into the fullscreen overlay when it opens.
   // useEffect rather than `dangerouslySetInnerHTML` so we can also

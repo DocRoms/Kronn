@@ -83,7 +83,7 @@ describe('DiscussionSidebar — source badge (0.8.4 #294)', () => {
     await waitFor(() => {
       const badges = screen.queryAllByTestId('disc-source-badge');
       expect(badges).toHaveLength(1);
-      expect(badges[0].textContent).toContain('ClaudeCode');
+      expect(badges[0].getAttribute('aria-label')).toContain('ClaudeCode');
     });
   });
 
@@ -165,7 +165,9 @@ describe('DiscussionSidebar — source badge (0.8.4 #294)', () => {
     const badge = await screen.findByTestId('disc-source-badge');
     expect(badge.getAttribute('title')).toMatch(/disc\.source\.boundHint/);
     expect(badge.getAttribute('title')).not.toMatch(/imported/i);
-    expect(badge.textContent).toContain('disc.source.boundBadge');
+    expect(badge.getAttribute('aria-label')).toContain('disc.source.boundBadge');
+    expect(badge.closest('.disc-item-title')).toBeNull();
+    expect(badge.closest('.disc-item-meta')).not.toBeNull();
   });
 
   // KT-74 — the two provenances are independent. A bound disc is not an
@@ -186,8 +188,8 @@ describe('DiscussionSidebar — source badge (0.8.4 #294)', () => {
         <DiscussionSidebar {...baseProps} discussions={[mkDisc('d-imported', 'from a colleague')]} />
       );
       const badge = await screen.findByTestId('disc-import-badge');
-      expect(badge.textContent).toContain('disc.import.byBadge');
-      expect(badge.textContent).toContain('Romu');
+      expect(badge.getAttribute('aria-label')).toContain('disc.import.byBadge');
+      expect(badge.getAttribute('aria-label')).toContain('Romu');
       // No source binding → no bound badge on the same row.
       expect(screen.queryByTestId('disc-source-badge')).toBeNull();
     });
@@ -207,10 +209,10 @@ describe('DiscussionSidebar — source badge (0.8.4 #294)', () => {
         <DiscussionSidebar {...baseProps} discussions={[mkDisc('d-legacy', 'legacy bundle')]} />
       );
       const badge = await screen.findByTestId('disc-import-badge');
-      expect(badge.textContent).toContain('disc.import.anonymousBadge');
+      expect(badge.getAttribute('aria-label')).toContain('disc.import.anonymousBadge');
       // Neither a leaked placeholder nor the "imported BY someone" branch.
-      expect(badge.textContent).not.toMatch(/undefined|null/i);
-      expect(badge.textContent).not.toContain('disc.import.byBadge');
+      expect(badge.getAttribute('aria-label')).not.toMatch(/undefined|null/i);
+      expect(badge.getAttribute('aria-label')).not.toContain('disc.import.byBadge');
     });
 
     it('ignores the reserved agent_transcript kind, which is not implemented', async () => {
@@ -264,7 +266,9 @@ describe('DiscussionSidebar — source badge (0.8.4 #294)', () => {
     await waitFor(() => {
       expect(screen.queryAllByTestId('disc-source-badge')).toHaveLength(2);
     });
-    const labels = screen.getAllByTestId('disc-source-badge').map(b => b.textContent ?? '');
+    const labels = screen.getAllByTestId('disc-source-badge').map(
+      b => b.getAttribute('aria-label') ?? '',
+    );
     expect(labels.some(l => l.includes('Codex'))).toBe(true);
     expect(labels.some(l => l.includes('ClaudeCode'))).toBe(true);
   });

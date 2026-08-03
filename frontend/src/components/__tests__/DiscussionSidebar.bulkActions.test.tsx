@@ -74,6 +74,7 @@ describe('DiscussionSidebar — bulk selection', () => {
     vi.stubGlobal('confirm', confirmStub);
     render(<DiscussionSidebar {...props} />);
 
+    fireEvent.click(screen.getByRole('button', { name: 'disc.sidebar.moreActions' }));
     fireEvent.click(screen.getByRole('button', { name: 'disc.bulk.start' }));
     fireEvent.click(screen.getByRole('checkbox', { name: /Discussion disc-a/ }));
     fireEvent.click(screen.getByRole('checkbox', { name: /Discussion disc-b/ }));
@@ -97,6 +98,7 @@ describe('DiscussionSidebar — bulk selection', () => {
     vi.stubGlobal('confirm', confirmStub);
     render(<DiscussionSidebar {...props} />);
 
+    fireEvent.click(screen.getByRole('button', { name: 'disc.sidebar.moreActions' }));
     fireEvent.click(screen.getByRole('button', { name: 'disc.bulk.start' }));
     fireEvent.click(screen.getByRole('checkbox', { name: /Discussion disc-a/ }));
     fireEvent.click(screen.getByRole('button', { name: 'disc.bulk.delete' }));
@@ -105,5 +107,21 @@ describe('DiscussionSidebar — bulk selection', () => {
     expect(confirmStub).toHaveBeenCalledWith('disc.bulk.confirmDelete:1');
     expect(props.onBulkDelete).not.toHaveBeenCalled();
     expect(screen.getByText('disc.bulk.selected:1')).toBeInTheDocument();
+  });
+
+  it('moves focus into the header disclosure and restores it on Escape', async () => {
+    const props = makeProps();
+    render(<DiscussionSidebar {...props} />);
+
+    const trigger = screen.getByRole('button', { name: 'disc.sidebar.moreActions' });
+    fireEvent.click(trigger);
+
+    const action = screen.getByRole('button', { name: 'disc.bulk.start' });
+    await waitFor(() => expect(action).toHaveFocus());
+    expect(screen.getByRole('group', { name: 'disc.sidebar.moreActions' })).toBeInTheDocument();
+
+    fireEvent.keyDown(window, { key: 'Escape' });
+    await waitFor(() => expect(trigger).toHaveFocus());
+    expect(screen.queryByRole('group', { name: 'disc.sidebar.moreActions' })).toBeNull();
   });
 });

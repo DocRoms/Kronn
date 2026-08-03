@@ -18,29 +18,62 @@ interface SourceCodeViewerProps {
 }
 
 export function SourceCodeViewer({ projectId, onOpenCommit }: SourceCodeViewerProps) {
+  return (
+    <SourceCodeViewerProject
+      key={projectId}
+      projectId={projectId}
+      onOpenCommit={onOpenCommit}
+    />
+  );
+}
+
+interface ContentResult {
+  projectId: string;
+  path: string;
+  content: string | null;
+}
+
+interface BlameResult {
+  projectId: string;
+  path: string;
+  lines: GitBlameLine[];
+  error: boolean;
+}
+
+interface CommitResult {
+  projectId: string;
+  sha: string;
+  detail: GitCommitDetail | null;
+  error: string | null;
+}
+
+interface SearchResult {
+  projectId: string;
+  query: string;
+  exclusionsKey: string;
+  matches: Map<string, number>;
+}
+
+const EMPTY_SEARCH_RESULTS = new Map<string, number>();
+
+function SourceCodeViewerProject({ projectId, onOpenCommit }: SourceCodeViewerProps) {
   const { t } = useT();
   const [tree, setTree] = useState<SourceFileNode[]>([]);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
-  const [content, setContent] = useState<string | null>(null);
+  const [contentResult, setContentResult] = useState<ContentResult | null>(null);
   const [treeLoading, setTreeLoading] = useState(true);
   const [treeHydrating, setTreeHydrating] = useState(false);
-  const [contentLoading, setContentLoading] = useState(false);
   const [treeError, setTreeError] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
-  const [searchResults, setSearchResults] = useState<Map<string, number>>(new Map());
-  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchResult, setSearchResult] = useState<SearchResult | null>(null);
   const [currentMatchIdx, setCurrentMatchIdx] = useState(0);
   const [branch, setBranch] = useState<string | null>(null);
   const [annotate, setAnnotate] = useState(false);
-  const [blameLines, setBlameLines] = useState<GitBlameLine[]>([]);
-  const [blameLoading, setBlameLoading] = useState(false);
-  const [blameError, setBlameError] = useState(false);
+  const [blameResult, setBlameResult] = useState<BlameResult | null>(null);
   // KT-67 — the commit an annotated line points at. `sha` drives the fetch
   // so a click is enough; the detail arrives asynchronously.
   const [commitSha, setCommitSha] = useState<string | null>(null);
-  const [commitDetail, setCommitDetail] = useState<GitCommitDetail | null>(null);
-  const [commitLoading, setCommitLoading] = useState(false);
-  const [commitError, setCommitError] = useState<string | null>(null);
+  const [commitResult, setCommitResult] = useState<CommitResult | null>(null);
   const [exclusions, setExclusions] = useState<string[]>([]);
   const [exclusionSaving, setExclusionSaving] = useState<string | null>(null);
   const [exclusionError, setExclusionError] = useState(false);
@@ -50,34 +83,36 @@ export function SourceCodeViewer({ projectId, onOpenCommit }: SourceCodeViewerPr
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const treeLoadRef = useRef(0);
-  const treeProjectRef = useRef<string | null>(null);
 
-  const loadTree = useCallback(async () => {
-    const generation = treeLoadRef.current + 1;
-    treeLoadRef.current = generation;
-    const projectChanged = treeProjectRef.current !== projectId;
-    treeProjectRef.current = projectId;
-    setTreeLoading(true);
-    setTreeHydrating(false);
-    setTreeError(false);
-    try {
-      const [rootFiles, savedExclusions] = await Promise.all([
-        projectsApi.listSourceFiles(projectId, true),
-        projectsApi.getSourceExclusions(projectId),
-      ]);
-      if (treeLoadRef.current !== generation) return;
-      setTree(rootFiles);
-      setExclusions(savedExclusions);
-      setSelectedPath(previous => (
-        !projectChanged && previous
-          ? previous
-          : findPreferredSourceFile(rootFiles)?.path ?? null
-      ));
-      setTreeLoading(false);
-      setTreeHydrating(true);
+  const readTreeRoot = useCallback(() => Promise.all([
+    projectsApi.listSourceFiles(projectId, true),
+    projectsApi.getSourceExclusions(projectId),
+  ]), [projectId]);
 
-      try {
-        const files = await projectsApi.listSourceFiles(projectId);
+  const rejectTreeRoot = useCallback((generation: number) => {
+    if (treeLoadRef.current !== generation) return;
+    setTreeError(true);
+    setTreeLoading(false);
+  }, []);
+
+  const applyTreeRoot = useCallback((
+    rootFiles: SourceFileNode[],
+    savedExclusions: string[],
+    generation: number,
+  ) => {
+    if (treeLoadRef.current !== generation) return Promise.resolve();
+    setTree(rootFiles);
+    setExclusions(savedExclusions);
+    setSelectedPath(previous => (
+      previous
+        ? previous
+        : findPreferredSourceFile(rootFiles)?.path ?? null
+    ));
+    setTreeLoading(false);
+    setTreeHydrating(true);
+
+    return projectsApi.listSourceFiles(projectId)
+      .then(files => {
         if (treeLoadRef.current !== generation) return;
         setTree(files);
         setSelectedPath(previous => (
@@ -85,37 +120,62 @@ export function SourceCodeViewer({ projectId, onOpenCommit }: SourceCodeViewerPr
             ? previous
             : findPreferredSourceFile(files)?.path ?? null
         ));
-      } catch {
+      })
+      .catch(() => {
         // The root-level tree is already usable; a failed enrichment must not
         // replace it with a full-page error.
-      } finally {
+      })
+      .finally(() => {
         if (treeLoadRef.current === generation) setTreeHydrating(false);
-      }
-    } catch {
-      if (treeLoadRef.current === generation) setTreeError(true);
-    } finally {
-      if (treeLoadRef.current === generation) setTreeLoading(false);
-    }
+      });
   }, [projectId]);
 
+  const fetchTree = useCallback(() => {
+    const generation = treeLoadRef.current + 1;
+    treeLoadRef.current = generation;
+    return readTreeRoot()
+      .then(([rootFiles, savedExclusions]) => (
+        applyTreeRoot(rootFiles, savedExclusions, generation)
+      ))
+      .catch(() => rejectTreeRoot(generation));
+  }, [applyTreeRoot, readTreeRoot, rejectTreeRoot]);
+
   useEffect(() => {
-    void loadTree();
-    return () => { treeLoadRef.current += 1; };
-  }, [loadTree]);
+    const generation = treeLoadRef.current + 1;
+    treeLoadRef.current = generation;
+    void readTreeRoot()
+      .then(([rootFiles, savedExclusions]) => (
+        applyTreeRoot(rootFiles, savedExclusions, generation)
+      ))
+      .catch(() => rejectTreeRoot(generation));
+    return () => {
+      treeLoadRef.current += 1;
+    };
+  }, [applyTreeRoot, readTreeRoot, rejectTreeRoot]);
+
+  const retryTree = useCallback(() => {
+    setTreeLoading(true);
+    setTreeHydrating(false);
+    setTreeError(false);
+    void fetchTree();
+  }, [fetchTree]);
 
   const saveExclusions = useCallback(async (nextPaths: string[], changedPath: string) => {
     setExclusionSaving(changedPath);
     setExclusionError(false);
+    setTreeLoading(true);
+    setTreeHydrating(false);
+    setTreeError(false);
     try {
       const saved = await projectsApi.setSourceExclusions(projectId, nextPaths);
       setExclusions(saved);
-      await loadTree();
+      await fetchTree();
     } catch {
       setExclusionError(true);
     } finally {
       setExclusionSaving(null);
     }
-  }, [loadTree, projectId]);
+  }, [fetchTree, projectId]);
 
   useEffect(() => {
     let alive = true;
@@ -126,37 +186,29 @@ export function SourceCodeViewer({ projectId, onOpenCommit }: SourceCodeViewerPr
   }, [projectId]);
 
   useEffect(() => {
-    if (!selectedPath) {
-      setContent(null);
-      return;
-    }
-    setContentLoading(true);
+    if (!selectedPath) return;
+    let alive = true;
+    const path = selectedPath;
     projectsApi.readSourceFile(projectId, selectedPath)
-      .then(file => setContent(file.content))
-      .catch(() => setContent(null))
-      .finally(() => setContentLoading(false));
+      .then(file => {
+        if (alive) setContentResult({ projectId, path, content: file.content });
+      })
+      .catch(() => {
+        if (alive) setContentResult({ projectId, path, content: null });
+      });
+    return () => { alive = false; };
   }, [projectId, selectedPath]);
 
   useEffect(() => {
-    if (!annotate || !selectedPath) {
-      setBlameLines([]);
-      setBlameError(false);
-      setBlameLoading(false);
-      return;
-    }
+    if (!annotate || !selectedPath) return;
     let alive = true;
-    setBlameLines([]);
-    setBlameError(false);
-    setBlameLoading(true);
+    const path = selectedPath;
     projectsApi.gitBlame(projectId, selectedPath)
       .then(result => {
-        if (alive) setBlameLines(result.lines);
+        if (alive) setBlameResult({ projectId, path, lines: result.lines, error: false });
       })
       .catch(() => {
-        if (alive) setBlameError(true);
-      })
-      .finally(() => {
-        if (alive) setBlameLoading(false);
+        if (alive) setBlameResult({ projectId, path, lines: [], error: true });
       });
     return () => { alive = false; };
   }, [annotate, projectId, selectedPath]);
@@ -164,20 +216,16 @@ export function SourceCodeViewer({ projectId, onOpenCommit }: SourceCodeViewerPr
   // KT-67 — load the clicked commit. Keyed on the sha so re-clicking the same
   // line is free, and a stale response can't overwrite a newer one.
   useEffect(() => {
-    if (!commitSha) {
-      setCommitDetail(null);
-      setCommitError(null);
-      setCommitLoading(false);
-      return;
-    }
+    if (!commitSha) return;
     let alive = true;
-    setCommitDetail(null);
-    setCommitError(null);
-    setCommitLoading(true);
+    const sha = commitSha;
     projectsApi.gitCommitDetail(projectId, commitSha)
-      .then(detail => { if (alive) setCommitDetail(detail); })
-      .catch(error => { if (alive) setCommitError(String(error)); })
-      .finally(() => { if (alive) setCommitLoading(false); });
+      .then(detail => {
+        if (alive) setCommitResult({ projectId, sha, detail, error: null });
+      })
+      .catch(error => {
+        if (alive) setCommitResult({ projectId, sha, detail: null, error: String(error) });
+      });
     return () => { alive = false; };
   }, [commitSha, projectId]);
 
@@ -194,30 +242,55 @@ export function SourceCodeViewer({ projectId, onOpenCommit }: SourceCodeViewerPr
   useEffect(() => {
     if (searchTimer.current) clearTimeout(searchTimer.current);
     const query = searchQuery.trim();
-    if (!query) {
-      setSearchResults(new Map());
-      setSearchLoading(false);
-      setCurrentMatchIdx(0);
-      return;
-    }
-    setSearchLoading(true);
+    if (!query) return;
+    const exclusionsKey = exclusions.join('\0');
+    let active = true;
     searchTimer.current = setTimeout(() => {
       projectsApi.searchSourceFiles(projectId, query)
         .then(results => {
+          if (!active) return;
           const matches = new Map(results.map(result => [result.path, result.match_count]));
-          setSearchResults(matches);
+          setSearchResult({ projectId, query, exclusionsKey, matches });
           setSelectedPath(current =>
             results[0] && !matches.has(current ?? '') ? results[0].path : current,
           );
           setCurrentMatchIdx(0);
         })
-        .catch(() => setSearchResults(new Map()))
-        .finally(() => setSearchLoading(false));
+        .catch(() => {
+          if (active) {
+            setSearchResult({ projectId, query, exclusionsKey, matches: new Map() });
+          }
+        });
     }, 250);
     return () => {
+      active = false;
       if (searchTimer.current) clearTimeout(searchTimer.current);
     };
   }, [exclusions, projectId, searchQuery]);
+
+  const contentIsCurrent = contentResult?.projectId === projectId
+    && contentResult.path === selectedPath;
+  const content = contentIsCurrent ? contentResult.content : null;
+  const contentLoading = selectedPath !== null && !contentIsCurrent;
+  const blameIsCurrent = annotate
+    && blameResult?.projectId === projectId
+    && blameResult.path === selectedPath;
+  const blameLoading = annotate && selectedPath !== null && !blameIsCurrent;
+  const blameError = blameIsCurrent && blameResult.error;
+  const commitIsCurrent = commitResult?.projectId === projectId
+    && commitResult.sha === commitSha;
+  const commitDetail = commitIsCurrent ? commitResult.detail : null;
+  const commitError = commitIsCurrent ? commitResult.error : null;
+  const commitLoading = commitSha !== null && !commitIsCurrent;
+  const trimmedSearchQuery = searchQuery.trim();
+  const exclusionsKey = exclusions.join('\0');
+  const searchIsCurrent = searchResult?.projectId === projectId
+    && searchResult.query === trimmedSearchQuery
+    && searchResult.exclusionsKey === exclusionsKey;
+  const searchResults = trimmedSearchQuery && searchIsCurrent
+    ? searchResult.matches
+    : EMPTY_SEARCH_RESULTS;
+  const searchLoading = Boolean(trimmedSearchQuery) && !searchIsCurrent;
 
   const effectiveExpandedDirs = useMemo(() => {
     if (searchResults.size === 0) return expandedDirs;
@@ -251,10 +324,10 @@ export function SourceCodeViewer({ projectId, onOpenCommit }: SourceCodeViewerPr
   }, [currentMatchIdx, filesWithMatches, searchResults, selectedPath, totalMatches]);
   const language = selectedPath ? sourceLanguage(selectedPath) : '';
   const syntaxLanguage = selectedPath ? languageForPath(selectedPath) : null;
-  const blameByLine = useMemo(
-    () => new Map(blameLines.map(line => [line.line_number, line])),
-    [blameLines],
-  );
+  const blameByLine = useMemo(() => {
+    const lines = blameIsCurrent ? blameResult.lines : [];
+    return new Map(lines.map(line => [line.line_number, line]));
+  }, [blameIsCurrent, blameResult]);
 
   const goToPreviousMatch = useCallback(() => {
     if (!selectedPath || totalMatches === 0) return;
@@ -311,7 +384,7 @@ export function SourceCodeViewer({ projectId, onOpenCommit }: SourceCodeViewerPr
     return (
       <div className="source-state source-state-error">
         <span>{t('projects.source.error')}</span>
-        <button type="button" onClick={loadTree}>{t('projects.docAi.retry')}</button>
+        <button type="button" onClick={retryTree}>{t('projects.docAi.retry')}</button>
       </div>
     );
   }

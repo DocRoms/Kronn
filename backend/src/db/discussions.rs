@@ -153,6 +153,7 @@ pub fn reconcile_awaiting_agents(conn: &Connection) -> Result<Vec<String>> {
                 lint_report: None,
                 id: uuid::Uuid::new_v4().to_string(),
                 role: MessageRole::Agent,
+                channel: crate::models::MessageChannel::Main,
                 content: FOOTER.to_string(),
                 agent_type: None,
                 timestamp: Utc::now(),
@@ -248,6 +249,7 @@ pub fn recover_partial_responses(conn: &Connection) -> Result<Vec<String>> {
             lint_report: None,
             id: uuid::Uuid::new_v4().to_string(),
             role: MessageRole::Agent,
+            channel: crate::models::MessageChannel::Main,
             content,
             agent_type: recovered_agent,
             timestamp: ts,
@@ -802,7 +804,7 @@ pub fn insert_user_message_with_agent_handoff(
         .cloned()
         .map(MessageTarget::agent)
         .collect::<Vec<_>>();
-    insert_user_message_with_agent_handoff_inner(conn, discussion_id, msg, &targets, &[])
+    insert_user_message_with_agent_handoff_inner(conn, discussion_id, msg, &targets, &[], false)
 }
 
 #[derive(Debug)]
@@ -832,7 +834,14 @@ pub fn insert_user_message_with_dispatch(
         job_id: dispatch_job_id,
         agent_override,
     }];
-    insert_user_message_with_agent_handoff_inner(conn, discussion_id, msg, &targets, &dispatches)
+    insert_user_message_with_agent_handoff_inner(
+        conn,
+        discussion_id,
+        msg,
+        &targets,
+        &dispatches,
+        false,
+    )
 }
 
 /// Accept one human turn with every explicit target and every native dispatch
@@ -844,8 +853,58 @@ pub fn insert_user_message_with_dispatches(
     msg: &DiscussionMessage,
     targets: &[MessageTarget],
     dispatches: &[UserDispatchSpec<'_>],
+    native_fallback_candidate: bool,
 ) -> Result<InsertUserMessageOutcome> {
-    insert_user_message_with_agent_handoff_inner(conn, discussion_id, msg, targets, dispatches)
+    insert_user_message_with_agent_handoff_inner(
+        conn,
+        discussion_id,
+        msg,
+        targets,
+        dispatches,
+        native_fallback_candidate,
+    )
+}
+
+/// Persist a human-authored out-of-context note without consuming an agent
+/// handoff, creating a dispatch job or touching `awaiting_agent`.
+pub fn insert_note_message(
+    conn: &Connection,
+    discussion_id: &str,
+    msg: &DiscussionMessage,
+) -> Result<InsertUserMessageOutcome> {
+    if !matches!(msg.channel, crate::models::MessageChannel::Note) {
+        anyhow::bail!("insert_note_message requires channel=note");
+    }
+    let transaction = conn.unchecked_transaction()?;
+    let existing = transaction
+        .query_row(
+            "SELECT discussion_id, role, channel, sort_order
+             FROM messages WHERE id = ?1",
+            [&msg.id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )
+        .optional()?;
+    if let Some((existing_discussion_id, role, channel, sort_order)) = existing {
+        if existing_discussion_id == discussion_id && role == "User" && channel == "note" {
+            return Ok(InsertUserMessageOutcome::Duplicate { sort_order });
+        }
+        anyhow::bail!("message id already belongs to another message");
+    }
+
+    let sort_order = insert_message(&transaction, discussion_id, msg)?;
+    transaction.commit()?;
+    Ok(InsertUserMessageOutcome::Inserted {
+        message: Box::new(msg.clone()),
+        sort_order,
+        dispatch_job: None,
+    })
 }
 
 /// Persist any live turn (including a joined MCP peer's Agent reply) together
@@ -1021,6 +1080,7 @@ fn insert_user_message_with_agent_handoff_inner(
     msg: &DiscussionMessage,
     targets: &[MessageTarget],
     dispatches: &[UserDispatchSpec<'_>],
+    native_fallback_candidate: bool,
 ) -> Result<InsertUserMessageOutcome> {
     let tx = conn.unchecked_transaction()?;
 
@@ -1070,6 +1130,18 @@ fn insert_user_message_with_agent_handoff_inner(
         stored.content = content_with_agent_handoff(&stored.content, &from, &current_agent);
     }
     let sort_order = insert_message(&tx, discussion_id, &stored)?;
+    // KT-157 — mark the turn for one-shot CLI catch-up in the SAME
+    // transaction that accepts it: an untargeted main-channel User turn owned
+    // by the native principal while CLI sessions belong to the room. A crash
+    // after commit can never leave an accepted turn unmarked.
+    if native_fallback_candidate
+        && crate::db::discussion_sessions::count_cli_sessions(&tx, discussion_id)? > 0
+    {
+        tx.execute(
+            "UPDATE messages SET native_fallback = 1 WHERE id = ?1",
+            [&stored.id],
+        )?;
+    }
     replace_message_targets(&tx, &stored.id, targets)?;
     tx.execute(
         "UPDATE discussions SET pending_agent_handoff_from = NULL WHERE id = ?1",
@@ -1275,7 +1347,7 @@ fn list_all_messages(
     conn: &Connection,
 ) -> Result<std::collections::HashMap<String, Vec<DiscussionMessage>>> {
     let mut stmt = conn.prepare(
-        "SELECT discussion_id, id, role, content, agent_type, timestamp, tokens_used, auth_mode, model_tier, cost_usd, duration_ms, lint_report, model, reply_to_message_id
+        "SELECT discussion_id, id, role, channel, content, agent_type, timestamp, tokens_used, auth_mode, model_tier, cost_usd, duration_ms, lint_report, model, reply_to_message_id
          FROM messages ORDER BY sort_order, timestamp"
     )?;
 
@@ -1284,34 +1356,36 @@ fn list_all_messages(
     let rows = stmt.query_map([], |row| {
         let disc_id: String = row.get(0)?;
         let role_str: String = row.get(2)?;
-        let agent_type_str: Option<String> = row.get(4)?;
+        let channel_str: String = row.get(3)?;
+        let agent_type_str: Option<String> = row.get(5)?;
 
         Ok((
             disc_id,
             DiscussionMessage {
                 id: row.get(1)?,
                 role: parse_role(&role_str),
-                content: row.get(3)?,
+                channel: parse_message_channel(&channel_str),
+                content: row.get(4)?,
                 agent_type: agent_type_str.map(|s| parse_agent_type(&s)),
-                timestamp: parse_dt(row.get::<_, String>(5)?),
-                tokens_used: row.get::<_, i64>(6).unwrap_or(0) as u64,
-                auth_mode: row.get(7)?,
-                model_tier: row.get::<_, Option<String>>(8).unwrap_or(None),
-                cost_usd: row.get::<_, Option<f64>>(9).unwrap_or(None),
+                timestamp: parse_dt(row.get::<_, String>(6)?),
+                tokens_used: row.get::<_, i64>(7).unwrap_or(0) as u64,
+                auth_mode: row.get(8)?,
+                model_tier: row.get::<_, Option<String>>(9).unwrap_or(None),
+                cost_usd: row.get::<_, Option<f64>>(10).unwrap_or(None),
                 author_pseudo: None,
                 author_avatar_email: None,
                 source_msg_id: None,
                 duration_ms: row
-                    .get::<_, Option<i64>>(10)
+                    .get::<_, Option<i64>>(11)
                     .unwrap_or(None)
                     .map(|d| d as u64),
                 lint_report: row
-                    .get::<_, Option<String>>(11)
+                    .get::<_, Option<String>>(12)
                     .unwrap_or(None)
                     .and_then(|s| serde_json::from_str(&s).ok()),
-                model: row.get::<_, Option<String>>(12).unwrap_or(None),
+                model: row.get::<_, Option<String>>(13).unwrap_or(None),
                 target_agent: None,
-                reply_to_message_id: row.get::<_, Option<String>>(13).unwrap_or(None),
+                reply_to_message_id: row.get::<_, Option<String>>(14).unwrap_or(None),
             },
         ))
     })?;
@@ -1325,7 +1399,7 @@ fn list_all_messages(
 
 pub fn list_messages(conn: &Connection, discussion_id: &str) -> Result<Vec<DiscussionMessage>> {
     let mut stmt = conn.prepare(
-        "SELECT id, role, content, agent_type, timestamp, tokens_used, auth_mode, model_tier, cost_usd, author_pseudo, author_avatar_email, source_msg_id, duration_ms, lint_report, model, target_agent, reply_to_message_id
+        "SELECT id, role, channel, content, agent_type, timestamp, tokens_used, auth_mode, model_tier, cost_usd, author_pseudo, author_avatar_email, source_msg_id, duration_ms, lint_report, model, target_agent, reply_to_message_id
          FROM messages WHERE discussion_id = ?1
          ORDER BY sort_order, timestamp"
     )?;
@@ -1333,41 +1407,110 @@ pub fn list_messages(conn: &Connection, discussion_id: &str) -> Result<Vec<Discu
     let messages = stmt
         .query_map(params![discussion_id], |row| {
             let role_str: String = row.get(1)?;
-            let agent_type_str: Option<String> = row.get(3)?;
+            let channel_str: String = row.get(2)?;
+            let agent_type_str: Option<String> = row.get(4)?;
 
             Ok(DiscussionMessage {
                 id: row.get(0)?,
                 role: parse_role(&role_str),
-                content: row.get(2)?,
+                channel: parse_message_channel(&channel_str),
+                content: row.get(3)?,
                 agent_type: agent_type_str.map(|s| parse_agent_type(&s)),
-                timestamp: parse_dt(row.get::<_, String>(4)?),
-                tokens_used: row.get::<_, i64>(5).unwrap_or(0) as u64,
-                auth_mode: row.get(6)?,
-                model_tier: row.get::<_, Option<String>>(7).unwrap_or(None),
-                cost_usd: row.get::<_, Option<f64>>(8).unwrap_or(None),
-                author_pseudo: row.get::<_, Option<String>>(9).unwrap_or(None),
-                author_avatar_email: row.get::<_, Option<String>>(10).unwrap_or(None),
-                source_msg_id: row.get::<_, Option<String>>(11).unwrap_or(None),
+                timestamp: parse_dt(row.get::<_, String>(5)?),
+                tokens_used: row.get::<_, i64>(6).unwrap_or(0) as u64,
+                auth_mode: row.get(7)?,
+                model_tier: row.get::<_, Option<String>>(8).unwrap_or(None),
+                cost_usd: row.get::<_, Option<f64>>(9).unwrap_or(None),
+                author_pseudo: row.get::<_, Option<String>>(10).unwrap_or(None),
+                author_avatar_email: row.get::<_, Option<String>>(11).unwrap_or(None),
+                source_msg_id: row.get::<_, Option<String>>(12).unwrap_or(None),
                 duration_ms: row
-                    .get::<_, Option<i64>>(12)
+                    .get::<_, Option<i64>>(13)
                     .unwrap_or(None)
                     .map(|d| d as u64),
                 lint_report: row
-                    .get::<_, Option<String>>(13)
+                    .get::<_, Option<String>>(14)
                     .unwrap_or(None)
                     .and_then(|s| serde_json::from_str(&s).ok()),
-                model: row.get::<_, Option<String>>(14).unwrap_or(None),
+                model: row.get::<_, Option<String>>(15).unwrap_or(None),
                 target_agent: row
-                    .get::<_, Option<String>>(15)
+                    .get::<_, Option<String>>(16)
                     .unwrap_or(None)
                     .map(|s| parse_agent_type(&s)),
-                reply_to_message_id: row.get::<_, Option<String>>(16).unwrap_or(None),
+                reply_to_message_id: row.get::<_, Option<String>>(17).unwrap_or(None),
             })
         })?
         .filter_map(|r| r.ok())
         .collect();
 
     Ok(messages)
+}
+
+pub fn list_notes(
+    conn: &Connection,
+    discussion_id: &str,
+    after_sort_order: i64,
+    limit: u32,
+) -> Result<Vec<(i64, DiscussionMessage)>> {
+    let mut stmt = conn.prepare(
+        "SELECT sort_order, id, role, channel, content, agent_type, timestamp,
+                tokens_used, auth_mode, model_tier, cost_usd, author_pseudo,
+                author_avatar_email, source_msg_id, duration_ms, lint_report,
+                model, target_agent, reply_to_message_id
+         FROM messages
+         WHERE discussion_id = ?1 AND channel = 'note' AND sort_order > ?2
+         ORDER BY sort_order ASC
+         LIMIT ?3",
+    )?;
+    let rows = stmt.query_map(
+        params![discussion_id, after_sort_order, limit.clamp(1, 101)],
+        |row| {
+            let role: String = row.get(2)?;
+            let channel: String = row.get(3)?;
+            let agent_type = row.get::<_, Option<String>>(5)?;
+            Ok((
+                row.get(0)?,
+                DiscussionMessage {
+                    id: row.get(1)?,
+                    role: parse_role(&role),
+                    channel: parse_message_channel(&channel),
+                    content: row.get(4)?,
+                    agent_type: agent_type.map(|value| parse_agent_type(&value)),
+                    timestamp: parse_dt(row.get::<_, String>(6)?),
+                    tokens_used: row.get::<_, i64>(7).unwrap_or(0) as u64,
+                    auth_mode: row.get(8)?,
+                    model_tier: row.get(9)?,
+                    cost_usd: row.get(10)?,
+                    author_pseudo: row.get(11)?,
+                    author_avatar_email: row.get(12)?,
+                    source_msg_id: row.get(13)?,
+                    duration_ms: row
+                        .get::<_, Option<i64>>(14)?
+                        .map(|duration| duration as u64),
+                    lint_report: row
+                        .get::<_, Option<String>>(15)?
+                        .and_then(|value| serde_json::from_str(&value).ok()),
+                    model: row.get(16)?,
+                    target_agent: row
+                        .get::<_, Option<String>>(17)?
+                        .map(|value| parse_agent_type(&value)),
+                    reply_to_message_id: row.get(18)?,
+                },
+            ))
+        },
+    )?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
+}
+
+pub fn count_notes(conn: &Connection, discussion_id: &str) -> Result<u32> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM messages
+         WHERE discussion_id = ?1 AND channel = 'note'",
+        [discussion_id],
+        |row| row.get(0),
+    )
+    .map_err(Into::into)
 }
 
 /// For each SHARED discussion, the pair `(shared_id, latest_message_ts_millis)`.
@@ -1414,7 +1557,7 @@ pub fn last_message_at(
     let ts: Option<String> = conn
         .query_row(
             "SELECT COALESCE(received_at, timestamp) FROM messages
-              WHERE discussion_id = ?1
+              WHERE discussion_id = ?1 AND channel = 'main'
               ORDER BY sort_order DESC LIMIT 1",
             params![discussion_id],
             |r| r.get(0),
@@ -1438,7 +1581,7 @@ pub fn last_user_message_at(
     let ts: Option<String> = conn
         .query_row(
             "SELECT COALESCE(received_at, timestamp) FROM messages
-              WHERE discussion_id = ?1 AND role = 'User'
+              WHERE discussion_id = ?1 AND role = 'User' AND channel = 'main'
               ORDER BY sort_order DESC LIMIT 1",
             params![discussion_id],
             |r| r.get(0),
@@ -1464,7 +1607,8 @@ pub fn insert_message(
     // inside a tx and self-starting standalone — guarantees the message + its
     // proposals commit together or roll back together. The fence-free common
     // path skips it entirely (zero overhead on bulk inserts).
-    if matches!(msg.role, crate::models::MessageRole::Agent)
+    if matches!(msg.channel, crate::models::MessageChannel::Main)
+        && matches!(msg.role, crate::models::MessageRole::Agent)
         && msg.content.contains("kronn-plan-action")
     {
         conn.execute_batch("SAVEPOINT insert_message_h")?;
@@ -1503,12 +1647,13 @@ fn insert_message_inner(
         .and_then(|r| serde_json::to_string(r).ok());
 
     conn.execute(
-        "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, sort_order, tokens_used, auth_mode, model_tier, cost_usd, author_pseudo, author_avatar_email, source_msg_id, duration_ms, lint_report, model, target_agent, received_at, reply_to_message_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+        "INSERT INTO messages (id, discussion_id, role, channel, content, agent_type, timestamp, sort_order, tokens_used, auth_mode, model_tier, cost_usd, author_pseudo, author_avatar_email, source_msg_id, duration_ms, lint_report, model, target_agent, received_at, reply_to_message_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
         params![
             msg.id,
             discussion_id,
             format_role(&msg.role),
+            format_message_channel(msg.channel),
             msg.content,
             msg.agent_type.as_ref().map(format_agent_type),
             msg.timestamp.to_rfc3339(),
@@ -1544,7 +1689,9 @@ fn insert_message_inner(
     // 0.9.2-H — persist any `kronn-plan-action` proposals this Agent message
     // carries, in THIS transaction, so a proposal exists iff its message does.
     // Idempotent (deterministic IDs + INSERT OR IGNORE); no-op without a fence.
-    if matches!(msg.role, crate::models::MessageRole::Agent) {
+    if matches!(msg.channel, crate::models::MessageChannel::Main)
+        && matches!(msg.role, crate::models::MessageRole::Agent)
+    {
         super::planning_proposals::ingest_message_proposals(
             conn,
             discussion_id,
@@ -2452,6 +2599,20 @@ fn format_role(r: &MessageRole) -> &'static str {
         MessageRole::User => "User",
         MessageRole::Agent => "Agent",
         MessageRole::System => "System",
+    }
+}
+
+fn parse_message_channel(value: &str) -> crate::models::MessageChannel {
+    match value {
+        "note" => crate::models::MessageChannel::Note,
+        _ => crate::models::MessageChannel::Main,
+    }
+}
+
+fn format_message_channel(channel: crate::models::MessageChannel) -> &'static str {
+    match channel {
+        crate::models::MessageChannel::Main => "main",
+        crate::models::MessageChannel::Note => "note",
     }
 }
 

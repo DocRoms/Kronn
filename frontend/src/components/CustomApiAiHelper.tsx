@@ -18,12 +18,17 @@ import {
 } from 'lucide-react';
 import { discussions as discussionsApi } from '../lib/api';
 import { AGENT_LABELS, agentColor } from '../lib/constants';
-import { t as translate, type UILocale } from '../lib/i18n';
-import type { AgentType, ApiEndpoint, CustomApiField, CustomApiPayload } from '../types/generated';
-import { parseApplyBlocks } from './workflows/ApiCallAiHelper';
+import { isLocaleLoaded, loadLocale, t as translate, type UILocale } from '../lib/i18n';
+import type { AgentType, CustomApiPayload } from '../types/generated';
+import { parseApplyBlocks } from './workflows/apiCallAiHelperUtils';
+import {
+  applyToCustomForm,
+  buildContextBlock,
+  buildSystemPrompt,
+  type CustomApiFormSnapshot,
+  type Translator,
+} from './customApiAiHelperUtils';
 import './aiHelper.css';
-
-type Translator = (key: string, ...args: (string | number)[]) => string;
 
 function toUILocale(lang: string | undefined): UILocale {
   if (lang === 'fr' || lang === 'en' || lang === 'es') return lang;
@@ -36,19 +41,7 @@ function toUILocale(lang: string | undefined): UILocale {
 export interface CustomApiAiHelperProps {
   /** Current form values — rendered into the context block so the agent
    *  sees what the user has typed so far and only fills the gaps. */
-  formSnapshot: {
-    name: string;
-    base_url: string;
-    description: string;
-    docs_url: string;
-    fields: CustomApiField[];
-    /** 0.8.6 — endpoints already declared on the form, surfaced in the
-     *  agent's context so it can skip ones the user has typed in. The
-     *  agent's KRONN:APPLY may propose additions (especially after a
-     *  WebFetch of `docs_url`) without re-emitting what's already
-     *  there. */
-    endpoints: ApiEndpoint[];
-  };
+  formSnapshot: CustomApiFormSnapshot;
   /** Apply a partial Custom API spec back to the parent form state. */
   onApply: (updates: Partial<CustomApiPayload>) => void;
   /** Agents installed locally — used to pre-select & populate the picker. */
@@ -66,129 +59,6 @@ interface ChatMessage {
   text: string;
 }
 
-/** System prompt for the Custom API creation flow. Tells the agent what
- *  it can produce (fenced KRONN:APPLY JSON), what fields the form
- *  expects, and how to ask follow-up questions when the user's input is
- *  ambiguous. The prompt is intentionally short — the agent will see the
- *  current form state on every user message via the context block. */
-export function buildSystemPrompt(t: Translator): string {
-  return `${t('mcp.custom.helper.sys.role')}
-
-${t('mcp.custom.helper.sys.boundaries')}
-
-${t('mcp.custom.helper.sys.action')}
-
-${t('mcp.custom.helper.sys.format')}
-
-KRONN:APPLY
-\`\`\`json
-{
-  "name": "Salesforce Sales API",
-  "base_url": "https://my-org.salesforce.com/services/data/v59.0",
-  "description": "REST API for Salesforce Sales objects (Account, Contact, Opportunity)",
-  "docs_url": "https://developer.salesforce.com/docs/atlas.en-us.api_rest.meta/api_rest/",
-  "fields": [
-    {"label": "Bearer Token", "value": ""},
-    {"label": "Org ID", "value": ""}
-  ],
-  "endpoints": [
-    {"path": "/sobjects/Account", "method": "GET", "description": "List accounts"},
-    {"path": "/sobjects/Contact", "method": "POST", "description": "Create contact"},
-    {"path": "/query", "method": "GET", "description": "SOQL query"}
-  ]
-}
-\`\`\`
-
-${t('mcp.custom.helper.sys.endpoints')}
-
-${t('mcp.custom.helper.sys.partial')}
-
-${t('mcp.custom.helper.sys.style')}
-
-${t('mcp.custom.helper.sys.starter')}`;
-}
-
-/** Render the current form state as a short context block prepended to
- *  every user message so the agent knows what's already filled vs. blank. */
-export function buildContextBlock(
-  snapshot: CustomApiAiHelperProps['formSnapshot'],
-  t: Translator,
-): string {
-  const fieldsLine = snapshot.fields.length === 0
-    ? t('mcp.custom.helper.ctx.noFields')
-    : snapshot.fields.map(f => `  - ${f.label || '(blank)'}${f.value ? ' ✓' : ' (empty)'}`).join('\n');
-  // 0.8.6 — surface the endpoint count + first few paths so the agent
-  // can skip ones already declared. We cap at 5 to keep the context
-  // block compact even for plugins with 30+ endpoints.
-  const endpointsLine = snapshot.endpoints.length === 0
-    ? t('mcp.custom.helper.ctx.noEndpoints')
-    : snapshot.endpoints.slice(0, 5).map(e => `  - ${e.method} ${e.path}`).join('\n')
-      + (snapshot.endpoints.length > 5 ? `\n  - … (+${snapshot.endpoints.length - 5})` : '');
-  return `${t('mcp.custom.helper.ctx.header')}
-- name        : ${snapshot.name || t('mcp.custom.helper.ctx.empty')}
-- base_url    : ${snapshot.base_url || t('mcp.custom.helper.ctx.empty')}
-- description : ${snapshot.description || t('mcp.custom.helper.ctx.empty')}
-- docs_url    : ${snapshot.docs_url || t('mcp.custom.helper.ctx.empty')}
-- fields      :
-${fieldsLine}
-- endpoints   :
-${endpointsLine}`;
-}
-
-/** Map a parsed KRONN:APPLY object onto a `Partial<CustomApiPayload>`.
- *  We strictly whitelist the known fields so a hallucinating agent can't
- *  inject extra keys; `value` is stripped from incoming fields (the user
- *  fills credentials in, the agent should never propose a value). */
-export function applyToCustomForm(parsed: Record<string, unknown>): Partial<CustomApiPayload> {
-  const updates: Partial<CustomApiPayload> = {};
-  if (typeof parsed.name === 'string') updates.name = parsed.name;
-  if (typeof parsed.base_url === 'string') updates.base_url = parsed.base_url;
-  if (typeof parsed.description === 'string') updates.description = parsed.description;
-  if (typeof parsed.docs_url === 'string') updates.docs_url = parsed.docs_url;
-  if (Array.isArray(parsed.fields)) {
-    const fields: CustomApiField[] = [];
-    for (const raw of parsed.fields) {
-      if (raw && typeof raw === 'object' && 'label' in raw) {
-        const f = raw as Record<string, unknown>;
-        if (typeof f.label === 'string' && f.label.trim()) {
-          fields.push({
-            label: f.label,
-            // Never trust the agent's value — credentials are user-supplied.
-            value: typeof f.value === 'string' ? f.value : '',
-          });
-        }
-      }
-    }
-    if (fields.length > 0) updates.fields = fields;
-  }
-  // 0.8.6 — endpoint extraction. The agent emits a list of `{path,
-  // method, description}` entries (typically after a WebFetch on
-  // `docs_url`). Filter to entries with a non-blank `path` — without it
-  // the executor's allowlist match has nothing to compare against.
-  // Method defaults to GET when blank/missing (most common, safe).
-  // Description is optional — falls back to empty so a future drawer
-  // can render "(undocumented)".
-  if (Array.isArray(parsed.endpoints)) {
-    const endpoints: ApiEndpoint[] = [];
-    for (const raw of parsed.endpoints) {
-      if (raw && typeof raw === 'object' && 'path' in raw) {
-        const e = raw as Record<string, unknown>;
-        if (typeof e.path === 'string' && e.path.trim()) {
-          endpoints.push({
-            path: e.path.trim(),
-            method: (typeof e.method === 'string' && e.method.trim()
-              ? e.method.trim().toUpperCase()
-              : 'GET'),
-            description: typeof e.description === 'string' ? e.description : '',
-          });
-        }
-      }
-    }
-    if (endpoints.length > 0) updates.endpoints = endpoints;
-  }
-  return updates;
-}
-
 export function CustomApiAiHelper({
   formSnapshot,
   onApply,
@@ -196,9 +66,10 @@ export function CustomApiAiHelper({
   configLanguage,
   t,
 }: CustomApiAiHelperProps) {
+  const agentLocale = toUILocale(configLanguage);
   const agentT = useCallback<Translator>(
-    (key, ...args) => translate(toUILocale(configLanguage), key, ...args),
-    [configLanguage],
+    (key, ...args) => translate(agentLocale, key, ...args),
+    [agentLocale],
   );
 
   const [phase, setPhase] = useState<Phase>('closed');
@@ -288,6 +159,7 @@ export function CustomApiAiHelper({
     setMessages([]);
     setError(null);
     try {
+      if (!isLocaleLoaded(agentLocale)) await loadLocale(agentLocale);
       const disc = await discussionsApi.create({
         project_id: null,
         title: `🤖 ${t('mcp.custom.helper.discTitle')}`,
@@ -300,7 +172,7 @@ export function CustomApiAiHelper({
       console.error('[CustomApiAiHelper] startWithAgent failed:', e);
       setError(String(e));
     }
-  }, [t, configLanguage, agentT]);
+  }, [t, configLanguage, agentLocale, agentT]);
 
   useEffect(() => {
     startWithAgentRef.current = startWithAgent;
@@ -315,6 +187,16 @@ export function CustomApiAiHelper({
     setMessages(prev => [...prev, { role: 'user', text: userText }, { role: 'assistant', text: '' }]);
     setStreaming(true);
 
+    try {
+      if (!isLocaleLoaded(agentLocale)) await loadLocale(agentLocale);
+    } catch (e) {
+      setMessages(prev => prev.slice(0, -2));
+      setInput(userText);
+      setError(String(e));
+      streamingRef.current = false;
+      setStreaming(false);
+      return;
+    }
     const contextBlock = buildContextBlock(formSnapshot, agentT);
     const enriched = `${contextBlock}\n\n${agentT('mcp.custom.helper.sys.userQuestion')}\n${userText}`;
 
@@ -342,7 +224,7 @@ export function CustomApiAiHelper({
       },
       controller.signal,
     );
-  }, [input, discussionId, formSnapshot, agentT]);
+  }, [input, discussionId, formSnapshot, agentLocale, agentT]);
 
   const stopStream = useCallback(() => {
     abortRef.current?.abort();

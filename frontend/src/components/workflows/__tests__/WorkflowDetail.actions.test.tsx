@@ -626,7 +626,9 @@ describe('WorkflowDetail — compact run rows', () => {
 
     fireEvent.click(await screen.findByText('wf.resumeRun'));
 
-    await waitFor(() => expect(resumeRun).toHaveBeenCalledWith('parent-run'));
+    await waitFor(() => expect(resumeRun).toHaveBeenCalledWith('parent-run', {
+      retry_uncertain_effect: false,
+    }));
     expect(onNavigateToRun).toHaveBeenCalledWith('parent-wf', 'parent-run');
     expect(props.onRefresh).toHaveBeenCalled();
   });

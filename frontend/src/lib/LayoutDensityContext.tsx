@@ -16,12 +16,14 @@
 // this is a per-machine preference (the same user on a 13" laptop and a
 // 32" desktop probably wants different densities).
 
-import { createContext, useContext, useState, useEffect, useCallback, type ReactNode } from 'react';
-
-export type LayoutDensity = 'small' | 'medium' | 'large';
+import { useState, useEffect, useCallback, type ReactNode } from 'react';
+import {
+  DEFAULT_DENSITY,
+  LayoutDensityContext,
+  type LayoutDensity,
+} from './layoutDensity';
 
 const STORAGE_KEY = 'kronn:layoutDensity';
-const DEFAULT_DENSITY: LayoutDensity = 'medium';
 
 function isValidDensity(v: unknown): v is LayoutDensity {
   return v === 'small' || v === 'medium' || v === 'large';
@@ -38,16 +40,6 @@ function loadInitial(): LayoutDensity {
 function applyDensity(density: LayoutDensity) {
   document.documentElement.setAttribute('data-density', density);
 }
-
-interface LayoutDensityContextValue {
-  density: LayoutDensity;
-  setDensity: (d: LayoutDensity) => void;
-}
-
-const LayoutDensityContext = createContext<LayoutDensityContextValue>({
-  density: DEFAULT_DENSITY,
-  setDensity: () => {},
-});
 
 export function LayoutDensityProvider({ children }: { children: ReactNode }) {
   const [density, setDensityState] = useState<LayoutDensity>(loadInitial);
@@ -66,8 +58,4 @@ export function LayoutDensityProvider({ children }: { children: ReactNode }) {
       {children}
     </LayoutDensityContext.Provider>
   );
-}
-
-export function useLayoutDensity() {
-  return useContext(LayoutDensityContext);
 }

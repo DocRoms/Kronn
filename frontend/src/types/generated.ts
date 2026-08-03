@@ -865,7 +865,12 @@ export type CreatePlanningDodItem = { id: string | null, sentence: string, compl
 
 export type CreatePlanningTaskLink = { label: string, url: string, };
 
-export type CreatePlanningTaskRequest = { title: string, description?: string, status?: PlanningTaskStatus, priority?: PlanningTaskPriority, parent_id?: string | null, project_ids?: Array<string>, tags?: Array<string>, definition_of_done?: Array<CreatePlanningDodItem>, links?: Array<CreatePlanningTaskLink>, actor?: PlanningActor, };
+export type CreatePlanningTaskRequest = { title: string,
+/**
+ * Opaque caller-scoped retry key. The same key and content returns the
+ * existing task; reusing it for different content is a conflict.
+ */
+idempotency_key?: string | null, description?: string, status?: PlanningTaskStatus, priority?: PlanningTaskPriority, parent_id?: string | null, project_ids?: Array<string>, tags?: Array<string>, definition_of_done?: Array<CreatePlanningDodItem>, links?: Array<CreatePlanningTaskLink>, actor?: PlanningActor, };
 
 export type CreateProfileRequest = { name: string, persona_name?: string, role: string, avatar: string, color: string, category: ProfileCategory, persona_prompt: string, default_engine?: string | null, };
 
@@ -994,7 +999,13 @@ export type DependencyManagerUpdate = { manager: string, manifest: string, statu
 
 export type DependencyUpdatePackage = { name: string, current: string, latest: string, major: boolean, };
 
-export type DependencyUpdateSummary = { managers: Array<DependencyManagerUpdate>, total_outdated: number, total_major: number, checked_at: string, cached: boolean, };
+export type DependencyUpdateSummary = { managers: Array<DependencyManagerUpdate>, total_outdated: number, total_major: number, checked_at: string, cached: boolean,
+/**
+ * `None` means manual checks only; otherwise the persisted result is
+ * refreshed opportunistically when the project overview is opened after
+ * this many days. No package update command is ever executed.
+ */
+monitoring_interval_days: number | null, next_check_at: string | null, };
 
 /**
  * A detected network IP with its type.
@@ -1027,7 +1038,7 @@ export type DirectiveCategory = "Output" | "Language";
  * because it's how the dedup pass works — without it we'd duplicate
  * every message on every reconnect.
  */
-export type DiscAppendMessage = { source_msg_id: string, role: MessageRole, content: string, agent_type?: AgentType | null,
+export type DiscAppendMessage = { source_msg_id: string, role: MessageRole, channel?: MessageChannel, content: string, agent_type?: AgentType | null,
 /**
  * Authoritative responder identities for this live peer turn. This is the
  * same typed model as human messages, so `@codex` (native) and one exact
@@ -1109,7 +1120,7 @@ export type DiscLinkRequest = { disc_id: string, source_agent: string, source_se
  */
 force_reassign?: boolean, };
 
-export type DiscLoadOtherMessage = { idx: number, role: MessageRole, content: string, agent_type: AgentType | null, timestamp: string,
+export type DiscLoadOtherMessage = { idx: number, role: MessageRole, channel: MessageChannel, content: string, agent_type: AgentType | null, timestamp: string,
 /**
  * Files attached to this message (0.8.8). Mirrors `disc_get_message` so a
  * cross-disc reader can discover an image's `disk_path` and open it with
@@ -1118,7 +1129,7 @@ export type DiscLoadOtherMessage = { idx: number, role: MessageRole, content: st
  */
 attachments?: Array<MessageAttachment>, };
 
-export type DiscLoadOtherQuery = { disc_id: string, from?: number | null, to?: number | null, };
+export type DiscLoadOtherQuery = { disc_id: string, from?: number | null, to?: number | null, include_notes?: boolean, };
 
 export type DiscLoadOtherResponse = { disc_id: string, title: string, total_messages: number, from_idx: number, to_idx: number, messages: Array<DiscLoadOtherMessage>, };
 
@@ -1160,7 +1171,7 @@ export type DiscoverSourceError = { source_id: string, source_label: string, pro
  */
 export type DiscSearchHit = { disc_id: string, title: string, snippet: string, source_agent: string | null, source_session_id: string | null, };
 
-export type DiscSearchQuery = { q: string, limit?: number | null, };
+export type DiscSearchQuery = { q: string, limit?: number | null, include_notes?: boolean, };
 
 export type DiscSessionStatusQuery = { source_agent: string, source_session_id: string, };
 
@@ -1192,6 +1203,15 @@ export type DiscSourceDetail = { current: DiscSourceBinding | null, history: Arr
  * session X, then Cursor session Y" chain.
  */
 export type DiscSourceHistoryEntry = { binding_version: number, source_agent: string, source_session_id: string, linked_at: string, unlinked_at: string | null, };
+
+export type DiscTransferSessionRequest = { from_disc_id: string, to_disc_id: string, source_agent: string, source_session_id: string,
+/**
+ * A transfer changes which room survives an MCP reload. Callers must make
+ * that destructive ownership change explicit.
+ */
+confirm_transfer: boolean, };
+
+export type DiscTransferSessionResponse = { previous_disc_id: string, disc_id: string, session_bound: boolean, transferred: boolean, binding_version: number, };
 
 export type DiscUnlinkRequest = { disc_id: string,
 /**
@@ -1309,7 +1329,7 @@ export type DiscussionImportProvenance = { disc_id: string,
  */
 provenance_kind: string, imported_by_pseudo: string | null, imported_by_avatar_email: string | null, imported_at: string, };
 
-export type DiscussionMessage = { id: string, role: MessageRole, content: string, agent_type: AgentType | null, timestamp: string, tokens_used: number, auth_mode: string | null,
+export type DiscussionMessage = { id: string, role: MessageRole, channel: MessageChannel, content: string, agent_type: AgentType | null, timestamp: string, tokens_used: number, auth_mode: string | null,
 /**
  * Which model tier was used for this message (economy/default/reasoning).
  */
@@ -1380,7 +1400,7 @@ export type DiscussionMessageRead = { idx: number, id: string,
 /**
  * Stable compact reference accepted by `disc_get_message`.
  */
-message_ref: string, role: MessageRole, content: string, agent_type: AgentType | null, reply_to_message_id?: string | null,
+message_ref: string, role: MessageRole, channel: MessageChannel, content: string, agent_type: AgentType | null, reply_to_message_id?: string | null,
 /**
  * Exact joined CLI identity that authored this message, when locally
  * verifiable. Use it as the durable target for a reply.
@@ -1427,6 +1447,12 @@ pacing?: PacingState, project_id: string | null, };
 
 export type DiscussionNativeAgentMode = { disabled: boolean, };
 
+export type DiscussionNote = { sort_order: number, message: DiscussionMessage, attachments: Array<MessageAttachment>, };
+
+export type DiscussionNoteListQuery = { cursor?: number | null, limit?: number | null, };
+
+export type DiscussionNoteListResponse = { discussion_id: string, total_notes: number, notes: Array<DiscussionNote>, next_cursor: number | null, };
+
 export type DiscussionPlan = { discussion_id: string, primary_objective: PlanningTaskSummary | null, active: Array<PlanningDiscussionRelation>, later: Array<PlanningDiscussionRelation>,
 /**
  * Retained aliases (== `stats.done` / sum of the five Active buckets) so
@@ -1469,6 +1495,18 @@ model: string | null,
  * the Kronn bridge binding.
  */
 conversation_id: string | null, };
+
+export type DiscussionWorkspace = { id: string, disc_id: string, session_pk: number | null, session_agent_type: string | null, task_id: string | null, task_reference: string | null, project_id: string, workspace_path: string | null, canonical_path: string | null, branch: string, head_sha: string | null, ownership: string, state: string, created_at: string, updated_at: string, };
+
+export type DiscWorkspaceBlocker = { kind: string, message: string, };
+
+export type DiscWorkspaceQuery = { source_agent: string, source_session_id: string, };
+
+export type DiscWorkspaceSetRequest = { source_agent: string, source_session_id: string, workspace_path: string, task_ref?: string | null, };
+
+export type DiscWorkspaceSetResponse = { workspace: DiscussionWorkspace, blockers: Array<DiscWorkspaceBlocker>, };
+
+export type DiscWorkspaceState = { disc_id: string, session_pk: number, current: DiscussionWorkspace | null, workspaces: Array<DiscussionWorkspace>, };
 
 export type DriftCheckResponse = { audit_date: string | null, stale_sections: Array<DriftSection>, fresh_sections: Array<string>, total_sections: number, };
 
@@ -2071,6 +2109,8 @@ export type McpTransport = { "Stdio": { command: string, args: Array<string>, } 
  */
 export type MessageAttachment = { id: string, filename: string, mime_type: string, disk_path: string | null, };
 
+export type MessageChannel = "main" | "note";
+
 export type MessageRevisionReceipt = { event_id: string, message_id: string, revision: string, sort_order: number, duplicate: boolean, dispatch_job_id: string | null, };
 
 export type MessageRole = "User" | "Agent" | "System";
@@ -2380,6 +2420,11 @@ resume_token: string, peer_count: number,
  */
 disc_title: string,
 /**
+ * Number of out-of-context notes in the room. Their bodies are omitted
+ * from join context and require an explicit note-list call.
+ */
+note_count: number,
+/**
  * Last N messages already in the disc (default 10). Empty for a
  * freshly-created topic.
  */
@@ -2505,7 +2550,7 @@ result_task_id?: string, decided_at?: string, };
 
 export type PlanningTaskChange = { task_id: string, task_reference: string, task_title: string, id: string, action: string, actor_kind: PlanningActorKind, actor_id: string | null, changes: JsonValue, source_message_id: string | null, created_at: string, };
 
-export type PlanningTaskDetail = { subtasks: Array<PlanningTaskSummary>, description: string, blocked_reason: string | null, definition_of_done: Array<PlanningDodItem>, links: Array<PlanningTaskLink>, blockers: Array<PlanningTaskSummary>, blocking: Array<PlanningTaskSummary>, events: Array<PlanningTaskEvent>, id: string, reference: string, parent_id: string | null, parent_reference: string | null, parent_title: string | null, title: string, status: PlanningTaskStatus, priority: PlanningTaskPriority, rank: number, completed_subtasks: number, total_subtasks: number, project_ids: Array<string>, discussion_ids: Array<string>, tags: Array<string>, blocker_count: number, created_at: string, updated_at: string, };
+export type PlanningTaskDetail = { subtasks: Array<PlanningTaskSummary>, description: string, blocked_reason: string | null, definition_of_done: Array<PlanningDodItem>, links: Array<PlanningTaskLink>, blockers: Array<PlanningTaskSummary>, blocking: Array<PlanningTaskSummary>, workspaces?: Array<PlanningWorkspaceSummary>, events: Array<PlanningTaskEvent>, id: string, reference: string, parent_id: string | null, parent_reference: string | null, parent_title: string | null, title: string, status: PlanningTaskStatus, priority: PlanningTaskPriority, rank: number, completed_subtasks: number, total_subtasks: number, project_ids: Array<string>, discussion_ids: Array<string>, tags: Array<string>, blocker_count: number, created_at: string, updated_at: string, };
 
 export type PlanningTaskEvent = { id: string, action: string, actor_kind: PlanningActorKind, actor_id: string | null, changes: JsonValue, source_message_id: string | null, created_at: string, };
 
@@ -2518,6 +2563,8 @@ export type PlanningTaskPriority = "critical" | "high" | "normal" | "low";
 export type PlanningTaskStatus = "idea" | "todo" | "in_progress" | "blocked" | "done" | "archived";
 
 export type PlanningTaskSummary = { id: string, reference: string, parent_id: string | null, parent_reference: string | null, parent_title: string | null, title: string, status: PlanningTaskStatus, priority: PlanningTaskPriority, rank: number, completed_subtasks: number, total_subtasks: number, project_ids: Array<string>, discussion_ids: Array<string>, tags: Array<string>, blocker_count: number, created_at: string, updated_at: string, };
+
+export type PlanningWorkspaceSummary = { id: string, disc_id: string, branch: string, state: string, ownership: string, session_agent_type: string | null, };
 
 export type PluginBundleEnvelope = { kind: string, version: number, bundle_id: string, exported_at: string, includes_values: boolean, encrypted: boolean, plugin_labels: Array<string>, value_manifest: Array<PluginBundlePreviewItem>, payload?: PluginBundlePayload | null, encrypted_payload?: string | null, wrapped_key?: string | null, };
 
@@ -2834,6 +2881,14 @@ export type RemoteRepo = { name: string, full_name: string, clone_url: string, s
 
 export type RepoSource = { id: string, label: string, provider: string, };
 
+export type ResumeInterruptedRequest = {
+/**
+ * Explicit operator acknowledgement that a mechanically side-effecting
+ * step may already have committed before the crash. False/missing keeps
+ * the resume fail-closed.
+ */
+retry_uncertain_effect?: boolean, };
+
 /**
  * Response for [`resume_interrupted`].
  */
@@ -2978,6 +3033,11 @@ scan_depth: number, };
 
 export type SendMessageRequest = { content: string,
 /**
+ * Notes remain visible in the human timeline but never wake or enter an
+ * agent's context unless an explicit note-reading tool is used.
+ */
+channel?: MessageChannel,
+/**
  * Durable target identities selected by current clients. Unlike the
  * compatibility `target_agents` projection, this distinguishes the
  * configured discussion agent, a one-shot agent, and a joined CLI.
@@ -3071,6 +3131,12 @@ anti_hallucination_mode: string,
  */
 continual_learning_enabled: boolean,
 /**
+ * Show the per-message out-of-context note control in discussion
+ * composers. Enabled by default; turning it off hides the authoring
+ * affordance without deleting existing notes.
+ */
+discussion_notes_enabled: boolean,
+/**
  * Debug mode — when true, the tracing subscriber is initialized at
  * `debug` level instead of `info`, producing significantly more
  * output on stdout. Lets users diagnose agent detection / project
@@ -3113,6 +3179,10 @@ default_model_tier: ModelTier,
 default_summary_strategy: SummaryStrategy, };
 
 export type ServerConfigPublic = { host: string, port: number, domain: string | null, max_concurrent_agents: number, agent_stall_timeout_min: number, auth_enabled: boolean, pseudo: string | null, avatar_email: string | null, bio: string | null, debug_mode: boolean,
+/**
+ * Whether discussion composers expose the out-of-context note control.
+ */
+discussion_notes_enabled: boolean,
 /**
  * 0.8.6 phase 4 — default model tier for new disc/QP/WF agent steps.
  * Mirrored from `ServerConfig.default_model_tier` so the frontend
@@ -3350,7 +3420,11 @@ to?: number | null,
  * Force regeneration even if the cached summary covers the same
  * range. Useful when the agent thinks the cached summary is stale.
  */
-force_refresh?: boolean, };
+force_refresh?: boolean,
+/**
+ * Include out-of-context notes in this explicit audit-style read.
+ */
+include_notes?: boolean, };
 
 export type SummarizeResponse = { summary: string, from_idx: number, to_idx: number, generated: boolean,
 /**
@@ -3708,6 +3782,15 @@ targets?: Array<MessageTarget>,
  */
 reply_target?: MessageTarget | null,
 /**
+ * KT-189 — `true` for a turn delivered as AWARENESS: it did not target
+ * this CLI (untargeted room traffic, or a turn addressed to another
+ * responder) and is attached, bounded and once, to a legitimate wake so
+ * the session keeps full room context without being woken for it.
+ * Context only: the caller must NOT answer it; the addressed responder
+ * owns that turn.
+ */
+awareness?: boolean,
+/**
  * Server-computed for the calling durable CLI session. A CLI answers only
  * when this is true; matching the provider name is intentionally
  * insufficient because `@codex` and `@codex · CLI` are distinct targets.
@@ -3732,6 +3815,19 @@ messages: Array<WaitForPeerMessage>,
  */
 latest_sort_order: number,
 /**
+ * KT-189 — awareness turns beyond the per-wake attach cap. Non-zero means
+ * older unseen turns exist that were NOT attached this time; they remain
+ * unacked and return with the next wake, and the human-side transcript
+ * remains the complete record.
+ */
+awareness_omitted?: number,
+/**
+ * KT-189 — highest `sort_order` among the awareness turns attached to
+ * this response. The bridge echoes it back as `ack_awareness_upto` once
+ * the model's next tool call proves the delivery was consumed.
+ */
+awareness_delivered_upto?: number | null,
+/**
  * stab-3 — server-computed pacing: apply `next_delay_seconds` before
  * the next wait, verbatim. Hot (short interval) while a User message is
  * within the attention lease; otherwise the next DETERMINISTIC step of
@@ -3748,13 +3844,13 @@ pacing: PacingState,
  */
 next_poll_at: string | null,
 /**
- * How many turns in this window were addressed to someone else and so held
- * back from `messages`. `latest_sort_order` still counts them, otherwise the
- * caller would loop on a cursor gap — which makes "withheld by routing" and
- * "not read yet" indistinguishable from the cursor alone. Reporting the count
- * lets an agent say "3 turns were not for me" instead of looking deaf when a
- * human asks whether it saw their message. Excludes the caller's own appends:
- * it wrote those, they were never news.
+ * How many window turns this response carries NEITHER as a wake NOR as
+ * attached awareness — rows still gated by the awareness cap or the ack
+ * cursor (they return with a later wake), and rows only visible to other
+ * identities. `latest_sort_order` still counts them, otherwise the caller
+ * would loop on a cursor gap. Excludes the caller's own appends: it wrote
+ * those, they were never news. Since KT-189 nothing content-bearing is
+ * permanently withheld: awareness delivery is deferred, not denied.
  */
 withheld_by_routing: number, };
 
@@ -4310,7 +4406,7 @@ export type WsMessage = { "type": "presence", from_pseudo: string, from_invite_c
  * (no field on the wire) decoding to the historical behaviour
  * (role=User, agent_type=None).
  */
-role: MessageRole, agent_type: AgentType | null,
+role: MessageRole, channel: MessageChannel, agent_type: AgentType | null,
 /**
  * Every explicitly addressed agent, in author text order. Empty on
  * older peers; receivers then fall back to the legacy single target.

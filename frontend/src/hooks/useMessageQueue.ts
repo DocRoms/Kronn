@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { MessageTarget } from '../types/generated';
 
 /** A free-text message the user typed while the agent was still streaming. */
@@ -58,7 +58,9 @@ export function useMessageQueue({
   }, []);
 
   const onFireRef = useRef(onFire);
-  onFireRef.current = onFire;
+  useLayoutEffect(() => {
+    onFireRef.current = onFire;
+  }, [onFire]);
 
   // Reset when the active discussion changes — queued follow-ups are bound to
   // the conversation they were typed in, not carried across discussions.

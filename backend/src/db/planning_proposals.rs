@@ -683,6 +683,7 @@ mod ingest_tests {
             lint_report: None,
             id: "am1".to_string(),
             role: crate::models::MessageRole::Agent,
+            channel: crate::models::MessageChannel::Main,
             content: "```kronn-plan-action\n{\"action\":\"create\",\"title\":\"X\"}\n```"
                 .to_string(),
             agent_type: Some(crate::models::AgentType::Codex),
@@ -816,6 +817,7 @@ fn apply_accepted(
                 conn,
                 &CreatePlanningTaskRequest {
                     title: p.title.clone().unwrap_or_default(),
+                    idempotency_key: None,
                     description: p.description.clone().unwrap_or_default(),
                     status: PlanningTaskStatus::Todo,
                     priority: priority_from_payload(p.priority.as_deref())?,
@@ -1052,6 +1054,7 @@ fn decide_item_inner(
         lint_report: None,
         id: receipt_id.clone(),
         role: crate::models::MessageRole::System,
+        channel: crate::models::MessageChannel::Main,
         content: format!("[kronn-planning: {receipt_body}]"),
         agent_type: None,
         timestamp: Utc::now(),

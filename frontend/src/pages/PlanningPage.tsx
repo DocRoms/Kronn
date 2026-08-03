@@ -6,6 +6,7 @@ import {
   ChevronRight,
   Circle,
   Filter,
+  GitBranch,
   GripVertical,
   History,
   Link2,
@@ -16,6 +17,7 @@ import {
   X,
 } from 'lucide-react';
 import { planning } from '../lib/api';
+import { queueDiscussionWorkspaceTarget } from '../lib/discussion-navigation';
 import { useT } from '../lib/I18nContext';
 import { userError } from '../lib/userError';
 import { CopyIdPill } from '../components/CopyIdPill';
@@ -648,6 +650,30 @@ function PlanningDetailForm({
         <span>{t('planning.description')}</span>
         <textarea rows={7} value={description} onChange={event => setDescription(event.target.value)} />
       </label>
+      {(task.workspaces?.length ?? 0) > 0 && (
+        <section className="planning-task-workspaces">
+          <h3>{t('planning.workspaces')}</h3>
+          {task.workspaces?.map(workspace => (
+            <button
+              type="button"
+              key={workspace.id}
+              onClick={() => {
+                queueDiscussionWorkspaceTarget(workspace.disc_id, workspace.id);
+                onNavigateDiscussion(workspace.disc_id);
+              }}
+              title={t('planning.workspaceViewFiles')}
+            >
+              <GitBranch size={12} />
+              <span>{workspace.branch}</span>
+              <small>
+                {workspace.session_agent_type ?? t('git.workspaceManaged')}
+                {' · '}
+                {t(`planning.workspaceState.${workspace.state}`)}
+              </small>
+            </button>
+          ))}
+        </section>
+      )}
       {(status === 'blocked' || blockedReason) && (
         <label>
           <span>{t('planning.blockedReason')}</span>

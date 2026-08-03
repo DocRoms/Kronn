@@ -73,11 +73,7 @@ export function CompressionSection({ agents, onActivated, toast, t }: Compressio
   // poll `rtk gain` on every re-render of a large agent list.
   useEffect(() => {
     let cancelled = false;
-    if (!rtkBinaryAvailable) {
-      setSavings(null);
-      setVersionInfo(null);
-      return;
-    }
+    if (!rtkBinaryAvailable) return;
     rtkApi.savings().then(s => {
       if (!cancelled) setSavings({
         total: s.total_tokens_saved,
@@ -100,6 +96,9 @@ export function CompressionSection({ agents, onActivated, toast, t }: Compressio
     });
     return () => { cancelled = true; };
   }, [rtkBinaryAvailable, configured]);
+
+  const visibleSavings = rtkBinaryAvailable ? savings : null;
+  const visibleVersionInfo = rtkBinaryAvailable ? versionInfo : null;
 
   const handleActivate = async () => {
     setActivating(true);
@@ -236,16 +235,16 @@ export function CompressionSection({ agents, onActivated, toast, t }: Compressio
                *  installed < latest_known under lenient semver. Click
                *  opens a small modal with a copyable upgrade command
                *  (RTK install.sh is idempotent — re-runs upgrade). */}
-              {versionInfo?.updateAvailable && versionInfo.installed && (
+              {visibleVersionInfo?.updateAvailable && visibleVersionInfo.installed && (
                 <button
                   type="button"
                   className="set-compression-update-pill"
                   onClick={() => setShowUpdateModal(true)}
-                  aria-label={t('config.rtk.updateAvailableAria', versionInfo.installed, versionInfo.latest)}
-                  title={t('config.rtk.updateAvailableTitle', versionInfo.installed, versionInfo.latest)}
+                  aria-label={t('config.rtk.updateAvailableAria', visibleVersionInfo.installed, visibleVersionInfo.latest)}
+                  title={t('config.rtk.updateAvailableTitle', visibleVersionInfo.installed, visibleVersionInfo.latest)}
                 >
                   <ArrowUpCircle size={10} />
-                  <span>{t('config.rtk.updateAvailable', versionInfo.latest)}</span>
+                  <span>{t('config.rtk.updateAvailable', visibleVersionInfo.latest)}</span>
                 </button>
               )}
             </div>
@@ -272,10 +271,10 @@ export function CompressionSection({ agents, onActivated, toast, t }: Compressio
                 ? t('config.rtk.stateNone')
                 : t('config.rtk.statePartial', configured, applicable)}
           </span>
-          {savings?.available && savings.total > 0 && (
+          {visibleSavings?.available && visibleSavings.total > 0 && (
             <>
               <span className="set-compression-savings">
-                · {t('config.rtk.savings', formatTokens(savings.total))}
+                · {t('config.rtk.savings', formatTokens(visibleSavings.total))}
               </span>
               <button
                 type="button"
@@ -290,19 +289,19 @@ export function CompressionSection({ agents, onActivated, toast, t }: Compressio
           )}
         </div>
 
-        {showDetails && savings?.available && (
+        {showDetails && visibleSavings?.available && (
           <div className="set-compression-details">
             <div className="set-compression-stat">
               <div className="set-compression-stat-label">{t('config.rtk.statTokens')}</div>
-              <div className="set-compression-stat-value">{formatTokens(savings.total)}</div>
+              <div className="set-compression-stat-value">{formatTokens(visibleSavings.total)}</div>
             </div>
             <div className="set-compression-stat">
               <div className="set-compression-stat-label">{t('config.rtk.statRatio')}</div>
-              <div className="set-compression-stat-value">{savings.ratio.toFixed(0)}%</div>
+              <div className="set-compression-stat-value">{visibleSavings.ratio.toFixed(0)}%</div>
             </div>
             <div className="set-compression-stat">
               <div className="set-compression-stat-label">{t('config.rtk.statSamples')}</div>
-              <div className="set-compression-stat-value">{savings.samples.toLocaleString()}</div>
+              <div className="set-compression-stat-value">{visibleSavings.samples.toLocaleString()}</div>
             </div>
           </div>
         )}
@@ -370,7 +369,7 @@ export function CompressionSection({ agents, onActivated, toast, t }: Compressio
         </div>
       </div>
 
-      {showUpdateModal && versionInfo && (
+      {showUpdateModal && visibleVersionInfo && (
         <div className="dash-modal-overlay" onClick={() => setShowUpdateModal(false)}>
           <div
             className="dash-modal set-compression-modal"
@@ -395,15 +394,15 @@ export function CompressionSection({ agents, onActivated, toast, t }: Compressio
             <div className="set-compression-modal-body">
               <p>
                 {t('config.rtk.updateModalBody',
-                  versionInfo.installed ?? '?',
-                  versionInfo.latest)}
+                  visibleVersionInfo.installed ?? '?',
+                  visibleVersionInfo.latest)}
               </p>
               <div className="set-compression-install-label">{t('config.rtk.installCommand')}</div>
-              <pre className="set-compression-install-cmd">{versionInfo.updateCommand}</pre>
+              <pre className="set-compression-install-cmd">{visibleVersionInfo.updateCommand}</pre>
               <button
                 type="button"
                 className="set-compression-copy-btn"
-                onClick={() => navigator.clipboard.writeText(versionInfo.updateCommand).catch(() => {})}
+                onClick={() => navigator.clipboard.writeText(visibleVersionInfo.updateCommand).catch(() => {})}
                 aria-label={t('common.copy')}
               >
                 <Copy size={12} /> {t('common.copy')}

@@ -72,6 +72,10 @@ const mkDisc = (id: string, msgCount: number, archived = false): Discussion => (
   awaiting_agent: false,
 });
 
+const openHeaderMenu = () => {
+  fireEvent.click(screen.getByLabelText('disc.sidebar.moreActions'));
+};
+
 describe('DiscussionSidebar — Mark all as read (0.8.3 #277)', () => {
   it('renders the button when there is unread + handler wired', () => {
     // 100 messages, none seen → 100 unread → button must render.
@@ -84,6 +88,7 @@ describe('DiscussionSidebar — Mark all as read (0.8.3 #277)', () => {
         onMarkAllRead={vi.fn()}
       />
     );
+    openHeaderMenu();
     expect(screen.getByLabelText('disc.markAllRead')).toBeInTheDocument();
   });
 
@@ -99,6 +104,7 @@ describe('DiscussionSidebar — Mark all as read (0.8.3 #277)', () => {
         onMarkAllRead={vi.fn()}
       />
     );
+    openHeaderMenu();
     const btn = screen.getByLabelText('disc.markAllRead');
     // Tooltip uses `disc.markAllReadTooltip` with the count param.
     expect(btn.getAttribute('title')).toContain('80');
@@ -115,6 +121,7 @@ describe('DiscussionSidebar — Mark all as read (0.8.3 #277)', () => {
         onMarkAllRead={onMarkAllRead}
       />
     );
+    openHeaderMenu();
     fireEvent.click(screen.getByLabelText('disc.markAllRead'));
     expect(onMarkAllRead).toHaveBeenCalledTimes(1);
   });
@@ -131,6 +138,7 @@ describe('DiscussionSidebar — Mark all as read (0.8.3 #277)', () => {
         onMarkAllRead={vi.fn()}
       />
     );
+    openHeaderMenu();
     expect(screen.queryByLabelText('disc.markAllRead')).not.toBeInTheDocument();
   });
 
@@ -146,6 +154,7 @@ describe('DiscussionSidebar — Mark all as read (0.8.3 #277)', () => {
         // onMarkAllRead INTENTIONALLY OMITTED
       />
     );
+    openHeaderMenu();
     expect(screen.queryByLabelText('disc.markAllRead')).not.toBeInTheDocument();
   });
 
@@ -162,6 +171,7 @@ describe('DiscussionSidebar — Mark all as read (0.8.3 #277)', () => {
         onMarkAllRead={vi.fn()}
       />
     );
+    openHeaderMenu();
     const btn = screen.getByLabelText('disc.markAllRead');
     expect(btn.getAttribute('title')).toContain('559');
   });
@@ -181,6 +191,7 @@ describe('DiscussionSidebar — Mark all as read (0.8.3 #277)', () => {
         onMarkAllRead={vi.fn()}
       />
     );
+    openHeaderMenu();
     const btn = screen.getByLabelText('disc.markAllRead');
     expect(btn.getAttribute('title')).toContain('300');
   });
@@ -208,6 +219,7 @@ describe('DiscussionSidebar — Mark all as read (0.8.3 #277)', () => {
         onMarkAllRead={vi.fn()}
       />
     );
+    openHeaderMenu();
     const btn = screen.getByLabelText('disc.markAllRead');
     expect(btn.getAttribute('title')).toContain('75');
   });

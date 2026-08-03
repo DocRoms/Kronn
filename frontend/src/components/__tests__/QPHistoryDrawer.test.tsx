@@ -21,7 +21,8 @@ vi.mock('../../lib/api', async () => {
   return buildApiMock();
 });
 
-import QPHistoryDrawer, { diffLines } from '../QPHistoryDrawer';
+import QPHistoryDrawer from '../QPHistoryDrawer';
+import { diffLines } from '../../lib/qp-history-diff';
 import { quickPrompts as quickPromptsApi } from '../../lib/api';
 
 const wrap = (ui: ReactElement) => render(<I18nProvider>{ui}</I18nProvider>);

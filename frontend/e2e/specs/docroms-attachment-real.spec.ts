@@ -27,14 +27,17 @@
  * worktree image-save path, the send-time link UPDATE, or the byte-serving
  * route's DB lookup. Same rationale as `disc-cancel-recovery.spec.ts`.
  *
- * Local-only: needs Anthropic creds + the Claude binary + a clean DOCROMS_WEB
- * checkout. CI-skipped (tokens billed per run).
+ * Explicit opt-in: needs Anthropic creds + the Claude binary + a clean
+ * DOCROMS_WEB checkout. Run with `KRONN_REAL_AGENT_E2E=1` (tokens billed).
  */
 import { test, expect, type APIRequestContext } from '@playwright/test';
 import { DashboardPage } from '../pages/DashboardPage';
 
 test.describe.configure({ timeout: 240_000, retries: 0 });
-test.skip(!!process.env.CI, 'real-agent spec — local-only (Anthropic creds + Claude binary required, tokens billed per run)');
+test.skip(
+  process.env.KRONN_REAL_AGENT_E2E !== '1',
+  'real-agent spec — set KRONN_REAL_AGENT_E2E=1 (credentials + billed tokens required)',
+);
 
 const TITLE = `Attach E2E ${Date.now()}`;
 // Smallest valid PNG (1×1 transparent pixel) — a real binary upload.

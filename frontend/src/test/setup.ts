@@ -11,14 +11,12 @@ import { configure } from '@testing-library/react';
 // only matters when the environment is genuinely slow.
 configure({ asyncUtilTimeout: 5000 });
 
-// localStorage polyfill for the test env. Node ≥22 ships an EXPERIMENTAL global
-// `localStorage` that is inert unless `--localstorage-file` is passed, and it
-// shadows happy-dom's storage — so under that Node every storage-backed module
-// (i18n locale, theme/density, chat drafts, audit checkpoints, TTS prefs) and
-// every spec that calls `localStorage.clear()` throws "Cannot read properties
-// of undefined (reading 'getItem')". Install a deterministic in-memory Storage
-// when the ambient one is missing/non-functional. No-op where happy-dom already
-// provides a working store; `configurable`/`writable` so specs can still spy.
+// Deterministic storage for the test env. Node >= 22 ships EXPERIMENTAL global
+// storage accessors that are inert without `--localstorage-file` and shadow
+// happy-dom's stores. Install our in-memory implementation without reading the
+// ambient accessors; `configurable`/`writable` lets specs continue to spy. This
+// lightweight implementation supports the Storage methods used by the app,
+// not named-property access such as `localStorage['key']`.
 // 0.8.11 (D10) — getUILocale() now follows the browser's language when no
 // locale is stored. The test runner's navigator.language is 'en-US', which would
 // flip every French-asserting component test to English. Pin the browser locale
@@ -42,13 +40,23 @@ function makeMemoryStorage(): Storage {
     setItem(key: string, value: string) { store.set(String(key), String(value)); },
   } as Storage;
 }
+// Install both stores unconditionally. On Node >= 22, merely reading the
+// ambient `globalThis.localStorage` accessor emits an ExperimentalWarning
+// unless `--localstorage-file` is configured. Vitest forwards that warning
+// through the worker RPC; under a heavily parallel suite the worker can be
+// torn down while `onUserConsoleLog` is still pending. Defining the test
+// stores without probing the ambient accessor avoids the warning entirely
+// and gives every worker the same deterministic storage implementation.
 for (const name of ['localStorage', 'sessionStorage'] as const) {
-  const cur = (globalThis as Record<string, unknown>)[name] as Storage | undefined;
-  if (!cur || typeof cur.getItem !== 'function') {
-    Object.defineProperty(globalThis, name, {
-      value: makeMemoryStorage(),
-      configurable: true,
-      writable: true,
-    });
-  }
+  Object.defineProperty(globalThis, name, {
+    value: makeMemoryStorage(),
+    configurable: true,
+    writable: true,
+  });
 }
+
+// Unit tests exercise the synchronous `t()` API directly and intentionally
+// validate all three dictionaries. Production preloads only the active locale
+// in main.tsx; the test harness loads all chunks once before specs start.
+const { loadLocale } = await import('../lib/i18n');
+await Promise.all([loadLocale('fr'), loadLocale('en'), loadLocale('es')]);

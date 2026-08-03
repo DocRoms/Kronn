@@ -18,7 +18,7 @@
 //     `.data` / `.summary` from the very first save
 
 import { describe, it, expect } from 'vitest';
-import { buildBlankStep } from '../WorkflowWizard';
+import { buildBlankStep } from '../../../lib/workflowUiUtils';
 
 describe('buildBlankStep — default tier semantic', () => {
   it('NULL defaultTier : no agent_settings field set (legacy-compatible)', () => {

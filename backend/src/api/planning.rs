@@ -16,6 +16,8 @@ fn planning_error<T: serde::Serialize>(error: anyhow::Error) -> Json<ApiResponse
     let message = error.to_string();
     let code = if message.contains("not found") || message.contains("Unknown project") {
         ApiErrorCode::NotFound
+    } else if message.contains("idempotency key was reused") {
+        ApiErrorCode::Conflict
     } else if message.contains("cycle")
         || message.contains("must")
         || message.contains("cannot")

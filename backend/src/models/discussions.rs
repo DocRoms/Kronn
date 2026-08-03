@@ -128,6 +128,8 @@ fn default_workspace_mode() -> String {
 pub struct DiscussionMessage {
     pub id: String,
     pub role: MessageRole,
+    #[serde(default)]
+    pub channel: MessageChannel,
     pub content: String,
     pub agent_type: Option<AgentType>,
     pub timestamp: DateTime<Utc>,
@@ -254,6 +256,15 @@ mod summary_strategy_tests {
         assert!(SummaryStrategy::auto_fires(OnDemand, Auto));
         assert!(!SummaryStrategy::auto_fires(OnDemand, Off));
     }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum MessageChannel {
+    #[default]
+    Main,
+    Note,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, TS)]
@@ -385,6 +396,10 @@ impl MessageTarget {
 #[ts(export)]
 pub struct SendMessageRequest {
     pub content: String,
+    /// Notes remain visible in the human timeline but never wake or enter an
+    /// agent's context unless an explicit note-reading tool is used.
+    #[serde(default)]
+    pub channel: MessageChannel,
     /// Durable target identities selected by current clients. Unlike the
     /// compatibility `target_agents` projection, this distinguishes the
     /// configured discussion agent, a one-shot agent, and a joined CLI.

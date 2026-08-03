@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, act, fireEvent, cleanup } from '@testing-library/react';
+import { readFileSync } from 'node:fs';
 
 vi.mock('../../lib/api', () => ({
   discussions: {
@@ -28,7 +29,30 @@ afterEach(() => {
   cleanup();
 });
 
+async function openParticipant(index = 0) {
+  await act(async () => {
+    fireEvent.click(document.querySelectorAll('.disc-participant-chip')[index] as HTMLButtonElement);
+  });
+}
+
+const participantStatus = () =>
+  document.querySelector('.disc-participant-details dd')?.textContent;
+
 describe('DiscParticipantsHeader — 0.8.6 phase 2', () => {
+  it('reserves separate header rows for the title and compact participant strip', () => {
+    const headerCss = readFileSync('src/pages/DiscussionsPage.css', 'utf8');
+    const participantCss = readFileSync('src/styles/components.css', 'utf8');
+    const headerTop = headerCss.match(/\.disc-chat-header-top\s*\{([^}]*)\}/)?.[1] ?? '';
+    const presence = headerCss.match(/\.disc-chat-header-presence\s*\{([^}]*)\}/)?.[1] ?? '';
+    const participantList = participantCss.match(/\.disc-participants-list\s*\{([^}]*)\}/)?.[1] ?? '';
+
+    expect(headerTop).toContain('display: grid');
+    expect(headerTop).toContain('grid-template-columns: minmax(0, 1fr)');
+    expect(presence).toContain('width: 100%');
+    expect(participantList).toContain('flex-wrap: nowrap');
+    expect(participantList).toContain('overflow-x: auto');
+  });
+
   it('shows the empty-state copy when the disc has no participants', async () => {
     (discussionsApi.participants as ReturnType<typeof vi.fn>).mockResolvedValue([]);
     await act(async () => {
@@ -50,8 +74,14 @@ describe('DiscParticipantsHeader — 0.8.6 phase 2', () => {
     });
     const chips = document.querySelectorAll('.disc-participant-chip');
     expect(chips.length).toBe(2);
-    expect(chips[0].textContent).toContain('@claude · disc.targetCli');
-    expect(chips[1].textContent).toContain('@codex · disc.targetCli');
+    expect(chips[0].querySelector('.disc-participant-name')?.textContent).toBe('@claude');
+    expect(chips[1].querySelector('.disc-participant-name')?.textContent).toBe('@codex');
+    expect(document.querySelector('[data-testid="disc-participant-details"]')).toBeNull();
+    await openParticipant();
+    expect(document.querySelector('[data-testid="disc-participant-details"]')).not.toBeNull();
+    expect(chips[0].getAttribute('aria-expanded')).toBe('true');
+    fireEvent.click(document.querySelector('.disc-participant-details header button') as HTMLButtonElement);
+    expect(document.querySelector('[data-testid="disc-participant-details"]')).toBeNull();
   });
 
   it('shows only an explicitly declared JOIN model and labels it as join metadata', async () => {
@@ -71,11 +101,11 @@ describe('DiscParticipantsHeader — 0.8.6 phase 2', () => {
       await Promise.resolve();
     });
 
+    expect(document.querySelectorAll('.disc-participant-model')).toHaveLength(0);
+    await openParticipant();
     const models = document.querySelectorAll('.disc-participant-model');
     expect(models).toHaveLength(1);
     expect(models[0].textContent).toContain('claude-sonnet-4-5');
-    expect(models[0].getAttribute('title'))
-      .toBe('disc.modelDeclaredAtJoin(claude-sonnet-4-5)');
     expect(document.body.textContent).not.toContain('undefined');
   });
 
@@ -108,14 +138,13 @@ describe('DiscParticipantsHeader — 0.8.6 phase 2', () => {
       await Promise.resolve();
     });
 
-    const resumeButtons = Array.from(
-      document.querySelectorAll('button.disc-participant-resume'),
-    ) as HTMLButtonElement[];
-    expect(resumeButtons).toHaveLength(2);
-
+    await openParticipant();
     await act(async () => {
-      fireEvent.click(resumeButtons[0]);
-      fireEvent.click(resumeButtons[1]);
+      fireEvent.click(document.querySelector('button.disc-participant-resume') as HTMLButtonElement);
+      fireEvent.click(document.querySelectorAll('.disc-participant-chip')[1] as HTMLButtonElement);
+    });
+    await act(async () => {
+      fireEvent.click(document.querySelector('button.disc-participant-resume') as HTMLButtonElement);
       await Promise.resolve();
     });
     expect(writeText).toHaveBeenNthCalledWith(
@@ -138,7 +167,10 @@ describe('DiscParticipantsHeader — 0.8.6 phase 2', () => {
       await Promise.resolve();
       await Promise.resolve();
     });
-    expect(document.querySelector('.disc-participant-resume')).toBeNull();
+    for (const chip of document.querySelectorAll('.disc-participant-chip')) {
+      await act(async () => { fireEvent.click(chip); });
+      expect(document.querySelector('.disc-participant-resume')).toBeNull();
+    }
   });
 
   it('renders paused participants with the paused style attribute', async () => {
@@ -270,11 +302,14 @@ describe('honest participant presence — 0.9.2 G', () => {
       await Promise.resolve();
       await Promise.resolve();
     });
-    const labels = Array.from(document.querySelectorAll('.disc-participant-activity'));
-    expect(labels.length, 'every participant gets an honest state').toBe(3);
-    expect(labels[0].textContent).toBe('disc.presenceListening');
-    expect(labels[1].textContent).toBe('disc.activityReading');
-    expect(labels[2].textContent).toBe('disc.presenceOffline');
+    for (const [index, expected] of [
+      'disc.presenceListening',
+      'disc.activityReading',
+      'disc.presenceOffline',
+    ].entries()) {
+      await openParticipant(index);
+      expect(participantStatus(), 'every participant exposes an honest state').toBe(expected);
+    }
   });
 
   it('a waiting legacy participant renders dormant, not falsely listening', async () => {
@@ -290,8 +325,8 @@ describe('honest participant presence — 0.9.2 G', () => {
     const chip = document.querySelector('.disc-participant-chip');
     expect(chip?.getAttribute('data-presence')).toBe('dormant');
     expect(chip?.getAttribute('data-freshness')).toBe('idle');
-    const label = document.querySelector('.disc-participant-activity');
-    expect(label?.textContent).toBe('disc.presenceDormant');
+    await openParticipant();
+    expect(participantStatus()).toBe('disc.presenceDormant');
   });
 
   it('never renders a raw token for an unknown future activity value', async () => {
@@ -303,8 +338,8 @@ describe('honest participant presence — 0.9.2 G', () => {
       await Promise.resolve();
       await Promise.resolve();
     });
-    expect(document.querySelector('.disc-participant-activity')?.textContent)
-      .toBe('disc.presenceOffline');
+    await openParticipant();
+    expect(participantStatus()).toBe('disc.presenceOffline');
     expect(document.body.textContent).not.toContain('compiling');
   });
 
@@ -342,9 +377,11 @@ describe('honest participant presence — 0.9.2 G', () => {
     expect(chips.map(chip => chip.getAttribute('data-presence')))
       .toEqual(['listening', 'dormant', 'offline', 'running']);
     expect(chips[0].getAttribute('data-read-live')).toBe('true');
-    expect(chips[1].textContent).toContain('disc.presenceDormantSeconds');
-    expect(chips[2].textContent).toContain('disc.presenceOffline');
-    expect(chips[2].textContent).toContain('disc.writeFailed');
+    await openParticipant(1);
+    expect(participantStatus()).toContain('disc.presenceDormantSeconds');
+    await openParticipant(2);
+    expect(participantStatus()).toBe('disc.presenceOffline');
+    expect(document.querySelector('.disc-participant-write-failed')).not.toBeNull();
     expect(chips[3].querySelector('.disc-participant-running')).not.toBeNull();
   });
 
@@ -362,7 +399,8 @@ describe('honest participant presence — 0.9.2 G', () => {
     });
     const chip = document.querySelector('.disc-participant-chip');
     expect(chip?.getAttribute('data-presence')).toBe('offline');
-    expect(chip?.textContent).toContain('disc.presencePaused');
+    await openParticipant();
+    expect(participantStatus()).toBe('disc.presencePaused');
   });
 
   it('labels a deferred native obligation as waiting for a runtime', async () => {
@@ -381,8 +419,10 @@ describe('honest participant presence — 0.9.2 G', () => {
     });
     const chip = document.querySelector('.disc-participant-chip');
     expect(chip?.getAttribute('data-wake-mode')).toBe('native_dispatch');
-    expect(chip?.textContent).toContain('disc.presenceAwaitingRuntime');
-    expect(chip?.textContent).not.toContain('disc.presenceDormantSeconds');
+    await openParticipant();
+    expect(participantStatus()).toBe('disc.presenceAwaitingRuntime');
+    expect(document.querySelector('.disc-participant-details')?.textContent)
+      .not.toContain('disc.presenceDormantSeconds');
   });
 
   it('pins the invite button OUTSIDE the scrollable chip strip (3 offline peers)', async () => {

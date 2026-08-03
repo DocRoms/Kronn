@@ -1,18 +1,18 @@
-import { useState, useEffect } from 'react';
+import { useCallback, useSyncExternalStore } from 'react';
 
 /** Returns true when viewport width is below the given breakpoint (default: 768px) */
 export function useIsMobile(breakpoint = 768): boolean {
-  const [isMobile, setIsMobile] = useState(() =>
-    typeof window !== 'undefined' ? window.innerWidth < breakpoint : false
-  );
-
-  useEffect(() => {
+  const subscribe = useCallback((notify: () => void) => {
     const mql = window.matchMedia(`(max-width: ${breakpoint - 1}px)`);
-    const handler = (e: MediaQueryListEvent) => setIsMobile(e.matches);
-    setIsMobile(mql.matches);
+    const handler = () => notify();
     mql.addEventListener('change', handler);
     return () => mql.removeEventListener('change', handler);
   }, [breakpoint]);
 
-  return isMobile;
+  const getSnapshot = useCallback(
+    () => window.matchMedia(`(max-width: ${breakpoint - 1}px)`).matches,
+    [breakpoint],
+  );
+
+  return useSyncExternalStore(subscribe, getSnapshot, () => false);
 }

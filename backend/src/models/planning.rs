@@ -195,6 +195,17 @@ pub struct PlanningTaskEvent {
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
+pub struct PlanningWorkspaceSummary {
+    pub id: String,
+    pub disc_id: String,
+    pub branch: String,
+    pub state: String,
+    pub ownership: String,
+    pub session_agent_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
 pub struct PlanningTaskChange {
     pub task_id: String,
     pub task_reference: String,
@@ -215,6 +226,8 @@ pub struct PlanningTaskDetail {
     pub links: Vec<PlanningTaskLink>,
     pub blockers: Vec<PlanningTaskSummary>,
     pub blocking: Vec<PlanningTaskSummary>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workspaces: Vec<PlanningWorkspaceSummary>,
     pub events: Vec<PlanningTaskEvent>,
 }
 
@@ -307,6 +320,10 @@ pub struct CreatePlanningTaskLink {
 #[ts(export)]
 pub struct CreatePlanningTaskRequest {
     pub title: String,
+    /// Opaque caller-scoped retry key. The same key and content returns the
+    /// existing task; reusing it for different content is a conflict.
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
     #[serde(default)]
     pub description: String,
     #[serde(default)]

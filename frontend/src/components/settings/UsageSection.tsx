@@ -12,6 +12,7 @@ import { BarChart3, ExternalLink, ChevronDown, ChevronUp, ChevronLeft, ChevronRi
 import { usage as usageApi } from '../../lib/api';
 import { useT } from '../../lib/I18nContext';
 import type { UsageReport } from '../../types/generated';
+import { formatPeriod, rowsPerPage } from './usageFormat';
 import '../../pages/SettingsPage.css';
 
 const CCUSAGE_GITHUB_URL = 'https://github.com/ryoppippi/ccusage';
@@ -34,35 +35,6 @@ function fmtTokens(n: number): string {
  * ccusage stamps only the *start* of each bucket: a `YYYY-MM-DD` Monday for
  * weekly, `YYYY-MM` for monthly. Daily is already a full date. We expand
  * weekly into a `start → end` range and localise the month name. */
-function addDaysISO(iso: string, days: number): string {
-  const d = new Date(`${iso}T00:00:00Z`);
-  if (Number.isNaN(d.getTime())) return iso;
-  d.setUTCDate(d.getUTCDate() + days);
-  return d.toISOString().slice(0, 10);
-}
-export function formatPeriod(kind: string, period: string, locale: string): string {
-  if (kind === 'weekly') {
-    const end = addDaysISO(period, 6);
-    return end === period ? period : `${period} → ${end}`;
-  }
-  if (kind === 'monthly') {
-    const [y, m] = period.split('-').map(Number);
-    if (y && m) {
-      return new Date(Date.UTC(y, m - 1, 1)).toLocaleDateString(locale, {
-        month: 'short', year: 'numeric', timeZone: 'UTC',
-      });
-    }
-  }
-  return period;
-}
-
-/* Rows per page, tuned per bucket so a page is a meaningful span:
- * ~a month of days, a quarter+ of weeks, a year of months. */
-const ROWS_PER_PAGE: Record<string, number> = { daily: 30, weekly: 15, monthly: 12 };
-export function rowsPerPage(kind: string): number {
-  return ROWS_PER_PAGE[kind] ?? 30;
-}
-
 /* ── Model name → agent rollup ── */
 const AGENT_COLORS: Record<string, string> = {
   claude: '#d4a574',
@@ -125,7 +97,24 @@ export function UsageSection(_props: UsageSectionProps) {
     }
   }, []);
 
-  useEffect(() => { setPage(0); refresh(period); }, [period, refresh]);
+  useEffect(() => {
+    let active = true;
+    usageApi.get(period)
+      .then(nextReport => {
+        if (!active) return;
+        setReport(nextReport);
+        setError(null);
+      })
+      .catch(error => {
+        if (!active) return;
+        setError(String(error));
+        setReport(null);
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => { active = false; };
+  }, [period]);
 
   const byAgent = report ? rollupByAgent(report) : [];
   const totalAgentCost = byAgent.reduce((s, a) => s + a.cost, 0);
@@ -150,7 +139,12 @@ export function UsageSection(_props: UsageSectionProps) {
                     aria-selected={period === p}
                     className="set-usage-toggle-btn"
                     data-active={period === p}
-                    onClick={() => setPeriod(p)}
+                    onClick={() => {
+                      setPage(0);
+                      setLoading(true);
+                      setError(null);
+                      setPeriod(p);
+                    }}
                     data-testid={`usage-period-${p}`}
                   >
                     {t(`usage.period.${p}`)}

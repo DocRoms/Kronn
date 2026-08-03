@@ -36,8 +36,7 @@ test('exports, imports and replays a discussion idempotently', async ({ page, re
 
   const dashboard = new DashboardPage(page);
   await dashboard.goto();
-  await dashboard.navDiscussions.click();
-  await page.getByRole('button', { name: new RegExp(title) }).click();
+  await dashboard.openDiscussion(sourceId);
 
   const downloadPromise = page.waitForEvent('download');
   await page.getByRole('button', { name: 'Exporter la discussion' }).click();
@@ -45,10 +44,20 @@ test('exports, imports and replays a discussion idempotently', async ({ page, re
   expect(download.suggestedFilename()).toMatch(/\.kronn-discussion\.json$/);
   const bundlePath = await download.path();
   expect(bundlePath).toBeTruthy();
+  if (!bundlePath) throw new Error('Playwright returned no downloaded bundle path');
 
-  const importButton = page.getByRole('button', { name: 'Importer une discussion' });
-  await importButton.click();
-  await page.locator('input[type="file"][accept*=".kronn-discussion.json"]').setInputFiles(bundlePath!);
+  // The header actions panel is a disclosure of plain buttons, not an ARIA menu:
+  // it never implemented arrow-key navigation, so the menu/menuitem roles were
+  // dropped rather than left as a contract the widget did not honour.
+  const openImportPicker = async () => {
+    await page.getByRole('button', { name: 'Autres actions' }).click();
+    await page
+      .getByRole('group', { name: 'Autres actions' })
+      .getByRole('button', { name: 'Importer une discussion' })
+      .click();
+  };
+  await openImportPicker();
+  await page.locator('input[type="file"][accept*=".kronn-discussion.json"]').setInputFiles(bundlePath);
   await expect(page.getByText(/Discussion importée : \d+ messages/)).toBeVisible();
 
   const afterImport = await request.get('/api/discussions');
@@ -59,8 +68,8 @@ test('exports, imports and replays a discussion idempotently', async ({ page, re
   expect(matchingAfterImport).toHaveLength(2);
   for (const discussion of matchingAfterImport) createdIds.add(discussion.id);
 
-  await importButton.click();
-  await page.locator('input[type="file"][accept*=".kronn-discussion.json"]').setInputFiles(bundlePath!);
+  await openImportPicker();
+  await page.locator('input[type="file"][accept*=".kronn-discussion.json"]').setInputFiles(bundlePath);
   await expect(page.getByText(/Ce bundle avait déjà été importé/)).toBeVisible();
 
   const afterReplay = await request.get('/api/discussions');

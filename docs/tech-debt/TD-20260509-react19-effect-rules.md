@@ -18,26 +18,45 @@ Ad-hoc TS-strict warnings ride alongside:
 - `@typescript-eslint/no-non-null-assertion`
 - `@typescript-eslint/no-explicit-any`
 
-## Current count (2026-07-24)
+## Current count (2026-08-02 — third contextual pass)
 
-`pnpm exec eslint src/ -f json` reports **161 warnings, 0 errors**:
+The maintenance pass remeasured **164 warnings, 0 errors** before editing (two
+additional `set-state-in-effect` hits and one additional Fast Refresh hit since
+the 2026-07-30 snapshot). After three contextual batches,
+`pnpm exec eslint src/ -f json` reports **92 warnings, 0 errors**:
 
 | Rule | Count | Category |
 |---|---|---|
-| `react-hooks/set-state-in-effect` | 58 | Heavy refactor each (often state derived from props) |
-| `react-hooks/immutability` | 27 | Mutation in render / effect |
-| `react-refresh/only-export-components` | 22 | Split shared exports from component modules |
-| `react-hooks/exhaustive-deps` | 18 | Mostly stable refs / useCallback opportunities |
-| `react-hooks/refs` | 13 | Refs for non-DOM values |
-| `@typescript-eslint/no-non-null-assertion` | 12 | Add explicit narrowing |
+| `react-hooks/set-state-in-effect` | 43 | Heavy refactor each (often state derived from props) |
+| `react-hooks/immutability` | 21 | Mutation in render / effect |
+| `react-hooks/exhaustive-deps` | 13 | Mostly stable refs / useCallback opportunities |
+| `react-hooks/refs` | 5 | Refs for non-DOM values |
 | `react-hooks/purity` | 4 | Pure-render rule violations |
 | `no-restricted-syntax` | 3 | Project-specific restricted patterns |
 | `react-hooks/preserve-manual-memoization` | 2 | Memo broken by inner ref change |
-| `no-console` | 2 | Debug output |
+| `no-console` | 1 | Debug output |
 
-The earlier 2026-05-10 snapshot was 99 warnings. The rule set and code surface
-have evolved since then, so the old count must not be used as the CI baseline.
-The inventory above was measured directly after the 0.9.0 quick-win pass.
+The first batch brought ten targeted component files to zero warnings without
+disabling a rule: `SourceCodeViewer`, `AiDocViewer`, `AgentQuestionForm`,
+`AuditRecapPanel`, `DiscParticipantsHeader`, `QPHistoryDrawer`,
+`DiscussionPlanPanel`, `DiscussionSessionBinding`, `Dropdown` and
+`MermaidDiagram`. The earlier snapshots remain historical context, not the CI
+baseline.
+
+The second batch removes another 33 warnings across boot/setup, Settings,
+Custom API and usage helpers, theme/user-context components, responsive state,
+WebSocket/API hooks and callback-ref hooks. Pure helpers and contexts now live
+outside component-only Fast Refresh modules; external subscriptions use
+`useSyncExternalStore` or effect-managed callbacks; latest-callback refs update
+during the layout phase, before browser callbacks can observe a stale handler;
+and initial async reads use guarded promise continuations instead of scheduler
+indirection.
+
+The third batch clears the remaining Fast Refresh and non-null assertion
+categories. Message parsing, discussion unread labels, workflow UI helpers and
+API-assistant transforms now live in pure modules, while the toast item is a
+component-only boundary. Tests import the same production helpers directly,
+so extracting them does not create parallel test-only implementations.
 
 ## Patterns applied for the cleared cases
 
@@ -46,6 +65,22 @@ The inventory above was measured directly after the 0.9.0 quick-win pass.
 - `arr.find(...)!` → explicit `if (!found) return null;` guard.
 - `[a, b]` array → `as Array<[string, string]>` cast for tuple destructure.
 - Derived state setter inside an effect with stale ref → drop the ref and recompute via `useMemo`.
+- Async data reset in an effect → store a result keyed by project/path/query and
+  derive loading/empty state from whether the result matches the current key.
+- Concurrent async searches → invalidate the previous effect generation before
+  applying a response, so a slower earlier request cannot replace the current
+  result or select a stale file.
+- Async retry actions → reset loading and error state in the user event, then
+  reuse the same generation-guarded reader as the initial load.
+- Latest-callback refs used by browser subscriptions → update the ref in a
+  layout effect so events cannot observe a commit-to-passive-effect stale
+  window.
+- Local form state that must reset on identity change → key a small inner
+  component by that identity instead of issuing a reset render from an effect.
+- Picker highlight derived from an external value → initialize it in the open
+  event that needs it, rather than continuously mirroring props into state.
+- Pure helpers exported from component modules → move them to a dedicated
+  library module so Fast Refresh keeps a component-only boundary.
 
 ## Why the remaining warnings stay
 
@@ -62,7 +97,7 @@ No automated fix for these — `eslint --fix` doesn't help.
 
 Each warning needs contextual analysis:
 
-- **`set-state-in-effect`** (58 hits) — usually means "reset state on
+- **`set-state-in-effect`** (43 hits) — usually means "reset state on
   prop change" or "derive state from props with a side-effect".
   Three legitimate fixes per case:
   - Replace with `useMemo` (when no real side effect)
@@ -71,14 +106,14 @@ Each warning needs contextual analysis:
   - Use `useEffectEvent` (not yet stable in React 19) or accept and
     document the pattern (when external side-effect is unavoidable
     e.g. `stopTts()` on disc switch).
-- **`exhaustive-deps`** (18 hits) — half are stable callbacks that
+- **`exhaustive-deps`** (13 hits) — half are stable callbacks that
   could move into `useCallback` (mechanical fix), half are
   derived-state-with-loop traps (need split effects).
-- **`refs`** (13 hits) — refs storing non-DOM values. Sometimes
+- **`refs`** (5 hits) — refs storing non-DOM values. Sometimes
   safe to migrate to `useState` + `useEffect` pair, sometimes not
   (the ref's stability is load-bearing for race guards — see
   `feedback_race_guards.md`).
-- **`immutability`** (27 hits) — mutation in render. Almost always
+- **`immutability`** (21 hits) — mutation in render. Almost always
   fixable by hoisting the value into a `useMemo`.
 
 Recompute per-file hotspots from the JSON lint output before each pass; the

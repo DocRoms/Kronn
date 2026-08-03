@@ -34,7 +34,7 @@
  *
  * # When to run
  *
- *   pnpm exec playwright test e2e/specs/codex-real-introspection.spec.ts
+ *   KRONN_REAL_AGENT_E2E=1 pnpm exec playwright test e2e/specs/codex-real-introspection.spec.ts
  *
  * Don't add to CI — needs the prod backend on :3140 with the user's
  * Anthropic creds, burns Claude tokens on every run.
@@ -70,14 +70,13 @@ let log = '';
 // Anthropic blip doesn't double the bill.
 test.describe.configure({ mode: 'serial', timeout: 240_000, retries: 0 });
 
-// This spec is explicitly NOT meant to run in CI (cf. file-level docstring
-// "Don't add to CI — needs the prod backend on :3140 with the user's
-// Anthropic creds, burns Claude tokens on every run"). Without this guard
-// the spec ran on GitHub Actions and timed out at 240s on every push because
-// no Claude binary is installed on the runner and no creds exist. CI-skip
-// makes the spec a noop in CI while keeping it runnable locally where the
-// user has both the binary and the budget.
-test.skip(!!process.env.CI, 'real-agent spec — local-only (Anthropic creds + Claude binary required, tokens billed per run)');
+// Never spend tokens or depend on the operator's credentials/rate limits from
+// the default regression command. Release validation opts into this canary
+// deliberately when its external prerequisites are ready.
+test.skip(
+  process.env.KRONN_REAL_AGENT_E2E !== '1',
+  'real-agent spec — set KRONN_REAL_AGENT_E2E=1 (credentials + billed tokens required)',
+);
 
 test.describe('Introspection bridge — real ClaudeCode run on prod', () => {
   test.beforeAll(async ({ request }) => {

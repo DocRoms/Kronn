@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { render, screen, act, cleanup, fireEvent } from '@testing-library/react';
+import { render, screen, act, cleanup, fireEvent, waitFor } from '@testing-library/react';
 import { I18nProvider } from '../../lib/I18nContext';
 import { TourProvider } from '../../components/tour/TourProvider';
 
@@ -26,7 +26,7 @@ vi.mock('../../lib/api', () => ({
     getScanDepth: vi.fn().mockResolvedValue(4),
     getScanPaths: vi.fn().mockResolvedValue(['/home/user/repos']),
     getScanIgnore: vi.fn().mockResolvedValue(['node_modules', '.git']),
-    getServerConfig: vi.fn().mockResolvedValue({ host: '127.0.0.1', port: 3140, domain: null, max_concurrent_agents: 5, auth_enabled: true }),
+    getServerConfig: vi.fn().mockResolvedValue({ host: '127.0.0.1', port: 3140, domain: null, max_concurrent_agents: 5, auth_enabled: true, discussion_notes_enabled: true }),
     setServerConfig: vi.fn().mockResolvedValue(undefined),
     getNetworkExposure: vi.fn().mockResolvedValue({ exposed: false, restart_required: false, port: 3140, reachable_ips: [] }),
     setNetworkExposure: vi.fn().mockResolvedValue({ exposed: false, restart_required: false, port: 3140, reachable_ips: [] }),
@@ -96,6 +96,10 @@ vi.mock('../../lib/api', () => ({
     setDefaultSkills: vi.fn().mockResolvedValue(true),
     setDefaultProfile: vi.fn().mockResolvedValue(true),
   },
+  mcps: {
+    hostDiscovery: vi.fn().mockResolvedValue([]),
+    adoptHost: vi.fn().mockResolvedValue(undefined),
+  },
   profiles: {
     list: vi.fn().mockResolvedValue([]),
     get: vi.fn(),
@@ -139,9 +143,24 @@ vi.mock('../../lib/api', () => ({
       agents_detected: [],
     }),
   },
+  debugApi: {
+    getLogs: vi.fn().mockResolvedValue({
+      lines: [],
+      buffered: 0,
+      capacity: 1_000,
+    }),
+    clearLogs: vi.fn().mockResolvedValue(undefined),
+  },
+  userContext: {
+    list: vi.fn().mockResolvedValue([]),
+    get: vi.fn(),
+    upsert: vi.fn(),
+    delete: vi.fn(),
+  },
 }));
 
 import { SettingsPage } from '../SettingsPage';
+import { config as configApi } from '../../lib/api';
 import type { AgentsConfig, AgentDetection } from '../../types/generated';
 import type { ToastFn } from '../../hooks/useToast';
 
@@ -197,6 +216,20 @@ const defaultProps = {
 };
 
 describe('SettingsPage', () => {
+  it('persists the discussion-note composer toggle', async () => {
+    await wrap(<SettingsPage {...defaultProps} />);
+    const heading = screen.getByText('Notes de discussion hors contexte');
+    const toggle = heading.closest('.mb-8')?.querySelector<HTMLElement>('[role="switch"]');
+    expect(toggle).toHaveAttribute('aria-checked', 'true');
+
+    fireEvent.click(toggle!);
+
+    await waitFor(() => expect(configApi.setServerConfig).toHaveBeenCalledWith({
+      discussion_notes_enabled: false,
+    }));
+    expect(toggle).toHaveAttribute('aria-checked', 'false');
+  });
+
   it('renders all main sections', async () => {
     await wrap(<SettingsPage {...defaultProps} agents={[sampleAgent]} />);
     const body = document.body.textContent!;

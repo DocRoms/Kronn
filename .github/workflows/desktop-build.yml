@@ -9,7 +9,12 @@ permissions:
   contents: write
 
 jobs:
+  dependency-review:
+    name: Pre-release dependency review
+    uses: ./.github/workflows/dependency-review.yml
+
   build-desktop:
+    needs: dependency-review
     strategy:
       fail-fast: false
       matrix:

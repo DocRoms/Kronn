@@ -161,7 +161,7 @@ describe('DiscussionSidebar — grouping', () => {
 
     expect(screen.getByText('Global one')).toBeInTheDocument();
     // The global group header uses key '__global__'.
-    const globalBtn = screen.getByText('disc.general').closest('button')!;
+    const globalBtn = screen.getByText('disc.noProject').closest('button')!;
     expect(globalBtn).toHaveAttribute('aria-expanded', 'true');
     fireEvent.click(globalBtn);
     expect(onToggleGroup).toHaveBeenCalledWith('__global__');
@@ -181,11 +181,30 @@ describe('DiscussionSidebar — grouping', () => {
     await waitFor(() => expect(projectsApi.discSources).toHaveBeenCalled());
 
     // Header still renders, but the disc inside is collapsed away.
-    expect(screen.getByText('disc.general')).toBeInTheDocument();
+    expect(screen.getByText('disc.noProject')).toBeInTheDocument();
     expect(screen.queryByText('Hidden global thread')).toBeNull();
     // Collapsed header reports aria-expanded=false.
-    const globalBtn = screen.getByText('disc.general').closest('button')!;
+    const globalBtn = screen.getByText('disc.noProject').closest('button')!;
     expect(globalBtn).toHaveAttribute('aria-expanded', 'false');
+  });
+
+  it('collapses the complete canonical tree behind the Projects section', async () => {
+    const onToggleGroup = vi.fn();
+    render(
+      <DiscussionSidebar
+        {...baseProps}
+        discussions={[mkDisc({ id: 'g1', project_id: null, title: 'Canonical thread' })]}
+        collapsedGroups={new Set(['__projects__'])}
+        onToggleGroup={onToggleGroup}
+      />,
+    );
+    await waitFor(() => expect(projectsApi.discSources).toHaveBeenCalled());
+
+    const projectsButton = screen.getByText('projects.title').closest('button')!;
+    expect(projectsButton).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByText('Canonical thread')).toBeNull();
+    fireEvent.click(projectsButton);
+    expect(onToggleGroup).toHaveBeenCalledWith('__projects__');
   });
 
   it('clicking a project folder fires onToggleGroup with the project id', async () => {
@@ -219,11 +238,10 @@ describe('DiscussionSidebar — grouping', () => {
     render(<DiscussionSidebar {...baseProps} discussions={discussions} onSelect={onSelect} />);
     await waitFor(() => expect(projectsApi.discSources).toHaveBeenCalled());
 
-    // The disc row is role="button" — selection is wired to Enter/Space
-    // (keyboard) + pointerup (swipe-aware). fireEvent.click doesn't trip
-    // the pointer path, so we drive the keyboard handler.
+    // The row is a native button: its click path is shared by pointer and
+    // keyboard activation (the browser synthesizes click for Enter/Space).
     const row = screen.getByRole('button', { name: /Click me/ });
-    fireEvent.keyDown(row, { key: 'Enter' });
+    fireEvent.click(row);
     expect(onSelect).toHaveBeenCalledWith('d1', 7);
   });
 });
@@ -292,31 +310,30 @@ describe('DiscussionSidebar — pinned / favorites section', () => {
   });
 });
 
-describe('DiscussionSidebar — search filter', () => {
+describe('DiscussionSidebar — global search entry point', () => {
   const discussions = [
     mkDisc({ id: 'aabbccdd', project_id: null, title: 'Apple pie recipe' }),
     mkDisc({ id: 'eeff0011', project_id: null, title: 'Banana bread' }),
   ];
 
-  it('narrows the list by title substring and clears via the X button', async () => {
+  it('keeps the local tree stable while the user composes a global query', async () => {
     render(<DiscussionSidebar {...baseProps} discussions={discussions} />);
     await waitFor(() => expect(projectsApi.discSources).toHaveBeenCalled());
 
     const input = document.querySelector('.disc-search-input') as HTMLInputElement;
     fireEvent.change(input, { target: { value: 'banana' } });
 
-    await waitFor(() => {
-      expect(screen.queryByText('Apple pie recipe')).toBeNull();
-      expect(screen.getByText('Banana bread')).toBeInTheDocument();
-    });
+    // The field searches the backend on Enter. It must not remount/filter the
+    // potentially huge local tree on every keystroke.
+    expect(screen.getByText('Apple pie recipe')).toBeInTheDocument();
+    expect(screen.getByText('Banana bread')).toBeInTheDocument();
 
-    // Clear button resets the filter and both discs return.
+    // Clear resets the shared query without changing the list.
     const clearBtn = screen.getByLabelText('disc.searchClear');
     fireEvent.click(clearBtn);
-    await waitFor(() => {
-      expect(screen.getByText('Apple pie recipe')).toBeInTheDocument();
-      expect(screen.getByText('Banana bread')).toBeInTheDocument();
-    });
+    expect(input.value).toBe('');
+    expect(screen.getByText('Apple pie recipe')).toBeInTheDocument();
+    expect(screen.getByText('Banana bread')).toBeInTheDocument();
   });
 
   it('uses one query when switching from quick to advanced search', async () => {
@@ -351,7 +368,7 @@ describe('DiscussionSidebar — search filter', () => {
 
     const advancedInput = screen.getByTestId('global-search-input') as HTMLInputElement;
     expect(advancedInput.value).toBe('banana');
-    expect(screen.getByPlaceholderText('disc.searchPlaceholder')).not.toBeVisible();
+    expect(document.querySelector('.disc-search-input')).not.toBeVisible();
   });
 
   it('clears the shared query when advanced search is closed', async () => {
@@ -389,65 +406,89 @@ describe('DiscussionSidebar — search filter', () => {
         onOpenGlobalSearch={noop}
       />,
     );
-    expect((screen.getByPlaceholderText('disc.searchPlaceholder') as HTMLInputElement).value)
+    expect((screen.getByPlaceholderText('disc.globalSearch.placeholder') as HTMLInputElement).value)
       .toBe('');
     expect(screen.getByText('Apple pie recipe')).toBeInTheDocument();
     expect(screen.getByText('Banana bread')).toBeInTheDocument();
   });
 
-  it('matches on an id prefix (paste-an-id-to-jump)', async () => {
+});
+
+describe('DiscussionSidebar — high-volume smart sections', () => {
+  it('shows unique Follow up / Favorites / Recent shortcuts above the canonical tree', async () => {
+    const discussions = Array.from({ length: 20 }, (_, index) => mkDisc({
+      id: `smart-${index}`,
+      title: `Smart discussion ${index}`,
+      pinned: index === 0 || index === 1,
+      non_system_message_count: index === 2 ? 3 : 0,
+      message_count: index === 2 ? 3 : 0,
+      updated_at: `2026-07-${String(20 + Math.min(index, 9)).padStart(2, '0')}T10:00:00Z`,
+    }));
+
+    render(
+      <DiscussionSidebar
+        {...baseProps}
+        discussions={discussions}
+        sendingMap={{ 'smart-1': true }}
+      />,
+    );
+    await waitFor(() => expect(projectsApi.discSources).toHaveBeenCalled());
+
+    const followUp = document.querySelector('.disc-sidebar-follow-up') as HTMLElement;
+    const favorites = document.querySelector('.disc-sidebar-favorites') as HTMLElement;
+    const recent = document.querySelector('.disc-sidebar-recent') as HTMLElement;
+    expect(followUp).not.toBeNull();
+    expect(favorites).not.toBeNull();
+    expect(recent).not.toBeNull();
+
+    // Running wins over pinned, unread joins Follow up, and neither leaks into
+    // another smart section. The canonical project/general tree still contains
+    // every discussion below those shortcuts.
+    expect(within(followUp).getByText('Smart discussion 1')).toBeInTheDocument();
+    expect(within(followUp).getByText('Smart discussion 2')).toBeInTheDocument();
+    expect(within(favorites).queryByText('Smart discussion 1')).toBeNull();
+    expect(within(favorites).getByText('Smart discussion 0')).toBeInTheDocument();
+    expect(within(recent).queryByText('Smart discussion 0')).toBeNull();
+    expect(within(recent).queryByText('Smart discussion 1')).toBeNull();
+    expect(within(recent).queryByText('Smart discussion 2')).toBeNull();
+  });
+
+  it('caps shortcut rows until the user explicitly asks for the rest', async () => {
+    const discussions = Array.from({ length: 20 }, (_, index) => mkDisc({
+      id: `unread-${index}`,
+      title: `Unread discussion ${index}`,
+      non_system_message_count: 2,
+      message_count: 2,
+      updated_at: `2026-07-${String(1 + index).padStart(2, '0')}T10:00:00Z`,
+    }));
+
     render(<DiscussionSidebar {...baseProps} discussions={discussions} />);
     await waitFor(() => expect(projectsApi.discSources).toHaveBeenCalled());
 
-    const input = document.querySelector('.disc-search-input') as HTMLInputElement;
-    fireEvent.change(input, { target: { value: 'aabb' } });
-
-    await waitFor(() => {
-      // aabbccdd matches by id-prefix → Apple stays; Banana filtered out.
-      expect(screen.getByText('Apple pie recipe')).toBeInTheDocument();
-      expect(screen.queryByText('Banana bread')).toBeNull();
-    });
+    const followUp = document.querySelector('.disc-sidebar-follow-up') as HTMLElement;
+    expect(within(followUp).getAllByRole('button', { name: /Unread discussion/ })).toHaveLength(5);
+    fireEvent.click(within(followUp).getByText(/15 disc\.showMore/));
+    expect(within(followUp).getAllByRole('button', { name: /Unread discussion/ })).toHaveLength(20);
   });
+});
 
-  it('a no-match query hides every disc', async () => {
+describe('DiscussionSidebar — archive paging', () => {
+  it('mounts archived discussions 50 at a time', async () => {
+    const discussions = Array.from({ length: 55 }, (_, index) => mkDisc({
+      id: `archive-${index}`,
+      title: `Archived discussion ${index}`,
+      archived: true,
+      updated_at: `2026-06-${String(1 + (index % 28)).padStart(2, '0')}T10:00:00Z`,
+    }));
+
     render(<DiscussionSidebar {...baseProps} discussions={discussions} />);
     await waitFor(() => expect(projectsApi.discSources).toHaveBeenCalled());
 
-    const input = document.querySelector('.disc-search-input') as HTMLInputElement;
-    fireEvent.change(input, { target: { value: 'zzz-nothing-here' } });
+    fireEvent.click(screen.getByText('disc.archived'));
+    expect(document.querySelectorAll('.disc-item-title-text')).toHaveLength(50);
 
-    await waitFor(() => {
-      expect(screen.queryByText('Apple pie recipe')).toBeNull();
-      expect(screen.queryByText('Banana bread')).toBeNull();
-    });
-  });
-
-  it('a search hides empty project folders + non-matching favorites', async () => {
-    const projects = [mkProject('p-acme', 'AcmeRepo', 'git@github.com:acme-org/AcmeRepo.git')];
-    const discussions = [
-      // A favorite that does NOT match the query — must disappear during search.
-      mkDisc({ id: 'fav1', pinned: true, pin_first_message: false, title: 'Pinned unrelated note' }),
-      // A project disc that does NOT match — its folder must vanish entirely.
-      mkDisc({ id: 'pj1', project_id: 'p-acme', title: 'AcmeRepo chore' }),
-      // The one we're hunting for.
-      mkDisc({ id: 'tgt', project_id: null, title: 'Ticket EW-7149 UTM bug' }),
-    ];
-    render(<DiscussionSidebar {...baseProps} projects={projects} discussions={discussions} />);
-    await waitFor(() => expect(projectsApi.discSources).toHaveBeenCalled());
-
-    const input = document.querySelector('.disc-search-input') as HTMLInputElement;
-    fireEvent.change(input, { target: { value: 'ew-7149' } });
-
-    await waitFor(() => {
-      // The match shows …
-      expect(screen.getByText('Ticket EW-7149 UTM bug')).toBeInTheDocument();
-      // … the non-matching favorite + its section are gone …
-      expect(screen.queryByText('Pinned unrelated note')).toBeNull();
-      expect(screen.queryByText('disc.favorites')).toBeNull();
-      // … and the empty project folder header (AcmeRepo) is gone too.
-      expect(screen.queryByText('AcmeRepo chore')).toBeNull();
-      expect(screen.queryByText('AcmeRepo')).toBeNull();
-    });
+    fireEvent.click(screen.getByText('+ 5 disc.showMore'));
+    expect(document.querySelectorAll('.disc-item-title-text')).toHaveLength(55);
   });
 });
 
@@ -488,6 +529,9 @@ describe('DiscussionSidebar — batch groups', () => {
     mkDisc({ id: 'b2', project_id: 'p1', workflow_run_id: runId, title: 'EW-100 — agent B', message_count: 4 }),
   ];
   const projects = [mkProject('p1', 'ProjectAlpha')];
+  const openBatchMenu = () => {
+    fireEvent.click(screen.getByRole('button', { name: 'disc.batchMoreActions' }));
+  };
 
   it('renders a batch folder with a done status pastille', async () => {
     const summaries = [mkBatchSummary({
@@ -505,10 +549,20 @@ describe('DiscussionSidebar — batch groups', () => {
     );
     await waitFor(() => expect(projectsApi.discSources).toHaveBeenCalled());
 
-    // Folder labelled by the QP name, glyph from the QP icon.
+    // The hierarchy is stable even for one run: QP → run → discussions.
+    const campaign = document.querySelector('[data-batch-campaign-key="batch-only::run-123"]');
     const wrap = document.querySelector('[data-batch-key="batch::run-123"]');
+    expect(campaign).not.toBeNull();
     expect(wrap).not.toBeNull();
-    expect(wrap!.textContent).toContain('Compare agents');
+    expect(campaign!.textContent).toContain('Compare agents');
+    expect(within(campaign as HTMLElement).getAllByText('Compare agents')).toHaveLength(1);
+    expect(wrap!.textContent).not.toContain('Compare agents');
+    expect(screen.getByLabelText('disc.batchCampaignStats:1,2')).toBeInTheDocument();
+    const runHeader = wrap!.querySelector<HTMLElement>('.disc-batch-header')!;
+    expect(runHeader).toHaveAttribute('data-compact', 'true');
+    // The campaign tree already owns the indentation. An extra inline margin
+    // squeezed the timestamp/status row and made it wrap on narrow sidebars.
+    expect(runHeader.style.marginLeft).toBe('');
     // 2/2 messages ≥ 2 and none sending → "✓ 2/2" done pill.
     const pill = wrap!.querySelector('[data-batch-status]');
     expect(pill).not.toBeNull();
@@ -554,9 +608,8 @@ describe('DiscussionSidebar — batch groups', () => {
     );
     await waitFor(() => expect(projectsApi.discSources).toHaveBeenCalled());
 
-    const pill = document.querySelector('.disc-batch-parent-pill') as HTMLButtonElement;
-    expect(pill).not.toBeNull();
-    fireEvent.click(pill);
+    openBatchMenu();
+    fireEvent.click(screen.getByRole('button', { name: /Nightly Audit/ }));
     expect(onNavigateWorkflow).toHaveBeenCalledWith('wf-99');
   });
 
@@ -577,9 +630,8 @@ describe('DiscussionSidebar — batch groups', () => {
     );
     await waitFor(() => expect(projectsApi.discSources).toHaveBeenCalled());
 
-    const delBtn = document.querySelector('.disc-batch-delete') as HTMLButtonElement;
-    expect(delBtn).not.toBeNull();
-    fireEvent.click(delBtn);
+    openBatchMenu();
+    fireEvent.click(screen.getByRole('button', { name: 'disc.batchDeleteAction' }));
     expect(confirmStub).toHaveBeenCalled();
     expect(onDeleteBatch).toHaveBeenCalledWith(runId, 2);
   });
@@ -604,9 +656,8 @@ describe('DiscussionSidebar — batch groups', () => {
     );
     await waitFor(() => expect(projectsApi.discSources).toHaveBeenCalled());
 
-    const retryBtn = document.querySelector('.disc-batch-retry') as HTMLButtonElement;
-    expect(retryBtn).not.toBeNull();
-    fireEvent.click(retryBtn);
+    openBatchMenu();
+    fireEvent.click(screen.getByRole('button', { name: /disc\.batchRetryAction/ }));
     expect(confirmStub).toHaveBeenCalled();
     expect(onRetryBatch).toHaveBeenCalledWith(runId, 'qp-7', ['b1', 'b2']);
   });
@@ -628,10 +679,31 @@ describe('DiscussionSidebar — batch groups', () => {
     );
     await waitFor(() => expect(projectsApi.discSources).toHaveBeenCalled());
 
-    const reviewBtn = document.querySelector('.disc-batch-review') as HTMLButtonElement;
-    expect(reviewBtn).not.toBeNull();
-    fireEvent.click(reviewBtn);
+    openBatchMenu();
+    fireEvent.click(screen.getByRole('button', { name: 'disc.batchReviewAction' }));
     expect(onReviewBatch).toHaveBeenCalledWith(runId, 'Analyse tickets', ['b1', 'b2']);
+  });
+
+  it('moves focus into the action disclosure and restores it on Escape', async () => {
+    render(
+      <DiscussionSidebar
+        {...baseProps}
+        projects={projects}
+        discussions={batchDiscs}
+        batchSummaries={[mkBatchSummary({ run_id: runId, quick_prompt_name: 'Compare agents' })]}
+        onReviewBatch={vi.fn()}
+      />
+    );
+    await waitFor(() => expect(projectsApi.discSources).toHaveBeenCalled());
+
+    const trigger = screen.getByRole('button', { name: 'disc.batchMoreActions' });
+    fireEvent.click(trigger);
+    const action = screen.getByRole('button', { name: 'disc.batchReviewAction' });
+    await waitFor(() => expect(action).toHaveFocus());
+
+    fireEvent.keyDown(window, { key: 'Escape' });
+    await waitFor(() => expect(trigger).toHaveFocus());
+    expect(screen.queryByRole('group', { name: 'disc.batchMoreActions' })).toBeNull();
   });
 
   it('cancelling the delete confirm does NOT call onDeleteBatch', async () => {
@@ -649,12 +721,13 @@ describe('DiscussionSidebar — batch groups', () => {
     );
     await waitFor(() => expect(projectsApi.discSources).toHaveBeenCalled());
 
-    fireEvent.click(document.querySelector('.disc-batch-delete') as HTMLButtonElement);
+    openBatchMenu();
+    fireEvent.click(screen.getByRole('button', { name: 'disc.batchDeleteAction' }));
     expect(onDeleteBatch).not.toHaveBeenCalled();
   });
 
-  it('toggling a batch folder fires onToggleGroup with the batch:: key', async () => {
-    const onToggleGroup = vi.fn();
+  it('toggling a batch folder uses the non-persisted run expansion callback', async () => {
+    const onToggleBatchRun = vi.fn();
     const summaries = [mkBatchSummary({ run_id: runId, quick_prompt_name: 'Compare agents' })];
     render(
       <DiscussionSidebar
@@ -662,15 +735,80 @@ describe('DiscussionSidebar — batch groups', () => {
         projects={projects}
         discussions={batchDiscs}
         batchSummaries={summaries}
-        onToggleGroup={onToggleGroup}
+        onToggleBatchRun={onToggleBatchRun}
       />
     );
     await waitFor(() => expect(projectsApi.discSources).toHaveBeenCalled());
 
     const wrap = document.querySelector('[data-batch-key="batch::run-123"]')!;
-    const folderBtn = within(wrap as HTMLElement).getByRole('button', { name: /Compare agents/ });
+    const folderBtn = wrap.querySelector<HTMLButtonElement>('button[data-variant="batch"]')!;
     fireEvent.click(folderBtn);
-    expect(onToggleGroup).toHaveBeenCalledWith('batch::run-123');
+    expect(onToggleBatchRun).toHaveBeenCalledWith('run-123');
+  });
+
+  it('groups repeated runs of one Quick Prompt under a single compact heading', async () => {
+    const runTwo = 'run-456';
+    const discussions = [
+      ...batchDiscs,
+      mkDisc({ id: 'b3', project_id: 'p1', workflow_run_id: runTwo, title: 'EW-200 — agent A', message_count: 4 }),
+      mkDisc({ id: 'b4', project_id: 'p1', workflow_run_id: runTwo, title: 'EW-200 — agent B', message_count: 4 }),
+    ];
+    const summaries = [
+      mkBatchSummary({
+        run_id: runId,
+        quick_prompt_id: 'qp-review',
+        quick_prompt_name: 'PR Review 3.3 shadow',
+        quick_prompt_icon: '🔎',
+      }),
+      mkBatchSummary({
+        run_id: runTwo,
+        quick_prompt_id: 'qp-review',
+        quick_prompt_name: 'PR Review 3.3 shadow',
+        quick_prompt_icon: '🔎',
+      }),
+    ];
+
+    render(
+      <DiscussionSidebar
+        {...baseProps}
+        projects={projects}
+        discussions={discussions}
+        batchSummaries={summaries}
+      />
+    );
+    await waitFor(() => expect(projectsApi.discSources).toHaveBeenCalled());
+
+    const campaign = document.querySelector('[data-batch-campaign-key="qp-batches::qp-review"]')!;
+    expect(campaign).not.toBeNull();
+    expect(within(campaign as HTMLElement).getAllByText('PR Review 3.3 shadow')).toHaveLength(1);
+    expect(within(campaign as HTMLElement).getByLabelText('disc.batchCampaignStats:2,4')).toBeInTheDocument();
+    expect(campaign.textContent).toContain('🔀 2');
+    expect(campaign.textContent).toContain('💬 4');
+    const runRows = campaign.querySelectorAll('.disc-batch-header[data-compact="true"]');
+    expect(runRows).toHaveLength(2);
+    for (const row of runRows) expect(row.textContent).not.toContain('PR Review 3.3 shadow');
+    expect(campaign.textContent).toContain('disc.batchRunId:run123');
+    expect(campaign.textContent).toContain('disc.batchRunId:run456');
+    // Individual conversations are lazy-mounted: four historical runs no
+    // longer flood the sidebar until the user opens the chosen execution.
+    expect(screen.queryByText('EW-100 — agent A')).toBeNull();
+    expect(screen.queryByText('EW-200 — agent A')).toBeNull();
+  });
+
+  it('auto-opens the active run even when historical batch children default closed', async () => {
+    render(
+      <DiscussionSidebar
+        {...baseProps}
+        projects={projects}
+        discussions={batchDiscs}
+        activeId="b1"
+        batchSummaries={[mkBatchSummary({ run_id: runId, quick_prompt_name: 'Compare agents' })]}
+      />
+    );
+    await waitFor(() => expect(projectsApi.discSources).toHaveBeenCalled());
+
+    expect(screen.getByText('EW-100 — agent A')).toBeInTheDocument();
+    expect(screen.getByText('EW-100 — agent B')).toBeInTheDocument();
   });
 });
 

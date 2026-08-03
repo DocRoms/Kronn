@@ -377,6 +377,30 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "100_message_cli_authors",
         include_str!("sql/100_message_cli_authors.sql"),
     ),
+    (
+        "101_discussion_workspaces",
+        include_str!("sql/101_discussion_workspaces.sql"),
+    ),
+    (
+        "102_planning_task_idempotency",
+        include_str!("sql/102_planning_task_idempotency.sql"),
+    ),
+    (
+        "103_project_dependency_monitoring",
+        include_str!("sql/103_project_dependency_monitoring.sql"),
+    ),
+    (
+        "104_message_channels",
+        include_str!("sql/104_message_channels.sql"),
+    ),
+    (
+        "105_user_turn_catchup",
+        include_str!("sql/105_user_turn_catchup.sql"),
+    ),
+    (
+        "106_awareness_offered_cursor",
+        include_str!("sql/106_awareness_offered_cursor.sql"),
+    ),
 ];
 
 /// Run all migrations, optionally backing up the database file first.
@@ -835,6 +859,36 @@ mod tests {
     }
 
     #[test]
+    fn message_channels_migration_registers_column_and_lookup_index() {
+        let conn = Connection::open_in_memory().unwrap();
+        run(&conn).unwrap();
+
+        let has_column: bool = conn
+            .query_row(
+                "SELECT EXISTS(
+                     SELECT 1 FROM pragma_table_info('messages')
+                     WHERE name = 'channel'
+                 )",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let has_index: bool = conn
+            .query_row(
+                "SELECT EXISTS(
+                     SELECT 1 FROM sqlite_master
+                     WHERE type = 'index' AND name = 'idx_messages_discussion_channel_sort'
+                 )",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert!(has_column);
+        assert!(has_index);
+    }
+
+    #[test]
     fn discussion_session_conversation_id_migration_adds_nullable_column() {
         let conn = Connection::open_in_memory().unwrap();
         run(&conn).unwrap();
@@ -910,6 +964,59 @@ mod tests {
 
         assert!(has_table);
         assert!(has_index);
+    }
+
+    #[test]
+    fn discussion_workspaces_migration_backfills_attached_and_unlocked_legacy_rows() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_through(&conn, "100_message_cli_authors").unwrap();
+        conn.execute(
+            "INSERT INTO projects (id, name, path, created_at, updated_at)
+             VALUES ('p-ws', 'Workspace', '/repo', '2026-01-01', '2026-01-01')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO discussions (
+                 id, project_id, title, created_at, updated_at, workspace_mode,
+                 workspace_path, worktree_branch
+             ) VALUES
+                 ('d-attached', 'p-ws', 'Attached', '2026-01-01', '2026-01-02',
+                  'Isolated', '/repo/.kronn/worktrees/attached', 'kronn/attached'),
+                 ('d-detached', 'p-ws', 'Detached', '2026-01-01', '2026-01-03',
+                  'Isolated', NULL, 'kronn/detached')",
+            [],
+        )
+        .unwrap();
+
+        run(&conn).unwrap();
+
+        let attached: (String, String, Option<String>) = conn
+            .query_row(
+                "SELECT ownership, state, canonical_path
+                   FROM discussion_workspaces WHERE disc_id = 'd-attached'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            attached,
+            (
+                "managed".into(),
+                "attached".into(),
+                Some("/repo/.kronn/worktrees/attached".into())
+            )
+        );
+
+        let detached: (String, Option<String>) = conn
+            .query_row(
+                "SELECT state, workspace_path
+                   FROM discussion_workspaces WHERE disc_id = 'd-detached'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(detached, ("detached".into(), None));
     }
 
     #[test]

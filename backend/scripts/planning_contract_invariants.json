@@ -30,6 +30,11 @@
     "fr": "ne recharge ou réécris jamais une tâche inchangée",
     "es": "nunca recargues o reescribas una tarea sin cambios"
   },
+  "read_before_direct_create": {
+    "en": "Immediately before any direct `task_create`, call `plan_get` again",
+    "fr": "Juste avant tout `task_create` direct, rappelle `plan_get`",
+    "es": "Justo antes de cualquier `task_create` directo, vuelve a llamar a `plan_get`"
+  },
   "stale_surface_fallback": {
     "en": "read-only `plan_snapshot`",
     "fr": "instantané `plan_snapshot`",

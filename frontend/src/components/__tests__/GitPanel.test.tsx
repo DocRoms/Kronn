@@ -40,6 +40,7 @@ vi.mock('../../lib/api', () => ({
     prTemplate: vi.fn().mockResolvedValue({ title: '', body: '' }),
   },
   discussions: {
+    workspaces: vi.fn().mockResolvedValue([]),
     gitStatus: vi.fn().mockImplementation(() => Promise.resolve(gitStatusOverride ?? makeMockGitStatus())),
     gitDiff: vi.fn().mockResolvedValue({ diff: '@@ diff content @@' }),
     gitCommit: vi.fn().mockResolvedValue({}),

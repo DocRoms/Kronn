@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { Send } from 'lucide-react';
 import type { AgentQuestion } from '../lib/agent-question-parse';
 import { composeAnswers } from '../lib/agent-question-parse';
@@ -31,16 +31,20 @@ interface Props {
  * ignore the structured path entirely and type a free-form reply.
  */
 export function AgentQuestionForm({ questions, discussionId, onSubmit, t }: Props) {
-  const [answers, setAnswers] = useState<Record<string, string>>({});
-
-  // Reset state when the user switches discussion OR the agent produces a
-  // new message with a different question set. Keying by (disc + vars)
-  // covers both: switching disc changes discussionId, a new question set
-  // on the same disc changes the joined var list.
   const signature = `${discussionId}:${questions.map(q => q.var).join(',')}`;
-  useEffect(() => {
-    setAnswers({});
-  }, [signature]);
+  return (
+    <AgentQuestionFields
+      key={signature}
+      questions={questions}
+      discussionId={discussionId}
+      onSubmit={onSubmit}
+      t={t}
+    />
+  );
+}
+
+function AgentQuestionFields({ questions, onSubmit, t }: Props) {
+  const [answers, setAnswers] = useState<Record<string, string>>({});
 
   const allRequired = questions.every(q => (answers[q.var] ?? '').trim().length > 0);
 

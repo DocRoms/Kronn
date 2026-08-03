@@ -39,6 +39,7 @@ vi.mock('../../lib/api', () => ({
 import { CustomApiAiHelper } from '../CustomApiAiHelper';
 import type { CustomApiAiHelperProps } from '../CustomApiAiHelper';
 import type { AgentType } from '../../types/generated';
+import { __setLocaleLoadersForTests, loadLocale } from '../../lib/i18n';
 
 const t: CustomApiAiHelperProps['t'] = (key, ...args) =>
   args.length === 0 ? key : `${key}(${args.join(',')})`;
@@ -106,6 +107,27 @@ describe('CustomApiAiHelper — startWithAgent', () => {
 });
 
 describe('CustomApiAiHelper — send message', () => {
+  it('restores the draft and unlocks sending when locale preload fails', async () => {
+    await openChat();
+    const restore = __setLocaleLoadersForTests({
+      fr: async () => ({ default: {} }),
+      en: async () => { throw new Error('locale chunk unavailable'); },
+      es: async () => ({ default: {} }),
+    });
+    try {
+      const textarea = screen.getByPlaceholderText(/mcp.custom.helper.inputPlaceholder/) as HTMLTextAreaElement;
+      fireEvent.change(textarea, { target: { value: 'keep this draft' } });
+      await act(async () => fireEvent.keyDown(textarea, { key: 'Enter' }));
+
+      await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('locale chunk unavailable'));
+      expect(textarea.value).toBe('keep this draft');
+      expect(streamMock).not.toHaveBeenCalled();
+    } finally {
+      restore();
+      await Promise.all([loadLocale('fr'), loadLocale('en'), loadLocale('es')]);
+    }
+  });
+
   it('guards empty input (no stream fired)', async () => {
     await openChat();
     const textarea = screen.getByPlaceholderText(/mcp.custom.helper.inputPlaceholder/) as HTMLTextAreaElement;

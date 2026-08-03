@@ -63,9 +63,13 @@ export function composerMentions(
     if (!canonical) continue;
     const ordinal = (ordinalByAgent.get(type) ?? 0) + 1;
     ordinalByAgent.set(type, ordinal);
+    const trigger = `${canonical.trigger}-cli${ordinal > 1 ? `-${ordinal}` : ''}`;
     options.push({
-      trigger: `${canonical.trigger}-cli${ordinal > 1 ? `-${ordinal}` : ''}`,
-      displayTrigger: canonical.trigger,
+      trigger,
+      // KT-211 — the menu must never show two identities under the same
+      // alias: a joined CLI displays its REAL room alias, not the bare
+      // provider trigger it shares with the punctual agent.
+      displayTrigger: trigger,
       label: ordinal > 1 ? `${labels.cli} ${ordinal}` : labels.cli,
       type,
       target: {

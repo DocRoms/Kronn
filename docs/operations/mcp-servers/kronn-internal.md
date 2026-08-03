@@ -8,8 +8,8 @@
 
 Bidirectional gateway between a CLI agent (Claude Code, Codex, Gemini, Kiro, Vibe in host-launched mode, …) and the Kronn backend. Three tool families :
 
-1. **Discussion introspection** (0.8.3+) — `disc_meta`, `disc_get_message`, `disc_summarize`. Cheap reads of the current Kronn discussion.
-2. **Cross-agent memory** (0.8.4) — `disc_create`, `disc_append`, `disc_link`, `disc_unlink`, `disc_find_by_session`, `disc_search`, `disc_load_other`. Push transcripts in / out of Kronn so the same thread can be picked up by a different agent later.
+1. **Discussion introspection** (0.8.3+) — `disc_meta`, `disc_get_message`, `disc_note_list`, `disc_summarize`. Cheap reads of the current Kronn discussion.
+2. **Cross-agent memory** (0.8.4) — `disc_create`, `disc_append`, `disc_link`, `disc_transfer_session`, `disc_unlink`, `disc_find_by_session`, `disc_search`, `disc_load_other`. Push transcripts in / out of Kronn so the same thread can be picked up by a different agent later.
 3. **Catalog + actions** (0.8.5–0.8.6) — `mcp_list`, `workflow_list`, `qp_list`, `qa_list`, `workflow_create_draft`, `qp_create_draft`, `api_call` (broker that invokes Kronn-configured APIs without credentials in the prompt).
 4. **Multi-agent collab** (0.8.6) — `disc_join` (consume invite token), `disc_wait_for_peer` (long-poll), `disc_leave`. Lets N CLI agents share one Kronn discussion in real time.
    **0.9.2 (KT-76) — surviving an MCP reload without a new token.** `disc_join`
@@ -30,6 +30,17 @@ Bidirectional gateway between a CLI agent (Claude Code, Codex, Gemini, Kiro, Vib
    Both refuse to act rather than guess when no durable identity exists, and
    neither ever passes `force_reassign`: a session owned by another discussion
    is reported, never stolen.
+   When the human explicitly asks to move that durable session after joining a
+   different room, first read its current owner with
+   `disc_find_by_session({})`, then call
+   `disc_transfer_session({from_disc_id: "<exact-old-id>",
+   confirm_transfer: true})`. The pinned source id makes ownership races fail
+   closed; the target is restricted to the room currently joined by the bridge.
+   The bridge also requires the target's local resume credential to be durable
+   on disk before moving server-side ownership.
+   A successful handoff closes the old append-only history row, opens the new
+   one atomically and returns `session_bound: true`. Retrying the same completed
+   transfer is idempotent.
    Codex bridges upgrading from the former PID-keyed scheme accept the old
    owner-only credential during the first MCP-only reload, then persist the
    rotated successor under the conversation-keyed path so a later full
@@ -46,7 +57,23 @@ Bidirectional gateway between a CLI agent (Claude Code, Codex, Gemini, Kiro, Vib
    structurally `codex resume <uuid>`; the anchored parser refuses UUIDs merely
    mentioned inside prompts.
    `[src: file: backend/scripts/disc-introspection-mcp.py:2656-2727]`
-5. **Planning** (0.9.1–0.9.2) — `plan_get`, `task_list`, `task_get` and
+   **0.9.3 (KT-140) — worktree declaration per joined session.**
+   `disc_workspace_get({})` returns the current CLI workspace plus the compact
+   list for the room. `disc_workspace_set({task_ref?})` defaults
+   `workspace_path` to the bridge process's current directory, while the
+   backend canonicalizes the path and reads the real branch and HEAD from Git.
+   Callers never submit guessed branch metadata. The path must be a registered
+   worktree of the discussion project's primary or linked repositories; a
+   physical worktree cannot be owned by two discussions. The declaration
+   response carries compact structured blockers (dirty tree, same-branch
+   concurrency, missing path, repository scope or ambiguous ownership), so
+   agents never need to parse prose errors. The optional task
+   reference creates the bidirectional Planning link shown in both the
+   discussion header and the task detail.
+   `[src: file: backend/src/api/disc_workspace.rs]`
+   `[src: file: backend/src/db/sql/101_discussion_workspaces.sql]`
+   `[src: file: backend/scripts/disc-introspection-mcp.py]`
+5. **Planning** (0.9.1–0.9.3) — `plan_get`, `task_list`, `task_get` and
    `task_changes` provide compact, on-demand task context. Narrow
    `task_create`, `task_update`, `task_update_dod`, `task_link_discussion` and
    `task_add_blocker` writes attribute every change to the calling agent.
@@ -98,6 +125,15 @@ actually needed.
 - Keep the plan honest when tracked work starts or materially changes (status,
   DoD, priority, blocker). Do not reload or rewrite an unchanged task merely
   to report progress.
+- Immediately before a direct `task_create`, call `plan_get` again so another
+  agent's recent write is visible. Direct create accepts an
+  `idempotency_key`; the bridge scopes explicit keys to the current discussion,
+  or derives one from `source_message_id`. A retry with the same key and
+  identical content returns the existing task without a second `created` event.
+  Reusing the key for different content is a conflict. Titles are ordinary
+  content, never identity: distinct keys may create tasks with the same title.
+  Creating several tasks from one source message therefore requires one
+  explicit key per logical task.
 - MCP writes stamp the client-derived agent identity automatically; callers
   may add `source_message_id` for provenance.
 - If the Planning tools named by the contract are absent from the client's
@@ -132,8 +168,11 @@ instruction bodies. After selecting an id, use `skill_get`, `profile_get`, or
   moving the session to another discussion. `GET /api/disc/sources` therefore
   returns several rows for the same `disc_id`; the sidebar renders one chip per
   distinct agent.
-- Set `force_reassign: true` only after an explicit user request to transfer
-  that session; the previous history row is closed and remains auditable.
+- For agents, prefer the dedicated `disc_transfer_session` contract over
+  `disc_link(force_reassign=true)`: it requires the exact previous room plus
+  `confirm_transfer=true`, restricts the target to the currently joined room,
+  and returns a structured durable-binding receipt. The previous history row is
+  closed and remains auditable.
 - `disc_find_by_session` is the idempotent resume lookup for Claude, Codex and
   other CLI session formats. A bare self-lookup resumes even if the server link
   already exists; an explicit third-party lookup remains a pure read. IDs are
@@ -141,6 +180,23 @@ instruction bodies. After selecting an id, use `skill_get`, `profile_get`, or
 These reads reuse the existing list endpoints and do not mutate the library.
 [src: file: backend/scripts/disc-introspection-mcp.py:1044-1088]
 [src: file: backend/scripts/disc-introspection-mcp.py:4223-4234]
+
+## Joined CLI worktrees
+
+- Call `disc_workspace_get({})` before editing when several peers may be
+  active. It is a compact read and derives this bridge's durable identity.
+- Call `disc_workspace_set({task_ref: "KT-140"})` from the worktree root (or
+  pass an explicit `workspace_path`) whenever the CLI changes worktree or
+  branch. Kronn refreshes branch and HEAD from Git on each declaration.
+- External worktrees are adopted, not managed: the discussion can target them
+  for status, diff, commit, push, PR creation and allowlisted terminal commands,
+  but lock/unlock never removes an external path. Legacy Isolated worktrees are
+  backfilled as `managed` and retain their existing lock/unlock flow.
+- The Git panel always makes its target explicit when more than one worktree is
+  available. A missing selected worktree is marked `missing` instead of falling
+  back silently to the project checkout.
+- `task_get` includes a compact `workspaces` list only when the task has linked
+  worktrees, so agents do not pay context tokens for empty metadata.
 
 ## Message references and local context
 
@@ -169,6 +225,37 @@ pre-receipt failure. Calls that use only `idx` remain backward compatible.
 [src: file: backend/src/api/federation.rs]
 [src: file: frontend/src/lib/chat-reply-drafts.ts]
 [src: file: backend/scripts/disc-introspection-mcp.py:95-135]
+
+## Out-of-context discussion notes
+
+Messages have two channels: `main` (the normal conversation) and `note`.
+Use a note for human/agent observations that must remain visible in the
+chronological timeline without waking an agent or silently consuming context:
+
+```json
+{"content":"Decision to revisit after the release","channel":"note"}
+```
+
+The default agent-facing surface is deliberately silent: prompts, numeric
+message indices and neighbours, `disc_join`, `disc_wait_for_peer`,
+`disc_search`, `disc_load_other`, and summaries exclude notes unless their
+contract exposes and receives an explicit `include_notes=true`. Hidden notes
+still advance the durable wait cursor, so reconnecting cannot replay an
+already-observed note forever.
+
+Use `disc_note_list({limit, cursor})` for a bounded, paginated note-only read.
+An exact `disc_get_message({message_id: "<note UUID>"})` is also allowed, while
+ordinary numeric message indices remain `main`-only. `disc_join` reports only a
+`note_count`, never note bodies. Export/import and shared-discussion federation
+preserve the channel. Notes are routing metadata, **not protected secrets**:
+portable discussion exports include their content and attachments like any
+other visible timeline message.
+
+[src: file: backend/src/api/disc_introspection.rs:585-626]
+[src: file: backend/src/api/disc_invite.rs:249-416]
+[src: file: backend/src/api/disc_source.rs:1029-1054]
+[src: file: backend/src/api/discussions/messaging.rs:243-319]
+[src: file: backend/src/db/discussions.rs:855-899]
 
 ## Multi-agent collab — required protocol
 

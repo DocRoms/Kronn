@@ -24,7 +24,7 @@ backend/sidecars/docs/*.egg-info/
 frontend/node_modules/
 frontend/node_modules_old/
 frontend/dist/
-frontend/.pnpm-store/
+.pnpm-store/
 
 # Playwright E2E
 frontend/test-results/
@@ -81,3 +81,10 @@ backend/coverage/
 
 # TypeScript incremental build cache (never commit)
 *.tsbuildinfo
+
+# Session artifacts from agent runs — never commit working-directory output
+# (KT-147: an audit-tool repo whose root ships agent session dumps reads as
+# sloppy in ten seconds, and the audit gate should be flagging these itself).
+findings/
+/docroms-card-expanded.md
+/PLAYWRIGHT_AUDIT_REVIEW.md

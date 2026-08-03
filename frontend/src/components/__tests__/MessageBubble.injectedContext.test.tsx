@@ -15,7 +15,8 @@ vi.mock('../../lib/api', async () => {
   return { ...real, config: { getUiLanguage: vi.fn().mockResolvedValue('fr') } };
 });
 
-import { splitInjectedContext, MessageBody } from '../MessageBubble';
+import { MessageBody } from '../MessageBubble';
+import { splitInjectedContext } from '../../lib/messageContent';
 
 const MARK = (title: string, body: string) =>
   `<!-- kronn:context title="${title}" -->\n${body}\n<!-- /kronn:context -->`;

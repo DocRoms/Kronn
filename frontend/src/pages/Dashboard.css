@@ -2692,8 +2692,38 @@ html[data-density="large"] .dash-main {
 .project-overview-dependencies-meta {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   gap: 7px;
   padding: 0 16px 14px;
+}
+
+.project-overview-dependencies-date {
+  color: var(--kr-text-faint);
+  font-size: var(--kr-fs-xs);
+}
+
+.project-overview-dependencies-schedule {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  color: var(--kr-text-faint);
+  font-size: var(--kr-fs-xs);
+}
+
+.project-overview-dependencies-schedule select {
+  min-height: 28px;
+  padding: 3px 24px 3px 8px;
+  border: 1px solid var(--kr-border-light);
+  border-radius: var(--kr-r-md);
+  background: var(--kr-bg-hover);
+  color: var(--kr-text-dim);
+  font: inherit;
+}
+
+.project-overview-dependencies-schedule select:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--kr-accent) 45%, transparent);
+  outline-offset: 1px;
 }
 
 .project-overview-dependency-list {

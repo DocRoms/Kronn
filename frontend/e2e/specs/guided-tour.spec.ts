@@ -131,6 +131,7 @@ test.describe('Guided tour — replay', () => {
     // Pre-mark completed so auto-launch is suppressed.
     await page.addInitScript((k) => { window.localStorage.setItem(k, 'true'); }, LEGACY_COMPLETED_KEY);
     await page.goto('/');
+    await waitForDashboardMounted(page);
     await page.waitForTimeout(AUTO_START_DELAY + 200);
 
     // Welcome tooltip should NOT be visible because the flag is set.
@@ -138,12 +139,15 @@ test.describe('Guided tour — replay', () => {
     await expect(tooltip).toHaveCount(0);
 
     // Click the "?" help button in the top nav.
-    await page.locator('button[aria-label]').filter({ hasText: '' }).first().waitFor();
-    const helpBtn = page.locator('button[aria-label*="tour" i], button[title*="tour" i]').first();
+    const helpBtn = page.getByRole('button', {
+      name: /Relancer le tour guidé|Replay guided tour|Repetir tour guiado/i,
+    });
+    await expect(helpBtn).toBeVisible();
     await helpBtn.click();
 
     // Tour overlay re-mounts at step 1.
-    await expect(tooltip).toBeVisible({ timeout: 3_000 });
+    await expect(helpBtn).toBeHidden();
+    await expect(tooltip).toBeVisible({ timeout: 5_000 });
     await expect(tooltip.locator('.tour-step-counter')).toContainText('1 / ');
   });
 

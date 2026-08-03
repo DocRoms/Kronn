@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { QuickPrompt } from '../types/generated';
 import { quickPrompts as quickPromptsApi } from '../lib/api';
 
@@ -40,7 +40,9 @@ export function useQpChain({
   // to memoize it. The send handler in DiscussionsPage closes over ~20
   // pieces of local state and is recreated on every render on purpose.
   const onFireRef = useRef(onFire);
-  onFireRef.current = onFire;
+  useLayoutEffect(() => {
+    onFireRef.current = onFire;
+  }, [onFire]);
 
   // Load QPs once.
   useEffect(() => {

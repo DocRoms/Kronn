@@ -57,6 +57,7 @@ pub async fn federate_message(state: &AppState, disc_id: &str, msg: &DiscussionM
         content: msg.content.clone(),
         timestamp: msg.timestamp.timestamp_millis(),
         role: msg.role.clone(),
+        channel: msg.channel,
         agent_type: msg.agent_type.clone(),
         target_agents: targets
             .iter()
@@ -247,6 +248,7 @@ pub async fn respond_to_sync_request(state: &AppState, shared_id: &str, since_ti
             content: m.content.clone(),
             timestamp: m.timestamp.timestamp_millis(),
             role: m.role.clone(),
+            channel: m.channel,
             agent_type: m.agent_type.clone(),
             target_agents: targets
                 .iter()
@@ -476,6 +478,7 @@ mod tests {
                 &DiscussionMessage {
                     id: "user-sync-revision".into(),
                     role: MessageRole::User,
+                    channel: crate::models::MessageChannel::Main,
                     content: "current projection".into(),
                     timestamp: now,
                     model: None,
@@ -499,6 +502,7 @@ mod tests {
                 &DiscussionMessage {
                     id: "agent-sync-reply".into(),
                     role: MessageRole::Agent,
+                    channel: crate::models::MessageChannel::Main,
                     content: "reply projection".into(),
                     timestamp: now + chrono::Duration::milliseconds(1),
                     model: None,

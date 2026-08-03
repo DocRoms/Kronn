@@ -405,7 +405,7 @@ pub fn build_agent_prompt(
             Cette discussion peut avoir un plan partagé composé de tâches priorisées et modifiables dans Kronn. \
             L'utilisateur peut y faire référence naturellement comme « le plan », « les tâches », « ce qu'il reste à faire », « la priorité », etc. \
             `plan_get()` lit ce plan ; `task_list`/`task_get`/`task_changes` lisent les tâches ; `proposal_list`/`proposal_get` lisent les propositions durables ; `task_create`/`task_update`/`task_link_discussion` permettent de créer, modifier, prioriser ou relier le travail. \
-            Lis d'abord le plan concerné. Applique directement une intention non ambiguë ; sinon propose l'action avec un bloc `kronn-plan-action` soumis à validation humaine (create, create_many, status, complete, unblock, open). \
+            Lis d'abord le plan concerné. Juste avant tout `task_create` direct, rappelle `plan_get` afin de voir l'écriture récente d'un pair. Applique directement une intention non ambiguë ; sinon propose l'action avec un bloc `kronn-plan-action` soumis à validation humaine (create, create_many, status, complete, unblock, open). \
             Tu peux lire et proposer, mais seul un humain accepte, refuse ou décide une proposition durable. \
             Ne remplace pas une demande de mise à jour du plan par un simple résumé Markdown. \
             Quand un travail suivi démarre ou change réellement, maintiens son statut, sa DoD et sa priorité dans le plan. N'écris que lors d'un changement réel : ne recharge ou réécris jamais une tâche inchangée pour simplement signaler l'avancement. \
@@ -418,7 +418,7 @@ pub fn build_agent_prompt(
             Esta conversación puede tener un plan compartido con tareas priorizadas y editables en Kronn. \
             El usuario puede referirse a él naturalmente como « el plan », « las tareas », « lo que queda », « la prioridad », etc. \
             `plan_get()` lee el plan; `task_list`/`task_get`/`task_changes` leen tareas; `proposal_list`/`proposal_get` leen las propuestas durables; `task_create`/`task_update`/`task_link_discussion` permiten crear, modificar, priorizar o vincular el trabajo. \
-            Lee primero el plan correspondiente. Aplica directamente una intención inequívoca; si es ambigua, propone un bloque `kronn-plan-action` con validación humana (create, create_many, status, complete, unblock, open). \
+            Lee primero el plan correspondiente. Justo antes de cualquier `task_create` directo, vuelve a llamar a `plan_get` para ver la escritura reciente de otro agente. Aplica directamente una intención inequívoca; si es ambigua, propone un bloque `kronn-plan-action` con validación humana (create, create_many, status, complete, unblock, open). \
             Puedes leer y proponer, pero solo un humano acepta, rechaza o decide una propuesta durable. \
             No sustituyas una actualización solicitada por un simple resumen Markdown. \
             Cuando un trabajo seguido empieza o cambia realmente, mantén su estado, DoD y prioridad en el plan. Escribe solo ante un cambio real: nunca recargues o reescribas una tarea sin cambios solo para informar del progreso. \
@@ -431,7 +431,7 @@ pub fn build_agent_prompt(
             This discussion may have a shared Kronn plan made of prioritized, editable tasks. \
             The user may refer to it naturally as “the plan”, “the tasks”, “what remains”, “the priority”, and similar wording. \
             `plan_get()` reads the plan; `task_list`/`task_get`/`task_changes` read tasks; `proposal_list`/`proposal_get` read durable proposals; `task_create`/`task_update`/`task_link_discussion` create, edit, prioritize or link work. \
-            Read the relevant plan first. Apply unambiguous intent directly; otherwise propose a human-gated `kronn-plan-action` fence (create, create_many, status, complete, unblock, open). \
+            Read the relevant plan first. Immediately before any direct `task_create`, call `plan_get` again so a peer's recent write is visible. Apply unambiguous intent directly; otherwise propose a human-gated `kronn-plan-action` fence (create, create_many, status, complete, unblock, open). \
             You may read and propose, but only a human accepts, rejects or decides a durable proposal. \
             Never replace a requested plan update with a prose-only Markdown summary. \
             Whenever tracked work starts or materially changes, keep its status, DoD and priority honest in the plan. Write only on a real change: never reload or rewrite an unchanged task merely to report progress. \
@@ -466,13 +466,19 @@ pub fn build_agent_prompt(
     let user_msgs: Vec<_> = disc
         .messages
         .iter()
-        .filter(|m| matches!(m.role, MessageRole::User))
+        .filter(|m| {
+            matches!(m.channel, crate::models::MessageChannel::Main)
+                && matches!(m.role, MessageRole::User)
+        })
         .collect();
     let latest_is_peer_agent = disc
         .messages
         .iter()
         .rev()
-        .find(|m| !matches!(m.role, MessageRole::System))
+        .find(|m| {
+            matches!(m.channel, crate::models::MessageChannel::Main)
+                && !matches!(m.role, MessageRole::System)
+        })
         .is_some_and(|m| matches!(m.role, MessageRole::Agent));
 
     // The single-user-message short form intentionally omits history. A peer
@@ -555,7 +561,10 @@ pub fn build_agent_prompt(
     let non_system_msgs: Vec<_> = disc
         .messages
         .iter()
-        .filter(|m| !matches!(m.role, MessageRole::System))
+        .filter(|m| {
+            matches!(m.channel, crate::models::MessageChannel::Main)
+                && !matches!(m.role, MessageRole::System)
+        })
         .collect();
 
     let pinned_block = if disc.pin_first_message {
@@ -763,6 +772,7 @@ mod tests {
             lint_report: None,
             id: uuid::Uuid::new_v4().to_string(),
             role: MessageRole::User,
+            channel: crate::models::MessageChannel::Main,
             content: content.into(),
             agent_type: None,
             timestamp: chrono::Utc::now(),
@@ -785,6 +795,7 @@ mod tests {
             lint_report: None,
             id: uuid::Uuid::new_v4().to_string(),
             role: MessageRole::Agent,
+            channel: crate::models::MessageChannel::Main,
             content: content.into(),
             agent_type: Some(agent_type),
             timestamp: chrono::Utc::now(),
@@ -820,6 +831,18 @@ mod tests {
         assert!(prompt.contains("first question"));
         assert!(prompt.contains("follow-up question"));
         assert!(prompt.contains("Please respond to the latest user message"));
+    }
+
+    #[test]
+    fn agent_prompt_excludes_out_of_context_notes() {
+        let mut note = user_msg("private note body");
+        note.channel = crate::models::MessageChannel::Note;
+        let disc = disc_with_messages(vec![user_msg("visible question"), note], "en");
+
+        let prompt = build_agent_prompt(&disc, &AgentType::ClaudeCode, 0);
+
+        assert!(prompt.contains("visible question"));
+        assert!(!prompt.contains("private note body"));
     }
 
     #[test]
@@ -968,6 +991,7 @@ mod tests {
             for invariant in [
                 "maintain_on_change",
                 "no_noop_writes",
+                "read_before_direct_create",
                 "stale_surface_fallback",
             ] {
                 let marker = contract[invariant][lang]

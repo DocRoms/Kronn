@@ -58,6 +58,31 @@ const baseProps = {
 describe('DiscussionSidebar — click contact to start chat', () => {
   beforeEach(() => vi.clearAllMocks());
 
+  it('exposes the WebSocket connection dot as a named status', () => {
+    const { getByRole } = render(<DiscussionSidebar {...baseProps} />);
+
+    expect(getByRole('status', { name: 'contacts.wsConnected' })).toBeInTheDocument();
+  });
+
+  it('collapses contacts through the persisted sidebar group state', () => {
+    const onToggleGroup = vi.fn();
+    render(
+      <DiscussionSidebar
+        {...baseProps}
+        collapsedGroups={new Set(['__contacts__'])}
+        onToggleGroup={onToggleGroup}
+      />,
+    );
+
+    const toggle = document.querySelector('.disc-contacts-toggle') as HTMLButtonElement;
+    expect(toggle).not.toBeNull();
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    expect(document.querySelector('.disc-contact-row')).toBeNull();
+
+    act(() => { fireEvent.click(toggle); });
+    expect(onToggleGroup).toHaveBeenCalledWith('__contacts__');
+  });
+
   it('clicking the contact identity fires onStartChat with that contact', () => {
     const onStartChat = vi.fn();
     render(<DiscussionSidebar {...baseProps} onStartChat={onStartChat} />);

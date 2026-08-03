@@ -8,7 +8,7 @@
 // constant-time regardless of run length.
 
 import { describe, it, expect } from 'vitest';
-import { appendLiveBuffer } from '../WorkflowsPage';
+import { appendLiveBuffer } from '../../lib/workflowUiUtils';
 
 describe('appendLiveBuffer — FIFO cap on live progress text', () => {
   it('returns prev + chunks unchanged when total fits under the cap', () => {

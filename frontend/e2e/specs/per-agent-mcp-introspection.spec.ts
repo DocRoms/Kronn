@@ -33,7 +33,7 @@
  *
  * # When to run
  *
- *   pnpm exec playwright test e2e/specs/per-agent-mcp-introspection.spec.ts
+ *   KRONN_REAL_AGENT_E2E=1 pnpm exec playwright test e2e/specs/per-agent-mcp-introspection.spec.ts
  *
  * Don't add to CI — needs the prod backend and burns real tokens.
  */
@@ -128,19 +128,18 @@ async function probeAgentBailout(agent: string): Promise<string | null> {
 }
 
 /**
- * Real-agent runs are OPT-IN on CI. These scenarios launch actual CLIs, which
- * need credentials a shared runner deliberately does not have — so on CI they
- * failed with auth errors every time, teaching nothing. Locally nothing
- * changes: the tests still run whenever the agent is installed.
+ * Real-agent runs are always OPT-IN. These scenarios launch actual CLIs, need
+ * provider credentials, burn tokens and depend on the operator's current rate
+ * limits. Letting the default local regression suite auto-discover and run
+ * every installed CLI made `pnpm test:e2e` non-hermetic and expensive.
  *
  * The skip is loud on purpose. "Green by silent skip" is a known trap in this
  * repo: every skipped agent prints its reason, and the Playwright summary
  * carries the skipped count, so nobody can read the run as covered.
  */
-const REAL_AGENT_RUNS_ENABLED =
-  !process.env.CI || process.env.KRONN_REAL_AGENT_E2E === '1';
-const CI_OPT_IN_REASON =
-  'real-agent run: opt-in on CI — the runner has no agent credentials. '
+const REAL_AGENT_RUNS_ENABLED = process.env.KRONN_REAL_AGENT_E2E === '1';
+const REAL_AGENT_OPT_IN_REASON =
+  'real-agent run: explicit opt-in required because it launches billed external CLIs. '
   + 'Set KRONN_REAL_AGENT_E2E=1 (and provide credentials) to enable.';
 
 for (const AGENT of INTROSPECTION_AGENTS) {
@@ -156,8 +155,8 @@ for (const AGENT of INTROSPECTION_AGENTS) {
     test.beforeAll(async ({ request }) => {
       if (!REAL_AGENT_RUNS_ENABLED) {
         // eslint-disable-next-line no-console
-        console.log(`[per-agent-mcp] skipping ${AGENT}: ${CI_OPT_IN_REASON}`);
-        skipReason = CI_OPT_IN_REASON;
+        console.log(`[per-agent-mcp] skipping ${AGENT}: ${REAL_AGENT_OPT_IN_REASON}`);
+        skipReason = REAL_AGENT_OPT_IN_REASON;
         return;
       }
       const agents = await discoverInstalledAgents(request);

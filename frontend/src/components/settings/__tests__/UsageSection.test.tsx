@@ -33,7 +33,7 @@ vi.mock('../../../lib/I18nContext', () => ({
 }));
 
 import { UsageSection } from '../UsageSection';
-import { formatPeriod, rowsPerPage } from '../UsageSection';
+import { formatPeriod, rowsPerPage } from '../usageFormat';
 
 beforeEach(() => {
   usageApi.get.mockResolvedValue({

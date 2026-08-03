@@ -14,6 +14,7 @@ pub mod disc_invite;
 pub mod disc_portability;
 pub mod disc_prompts;
 pub mod disc_source;
+pub mod disc_workspace;
 pub mod discover;
 pub mod discussions;
 pub mod docs;

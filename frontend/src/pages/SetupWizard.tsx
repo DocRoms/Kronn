@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { setup as setupApi, agents as agentsApi, projects as projectsApi } from '../lib/api';
 import type { SetupStatus, AgentDetection, DetectedRepo } from '../types/generated';
 import { useT } from '../lib/I18nContext';
@@ -30,7 +30,7 @@ export function SetupWizard({ initialStatus, onComplete, inDocker = false }: Pro
   const [repos, setRepos] = useState<DetectedRepo[]>(initialStatus?.repos_detected ?? []);
   const [scanning, setScanning] = useState(false);
   const [installing, setInstalling] = useState<string | null>(null);
-  const [detecting, setDetecting] = useState(false);
+  const [detecting, setDetecting] = useState(true);
   const [completing, setCompleting] = useState(false);
   const completingRef = useRef(false);
   const [error, setError] = useState<string | null>(null);
@@ -41,11 +41,7 @@ export function SetupWizard({ initialStatus, onComplete, inDocker = false }: Pro
 
   const installedCount = agents.filter(a => a.installed || a.runtime_available).length;
 
-  useEffect(() => {
-    refreshAgents();
-  }, []);
-
-  const refreshAgents = async () => {
+  const refreshAgents = useCallback(async () => {
     setDetecting(true);
     try {
       const detected = await agentsApi.detect();
@@ -55,7 +51,24 @@ export function SetupWizard({ initialStatus, onComplete, inDocker = false }: Pro
     } finally {
       setDetecting(false);
     }
-  };
+  }, [t]);
+
+  useEffect(() => {
+    let active = true;
+    agentsApi.detect()
+      .then(detected => {
+        if (active) setAgents(detected);
+      })
+      .catch(error => {
+        if (active) {
+          setError(error instanceof Error ? error.message : t('setup.detectionFailed'));
+        }
+      })
+      .finally(() => {
+        if (active) setDetecting(false);
+      });
+    return () => { active = false; };
+  }, [t]);
 
   const handleInstallAgent = async (agent: AgentDetection) => {
     setInstalling(agent.name);

@@ -8,6 +8,7 @@ import { LayoutDensityProvider } from './lib/LayoutDensityContext';
 import { LocalIdentityProvider } from './lib/LocalIdentityContext';
 import { ThemeEffects } from './components/ThemeEffects';
 import { setApiBase } from './lib/api';
+import { loadInitialLocale, renderBootstrapFailure } from './lib/bootstrapLocale';
 
 // Detect Tauri desktop mode and configure API base URL
 async function initApiBase() {
@@ -23,7 +24,11 @@ async function initApiBase() {
   }
 }
 
-initApiBase().then(() => {
+async function bootstrap() {
+  await initApiBase();
+  // Load exactly the active dictionary before first paint. Other locales stay
+  // in their own Vite chunks until the user switches language.
+  await loadInitialLocale();
   const rootEl = document.getElementById('root');
   if (!rootEl) throw new Error('Missing #root element in index.html');
   ReactDOM.createRoot(rootEl).render(
@@ -40,4 +45,10 @@ initApiBase().then(() => {
       </ThemeProvider>
     </React.StrictMode>,
   );
+}
+
+void bootstrap().catch(error => {
+  console.error('[bootstrap] failed to load the interface:', error);
+  const rootEl = document.getElementById('root');
+  if (rootEl) renderBootstrapFailure(rootEl);
 });

@@ -1,7 +1,13 @@
 import { useState, useEffect, useRef } from 'react';
 import '../pages/DiscussionsPage.css';
 import { discussions as discussionsApi } from '../lib/api';
-import type { Project, AgentDetection, Discussion, AgentType } from '../types/generated';
+import type {
+  Project,
+  AgentDetection,
+  Discussion,
+  AgentType,
+  DiscussionWorkspace,
+} from '../types/generated';
 import { AGENT_MENTIONS, isUsable, isValidationDisc, isBriefingDisc, isBootstrapDisc } from '../lib/constants';
 import type { ToastFn } from '../hooks/useToast';
 import {
@@ -97,6 +103,7 @@ export function ChatHeader({
     disabled: boolean;
   } | null>(null);
   const [nativeAgentModeSaving, setNativeAgentModeSaving] = useState(false);
+  const [sessionWorkspaces, setSessionWorkspaces] = useState<DiscussionWorkspace[]>([]);
   const exportInFlight = useRef(false);
   const nativeAgentModeInFlight = useRef(false);
   const discIdResetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -127,6 +134,36 @@ export function ChatHeader({
     return () => {
       current = false;
       if (retryTimer) clearTimeout(retryTimer);
+    };
+  }, [discussion.id]);
+
+  useEffect(() => {
+    let current = true;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const load = () => {
+      // Partial API mocks are used by focused header tests, and a stale
+      // hot-reloaded frontend can briefly run against the previous API object.
+      // In both cases the declaration chips are optional decoration.
+      if (typeof discussionsApi.workspaces !== 'function') return;
+      void discussionsApi.workspaces(discussion.id)
+        .then(workspaces => {
+          if (!current) return;
+          setSessionWorkspaces(
+            workspaces.filter(workspace => workspace.session_pk !== null),
+          );
+        })
+        .catch(() => {
+          // A transient backend restart must not erase a previously rendered
+          // declaration. The next poll refreshes the authoritative state.
+        })
+        .finally(() => {
+          if (current) timer = setTimeout(load, 8_000);
+        });
+    };
+    load();
+    return () => {
+      current = false;
+      if (timer) clearTimeout(timer);
     };
   }, [discussion.id]);
 
@@ -251,6 +288,24 @@ export function ChatHeader({
               <MatrixText text={discussion.title} />
             </span>
           )}
+          {!isValidationDisc(discussion.title) && !isBootstrapDisc(discussion.title) && !isBriefingDisc(discussion.title) && (
+          <button
+            className="disc-icon-btn"
+            style={{ padding: '2px 4px', border: 'none', background: 'none', color: 'var(--kr-text-ghost)' }}
+            onClick={() => {
+              if (editingTitleId === discussion.id) {
+                setEditingTitleId(null);
+              } else {
+                setEditingTitleId(discussion.id);
+                setEditingTitleText(discussion.title);
+              }
+            }}
+            title={t('disc.editTitle')}
+            aria-label={t('disc.editTitle')}
+          >
+            <Pencil size={10} />
+          </button>
+          )}
           {/* 0.8.5 — short disc-id pill. Surfaces the id so a user
               reading an agent summary like "Disc 3 — 04a9c927" can
               click → copy full UUID + paste it anywhere (next disc,
@@ -284,24 +339,6 @@ export function ChatHeader({
             </ul>
             <p className="kr-context-help-agent-note">{t('contextHelp.discussion.mcp')}</p>
           </ContextHelp>
-          {!isValidationDisc(discussion.title) && !isBootstrapDisc(discussion.title) && !isBriefingDisc(discussion.title) && (
-          <button
-            className="disc-icon-btn"
-            style={{ padding: '2px 4px', border: 'none', background: 'none', color: 'var(--kr-text-ghost)' }}
-            onClick={() => {
-              if (editingTitleId === discussion.id) {
-                setEditingTitleId(null);
-              } else {
-                setEditingTitleId(discussion.id);
-                setEditingTitleText(discussion.title);
-              }
-            }}
-            title={t('disc.editTitle')}
-            aria-label={t('disc.editTitle')}
-          >
-            <Pencil size={10} />
-          </button>
-          )}
           </div>
           <div className="disc-chat-header-presence">
             <DiscParticipantsHeader discId={discussion.id} toast={toast} t={t} />
@@ -392,6 +429,29 @@ export function ChatHeader({
               </button>
             </span>
           )}
+          {sessionWorkspaces.map(workspace => (
+            <span
+              key={workspace.id}
+              className="disc-session-worktree-badge"
+              data-state={workspace.state}
+              title={[
+                workspace.session_agent_type,
+                workspace.workspace_path,
+                workspace.head_sha?.slice(0, 10),
+              ].filter(Boolean).join(' · ')}
+            >
+              <GitBranch size={8} />
+              <span>{workspace.branch}</span>
+              {workspace.task_reference && (
+                <span className="disc-session-worktree-task">
+                  {workspace.task_reference}
+                </span>
+              )}
+              <span className="disc-session-worktree-agent">
+                {workspace.session_agent_type ?? t('git.workspaceExternal')}
+              </span>
+            </span>
+          ))}
           {/* Test-mode CTA — only while the worktree is active and we're
               not already testing. Hidden in Direct mode (no branch to swap)
               and while in test mode (global banner is the exit path). */}

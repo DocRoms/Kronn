@@ -337,16 +337,25 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: TypeScript check
-        run: npx tsc --noEmit
+      - name: TypeScript 7 native check
+        run: pnpm typecheck:native
+
+      # TypeScript 7 intentionally ships without the programmatic API consumed
+      # by typescript-eslint. Keep the aliased TS6 compiler as an explicit
+      # compatibility gate until that ecosystem no longer needs it.
+      - name: TypeScript 6 API compatibility check
+        run: pnpm typecheck:legacy
 
       # Keep frontend gates in the frontend job. They previously lived in
       # test-backend solely because that job also builds the Tauri assets, so an
       # ESLint regression appeared in GitHub as a red "backend" check and Rust
       # tests never ran. The exact warning baseline is a ratchet: new warnings
       # fail CI, while cleanup can only lower this number.
+      - name: Lint — oxlint fast dual-run
+        run: pnpm lint:fast
+
       - name: Lint — eslint (0 errors, warning budget)
-        run: pnpm lint --max-warnings 161
+        run: pnpm lint --max-warnings 92
 
       - name: Lint — i18n key parity (fr/en/es)
         run: pnpm lint:i18n
@@ -354,8 +363,8 @@ jobs:
       - name: Run tests with coverage threshold floor
         # Uses `vitest run --coverage` so the `coverage.thresholds` block
         # in `vite.config.ts` enforces the 2026-05-29 baseline floor.
-        # Drift below (Statements 55 / Branches 50 / Functions 47 /
-        # Lines 58) fails the job — bump the thresholds in lockstep
+        # Drift below (Statements 67 / Branches 62.5 / Functions 62.5 /
+        # Lines 70.5) fails the job — bump the thresholds in lockstep
         # with any future coverage push.
         run: pnpm test:coverage
 
@@ -382,7 +391,7 @@ jobs:
     # runner think the baked-in browser is the wrong build and re-trigger
     # the very download we're avoiding. Bump both in lockstep.
     container:
-      image: mcr.microsoft.com/playwright:v1.59.1-noble
+      image: mcr.microsoft.com/playwright:v1.62.1-noble
       options: --user root
     timeout-minutes: 40
     steps:
@@ -583,4 +592,4 @@ jobs:
 
       - name: Run pnpm audit
         working-directory: frontend
-        run: pnpm audit --audit-level=moderate || true
+        run: pnpm audit --audit-level=moderate

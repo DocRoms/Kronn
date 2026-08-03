@@ -3,6 +3,7 @@ use std::str::FromStr;
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{params, params_from_iter, types::Value, Connection, OptionalExtension};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::models::{
@@ -11,8 +12,8 @@ use crate::models::{
     PlanningActorKind, PlanningDependencySummary, PlanningDiscussionRelation, PlanningDodItem,
     PlanningPlacement, PlanningPlanStats, PlanningTaskChange, PlanningTaskDetail,
     PlanningTaskEvent, PlanningTaskLink, PlanningTaskListQuery, PlanningTaskListResponse,
-    PlanningTaskPriority, PlanningTaskStatus, PlanningTaskSummary, UpdatePlanningDodItemRequest,
-    UpdatePlanningTaskRequest,
+    PlanningTaskPriority, PlanningTaskStatus, PlanningTaskSummary, PlanningWorkspaceSummary,
+    UpdatePlanningDodItemRequest, UpdatePlanningTaskRequest,
 };
 
 fn parse_dt(value: String) -> DateTime<Utc> {
@@ -41,6 +42,20 @@ impl<'c> NestableTx<'c> {
             "SAVEPOINT planning_mut"
         } else {
             "BEGIN"
+        })?;
+        Ok(Self {
+            conn,
+            savepoint,
+            committed: false,
+        })
+    }
+
+    fn begin_immediate(conn: &'c Connection) -> Result<Self> {
+        let savepoint = !conn.is_autocommit();
+        conn.execute_batch(if savepoint {
+            "SAVEPOINT planning_mut"
+        } else {
+            "BEGIN IMMEDIATE"
         })?;
         Ok(Self {
             conn,
@@ -96,6 +111,19 @@ fn validate_title(title: &str) -> Result<()> {
     Ok(())
 }
 
+fn normalized_idempotency_key(request: &CreatePlanningTaskRequest) -> Result<Option<&str>> {
+    match request.idempotency_key.as_deref() {
+        Some(key) => {
+            let key = key.trim();
+            if key.is_empty() || key.chars().count() > 240 {
+                bail!("Planning task idempotency keys must be 1-240 characters");
+            }
+            Ok(Some(key))
+        }
+        None => Ok(None),
+    }
+}
+
 fn validate_dod(items: &[CreatePlanningDodItem]) -> Result<()> {
     if items.len() > 200 {
         bail!("A task cannot contain more than 200 Definition of Done items");
@@ -147,6 +175,57 @@ fn normalize_tags(tags: &[String]) -> Result<Vec<String>> {
         }
     }
     Ok(normalized)
+}
+
+fn create_request_fingerprint(
+    request: &CreatePlanningTaskRequest,
+    parent_id: Option<&str>,
+    tags: &[String],
+) -> Result<String> {
+    let mut project_ids = request.project_ids.clone();
+    project_ids.sort();
+    project_ids.dedup();
+    let mut normalized_tags = tags
+        .iter()
+        .map(|tag| tag.to_lowercase())
+        .collect::<Vec<_>>();
+    normalized_tags.sort();
+    let definition_of_done = request
+        .definition_of_done
+        .iter()
+        .map(|item| {
+            serde_json::json!({
+                "sentence": item.sentence.trim(),
+                "completed": item.completed,
+            })
+        })
+        .collect::<Vec<_>>();
+    let links = request
+        .links
+        .iter()
+        .map(|link| {
+            serde_json::json!({
+                "label": link.label.trim(),
+                "url": link.url.trim(),
+            })
+        })
+        .collect::<Vec<_>>();
+    let canonical = serde_json::to_vec(&serde_json::json!({
+        "title": request.title.trim(),
+        "description": request.description,
+        "status": request.status,
+        "priority": request.priority,
+        "parent_id": parent_id,
+        "project_ids": project_ids,
+        "tags": normalized_tags,
+        "definition_of_done": definition_of_done,
+        "links": links,
+    }))?;
+    let digest: String = Sha256::digest(canonical)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    Ok(format!("v1:{digest}"))
 }
 
 fn ensure_task_exists(conn: &Connection, task_id: &str) -> Result<()> {
@@ -539,6 +618,7 @@ pub fn create_task(
     validate_actor(&request.actor)?;
     validate_dod(&request.definition_of_done)?;
     validate_links(&request.links)?;
+    let idempotency_key = normalized_idempotency_key(request)?;
     let tags = normalize_tags(&request.tags)?;
     let parent_id = request
         .parent_id
@@ -548,8 +628,37 @@ pub fn create_task(
     if let Some(parent_id) = parent_id.as_deref() {
         ensure_parent_is_valid(conn, None, parent_id)?;
     }
+    let idempotency_fingerprint = idempotency_key
+        .map(|_| create_request_fingerprint(request, parent_id.as_deref(), &tags))
+        .transpose()?;
 
-    let transaction = NestableTx::begin(conn)?;
+    // A direct create may race with the retry of the same MCP call. Acquiring
+    // the writer lock before the lookup makes the unique-key decision atomic
+    // even when two backend connections target the same database.
+    let transaction = if idempotency_key.is_some() {
+        NestableTx::begin_immediate(conn)?
+    } else {
+        NestableTx::begin(conn)?
+    };
+    if let (Some(key), Some(fingerprint)) = (idempotency_key, idempotency_fingerprint.as_deref()) {
+        let existing = transaction
+            .query_row(
+                "SELECT id, idempotency_fingerprint
+                 FROM planning_tasks
+                 WHERE idempotency_key = ?1",
+                [key],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        if let Some((existing_id, existing_fingerprint)) = existing {
+            if existing_fingerprint != fingerprint {
+                bail!("Planning task idempotency key was reused with different content");
+            }
+            transaction.commit()?;
+            return get_task(conn, &existing_id)?.context("Idempotent planning task disappeared");
+        }
+    }
+
     let id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
     let task_number: i64 = transaction.query_row(
@@ -564,8 +673,9 @@ pub fn create_task(
     )?;
     transaction.execute(
         "INSERT INTO planning_tasks
-         (id, task_number, parent_id, title, description, status, priority, rank, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)",
+         (id, task_number, parent_id, title, description, status, priority, rank,
+          idempotency_key, idempotency_fingerprint, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11)",
         params![
             id,
             task_number,
@@ -575,6 +685,8 @@ pub fn create_task(
             request.status.as_str(),
             request.priority.as_str(),
             rank,
+            idempotency_key,
+            idempotency_fingerprint,
             now,
         ],
     )?;
@@ -816,6 +928,29 @@ pub fn get_task(conn: &Connection, task_id: &str) -> Result<Option<PlanningTaskD
             .collect::<rusqlite::Result<Vec<_>>>()?;
         items
     };
+    let workspaces = {
+        let mut statement = conn.prepare(
+            "SELECT dw.id, dw.disc_id, dw.branch, dw.state, dw.ownership,
+                    ds.agent_type
+               FROM discussion_workspaces dw
+               LEFT JOIN discussion_sessions ds ON ds.id = dw.session_pk
+              WHERE dw.task_id = ?1
+              ORDER BY dw.updated_at DESC",
+        )?;
+        let rows = statement
+            .query_map([task_id], |row| {
+                Ok(PlanningWorkspaceSummary {
+                    id: row.get(0)?,
+                    disc_id: row.get(1)?,
+                    branch: row.get(2)?,
+                    state: row.get(3)?,
+                    ownership: row.get(4)?,
+                    session_agent_type: row.get(5)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    };
 
     Ok(Some(PlanningTaskDetail {
         summary,
@@ -826,6 +961,7 @@ pub fn get_task(conn: &Connection, task_id: &str) -> Result<Option<PlanningTaskD
         links,
         blockers,
         blocking,
+        workspaces,
         events,
     }))
 }
@@ -1538,6 +1674,7 @@ mod tests {
     fn request(title: &str) -> CreatePlanningTaskRequest {
         CreatePlanningTaskRequest {
             title: title.into(),
+            idempotency_key: None,
             description: String::new(),
             status: PlanningTaskStatus::Todo,
             priority: PlanningTaskPriority::Normal,
@@ -1592,6 +1729,63 @@ mod tests {
         .unwrap();
         assert_eq!(tagged.items.len(), 1);
         assert_eq!(tagged.items[0].id, first.summary.id);
+    }
+
+    #[test]
+    fn task_detail_exposes_linked_discussion_workspaces() {
+        let connection = connection();
+        let now = Utc::now().to_rfc3339();
+        connection
+            .execute(
+                "INSERT INTO projects (id, name, path, created_at, updated_at)
+                 VALUES ('p-workspace', 'Workspace', '/repo', ?1, ?1)",
+                [&now],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO discussions (
+                     id, project_id, title, created_at, updated_at
+                 ) VALUES ('d-workspace', 'p-workspace', 'Room', ?1, ?1)",
+                [&now],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO discussion_sessions (
+                     id, disc_id, agent_type, session_id, role, status, joined_at
+                 ) VALUES (
+                     41, 'd-workspace', 'Codex', 'sess-workspace',
+                     'peer', 'active', ?1
+                 )",
+                [&now],
+            )
+            .unwrap();
+        let mut create = request("Workspace-aware task");
+        create.project_ids = vec!["p-workspace".into()];
+        let task = create_task(&connection, &create).unwrap();
+        crate::db::discussion_workspaces::upsert_external(
+            &connection,
+            "d-workspace",
+            41,
+            Some(&task.summary.id),
+            "p-workspace",
+            "/repo-worktree",
+            "/repo-worktree",
+            "feature/workspace",
+            "abc123",
+        )
+        .unwrap();
+
+        let detail = get_task(&connection, &task.summary.reference)
+            .unwrap()
+            .unwrap();
+        assert_eq!(detail.workspaces.len(), 1);
+        assert_eq!(detail.workspaces[0].disc_id, "d-workspace");
+        assert_eq!(
+            detail.workspaces[0].session_agent_type.as_deref(),
+            Some("Codex")
+        );
     }
 
     #[test]

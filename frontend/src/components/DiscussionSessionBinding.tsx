@@ -40,6 +40,17 @@ const SOURCE_AGENTS = [
 ] as const;
 
 export function DiscussionSessionBinding({ discussionId, toast, t }: Props) {
+  return (
+    <DiscussionSessionBindingContent
+      key={discussionId}
+      discussionId={discussionId}
+      toast={toast}
+      t={t}
+    />
+  );
+}
+
+function DiscussionSessionBindingContent({ discussionId, toast, t }: Props) {
   const rootRef = useRef<HTMLDivElement>(null);
   const [open, setOpen] = useState(false);
   const [current, setCurrent] = useState<SourceBinding | null>(null);
@@ -50,30 +61,43 @@ export function DiscussionSessionBinding({ discussionId, toast, t }: Props) {
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
 
-  const refresh = useCallback(async () => {
+  const readBinding = useCallback(async () => {
     const detail = await discussionsApi.sourceDetail(discussionId);
     const binding = detail.current ?? null;
-    setCurrent(binding);
-    setHistory(detail.history);
+    const nextStatus = binding
+      ? await discussionsApi
+          .sourceSessionStatus(binding.source_agent, binding.source_session_id)
+          .catch(() => null)
+      : null;
+    return { binding, history: detail.history, status: nextStatus };
+  }, [discussionId]);
+
+  const applyBinding = useCallback((result: Awaited<ReturnType<typeof readBinding>>) => {
+    setCurrent(result.binding);
+    setHistory(result.history);
+    setStatus(result.status);
+    const binding = result.binding;
     if (binding) {
       setSourceAgent(binding.source_agent);
       setSessionId(binding.source_session_id);
-      const nextStatus = await discussionsApi
-        .sourceSessionStatus(binding.source_agent, binding.source_session_id)
-        .catch(() => null);
-      setStatus(nextStatus);
-    } else {
-      setStatus(null);
     }
-  }, [discussionId]);
+  }, []);
+
+  const refresh = useCallback(async () => {
+    applyBinding(await readBinding());
+  }, [applyBinding, readBinding]);
 
   useEffect(() => {
-    setOpen(false);
-    setError('');
-    void refresh().catch(() => {
-      // The binding is optional metadata; a failed read must not break chat.
-    });
-  }, [refresh]);
+    let active = true;
+    readBinding()
+      .then(result => {
+        if (active) applyBinding(result);
+      })
+      .catch(() => {
+        // The binding is optional metadata; a failed read must not break chat.
+      });
+    return () => { active = false; };
+  }, [applyBinding, readBinding]);
 
   useEffect(() => {
     if (!open) return;

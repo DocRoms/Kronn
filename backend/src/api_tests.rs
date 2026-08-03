@@ -121,6 +121,57 @@ mod tests {
         assert_eq!(json["error_code"], "not_found");
     }
 
+    #[tokio::test]
+    async fn discussion_notes_endpoint_is_bounded_paginated_and_note_only() {
+        let state = test_state();
+        state
+            .db
+            .with_conn(|connection| {
+                connection.execute(
+                    "INSERT INTO discussions
+                     (id, title, agent, language, created_at, updated_at)
+                     VALUES ('disc-notes', 'Notes room', 'Codex', 'fr', 'now', 'now')",
+                    [],
+                )?;
+                connection.execute_batch(
+                    "INSERT INTO messages
+                         (id, discussion_id, role, channel, content, timestamp, sort_order)
+                     VALUES
+                         ('note-1', 'disc-notes', 'User', 'note', 'Première note', 'now', 1),
+                         ('main-2', 'disc-notes', 'User', 'main', 'Message normal', 'now', 2),
+                         ('note-3', 'disc-notes', 'Agent', 'note', 'Deuxième note', 'now', 3);",
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let first = Request::builder()
+            .uri("/api/discussions/disc-notes/notes?limit=1")
+            .body(Body::empty())
+            .unwrap();
+        let (status, json) = send(state.clone(), false, first).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["total_notes"], 2);
+        assert_eq!(json["data"]["notes"].as_array().unwrap().len(), 1);
+        assert_eq!(json["data"]["notes"][0]["message"]["id"], "note-1");
+        assert_eq!(json["data"]["notes"][0]["message"]["channel"], "note");
+        assert_eq!(
+            json["data"]["notes"][0]["attachments"],
+            serde_json::json!([])
+        );
+        assert_eq!(json["data"]["next_cursor"], 1);
+
+        let second = Request::builder()
+            .uri("/api/discussions/disc-notes/notes?limit=1&cursor=1")
+            .body(Body::empty())
+            .unwrap();
+        let (_, json) = send(state, false, second).await;
+        assert_eq!(json["data"]["notes"][0]["message"]["id"], "note-3");
+        assert!(json["data"].get("next_cursor").is_none());
+    }
+
     // ─── GET /api/discussions/running (2026-06-24) ────────────────────────────
 
     /// Surfaces in-flight runs so a background/batch agent still working after
@@ -1375,6 +1426,112 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn source_session_transfer_is_explicit_audited_and_idempotent() {
+        let state = test_state();
+        insert_test_discussion(&state, "disc-transfer-a", "Transfer A").await;
+        insert_test_discussion(&state, "disc-transfer-b", "Transfer B").await;
+        insert_test_discussion(&state, "disc-transfer-c", "Transfer C").await;
+
+        let link = Request::builder()
+            .method("POST")
+            .uri("/api/disc/link")
+            .header("Content-Type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "disc_id": "disc-transfer-a",
+                    "source_agent": "Codex",
+                    "source_session_id": "codex-transfer-session",
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let (_, linked) = send(state.clone(), false, link).await;
+        assert_eq!(linked["success"], true, "{linked}");
+
+        let transfer = |from_disc_id: &str, confirm_transfer: bool| {
+            Request::builder()
+                .method("POST")
+                .uri("/api/disc/transfer-session")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "from_disc_id": from_disc_id,
+                        "to_disc_id": "disc-transfer-b",
+                        "source_agent": "Codex",
+                        "source_session_id": "codex-transfer-session",
+                        "confirm_transfer": confirm_transfer,
+                    })
+                    .to_string(),
+                ))
+                .unwrap()
+        };
+
+        let (_, unconfirmed) = send(state.clone(), false, transfer("disc-transfer-a", false)).await;
+        assert_eq!(unconfirmed["success"], false);
+        assert!(unconfirmed["error"]
+            .as_str()
+            .unwrap()
+            .contains("confirm_transfer=true"));
+
+        let (_, stale_owner) = send(state.clone(), false, transfer("disc-transfer-c", true)).await;
+        assert_eq!(stale_owner["success"], false);
+        assert!(stale_owner["error"]
+            .as_str()
+            .unwrap()
+            .contains("ownership changed"));
+
+        let (_, transferred) = send(state.clone(), false, transfer("disc-transfer-a", true)).await;
+        assert_eq!(transferred["success"], true, "{transferred}");
+        assert_eq!(transferred["data"]["previous_disc_id"], "disc-transfer-a");
+        assert_eq!(transferred["data"]["disc_id"], "disc-transfer-b");
+        assert_eq!(transferred["data"]["session_bound"], true);
+        assert_eq!(transferred["data"]["transferred"], true);
+        assert_eq!(transferred["data"]["binding_version"], 1);
+
+        let (_, replayed) = send(state.clone(), false, transfer("disc-transfer-a", true)).await;
+        assert_eq!(replayed["success"], true, "{replayed}");
+        assert_eq!(replayed["data"]["session_bound"], true);
+        assert_eq!(replayed["data"]["transferred"], false);
+
+        let (_, wrong_replay) = send(state.clone(), false, transfer("disc-transfer-c", true)).await;
+        assert_eq!(wrong_replay["success"], false);
+        assert!(wrong_replay["error"]
+            .as_str()
+            .unwrap()
+            .contains("no completed transfer"));
+
+        let find = Request::builder()
+            .uri(
+                "/api/disc/find_by_session?source_agent=Codex&source_session_id=codex-transfer-session",
+            )
+            .body(Body::empty())
+            .unwrap();
+        let (_, resumed) = send(state.clone(), false, find).await;
+        assert_eq!(resumed["data"]["disc_id"], "disc-transfer-b");
+
+        let (old_history, new_history) = state
+            .db
+            .with_read_conn(|connection| {
+                Ok((
+                    crate::db::disc_source::list_source_history(connection, "disc-transfer-a")?,
+                    crate::db::disc_source::list_source_history(connection, "disc-transfer-b")?,
+                ))
+            })
+            .await
+            .unwrap();
+        assert_eq!(old_history.len(), 1);
+        assert!(
+            old_history[0].unlinked_at.is_some(),
+            "the previous binding remains in the audit chain as closed"
+        );
+        assert_eq!(new_history.len(), 1);
+        assert!(
+            new_history[0].unlinked_at.is_none(),
+            "the target binding is the only open owner"
+        );
+    }
+
+    #[tokio::test]
     async fn discussion_export_import_is_versioned_idempotent_and_conflict_aware() {
         let state = test_state();
         insert_test_discussion(&state, "disc-portability-http", "Portable HTTP").await;
@@ -1387,6 +1544,7 @@ mod tests {
                     &crate::models::DiscussionMessage {
                         id: "portable-http-message".into(),
                         role: crate::models::MessageRole::User,
+                        channel: crate::models::MessageChannel::Main,
                         content: "Export me".into(),
                         agent_type: None,
                         timestamp: chrono::Utc::now(),
@@ -2048,6 +2206,7 @@ mod tests {
                             "Agent" => crate::models::MessageRole::Agent,
                             _ => crate::models::MessageRole::System,
                         },
+                        channel: crate::models::MessageChannel::Main,
                         content,
                         agent_type: if role == "Agent" {
                             Some(crate::models::AgentType::ClaudeCode)

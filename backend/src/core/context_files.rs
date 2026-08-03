@@ -17,12 +17,10 @@ const PREVIEW_BYTES: usize = 8 * 1024;
 /// useful to read on disk; the extracted text is).
 const OFFICE_DOC_EXTENSIONS: &[&str] = &["xlsx", "xls", "docx", "pptx", "pdf"];
 /// Hard cap on the RAW bytes of an office doc before we hand it to a parser.
-/// Bounds the work an untrusted spreadsheet/doc can force on the underlying XML
-/// parser — notably `quick-xml` via `calamine` for xlsx, whose 0.39 line has
-/// DoS advisories (RUSTSEC-2026-0194 quadratic attr-dup check, -0195 unbounded
-/// namespace allocation) with no upstream fix yet (latest calamine still pins
-/// quick-xml ^0.39; see `.cargo/audit.toml`). 10 MB is comfortably above any
-/// legitimate context spreadsheet while keeping the worst-case parse bounded.
+/// Bounds the work an untrusted spreadsheet/doc can force on the underlying
+/// parsers. `calamine` now uses the patched `quick-xml` 0.41 line; this cap
+/// remains useful defense in depth for parser CPU and memory consumption.
+/// 10 MB is comfortably above any legitimate context spreadsheet.
 const MAX_OFFICE_DOC_SIZE: usize = 10 * 1024 * 1024;
 /// Max context files per discussion
 pub const MAX_FILES_PER_DISCUSSION: usize = 20;
@@ -782,9 +780,8 @@ mod tests {
 
     #[test]
     fn extract_content_oversized_office_doc_is_rejected() {
-        // A > 10 MB xlsx must be rejected BEFORE parsing — bounds the quick-xml
-        // DoS surface (RUSTSEC-2026-0194/-0195) reached via calamine. The bytes
-        // don't need to be a real xlsx: the size guard trips before parsing.
+        // A > 10 MB xlsx must be rejected before parsing. The bytes don't need
+        // to be a real xlsx: the size guard trips before parser work begins.
         let big = vec![0u8; MAX_OFFICE_DOC_SIZE + 1];
         let err = match extract_content("huge.xlsx", &big) {
             Ok(_) => panic!("oversized xlsx should be rejected"),

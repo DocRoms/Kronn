@@ -4,7 +4,7 @@
  * (that is where a silent bug would hide) and the hand-off of a chosen result.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, act, fireEvent, cleanup } from '@testing-library/react';
+import { render, act, fireEvent, cleanup, waitFor } from '@testing-library/react';
 
 vi.mock('../../lib/api', () => ({
   discussions: { searchMessages: vi.fn() },
@@ -95,6 +95,18 @@ describe('GlobalSearchPanel', () => {
     expect(input.value).toBe('Fastly');
     fireEvent.change(input, { target: { value: 'Fastly purge' } });
     expect(onQueryChange).toHaveBeenCalledWith('Fastly purge');
+  });
+
+  it('runs a non-empty sidebar query immediately when the panel opens', async () => {
+    renderPanel(vi.fn(), vi.fn(), 'Fastly');
+
+    await waitFor(() => {
+      expect(searchMessages()).toHaveBeenCalledWith(expect.objectContaining({
+        q: 'Fastly',
+        limit: 20,
+        offset: 0,
+      }));
+    });
   });
 
   it('sends the picked filters and widens a date to cover the whole day', async () => {

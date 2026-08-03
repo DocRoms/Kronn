@@ -48,7 +48,8 @@ vi.mock('../../../lib/I18nContext', () => ({
   }),
 }));
 
-import { WorkflowWizard, buildBlankStep } from '../WorkflowWizard';
+import { WorkflowWizard } from '../WorkflowWizard';
+import { buildBlankStep } from '../../../lib/workflowUiUtils';
 
 // ── Fixtures ────────────────────────────────────────────────────────
 

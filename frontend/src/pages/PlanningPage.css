@@ -496,6 +496,7 @@
 
 .planning-detail-dod,
 .planning-detail-links,
+.planning-task-workspaces,
 .planning-detail-subtasks,
 .planning-detail-projects,
 .planning-detail-blockers,
@@ -506,6 +507,36 @@
   border: 1px solid var(--kr-border-light);
   border-radius: var(--kr-r-lg);
   background: var(--kr-bg-hover);
+}
+
+.planning-task-workspaces h3 {
+  margin: 0 0 8px;
+  color: var(--kr-text-dim);
+  font-size: var(--kr-fs-xs);
+}
+
+.planning-task-workspaces > button {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  padding: 7px 8px;
+  border: 1px solid var(--kr-border-subtle);
+  border-radius: var(--kr-radius-sm);
+  background: var(--kr-bg-elevated);
+  color: var(--kr-text-secondary);
+  text-align: left;
+}
+
+.planning-task-workspaces > button span {
+  overflow: hidden;
+  flex: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.planning-task-workspaces > button small {
+  color: var(--kr-text-dim);
 }
 
 .planning-detail-dod button,

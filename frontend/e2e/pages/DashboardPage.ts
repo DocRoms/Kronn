@@ -21,7 +21,33 @@ export class DashboardPage {
   get navWorkflows(): Locator { return this.page.locator('[data-tour-id="nav-workflows"]'); }
   get navSettings(): Locator { return this.page.locator('[data-tour-id="nav-settings"]'); }
 
-  async clickWorkflows() { await this.navWorkflows.click(); }
+  async clickWorkflows() { await this.openWorkflows(); }
   async clickSettings() { await this.navSettings.click(); }
   async clickProjects() { await this.navProjects.click(); }
+
+  /** Open Automation even when a live run makes the first nav click open the
+   *  quick-stop popover. Tests must not depend on the operator having zero
+   *  workflows in flight. */
+  async openWorkflows() {
+    await this.navWorkflows.click();
+    const automationKinds = this.page.locator('[data-tour-id="automation-kinds"]');
+    try {
+      await automationKinds.waitFor({ state: 'visible', timeout: 1_000 });
+    } catch {
+      await this.page.locator('.wf-active-runs-footer').click();
+      await automationKinds.waitFor({ state: 'visible', timeout: 10_000 });
+    }
+  }
+
+  /** Select one concrete discussion without assuming it appears only once.
+   *  Smart shortcuts and the canonical project tree intentionally render the
+   *  same discussion; the durable id is the stable identity. */
+  async openDiscussion(discId: string) {
+    await this.navDiscussions.click();
+    await this.page.locator('.disc-sidebar').waitFor({ state: 'visible', timeout: 10_000 });
+    await this.page
+      .locator(`[data-tour-disc-id="${discId}"] .disc-item-open`)
+      .first()
+      .click();
+  }
 }

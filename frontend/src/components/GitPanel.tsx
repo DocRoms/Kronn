@@ -10,6 +10,7 @@ import {
   Loader2, Check, X, Terminal, Maximize2, Minimize2,
 } from 'lucide-react';
 import { GitDiffViewer } from './GitDiffViewer';
+import type { DiscussionWorkspace } from '../types/generated';
 
 // ─── Types (mirrors backend GitStatusResponse / GitDiffResponse) ─────────────
 
@@ -35,6 +36,7 @@ interface GitStatus {
 interface Props {
   projectId?: string;
   discussionId?: string;
+  initialWorkspaceId?: string;
   onClose: () => void;
   onExpandedChange?: (expanded: boolean) => void;
   terminalEnabled?: boolean;
@@ -90,6 +92,7 @@ function ExpandedFileButton({
 export function GitPanel({
   projectId,
   discussionId,
+  initialWorkspaceId,
   onClose,
   onExpandedChange,
   terminalEnabled = false,
@@ -98,6 +101,10 @@ export function GitPanel({
   const [status, setStatus] = useState<GitStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [workspaces, setWorkspaces] = useState<DiscussionWorkspace[]>([]);
+  const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string | undefined>(
+    initialWorkspaceId,
+  );
 
   // Diff view
   const [diffPath, setDiffPath] = useState<string | null>(null);
@@ -143,7 +150,9 @@ export function GitPanel({
     setError('');
     try {
       const res = discussionId
-        ? await discussionsApi.gitStatus(discussionId)
+        ? selectedWorkspaceId
+          ? await discussionsApi.gitStatus(discussionId, selectedWorkspaceId)
+          : await discussionsApi.gitStatus(discussionId)
         : projectId
           ? await projectsApi.gitStatus(projectId)
           : null;
@@ -154,9 +163,49 @@ export function GitPanel({
     } finally {
       setLoading(false);
     }
-  }, [projectId, discussionId]);
+  }, [projectId, discussionId, selectedWorkspaceId]);
 
   useEffect(() => { fetchStatus(); }, [fetchStatus]);
+
+  useEffect(() => {
+    if (initialWorkspaceId) setSelectedWorkspaceId(initialWorkspaceId);
+  }, [initialWorkspaceId]);
+
+  useEffect(() => {
+    let current = true;
+    if (!discussionId) {
+      setWorkspaces([]);
+      setSelectedWorkspaceId(undefined);
+      return () => { current = false; };
+    }
+    if (typeof discussionsApi.workspaces !== 'function') {
+      return () => { current = false; };
+    }
+    void discussionsApi.workspaces(discussionId)
+      .then(rows => {
+        if (!current) return;
+        const attached = rows.filter(row => row.state === 'attached');
+        setWorkspaces(rows);
+        setSelectedWorkspaceId(previous => {
+          if (
+            initialWorkspaceId
+            && rows.some(row => row.id === initialWorkspaceId)
+          ) {
+            return initialWorkspaceId;
+          }
+          if (previous && rows.some(row => row.id === previous)) return previous;
+          // Legacy Isolated rows are already the default resolver target. For
+          // Direct discussions, select the first declared CLI worktree so the
+          // panel never silently edits the project checkout instead.
+          const hasLegacy = attached.some(row => row.session_pk === null);
+          return hasLegacy ? undefined : attached[0]?.id;
+        });
+      })
+      .catch(() => {
+        if (current) setWorkspaces([]);
+      });
+    return () => { current = false; };
+  }, [discussionId, initialWorkspaceId]);
 
   const openDiff = useCallback(async (path: string, committed = false) => {
     setDiffPath(path);
@@ -165,7 +214,9 @@ export function GitPanel({
     try {
       let res;
       if (discussionId) {
-        res = await discussionsApi.gitDiff(discussionId, path, committed);
+        res = selectedWorkspaceId
+          ? await discussionsApi.gitDiff(discussionId, path, committed, selectedWorkspaceId)
+          : await discussionsApi.gitDiff(discussionId, path, committed);
       } else if (projectId) {
         res = await projectsApi.gitDiff(projectId, path, committed);
       } else {
@@ -177,7 +228,7 @@ export function GitPanel({
     } finally {
       setDiffLoading(false);
     }
-  }, [discussionId, projectId]);
+  }, [discussionId, projectId, selectedWorkspaceId]);
 
   const toggleExpanded = () => {
     setExpanded(value => {
@@ -223,7 +274,11 @@ export function GitPanel({
     try {
       const commitReq = { files: selectedFiles, message: commitMsg.trim(), amend: commitAmend, sign: commitSign };
       if (discussionId) {
-        await discussionsApi.gitCommit(discussionId, commitReq);
+        if (selectedWorkspaceId) {
+          await discussionsApi.gitCommit(discussionId, commitReq, selectedWorkspaceId);
+        } else {
+          await discussionsApi.gitCommit(discussionId, commitReq);
+        }
       } else if (projectId) {
         await projectsApi.gitCommit(projectId, commitReq);
       } else {
@@ -246,7 +301,11 @@ export function GitPanel({
     setPushResult(null);
     try {
       if (discussionId) {
-        await discussionsApi.gitPush(discussionId);
+        if (selectedWorkspaceId) {
+          await discussionsApi.gitPush(discussionId, selectedWorkspaceId);
+        } else {
+          await discussionsApi.gitPush(discussionId);
+        }
       } else if (projectId) {
         await projectsApi.gitPush(projectId);
       } else {
@@ -263,7 +322,6 @@ export function GitPanel({
 
   const openPrForm = async () => {
     if (!status) return;
-    const api = discussionId ? discussionsApi : projectsApi;
     const id = discussionId || projectId;
     if (!id) return;
     // Auto-fill title from branch name
@@ -272,7 +330,11 @@ export function GitPanel({
     setShowPrForm(true);
     // Fetch template
     try {
-      const res = await api.prTemplate(id);
+      const res = discussionId
+        ? selectedWorkspaceId
+          ? await discussionsApi.prTemplate(discussionId, selectedWorkspaceId)
+          : await discussionsApi.prTemplate(discussionId)
+        : await projectsApi.prTemplate(id);
       setPrBody(res.template);
       setPrTemplateSource(res.source);
     } catch {
@@ -285,18 +347,27 @@ export function GitPanel({
     if (!prTitle.trim()) return;
     setPrLoading(true);
     try {
-      const api = discussionId ? discussionsApi : projectsApi;
       const id = discussionId || projectId;
       if (!id) return;
       // Auto-push if branch has no upstream yet
       if (status && !status.has_upstream) {
-        await api.gitPush(id);
+        if (discussionId && selectedWorkspaceId) {
+          await discussionsApi.gitPush(discussionId, selectedWorkspaceId);
+        } else if (discussionId) {
+          await discussionsApi.gitPush(discussionId);
+        }
+        else await projectsApi.gitPush(id);
       }
-      const res = await api.createPr(id, {
-        title: prTitle.trim(),
-        body: prBody.trim(),
-        base: status?.default_branch || 'main',
-      });
+      const request = {
+          title: prTitle.trim(),
+          body: prBody.trim(),
+          base: status?.default_branch || 'main',
+      };
+      const res = discussionId
+        ? selectedWorkspaceId
+          ? await discussionsApi.createPr(discussionId, request, selectedWorkspaceId)
+          : await discussionsApi.createPr(discussionId, request)
+        : await projectsApi.createPr(id, request);
       setPushResult(`PR: ${res.url}`);
       setShowPrForm(false);
       await fetchStatus();
@@ -330,7 +401,9 @@ export function GitPanel({
     try {
       let res;
       if (discussionId) {
-        res = await discussionsApi.exec(discussionId, cmd);
+        res = selectedWorkspaceId
+          ? await discussionsApi.exec(discussionId, cmd, selectedWorkspaceId)
+          : await discussionsApi.exec(discussionId, cmd);
       } else if (projectId) {
         res = await projectsApi.exec(projectId, cmd);
       } else {
@@ -456,6 +529,45 @@ export function GitPanel({
           <button className="disc-tool-panel-icon git-close-btn" onClick={onClose} aria-label="Close git panel"><X size={14} /></button>
         </div>
       </header>
+
+      {discussionId && workspaces.some(
+        row => row.session_pk !== null || row.state === 'attached',
+      ) && (
+        <label className="git-workspace-picker">
+          <span>{t('git.workspaceSelector')}</span>
+          <select
+            value={selectedWorkspaceId ?? ''}
+            onChange={event => {
+              const next = event.target.value || undefined;
+              setSelectedWorkspaceId(next);
+              setDiffPath(null);
+              setSelectedFiles([]);
+              setStatus(null);
+            }}
+            aria-label={t('git.workspaceSelector')}
+          >
+            {workspaces.some(row => row.session_pk === null && row.state === 'attached') && (
+              <option value="">{t('git.workspaceDefault')}</option>
+            )}
+            {workspaces
+              .filter(row => row.session_pk !== null)
+              .map(workspace => (
+                <option
+                  key={workspace.id}
+                  value={workspace.id}
+                  disabled={workspace.state !== 'attached'}
+                >
+                  {workspace.task_reference ? `${workspace.task_reference} · ` : ''}
+                  {workspace.branch}
+                  {` · ${t(workspace.ownership === 'managed' ? 'git.workspaceManaged' : 'git.workspaceExternal')}`}
+                  {workspace.state !== 'attached'
+                    ? ` · ${t(`planning.workspaceState.${workspace.state}`)}`
+                    : ''}
+                </option>
+              ))}
+          </select>
+        </label>
+      )}
 
       {loading && (
         <div className="git-center"><Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} /></div>

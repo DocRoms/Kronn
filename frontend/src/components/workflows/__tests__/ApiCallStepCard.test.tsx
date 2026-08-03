@@ -22,7 +22,8 @@ vi.mock('../../../lib/api', () => buildApiMock({
   },
 }));
 
-import { ApiCallStepCard, previewString, type ApiPluginOption } from '../ApiCallStepCard';
+import { ApiCallStepCard, type ApiPluginOption } from '../ApiCallStepCard';
+import { previewString } from '../../../lib/workflowUiUtils';
 
 const t = (key: string, ...args: (string | number)[]) =>
   args.length > 0 ? `${key}:${args.join(',')}` : key;

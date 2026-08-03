@@ -684,6 +684,42 @@
   white-space: pre-wrap;
 }
 
+.plan-task-workspaces {
+  display: grid;
+  gap: 5px;
+}
+
+.plan-task-workspaces > strong {
+  color: var(--kr-text-dim);
+  font-size: var(--kr-fs-2xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.plan-task-workspaces > button {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid var(--kr-border-subtle);
+  border-radius: var(--kr-radius-sm);
+  background: var(--kr-bg-elevated);
+  color: var(--kr-text-secondary);
+  text-align: left;
+}
+
+.plan-task-workspaces > button span {
+  overflow: hidden;
+  flex: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.plan-task-workspaces > button small {
+  color: var(--kr-text-dim);
+}
+
 .plan-dod {
   display: grid;
   gap: 6px;

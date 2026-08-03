@@ -1,0 +1,164 @@
+{
+  "schema_version": "1.3.0",
+  "generated_at": "2026-08-02T08:17:02.784402+00:00",
+  "window": {
+    "from": "2026-07-03T08:17:02.784402+00:00",
+    "to": "2026-08-02T08:17:02.784402+00:00"
+  },
+  "scenario": null,
+  "scenario_is_canonical": null,
+  "scope": {
+    "repo_pseudonym": "186090b0",
+    "kronn_installed": true,
+    "rtk_installed": true
+  },
+  "kpi": {
+    "completed_tasks": null,
+    "raw_traffic_tokens_per_completed_task_by_agent": {
+      "claude": null,
+      "codex": null,
+      "copilot": null
+    }
+  },
+  "agents": {
+    "claude": {
+      "raw_traffic_tokens": 8763308033,
+      "estimated_cost_usd": null,
+      "non_cached_input_tokens": 1577403,
+      "cache_write_tokens": 150034799,
+      "cache_read_tokens": 8592174590,
+      "output_tokens": 19521241,
+      "assistant_calls": 27234,
+      "sessions": 1532,
+      "top_1_share_pct": 23.3,
+      "top_4_share_pct": 74.88,
+      "repo_sessions_share_pct": 82.1,
+      "disc_wait_calls": 1899,
+      "disc_wait_associated_tokens": 1100424247,
+      "coverage": {
+        "observed_from": "2026-07-03T17:00:03.612000+00:00",
+        "observed_to": "2026-08-02T08:16:51.176000+00:00"
+      },
+      "provenance": "claude-code jsonl (stream records canonicalized by requestId+message.id: earliest timestamp, largest coherent usage snapshot, union of tool names)"
+    },
+    "codex": {
+      "raw_traffic_tokens": 4764912534,
+      "estimated_cost_usd": null,
+      "non_cached_input_tokens": 114747709,
+      "cache_write_tokens": null,
+      "cache_read_tokens": 4641656042,
+      "output_tokens": 8508783,
+      "reasoning_tokens": 3380773,
+      "sessions": 257,
+      "rollouts": 275,
+      "top_1_share_pct": 55.51,
+      "coverage": {
+        "observed_from": "2026-07-12T19:14:28.787000+00:00",
+        "observed_to": "2026-08-02T08:17:02.715000+00:00"
+      },
+      "provenance": "codex rollout jsonl (per root thread: ancestry-coherent cumulative window deltas; divergent branches fail closed)"
+    },
+    "copilot": {
+      "raw_traffic_tokens": 30481421,
+      "estimated_cost_usd": null,
+      "non_cached_input_tokens": 15417302,
+      "cache_read_tokens": 14509450,
+      "cache_write_tokens": 516410,
+      "output_tokens": 38259,
+      "reasoning_tokens": 12174,
+      "calls": 162,
+      "coverage_days": 1,
+      "observed_range_covers_window": false,
+      "coverage": {
+        "observed_from": "2026-07-14T13:17:01.491000+00:00",
+        "observed_to": "2026-07-14T21:20:18.076000+00:00"
+      },
+      "provenance": "copilot session-store.db assistant_usage_events (read-only)"
+    }
+  },
+  "kronn": {
+    "external_agent_replies": 3223,
+    "external_replies_with_tokens_pct": 3.26,
+    "traced_tokens_used": 1049892,
+    "untraced_replies_by_agent": {
+      "unknown": 1,
+      "ClaudeCode": 1106,
+      "Codex": 1947,
+      "CopilotCli": 30,
+      "Ollama": 0,
+      "Vibe": 34
+    },
+    "provenance": "kronn.db messages.tokens_used (read-only)"
+  },
+  "rtk": {
+    "installed": true,
+    "version": "rtk 0.42.4",
+    "commands": 41101,
+    "raw_output_tokens": 101128209,
+    "compacted_output_tokens": 34559855,
+    "saved_tokens": 66594677,
+    "saved_pct": 65.85,
+    "granularity": "daily",
+    "included_full_days": 29,
+    "window_coverage": "partial",
+    "provenance": "rtk gain --daily --format json (complete UTC days only)"
+  },
+  "data_gaps": [
+    "claude: malformed assistant usage records were ignored",
+    "codex path-date fallback cannot allocate timestamp-less records on partial UTC boundary days",
+    "copilot observed coverage does not span the requested window",
+    "rtk daily granularity excludes partial UTC boundary days",
+    "completed task denominator was not provided or is zero"
+  ],
+  "data_gap_details": [
+    {
+      "id": "gap-1",
+      "source": "claude",
+      "code": "source_quality",
+      "message": "claude: malformed assistant usage records were ignored"
+    },
+    {
+      "id": "gap-2",
+      "source": "codex",
+      "code": "insufficient_granularity",
+      "message": "codex path-date fallback cannot allocate timestamp-less records on partial UTC boundary days"
+    },
+    {
+      "id": "gap-3",
+      "source": "copilot",
+      "code": "coverage_incomplete",
+      "message": "copilot observed coverage does not span the requested window"
+    },
+    {
+      "id": "gap-4",
+      "source": "rtk",
+      "code": "insufficient_granularity",
+      "message": "rtk daily granularity excludes partial UTC boundary days"
+    },
+    {
+      "id": "gap-5",
+      "source": "kpi",
+      "code": "missing_denominator",
+      "message": "completed task denominator was not provided or is zero"
+    }
+  ],
+  "notes": [
+    "raw traffic includes cache reads and must never be read as billing",
+    "every null has a typed null_reasons entry; zero is measured",
+    "estimated_cost_usd stays null until a per-model tariff table is configured",
+    "per-task KPI stays provider-specific; no incomplete cross-provider total is inferred"
+  ],
+  "null_reasons": {
+    "scenario": "not_requested",
+    "scenario_is_canonical": "not_requested",
+    "kpi.completed_tasks": "missing_denominator",
+    "kpi.raw_traffic_tokens_per_completed_task_by_agent.claude": "missing_denominator",
+    "kpi.raw_traffic_tokens_per_completed_task_by_agent.codex": "missing_denominator",
+    "kpi.raw_traffic_tokens_per_completed_task_by_agent.copilot": "missing_denominator",
+    "agents.claude.estimated_cost_usd": "unconfigured_cost",
+    "agents.codex.estimated_cost_usd": "unconfigured_cost",
+    "agents.codex.cache_write_tokens": "unsupported_metric",
+    "agents.copilot.estimated_cost_usd": "unconfigured_cost"
+  },
+  "null_gap_links": {}
+}

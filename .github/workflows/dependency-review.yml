@@ -1,0 +1,86 @@
+name: Dependency review
+
+on:
+  schedule:
+    # Weekly by default. Project-level checks remain independently configurable
+    # in Kronn's Project overview.
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  review:
+    name: Security alerts and ordinary updates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      # Security checks are deliberately separate and visually prior to
+      # ordinary version drift. The individual steps continue so all three
+      # graphs are reported; the aggregate step below then fails the workflow.
+      - name: Security — audit backend Rust dependencies
+        id: audit-backend
+        working-directory: backend
+        continue-on-error: true
+        run: cargo audit
+
+      - name: Security — audit desktop Rust dependencies
+        id: audit-desktop
+        working-directory: desktop/src-tauri
+        continue-on-error: true
+        run: cargo audit
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Security — audit frontend dependencies
+        id: audit-frontend
+        working-directory: frontend
+        continue-on-error: true
+        run: pnpm audit --audit-level=moderate
+
+      - name: Flag security findings
+        if: >-
+          steps.audit-backend.outcome == 'failure' ||
+          steps.audit-desktop.outcome == 'failure' ||
+          steps.audit-frontend.outcome == 'failure'
+        run: |
+          echo "::error title=Dependency security review::One or more security audits reported alerts or could not complete. Review the Security steps before releasing."
+          exit 1
+
+      # These commands only resolve/report available versions. `--dry-run` is
+      # mandatory for Cargo; no install/update command is ever executed.
+      - name: Updates — review backend Rust version drift
+        working-directory: backend
+        continue-on-error: true
+        run: cargo update --dry-run --verbose --color never
+
+      - name: Updates — review desktop Rust version drift
+        working-directory: desktop/src-tauri
+        continue-on-error: true
+        run: cargo update --dry-run --verbose --color never
+
+      - name: Updates — review frontend version drift
+        working-directory: frontend
+        continue-on-error: true
+        run: pnpm outdated --format json
+
+      - name: Review policy
+        run: |
+          echo "Dependency review completed."
+          echo "Security findings are reported separately from ordinary version drift."
+          echo "No dependency was updated automatically."

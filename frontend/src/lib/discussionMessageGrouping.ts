@@ -13,6 +13,7 @@
 // catch it.
 
 import type { DiscussionMessage } from '../types/generated';
+import { localCalendarDayKey } from './discussionDates';
 import { isKronnToolMessage } from './kronnToolParser';
 
 export type DiscussionRenderItem =
@@ -66,6 +67,12 @@ export function groupMessagesWithToolFold(
     const msg = messages[idx];
     if (isAutoPrompt?.(idx)) continue;
     if (msg.role === 'System' && isKronnToolMessage(msg.content)) {
+      const previousTool = toolBuffer.at(-1);
+      const previousDayKey = previousTool ? localCalendarDayKey(previousTool.timestamp) : null;
+      const currentDayKey = localCalendarDayKey(msg.timestamp);
+      if (previousDayKey !== null && currentDayKey !== null && previousDayKey !== currentDayKey) {
+        flushToolBuffer();
+      }
       toolBuffer.push(msg);
       continue;
     }

@@ -10,7 +10,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, cleanup, waitFor, act } from '@testing-library/react';
 import { I18nProvider } from '../../lib/I18nContext';
-import { formatPeriod, rowsPerPage, UsageSection } from '../settings/UsageSection';
+import { UsageSection } from '../settings/UsageSection';
+import { formatPeriod, rowsPerPage } from '../settings/usageFormat';
 import type { UsageReport, UsageRow } from '../../types/generated';
 
 const { getUsage } = vi.hoisted(() => ({ getUsage: vi.fn() }));

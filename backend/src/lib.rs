@@ -921,7 +921,7 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         )
         .route(
             "/api/projects/{id}/dependency-updates",
-            get(api::projects::dependency_updates),
+            get(api::projects::dependency_updates).put(api::projects::set_dependency_monitoring),
         )
         .route("/api/projects/{id}/git-diff", get(api::projects::git_diff))
         .route(
@@ -1357,6 +1357,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             "/api/discussions/{id}/participants",
             get(api::disc_invite::list_participants),
         )
+        .route(
+            "/api/discussions/{id}/workspaces",
+            get(api::disc_workspace::discussion_workspaces),
+        )
         // 0.8.6 phase 3 — long-poll for new peer messages.
         .route(
             "/api/discussions/{id}/wait",
@@ -1401,6 +1405,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             get(api::disc_introspection::disc_get_message),
         )
         .route(
+            "/api/discussions/{id}/notes",
+            get(api::disc_introspection::disc_note_list),
+        )
+        .route(
             "/api/discussions/{id}/summarize",
             post(api::disc_introspection::disc_summarize),
         )
@@ -1412,10 +1420,19 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/disc/create", post(api::disc_source::disc_create))
         .route("/api/disc/append", post(api::disc_source::disc_append))
         .route("/api/disc/link", post(api::disc_source::disc_link))
+        .route(
+            "/api/disc/transfer-session",
+            post(api::disc_source::disc_transfer_session),
+        )
         .route("/api/disc/unlink", post(api::disc_source::disc_unlink))
         .route(
             "/api/disc/session-status",
             get(api::disc_source::disc_session_status),
+        )
+        .route(
+            "/api/disc/workspace",
+            get(api::disc_workspace::disc_workspace_get)
+                .post(api::disc_workspace::disc_workspace_set),
         )
         .route(
             "/api/disc/find_by_session",

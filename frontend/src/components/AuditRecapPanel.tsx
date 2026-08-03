@@ -35,6 +35,21 @@ interface Props {
   refreshTrigger?: number;
 }
 
+interface HistoryResult {
+  key: string;
+  rows: AuditRun[];
+  error: string | null;
+}
+
+interface StepsResult {
+  runId: string;
+  rows: Step[];
+  error: string | null;
+}
+
+const EMPTY_AUDIT_RUNS: AuditRun[] = [];
+const EMPTY_AUDIT_STEPS: Step[] = [];
+
 function fmtDuration(ms: number | null | undefined): string {
   if (ms == null) return '—';
   if (ms < 1000) return `${ms}ms`;
@@ -89,12 +104,9 @@ function kindIcon(kind: string): string {
 export default function AuditRecapPanel({ projectId, refreshTrigger }: Props) {
   const { t, locale } = useT();
   const [drawerOpen, setDrawerOpen] = useState(false);
-  const [history, setHistory] = useState<AuditRun[]>([]);
+  const [historyResult, setHistoryResult] = useState<HistoryResult | null>(null);
   const [expandedRunId, setExpandedRunId] = useState<string | null>(null);
-  const [steps, setSteps] = useState<Step[]>([]);
-  const [loadingHistory, setLoadingHistory] = useState(false);
-  const [loadingSteps, setLoadingSteps] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [stepsResult, setStepsResult] = useState<StepsResult | null>(null);
   const [sortKey, setSortKey] = useState<SortKey>('step_index');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc');
   const [kindFilter, setKindFilter] = useState<string | null>(null);
@@ -103,17 +115,16 @@ export default function AuditRecapPanel({ projectId, refreshTrigger }: Props) {
   // Fetch history on mount + every refreshTrigger bump.
   useEffect(() => {
     let cancelled = false;
-    setLoadingHistory(true);
-    setError(null);
+    const key = `${projectId}:${refreshTrigger ?? 0}`;
     (async () => {
       try {
         const rows = await projectsApi.auditHistory(projectId);
         if (cancelled) return;
-        setHistory(rows ?? []);
+        setHistoryResult({ key, rows: rows ?? [], error: null });
       } catch (e) {
-        if (!cancelled) setError(String((e as Error).message ?? e));
-      } finally {
-        if (!cancelled) setLoadingHistory(false);
+        if (!cancelled) {
+          setHistoryResult({ key, rows: [], error: String((e as Error).message ?? e) });
+        }
       }
     })();
     return () => { cancelled = true; };
@@ -121,22 +132,32 @@ export default function AuditRecapPanel({ projectId, refreshTrigger }: Props) {
 
   // Load steps for the expanded card.
   useEffect(() => {
-    if (!expandedRunId) { setSteps([]); return; }
+    if (!expandedRunId) return;
     let cancelled = false;
-    setLoadingSteps(true);
+    const runId = expandedRunId;
     (async () => {
       try {
         const rows = await projectsApi.auditRunSteps(expandedRunId);
         if (cancelled) return;
-        setSteps(rows ?? []);
+        setStepsResult({ runId, rows: rows ?? [], error: null });
       } catch (e) {
-        if (!cancelled) setError(String((e as Error).message ?? e));
-      } finally {
-        if (!cancelled) setLoadingSteps(false);
+        if (!cancelled) {
+          setStepsResult({ runId, rows: [], error: String((e as Error).message ?? e) });
+        }
       }
     })();
     return () => { cancelled = true; };
   }, [expandedRunId]);
+
+  const historyKey = `${projectId}:${refreshTrigger ?? 0}`;
+  const historyIsCurrent = historyResult?.key === historyKey;
+  const history = historyIsCurrent ? historyResult.rows : EMPTY_AUDIT_RUNS;
+  const loadingHistory = !historyIsCurrent;
+  const stepsAreCurrent = expandedRunId !== null && stepsResult?.runId === expandedRunId;
+  const steps = stepsAreCurrent ? stepsResult.rows : EMPTY_AUDIT_STEPS;
+  const loadingSteps = expandedRunId !== null && !stepsAreCurrent;
+  const error = (historyIsCurrent ? historyResult.error : null)
+    ?? (stepsAreCurrent ? stepsResult.error : null);
 
   // Close drawer on Escape.
   useEffect(() => {

@@ -9,7 +9,8 @@
 // — fix them in i18n.ts and rerun.
 
 import { describe, it, expect } from 'vitest';
-import { dictionaries, UI_LOCALES } from '../i18n';
+import { UI_LOCALES } from '../i18n';
+import { dictionaries } from '../i18n/testing';
 
 describe('i18n key parity', () => {
   const referenceLocale = 'fr';

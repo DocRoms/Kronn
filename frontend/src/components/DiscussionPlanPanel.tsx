@@ -9,6 +9,7 @@ import {
   Flag,
   Focus,
   FolderKanban,
+  GitBranch,
   Loader2,
   Inbox,
   List,
@@ -18,6 +19,7 @@ import {
   X,
 } from 'lucide-react';
 import { planning } from '../lib/api';
+import { queueDiscussionWorkspaceTarget } from '../lib/discussion-navigation';
 import { useT } from '../lib/I18nContext';
 import { userError } from '../lib/userError';
 import { CopyIdPill } from './CopyIdPill';
@@ -75,30 +77,38 @@ export function DiscussionPlanPanel({
     selectedTaskIdRef.current = selectedTask?.id ?? null;
   }, [selectedTask?.id]);
 
+  const readPlan = useCallback(async () => {
+    const selectedId = selectedTaskIdRef.current;
+    const [next, nextDetail, nextProposals] = await Promise.all([
+      planning.discussionPlan(discussionId),
+      selectedId ? planning.get(selectedId) : Promise.resolve(null),
+      planning.proposals(discussionId),
+    ]);
+    return { next, nextDetail, nextProposals, selectedId };
+  }, [discussionId]);
+
+  const applyPlan = useCallback((result: Awaited<ReturnType<typeof readPlan>>) => {
+    setPlan(result.next);
+    setProposalInbox(result.nextProposals);
+    if (result.nextDetail && selectedTaskIdRef.current === result.selectedId) {
+      setSelectedTask(result.nextDetail);
+    }
+    onChanged?.(result.next);
+  }, [onChanged]);
+
   const refresh = useCallback(async (silent = false) => {
     if (!silent) {
       setLoading(true);
       setError('');
     }
     try {
-      const selectedId = selectedTaskIdRef.current;
-      const [next, nextDetail, nextProposals] = await Promise.all([
-        planning.discussionPlan(discussionId),
-        selectedId ? planning.get(selectedId) : Promise.resolve(null),
-        planning.proposals(discussionId),
-      ]);
-      setPlan(next);
-      setProposalInbox(nextProposals);
-      if (nextDetail && selectedTaskIdRef.current === selectedId) {
-        setSelectedTask(nextDetail);
-      }
-      onChanged?.(next);
+      applyPlan(await readPlan());
     } catch (cause) {
       if (!silent) setError(userError(cause));
     } finally {
       if (!silent) setLoading(false);
     }
-  }, [discussionId, onChanged]);
+  }, [applyPlan, readPlan]);
 
   const updateProposal = (updated: PlanningProposal) => {
     setProposalInbox(previous => {
@@ -122,7 +132,17 @@ export function DiscussionPlanPanel({
   };
 
   useEffect(() => {
-    void refresh();
+    let active = true;
+    readPlan()
+      .then(result => {
+        if (active) applyPlan(result);
+      })
+      .catch(cause => {
+        if (active) setError(userError(cause));
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
     const refreshProposals = (event: Event) => {
       const changedDiscussionId = (
         event as CustomEvent<{ discussionId?: string }>
@@ -134,10 +154,11 @@ export function DiscussionPlanPanel({
       if (!document.hidden) void refresh(true);
     }, 5_000);
     return () => {
+      active = false;
       window.removeEventListener('kronn:plan-proposals-changed', refreshProposals);
       window.clearInterval(interval);
     };
-  }, [discussionId, refresh]);
+  }, [applyPlan, discussionId, readPlan, refresh]);
 
   const current = useMemo(
     () => plan?.active.filter(item => (
@@ -674,6 +695,30 @@ export function DiscussionPlanPanel({
             </div>
             <h3>{selectedTask.title}</h3>
             {selectedTask.description && <p>{selectedTask.description}</p>}
+            {(selectedTask.workspaces?.length ?? 0) > 0 && (
+              <div className="plan-task-workspaces">
+                <strong>{t('planning.workspaces')}</strong>
+                {selectedTask.workspaces?.map(workspace => (
+                  <button
+                    type="button"
+                    key={workspace.id}
+                    onClick={() => {
+                      queueDiscussionWorkspaceTarget(workspace.disc_id, workspace.id);
+                      onNavigateDiscussion?.(workspace.disc_id);
+                    }}
+                    title={t('planning.workspaceViewFiles')}
+                  >
+                    <GitBranch size={11} />
+                    <span>{workspace.branch}</span>
+                    <small>
+                      {workspace.session_agent_type ?? t('git.workspaceManaged')}
+                      {' · '}
+                      {t(`planning.workspaceState.${workspace.state}`)}
+                    </small>
+                  </button>
+                ))}
+              </div>
+            )}
             {selectedRelation && (
               <div className="plan-detail-actions" aria-label={t('planning.taskActions')}>
                 <button

@@ -23,6 +23,7 @@
  * any agent. No tokens spent.
  */
 import { test, expect, type APIRequestContext } from '@playwright/test';
+import { DashboardPage } from '../pages/DashboardPage';
 
 const QP_TITLE = `PW compare-multi ${Date.now()}`;
 const QP_PROMPT = 'Réponds simplement par "ok".';
@@ -120,8 +121,9 @@ test.describe('Compare-agents — chip selector + multi-disc fan-out (UI level)'
       resp.url().includes(`/api/quick-prompts/${qp.id}/compare-agents`) && resp.status() === 200
     );
 
-    await page.goto('/');
-    await page.locator('[data-tour-id="nav-workflows"]').click();
+    const dashboard = new DashboardPage(page);
+    await dashboard.goto();
+    await dashboard.openWorkflows();
     await page.locator('button.dash-tab', { hasText: /Quick Prompts/i }).click();
 
     // Find our QP card. The 🤝 button stays disabled until /api/agents

@@ -22,9 +22,10 @@ test.describe('Dashboard — every nav tab loads', () => {
   test('Automatisation tab loads', async ({ page }) => {
     const dashboard = new DashboardPage(page);
     await dashboard.goto();
-    await dashboard.clickWorkflows();
-    // Automation header sub-tabs are visible.
-    await expect(page.getByRole('button', { name: /Quick Prompts/i })).toBeVisible({ timeout: 5_000 });
+    await dashboard.openWorkflows();
+    // Stable capability hook; counts and translated labels may change.
+    await expect(page.locator('[data-tour-id="automation-kind-quick-prompt"]'))
+      .toBeVisible({ timeout: 5_000 });
   });
 
   test('Config tab loads', async ({ page }) => {

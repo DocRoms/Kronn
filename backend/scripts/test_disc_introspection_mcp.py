@@ -28,6 +28,7 @@ Stdlib `unittest` + `unittest.mock` only — zero extra dev deps,
 matches the script's own "no third-party packages" discipline.
 """
 
+import hashlib
 import io
 import importlib.util
 import json
@@ -329,6 +330,93 @@ class DiscSourceBindingToolTests(unittest.TestCase):
         body = self.fake_http.call_args.args[2]
         self.assertIs(body["force_reassign"], True)
 
+    def test_disc_transfer_session_requires_pinned_source_and_confirmation(self):
+        tool = next(
+            item for item in self.mod.TOOLS
+            if item["name"] == "disc_transfer_session"
+        )
+        self.assertEqual(
+            tool["inputSchema"]["required"],
+            ["from_disc_id", "confirm_transfer"],
+        )
+
+        self.mod._set_current_disc_id("disc-new")
+        with mock.patch.object(self.mod, "_read_binding", return_value=None), \
+             mock.patch.object(self.mod, "_http", self.fake_http):
+            with self.assertRaises(RuntimeError) as missing_confirmation:
+                self.mod.call_disc_transfer_session({"from_disc_id": "disc-old"})
+            self.assertIn("confirm_transfer=true", str(missing_confirmation.exception))
+
+            with self.assertRaises(RuntimeError) as missing_source:
+                self.mod.call_disc_transfer_session({"confirm_transfer": True})
+            self.assertIn("from_disc_id is required", str(missing_source.exception))
+
+            with self.assertRaises(RuntimeError) as missing_resume:
+                self.mod.call_disc_transfer_session({
+                    "from_disc_id": "disc-old",
+                    "confirm_transfer": True,
+                })
+            self.assertIn("no durable local resume credential", str(missing_resume.exception))
+        self.fake_http.assert_not_called()
+
+    def test_disc_transfer_session_moves_only_to_the_joined_room(self):
+        self.mod._set_current_disc_id("disc-new")
+        response = {
+            "success": True,
+            "data": {
+                "previous_disc_id": "disc-old",
+                "disc_id": "disc-new",
+                "session_bound": True,
+                "transferred": True,
+                "binding_version": 1,
+            },
+        }
+        http = mock.MagicMock(return_value=response)
+        with mock.patch.object(self.mod, "_durable_session_id", return_value="cli-durable"), \
+             mock.patch.object(self.mod, "_agent_type_for_session", return_value="Codex"), \
+             mock.patch.object(self.mod, "_read_binding", return_value={"disc_id": "disc-new"}), \
+             mock.patch.object(self.mod, "_http", http):
+            with self.assertRaises(RuntimeError) as wrong_target:
+                self.mod.call_disc_transfer_session({
+                    "from_disc_id": "disc-old",
+                    "to_disc_id": "disc-third",
+                    "confirm_transfer": True,
+                })
+            self.assertIn("currently joined", str(wrong_target.exception))
+            result = self.mod.call_disc_transfer_session({
+                "from_disc_id": "disc-old",
+                "confirm_transfer": True,
+            })
+
+        self.assertTrue(result["session_bound"])
+        http.assert_called_once_with("POST", "/api/disc/transfer-session", {
+            "from_disc_id": "disc-old",
+            "to_disc_id": "disc-new",
+            "source_agent": "Codex",
+            "source_session_id": "cli-durable",
+            "confirm_transfer": True,
+        })
+
+    def test_disc_transfer_session_surfaces_ownership_conflicts(self):
+        self.mod._set_current_disc_id("disc-new")
+        http = mock.MagicMock(return_value={
+            "success": False,
+            "error": (
+                "DB error transferring session: session ownership changed: "
+                "expected discussion disc-old, found disc-other"
+            ),
+        })
+        with mock.patch.object(self.mod, "_durable_session_id", return_value="cli-durable"), \
+             mock.patch.object(self.mod, "_agent_type_for_session", return_value="Codex"), \
+             mock.patch.object(self.mod, "_read_binding", return_value={"disc_id": "disc-new"}), \
+             mock.patch.object(self.mod, "_http", http):
+            with self.assertRaises(RuntimeError) as conflict:
+                self.mod.call_disc_transfer_session({
+                    "from_disc_id": "disc-old",
+                    "confirm_transfer": True,
+                })
+        self.assertIn("ownership changed", str(conflict.exception))
+
 
 class CallDiscGetMessageTests(unittest.TestCase):
     """Selector and bounded-window contract for the cheap message reader."""
@@ -394,6 +482,41 @@ class CallDiscGetMessageTests(unittest.TestCase):
         self.fake_http.assert_not_called()
 
 
+class CallDiscNoteListTests(unittest.TestCase):
+    """Explicit note reader stays bounded and discoverable."""
+
+    def setUp(self):
+        self.mod = _load_module()
+        self.env_patch = mock.patch.dict(
+            os.environ,
+            {"KRONN_DISCUSSION_ID": "disc-abc"},
+            clear=False,
+        )
+        self.env_patch.start()
+        self.addCleanup(self.env_patch.stop)
+        self.fake_http = mock.MagicMock(return_value={
+            "success": True,
+            "data": {"notes": [], "total_notes": 0},
+        })
+        self.http_patch = mock.patch.object(self.mod, "_http", self.fake_http)
+        self.http_patch.start()
+        self.addCleanup(self.http_patch.stop)
+
+    def test_catalog_and_dispatch_expose_bounded_reader(self):
+        tool = next(item for item in self.mod.TOOLS if item["name"] == "disc_note_list")
+        self.assertEqual(tool["inputSchema"]["properties"]["limit"]["maximum"], 100)
+        self.assertIn("disc_note_list", self.mod.DISPATCH)
+
+    def test_cursor_and_limit_are_forwarded_without_message_history(self):
+        self.mod.call_disc_note_list({"cursor": 17, "limit": 25})
+        method, path = self.fake_http.call_args.args
+        self.assertEqual(method, "GET")
+        self.assertEqual(
+            path,
+            "/api/discussions/disc-abc/notes?cursor=17&limit=25",
+        )
+
+
 class McpListEnrichedOutputTests(unittest.TestCase):
     """0.8.6 — the `mcp_list` tool surfaces enough metadata for the
     agent to PICK an API natively (description, docs link, per-endpoint
@@ -407,6 +530,20 @@ class McpListEnrichedOutputTests(unittest.TestCase):
 
     def setUp(self):
         self.mod = _load_module()
+
+    def test_mcp_list_timestamps_snapshot_and_explains_api_gate(self):
+        fake_backend = {
+            "success": True,
+            "data": {"configs": [], "servers": []},
+        }
+        with mock.patch.object(self.mod, "_http", return_value=fake_backend):
+            out = self.mod.call_mcp_list({})
+        self.assertRegex(
+            out["captured_at"],
+            r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$",
+        )
+        self.assertIn("necessary but not sufficient", out["api_call_contract"])
+        self.assertIn("api_spec", out["api_call_contract"])
 
     def test_mcp_list_surfaces_docs_url_description_and_custom_flag(self):
         fake_backend = {
@@ -1307,6 +1444,21 @@ class DiscAppendSimpleModeTests(unittest.TestCase):
             "agent_type": "Ollama",
         }])
 
+    def test_note_channel_preserves_author_but_never_routes_mentions(self):
+        with mock.patch.object(self.mod, "_current_disc_meta", return_value={
+            "agent": "ClaudeCode",
+        }), mock.patch.object(self.mod, "_http") as mock_http:
+            mock_http.return_value = {"success": True, "data": {}}
+            self.mod.call_disc_append({
+                "content": "@ollama piste à revoir plus tard",
+                "channel": "note",
+            })
+        msg = _append_body(mock_http)["messages"][0]
+        self.assertEqual(msg["channel"], "note")
+        self.assertEqual(msg["agent_type"], "Codex")
+        self.assertNotIn("target_agent", msg)
+        self.assertNotIn("targets", msg)
+
     def test_code_examples_and_non_mentions_do_not_infer_a_target(self):
         cases = [
             "Documente `@ollama` sans le lancer.",
@@ -1362,6 +1514,160 @@ class DiscAppendSimpleModeTests(unittest.TestCase):
             "cli_session_id": 42,
         }])
         self.assertEqual(msg["target_agent"], "Codex")
+
+    def _reply_guard_http(self, reply_target, participants=None):
+        def http(method, path, body=None, **kwargs):
+            if "/message/" in path:
+                return {"success": True, "data": {
+                    "id": "m-replied", "role": "Agent", "agent_type": "Codex",
+                    "content": "earlier turn", "reply_target": reply_target,
+                }}
+            if path.endswith("/participants"):
+                return {"success": True, "data": participants or []}
+            return {"success": True, "data": {}}
+        return http
+
+    def test_reply_to_cli_author_with_short_alias_is_refused_with_suggestion(self):
+        # KT-211 — replying to a joined-CLI-authored message while naming the
+        # bare provider alias would wake a punctual agent instead of the
+        # author. The append fails closed with the EXACT corrective alias.
+        participants = [
+            {"id": 41, "agent_type": "Codex"},
+            {"id": 42, "agent_type": "Codex"},
+        ]
+        http = self._reply_guard_http(
+            {"kind": "cli", "agent_type": "Codex", "cli_session_id": 42},
+            participants,
+        )
+        with mock.patch.object(self.mod, "_current_disc_meta", return_value={
+            "agent": "ClaudeCode",
+        }), mock.patch.object(self.mod, "_http", side_effect=http):
+            with self.assertRaises(RuntimeError) as ctx:
+                self.mod.call_disc_append({
+                    "content": "@codex je te réponds ici",
+                    "reply_to_message_id": "m-replied",
+                })
+        self.assertIn("@codex-cli-2", str(ctx.exception))
+        self.assertIn("native agent", str(ctx.exception))
+
+    def test_reply_to_cli_author_of_the_principal_provider_is_also_refused(self):
+        # Review case 1: the author's provider IS the room's discussion
+        # agent, so the short alias resolves to `discussion_agent` — the
+        # guard must cover both native kinds, not only punctual spawns.
+        participants = [{"id": 50, "agent_type": "ClaudeCode"}]
+        http = self._reply_guard_http(
+            {"kind": "cli", "agent_type": "ClaudeCode", "cli_session_id": 50},
+            participants,
+        )
+        with mock.patch.object(self.mod, "_current_disc_meta", return_value={
+            "agent": "ClaudeCode",
+        }), mock.patch.object(self.mod, "_http", side_effect=http):
+            with self.assertRaises(RuntimeError) as ctx:
+                self.mod.call_disc_append({
+                    "content": "@claude je te réponds",
+                    "reply_to_message_id": "m-replied",
+                })
+        self.assertIn("@claude-cli", str(ctx.exception))
+
+    def test_deliberate_fanout_to_exact_cli_and_native_passes(self):
+        # Review case 2: listing the exact replied CLI AND the native agent
+        # is an intentional two-responder fan-out; the guard must not block.
+        participants = [{"id": 41, "agent_type": "Codex"}]
+        http = self._reply_guard_http(
+            {"kind": "cli", "agent_type": "Codex", "cli_session_id": 41},
+            participants,
+        )
+        with mock.patch.object(self.mod, "_current_disc_meta", return_value={
+            "agent": "ClaudeCode",
+        }), mock.patch.object(self.mod, "_http", side_effect=http) as mock_http:
+            self.mod.call_disc_append({
+                "content": "@codex-cli et @codex, vos deux avis",
+                "reply_to_message_id": "m-replied",
+            })
+        msg = _append_body(mock_http)["messages"][0]
+        self.assertEqual(msg["targets"], [
+            {"kind": "cli", "agent_type": "Codex", "cli_session_id": 41},
+            {"kind": "agent", "agent_type": "Codex"},
+        ])
+
+    def test_unresolvable_replied_author_fails_closed(self):
+        # Review case 3a: a native mention in a reply whose author cannot be
+        # verified must be refused, never delivered unverified.
+        def http(method, path, body=None, **kwargs):
+            if "/message/" in path:
+                raise RuntimeError("HTTP 500: transient")
+            return {"success": True, "data": {}}
+
+        with mock.patch.object(self.mod, "_current_disc_meta", return_value={
+            "agent": "ClaudeCode",
+        }), mock.patch.object(self.mod, "_http", side_effect=http):
+            with self.assertRaises(RuntimeError) as ctx:
+                self.mod.call_disc_append({
+                    "content": "@codex je te réponds",
+                    "reply_to_message_id": "m-replied",
+                })
+        self.assertIn("cannot verify", str(ctx.exception))
+
+    def test_unresolvable_suggestion_refuses_without_fabricated_ordinal(self):
+        # Review case 3b: when participants cannot be read, the refusal must
+        # not invent an ordinal — it points to the room's displayed alias.
+        def http(method, path, body=None, **kwargs):
+            if "/message/" in path:
+                return {"success": True, "data": {
+                    "id": "m-replied", "role": "Agent", "agent_type": "Codex",
+                    "content": "earlier turn",
+                    "reply_target": {"kind": "cli", "agent_type": "Codex",
+                                     "cli_session_id": 42},
+                }}
+            if path.endswith("/participants"):
+                raise RuntimeError("HTTP 500: transient")
+            return {"success": True, "data": {}}
+
+        with mock.patch.object(self.mod, "_current_disc_meta", return_value={
+            "agent": "ClaudeCode",
+        }), mock.patch.object(self.mod, "_http", side_effect=http):
+            with self.assertRaises(RuntimeError) as ctx:
+                self.mod.call_disc_append({
+                    "content": "@codex je te réponds",
+                    "reply_to_message_id": "m-replied",
+                })
+        message = str(ctx.exception)
+        self.assertIn("@codex-cli[-N]", message)
+        self.assertNotIn("@codex-cli-2", message)
+
+    def test_reply_to_cli_author_with_exact_cli_alias_passes(self):
+        participants = [{"id": 41, "agent_type": "Codex"}]
+        http = self._reply_guard_http(
+            {"kind": "cli", "agent_type": "Codex", "cli_session_id": 41},
+            participants,
+        )
+        with mock.patch.object(self.mod, "_current_disc_meta", return_value={
+            "agent": "ClaudeCode",
+        }), mock.patch.object(self.mod, "_http", side_effect=http) as mock_http:
+            self.mod.call_disc_append({
+                "content": "@codex-cli je te réponds ici",
+                "reply_to_message_id": "m-replied",
+            })
+        msg = _append_body(mock_http)["messages"][0]
+        self.assertEqual(msg["targets"], [{
+            "kind": "cli", "agent_type": "Codex", "cli_session_id": 41,
+        }])
+
+    def test_reply_to_native_author_keeps_the_short_alias_free(self):
+        # The replied message has no CLI author: `@codex` legitimately
+        # names the punctual/native identity, no refusal.
+        http = self._reply_guard_http(None)
+        with mock.patch.object(self.mod, "_current_disc_meta", return_value={
+            "agent": "ClaudeCode",
+        }), mock.patch.object(self.mod, "_http", side_effect=http) as mock_http:
+            self.mod.call_disc_append({
+                "content": "@codex un avis sur ce point ?",
+                "reply_to_message_id": "m-replied",
+            })
+        msg = _append_body(mock_http)["messages"][0]
+        self.assertEqual(msg["targets"], [{
+            "kind": "agent", "agent_type": "Codex",
+        }])
 
     def test_explicit_target_agent_wins_over_inference(self):
         with mock.patch.object(self.mod, "_current_disc_meta", return_value={
@@ -1774,7 +2080,7 @@ class DiscWaitForPeerTests(unittest.TestCase):
         }
         calls = []
 
-        def flaky(method, path, body=None):
+        def flaky(method, path, body=None, **kwargs):
             calls.append(path)
             if len(calls) < 3:
                 raise urllib.error.URLError(ConnectionRefusedError(61, "refused"))
@@ -1782,11 +2088,18 @@ class DiscWaitForPeerTests(unittest.TestCase):
 
         with mock.patch.object(self.mod, "_http", side_effect=flaky), \
              mock.patch.object(self.mod.time, "sleep") as mock_sleep:
-            result = self.mod.call_disc_wait_for_peer({"since_sort_order": 12})
+            result = self.mod._wait_once({"since_sort_order": 12})
         self.assertEqual(len(calls), 3, "two failures then success")
         self.assertTrue(all(p == calls[0] for p in calls), "identical request each attempt")
         self.assertTrue(result["timed_out"])
-        self.assertEqual(mock_sleep.call_count, 2, "bounded backoff between attempts")
+        # Count only the transport-backoff sleeps: unrelated code on the
+        # success path (e.g. the binding-lock retry in _commit_read_cursor)
+        # may legitimately sleep too, and made this assertion flaky when it
+        # counted every sleep globally.
+        backoff_sleeps = [
+            c for c in mock_sleep.call_args_list if c.args and c.args[0] in (2, 4, 8, 12, 16)
+        ]
+        self.assertEqual(len(backoff_sleeps), 2, "bounded backoff between attempts")
 
     def test_transport_retry_is_bounded_and_names_the_resume_contract(self):
         import urllib.error
@@ -1819,7 +2132,7 @@ class DiscWaitForPeerTests(unittest.TestCase):
                 "success": True,
                 "data": {"timed_out": True, "messages": [], "latest_sort_order": 12},
             }
-            self.mod.call_disc_wait_for_peer({
+            self.mod._wait_once({
                 "since_sort_order": 12,
                 "timeout_secs": 30,
             })
@@ -1840,7 +2153,7 @@ class DiscWaitForPeerTests(unittest.TestCase):
                 "success": True,
                 "data": {"timed_out": True, "messages": [], "latest_sort_order": -1},
             }
-            self.mod.call_disc_wait_for_peer({})
+            self.mod._wait_once({})
         path = mock_http.call_args[0][1]
         self.assertNotIn("since_sort_order", path)
         self.assertNotIn("timeout_secs", path)
@@ -1880,6 +2193,50 @@ class DiscWaitForPeerTests(unittest.TestCase):
         self.assertEqual(result["messages"][0]["agent_type"], "ClaudeCode")
         self.assertEqual(result["messages"][0]["target_agent"], "ClaudeCode")
 
+    def test_awareness_messages_are_explicit_context_and_stage_the_ack(self):
+        with mock.patch.object(self.mod, "_http") as mock_http:
+            mock_http.return_value = {
+                "success": True,
+                "data": {
+                    "timed_out": False,
+                    "messages": [{
+                        "message_id": "unseen-room-turn",
+                        "sort_order": 4,
+                        "role": "User",
+                        "agent_type": None,
+                        "content": "turn owned by another responder",
+                        "timestamp": "2026-07-31T10:00:00Z",
+                        "awareness": True,
+                        "addressed_to_caller": False,
+                    }],
+                    "latest_sort_order": 25,
+                    "awareness_omitted": 3,
+                    "awareness_delivered_upto": 4,
+                },
+            }
+            result = self.mod.call_disc_wait_for_peer({"since_sort_order": 0})
+
+        self.assertIn("awareness_hint", result)
+        self.assertIn("do NOT answer", result["awareness_hint"])
+        self.assertIn("3 older unseen turn(s)", result["awareness_hint"])
+        # KT-189 two-phase ack: emission STAGES the value; only the next
+        # tool call commits it, and only committed values reach the server.
+        disc = self.mod._disc_id()
+        self.assertEqual(
+            self.mod._PENDING_AWARENESS_ACK_BY_DISC[disc]["upto"], 4
+        )
+        self.assertNotIn(disc, self.mod._ACKED_AWARENESS_UPTO_BY_DISC)
+        self.mod._ack_pending_read_cursors(self.mod._RPC_SEQUENCE + 1)
+        self.assertEqual(self.mod._ACKED_AWARENESS_UPTO_BY_DISC[disc], 4)
+        # The committed ack is echoed on the next wait poll.
+        with mock.patch.object(self.mod, "_http") as mock_http:
+            mock_http.return_value = {
+                "success": True,
+                "data": {"timed_out": True, "messages": [], "latest_sort_order": 25},
+            }
+            self.mod._wait_once({"since_sort_order": 25})
+        self.assertIn("ack_awareness_upto=4", mock_http.call_args[0][1])
+
     def test_happy_path_timed_out_returns_empty_messages(self):
         # The other terminal state : the long-poll fired the timeout
         # without any new peer activity. The agent gets timed_out=true
@@ -1893,7 +2250,7 @@ class DiscWaitForPeerTests(unittest.TestCase):
                     "latest_sort_order": 7,
                 },
             }
-            result = self.mod.call_disc_wait_for_peer({
+            result = self.mod._wait_once({
                 "since_sort_order": 7,
                 "timeout_secs": 5,
             })
@@ -1902,11 +2259,13 @@ class DiscWaitForPeerTests(unittest.TestCase):
         # latest_sort_order echoes the input on timeout so the agent
         # can keep calling without losing its cursor.
         self.assertEqual(result["latest_sort_order"], 7)
-        # A timeout now carries an explicit next-action hint so literal agents
+        # A quiet poll still carries a next-action hint so literal agents
         # (notably Codex) keep waiting instead of treating it as end-of-convo
-        # and stopping after ~60s.
+        # — but it must NOT demand an immediate re-call (KT-189: the loop
+        # is bridge-side now).
         self.assertIn("hint", result)
-        self.assertIn("again", result["hint"].lower())
+        self.assertIn("re-arm", result["hint"].lower())
+        self.assertNotIn("again", result["hint"].lower())
         self.assertIn("disc_wait_for_peer", result["hint"])
 
     def test_targeted_message_stays_visible_but_tells_other_peer_to_abstain(self):
@@ -3775,13 +4134,20 @@ class StepSchemaAndBindingListTests(unittest.TestCase):
         opt = " ".join(out["fields_by_type"]["Exec"]["optional"])
         self.assertIn("exec_stdin", opt)
 
-    def test_step_schema_warns_batchqp_output_is_metadata_only(self):
+    def test_step_schema_documents_batchqp_output_piping(self):
         out = self.mod.call_workflow_step_schema({})
-        bqp = out["fields_by_type"]["BatchQuickPrompt"]["OUTPUT_IS_METADATA_ONLY"]
-        # the trap: data is counters, the produced content is in discussions
-        self.assertIn("metadata", bqp.lower())
-        self.assertIn("discussions", bqp.lower())
-        self.assertIn("results[]", bqp)
+        bqp = out["fields_by_type"]["BatchQuickPrompt"]["OUTPUT_PIPING"]
+        self.assertIn("data.results", bqp)
+        self.assertIn("not truncated", bqp)
+        self.assertIn("tokens_status", bqp)
+
+    def test_step_schema_distinguishes_workflow_and_foreach_concurrency(self):
+        out = self.mod.call_workflow_step_schema({})
+        contract = out["fields_by_type"]["SubWorkflow"]["FOREACH_CONCURRENCY"]
+        self.assertIn("SEQUENTIAL", contract)
+        self.assertIn("concurrency_limit", contract)
+        self.assertIn("rejected", contract)
+        self.assertIn("BatchQuickPrompt", contract)
 
     def test_step_schema_agent_documents_typedschema_piping(self):
         out = self.mod.call_workflow_step_schema({})
@@ -3932,6 +4298,15 @@ class WorkflowRunHistoryTests(unittest.TestCase):
         method, path = fake.call_args.args[:2]
         self.assertEqual((method, path), ("POST", "/api/workflows/wf/runs/r5/cancel"))
 
+    def test_workflow_resume_run_sends_explicit_empty_json_object(self):
+        fake = mock.MagicMock(return_value=self._env({"run_id": "r5"}))
+        with mock.patch.object(self.mod, "_http", fake):
+            self.mod.call_workflow_resume_run({"run_id": "r5"})
+        self.assertEqual(
+            fake.call_args.args,
+            ("POST", "/api/workflow-runs/r5/resume", {}),
+        )
+
     def test_run_history_tools_registered(self):
         names = [t["name"] for t in self.mod.TOOLS]
         for n in ["workflow_runs", "workflow_run_get", "workflow_cancel_run"]:
@@ -4029,7 +4404,7 @@ class AgentLibraryCrudTests(unittest.TestCase):
         }]
         calls = []
 
-        def fake_http(method, path, body=None):
+        def fake_http(method, path, body=None, **kwargs):
             calls.append((method, path, body))
             if method == "GET":
                 return self._env(existing)
@@ -4271,7 +4646,7 @@ class AuditToolsTests(unittest.TestCase):
     def test_audit_status_null_live_falls_back_to_db_and_says_so(self):
         # live=null must NEVER read as "finished" — the tool falls back to
         # latest/resumable and states the ambiguity explicitly.
-        def fake_http(method, path, body=None):
+        def fake_http(method, path, body=None, **kwargs):
             if path.endswith("/audit-status"):
                 return {"success": True, "data": None}
             if path.endswith("/audit-latest"):
@@ -4541,7 +4916,7 @@ class AuditToolsTests(unittest.TestCase):
             _time.sleep(0.01)
         self.assertTrue(stream.closed, "the finally must close the response")
         # And audit_status keeps the three layers separate.
-        def fake_http(method, path, body=None):
+        def fake_http(method, path, body=None, **kwargs):
             if path.endswith("/audit-status"):
                 return {"success": True, "data": None}
             return {"success": True, "data": None}
@@ -5402,7 +5777,7 @@ class ResumeBindingTests(unittest.TestCase):
         self.mod._CURRENT_RPC_SEQUENCE = 10
         calls = []
 
-        def fake_http(method, path, body=None):
+        def fake_http(method, path, body=None, **kwargs):
             calls.append((method, path))
             if path == "/api/disc/append":
                 # Two peer messages landed first; our append was assigned 43.
@@ -5472,7 +5847,7 @@ class ResumeBindingTests(unittest.TestCase):
 
         calls = []
 
-        def fake_http(method, path, body=None):
+        def fake_http(method, path, body=None, **kwargs):
             calls.append((method, path))
             if path == "/api/disc/append":
                 return self._envelope({"appended": 1, "last_sort_order": 44})
@@ -5508,7 +5883,7 @@ class ResumeBindingTests(unittest.TestCase):
         self.mod._set_read_cursor("d-wait", 12)
         self.mod._CURRENT_RPC_SEQUENCE = 20
 
-        def fake_retry(method, path, body=None):
+        def fake_retry(method, path, body=None, **kwargs):
             self.assertEqual(method, "GET")
             self.assertIn("since_sort_order=12", path)
             return self._envelope({
@@ -5541,7 +5916,7 @@ class ResumeBindingTests(unittest.TestCase):
                 "withheld_by_routing": 2,
             }),
         ):
-            result = self.mod.call_disc_wait_for_peer({})
+            result = self.mod._wait_once({})
 
         self.assertEqual(result["withheld_by_routing"], 2)
         self.assertIn("intentionally withheld", result["routing_visibility"])
@@ -5654,7 +6029,7 @@ class ResumeBindingTests(unittest.TestCase):
         self.mod._CURRENT_DISC_ID = "d-bulk"
         calls = []
 
-        def fake_http(method, path, body=None):
+        def fake_http(method, path, body=None, **kwargs):
             calls.append(path)
             return self._envelope({"appended": 2, "last_sort_order": 9})
 
@@ -5671,7 +6046,7 @@ class ResumeBindingTests(unittest.TestCase):
         post failed and invite a duplicate."""
         self.mod._CURRENT_DISC_ID = "d-fail"
 
-        def fake_http(method, path, body=None):
+        def fake_http(method, path, body=None, **kwargs):
             if path == "/api/disc/append":
                 return self._envelope({"appended": 1, "last_sort_order": 7})
             raise RuntimeError("backend went away")
@@ -5738,6 +6113,7 @@ class PlanningToolTests(unittest.TestCase):
                 contract["human_decides"]["en"],
                 contract["maintain_on_change"]["en"],
                 contract["no_noop_writes"]["en"],
+                contract["read_before_direct_create"]["en"],
                 contract["stale_surface_fallback"]["en"],
             ]
         )
@@ -5826,6 +6202,39 @@ class PlanningToolTests(unittest.TestCase):
             "id": "Codex",
             "source_message_id": "MSG-12345678",
         })
+        expected_key = "mcp-task-create:" + hashlib.sha256(
+            b"disc-plan\0message\0MSG-12345678"
+        ).hexdigest()
+        self.assertEqual(body["idempotency_key"], expected_key)
+
+    def test_task_create_scopes_explicit_idempotency_without_using_the_title(self):
+        with mock.patch.object(self.mod, "_http", self.fake_http), \
+             mock.patch.object(self.mod, "_agent_type_for_session", return_value="Codex"):
+            self.mod.call_task_create({
+                "title": "Same title",
+                "idempotency_key": "logical-create-1",
+            })
+        body = self.fake_http.call_args.args[2]
+        expected_key = "mcp-task-create:" + hashlib.sha256(
+            b"disc-plan\0explicit\0logical-create-1"
+        ).hexdigest()
+        self.assertEqual(body["idempotency_key"], expected_key)
+
+        self.fake_http.reset_mock()
+        with mock.patch.object(self.mod, "_http", self.fake_http):
+            with self.assertRaises(RuntimeError) as empty:
+                self.mod.call_task_create({
+                    "title": "Same title",
+                    "idempotency_key": " ",
+                })
+        self.assertIn("cannot be empty", str(empty.exception))
+        self.fake_http.assert_not_called()
+
+    def test_task_create_without_stable_provenance_stays_backward_compatible(self):
+        with mock.patch.object(self.mod, "_http", self.fake_http):
+            self.mod.call_task_create({"title": "Legacy caller"})
+        body = self.fake_http.call_args.args[2]
+        self.assertNotIn("idempotency_key", body)
 
     def test_task_update_preserves_explicit_null_for_clear(self):
         with mock.patch.object(self.mod, "_http", self.fake_http), \
@@ -6315,6 +6724,534 @@ class CodexOpenRolloutProbeTests(unittest.TestCase):
             side_effect=self.mod.subprocess.TimeoutExpired(cmd="lsof", timeout=2),
         ), mock.patch.object(self.mod.os.path, "isdir", return_value=False):
             self.assertEqual(self.mod._open_rollout_paths_of(100), [])
+
+
+class DiscussionWorkspaceToolTests(unittest.TestCase):
+    def setUp(self):
+        self.mod = _load_module()
+
+    def test_tools_are_discoverable_and_dispatched(self):
+        names = {tool["name"] for tool in self.mod.TOOLS}
+        self.assertIn("disc_workspace_get", names)
+        self.assertIn("disc_workspace_set", names)
+        self.assertIs(
+            self.mod.DISPATCH["disc_workspace_get"],
+            self.mod.call_disc_workspace_get,
+        )
+        self.assertIs(
+            self.mod.DISPATCH["disc_workspace_set"],
+            self.mod.call_disc_workspace_set,
+        )
+
+    def test_get_derives_durable_identity(self):
+        with mock.patch.object(
+            self.mod, "_agent_type_for_session", return_value="Codex"
+        ), mock.patch.object(
+            self.mod, "_durable_session_id", return_value="sess-1"
+        ), mock.patch.object(
+            self.mod,
+            "_http",
+            return_value={"success": True, "data": {"disc_id": "d1"}},
+        ) as http:
+            result = self.mod.call_disc_workspace_get({})
+
+        self.assertEqual(result, {"disc_id": "d1"})
+        method, path = http.call_args.args
+        self.assertEqual(method, "GET")
+        self.assertIn("/api/disc/workspace?", path)
+        self.assertIn("source_agent=Codex", path)
+        self.assertIn("source_session_id=sess-1", path)
+
+    def test_set_defaults_to_cwd_and_forwards_task_reference(self):
+        with mock.patch.object(
+            self.mod, "_agent_type_for_session", return_value="ClaudeCode"
+        ), mock.patch.object(
+            self.mod, "_durable_session_id", return_value="sess-2"
+        ), mock.patch.object(
+            self.mod.os, "getcwd", return_value="/tmp/kronn-kt140"
+        ), mock.patch.object(
+            self.mod,
+            "_http",
+            return_value={
+                "success": True,
+                "data": {
+                    "workspace": {"branch": "feature/kt140"},
+                    "blockers": [],
+                },
+            },
+        ) as http:
+            result = self.mod.call_disc_workspace_set({"task_ref": " KT-140 "})
+
+        self.assertEqual(
+            result,
+            {
+                "workspace": {"branch": "feature/kt140"},
+                "blockers": [],
+            },
+        )
+        http.assert_called_once_with(
+            "POST",
+            "/api/disc/workspace",
+            {
+                "source_agent": "ClaudeCode",
+                "source_session_id": "sess-2",
+                "workspace_path": "/tmp/kronn-kt140",
+                "task_ref": "KT-140",
+            },
+        )
+
+    def test_set_preserves_structured_backend_blockers(self):
+        with mock.patch.object(
+            self.mod, "_agent_type_for_session", return_value="Codex"
+        ), mock.patch.object(
+            self.mod, "_durable_session_id", return_value="sess-3"
+        ), mock.patch.object(
+            self.mod,
+            "_http",
+            return_value={
+                "success": False,
+                "error": "workspace does not belong to the discussion project repositories",
+                "error_code": "validation",
+                "data": None,
+            },
+        ):
+            result = self.mod.call_disc_workspace_set(
+                {"workspace_path": "/tmp/unrelated"}
+            )
+
+        self.assertEqual(result["error_code"], "validation")
+        self.assertEqual(result["blockers"][0]["kind"], "repository_scope")
+        self.assertIn("does not belong", result["blockers"][0]["message"])
+
+
+class WaitOutsideLlmLoopTests(unittest.TestCase):
+    """KT-189 — disc_wait_for_peer holds quiet waits bridge-side.
+
+    A server timeout must NOT surface as a tool return (each return replays
+    the CLI's whole native context); the loop only hands back on a real
+    message, an interruption, or the overall safety cap.
+    """
+
+    def setUp(self):
+        self.mod = _load_module()
+        # Deterministic clock: monotonic() reads it, sleep() advances it.
+        self.now = [0.0]
+        self.clock_patches = [
+            mock.patch.object(self.mod.time, "monotonic", side_effect=lambda: self.now[0]),
+            mock.patch.object(
+                self.mod.time,
+                "sleep",
+                side_effect=lambda s: self.now.__setitem__(0, self.now[0] + max(s, 0.001)),
+            ),
+        ]
+        for patch in self.clock_patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def _quiet(self, latest=41, delay=1):
+        return {
+            "timed_out": True,
+            "messages": [],
+            "latest_sort_order": latest,
+            "pacing": {"regime": "hot", "next_delay_seconds": delay},
+        }
+
+    def test_quiet_polls_never_return_to_the_model(self):
+        answers = [self._quiet(), self._quiet(), self._quiet(),
+                   {"timed_out": False, "messages": [{"message_id": "m1"}], "latest_sort_order": 42}]
+        calls = []
+
+        def fake_wait_once(args):
+            calls.append(dict(args))
+            self.now[0] += 60  # each poll consumes its window
+            return answers[len(calls) - 1]
+
+        with mock.patch.object(self.mod, "_wait_once", fake_wait_once):
+            result = self.mod.call_disc_wait_for_peer({"timeout_secs": 170})
+
+        # A single tool return, carrying the message, after 4 bridge polls.
+        self.assertEqual(result["messages"][0]["message_id"], "m1")
+        self.assertEqual(result["bridge_polls"], 4)
+        self.assertEqual(len(calls), 4)
+        # Inner polls are capped for cancellation responsiveness…
+        self.assertTrue(all(call["timeout_secs"] <= self.mod._WAIT_POLL_SECS for call in calls))
+        # …and the cursor advances between polls from what was observed.
+        self.assertEqual(calls[1]["since_sort_order"], 41)
+
+    def test_default_wait_is_unbounded_and_does_not_return_on_inner_quiet_polls(self):
+        # Bridge contract: without an opt-in budget, inner quiet polls do not
+        # return. A host can still background the outer MCP call and emit its
+        # own model-visible task notification.
+        # 500 quiet polls (≈8h of simulated silence) then one message.
+        answers = [self._quiet()] * 500 + [
+            {"timed_out": False, "messages": [{"message_id": "m"}]}
+        ]
+        polls = []
+
+        def fake_wait_once(args):
+            polls.append(1)
+            self.now[0] += 60
+            return answers[len(polls) - 1]
+
+        with mock.patch.object(self.mod, "_wait_once", fake_wait_once):
+            result = self.mod.call_disc_wait_for_peer({})
+
+        self.assertEqual(result["bridge_polls"], 501)
+        self.assertEqual(result["messages"][0]["message_id"], "m")
+
+    def test_wait_description_prevents_stacked_host_background_tasks(self):
+        description = next(
+            tool["description"] for tool in self.mod.TOOLS
+            if tool["name"] == "disc_wait_for_peer"
+        )
+        self.assertIn("moved to the background", description)
+        self.assertIn("DO NOT start another wait", description)
+        self.assertNotIn("costs ZERO model turns", description)
+
+    def test_opt_in_budget_returns_quiet_with_rearm_hint(self):
+        def fake_wait_once(args):
+            self.now[0] += 60
+            return self._quiet()
+
+        with mock.patch.object(self.mod, "_wait_once", fake_wait_once):
+            result = self.mod.call_disc_wait_for_peer({"max_total_secs": 120})
+
+        self.assertTrue(result["timed_out"])
+        self.assertIn("re-arm", result["hint"])
+        self.assertNotIn("AGAIN", result["hint"])
+        self.assertGreaterEqual(result["bridge_polls"], 2)
+
+    def test_opt_in_budget_is_a_true_bound_despite_long_pacing(self):
+        # Codex review: pacing sleeps (up to 480 s) and the next poll must
+        # be clamped by the remaining budget, never overshoot it.
+        def fake_wait_once(args):
+            self.now[0] += args["timeout_secs"]
+            return self._quiet(delay=480)
+
+        start = self.now[0]
+        with mock.patch.object(self.mod, "_wait_once", fake_wait_once):
+            result = self.mod.call_disc_wait_for_peer({"max_total_secs": 150})
+
+        self.assertTrue(result["timed_out"])
+        # Elapsed simulated time never exceeds the budget by more than the
+        # 1 s sleep-slice granularity.
+        self.assertLessEqual(self.now[0] - start, 151)
+
+    def test_cancellation_stops_the_loop(self):
+        self.mod._CURRENT_PROGRESS_TOKEN["rid"] = 7
+        polls = []
+
+        def fake_wait_once(args):
+            polls.append(1)
+            self.now[0] += 60
+            if len(polls) == 2:
+                self.mod._CANCELLED_REQUEST_IDS[7] = self.mod.time.monotonic()
+            return self._quiet()
+
+        with mock.patch.object(self.mod, "_wait_once", fake_wait_once):
+            self.mod.call_disc_wait_for_peer({})
+
+        self.assertEqual(len(polls), 2)
+
+    def test_queued_tools_call_interrupts_the_wait(self):
+        def fake_wait_once(args):
+            self.now[0] += 60
+            self.mod._REQUEST_QUEUE.put({"method": "tools/call", "id": 12,
+                                         "params": {"name": "disc_meta", "arguments": {}}})
+            return self._quiet()
+
+        with mock.patch.object(self.mod, "_wait_once", fake_wait_once):
+            result = self.mod.call_disc_wait_for_peer({})
+
+        self.assertIn("interrupted", result["hint"])
+        # The preempting request stays queued for the main loop, unconsumed.
+        self.assertEqual(self.mod._REQUEST_QUEUE.get_nowait()["id"], 12)
+
+    def test_ping_and_tools_list_are_serviced_without_waking_the_model(self):
+        # Codex review P0: control traffic must be answered inline; only a
+        # tools/call may preempt the wait.
+        sent = []
+        answers = [self._quiet(), self._quiet(),
+                   {"timed_out": False, "messages": [{"message_id": "m"}]}]
+        polls = []
+
+        def fake_wait_once(args):
+            polls.append(1)
+            self.now[0] += 60
+            if len(polls) == 1:
+                self.mod._REQUEST_QUEUE.put({"jsonrpc": "2.0", "id": 31, "method": "ping"})
+                self.mod._REQUEST_QUEUE.put({"jsonrpc": "2.0", "id": 32, "method": "tools/list"})
+            return answers[len(polls) - 1]
+
+        with mock.patch.object(self.mod, "_wait_once", fake_wait_once), \
+             mock.patch.object(self.mod, "_send", sent.append):
+            result = self.mod.call_disc_wait_for_peer({})
+
+        # The wait survived the control traffic and returned the message.
+        self.assertEqual(result["messages"][0]["message_id"], "m")
+        self.assertEqual(result["bridge_polls"], 3)
+        ping_replies = [p for p in sent if p.get("id") == 31]
+        list_replies = [p for p in sent if p.get("id") == 32]
+        self.assertEqual(ping_replies[0]["result"], {})
+        self.assertIn("tools", list_replies[0]["result"])
+        self.assertTrue(self.mod._REQUEST_QUEUE.empty())
+
+    def test_retry_backoff_respects_the_overall_budget(self):
+        # Codex review: six transport attempts + backoff must not overshoot
+        # max_total_secs. With a deadline 5 s away, the retry ladder stops
+        # as soon as the next backoff would cross it.
+        import urllib.error
+
+        attempts = []
+
+        def always_down(method, path, body=None, **kwargs):
+            attempts.append(1)
+            raise urllib.error.URLError(ConnectionRefusedError(61, "refused"))
+
+        deadline = self.mod.time.monotonic() + 5
+        with mock.patch.object(self.mod, "_http", side_effect=always_down):
+            with self.assertRaises(RuntimeError):
+                self.mod._http_transport_retry("GET", "/x", deadline=deadline)
+        # 2 s backoff fits, the next 4 s one would cross the deadline.
+        self.assertLessEqual(len(attempts), 3)
+
+    def test_control_traffic_is_serviced_between_genuinely_blocking_slices(self):
+        # Codex review: the blocking urllib call is the only blind spot, so
+        # polls are short slices. Each fake poll BLOCKS for a full slice of
+        # simulated time; a ping queued while slice 1 is in flight must be
+        # answered before slice 3 ends — without ending the wait or waking
+        # the model.
+        sent = []
+        polls = []
+
+        def blocking_wait_once(args):
+            polls.append(args["timeout_secs"])
+            # The slice really consumes wall-clock (simulated) time.
+            self.now[0] += args["timeout_secs"]
+            if len(polls) == 1:
+                # Lands mid-flight; only serviceable AFTER this slice.
+                self.mod._REQUEST_QUEUE.put({"jsonrpc": "2.0", "id": 51, "method": "ping"})
+            if len(polls) == 3:
+                return {"timed_out": False, "messages": [{"message_id": "m"}]}
+            return self._quiet()
+
+        with mock.patch.object(self.mod, "_wait_once", blocking_wait_once), \
+             mock.patch.object(self.mod, "_send", sent.append):
+            result = self.mod.call_disc_wait_for_peer({})
+
+        # Slices stay short (blind spot bounded)…
+        self.assertTrue(all(p <= self.mod._WAIT_POLL_SECS for p in polls))
+        # …the ping was answered between slices, and the wait survived it.
+        ping_replies = [p for p in sent if p.get("id") == 51]
+        self.assertEqual(ping_replies[0]["result"], {})
+        self.assertEqual(result["messages"][0]["message_id"], "m")
+        self.assertEqual(result["bridge_polls"], 3)
+
+    def test_ping_is_answered_while_the_transport_is_genuinely_in_flight(self):
+        # KT-189 review residual 2: the transport runs in a worker, so the
+        # main thread answers control traffic while the socket is REALLY
+        # blocked (not merely between polls). The fake _http blocks on an
+        # Event that the test releases only after asserting the ping reply.
+        import threading as _threading
+
+        release = _threading.Event()
+        sent = []
+        answered_during_flight = []
+
+        def blocked_http(method, path, body=None, **kwargs):
+            release.wait(timeout=10)
+            return {
+                "success": True,
+                "data": {"timed_out": False,
+                         "messages": [{"message_id": "m", "sort_order": 1}],
+                         "latest_sort_order": 1},
+            }
+
+        def capture(payload):
+            sent.append(payload)
+            if payload.get("id") == 71 and not release.is_set():
+                answered_during_flight.append(True)
+                release.set()
+
+        self.mod._CURRENT_DISC_ID = "d-inflight"
+        self.mod._REQUEST_QUEUE.put({"jsonrpc": "2.0", "id": 71, "method": "ping"})
+        with mock.patch.object(self.mod, "_http", side_effect=blocked_http), \
+             mock.patch.object(self.mod, "_send", capture):
+            result = self.mod.call_disc_wait_for_peer({})
+
+        self.assertEqual(answered_during_flight, [True],
+                         "ping must be answered WHILE the socket is blocked")
+        self.assertEqual(result["messages"][0]["message_id"], "m")
+
+    def test_budget_bounds_a_genuinely_hung_transport(self):
+        # KT-189 review residual 1: a hung socket must not outlive the
+        # opt-in budget. The fake _http hangs far beyond it; the wait must
+        # hand back a quiet budget return without waiting for the socket.
+        import threading as _threading
+
+        never = _threading.Event()
+
+        def hung_http(method, path, body=None, **kwargs):
+            never.wait(timeout=30)
+            raise TimeoutError("socket eventually died")
+
+        # Real clock for this test: the worker blocks on a real Event.
+        for patch in self.clock_patches:
+            patch.stop()
+        self.clock_patches = []
+        self.mod._CURRENT_DISC_ID = "d-hung"
+        started = self.mod.time.monotonic()
+        with mock.patch.object(self.mod, "_http", side_effect=hung_http):
+            result = self.mod.call_disc_wait_for_peer({"max_total_secs": 2})
+        elapsed = self.mod.time.monotonic() - started
+
+        self.assertTrue(result["timed_out"])
+        self.assertIn("re-arm", result.get("hint", ""))
+        self.assertLess(elapsed, 10, "the budget, not the socket, ends the wait")
+        never.set()
+
+    def test_progress_notifications_flow_while_waiting(self):
+        self.mod._CURRENT_PROGRESS_TOKEN["token"] = "tok-1"
+        sent = []
+        answers = [self._quiet(), self._quiet(), {"timed_out": False, "messages": [{"message_id": "m"}]}]
+        polls = []
+
+        def fake_wait_once(args):
+            polls.append(1)
+            self.now[0] += 60
+            return answers[len(polls) - 1]
+
+        with mock.patch.object(self.mod, "_wait_once", fake_wait_once), \
+             mock.patch.object(self.mod, "_send", sent.append):
+            self.mod.call_disc_wait_for_peer({})
+
+        progress = [p for p in sent if p.get("method") == "notifications/progress"]
+        # One heartbeat before each of the three polls (plus any sleep-slice
+        # heartbeats when pacing is long — not the case here).
+        self.assertEqual(len(progress), 3)
+        self.assertEqual(progress[0]["params"]["progressToken"], "tok-1")
+
+    def test_stdin_reader_flags_cancellations_and_queues_requests(self):
+        # id 9 is the request currently in flight → its cancellation counts.
+        # id 999 matches nothing in flight or queued → generation guard
+        # drops it (a late cancellation must not poison a legal id reuse).
+        self.mod._CURRENT_PROGRESS_TOKEN["rid"] = 9
+        lines = [
+            json.dumps({"jsonrpc": "2.0", "method": "notifications/cancelled",
+                        "params": {"requestId": 9}}) + "\n",
+            json.dumps({"jsonrpc": "2.0", "method": "notifications/cancelled",
+                        "params": {"requestId": 999}}) + "\n",
+            "not json\n",
+            json.dumps({"jsonrpc": "2.0", "id": 10, "method": "tools/list"}) + "\n",
+            # Arrives while id 10 sits in the queue → applies.
+            json.dumps({"jsonrpc": "2.0", "method": "notifications/cancelled",
+                        "params": {"requestId": 10}}) + "\n",
+        ]
+        with mock.patch.object(self.mod.sys, "stdin", iter(lines)):
+            self.mod._stdin_reader()
+
+        self.assertIn(9, self.mod._CANCELLED_REQUEST_IDS)
+        self.assertNotIn(999, self.mod._CANCELLED_REQUEST_IDS)
+        self.assertIn(10, self.mod._CANCELLED_REQUEST_IDS)
+        self.assertEqual(self.mod._REQUEST_QUEUE.get_nowait()["id"], 10)
+        self.assertIsNone(self.mod._REQUEST_QUEUE.get_nowait())  # EOF sentinel
+
+    def _cancel(self, rid):
+        self.mod._CANCELLED_REQUEST_IDS[rid] = self.mod.time.monotonic()
+
+    def test_cancelled_wait_gets_no_response_and_unstages_its_cursor(self):
+        # Codex P0 repro: a wait delivers messages, the SAME request gets
+        # cancelled before emission — the response is suppressed AND the
+        # staged read cursor must be purged, otherwise the next RPC acks a
+        # delivery the model never saw (silent message loss).
+        def fake_wait(args):
+            self.mod._stage_read_cursor("d-cancel", 7)
+            self._cancel(3)
+            return {"timed_out": False, "messages": [{"sort_order": 7}]}
+
+        with mock.patch.dict(self.mod.DISPATCH, {"disc_wait_for_peer": fake_wait}):
+            resp = self.mod._handle({
+                "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                "params": {"name": "disc_wait_for_peer", "arguments": {}},
+            })
+        self.assertIsNone(resp)
+        self.assertNotIn(3, self.mod._CANCELLED_REQUEST_IDS)
+        self.assertNotIn("d-cancel", self.mod._PENDING_READ_SORT_ORDER_BY_DISC)
+        # The next tool call therefore does NOT commit sort_order 7.
+        with mock.patch.dict(self.mod.DISPATCH, {"disc_meta": lambda a: {"ok": True}}):
+            self.mod._handle({
+                "jsonrpc": "2.0", "id": 4, "method": "tools/call",
+                "params": {"name": "disc_meta", "arguments": {}},
+            })
+        self.assertNotEqual(self.mod._read_cursor("d-cancel"), 7)
+
+    def test_cancelled_mutation_keeps_its_terminal_receipt(self):
+        # Codex review: a mutation that already ran must keep its receipt —
+        # silently dropping it would invite a duplicating retry.
+        def fake_mutation(args):
+            self._cancel(5)
+            return {"appended": 1}
+
+        with mock.patch.dict(self.mod.DISPATCH, {"disc_append": fake_mutation}):
+            resp = self.mod._handle({
+                "jsonrpc": "2.0", "id": 5, "method": "tools/call",
+                "params": {"name": "disc_append", "arguments": {"content": "x"}},
+            })
+        self.assertIsNotNone(resp)
+        self.assertIn("appended", resp["result"]["content"][0]["text"])
+
+    def test_cancellation_before_dispatch_never_executes(self):
+        executed = []
+
+        def fake_mutation(args):
+            executed.append(1)
+            return {"appended": 1}
+
+        self._cancel(6)
+        with mock.patch.dict(self.mod.DISPATCH, {"disc_append": fake_mutation}):
+            resp = self.mod._handle({
+                "jsonrpc": "2.0", "id": 6, "method": "tools/call",
+                "params": {"name": "disc_append", "arguments": {"content": "x"}},
+            })
+        self.assertIsNone(resp)
+        self.assertEqual(executed, [])
+
+    def test_exception_after_cancellation_is_suppressed_for_the_wait(self):
+        def exploding_wait(args):
+            self._cancel(8)
+            raise RuntimeError("backend went away")
+
+        with mock.patch.dict(self.mod.DISPATCH, {"disc_wait_for_peer": exploding_wait}):
+            resp = self.mod._handle({
+                "jsonrpc": "2.0", "id": 8, "method": "tools/call",
+                "params": {"name": "disc_wait_for_peer", "arguments": {}},
+            })
+        self.assertIsNone(resp)
+
+    def test_ping_method_is_answered(self):
+        resp = self.mod._handle({"jsonrpc": "2.0", "id": 40, "method": "ping"})
+        self.assertEqual(resp["result"], {})
+
+    def test_stale_cancellations_expire(self):
+        self.mod._CANCELLED_REQUEST_IDS[99] = self.mod.time.monotonic()
+        self.now[0] += self.mod._CANCELLATION_TTL_SECS + 1
+        self.assertFalse(self.mod._is_cancelled(99))
+        self.assertNotIn(99, self.mod._CANCELLED_REQUEST_IDS)
+
+    def test_append_chained_wait_stays_single_poll(self):
+        # The chained wait after an append must NOT enter the long
+        # bridge-side loop: an append should come back promptly.
+        wait_once = mock.Mock(return_value=self._quiet())
+        appended = {"success": True, "data": {"appended": 1, "last_sort_order": 5}}
+        with mock.patch.object(self.mod, "_wait_once", wait_once), \
+             mock.patch.object(self.mod, "_http", return_value=appended), \
+             mock.patch.object(self.mod, "_disc_id", return_value="d1"), \
+             mock.patch.object(self.mod, "_read_cursor", return_value=4), \
+             mock.patch.object(self.mod, "_session_id_for_caller", return_value="s"):
+            result = self.mod.call_disc_append({"content": "hello"})
+
+        self.assertEqual(wait_once.call_count, 1)
+        self.assertTrue(result["waited"]["timed_out"])
 
 
 if __name__ == "__main__":

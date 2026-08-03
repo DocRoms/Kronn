@@ -1,5 +1,6 @@
-import { useState, useEffect, useRef, lazy, Suspense } from 'react';
+import { useState, useEffect, useRef, useCallback, lazy, Suspense } from 'react';
 import { setup as setupApi, config as configApi, health as healthApi } from './lib/api';
+import { RETRY_DELAY, STATUS_TIMEOUT_MS, withTimeout } from './lib/appBoot';
 import type { SetupStatus } from './types/generated';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { UpdateBanner } from './components/UpdateBanner';
@@ -8,24 +9,6 @@ import './App.css';
 
 const SetupWizard = lazy(() => import('./pages/SetupWizard').then(m => ({ default: m.SetupWizard })));
 const Dashboard = lazy(() => import('./pages/Dashboard').then(m => ({ default: m.Dashboard })));
-
-/** Auto-retry delay (ms) for backend connection. Exported for test override. */
-export let RETRY_DELAY = 2000;
-export function setRetryDelay(ms: number) { RETRY_DELAY = ms; }
-
-// Per-request boot timeout. Kept short so a slow setup/status can't wedge the
-// boot — exported so tests can shrink it.
-export let STATUS_TIMEOUT_MS = 8000;
-export function setStatusTimeout(ms: number) { STATUS_TIMEOUT_MS = ms; }
-
-/** Reject if `p` doesn't settle within `ms`. Lets the boot treat a HANGING
- *  request (which never rejects on its own) like a failure it can retry. */
-export function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
-  return Promise.race([
-    p,
-    new Promise<T>((_, reject) => setTimeout(() => reject(new Error('timeout')), ms)),
-  ]);
-}
 
 export function App() {
   const [setupStatus, setSetupStatus] = useState<SetupStatus | null>(null);
@@ -37,7 +20,7 @@ export function App() {
   const [inDocker, setInDocker] = useState(false);
   const retries = useRef(0);
 
-  const fetchStatus = (resetRetries = false) => {
+  const fetchStatus = useCallback(function fetchSetupStatus(resetRetries = false) {
     if (resetRetries) retries.current = 0;
     setLoading(true);
     setApiError(false);
@@ -56,7 +39,7 @@ export function App() {
         // Auto-retry up to 5 times with 2s delay (backend may still be starting)
         if (retries.current < 5) {
           retries.current += 1;
-          setTimeout(fetchStatus, RETRY_DELAY);
+          setTimeout(fetchSetupStatus, RETRY_DELAY);
           return;
         }
         // Retries exhausted. Distinguish "backend slow" from "backend down":
@@ -84,9 +67,9 @@ export function App() {
             setLoading(false);
           });
       });
-  };
+  }, []);
 
-  useEffect(() => { fetchStatus(); }, []);
+  useEffect(() => { fetchStatus(); }, [fetchStatus]);
   useEffect(() => { healthApi.get().then(h => setInDocker(h.in_docker)).catch(() => {}); }, []);
 
   // Intercept external link clicks in Tauri desktop only.

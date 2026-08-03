@@ -51,13 +51,14 @@ export function ThemeEffects() {
 
     const WIND_RADIUS = 90;
     const MAX_PUSH = 55;
+    const petalsForEffect = petalRefs.current;
     let rafQueued = false;
     let lastX = 0;
     let lastY = 0;
 
     const apply = () => {
       rafQueued = false;
-      for (const el of petalRefs.current) {
+      for (const el of petalsForEffect) {
         if (!el) continue;
         const rect = el.getBoundingClientRect();
         const cx = rect.left + rect.width / 2;
@@ -98,7 +99,7 @@ export function ThemeEffects() {
       window.removeEventListener('mousemove', onMove);
       // Reset all petals on theme change so lingering inline styles
       // don't pin them off-track.
-      for (const el of petalRefs.current) {
+      for (const el of petalsForEffect) {
         if (el) { el.style.transform = ''; el.style.transition = ''; }
       }
     };

@@ -1,9 +1,12 @@
-import { useState, useRef, useEffect, useCallback, useMemo, useDeferredValue } from 'react';
+import { Fragment, useState, useRef, useEffect, useCallback, useMemo, useDeferredValue } from 'react';
 import './DiscussionsPage.css';
 import { MessageBubble, MarkdownContent } from '../components/MessageBubble';
-import { unseenBasis } from '../components/SwipeableDiscItem';
+import { DiscussionNote } from '../components/DiscussionNote';
+import { unseenBasis } from '../lib/discussionUiUtils';
 import { ToolCallsGroup } from '../components/ToolCallsGroup';
+import { MessageDateSeparator } from '../components/MessageDateSeparator';
 import { groupMessagesWithToolFold } from '../lib/discussionMessageGrouping';
+import { localCalendarDayKey } from '../lib/discussionDates';
 import { ChatInput } from '../components/ChatInput';
 import { discussions as discussionsApi, projects as projectsApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi, contacts as contactsApi, workflows as workflowsApi, quickPrompts as quickPromptsApi, planning as planningApi } from '../lib/api';
 import { GitPanel } from '../components/GitPanel';
@@ -21,7 +24,7 @@ import { parseAgentQuestions } from '../lib/agent-question-parse';
 import { userError } from '../lib/userError';
 import { getDeployedVersion, setDeployedVersion } from '../lib/qp-improver-banner';
 import { sanitizeQpImproverPayload } from '../lib/qp-improver-sanitize';
-import type { Project, AgentDetection, Discussion, DiscussionMessage, AgentType, AgentsConfig, Skill, AgentProfile, Directive, McpConfigDisplay, McpIncompatibility, Contact, WsMessage, ContextFile, BatchRunSummary, DiscussionPlan, ProposalListResponse, MessageSearchHit, MessageTarget, ParticipantView } from '../types/generated';
+import type { Project, AgentDetection, Discussion, DiscussionMessage, MessageChannel, AgentType, AgentsConfig, Skill, AgentProfile, Directive, McpConfigDisplay, McpIncompatibility, Contact, WsMessage, ContextFile, BatchRunSummary, DiscussionPlan, ProposalListResponse, MessageSearchHit, MessageTarget, ParticipantView } from '../types/generated';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { useQpChain } from '../hooks/useQpChain';
 import { useMessageQueue } from '../hooks/useMessageQueue';
@@ -32,6 +35,7 @@ import { saveDraft } from '../lib/chat-drafts';
 import { clearReplyDraft, loadReplyDraft, saveReplyDraft } from '../lib/chat-reply-drafts';
 import { publishMessageSendSettled } from '../lib/messageSendLifecycle';
 import { findRenderedTextRanges } from '../lib/discussionMessageSearch';
+import { consumeDiscussionWorkspaceTarget } from '../lib/discussion-navigation';
 import { buildBatchTriageRows, buildContinuationDraft, type BatchTriageRow } from '../lib/batchTriage';
 import { useT } from '../lib/I18nContext';
 import { AGENT_LABELS, agentColor, isAgentRestricted as isAgentRestrictedUtil, hasAgentFullAccess, getProjectGroup, isUsable, isBriefingDisc, isBootstrapDisc, isValidationDisc } from '../lib/constants';
@@ -216,7 +220,7 @@ export function DiscussionsPage({
   mcpIncompatibilities = [],
   onLaunchWorkflowFromPreset,
 }: DiscussionsPageProps) {
-  const { t } = useT();
+  const { t, locale } = useT();
   const isMobile = useIsMobile();
 
   // ─── Internal state ──────────────────────────────────────────────────────
@@ -227,10 +231,21 @@ export function DiscussionsPage({
   const [activeDiscussionId, setActiveDiscussionId] = useState<string | null>(initialActiveDiscussionId ?? null);
   const [showNewDiscussion, setShowNewDiscussion] = useState(false);
   const [showGitPanel, setShowGitPanel] = useState(false);
+  const [initialGitWorkspaceId, setInitialGitWorkspaceId] = useState<string | undefined>();
   const [gitPanelExpanded, setGitPanelExpanded] = useState(false);
   const [showPlanPanel, setShowPlanPanel] = useState(false);
   const [showSettingsPanel, setShowSettingsPanel] = useState(false);
   const [showMessageSearch, setShowMessageSearch] = useState(false);
+  const [showDiscussionNotes, setShowDiscussionNotes] = useState<boolean>(() => {
+    try { return localStorage.getItem('kronn:showDiscussionNotes') !== 'false'; } catch { return true; }
+  });
+  const toggleDiscussionNotes = useCallback(() => {
+    setShowDiscussionNotes(current => {
+      const next = !current;
+      try { localStorage.setItem('kronn:showDiscussionNotes', String(next)); } catch { /* non-fatal */ }
+      return next;
+    });
+  }, []);
   const [showGlobalSearch, setShowGlobalSearch] = useState(false);
   const [globalSearchTarget, setGlobalSearchTarget] = useState<GlobalSearchTarget | null>(null);
   const globalSearchTargetRef = useRef<GlobalSearchTarget | null>(null);
@@ -256,6 +271,17 @@ export function DiscussionsPage({
     window.addEventListener('keydown', closePanel);
     return () => window.removeEventListener('keydown', closePanel);
   }, [showGitPanel, showPlanPanel, showSettingsPanel]);
+
+  useEffect(() => {
+    setInitialGitWorkspaceId(undefined);
+    if (!activeDiscussionId) return;
+    const workspaceId = consumeDiscussionWorkspaceTarget(activeDiscussionId);
+    if (!workspaceId) return;
+    setInitialGitWorkspaceId(workspaceId);
+    setShowPlanPanel(false);
+    setShowSettingsPanel(false);
+    setShowGitPanel(true);
+  }, [activeDiscussionId]);
 
   const clearMessageSearchHighlights = useCallback(() => {
     const registry = cssHighlightRegistry();
@@ -324,9 +350,26 @@ export function DiscussionsPage({
   const [collapsedDiscGroups, setCollapsedDiscGroups] = useState<Set<string>>(() => {
     try {
       const saved = localStorage.getItem('kronn:discCollapsedGroups');
-      return saved ? new Set(JSON.parse(saved) as string[]) : new Set();
-    } catch { return new Set(); }
+      const groups = saved ? new Set(JSON.parse(saved) as string[]) : new Set<string>();
+      // Batch run ids are ephemeral. Older sidebar versions persisted both
+      // `batch::` collapse keys and the short-lived `batch-open::` inverse
+      // convention; neither belongs in durable UI preferences.
+      for (const key of [...groups]) {
+        if (key.startsWith('batch::') || key.startsWith('batch-open::')) groups.delete(key);
+      }
+      // One-shot migration for the scalable sidebar: existing installations
+      // already have a collapse preference, so a plain fallback would leave
+      // Contacts permanently open for exactly the large workspaces this
+      // redesign targets. Apply the new default once, then respect every
+      // subsequent user toggle.
+      if (!localStorage.getItem('kronn:discSidebarSectionsV2')) {
+        groups.add('__contacts__');
+        localStorage.setItem('kronn:discSidebarSectionsV2', '1');
+      }
+      return groups;
+    } catch { return new Set(['__contacts__']); }
   });
+  const [openBatchRuns, setOpenBatchRuns] = useState<Set<string>>(() => new Set());
   const [orchState, setOrchState] = useState<Record<string, {
     active: boolean;
     round: number | string;
@@ -1289,6 +1332,7 @@ export function DiscussionsPage({
             messages: [...disc.messages, {
               id: `optimistic-agent-${Date.now()}`,
               role: 'Agent' as const,
+              channel: 'main' as const,
               content: streamedText,
               agent_type: targetAgent ?? disc.agent,
               timestamp: new Date().toISOString(),
@@ -1444,10 +1488,16 @@ export function DiscussionsPage({
     }
     const projectKey = childDisc.project_id ?? null;
     const batchKey = `batch::${focusBatchId}`;
+    const quickPromptId = batchSummaries.find(summary => summary.run_id === focusBatchId)?.quick_prompt_id;
     setCollapsedDiscGroups(prev => {
       const next = new Set(prev);
       if (projectKey != null) next.delete(projectKey);
-      next.delete(batchKey);
+      if (quickPromptId) next.delete(`qp-batches::${quickPromptId}`);
+      return next;
+    });
+    setOpenBatchRuns(prev => {
+      const next = new Set(prev);
+      next.add(focusBatchId);
       return next;
     });
     // Defer the scroll one tick so the just-uncollapsed nodes have time to render.
@@ -1459,7 +1509,7 @@ export function DiscussionsPage({
     });
     onFocusBatchConsumed?.();
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [focusBatchId, allDiscussions.length]);
+  }, [focusBatchId, allDiscussions.length, batchSummaries]);
 
   const handleCreateDiscussion = async (config: NewDiscConfig) => {
     let disc;
@@ -1568,9 +1618,105 @@ export function DiscussionsPage({
     targets: MessageTarget[] = [],
     targetAll = false,
     replyTargetId?: string,
+    channel: MessageChannel = 'main',
   ) => {
     if (!activeDiscussionId || !msg.trim()) return;
     const discId = activeDiscussionId;
+
+    if (channel === 'note') {
+      stopTts();
+      const clientMessageId = newClientMessageId();
+      optimisticMessageIdsRef.current.add(clientMessageId);
+      setReplyToMessageId(null);
+      setLoadedDiscussions(prev => {
+        const disc = prev[discId];
+        if (!disc) return prev;
+        return {
+          ...prev,
+          [discId]: {
+            ...disc,
+            messages: [...disc.messages, {
+              id: clientMessageId,
+              role: 'User' as const,
+              channel: 'note' as const,
+              content: msg,
+              agent_type: null,
+              timestamp: new Date().toISOString(),
+              tokens_used: 0,
+              auth_mode: null,
+              target_agent: null,
+              reply_to_message_id: replyTargetId ?? null,
+            }],
+            message_count: disc.message_count + 1,
+            non_system_message_count: disc.non_system_message_count + 1,
+          },
+        };
+      });
+
+      let accepted = false;
+      let settled = false;
+      const rollback = () => {
+        if (settled) return;
+        settled = true;
+        optimisticMessageIdsRef.current.delete(clientMessageId);
+        setLoadedDiscussions(prev => {
+          const disc = prev[discId];
+          if (!disc) return prev;
+          return {
+            ...prev,
+            [discId]: {
+              ...disc,
+              messages: disc.messages.filter(message => message.id !== clientMessageId),
+              message_count: Math.max(0, disc.message_count - 1),
+              non_system_message_count: Math.max(0, disc.non_system_message_count - 1),
+            },
+          };
+        });
+        publishMessageSendSettled(discId, msg, 'refused');
+      };
+
+      try {
+        await discussionsApi.sendMessageStream(
+          discId,
+          {
+            content: msg,
+            channel: 'note',
+            targets: [],
+            target_all: false,
+            target_agents: [],
+            target_agent: undefined,
+            client_message_id: clientMessageId,
+            reply_to_message_id: replyTargetId,
+          },
+          () => undefined,
+          () => {
+            if (!accepted) rollback();
+          },
+          error => {
+            if (!accepted) rollback();
+            toast(userError(error), 'error');
+          },
+          undefined,
+          undefined,
+          undefined,
+          () => {
+            accepted = true;
+            settled = true;
+            optimisticMessageIdsRef.current.delete(clientMessageId);
+            publishMessageSendSettled(discId, msg, 'accepted');
+            refetchDiscussions();
+            reloadDiscussion(discId);
+            loadContextFiles(discId);
+            markDiscussionSeen(discId, activeDiscussion ? unseenBasis(activeDiscussion) + 1 : 1);
+          },
+        );
+      } catch (error) {
+        if (!accepted) rollback();
+        toast(userError(error), 'error');
+      }
+      return;
+    }
+
     // Synchronous re-entry guard: `sending` is derived from `sendingMap`
     // which only flips true inside the SSE `onStart` callback (backend
     // round-trip ~100 ms-2 s). A fast double / triple click on Send fires
@@ -1614,6 +1760,7 @@ export function DiscussionsPage({
           messages: [...disc.messages, {
             id: clientMessageId,
             role: 'User' as const,
+            channel: 'main' as const,
             content: msg,
             agent_type: null,
             timestamp: new Date().toISOString(),
@@ -1714,6 +1861,7 @@ export function DiscussionsPage({
         discId,
         {
           content: msg,
+          channel: 'main',
           targets,
           target_all: targetAll,
           // Compatibility projection for older peers during rolling upgrades.
@@ -2483,6 +2631,11 @@ export function DiscussionsPage({
             try {
               const res = await workflowsApi.deleteBatchRun(runId);
               toast(t('disc.batchDeletedToast', res.discussions_deleted), 'success');
+              setOpenBatchRuns(prev => {
+                const next = new Set(prev);
+                next.delete(runId);
+                return next;
+              });
               refetchDiscussions();
               refetchBatchSummaries();
             } catch (e) {
@@ -2531,6 +2684,12 @@ export function DiscussionsPage({
           onReviewBatch={openBatchReview}
           collapsedGroups={collapsedDiscGroups}
           onToggleGroup={handleToggleGroup}
+          openBatchRuns={openBatchRuns}
+          onToggleBatchRun={(runId) => setOpenBatchRuns(prev => {
+            const next = new Set(prev);
+            if (next.has(runId)) next.delete(runId); else next.add(runId);
+            return next;
+          })}
           onCollapse={() => setSidebarCollapsed(true)}
         />
       ) : null}
@@ -2680,6 +2839,7 @@ export function DiscussionsPage({
               pendingFilesCount={pendingFilesCount}
               onRequestTestMode={() => { void handleRequestTestMode(activeDiscussion.id); }}
               onToggleGitPanel={() => {
+                setInitialGitWorkspaceId(undefined);
                 setShowPlanPanel(false);
                 setShowSettingsPanel(false);
                 setShowGitPanel(prev => !prev);
@@ -2892,17 +3052,26 @@ export function DiscussionsPage({
               onScroll={handleMessagesScroll}
             >
               {(() => {
-                const msgs = activeDiscussion.messages;
+                const msgs = showDiscussionNotes
+                  ? activeDiscussion.messages
+                  : activeDiscussion.messages.filter(message => message.channel !== 'note');
                 // Pre-compute indices and timestamps in O(n) instead of O(n²)
                 let lastUserIdx = -1;
-                for (let i = msgs.length - 1; i >= 0; i--) { if (msgs[i].role === 'User') { lastUserIdx = i; break; } }
-                const lastAgentIdx = msgs.length - 1;
+                let lastAgentIdx = -1;
+                for (let i = msgs.length - 1; i >= 0; i--) {
+                  if (msgs[i].channel === 'note') continue;
+                  if (lastUserIdx < 0 && msgs[i].role === 'User') lastUserIdx = i;
+                  if (lastAgentIdx < 0 && msgs[i].role === 'Agent') lastAgentIdx = i;
+                  if (lastUserIdx >= 0 && lastAgentIdx >= 0) break;
+                }
                 // Pre-compute previous user timestamp per message (for response duration display)
                 const prevUserTs: (string | null)[] = [];
                 let lastSeenUserTs: string | null = null;
                 for (let i = 0; i < msgs.length; i++) {
                   prevUserTs.push(lastSeenUserTs);
-                  if (msgs[i].role === 'User') lastSeenUserTs = msgs[i].timestamp;
+                  if (msgs[i].channel !== 'note' && msgs[i].role === 'User') {
+                    lastSeenUserTs = msgs[i].timestamp;
+                  }
                 }
                 // Hide the initial system prompt for automated discussions (briefing, validation, bootstrap).
                 // Uses locale-aware detectors — `Briefing` is localized
@@ -2936,65 +3105,94 @@ export function DiscussionsPage({
                   repliesByTarget.set(message.reply_to_message_id, replies);
                 }
                 const items = groupMessagesWithToolFold(msgs, { isAutoPrompt });
+                let previousDayKey: string | null = null;
                 return items.map(item => {
+                  const firstMessage = item.kind === 'tool-group' ? item.messages[0] : item.msg;
+                  const dayKey = localCalendarDayKey(firstMessage.timestamp);
+                  const startsDay = dayKey !== null && dayKey !== previousDayKey;
+                  if (dayKey !== null) previousDayKey = dayKey;
+                  const separator = startsDay ? (
+                    <MessageDateSeparator
+                      timestamp={firstMessage.timestamp}
+                      locale={locale}
+                      t={t}
+                    />
+                  ) : null;
+
                   if (item.kind === 'tool-group') {
                     return (
-                      <ToolCallsGroup
-                        key={`tools-${item.messages[0].id}`}
-                        messages={item.messages}
-                        targetMessageId={globalSearchTarget?.messageId}
-                        t={t}
-                      />
+                      <Fragment key={`tools-${item.messages[0].id}`}>
+                        {separator}
+                        <ToolCallsGroup
+                          messages={item.messages}
+                          targetMessageId={globalSearchTarget?.messageId}
+                          t={t}
+                        />
+                      </Fragment>
                     );
                   }
                   const { msg, idx } = item;
+                  if (msg.channel === 'note') {
+                    return (
+                      <Fragment key={msg.id}>
+                        {separator}
+                        <DiscussionNote
+                          message={msg}
+                          discussionId={activeDiscussion.id}
+                          t={t}
+                        />
+                      </Fragment>
+                    );
+                  }
                   return (
-                    <MessageBubble
-                      key={msg.id}
-                      msg={msg}
-                      idx={idx}
-                      attachments={attachmentsByMessageId[msg.id] ?? EMPTY_ATTACHMENTS}
-                      pendingAttachment={pendingFileMsgIds.has(msg.id)}
-                      isLastUser={msg.role === 'User' && idx === lastUserIdx}
-                      isLastAgent={msg.role === 'Agent' && idx === lastAgentIdx}
-                      isEditing={editingMsgId === msg.id}
-                      isCopied={copiedMsgId === msg.id}
-                      isTtsActive={ttsPlayingMsgId === msg.id}
-                      ttsState={ttsState}
-                      isExpandedSummary={expandedSummaryMsgId === msg.id}
-                      prevUserTs={prevUserTs[idx]}
-                      defaultAgent={activeDiscussion.agent}
-                      summaryCache={activeDiscussion.summary_cache ?? null}
-                      language={activeDiscussion.language || 'fr'}
-                      sending={sending}
-                      editingText={editingMsgId === msg.id ? editingText : ''}
-                      hasFullAccess={hasFullAccess(msg.agent_type ?? activeDiscussion.agent)}
-                      onCopy={handleMsgCopy}
-                      onTts={handleMsgTts}
-                      onEditStart={handleMsgEditStart}
-                      onEditCancel={handleMsgEditCancel}
-                      onEditSubmit={handleEditMessage}
-                      onEditTextChange={setEditingText}
-                      onRetry={handleRetry}
-                      onExpandSummary={handleMsgExpandSummary}
-                      onNavigate={onNavigate}
-                      discussionId={activeDiscussion.id}
-                      projectId={activeDiscussion.project_id ?? null}
-                      chainableQPs={chainableQPs}
-                      onLaunchQp={qp => handleSendMessage(qp.prompt_template)}
-                      isSearchMatch={messageSearchMatches.some(match => match.messageId === msg.id)}
-                      isSearchCurrent={
-                        messageSearchMatches[messageSearchIndex]?.messageId === msg.id
-                        || globalSearchTarget?.messageId === msg.id
-                      }
-                      replyTarget={msg.reply_to_message_id
-                        ? messagesById.get(msg.reply_to_message_id) ?? null
-                        : null}
-                      replies={repliesByTarget.get(msg.id) ?? EMPTY_MESSAGES}
-                      onReply={handleMsgReply}
-                      onReplyNavigate={handleReplyNavigate}
-                      t={t}
-                    />
+                    <Fragment key={msg.id}>
+                      {separator}
+                      <MessageBubble
+                        msg={msg}
+                        idx={idx}
+                        attachments={attachmentsByMessageId[msg.id] ?? EMPTY_ATTACHMENTS}
+                        pendingAttachment={pendingFileMsgIds.has(msg.id)}
+                        isLastUser={msg.role === 'User' && idx === lastUserIdx}
+                        isLastAgent={msg.role === 'Agent' && idx === lastAgentIdx}
+                        isEditing={editingMsgId === msg.id}
+                        isCopied={copiedMsgId === msg.id}
+                        isTtsActive={ttsPlayingMsgId === msg.id}
+                        ttsState={ttsState}
+                        isExpandedSummary={expandedSummaryMsgId === msg.id}
+                        prevUserTs={prevUserTs[idx]}
+                        defaultAgent={activeDiscussion.agent}
+                        summaryCache={activeDiscussion.summary_cache ?? null}
+                        language={activeDiscussion.language || 'fr'}
+                        sending={sending}
+                        editingText={editingMsgId === msg.id ? editingText : ''}
+                        hasFullAccess={hasFullAccess(msg.agent_type ?? activeDiscussion.agent)}
+                        onCopy={handleMsgCopy}
+                        onTts={handleMsgTts}
+                        onEditStart={handleMsgEditStart}
+                        onEditCancel={handleMsgEditCancel}
+                        onEditSubmit={handleEditMessage}
+                        onEditTextChange={setEditingText}
+                        onRetry={handleRetry}
+                        onExpandSummary={handleMsgExpandSummary}
+                        onNavigate={onNavigate}
+                        discussionId={activeDiscussion.id}
+                        projectId={activeDiscussion.project_id ?? null}
+                        chainableQPs={chainableQPs}
+                        onLaunchQp={qp => handleSendMessage(qp.prompt_template)}
+                        isSearchMatch={messageSearchMatches.some(match => match.messageId === msg.id)}
+                        isSearchCurrent={
+                          messageSearchMatches[messageSearchIndex]?.messageId === msg.id
+                          || globalSearchTarget?.messageId === msg.id
+                        }
+                        replyTarget={msg.reply_to_message_id
+                          ? messagesById.get(msg.reply_to_message_id) ?? null
+                          : null}
+                        replies={repliesByTarget.get(msg.id) ?? EMPTY_MESSAGES}
+                        onReply={handleMsgReply}
+                        onReplyNavigate={handleReplyNavigate}
+                        t={t}
+                      />
+                    </Fragment>
                   );
                 });
               })()}
@@ -3822,6 +4020,9 @@ export function DiscussionsPage({
               onQueueQP={queueQP}
               onCancelQueuedQP={cancelQueuedQP}
               replyTarget={replyTarget}
+              hasDiscussionNotes={activeDiscussion.messages.some(message => message.channel === 'note')}
+              showDiscussionNotes={showDiscussionNotes}
+              onToggleDiscussionNotes={toggleDiscussionNotes}
               onCancelReply={() => {
                 clearReplyDraft(activeDiscussion.id);
                 setReplyToMessageId(null);
@@ -3836,9 +4037,11 @@ export function DiscussionsPage({
             {showGitPanel && activeDiscussion.project_id && (
               <GitPanel
                 projectId={activeDiscussion.project_id}
-                discussionId={activeDiscussion.workspace_mode === 'Isolated' ? activeDiscussion.id : undefined}
+                discussionId={activeDiscussion.id}
+                initialWorkspaceId={initialGitWorkspaceId}
                 onClose={() => {
                   setGitPanelExpanded(false);
+                  setInitialGitWorkspaceId(undefined);
                   setShowGitPanel(false);
                 }}
                 onExpandedChange={setGitPanelExpanded}

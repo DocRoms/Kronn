@@ -50,6 +50,7 @@ const { projectsApi, discussionsApi, baseStatus } = vi.hoisted(() => {
       exec: vi.fn(),
     },
     discussionsApi: {
+      workspaces: vi.fn(),
       gitStatus: vi.fn(),
       gitDiff: vi.fn(),
       gitCommit: vi.fn(),
@@ -103,6 +104,7 @@ beforeEach(() => {
   projectsApi.exec.mockResolvedValue({ stdout: 'ok-out', stderr: '', exit_code: 0 });
 
   discussionsApi.gitStatus.mockResolvedValue(baseStatus());
+  discussionsApi.workspaces.mockResolvedValue([]);
   discussionsApi.gitDiff.mockResolvedValue({ path: 'src/main.rs', diff: '@@ diff @@' });
   discussionsApi.gitCommit.mockResolvedValue({ hash: 'def456', message: 'done' });
   discussionsApi.gitPush.mockResolvedValue({ success: true, message: 'pushed' });
@@ -113,6 +115,107 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+});
+
+describe('GitPanel — discussion workspace selection', () => {
+  it('selects a declared CLI worktree and scopes every status refresh to it', async () => {
+    discussionsApi.workspaces.mockResolvedValue([{
+      id: 'workspace-1',
+      disc_id: 'd1',
+      session_pk: 42,
+      session_agent_type: 'Codex',
+      task_id: 'task-1',
+      task_reference: 'KT-140',
+      project_id: 'p1',
+      workspace_path: '/tmp/kronn-kt140',
+      canonical_path: '/tmp/kronn-kt140',
+      branch: 'feature/kt140',
+      head_sha: 'abc123',
+      ownership: 'external',
+      state: 'attached',
+      created_at: '2026-01-01',
+      updated_at: '2026-01-01',
+    }]);
+
+    renderPanel({ projectId: 'p1', discussionId: 'd1' });
+
+    const picker = await screen.findByRole('combobox', { name: 'git.workspaceSelector' });
+    expect(picker).toHaveValue('workspace-1');
+    await waitFor(() => {
+      expect(discussionsApi.gitStatus).toHaveBeenCalledWith('d1', 'workspace-1');
+    });
+  });
+
+  it('honours the workspace selected from a Planning task', async () => {
+    const workspace = (id: string, branch: string) => ({
+      id,
+      disc_id: 'd1',
+      session_pk: id === 'workspace-1' ? 41 : 42,
+      session_agent_type: 'Codex',
+      task_id: 'task-1',
+      task_reference: 'KT-140',
+      project_id: 'p1',
+      workspace_path: `/tmp/${id}`,
+      canonical_path: `/tmp/${id}`,
+      branch,
+      head_sha: 'abc123',
+      ownership: 'external',
+      state: 'attached',
+      created_at: '2026-01-01',
+      updated_at: '2026-01-01',
+    });
+    discussionsApi.workspaces.mockResolvedValue([
+      workspace('workspace-1', 'feature/one'),
+      workspace('workspace-2', 'feature/two'),
+    ]);
+
+    renderPanel({
+      projectId: 'p1',
+      discussionId: 'd1',
+      initialWorkspaceId: 'workspace-2',
+    });
+
+    const picker = await screen.findByRole('combobox', { name: 'git.workspaceSelector' });
+    expect(picker).toHaveValue('workspace-2');
+    await waitFor(() => {
+      expect(discussionsApi.gitStatus).toHaveBeenCalledWith('d1', 'workspace-2');
+    });
+  });
+
+  it('does not fall back when a Planning-linked workspace is missing', async () => {
+    discussionsApi.workspaces.mockResolvedValue([{
+      id: 'workspace-missing',
+      disc_id: 'd1',
+      session_pk: 42,
+      session_agent_type: 'Codex',
+      task_id: 'task-1',
+      task_reference: 'KT-140',
+      project_id: 'p1',
+      workspace_path: '/tmp/gone',
+      canonical_path: '/tmp/gone',
+      branch: 'feature/gone',
+      head_sha: 'abc123',
+      ownership: 'external',
+      state: 'missing',
+      created_at: '2026-01-01',
+      updated_at: '2026-01-01',
+    }]);
+    discussionsApi.gitStatus.mockRejectedValue(new Error('Workspace is missing'));
+
+    renderPanel({
+      projectId: 'p1',
+      discussionId: 'd1',
+      initialWorkspaceId: 'workspace-missing',
+    });
+
+    const picker = await screen.findByRole('combobox', { name: 'git.workspaceSelector' });
+    expect(picker).toHaveValue('workspace-missing');
+    await waitFor(() => {
+      expect(discussionsApi.gitStatus).toHaveBeenCalledWith('d1', 'workspace-missing');
+    });
+    expect(discussionsApi.gitStatus).not.toHaveBeenCalledWith('d1');
+    expect(await screen.findByText('Error: Workspace is missing')).toBeInTheDocument();
+  });
 });
 
 // ─── Commit ───────────────────────────────────────────────────────────────────

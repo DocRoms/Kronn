@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
+import { previewString } from '../../lib/workflowUiUtils';
 import { Plug, Play, Loader2, ChevronDown, ChevronRight as ChevRight, KeyRound, Link2, X as XIcon } from 'lucide-react';
 import { workflows as workflowsApi } from '../../lib/api';
 import type { AgentType, McpConfigDisplay, McpServer, WorkflowStep, ExtractSpec, StepType, QuickApi, JsonValue } from '../../types/generated';
@@ -1401,36 +1402,4 @@ function applyPathToActiveField(
 
 function capitalize(s: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1);
-}
-
-/** Render a JSONPath-resolved value as a one-line preview chip.
- *
- *  Goes one level deep so the user sees actual content for arrays/objects
- *  (`["fr.euronews.com/", "fr.euronews.com/voya…", … (+3)]`) instead of
- *  the previous `Array(5)` placeholder that conveyed nothing. Depth is
- *  capped at 1 to keep the chip readable on narrow viewports — a deeper
- *  inspection is what the JSON tree on the left is for. Exported for
- *  unit tests; otherwise component-private. */
-export function previewString(v: unknown, depth = 0): string {
-  if (v == null) return 'null';
-  if (typeof v === 'string') {
-    return `"${truncate(v, depth === 0 ? 60 : 30)}"`;
-  }
-  if (typeof v === 'number' || typeof v === 'boolean') return String(v);
-  if (Array.isArray(v)) {
-    if (v.length === 0) return '[]';
-    if (depth >= 1) return `[${v.length}]`;
-    const items = v.slice(0, 3).map(x => previewString(x, depth + 1));
-    const more = v.length > 3 ? `, … (+${v.length - 3})` : '';
-    return `[${items.join(', ')}${more}]`;
-  }
-  if (typeof v === 'object') {
-    const entries = Object.entries(v as Record<string, unknown>);
-    if (entries.length === 0) return '{}';
-    if (depth >= 1) return '{…}';
-    const items = entries.slice(0, 3).map(([k, val]) => `${k}: ${previewString(val, depth + 1)}`);
-    const more = entries.length > 3 ? `, … (+${entries.length - 3})` : '';
-    return `{${items.join(', ')}${more}}`;
-  }
-  return String(v);
 }

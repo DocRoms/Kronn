@@ -61,14 +61,16 @@ function renderItem(props?: Partial<Parameters<typeof SwipeableDiscItem>[0]>) {
       {...props}
     />,
   );
-  // The swipeable row is the role="button" element carrying the pointer handlers.
-  const row = screen.getByRole('button');
+  // The labelled open button owns keyboard selection + pointer gestures; row
+  // actions are sibling buttons and must never steal this query.
+  const row = screen.getByRole('button', { name: /DiscAlpha/ });
   return { onSelect, onArchive, onDelete, onStop, row };
 }
 
 /** Read the live translateX(...) value off the inline style. */
 function offsetOf(row: HTMLElement): number {
-  const m = /translateX\((-?\d+(?:\.\d+)?)px\)/.exec(row.style.transform);
+  const transformed = row.closest('.disc-item') as HTMLElement | null;
+  const m = /translateX\((-?\d+(?:\.\d+)?)px\)/.exec(transformed?.style.transform ?? '');
   return m ? Number(m[1]) : NaN;
 }
 
@@ -212,6 +214,67 @@ describe('SwipeableDiscItem — pointer/swipe gesture', () => {
   });
 });
 
+describe('SwipeableDiscItem — compact state cluster', () => {
+  it('keeps worktree and shared-room indicators outside the title text', () => {
+    renderItem({
+      disc: disc({
+        workspace_mode: 'Isolated',
+        shared_id: 'shared-1',
+        participants: ['Codex', 'ClaudeCode'],
+      }),
+    });
+
+    const titleText = document.querySelector('.disc-item-title-text')!;
+    const cluster = document.querySelector('.disc-item-state-cluster')!;
+    expect(cluster).not.toBeNull();
+    expect(titleText.contains(cluster)).toBe(false);
+    expect(screen.getByLabelText('disc.workspaceIsolated')).toBeInTheDocument();
+    expect(screen.getByLabelText('disc.sidebar.sharedDiscussion')).toBeInTheDocument();
+    expect(screen.queryByLabelText('disc.sidebar.multiAgentDiscussion')).toBeNull();
+  });
+
+  it('labels a local discussion with several agents without calling it shared', () => {
+    renderItem({
+      disc: disc({
+        participants: ['Codex', 'ClaudeCode'],
+        shared_id: null,
+      }),
+    });
+
+    expect(screen.getByLabelText('disc.sidebar.multiAgentDiscussion')).toBeInTheDocument();
+    expect(screen.queryByLabelText('disc.sidebar.sharedDiscussion')).toBeNull();
+  });
+});
+
+describe('SwipeableDiscItem — row action menu', () => {
+  it('keeps actions outside the discussion-open button and toggles a favorite', () => {
+    const onTogglePin = vi.fn();
+    renderItem({ onTogglePin });
+
+    const open = screen.getByRole('button', { name: /DiscAlpha/ });
+    const actions = screen.getByRole('button', { name: 'disc.actions' });
+    expect(open.contains(actions)).toBe(false);
+
+    fireEvent.click(actions);
+    fireEvent.click(screen.getByRole('menuitem', { name: 'disc.pin' }));
+    expect(onTogglePin).toHaveBeenCalledWith('disc-alpha', true);
+    expect(screen.queryByRole('menu')).toBeNull();
+  });
+
+  it('archives from the explicit keyboard-accessible menu', () => {
+    const { onArchive } = renderItem();
+    fireEvent.click(screen.getByRole('button', { name: 'disc.actions' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'disc.archive' }));
+    expect(onArchive).toHaveBeenCalledWith('disc-alpha');
+  });
+
+  it('labels the copy action explicitly as an ID copy', () => {
+    renderItem();
+    fireEvent.click(screen.getByRole('button', { name: 'disc.actions' }));
+    expect(screen.getByRole('menuitem', { name: 'disc.copyId' })).toBeInTheDocument();
+  });
+});
+
 describe('SwipeableDiscItem — visible "N msg" label (non-System count)', () => {
   it('renders non_system_message_count, not the System-inflated message_count', () => {
     // Real shape: 2 user-facing msgs + 50 tool/refusal/summary System rows.
@@ -219,6 +282,7 @@ describe('SwipeableDiscItem — visible "N msg" label (non-System count)', () =>
     expect(screen.getByText(/^2 msg ·/)).toBeDefined();
     expect(screen.queryByText(/52 msg/)).toBeNull();
     // aria-label matches too.
-    expect(screen.getByRole('button').getAttribute('aria-label')).toContain('2 messages');
+    expect(screen.getByRole('button', { name: /DiscAlpha/ }).getAttribute('aria-label'))
+      .toContain('2 messages');
   });
 });

@@ -35,6 +35,7 @@ function makeAgentMessage(content: string): DiscussionMessage {
   return {
     id: 'msg-test',
     role: 'Agent',
+    channel: 'main',
     content,
     agent_type: 'ClaudeCode',
     timestamp: new Date().toISOString(),

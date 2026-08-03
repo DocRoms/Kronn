@@ -138,8 +138,11 @@
 }
 
 @keyframes tour-fade-in {
-  from { opacity: 0; transform: translateY(6px); }
-  to   { opacity: 1; transform: translateY(0); }
+  /* Keep positioning transforms owned by the centered/mobile rules. Animating
+     `transform` here temporarily replaced translate(-50%, -50%), placing the
+     welcome card past the right edge in a half-screen window. */
+  from { opacity: 0; }
+  to   { opacity: 1; }
 }
 
 /* ── Tooltip content ─────────────────────────────────────────────────── */

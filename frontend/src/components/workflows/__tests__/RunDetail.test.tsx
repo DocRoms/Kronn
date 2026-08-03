@@ -16,7 +16,8 @@ import type { WorkflowRun, WorkflowStep, StepResult } from '../../../types/gener
 
 vi.mock('../../../lib/api', () => buildApiMock());
 
-import { RunDetail, runStatusTimeline, tryParseTriageManifest } from '../RunDetail';
+import { RunDetail } from '../RunDetail';
+import { runStatusTimeline, tryParseTriageManifest } from '../../../lib/workflowUiUtils';
 
 const t = (key: string, ...args: (string | number)[]) =>
   args.length > 0 ? `${key}:${args.join(',')}` : key;
@@ -280,6 +281,48 @@ describe('RunDetail — status chips and interrupted resume trail', () => {
     render(<RunDetail run={run} onDelete={() => {}} />);
     const trail = screen.getByTestId('wf-run-status-trail');
     expect(within(trail).getByText('Failed')).toHaveAttribute('data-current', 'true');
+  });
+
+  it('requires an explicit confirmation before retrying an uncertain external effect', () => {
+    const onResume = vi.fn();
+    const confirmRetry = vi.fn(() => true);
+    vi.stubGlobal('confirm', confirmRetry);
+    const run = mkRun({
+      status: 'Interrupted',
+      finished_at: null,
+      state: {
+        '__kronn.uncertain_side_effect': JSON.stringify({
+          version: 1,
+          step_name: 'publish_webhook',
+          step_index: 2,
+          step_type: 'Notify',
+          started_at: '2026-04-26T12:00:01Z',
+        }),
+      },
+    });
+
+    render(<RunDetail run={run} onDelete={() => {}} onResume={onResume} />);
+    fireEvent.click(screen.getByText('wf.resumeUncertain'));
+
+    expect(confirmRetry).toHaveBeenCalledWith(
+      'wf.resumeUncertainConfirm:publish_webhook,Notify',
+    );
+    expect(onResume).toHaveBeenCalledWith(true);
+    vi.unstubAllGlobals();
+  });
+
+  it('keeps the ordinary resume path for legacy interrupted runs', () => {
+    const onResume = vi.fn();
+    const run = mkRun({
+      status: 'Interrupted',
+      finished_at: null,
+      state: {},
+    });
+
+    render(<RunDetail run={run} onDelete={() => {}} onResume={onResume} />);
+    fireEvent.click(screen.getByText('wf.resumeRun'));
+
+    expect(onResume).toHaveBeenCalledWith(false);
   });
 });
 

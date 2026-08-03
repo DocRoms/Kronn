@@ -8,6 +8,7 @@ function msg(role: MessageRole, content = ''): DiscussionMessage {
   return {
     id: `m${seq}`,
     role,
+    channel: 'main',
     content,
     agent_type: role === 'Agent' ? 'ClaudeCode' : null,
     timestamp: '2026-05-29T00:00:00Z',
