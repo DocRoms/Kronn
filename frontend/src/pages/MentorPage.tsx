@@ -960,8 +960,10 @@ function ParcoursView({
   }
 
   /** The "validate this block → next step" action, shown only on the block that
-   *  is the parcours' current phase while it's open. Bilan finishes the run. */
-  function AdvanceBar({ phase }: { phase: MentorPhase }) {
+   *  is the parcours' current phase while it's open. Bilan finishes the run.
+   *  A render helper (not a component) so it can close over local state without
+   *  remounting on every render — see react-hooks/static-components. */
+  const renderAdvanceBar = (phase: MentorPhase) => {
     if (!discId || parcours.status !== 'open' || parcours.phase !== phase) return null;
     const isLast = phase === 'bilan';
     // Resources is a read-gate: match the backend — every resource must be read
@@ -999,7 +1001,7 @@ function ParcoursView({
       {actionError && <p className="mentor-turn-error" role="alert">{t('mentor.error.action')} — {actionError}</p>}
       </>
     );
-  }
+  };
 
   const sourceLabel = parcours.source.type === 'jira'
     ? (parcours.source.ticket_key ?? t('mentor.source.jira'))
@@ -1054,7 +1056,7 @@ function ParcoursView({
             <TurnPanel discId={discId} workflowId={workflowId} subject={parcours.objective} block="comprehension"
               hintLevel={parcours.hint_level} hint={parcours.last_hint ?? null} onUpdate={onUpdate} />
           )}
-          <AdvanceBar phase="comprehension" />
+          {renderAdvanceBar('comprehension')}
           {parcours.comprehension.forced && <ForcedNote />}
         </BlockCard>
 
@@ -1118,7 +1120,7 @@ function ParcoursView({
                 })}
               </div>
             )}
-          <AdvanceBar phase="resources" />
+          {renderAdvanceBar('resources')}
         </BlockCard>
 
         {/* ③ Target */}
@@ -1148,7 +1150,7 @@ function ParcoursView({
                 )}
               </div>
             )}
-          <AdvanceBar phase="target" />
+          {renderAdvanceBar('target')}
         </BlockCard>
 
         {/* ④⑤⑥ learner blocks */}
@@ -1178,7 +1180,7 @@ function ParcoursView({
                     <CodeReviewPanel discId={discId} workflowId={workflowId} projectId={projectId}
                       subject={parcours.objective} hintLevel={parcours.hint_level}
                       hint={parcours.last_hint ?? null} onUpdate={onUpdate} />
-                    <AdvanceBar phase="code" />
+                    {renderAdvanceBar('code')}
                   </>
                 ) : (
                   <>
@@ -1187,7 +1189,7 @@ function ParcoursView({
                     <TurnPanel discId={discId} workflowId={workflowId} subject={parcours.objective} block={key}
                       hintLevel={parcours.hint_level} hint={parcours.last_hint ?? null}
                       placeholder={key === 'bilan' ? t('mentor.bilan.placeholder') : undefined} onUpdate={onUpdate} />
-                    <AdvanceBar phase={key} />
+                    {renderAdvanceBar(key)}
                   </>
                 )
               ) : (
