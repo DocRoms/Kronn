@@ -53,6 +53,13 @@ export default defineConfig({
     globals: true,
     environment: 'happy-dom',
     setupFiles: ['./src/test/setup.ts'],
+    // Keep console output visible, but write it directly instead of relaying
+    // every log through the worker RPC. The suite intentionally exercises
+    // several warning/error paths; under CI load Vitest could tear a worker
+    // down while `onUserConsoleLog` was still pending and report a spurious
+    // EnvironmentTeardownError after every assertion had passed. Trade-off:
+    // direct logs no longer carry Vitest's automatic test-file attribution.
+    disableConsoleIntercept: true,
     css: false,
     testTimeout: 30000,
     hookTimeout: 30000,

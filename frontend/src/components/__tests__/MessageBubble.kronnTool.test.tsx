@@ -32,6 +32,7 @@ function makeSysMessage(content: string): DiscussionMessage {
   return {
     id: 'msg-test',
     role: 'System',
+    channel: 'main',
     content,
     agent_type: null,
     timestamp: new Date().toISOString(),

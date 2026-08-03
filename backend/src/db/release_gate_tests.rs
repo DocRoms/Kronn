@@ -40,6 +40,7 @@ fn message(id: &str, role: MessageRole, agent: Option<AgentType>) -> DiscussionM
         lint_report: None,
         id: id.to_string(),
         role,
+        channel: crate::models::MessageChannel::Main,
         content: format!("content of {id}"),
         agent_type: agent,
         timestamp: Utc::now(),

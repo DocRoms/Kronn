@@ -34,11 +34,11 @@ test('links, displays, copies and unlinks an offline Claude session', async ({ p
   expect(body?.success).toBe(true);
   discId = body?.data?.id;
   expect(discId).toBeTruthy();
+  if (!discId) throw new Error('discussion creation returned no id');
 
   const dashboard = new DashboardPage(page);
   await dashboard.goto();
-  await dashboard.navDiscussions.click();
-  await page.getByRole('button', { name: new RegExp(title) }).click();
+  await dashboard.openDiscussion(discId);
 
   await page.getByRole('button', { name: 'Session', exact: true }).click();
   const dialog = page.getByRole('dialog', { name: 'Session CLI liée' });

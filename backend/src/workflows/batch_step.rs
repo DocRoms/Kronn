@@ -39,6 +39,73 @@ const DEFAULT_BATCH_CONCURRENT_LIMIT: u32 = 5;
 /// hard cap and keeps a single batch from owning every agent slot.
 const MAX_BATCH_CONCURRENT_LIMIT: u32 = 20;
 
+#[derive(Debug)]
+struct CollectedBatchResults {
+    results: Vec<serde_json::Value>,
+    measured_tokens: u64,
+    tokens_status: &'static str,
+}
+
+/// Collect the durable output of every child discussion after the batch has
+/// reached a terminal state. `discussion_ids` and `items` share the ordering
+/// established by `create_batch_run`, so the returned `results[]` is directly
+/// pipeable by a deterministic downstream step.
+///
+/// A zero message token count is not presented as a measured zero: agent
+/// replies cannot be free, and several CLI hosts do not currently report
+/// usage. Those entries expose `tokens_used: null` plus an explicit status.
+fn collect_batch_results(
+    conn: &rusqlite::Connection,
+    discussion_ids: &[String],
+    items: &[serde_json::Value],
+) -> anyhow::Result<CollectedBatchResults> {
+    let mut results = Vec::with_capacity(discussion_ids.len());
+    let mut measured_tokens = 0u64;
+    let mut measured_children = 0usize;
+
+    for (index, discussion_id) in discussion_ids.iter().enumerate() {
+        let messages = crate::db::discussions::list_messages(conn, discussion_id)?;
+        let agent_messages: Vec<&DiscussionMessage> = messages
+            .iter()
+            .filter(|message| {
+                message.role == MessageRole::Agent && message.channel == MessageChannel::Main
+            })
+            .collect();
+        let output = agent_messages.last().map(|message| message.content.clone());
+        let child_tokens = agent_messages.iter().fold(0u64, |total, message| {
+            total.saturating_add(message.tokens_used)
+        });
+        let tokens_measured = !agent_messages.is_empty() && child_tokens > 0;
+        if tokens_measured {
+            measured_children += 1;
+            measured_tokens = measured_tokens.saturating_add(child_tokens);
+        }
+
+        results.push(serde_json::json!({
+            "index": index,
+            "discussion_id": discussion_id,
+            "item": items.get(index).cloned().unwrap_or(serde_json::Value::Null),
+            "output": output,
+            "tokens_used": tokens_measured.then_some(child_tokens),
+            "tokens_status": if tokens_measured { "measured" } else { "unavailable" },
+        }));
+    }
+
+    let tokens_status = if measured_children == discussion_ids.len() && !discussion_ids.is_empty() {
+        "measured"
+    } else if measured_children > 0 {
+        "partial"
+    } else {
+        "unavailable_children_not_measured"
+    };
+
+    Ok(CollectedBatchResults {
+        results,
+        measured_tokens,
+        tokens_status,
+    })
+}
+
 pub async fn execute_batch_quick_prompt_step(
     step: &WorkflowStep,
     parent_run_id: &str,
@@ -336,14 +403,17 @@ pub async fn execute_batch_quick_prompt_step(
     if !wait_for_completion {
         // Fire-and-forget mode: emit a best-effort structured envelope now
         // and return. Downstream steps won't know the actual counters.
-        let output = build_structured_output(
-            &outcome.run_id,
-            outcome.batch_total,
-            0,
-            0, // not yet known
-            &outcome.discussion_ids,
-            false, // incomplete
-        );
+        let output = build_structured_output(BatchStructuredOutput {
+            run_id: &outcome.run_id,
+            total: outcome.batch_total,
+            ok: 0,
+            failed: 0, // not yet known
+            discussion_ids: &outcome.discussion_ids,
+            completed: false,
+            results: &[],
+            tokens_used: None,
+            tokens_status: "pending",
+        });
         return StepOutcome {
             result: StepResult {
                 step_name: step.name.clone(),
@@ -464,15 +534,38 @@ pub async fn execute_batch_quick_prompt_step(
         }
     }
 
-    // ── Build the structured output envelope ────────────────────────────
-    let output = build_structured_output(
-        &outcome.run_id,
-        final_total,
-        final_ok,
-        final_failed,
-        &outcome.discussion_ids,
-        true,
-    );
+    // ── Collect child payloads + build the structured output envelope ───
+    // BatchRunFinished is emitted only after durable dispatch settlement,
+    // so every child message committed by the agent is readable here.
+    let result_discussion_ids = outcome.discussion_ids.clone();
+    let result_items = items.clone();
+    let collected = match state
+        .db
+        .with_conn(move |conn| collect_batch_results(conn, &result_discussion_ids, &result_items))
+        .await
+    {
+        Ok(collected) => collected,
+        Err(error) => {
+            return fail(
+                step,
+                start,
+                format!("BatchQuickPrompt: failed to collect child outputs: {error}"),
+            )
+        }
+    };
+
+    let output = build_structured_output(BatchStructuredOutput {
+        run_id: &outcome.run_id,
+        total: final_total,
+        ok: final_ok,
+        failed: final_failed,
+        discussion_ids: &outcome.discussion_ids,
+        completed: true,
+        results: &collected.results,
+        tokens_used: (collected.tokens_status != "unavailable_children_not_measured")
+            .then_some(collected.measured_tokens),
+        tokens_status: collected.tokens_status,
+    });
 
     // The step succeeds if AT LEAST one child succeeded — matches the
     // semantics used by `increment_batch_progress` for the child batch run
@@ -492,7 +585,7 @@ pub async fn execute_batch_quick_prompt_step(
             step_name: step.name.clone(),
             status: step_status,
             output,
-            tokens_used: 0,
+            tokens_used: collected.measured_tokens,
             duration_ms: start.elapsed().as_millis() as u64,
             started_at: None,
             condition_result,
@@ -840,14 +933,30 @@ fn item_to_vars_and_title(
 /// Build the structured JSON envelope used as the step's `output` field so
 /// downstream steps can chain on `{{steps.<name>.data.ok}}` etc. Matches the
 /// schema enforced by `workflows::template::extract_step_envelope`.
-fn build_structured_output(
-    run_id: &str,
+struct BatchStructuredOutput<'a> {
+    run_id: &'a str,
     total: u32,
     ok: u32,
     failed: u32,
-    discussion_ids: &[String],
+    discussion_ids: &'a [String],
     completed: bool,
-) -> String {
+    results: &'a [serde_json::Value],
+    tokens_used: Option<u64>,
+    tokens_status: &'a str,
+}
+
+fn build_structured_output(input: BatchStructuredOutput<'_>) -> String {
+    let BatchStructuredOutput {
+        run_id,
+        total,
+        ok,
+        failed,
+        discussion_ids,
+        completed,
+        results,
+        tokens_used,
+        tokens_status,
+    } = input;
     let status = if completed {
         if ok == total {
             "OK"
@@ -884,6 +993,17 @@ fn build_structured_output(
                 .map(|s| serde_json::Value::String(s.clone()))
                 .collect(),
         ),
+    );
+    data.insert("results", serde_json::Value::Array(results.to_vec()));
+    data.insert(
+        "tokens_used",
+        tokens_used
+            .map(serde_json::Value::from)
+            .unwrap_or(serde_json::Value::Null),
+    );
+    data.insert(
+        "tokens_status",
+        serde_json::Value::String(tokens_status.to_string()),
     );
 
     // 0.8.5 — canonical Kronn envelope (markers + signal) via the
@@ -1129,14 +1249,18 @@ mod tests {
 
     #[test]
     fn build_structured_output_ok() {
-        let out = build_structured_output(
-            "run-1",
-            3,
-            3,
-            0,
-            &["d1".into(), "d2".into(), "d3".into()],
-            true,
-        );
+        let discussion_ids = ["d1".into(), "d2".into(), "d3".into()];
+        let out = build_structured_output(BatchStructuredOutput {
+            run_id: "run-1",
+            total: 3,
+            ok: 3,
+            failed: 0,
+            discussion_ids: &discussion_ids,
+            completed: true,
+            results: &[],
+            tokens_used: Some(42),
+            tokens_status: "measured",
+        });
         let v = parse_envelope_for_test(&out);
         assert_eq!(v["status"], "OK");
         assert_eq!(v["data"]["total"], 3);
@@ -1144,6 +1268,8 @@ mod tests {
         assert_eq!(v["data"]["failed"], 0);
         assert_eq!(v["data"]["batch_run_id"], "run-1");
         assert_eq!(v["data"]["discussion_ids"].as_array().unwrap().len(), 3);
+        assert_eq!(v["data"]["tokens_used"], 42);
+        assert_eq!(v["data"]["tokens_status"], "measured");
         // Canonical envelope must also carry the matching SIGNAL line so
         // `on_result.contains` rules can branch on status.
         assert!(out.contains("[SIGNAL: OK]"));
@@ -1151,7 +1277,17 @@ mod tests {
 
     #[test]
     fn build_structured_output_partial() {
-        let out = build_structured_output("run-1", 5, 3, 2, &[], true);
+        let out = build_structured_output(BatchStructuredOutput {
+            run_id: "run-1",
+            total: 5,
+            ok: 3,
+            failed: 2,
+            discussion_ids: &[],
+            completed: true,
+            results: &[],
+            tokens_used: None,
+            tokens_status: "unavailable_children_not_measured",
+        });
         let v = parse_envelope_for_test(&out);
         assert_eq!(v["status"], "PARTIAL");
         assert!(out.contains("[SIGNAL: PARTIAL]"));
@@ -1159,7 +1295,17 @@ mod tests {
 
     #[test]
     fn build_structured_output_error() {
-        let out = build_structured_output("run-1", 5, 0, 5, &[], true);
+        let out = build_structured_output(BatchStructuredOutput {
+            run_id: "run-1",
+            total: 5,
+            ok: 0,
+            failed: 5,
+            discussion_ids: &[],
+            completed: true,
+            results: &[],
+            tokens_used: None,
+            tokens_status: "unavailable_children_not_measured",
+        });
         let v = parse_envelope_for_test(&out);
         assert_eq!(v["status"], "ERROR");
         assert!(out.contains("[SIGNAL: ERROR]"));
@@ -1167,10 +1313,91 @@ mod tests {
 
     #[test]
     fn build_structured_output_pending_fire_and_forget() {
-        let out = build_structured_output("run-1", 5, 0, 0, &[], false);
+        let out = build_structured_output(BatchStructuredOutput {
+            run_id: "run-1",
+            total: 5,
+            ok: 0,
+            failed: 0,
+            discussion_ids: &[],
+            completed: false,
+            results: &[],
+            tokens_used: None,
+            tokens_status: "pending",
+        });
         let v = parse_envelope_for_test(&out);
         assert_eq!(v["status"], "PENDING");
+        assert!(v["data"]["tokens_used"].is_null());
+        assert_eq!(v["data"]["tokens_status"], "pending");
         assert!(out.contains("[SIGNAL: PENDING]"));
+    }
+
+    #[tokio::test]
+    async fn collect_batch_results_preserves_eight_large_payloads_and_order() {
+        let db = Database::open_in_memory().expect("in-memory DB");
+        let discussion_ids: Vec<String> = (0..8).map(|index| format!("disc-{index}")).collect();
+        let items: Vec<serde_json::Value> = (0..8)
+            .map(|index| serde_json::json!({"pack": index}))
+            .collect();
+        let ids_for_insert = discussion_ids.clone();
+        let items_for_collect = items.clone();
+        let collected = db
+            .with_conn(move |conn| -> anyhow::Result<_> {
+                let now = chrono::Utc::now().to_rfc3339();
+                for (index, discussion_id) in ids_for_insert.iter().enumerate() {
+                    conn.execute(
+                        "INSERT INTO discussions (id, title, agent, language, created_at, updated_at) VALUES (?1, ?2, 'ClaudeCode', 'fr', ?3, ?3)",
+                        rusqlite::params![discussion_id, format!("Pack {index}"), now],
+                    )?;
+                    let payload = format!("pack-{index}:{}", "x".repeat(105 * 1024));
+                    conn.execute(
+                        "INSERT INTO messages (id, discussion_id, role, channel, content, agent_type, timestamp, sort_order, tokens_used) VALUES (?1, ?2, 'Agent', 'main', ?3, 'ClaudeCode', ?4, 1, ?5)",
+                        rusqlite::params![format!("msg-{index}"), discussion_id, payload, now, ((index + 1) * 10) as i64],
+                    )?;
+                }
+                collect_batch_results(conn, &ids_for_insert, &items_for_collect)
+            })
+            .await
+            .expect("collect batch results");
+
+        assert_eq!(collected.results.len(), 8);
+        assert_eq!(collected.measured_tokens, 360);
+        assert_eq!(collected.tokens_status, "measured");
+        let output = build_structured_output(BatchStructuredOutput {
+            run_id: "run-large",
+            total: 8,
+            ok: 8,
+            failed: 0,
+            discussion_ids: &discussion_ids,
+            completed: true,
+            results: &collected.results,
+            tokens_used: Some(collected.measured_tokens),
+            tokens_status: collected.tokens_status,
+        });
+        let envelope = parse_envelope_for_test(&output);
+        let detail_sum: u64 = envelope["data"]["results"]
+            .as_array()
+            .expect("results array")
+            .iter()
+            .filter_map(|result| result["tokens_used"].as_u64())
+            .sum();
+        assert_eq!(envelope["data"]["tokens_used"], detail_sum);
+        let mut downstream = TemplateContext::new();
+        downstream.set_step_output("reviewers", &output);
+        let rendered = downstream
+            .render("{{steps.reviewers.data.results}}")
+            .expect("downstream deterministic template");
+        let parsed: Vec<serde_json::Value> =
+            serde_json::from_str(&rendered).expect("Exec-compatible JSON array");
+        assert_eq!(parsed.len(), 8);
+        for (index, result) in collected.results.iter().enumerate() {
+            assert_eq!(result["index"], index);
+            assert_eq!(result["discussion_id"], discussion_ids[index]);
+            assert_eq!(result["item"], items[index]);
+            let output = result["output"].as_str().expect("full output string");
+            assert!(output.len() > 100 * 1024);
+            assert!(output.starts_with(&format!("pack-{index}:")));
+            assert_eq!(result["tokens_used"], ((index + 1) * 10) as u64);
+        }
     }
 
     // ─── E2E tests for `execute_batch_quick_prompt_step` ─────────────────────

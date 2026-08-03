@@ -398,8 +398,13 @@ For OSS-intent projects, each missing item below emits a TD at **Low or Medium**
 - `CONTRIBUTING.md` (or `.github/CONTRIBUTING.md`) — onboarding for external contributors (emit TD: Low — informational).\n\
 - `CODE_OF_CONDUCT.md` (or `.github/CODE_OF_CONDUCT.md`) — required by GitHub Community Standards checklist (emit TD: Low).\n\n\
 \n\
-The 6 categories above are MANDATORY when their gating condition matches. Even if you find 30 other findings, you MUST scan them. \
-The cap in § D point 5 applies AFTER these baseline findings are emitted.\n\n\
+**Repository hygiene** — universal (not gated on OSS intent). Use `git ls-files --cached` so only tracked/index content is judged; do not flag harmless local/untracked developer files:\n\
+- Package-manager caches (`.pnpm-store/`, `.npm/`, `.yarn/cache/`, `.gradle/caches/`, `.cargo/registry/`) are not tracked. They are generated, large and machine-specific (emit TD: Low when tracked), except a documented Yarn zero-install/offline-mirror setup (`enableGlobalCache: false` plus repository documentation).\n\
+- Runtime databases/logs/dumps (`*.db`, `*-wal`, `*-shm`, `*.log`, `*.trace`, `*.dump`) are not tracked from the repo root or cache/runtime/state/tmp directories. Test fixtures are legitimate and must not be flagged solely by extension.\n\
+- Ad-hoc audit/session handoff notes and generated review/test outputs (`findings/`, `playwright-report/`, `test-results/`) are ignored or stored in the project's documented artifact location, not tracked at the root by an agent run (emit TD: Low when clearly generated).\n\n\
+\n\
+The 7 categories above are MANDATORY when their gating condition matches. Even if you find 30 other findings, you MUST scan them. \
+Repository hygiene is always mandatory. Deterministic evidence is bounded to 15 paths per detector plus an explicit remainder count; the finding cap in § D point 5 applies AFTER these baseline findings are emitted.\n\n\
 # B. DIMENSIONAL SCAN — every dimension is ACCOUNTABLE (on top of the baseline)\n\
 \n\
 This is where audits silently under-deliver: the baseline (§ A) is easy + deterministic, so the model finds it and STOPS. \
@@ -2238,6 +2243,24 @@ mod prompt_tests {
             assert!(
                 prompt.contains(needle),
                 "Community-standards block must check `{}`",
+                needle
+            );
+        }
+        for needle in [
+            "Repository hygiene",
+            "git ls-files --cached",
+            "tracked/index content",
+            ".pnpm-store/",
+            "Runtime databases/logs/dumps",
+            "findings/",
+            "harmless local/untracked developer files",
+            "documented Yarn zero-install/offline-mirror",
+            "The 7 categories above",
+            "bounded to 15 paths per detector",
+        ] {
+            assert!(
+                prompt.contains(needle),
+                "Repository-hygiene baseline must retain `{}`",
                 needle
             );
         }

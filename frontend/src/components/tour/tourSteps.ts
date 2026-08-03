@@ -222,9 +222,9 @@ function armDemoLauncher(attempt = 0) {
   };
 }
 
-/** Open the seeded discussion by clicking its sidebar row — the same path a user
- *  takes, so the tour reaches into no private state. The launcher is closed first
- *  since it covers the sidebar. */
+/** Open the seeded discussion through its real accessible button — the same path
+ *  a user takes, so the tour reaches into no private state. The launcher is
+ *  closed first since it covers the sidebar. */
 function openDemoDiscussion() {
   cancelDemoTyping();
   closeNewDiscussionForm();
@@ -232,11 +232,12 @@ function openDemoDiscussion() {
   if (!id) return;
   const row = document.querySelector<HTMLElement>(`[data-tour-disc-id="${id}"]`);
   if (!row) return;
-  // The row only wires `onClick` in selection mode; in normal mode it is opened
-  // by its keyboard handler. Calling `.click()` did nothing, which silently cost
-  // the three steps that follow. Use the accessible activation path instead.
-  row.focus();
-  row.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  // KT-90 moved activation from the swipe wrapper to a nested real button. A
+  // synthetic keydown on the wrapper no longer opened anything, which silently
+  // skipped the five discussion-demo steps and left a finished tour incomplete.
+  const openButton = row.querySelector<HTMLButtonElement>('.disc-item-open');
+  openButton?.focus();
+  openButton?.click();
 }
 
 function openAutomationTab(tourId: string) {

@@ -22,6 +22,7 @@ function makeAgentMessage(over: Partial<DiscussionMessage>): DiscussionMessage {
   return {
     id: 'msg-test',
     role: 'Agent',
+    channel: 'main',
     content: 'Some answer.',
     agent_type: 'Ollama',
     timestamp: new Date().toISOString(),

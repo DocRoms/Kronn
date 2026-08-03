@@ -82,7 +82,7 @@ const AGENT_ICON: Record<string, string> = {
 
 const iconFor = (agentType: string) => AGENT_ICON[agentType] ?? '👤';
 
-export function resumeCommandFor(
+function resumeCommandFor(
   agentType: string,
   conversationId?: string | null,
 ): string | null {
@@ -120,22 +120,32 @@ export function DiscParticipantsHeader({ discId, toast, t }: DiscParticipantsHea
   const [awayAfterMs, setAwayAfterMs] = useState(DEFAULT_AWAY_AFTER_MS);
   const [inviting, setInviting] = useState(false);
   const [showModal, setShowModal] = useState(false);
+  const [selectedParticipantId, setSelectedParticipantId] = useState<number | null>(null);
   const [invite, setInvite] = useState<{ token: string; instruction: string; instructionMinimal: string; expiresAt: string; ttlSecs: number } | null>(null);
   // KT-52 — the enriched handoff is the default: an invited agent that reads
   // only the pasted line still learns to read the plan and to stay. The bare
   // call stays one click away for a human who just wants the token.
   const [handoffMinimal, setHandoffMinimal] = useState(false);
 
+  const applyParticipants = useCallback((list: ParticipantRow[]) => {
+    setParticipants(list);
+    setSelectedParticipantId(current => (
+      current !== null && list.some(participant => participant.id === current)
+        ? current
+        : null
+    ));
+  }, []);
+
   const fetchParticipants = useCallback(async () => {
     try {
       const list = await discussionsApi.participants(discId);
-      setParticipants(list);
+      applyParticipants(list);
     } catch (e) {
       // Don't toast for fetch failures — the header just stays empty,
       // less noisy than a popup every time the user opens a disc.
       console.warn('[DiscParticipantsHeader] participants fetch failed:', e);
     }
-  }, [discId]);
+  }, [applyParticipants, discId]);
 
   useEffect(() => {
     // The away threshold follows the server's poll policy — a single meta
@@ -156,15 +166,29 @@ export function DiscParticipantsHeader({ discId, toast, t }: DiscParticipantsHea
   }, [discId]);
 
   useEffect(() => {
-    fetchParticipants();
+    let active = true;
+    const pollParticipants = async () => {
+      try {
+        const list = await discussionsApi.participants(discId);
+        if (active) applyParticipants(list);
+      } catch (error) {
+        if (active) {
+          console.warn('[DiscParticipantsHeader] participants fetch failed:', error);
+        }
+      }
+    };
+    void pollParticipants();
     // 0.8.6 phase 3 — light polling refresh (5s) so peer join/leave
     // events show up in the header without manual refresh. Cheap : a
     // SELECT on a single indexed column. Will be replaced by SSE in a
     // later wave (`DiscPeerJoined` / `DiscPeerLeft` events plumbed
     // through the existing ws_broadcast).
-    const id = setInterval(fetchParticipants, 5000);
-    return () => clearInterval(id);
-  }, [fetchParticipants]);
+    const id = setInterval(() => { void pollParticipants(); }, 5000);
+    return () => {
+      active = false;
+      clearInterval(id);
+    };
+  }, [applyParticipants, discId]);
 
   const handleInvite = async () => {
     if (inviting) return;
@@ -192,6 +216,29 @@ export function DiscParticipantsHeader({ discId, toast, t }: DiscParticipantsHea
   const shownHandoff = invite
     ? (handoffMinimal ? invite.instructionMinimal : invite.instruction)
     : '';
+
+  const selectedParticipant = participants.find(
+    participant => participant.id === selectedParticipantId,
+  ) ?? null;
+  const selectedPresence = selectedParticipant
+    ? honestPresenceState(
+        selectedParticipant.presence_state,
+        selectedParticipant.status,
+        selectedParticipant.activity,
+        selectedParticipant.last_seen,
+        awayAfterMs,
+      )
+    : null;
+  const selectedPresenceLabel = selectedParticipant && selectedPresence
+    ? presenceLabel(selectedParticipant, selectedPresence, t)
+    : null;
+  const selectedResumeCommand = selectedParticipant
+    ? resumeCommandFor(selectedParticipant.agent_type, selectedParticipant.conversation_id)
+    : null;
+  const selectedDisplayName = selectedParticipant
+    ? AGENT_MENTIONS.find(mention => mention.type === selectedParticipant.agent_type)?.trigger
+      ?? selectedParticipant.agent_type
+    : null;
 
   const handleCopy = async () => {
     if (!invite) return;
@@ -223,9 +270,9 @@ export function DiscParticipantsHeader({ discId, toast, t }: DiscParticipantsHea
           const label = presenceLabel(p, presence, t);
           const readLive = p.read_live ?? presence === 'listening';
           const writeState = p.write_state ?? 'unknown';
-          const resumeCommand = resumeCommandFor(p.agent_type, p.conversation_id);
           return (
-            <span
+            <button
+              type="button"
               key={p.id}
               className="disc-participant-chip"
               data-status={p.status}
@@ -235,6 +282,15 @@ export function DiscParticipantsHeader({ discId, toast, t }: DiscParticipantsHea
               data-read-live={readLive}
               data-write-state={writeState}
               data-wake-mode={p.wake_mode}
+              aria-expanded={selectedParticipantId === p.id}
+              aria-haspopup="dialog"
+              aria-controls={selectedParticipantId === p.id ? `disc-participant-details-${p.id}` : undefined}
+              aria-label={t(
+                'disc.participantDetails',
+                AGENT_MENTIONS.find(mention => mention.type === p.agent_type)?.trigger
+                  ?? p.agent_type,
+              )}
+              onClick={() => setSelectedParticipantId(current => current === p.id ? null : p.id)}
               title={[
                 `${p.agent_type} (${p.role}) — ${label}`,
                 p.model ? t('disc.modelDeclaredAtJoin', p.model) : null,
@@ -254,36 +310,14 @@ export function DiscParticipantsHeader({ discId, toast, t }: DiscParticipantsHea
                 />
               )}
               <span aria-hidden>{iconFor(p.agent_type)}</span>
-              <span>
+              <span className="disc-participant-name">
                 {AGENT_MENTIONS.find(mention => mention.type === p.agent_type)?.trigger
                   ?? p.agent_type}
-                <span className="disc-participant-kind"> · {t('disc.targetCli')}</span>
-              </span>
-              {p.model && (
-                <span
-                  className="disc-participant-model"
-                  title={t('disc.modelDeclaredAtJoin', p.model)}
-                >
-                  · {p.model}
-                </span>
-              )}
-              {resumeCommand && (
-                <CopyIdPill
-                  id={resumeCommand}
-                  label={t('disc.resumeCli')}
-                  title={t('disc.resumeCliCopy', resumeCommand)}
-                  className="disc-participant-resume"
-                />
-              )}
-              <span className="disc-participant-activity" data-presence={presence}>
-                {label}
               </span>
               {writeState === 'failed' && (
-                <span className="disc-participant-write-failed">
-                  {t('disc.writeFailed')}
-                </span>
+                <span className="disc-participant-write-failed-dot" aria-label={t('disc.writeFailed')} />
               )}
-            </span>
+            </button>
           );
         })}
       </div>
@@ -298,6 +332,54 @@ export function DiscParticipantsHeader({ discId, toast, t }: DiscParticipantsHea
         <UserPlus size={11} />
         {t('disc.invitePeer')}
       </button>
+
+      {selectedParticipant && selectedDisplayName && selectedPresenceLabel && (
+          <section
+            id={`disc-participant-details-${selectedParticipant.id}`}
+            className="disc-participant-details"
+            role="dialog"
+            aria-label={t('disc.participantDetails', selectedDisplayName)}
+            data-testid="disc-participant-details"
+          >
+            <header>
+              <strong><span aria-hidden>{iconFor(selectedParticipant.agent_type)}</span> {selectedDisplayName}</strong>
+              <button
+                type="button"
+                onClick={() => setSelectedParticipantId(null)}
+                aria-label={t('common.close')}
+              >
+                <X size={12} />
+              </button>
+            </header>
+            <div className="disc-participant-details-meta">
+              <span>{selectedParticipant.role}</span>
+              <span>{t('disc.targetCli')}</span>
+            </div>
+            <dl>
+              <div>
+                <dt>{t('disc.participantStatus')}</dt>
+                <dd>{selectedPresenceLabel}</dd>
+              </div>
+              {selectedParticipant.model && (
+                <div>
+                  <dt>{t('disc.participantModel')}</dt>
+                  <dd className="disc-participant-model">{selectedParticipant.model}</dd>
+                </div>
+              )}
+            </dl>
+            {selectedParticipant.write_state === 'failed' && (
+              <span className="disc-participant-write-failed">{t('disc.writeFailed')}</span>
+            )}
+            {selectedResumeCommand && (
+              <CopyIdPill
+                id={selectedResumeCommand}
+                label={t('disc.resumeCli')}
+                title={t('disc.resumeCliCopy', selectedResumeCommand)}
+                className="disc-participant-resume"
+              />
+            )}
+          </section>
+      )}
 
       {showModal && invite && (
         <div

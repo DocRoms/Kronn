@@ -144,6 +144,75 @@ pub fn bind_to_source(
     Ok(())
 }
 
+/// Move one durable CLI session binding from an expected discussion to a new
+/// one. The expected source makes the handoff fail closed when ownership
+/// changed between the caller's lookup and transfer request.
+///
+/// Returns `true` when the binding moved and `false` for an idempotent replay
+/// after the same transfer already succeeded.
+pub fn transfer_source_binding(
+    conn: &Connection,
+    from_disc_id: &str,
+    to_disc_id: &str,
+    source_agent: &str,
+    source_session_id: &str,
+) -> Result<bool> {
+    if from_disc_id == to_disc_id {
+        anyhow::bail!("source and target discussions must differ");
+    }
+
+    let transaction = conn.unchecked_transaction()?;
+    let target_exists = transaction
+        .query_row(
+            "SELECT 1 FROM discussions WHERE id = ?1",
+            [to_disc_id],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if !target_exists {
+        anyhow::bail!("target discussion {to_disc_id} does not exist");
+    }
+
+    let current = find_disc_by_source_session(&transaction, source_agent, source_session_id)?;
+    match current.as_deref() {
+        Some(current_disc_id) if current_disc_id == to_disc_id => {
+            let matching_closed_source = transaction
+                .query_row(
+                    "SELECT 1
+                     FROM disc_source_history
+                     WHERE disc_id = ?1
+                       AND source_agent = ?2
+                       AND source_session_id = ?3
+                       AND unlinked_at IS NOT NULL
+                     LIMIT 1",
+                    params![from_disc_id, source_agent, source_session_id],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some();
+            if !matching_closed_source {
+                anyhow::bail!(
+                    "session is already linked to discussion {to_disc_id}, but no completed transfer from expected discussion {from_disc_id} exists"
+                );
+            }
+            transaction.commit()?;
+            return Ok(false);
+        }
+        Some(current_disc_id) if current_disc_id != from_disc_id => {
+            anyhow::bail!(
+                "session ownership changed: expected discussion {from_disc_id}, found {current_disc_id}"
+            );
+        }
+        None => anyhow::bail!("session is not linked to expected discussion {from_disc_id}"),
+        Some(_) => {}
+    }
+
+    bind_to_source(&transaction, to_disc_id, source_agent, source_session_id)?;
+    transaction.commit()?;
+    Ok(true)
+}
+
 /// The discussion's CURRENT binding — the most recent open one.
 ///
 /// KT-85 — the detail endpoint used to scan `list_all_source_bindings()` and take
@@ -426,7 +495,12 @@ pub struct DiscSearchHit {
     pub source_session_id: Option<String>,
 }
 
-pub fn search_discussions(conn: &Connection, q: &str, limit: u32) -> Result<Vec<DiscSearchHit>> {
+pub fn search_discussions(
+    conn: &Connection,
+    q: &str,
+    limit: u32,
+    include_notes: bool,
+) -> Result<Vec<DiscSearchHit>> {
     let pattern = format!("%{}%", q.replace('%', "\\%").replace('_', "\\_"));
     let lim = limit.clamp(1, 50);
 
@@ -434,7 +508,9 @@ pub fn search_discussions(conn: &Connection, q: &str, limit: u32) -> Result<Vec<
         "SELECT d.id, d.title, d.source_agent, d.source_session_id,
                 COALESCE(
                     (SELECT m.content FROM messages m
-                     WHERE m.discussion_id = d.id AND m.content LIKE ?1 ESCAPE '\\'
+                     WHERE m.discussion_id = d.id
+                       AND (?3 = 1 OR m.channel = 'main')
+                       AND m.content LIKE ?1 ESCAPE '\\'
                      ORDER BY m.sort_order ASC LIMIT 1),
                     d.title
                 ) AS snippet
@@ -442,12 +518,14 @@ pub fn search_discussions(conn: &Connection, q: &str, limit: u32) -> Result<Vec<
          WHERE d.title LIKE ?1 ESCAPE '\\'
             OR EXISTS (
                 SELECT 1 FROM messages m
-                WHERE m.discussion_id = d.id AND m.content LIKE ?1 ESCAPE '\\'
+                WHERE m.discussion_id = d.id
+                  AND (?3 = 1 OR m.channel = 'main')
+                  AND m.content LIKE ?1 ESCAPE '\\'
             )
          ORDER BY d.updated_at DESC
          LIMIT ?2",
     )?;
-    let rows = stmt.query_map(params![pattern, lim as i64], |row| {
+    let rows = stmt.query_map(params![pattern, lim as i64, include_notes], |row| {
         let raw_snip: String = row.get(4)?;
         let trimmed = if raw_snip.chars().count() > 80 {
             let cutoff = raw_snip
@@ -535,9 +613,11 @@ fn snippet_around(content: &str, needle: &str, window: usize) -> String {
     out
 }
 
-/// Message-level search with combinable filters. The SQL is bounded (LIMIT +
-/// OFFSET, newest first) so a large history can't turn one keystroke into a full
-/// table scan streamed to the client.
+/// Global discussion search with combinable filters. Message-content matches
+/// return the exact message. A title/id match returns only the discussion's
+/// latest message, which gives the UI a stable jump target without duplicating
+/// every message in that room. The SQL remains bounded (LIMIT + OFFSET, newest
+/// first) so a large history can't stream the whole database to the client.
 pub fn search_messages(
     conn: &Connection,
     q: &str,
@@ -545,7 +625,17 @@ pub fn search_messages(
     limit: u32,
     offset: u32,
 ) -> Result<Vec<MessageSearchHit>> {
-    let pattern = format!("%{}%", q.replace('%', "\\%").replace('_', "\\_"));
+    let trimmed = q.trim();
+    let escaped = trimmed.replace('%', "\\%").replace('_', "\\_");
+    let pattern = format!("%{escaped}%");
+    // UUIDs and legacy copyable ids are prefix-oriented. Requiring a useful
+    // length + id-safe charset prevents ordinary short words ("de", "ab")
+    // from accidentally matching dozens of UUID substrings.
+    let id_prefix_pattern = (trimmed.chars().count() >= 6
+        && trimmed
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '-'))
+    .then(|| format!("{escaped}%"));
     let lim = limit.clamp(1, 50) as i64;
     let off = offset.min(10_000) as i64;
 
@@ -554,9 +644,30 @@ pub fn search_messages(
                 m.content, m.agent_type, m.author_pseudo, d.project_id
            FROM messages m
            JOIN discussions d ON d.id = m.discussion_id
-          WHERE m.content LIKE ?1 ESCAPE '\\'",
+          WHERE (
+                m.content LIKE ?1 ESCAPE '\\'
+                OR (
+                    (d.title LIKE ?1 ESCAPE '\\'",
     );
     let mut binds: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(pattern.clone())];
+    if let Some(id_pattern) = id_prefix_pattern {
+        sql.push_str(" OR d.id LIKE ?");
+        sql.push_str(&(binds.len() + 1).to_string());
+        sql.push_str(" ESCAPE '\\'");
+        binds.push(Box::new(id_pattern));
+    }
+    sql.push_str(
+        ")
+                    AND m.id = (
+                        SELECT latest.id
+                          FROM messages latest
+                         WHERE latest.discussion_id = d.id
+                         ORDER BY latest.sort_order DESC
+                         LIMIT 1
+                    )
+                )
+          )",
+    );
 
     if let Some(disc) = filters.discussion_id {
         sql.push_str(" AND m.discussion_id = ?");
@@ -647,6 +758,7 @@ mod tests {
                 source_msg_id TEXT,
                 agent_type TEXT,
                 author_pseudo TEXT,
+                channel TEXT NOT NULL DEFAULT 'main',
                 timestamp TEXT NOT NULL DEFAULT '2026-05-15T10:00:00Z'
             );
             CREATE INDEX idx_msg_source_dedup ON messages(discussion_id, source_msg_id);
@@ -979,13 +1091,35 @@ mod tests {
     #[test]
     fn search_discussions_matches_title_and_content() {
         let conn = fresh_conn();
-        let hits = search_discussions(&conn, "ClaudeCode", 10).unwrap();
+        let hits = search_discussions(&conn, "ClaudeCode", 10, false).unwrap();
         assert_eq!(hits.len(), 1, "matches the m1 content body");
         assert_eq!(hits[0].disc_id, "d-alpha");
 
-        let hits2 = search_discussions(&conn, "Second", 10).unwrap();
+        let hits2 = search_discussions(&conn, "Second", 10, false).unwrap();
         assert_eq!(hits2.len(), 1, "matches the d-beta title");
         assert_eq!(hits2[0].disc_id, "d-beta");
+
+        conn.execute(
+            "INSERT INTO messages
+                 (id, discussion_id, role, channel, content, sort_order, timestamp)
+             VALUES ('note-only', 'd-alpha', 'User', 'note',
+                     'private-note-keyword', 20, '2026-05-15T12:00:00Z')",
+            [],
+        )
+        .unwrap();
+        assert!(
+            search_discussions(&conn, "private-note-keyword", 10, false)
+                .unwrap()
+                .is_empty(),
+            "notes stay out of default agent search"
+        );
+        assert_eq!(
+            search_discussions(&conn, "private-note-keyword", 10, true)
+                .unwrap()
+                .len(),
+            1,
+            "explicit include_notes reveals note content"
+        );
     }
 
     // ─── KT-65 — message-level search ───────────────────────────────────────
@@ -1022,6 +1156,31 @@ mod tests {
         assert_eq!(hits[0].author_pseudo.as_deref(), Some("Romu - mac"));
         assert_eq!(hits[1].message_id, "s1");
         assert_eq!(hits[1].agent_type.as_deref(), Some("Codex"));
+    }
+
+    #[test]
+    fn message_search_also_finds_a_discussion_by_title_or_id_once() {
+        let conn = search_conn();
+
+        let by_title = search_messages(&conn, "First disc", &Default::default(), 10, 0).unwrap();
+        assert_eq!(
+            by_title.len(),
+            1,
+            "a title match must not duplicate every message"
+        );
+        assert_eq!(by_title[0].disc_id, "d-alpha");
+        assert_eq!(by_title[0].message_id, "s2", "jump to the latest message");
+
+        let by_id = search_messages(&conn, "d-alph", &Default::default(), 10, 0).unwrap();
+        assert_eq!(by_id.len(), 1, "an id prefix resolves one discussion hit");
+        assert_eq!(by_id[0].disc_id, "d-alpha");
+        assert_eq!(by_id[0].message_id, "s2");
+
+        let short_word = search_messages(&conn, "ph", &Default::default(), 10, 0).unwrap();
+        assert!(
+            short_word.is_empty(),
+            "short ordinary words must not match arbitrary id substrings"
+        );
     }
 
     #[test]
@@ -1143,7 +1302,7 @@ mod tests {
             "INSERT INTO discussions (id, title, updated_at) VALUES ('d-pct', '100% coverage report', '2026-05-15T12:00:00Z')",
             [],
         ).unwrap();
-        let hits = search_discussions(&conn, "100%", 10).unwrap();
+        let hits = search_discussions(&conn, "100%", 10, false).unwrap();
         assert!(
             hits.iter().any(|h| h.disc_id == "d-pct"),
             "must still find the literal-% disc"

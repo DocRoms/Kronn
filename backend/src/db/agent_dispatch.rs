@@ -206,7 +206,7 @@ pub fn enqueue_for_latest_user(
     let trigger = conn
         .query_row(
             "SELECT id, sort_order FROM messages
-             WHERE discussion_id = ?1 AND role = 'User'
+             WHERE discussion_id = ?1 AND role = 'User' AND channel = 'main'
              ORDER BY sort_order DESC LIMIT 1",
             [new.discussion_id],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),

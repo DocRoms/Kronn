@@ -15,7 +15,8 @@ import { filterRuns, groupRunsByParent, RUN_PAGE_SIZE, type RunStatusFilter } fr
 import { formatDurationCompact } from '../../lib/kronnToolParser';
 import { computeGotoEdges } from '../../lib/stepGraph';
 import { StepBranchMap } from './StepBranchMap';
-import { RunDetail, RunStatusTrail, runStatusTimeline } from './RunDetail';
+import { RunDetail, RunStatusTrail } from './RunDetail';
+import { liveStepWaitingKey, runStatusTimeline } from '../../lib/workflowUiUtils';
 import { AgentSwitchPicker } from '../AgentSwitchPicker';
 import '../../pages/WorkflowsPage.css';
 
@@ -26,11 +27,6 @@ const checkAgentRestricted = isAgentRestricted;
  *  (ApiCall, Exec, Gate, Notify, JsonData, Batch*, SubWorkflow) produces its
  *  output at the END of the step, so the "L'agent démarre…" copy was wrong
  *  there — a user with a `fetch` ApiCall step (no agent at all) saw it. */
-export function liveStepWaitingKey(step: Pick<WorkflowStep, 'step_type'>): string {
-  const isAgentLike = !step.step_type || step.step_type.type === 'Agent';
-  return isAgentLike ? 'wf.live.stepStreamingWaiting' : 'wf.live.stepRunningNoStream';
-}
-
 /** Module-level tracker for in-flight and completed step tests.
  *
  *  A StepCard that starts a test doesn't own the SSE stream — it delegates
@@ -2225,10 +2221,12 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, onChangeSt
                   // so we just swallow silently.
                 }
               }}
-              onResume={async () => {
+              onResume={async (retryUncertainEffect = false) => {
                 try {
                   const resumeRunId = run.parent_run_id ?? run.id;
-                  await workflowsApi.resumeRun(resumeRunId);
+                  await workflowsApi.resumeRun(resumeRunId, {
+                    retry_uncertain_effect: retryUncertainEffect,
+                  });
                   onRefresh();
                   if (run.parent_run_id && run.parent_workflow_id) {
                     onNavigateToRun?.(run.parent_workflow_id, resumeRunId);

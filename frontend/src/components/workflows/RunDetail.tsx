@@ -5,6 +5,11 @@ import type { WorkflowRun, WorkflowStep, DecideRunRequest, ProducedBranch } from
 import { Trash2, ChevronRight, Square, Loader2, Plug, Send, Layers, Shield, Hand, Check, X, RotateCcw, Terminal, GitBranch, Copy, FlaskConical, AlertTriangle, CornerDownRight } from 'lucide-react';
 import { AGENT_LABELS, AGENT_COLORS } from '../../lib/constants';
 import { parseForeachEnvelope, isZeroTokenItem } from '../../lib/foreach-envelope';
+import {
+  runStatusTimeline,
+  tryParseTriageManifest,
+  type TriageManifest,
+} from '../../lib/workflowUiUtils';
 import '../../pages/WorkflowsPage.css';
 
 export type GateDecisionKind = 'approve' | 'request_changes' | 'reject';
@@ -23,22 +28,25 @@ const STATUS_COLORS: Record<string, string> = {
   Interrupted: 'var(--kr-text-ghost)',
 };
 
-const RUN_RESUME_HISTORY_KEY = '__kronn.resume_history';
+const UNCERTAIN_SIDE_EFFECT_STATE_KEY = '__kronn.uncertain_side_effect';
 
-export function runStatusTimeline(run: WorkflowRun): string[] {
-  const raw = run.state?.[RUN_RESUME_HISTORY_KEY];
-  if (!raw) return [run.status];
+type UncertainSideEffectIntent = {
+  step_name: string;
+  step_type: string;
+};
+
+function uncertainSideEffectIntent(run: WorkflowRun): UncertainSideEffectIntent | null {
+  const raw = run.state?.[UNCERTAIN_SIDE_EFFECT_STATE_KEY];
+  if (!raw) return null;
   try {
-    const parsed = JSON.parse(raw) as {
-      events?: Array<{ status?: unknown }>;
-    };
-    const timeline = (parsed.events ?? [])
-      .map(event => event.status)
-      .filter((status): status is string => typeof status === 'string' && status.length > 0);
-    if (timeline[timeline.length - 1] !== run.status) timeline.push(run.status);
-    return timeline.length > 0 ? timeline : [run.status];
+    const parsed = JSON.parse(raw) as Partial<UncertainSideEffectIntent>;
+    return typeof parsed.step_name === 'string' && typeof parsed.step_type === 'string'
+      ? { step_name: parsed.step_name, step_type: parsed.step_type }
+      : null;
   } catch {
-    return [run.status];
+    // A malformed reserved marker is still uncertain. Do not silently render
+    // the ordinary resume path just because its diagnostic payload is damaged.
+    return { step_name: '?', step_type: '?' };
   }
 }
 
@@ -76,7 +84,7 @@ export interface RunDetailProps {
   onCancel?: () => void;
   /** A2 — resume an Interrupted run. Button is only rendered for Interrupted
    *  status; child callbacks delegate the resume to their parent run. */
-  onResume?: () => void;
+  onResume?: (retryUncertainEffect?: boolean) => void;
   /** 0.7.0 Phase 4 — submit a gate decision (approve / request_changes / reject). */
   onDecide?: (payload: DecideRunRequest) => Promise<void> | void;
   /** 2026-06-13 — jump to a (sub-)workflow's run list, e.g. from a fan-out
@@ -236,98 +244,6 @@ function PausedSince({
  *  Fields beyond the four categories (e.g. `files_touched`) are tolerated
  *  but rendered in a collapsible summary so they don't dominate the panel.
  */
-type TriageClear = { id: string; what: string; where?: string };
-type TriageDecided = {
-  id: string;
-  what: string;
-  chosen: string;
-  why: string;
-  options_considered?: string[];
-};
-type TriageMocked = {
-  id: string;
-  what: string;
-  placeholder: string;
-  strategy?: string;
-  revisit_when?: string;
-};
-type TriageBlocked = {
-  id: string;
-  what: string;
-  why: string;
-  needed_from: string;
-  workaround?: string;
-};
-type TriageManifest = {
-  clear: TriageClear[];
-  decided: TriageDecided[];
-  mocked: TriageMocked[];
-  blocked: TriageBlocked[];
-  files_touched?: string[];
-};
-
-/** Try to extract a triage manifest from a Gate message. The runner
- *  substitutes `{{steps.triage.data}}` with the JSON value, so the
- *  message has prose + one embedded JSON object. We scan for the first
- *  `{`, brace-count to the matching `}`, and parse. Returns `null` if
- *  the JSON is missing, malformed, or doesn't match the manifest shape.
- *
- *  Defensive: any non-triage Gate (e.g. a plain "approve to deploy?"
- *  Gate) won't match the shape and we fall back to the raw message.
- *
- *  Exported for tests. The brace-counter has to handle `{` / `}` inside
- *  strings without mis-counting; the test suite exercises escaped quotes,
- *  nested objects, missing categories, and non-array category values. */
-export function tryParseTriageManifest(msg: string): TriageManifest | null {
-  if (!msg) return null;
-  const openIdx = msg.indexOf('{');
-  if (openIdx < 0) return null;
-  let depth = 0;
-  let endIdx = -1;
-  let inStr = false;
-  let esc = false;
-  for (let i = openIdx; i < msg.length; i++) {
-    const ch = msg[i];
-    if (inStr) {
-      if (esc) {
-        esc = false;
-      } else if (ch === '\\') {
-        esc = true;
-      } else if (ch === '"') {
-        inStr = false;
-      }
-      continue;
-    }
-    if (ch === '"') {
-      inStr = true;
-    } else if (ch === '{') {
-      depth++;
-    } else if (ch === '}') {
-      depth--;
-      if (depth === 0) {
-        endIdx = i + 1;
-        break;
-      }
-    }
-  }
-  if (endIdx < 0) return null;
-  try {
-    const obj = JSON.parse(msg.slice(openIdx, endIdx));
-    if (!obj || typeof obj !== 'object') return null;
-    if (
-      !Array.isArray(obj.clear) ||
-      !Array.isArray(obj.decided) ||
-      !Array.isArray(obj.mocked) ||
-      !Array.isArray(obj.blocked)
-    ) {
-      return null;
-    }
-    return obj as TriageManifest;
-  } catch {
-    return null;
-  }
-}
-
 /** 0.8.3 — structured rendering of a Feasibility-Gated triage manifest.
  *  Replaces the raw-JSON dump that the user used to see in the Gate
  *  panel. Each of the four categories is a collapsible section with
@@ -729,6 +645,7 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, on
   const { t } = useT();
   const [expandedStep, setExpandedStep] = useState<number | null>(null);
   const statusTimeline = runStatusTimeline(run);
+  const uncertainEffect = uncertainSideEffectIntent(run);
 
   const CONDITION_LABELS: Record<string, string> = {
     Stop: 'Stop',
@@ -828,11 +745,25 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, on
         {run.status === 'Interrupted' && run.run_type !== 'batch' && onResume && (
           <button
             className="wf-run-cancel-btn"
-            onClick={(e) => { e.stopPropagation(); onResume(); }}
-            title={t('wf.resumeRunHint')}
+            onClick={(e) => {
+              e.stopPropagation();
+              if (uncertainEffect) {
+                const confirmed = confirm(t(
+                  'wf.resumeUncertainConfirm',
+                  uncertainEffect.step_name,
+                  uncertainEffect.step_type,
+                ));
+                if (confirmed) onResume(true);
+              } else {
+                onResume(false);
+              }
+            }}
+            title={uncertainEffect
+              ? t('wf.resumeUncertainHint', uncertainEffect.step_name)
+              : t('wf.resumeRunHint')}
           >
-            <RotateCcw size={10} />
-            {t('wf.resumeRun')}
+            {uncertainEffect ? <AlertTriangle size={10} /> : <RotateCcw size={10} />}
+            {uncertainEffect ? t('wf.resumeUncertain') : t('wf.resumeRun')}
           </button>
         )}
         <button

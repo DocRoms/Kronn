@@ -81,6 +81,8 @@ pub enum WsMessage {
         #[serde(default)]
         role: crate::models::MessageRole,
         #[serde(default)]
+        channel: crate::models::MessageChannel,
+        #[serde(default)]
         agent_type: Option<crate::models::AgentType>,
         /// Every explicitly addressed agent, in author text order. Empty on
         /// older peers; receivers then fall back to the legacy single target.
@@ -325,6 +327,7 @@ mod tests {
             content: "hi".into(),
             timestamp: 0,
             role: crate::models::MessageRole::User,
+            channel: crate::models::MessageChannel::Main,
             agent_type: None,
             target_agents: vec![],
             targets: vec![],

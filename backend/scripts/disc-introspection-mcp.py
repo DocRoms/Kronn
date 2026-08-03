@@ -37,6 +37,7 @@ import re
 import secrets
 import subprocess
 import sys
+import queue
 import threading
 import time
 import urllib.error
@@ -161,6 +162,31 @@ TOOLS = [
         },
     },
     {
+        "name": "disc_note_list",
+        "description": (
+            "List out-of-context notes for the current discussion explicitly. "
+            "Notes are visible in the human timeline but excluded from ordinary "
+            "agent history, search, summaries and wait delivery. Bounded and "
+            "cursor-paginated; returns message-equivalent metadata."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "cursor": {
+                    "type": "integer",
+                    "description": "Last note sort_order already read. Omit for the first page.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100,
+                    "default": 50,
+                },
+            },
+            "required": [],
+        },
+    },
+    {
         "name": "disc_summarize",
         "description": (
             "Generate (or return cached) summary of a message range. "
@@ -183,6 +209,11 @@ TOOLS = [
                 "force_refresh": {
                     "type": "boolean",
                     "description": "Skip cache and regenerate. Default false.",
+                    "default": False,
+                },
+                "include_notes": {
+                    "type": "boolean",
+                    "description": "Explicit audit opt-in: include out-of-context notes. Default false.",
                     "default": False,
                 },
             },
@@ -306,12 +337,21 @@ TOOLS = [
             "Create one planning task. Keep quick creation compact: title is "
             "required; status defaults to idea and priority to normal. The "
             "bridge records this MCP client's agent identity in the event log. "
-            "Use direct writes only when the user's intent is unambiguous."
+            "Immediately before a direct create, call `plan_get` again so a "
+            "peer's recent write is visible. Use direct writes only when the "
+            "user's intent is unambiguous. Pass `idempotency_key` for a stable "
+            "retry identity; when it is omitted, `source_message_id` derives "
+            "one. Multiple tasks from one message need distinct explicit keys. "
+            "Titles are never identities."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "title": {"type": "string"},
+                "idempotency_key": {
+                    "type": "string",
+                    "description": "Stable caller key for this one logical create; scoped to the current discussion by the bridge.",
+                },
                 "description": {"type": "string"},
                 "status": {
                     "type": "string",
@@ -534,6 +574,7 @@ TOOLS = [
             "properties": {
                 "content": {"type": "string", "description": "Simple mode : the text to post. Bridge wraps it into a messages[]."},
                 "role": {"type": "string", "description": "Simple mode : role override (default Agent). Use User if you're echoing the user's words."},
+                "channel": {"type": "string", "enum": ["main", "note"], "description": "Simple mode: main (default) or note. A note never wakes an agent."},
                 "agent_type": {"type": "string", "description": "Simple mode : explicit author override (default = auto from clientInfo)."},
                 "target_agent": {"type": "string", "description": "Simple mode : explicit one-shot responder override. Normally inferred from one unambiguous structured @agent mention outside code. AgentType value such as ClaudeCode, Codex or Ollama."},
                 "targets": {
@@ -562,6 +603,7 @@ TOOLS = [
                         "properties": {
                             "source_msg_id": {"type": "string"},
                             "role": {"type": "string", "description": "User | Agent | System"},
+                            "channel": {"type": "string", "enum": ["main", "note"], "description": "Defaults to main."},
                             "content": {"type": "string"},
                             "agent_type": {"type": "string"},
                             "target_agent": {"type": "string", "description": "Optional explicit responder for this live message. Ignored as a dispatch signal by bulk historical imports."},
@@ -624,6 +666,39 @@ TOOLS = [
         },
     },
     {
+        "name": "disc_transfer_session",
+        "description": (
+            "Explicitly hand THIS durable CLI session from its previous room "
+            "to the room currently joined by this bridge. Use only after the "
+            "human clearly asks to change rooms. `from_disc_id` pins the room "
+            "the caller expects to release and `confirm_transfer=true` is "
+            "mandatory; ownership changes or missing confirmation fail closed. "
+            "The backend atomically closes the previous append-only binding "
+            "history row, opens the new one and returns `session_bound: true`. "
+            "Afterward, a bare `disc_find_by_session({})` resumes this new room "
+            "after an MCP reload. This transfers durable resume ownership only; "
+            "it does not impersonate `disc_leave` or alter unrelated peers."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "from_disc_id": {
+                    "type": "string",
+                    "description": "The exact room currently returned by disc_find_by_session({}).",
+                },
+                "to_disc_id": {
+                    "type": "string",
+                    "description": "Defaults to the room currently joined by this bridge.",
+                },
+                "confirm_transfer": {
+                    "type": "boolean",
+                    "description": "Must be true after an explicit human request to change rooms.",
+                },
+            },
+            "required": ["from_disc_id", "confirm_transfer"],
+        },
+    },
+    {
         "name": "disc_unlink",
         "description": (
             "Release YOUR OWN session binding on a disc. Every argument is "
@@ -638,6 +713,67 @@ TOOLS = [
             "properties": {
                 "disc_id": {"type": "string", "description": "Defaults to the bound disc."},
                 "source_agent": {"type": "string", "description": "Defaults to this client's agent type."},
+                "source_session_id": {
+                    "type": "string",
+                    "description": "Defaults to this bridge's durable CLI session id.",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "disc_workspace_get",
+        "description": (
+            "Return the compact worktree state for THIS joined CLI session and "
+            "the other worktrees declared in the current discussion. Called "
+            "bare, the bridge derives its durable agent/session identity. Use "
+            "this before editing when the room may contain several worktrees."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "source_agent": {
+                    "type": "string",
+                    "description": "Defaults to this client's agent type.",
+                },
+                "source_session_id": {
+                    "type": "string",
+                    "description": "Defaults to this bridge's durable CLI session id.",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "disc_workspace_set",
+        "description": (
+            "Declare or refresh THIS joined CLI session's Git worktree in the "
+            "current discussion. `workspace_path` defaults to the bridge's "
+            "current directory; Kronn canonicalizes it and reads the real "
+            "branch + HEAD from Git, so never guess or send those fields. "
+            "Optionally link the workspace to a planning task with `task_ref` "
+            "(for example `KT-140`). The path must be a registered worktree of "
+            "the discussion project's primary or linked repositories, and one "
+            "physical worktree cannot belong to two discussions. The result "
+            "always exposes a `blockers` array: dirty/branch-concurrency guards "
+            "on success, or a structured missing/repository/ownership blocker "
+            "when the declaration is refused."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "workspace_path": {
+                    "type": "string",
+                    "description": "Defaults to this bridge process's current directory.",
+                },
+                "task_ref": {
+                    "type": "string",
+                    "description": "Optional planning task reference or UUID.",
+                },
+                "source_agent": {
+                    "type": "string",
+                    "description": "Defaults to this client's agent type.",
+                },
                 "source_session_id": {
                     "type": "string",
                     "description": "Defaults to this bridge's durable CLI session id.",
@@ -686,6 +822,7 @@ TOOLS = [
             "properties": {
                 "q": {"type": "string", "description": "Search string. Wildcards: any char (LIKE-escaped)."},
                 "limit": {"type": "integer", "description": "Max hits (1-50, default 20)."},
+                "include_notes": {"type": "boolean", "description": "Explicit audit opt-in. Default false."},
             },
             "required": ["q"],
         },
@@ -838,14 +975,26 @@ TOOLS = [
     {
         "name": "disc_wait_for_peer",
         "description": (
-            "Long-poll the current Kronn discussion for new messages "
-            "from OTHER agents. Blocks server-side (up to 170 s) until "
-            "either a new message appears (newer than `since_sort_order`, "
-            "and not authored by this exact CLI session) or the "
-            "timeout fires. Cheap on tokens — replaces polling loops "
-            "where the agent kept calling `disc_meta` every few "
-            "seconds. Returns `{timed_out, messages, "
-            "latest_sort_order, withheld_by_routing}`. "
+            "Wait for new messages from OTHER agents in the current Kronn "
+            "discussion. The bridge holds the wait OUTSIDE the model loop: "
+            "it chains server long-polls itself and returns only when a "
+            "real message arrives (newer than `since_sort_order`, and not "
+            "authored by this exact CLI session), when the call is "
+            "interrupted, or when an OPT-IN budget elapses "
+            "(`max_total_secs`/`KRONN_WAIT_TOTAL_SECS`; unbounded by "
+            "default). The bridge does not return merely because an inner "
+            "server poll was quiet. HOST CAVEAT: a client may background a "
+            "long MCP call and emit a model-visible task notification (Claude "
+            "Code, for example, does this after about two minutes). If the "
+            "host says this wait was moved to the background, DO NOT start "
+            "another wait: the original call "
+            "is still active. Wait for its terminal notification, then re-arm "
+            "only if that completed result is quiet. "
+            "Returns `{timed_out, messages, latest_sort_order, "
+            "withheld_by_routing, bridge_polls}`. "
+            "A message flagged `awareness: true` is room context attached to "
+            "your wake: an untargeted turn or one owned by another responder "
+            "— read it, do not answer it. "
             "`withheld_by_routing` counts newer peer turns deliberately "
             "omitted because they target another identity, so a moving cursor "
             "cannot be mistaken for a lost message. Omit `since_sort_order` in normal use: the "
@@ -862,14 +1011,15 @@ TOOLS = [
             "message also carries `reply_target` when Kronn knows its exact "
             "author session, so a reply stays attached to that CLI even when "
             "several peers use the same provider. A joined CLI "
-            "receives User turns only when its own CLI identity is selected; "
-            "unrelated prompts are omitted to save tokens. Legacy "
+            "is WOKEN only by turns selecting its own CLI identity; other "
+            "room traffic arrives attached to its next wake as `awareness` "
+            "context, so nothing is lost and nothing wakes it needlessly. Legacy "
             "`target_agents` / `target_agent` remain compatibility projections. IMPORTANT: "
-            "`timed_out=true` "
-            "(no peer activity in the window) is NORMAL in an active "
-            "collaboration — call this tool AGAIN to keep waiting. A timeout "
-            "is NOT end-of-conversation; only stop/`disc_leave()` when the "
-            "task is done or the user says stop."
+            "`timed_out=true` now only happens at the safety cap or on an "
+            "interruption and is NORMAL in an active collaboration — re-arm "
+            "the wait when ready. A quiet return is NOT end-of-conversation; "
+            "only stop/`disc_leave()` when the task is done or the user says "
+            "stop."
         ),
         "inputSchema": {
             "type": "object",
@@ -880,7 +1030,11 @@ TOOLS = [
                 },
                 "timeout_secs": {
                     "type": "integer",
-                    "description": "Max blocking seconds (default 60, clamped server-side to [1, 170]). Prefer a LONG wait: every return is a window where nobody is listening.",
+                    "description": "Inner poll window in seconds (default 60, capped at 60 so interruptions stay responsive). The OVERALL wait is governed by max_total_secs, not this.",
+                },
+                "max_total_secs": {
+                    "type": "integer",
+                    "description": "OPT-IN overall wait budget in seconds before a quiet return (env KRONN_WAIT_TOTAL_SECS). Omit it in normal use: the bridge default is unbounded. A host may still background the tool call; never stack another wait while the original background task is active.",
                 },
             },
             "required": [],
@@ -904,6 +1058,7 @@ TOOLS = [
                 )},
                 "from": {"type": "integer", "description": "Inclusive start (0-based). Default 0."},
                 "to": {"type": "integer", "description": "Exclusive end. Default total length."},
+                "include_notes": {"type": "boolean", "description": "Explicit audit opt-in. Default false."},
             },
             "required": ["disc_id"],
         },
@@ -1048,7 +1203,9 @@ TOOLS = [
         "name": "mcp_list",
         "description": (
             "List every MCP / API plugin wired in the user's Kronn "
-            "instance. Returns `{configs, servers_with_api}` where "
+            "instance. Returns `{captured_at, configs, servers_with_api, "
+            "api_call_contract}` where `captured_at` timestamps this exact "
+            "snapshot, "
             "`configs` lists the user's instances (id + server_id + "
             "project scoping) and `servers_with_api` lists every "
             "plugin that exposes a REST API spec, with: `description`, "
@@ -1989,8 +2146,10 @@ TOOLS = [
             "`{run_id, workflow_id, status, started_at, finished_at?, "
             "elapsed_ms, current_step?, step_count, tokens_used, "
             "steps[], expected_duration_ms?, samples, next_check?}`. "
-            "`steps[]` has each step's name + status + duration_ms + "
-            "tokens_used + 200-char output excerpt + step_type.\n\n"
+            "`steps[]` has each step's name + status + started_at + duration_ms + "
+            "tokens_used (number or null) + tokens_status when measurement is "
+            "in progress/partial/unavailable + 200-char output excerpt + step_type. "
+            "Never interpret a null token count as zero.\n\n"
             "**Terminal vs in-flight** : when `status` is one of "
             "`Success`, `Failed`, `Cancelled`, `StoppedByGuard`, "
             "`next_check` is `null` — no further polling needed. "
@@ -2976,6 +3135,14 @@ def _agent_type_for_session():
 _CURRENT_DISC_ID = os.environ.get("KRONN_DISCUSSION_ID") or None
 _LAST_READ_SORT_ORDER_BY_DISC = {}
 _PENDING_READ_SORT_ORDER_BY_DISC = {}
+# KT-189 — two-phase awareness acknowledgement, mirroring the read cursor:
+# an awareness batch is STAGED when its response is emitted and COMMITTED by
+# the model's next tool call; only committed values are echoed to the server
+# as `ack_awareness_upto`, which is the sole thing that advances the durable
+# per-session awareness cursor. A cancelled call purges its stage, so a
+# delivery the model never saw is replayed instead of skipped.
+_PENDING_AWARENESS_ACK_BY_DISC = {}
+_ACKED_AWARENESS_UPTO_BY_DISC = {}
 _RPC_SEQUENCE = 0
 _CURRENT_RPC_SEQUENCE = None
 
@@ -3381,6 +3548,49 @@ def _ack_pending_read_cursors(next_rpc_sequence):
         _commit_read_cursor(disc_id, pending.get("sort_order"))
         if _read_cursor(disc_id) >= pending.get("sort_order"):
             _PENDING_READ_SORT_ORDER_BY_DISC.pop(disc_id, None)
+    for disc_id, pending in list(_PENDING_AWARENESS_ACK_BY_DISC.items()):
+        if pending.get("rpc_sequence") == next_rpc_sequence:
+            continue
+        committed = _ACKED_AWARENESS_UPTO_BY_DISC.get(disc_id)
+        if committed is None or pending["upto"] > committed:
+            _ACKED_AWARENESS_UPTO_BY_DISC[disc_id] = pending["upto"]
+        _PENDING_AWARENESS_ACK_BY_DISC.pop(disc_id, None)
+
+
+def _discard_pending_read_cursors(rpc_sequence):
+    """Un-stage a cancelled call's deliveries (KT-189 review P0).
+
+    A batch staged during a cancelled call never reached the model — the
+    response is discarded — so letting the NEXT call acknowledge it would
+    silently mark unseen messages as read. Dropping the stage means they
+    are re-delivered on the next wait; a duplicate in context is cheap,
+    a lost message is not. Awareness stages follow the same rule.
+    """
+    if rpc_sequence is None:
+        return
+    for disc_id, pending in list(_PENDING_READ_SORT_ORDER_BY_DISC.items()):
+        if pending.get("rpc_sequence") == rpc_sequence:
+            _PENDING_READ_SORT_ORDER_BY_DISC.pop(disc_id, None)
+    for disc_id, pending in list(_PENDING_AWARENESS_ACK_BY_DISC.items()):
+        if pending.get("rpc_sequence") == rpc_sequence:
+            _PENDING_AWARENESS_ACK_BY_DISC.pop(disc_id, None)
+
+
+def _stage_awareness_ack(disc_id, upto):
+    """Stage the highest awareness sort_order emitted in this call."""
+    if not isinstance(disc_id, str) or not disc_id:
+        return
+    if not isinstance(upto, int) or isinstance(upto, bool):
+        return
+    committed = _ACKED_AWARENESS_UPTO_BY_DISC.get(disc_id)
+    if committed is not None and upto <= committed:
+        return
+    pending = _PENDING_AWARENESS_ACK_BY_DISC.get(disc_id)
+    if pending is None or upto > pending["upto"]:
+        _PENDING_AWARENESS_ACK_BY_DISC[disc_id] = {
+            "upto": upto,
+            "rpc_sequence": _CURRENT_RPC_SEQUENCE,
+        }
 
 
 def _clear_promoted_legacy_codex_binding(disc_id, resume_token):
@@ -3572,7 +3782,7 @@ def _current_project_id():
     return meta.get("project_id") if meta else None
 
 
-def _http(method, path, body=None):
+def _http(method, path, body=None, timeout=180):
     url = f"{_backend_url()}{path}"
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(url, method=method, data=data)
@@ -3581,14 +3791,16 @@ def _http(method, path, body=None):
     if token:
         req.add_header("Authorization", f"Bearer {token}")
     try:
-        with urllib.request.urlopen(req, timeout=180) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.load(resp)
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", errors="replace")
         raise RuntimeError(f"HTTP {e.code}: {body[:500]}")
 
 
-def _http_transport_retry(method, path, attempts=6, delays=(2, 4, 8, 12, 16)):
+def _http_transport_retry(
+    method, path, attempts=6, delays=(2, 4, 8, 12, 16), timeout=180, deadline=None
+):
     """`_http` with a BOUNDED retry on TRANSPORT failures only (connection
     refused/reset, remote disconnect, socket timeout) — the signature of a
     backend restart, e.g. the dev watcher rebuilding for 30-60s. HTTP errors
@@ -3597,14 +3809,27 @@ def _http_transport_retry(method, path, attempts=6, delays=(2, 4, 8, 12, 16)):
     Total worst-case wait ≈ sum(delays) ≈ 42s + in-flight time."""
     last_err = None
     for i in range(attempts):
+        attempt_timeout = timeout
+        if deadline is not None:
+            # The budget bounds the IN-FLIGHT attempt too, not only the
+            # backoff between attempts (KT-189 review residual 1).
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                if last_err is None:
+                    last_err = TimeoutError("wait budget exhausted before attempt")
+                break
+            attempt_timeout = max(2, min(timeout, int(remaining) + 1))
         try:
-            return _http(method, path)
+            return _http(method, path, timeout=attempt_timeout)
         except RuntimeError:
             raise  # HTTPError path from _http — application error, no retry
         except (urllib.error.URLError, ConnectionError, TimeoutError, OSError) as e:
             last_err = e
             if i + 1 < attempts:
-                time.sleep(delays[min(i, len(delays) - 1)])
+                delay = delays[min(i, len(delays) - 1)]
+                if deadline is not None and time.monotonic() + delay >= deadline:
+                    break  # the caller's budget outranks the retry ladder
+                time.sleep(delay)
     raise RuntimeError(
         f"backend unreachable after {attempts} attempts (~{sum(delays)}s — rebuild in "
         f"progress?): {last_err}. Nothing is lost: messages persist in the DB — call "
@@ -3671,12 +3896,23 @@ def call_disc_get_message(args):
         f"/api/discussions/{_disc_id()}/message/{encoded_selector}?{query}",
     ))
 
+def call_disc_note_list(args):
+    params = {}
+    if args.get("cursor") is not None:
+        params["cursor"] = args["cursor"]
+    if args.get("limit") is not None:
+        params["limit"] = args["limit"]
+    query = urllib.parse.urlencode(params)
+    suffix = f"?{query}" if query else ""
+    return _unwrap(_http("GET", f"/api/discussions/{_disc_id()}/notes{suffix}"))
+
 
 def call_disc_summarize(args):
     body = {
         "from": args.get("from"),
         "to": args.get("to"),
         "force_refresh": bool(args.get("force_refresh", False)),
+        "include_notes": bool(args.get("include_notes", False)),
     }
     return _unwrap(_http("POST", f"/api/discussions/{_disc_id()}/summarize", body))
 
@@ -3762,6 +3998,22 @@ def call_task_create(args):
     ):
         if key in args and args[key] is not None:
             body[key] = args[key]
+    explicit_key = args.get("idempotency_key")
+    source_message_id = args.get("source_message_id")
+    if explicit_key is not None:
+        explicit_key = str(explicit_key).strip()
+        if not explicit_key:
+            raise RuntimeError("task_create: idempotency_key cannot be empty")
+        stable_provenance = f"explicit\0{explicit_key}"
+    elif source_message_id:
+        stable_provenance = f"message\0{source_message_id}"
+    else:
+        stable_provenance = None
+    if stable_provenance is not None:
+        scoped = f"{_disc_id()}\0{stable_provenance}".encode("utf-8")
+        body["idempotency_key"] = (
+            "mcp-task-create:" + hashlib.sha256(scoped).hexdigest()
+        )
     return _unwrap(_http("POST", "/api/planning/tasks", body))
 
 
@@ -3982,6 +4234,91 @@ def _structured_message_targets(content, disc_id):
     return targets
 
 
+_ALIAS_BY_AGENT_TYPE = {value: key for key, value in _MENTION_TARGETS.items()}
+
+
+def _reject_short_alias_reply_to_cli_author(disc_id, reply_to_message_id, targets):
+    """KT-211 reply-coherence guard — fail closed on the ONE unambiguous case.
+
+    Observed live: CLI A answers CLI B but types `@b` (short alias); the
+    reply then spawns/wakes a native agent while B never wakes. Identities
+    are never silently substituted (sealed 2026-08-02), but a reply context
+    makes the intent explicit, so the mismatch is refused with the
+    corrective alias instead of being delivered wrong.
+
+    Refusal requires ALL of: a reply to a CLI-authored message, a native
+    mention (punctual OR discussion agent — the provider may be the room's
+    principal) of that same provider, and the replied author's exact CLI
+    absent from the targets. A deliberate fan-out that lists the exact CLI
+    alongside its native identity passes untouched. When the replied
+    author or the corrective alias cannot be resolved, the append is
+    refused rather than delivered unverified — fail closed, and never
+    with a fabricated ordinal.
+    """
+    if not reply_to_message_id or not targets:
+        return
+    native = [
+        t for t in targets
+        if isinstance(t, dict) and t.get("kind") in ("agent", "discussion_agent")
+    ]
+    if not native:
+        return
+    encoded = urllib.parse.quote(str(reply_to_message_id), safe="")
+    try:
+        replied = _unwrap(_http(
+            "GET", f"/api/discussions/{disc_id}/message/{encoded}?before=0&after=0"
+        ))
+    except Exception as exc:  # noqa: BLE001 — suspicious shape stays fail-closed
+        raise RuntimeError(
+            "disc_append: cannot verify the replied message's author while a "
+            "native @mention is present in a reply; retry, or address the "
+            "joined CLI with its exact -cli alias"
+        ) from exc
+    reply_target = replied.get("reply_target") if isinstance(replied, dict) else None
+    if not isinstance(reply_target, dict) or reply_target.get("kind") != "cli":
+        return
+    author_type = reply_target.get("agent_type")
+    mismatch = next((t for t in native if t.get("agent_type") == author_type), None)
+    if mismatch is None:
+        return
+    # Deliberate fan-out: the exact replied author IS listed too — the
+    # native mention is then an intentional second responder, not a typo.
+    author_listed = any(
+        isinstance(t, dict)
+        and t.get("kind") == "cli"
+        and t.get("agent_type") == author_type
+        and t.get("cli_session_id") == reply_target.get("cli_session_id")
+        for t in targets
+    )
+    if author_listed:
+        return
+    alias = _ALIAS_BY_AGENT_TYPE.get(author_type, str(author_type).lower())
+    suggestion = None
+    try:
+        participants = _unwrap(_http("GET", f"/api/discussions/{disc_id}/participants"))
+        if isinstance(participants, list):
+            same = [p for p in participants if p.get("agent_type") == author_type]
+            for position, participant in enumerate(same, start=1):
+                if participant.get("id") == reply_target.get("cli_session_id"):
+                    suggestion = f"@{alias}-cli" + (f"-{position}" if position > 1 else "")
+                    break
+    except Exception:  # noqa: BLE001 — no fabricated ordinal below
+        pass
+    if suggestion is None:
+        raise RuntimeError(
+            f"disc_append: this reply answers a message authored by the joined "
+            f"{author_type} CLI, but the mention names its native agent — use "
+            f"that CLI's exact room alias (@{alias}-cli[-N], as shown in the "
+            "room) so the reply wakes the right identity"
+        )
+    raise RuntimeError(
+        f"disc_append: this reply answers a message authored by the joined "
+        f"{author_type} CLI, but the mention names its native agent — use "
+        f"'{suggestion}' (the replied author) so the reply wakes the right "
+        "identity"
+    )
+
+
 def _legacy_agent_target(agent_type):
     """Project the old one-provider override onto a typed native identity."""
     meta = _current_disc_meta() or {}
@@ -4014,6 +4351,7 @@ def _live_message_id(disc_id, args):
         {
             "disc": disc_id,
             "role": args.get("role") or "Agent",
+            "channel": args.get("channel") or "main",
             "agent": args.get("agent_type") or _agent_type_for_session(),
             "content": args.get("content"),
             "target": args.get("target_agent"),
@@ -4052,6 +4390,7 @@ def call_disc_append(args):
         message = {
             "source_msg_id": args.get("source_msg_id") or _live_message_id(disc_id, args),
             "role": args.get("role") or "Agent",
+            "channel": args.get("channel") or "main",
             "content": args["content"],
             "agent_type": (
                 args.get("agent_type")
@@ -4059,9 +4398,14 @@ def call_disc_append(args):
                 or None
             ),
         }
+        if message["channel"] not in ("main", "note"):
+            raise RuntimeError("disc_append: channel must be 'main' or 'note'")
         target_agent = args.get("target_agent")
         targets = args.get("targets")
-        if targets is None and message["role"] == "Agent":
+        if message["channel"] == "note":
+            target_agent = None
+            targets = []
+        elif targets is None and message["role"] == "Agent":
             if target_agent:
                 targets = [_legacy_agent_target(target_agent)]
             else:
@@ -4074,6 +4418,9 @@ def call_disc_append(args):
             message["target_agent"] = target_agent
         if args.get("reply_to_message_id"):
             message["reply_to_message_id"] = args["reply_to_message_id"]
+            _reject_short_alias_reply_to_cli_author(
+                disc_id, message["reply_to_message_id"], message.get("targets")
+            )
         messages = [message]
 
     if not isinstance(messages, list) or not messages:
@@ -4119,7 +4466,10 @@ def call_disc_append(args):
         }
         if cursor is not None:
             wait_args["since_sort_order"] = cursor
-        waited = call_disc_wait_for_peer(wait_args)
+        # Single poll only: an append should come back quickly to let the
+        # agent keep working. The bridge-side long wait (KT-189) belongs to
+        # an explicit disc_wait_for_peer call.
+        waited = _wait_once(wait_args)
     except Exception as exc:  # noqa: BLE001 — the append already succeeded
         # The message IS posted; a failed wait must not read as a failed post.
         appended["wait_error"] = f"{type(exc).__name__}: {exc}"
@@ -4158,6 +4508,53 @@ def call_disc_link(args):
         "source_session_id": source_session_id,
         "force_reassign": bool(args.get("force_reassign", False)),
     }))
+
+
+def call_disc_transfer_session(args):
+    if args.get("confirm_transfer") is not True:
+        raise RuntimeError(
+            "disc_transfer_session: confirm_transfer=true is required after an "
+            "explicit human request to change rooms"
+        )
+    from_disc_id = (args.get("from_disc_id") or "").strip()
+    if not from_disc_id:
+        raise RuntimeError(
+            "disc_transfer_session: from_disc_id is required; read the current "
+            "owner with disc_find_by_session({}) first"
+        )
+
+    current_disc_id = _disc_id()
+    to_disc_id = (args.get("to_disc_id") or current_disc_id).strip()
+    if to_disc_id != current_disc_id:
+        raise RuntimeError(
+            "disc_transfer_session: to_disc_id must be the room currently "
+            "joined by this bridge"
+        )
+    local_binding = _read_binding()
+    if not local_binding or local_binding.get("disc_id") != to_disc_id:
+        raise RuntimeError(
+            "disc_transfer_session: the joined target has no durable local "
+            "resume credential; join it with disc_join before transferring"
+        )
+    source_agent = _agent_type_for_session()
+    source_session_id = _durable_session_id()
+    if not source_agent or source_agent == "Unknown" or not source_session_id:
+        raise RuntimeError(
+            "disc_transfer_session: no durable identity is available for this bridge"
+        )
+
+    result = _unwrap(_http("POST", "/api/disc/transfer-session", {
+        "from_disc_id": from_disc_id,
+        "to_disc_id": to_disc_id,
+        "source_agent": source_agent,
+        "source_session_id": source_session_id,
+        "confirm_transfer": True,
+    }))
+    if not isinstance(result, dict) or result.get("session_bound") is not True:
+        raise RuntimeError(
+            "disc_transfer_session: backend did not confirm the new durable binding"
+        )
+    return result
 
 
 def call_disc_unlink(args):
@@ -4233,6 +4630,76 @@ def call_disc_find_by_session(args):
     return found
 
 
+def _workspace_identity(args, tool_name):
+    source_agent = args.get("source_agent") or _agent_type_for_session()
+    source_session_id = args.get("source_session_id") or _durable_session_id()
+    if not source_agent or source_agent == "Unknown" or not source_session_id:
+        raise RuntimeError(
+            f"{tool_name}: no durable identity for this bridge — pass "
+            "source_agent and source_session_id explicitly"
+        )
+    return source_agent, source_session_id
+
+
+def call_disc_workspace_get(args):
+    source_agent, source_session_id = _workspace_identity(
+        args, "disc_workspace_get"
+    )
+    query = urllib.parse.urlencode({
+        "source_agent": source_agent,
+        "source_session_id": source_session_id,
+    })
+    return _unwrap(_http("GET", f"/api/disc/workspace?{query}"))
+
+
+def _unwrap_disc_workspace_set(envelope):
+    if not isinstance(envelope, dict):
+        raise RuntimeError(f"unexpected response shape: {envelope!r}")
+    if envelope.get("success", False):
+        return envelope.get("data")
+
+    message = envelope.get("error") or "workspace declaration failed"
+    error_code = envelope.get("error_code") or "internal"
+    lowered = message.lower()
+    if error_code == "conflict":
+        kind = "ownership_ambiguous"
+    elif "does not exist" in lowered:
+        kind = "missing"
+    elif "detached head" in lowered:
+        kind = "detached_head"
+    elif "does not belong" in lowered or "registered git worktree" in lowered:
+        kind = "repository_scope"
+    else:
+        kind = error_code
+    return {
+        "workspace": None,
+        "blockers": [{"kind": kind, "message": message}],
+        "error_code": error_code,
+    }
+
+
+def call_disc_workspace_set(args):
+    source_agent, source_session_id = _workspace_identity(
+        args, "disc_workspace_set"
+    )
+    workspace_path = args.get("workspace_path")
+    if workspace_path is None:
+        workspace_path = os.getcwd()
+    if not isinstance(workspace_path, str) or not workspace_path.strip():
+        raise RuntimeError("disc_workspace_set: workspace_path must be a non-empty string")
+    body = {
+        "source_agent": source_agent,
+        "source_session_id": source_session_id,
+        "workspace_path": workspace_path,
+    }
+    task_ref = args.get("task_ref")
+    if task_ref is not None:
+        if not isinstance(task_ref, str) or not task_ref.strip():
+            raise RuntimeError("disc_workspace_set: task_ref must be a non-empty string")
+        body["task_ref"] = task_ref.strip()
+    return _unwrap_disc_workspace_set(_http("POST", "/api/disc/workspace", body))
+
+
 def call_disc_search(args):
     q = args.get("q")
     if not q:
@@ -4240,6 +4707,8 @@ def call_disc_search(args):
     params = {"q": q}
     if args.get("limit") is not None:
         params["limit"] = args["limit"]
+    if args.get("include_notes"):
+        params["include_notes"] = "true"
     qs = urllib.parse.urlencode(params)
     return _unwrap(_http("GET", f"/api/disc/search?{qs}"))
 
@@ -4508,12 +4977,16 @@ def call_disc_leave(_args):
     return result
 
 
-def call_disc_wait_for_peer(args):
-    """0.8.6 phase 3 — long-poll for new peer messages.
+def _wait_once(args):
+    """One server long-poll for new peer messages (≤170 s).
 
     Hits `GET /api/discussions/:id/wait` server-side. Excludes the
     caller's own `agent_type` (env-derived, same way as `disc_join`)
     so an agent doesn't wake itself on its own `disc_append`.
+    `call_disc_wait_for_peer` chains these polls bridge-side (KT-189)
+    so inner quiet polls do not return to the caller; chained append waits
+    still use a single poll. Host-imposed tool-call background notifications
+    remain outside this bridge's control.
     """
     disc_id = args.get("_disc_id") or _disc_id()
     since = args.get("since_sort_order")
@@ -4544,11 +5017,27 @@ def call_disc_wait_for_peer(args):
         late_conversation_id = _native_conversation_id(allow_probe=False)
         if late_conversation_id:
             params["conversation_id"] = late_conversation_id
+    # KT-189 — echo the COMMITTED awareness acknowledgement. The server only
+    # advances its durable per-session awareness cursor on this value.
+    acked_awareness = _ACKED_AWARENESS_UPTO_BY_DISC.get(disc_id)
+    if acked_awareness is not None:
+        params["ack_awareness_upto"] = acked_awareness
     qs = urllib.parse.urlencode(params)
     sep = "?" if qs else ""
     # Transport-level retry (bounded): a backend restart mid-poll must not
     # surface as a tool error — the wait is idempotent on since_sort_order.
-    result = _unwrap(_http_transport_retry("GET", f"/api/discussions/{disc_id}/wait{sep}{qs}"))
+    # Socket timeout tracks the requested window (+margin) instead of the
+    # generic 180 s, the caller's budget bounds every in-flight attempt and
+    # backoff, and the whole transport runs in a WORKER thread so the main
+    # thread keeps serving ping/cancel/progress even while the socket or a
+    # retry backoff blocks (KT-189 review residuals 1+2). An abandoned
+    # worker's late result is discarded here, BEFORE any read-cursor
+    # staging, so an interrupted delivery is replayed, never half-consumed.
+    socket_timeout = min(180, int(timeout_secs or 60) + 30)
+    result = _unwrap(_transport_in_worker(
+        "GET", f"/api/discussions/{disc_id}/wait{sep}{qs}", timeout=socket_timeout,
+        deadline=args.get("_retry_deadline"),
+    ))
     if isinstance(result, dict) and params.get("conversation_id"):
         _CONVERSATION_ID_DELIVERED[disc_id] = True
     if isinstance(result, dict):
@@ -4578,6 +5067,30 @@ def call_disc_wait_for_peer(args):
                 "because they target another identity. The read cursor moved "
                 "past them by design; do not claim to have read their content."
             )
+        # KT-189 — awareness turns are room CONTEXT attached to this wake:
+        # untargeted traffic or turns owned by another responder. The agent
+        # reads them silently and never answers them individually.
+        awareness_count = sum(
+            1
+            for message in result.get("messages", [])
+            if isinstance(message, dict) and message.get("awareness")
+        )
+        if awareness_count:
+            _stage_awareness_ack(disc_id, result.get("awareness_delivered_upto"))
+            omitted = result.get("awareness_omitted") or 0
+            hint = (
+                f"{awareness_count} message(s) flagged `awareness: true` are "
+                "room turns that did not target you (or targeted another "
+                "responder, who owns the reply). Read them as context — do "
+                "NOT answer them. If one still requires action from you "
+                "specifically, address it in a single consolidated reply."
+            )
+            if isinstance(omitted, int) and omitted > 0:
+                hint += (
+                    f" {omitted} older unseen turn(s) exceeded the attach cap; "
+                    "they will arrive with your next wake."
+                )
+            result["awareness_hint"] = hint
     # A timed-out wait (no peer activity in the window) is NORMAL in an ongoing
     # collaboration — but literal agents (notably Codex) otherwise read the empty
     # result as "conversation over" and STOP after ~60s. Surface an explicit
@@ -4634,24 +5147,233 @@ def call_disc_wait_for_peer(args):
             else:
                 result["routing_hint"] = awareness_hint
     if isinstance(result, dict) and result.get("timed_out"):
-        pacing = result.get("pacing") or {}
-        delay = pacing.get("next_delay_seconds")
-        regime = pacing.get("regime", "cold")
-        pace_line = (
-            f"PACING (server-computed, regime={regime}): wait ~{delay}s before "
-            "your next disc_wait_for_peer."
-            if delay is not None else
-            "PACING: apply the room's poll_policy (disc_join/disc_meta) — back "
-            "off 30s,30s,1m,1m,2m,2m,4m,4m cap 8m, reset on peer message."
-        )
         result["hint"] = (
             "No peer posted during this window. This is NORMAL — the other "
-            "agent may still be thinking. Call disc_wait_for_peer AGAIN to keep "
-            "waiting (pass latest_sort_order as since_sort_order). Do NOT stop "
-            "or disc_leave() just because the wait timed out — only leave when "
-            "the task is done or the user explicitly says stop. " + pace_line
+            "agent may still be thinking. Re-arm disc_wait_for_peer when you "
+            "are ready to listen: it now blocks bridge-side until a real "
+            "message arrives. If your host moved the prior call to a background "
+            "task, wait for that task to finish before re-arming. Do "
+            "NOT stop or disc_leave() just because a window was quiet — only "
+            "leave when the task is done or the user explicitly says stop."
         )
     return result
+
+
+# KT-189 — hold quiet waits bridge-side instead of returning each server
+# timeout to the model: every such return replays the CLI's full native
+# context (measured 2026-08: 1 341 disc_wait turns / 804.6M tokens in 30
+# days on this machine alone). The bridge wait is UNBOUNDED by default so it
+# does not create periodic model wakes itself, with an opt-in budget for callers
+# that want one. A client can still impose its own tool-call backgrounding and
+# model-visible notifications; that host limitation is documented above.
+# Short poll slices: the blocking urllib call is the only moment the bridge
+# cannot service control traffic (ping/cancel/progress), so each slice is
+# kept small and everything is serviced between slices.
+_WAIT_POLL_SECS = 15
+_WAIT_PROGRESS_SLICE_SECS = 10
+
+
+class _WaitAborted(RuntimeError):
+    """Raised when an in-flight wait transport is abandoned (cancellation,
+    queued tools/call, stdin EOF, or the opt-in budget). The poll's result,
+    if it ever lands, is discarded before any cursor staging."""
+
+    def __init__(self, reason):
+        super().__init__(f"wait transport abandoned: {reason}")
+        self.reason = reason
+
+
+def _transport_in_worker(method, path, timeout=180, deadline=None):
+    """Run a blocking transport call in a daemon worker while the main
+    thread keeps the control plane alive (ping/tools_list/notifications,
+    cancellation checks, progress heartbeats). Raises `_WaitAborted` when
+    the wait must hand back before the transport returns."""
+    box = {}
+
+    def run():
+        try:
+            box["result"] = _http_transport_retry(
+                method, path, timeout=timeout, deadline=deadline
+            )
+        except Exception as exc:  # noqa: BLE001 — re-raised on the main thread
+            box["error"] = exc
+
+    worker = threading.Thread(target=run, daemon=True, name="wait-transport")
+    worker.start()
+    next_progress = time.monotonic() + _WAIT_PROGRESS_SLICE_SECS
+    while True:
+        worker.join(0.5)
+        if not worker.is_alive():
+            break
+        reason = _wait_abort_reason()
+        if reason:
+            raise _WaitAborted(reason)
+        if deadline is not None and time.monotonic() >= deadline:
+            raise _WaitAborted("budget")
+        if time.monotonic() >= next_progress:
+            _emit_wait_progress(0, 0)
+            next_progress = time.monotonic() + _WAIT_PROGRESS_SLICE_SECS
+    if "error" in box:
+        raise box["error"]
+    return box.get("result")
+
+
+def _wait_total_budget(args):
+    """Opt-in overall wait budget in seconds; None = unbounded (default)."""
+    raw = args.get("max_total_secs")
+    if raw is None:
+        raw = os.environ.get("KRONN_WAIT_TOTAL_SECS")
+    if raw is None:
+        return None
+    try:
+        total = int(raw)
+    except (TypeError, ValueError):
+        return None
+    if total <= 0:
+        return None
+    return max(total, 1)
+
+
+def _emit_wait_progress(polls, waited_secs):
+    """Progress notification keeps the client's tool-call timeout alive."""
+    token = _CURRENT_PROGRESS_TOKEN.get("token")
+    if token is None:
+        return
+    _send({
+        "jsonrpc": "2.0",
+        "method": "notifications/progress",
+        "params": {
+            "progressToken": token,
+            "progress": polls,
+            "message": f"still listening (quiet for ~{waited_secs}s, no model turn spent)",
+        },
+    })
+
+
+def _wait_abort_reason():
+    """Why the bridge-side wait loop must hand control back NOW.
+
+    Control-plane traffic (ping, tools/list, notifications) is served
+    inline by `_service_control_traffic` and never aborts the wait; only
+    this call's own cancellation, a queued tools/call, or stdin EOF do.
+    """
+    rid = _CURRENT_PROGRESS_TOKEN.get("rid")
+    if rid is not None and _is_cancelled(rid):
+        return "cancelled"
+    return _service_control_traffic()
+
+
+def _wait_sleep(delay, polls, started):
+    """Sleep `delay` seconds in short slices; True if aborted mid-sleep.
+
+    Emits a progress heartbeat every ~10 s so a client never sees a
+    silent gap approaching its tool-call timeout during long pacing.
+    """
+    end = time.monotonic() + max(0, delay)
+    next_progress = time.monotonic() + _WAIT_PROGRESS_SLICE_SECS
+    while time.monotonic() < end:
+        if _wait_abort_reason():
+            return True
+        if time.monotonic() >= next_progress:
+            _emit_wait_progress(polls, int(time.monotonic() - started))
+            next_progress = time.monotonic() + _WAIT_PROGRESS_SLICE_SECS
+        time.sleep(min(1.0, max(0.0, end - time.monotonic())))
+    return _wait_abort_reason() is not None
+
+
+def call_disc_wait_for_peer(args):
+    """KT-189 — wait OUTSIDE the LLM loop.
+
+    Chains server long-polls bridge-side and returns to the model only on
+    a real message, a terminal error, an interruption (client cancelled
+    the call / a queued tools/call / stdin EOF) or the opt-in budget. A
+    quiet inner polls do not return to the model. A host may still background
+    the long-running tool call and surface its own notification.
+    """
+    budget = _wait_total_budget(args)
+    started = time.monotonic()
+    deadline = started + budget if budget is not None else None
+    poll_args = dict(args)
+    polls = 0
+    interrupted_hint = (
+        "Wait interrupted: another request reached the bridge. The room "
+        "stayed quiet; re-arm disc_wait_for_peer after handling the new "
+        "activity."
+    )
+    while True:
+        # Inner polls stay short so a cancellation is honored within
+        # ~_WAIT_POLL_SECS even though the overall wait can span hours —
+        # and never longer than the remaining opt-in budget.
+        requested = poll_args.get("timeout_secs")
+        poll_secs = min(int(requested or _WAIT_POLL_SECS), _WAIT_POLL_SECS)
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return {
+                    "timed_out": True,
+                    "messages": [],
+                    "bridge_polls": polls,
+                    "hint": _wait_budget_hint(started, polls),
+                }
+            poll_secs = max(1, min(poll_secs, int(remaining)))
+        _emit_wait_progress(polls, int(time.monotonic() - started))
+        poll_args["timeout_secs"] = poll_secs
+        poll_args["_retry_deadline"] = deadline
+        try:
+            result = _wait_once(poll_args)
+        except _WaitAborted as aborted:
+            quiet = {"timed_out": True, "messages": [], "bridge_polls": polls + 1}
+            if aborted.reason == "budget":
+                quiet["hint"] = _wait_budget_hint(started, polls + 1)
+            elif aborted.reason != "cancelled":
+                quiet["hint"] = interrupted_hint
+            return quiet
+        polls += 1
+        if not isinstance(result, dict):
+            return result
+        result["bridge_polls"] = polls
+        if result.get("messages") or not result.get("timed_out"):
+            return result
+        # Quiet poll — keep waiting bridge-side unless something changed.
+        reason = _wait_abort_reason()
+        if reason == "cancelled":
+            # The client abandoned this call; any response is discarded.
+            return result
+        if reason is not None:
+            result["hint"] = interrupted_hint
+            return result
+        if deadline is not None and time.monotonic() >= deadline:
+            result["hint"] = _wait_budget_hint(started, polls)
+            return result
+        # Follow the server's pacing between polls; presence eligibility is
+        # derived from next_poll_at + grace, so honoring it keeps the
+        # session an eligible responder while it sleeps.
+        pacing = result.get("pacing") or {}
+        delay = pacing.get("next_delay_seconds")
+        try:
+            delay = min(max(int(delay), 0), 480) if delay is not None else 0
+        except (TypeError, ValueError):
+            delay = 0
+        if deadline is not None:
+            delay = min(delay, max(0, int(deadline - time.monotonic())))
+        if delay and _wait_sleep(delay, polls, started):
+            if _wait_abort_reason() != "cancelled":
+                result["hint"] = interrupted_hint
+            return result
+        # Resume from what this poll actually observed so replays stay exact.
+        latest = result.get("latest_sort_order")
+        if isinstance(latest, int):
+            poll_args["since_sort_order"] = latest
+
+
+def _wait_budget_hint(started, polls):
+    return (
+        f"Quiet for the whole opt-in wait budget "
+        f"({int(time.monotonic() - started)}s, {polls} bridge polls). "
+        "This is NORMAL — re-arm disc_wait_for_peer to keep "
+        "listening, or take the next actionable task from the plan. Do NOT "
+        "stop or disc_leave() just because the room is quiet."
+    )
 
 
 def call_disc_load_other(args):
@@ -4663,6 +5385,8 @@ def call_disc_load_other(args):
         params["from"] = args["from"]
     if args.get("to") is not None:
         params["to"] = args["to"]
+    if args.get("include_notes"):
+        params["include_notes"] = "true"
     qs = urllib.parse.urlencode(params)
     return _unwrap(_http("GET", f"/api/disc/load_other?{qs}"))
 
@@ -4777,6 +5501,7 @@ def call_mcp_list(_args):
     # scan diagnostics; keeps only what the agent needs to compose an
     # ApiCall step (slug + config_id + project scoping).
     data = _unwrap(_http("GET", "/api/mcps")) or {}
+    captured_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     out_configs = []
     for c in data.get("configs") or []:
         out_configs.append({
@@ -4934,7 +5659,20 @@ def call_mcp_list(_args):
             "endpoints": endpoints,
             "hint": hint,
         })
-    return {"configs": out_configs, "servers_with_api": out_servers}
+    return {
+        "captured_at": captured_at,
+        "configs": out_configs,
+        "servers_with_api": out_servers,
+        "api_call_contract": (
+            "servers_with_api is the discovery snapshot of server registry "
+            "entries that currently expose api_spec. ApiCall requires BOTH "
+            "an exact config_id active globally or on the workflow project "
+            "AND its matching server entry with api_spec and decryptable "
+            "configuration. Presence is necessary but not sufficient; absence "
+            "at captured_at means ApiCall cannot use that server in this "
+            "snapshot. Re-run mcp_list before diagnosing a later observation."
+        ),
+    }
 
 
 # Allowlist of (name, version) → backend path. Keeps the surface tight
@@ -5190,7 +5928,10 @@ def call_workflow_resume_run(args):
     rid = args.get("run_id")
     if not rid:
         raise RuntimeError("workflow_resume_run: missing required 'run_id'")
-    return _unwrap(_http("POST", f"/api/workflow-runs/{rid}/resume"))
+    # Send an explicit empty object for older Kronn backends whose
+    # Option<Json<T>> extractor rejects an empty JSON body. Current backends
+    # accept both forms, so this remains backward-compatible.
+    return _unwrap(_http("POST", f"/api/workflow-runs/{rid}/resume", {}))
 
 
 def call_workflow_update(args):
@@ -6085,19 +6826,23 @@ def call_workflow_step_schema(_args):
             },
             "BatchQuickPrompt": {
                 "required": ["batch_quick_prompt_id", "batch_items_from"],
-                "optional": ["batch_wait_for_completion"],
-                "OUTPUT_IS_METADATA_ONLY": (
-                    "RUN-BREAKING gotcha: `{{steps.<name>.data}}` is batch METADATA only — "
-                    "`{batch_run_id, discussion_ids, ok, total}`. The QP's PRODUCED content "
-                    "(the table/JSON each run emits) lives in the child DISCUSSIONS, NOT in the "
-                    "step data, and there is NO `{{steps.<name>.results[]}}` / `.outputs` "
-                    "accessor. So you CANNOT pipe a BatchQuickPrompt's output into a downstream "
-                    "ApiCall/Exec. BatchQuickPrompt is FAN-OUT-to-discussions (kick off N runs, "
-                    "humans/agents read the threads). If you need the produced result piped "
-                    "onward deterministically, use a single Agent step with TypedSchema instead "
-                    "(see Agent.OUTPUT_PIPING). An agent CAN still read a child disc via the "
-                    "`disc_get_message`/`disc_summarize` MCP tools, but a deterministic step "
-                    "cannot."
+                "optional": [
+                    "batch_wait_for_completion",
+                    "batch_max_items",
+                    "batch_concurrent_limit",
+                    "batch_workspace_mode",
+                    "batch_chain_prompt_ids",
+                ],
+                "OUTPUT_PIPING": (
+                    "When batch_wait_for_completion=true, `{{steps.<name>.data.results}}` "
+                    "is an ordered array of `{index, discussion_id, item, output, "
+                    "tokens_used, tokens_status}`. `output` is the complete final Agent "
+                    "message from that child discussion (not truncated), so an Exec/ApiCall "
+                    "can consume the fan-out deterministically without an Agent collector. "
+                    "The data envelope also carries aggregate `tokens_used` plus "
+                    "`tokens_status` (`measured`, `partial`, or "
+                    "`unavailable_children_not_measured`). Fire-and-forget mode returns "
+                    "results=[] and tokens_status=pending because children are still running."
                 ),
                 "example": {
                     "name": "Fan out",
@@ -6154,6 +6899,16 @@ def call_workflow_step_schema(_args):
                     "step that needs the full object. Bookkeeping vars `{{__subwf_item_id__}}` "
                     "(=item `id`) and `{{__subwf_item__}}` (index) are also set."
                 ),
+                "FOREACH_CONCURRENCY": (
+                    "SubWorkflow foreach is intentionally SEQUENTIAL in the shared parent "
+                    "worktree. Workflow-level `concurrency_limit` controls overlapping FULL "
+                    "workflow runs (Cron/Tracker); it does not parallelize foreach items, and "
+                    "values above 1 are rejected when foreach is present so this cannot be "
+                    "mistaken for an ignored worker count. "
+                    "Use BatchQuickPrompt for parallel agent fan-out. Parallel SubWorkflow "
+                    "children would require isolated worktrees plus deterministic merge and "
+                    "is not silently enabled by any current field."
+                ),
                 "example": {
                     "name": "Implement",
                     "step_type": {"type": "SubWorkflow"},
@@ -6190,9 +6945,10 @@ def call_workflow_step_schema(_args):
                 "issue.{title,body,number,url,labels}": "tracker-trigger fields (Cron/Tracker workflows).",
                 "<launch_var>": "any manual-launch `variables[].name` is referenced bare as `{{name}}`.",
             },
-            "gotcha": (
-                "A BatchQuickPrompt's `steps.<name>.data` is batch METADATA only — its "
-                "produced content is NOT here (see BatchQuickPrompt.OUTPUT_IS_METADATA_ONLY)."
+            "batch_quick_prompt_results": (
+                "`steps.<name>.data.results` is the ordered, complete BatchQuickPrompt "
+                "payload list after completion; use `data.results` / `data_json.results` "
+                "for deterministic downstream piping."
             ),
         },
     }
@@ -6775,6 +7531,7 @@ DISPATCH = {
     "audit_status": call_audit_status,
     "disc_meta": call_disc_meta,
     "disc_get_message": call_disc_get_message,
+    "disc_note_list": call_disc_note_list,
     "disc_summarize": call_disc_summarize,
     # 0.9.1 — planning and discussion plans.
     "plan_get": call_plan_get,
@@ -6792,7 +7549,10 @@ DISPATCH = {
     "disc_create": call_disc_create,
     "disc_append": call_disc_append,
     "disc_link": call_disc_link,
+    "disc_transfer_session": call_disc_transfer_session,
     "disc_unlink": call_disc_unlink,
+    "disc_workspace_get": call_disc_workspace_get,
+    "disc_workspace_set": call_disc_workspace_set,
     "disc_find_by_session": call_disc_find_by_session,
     "disc_search": call_disc_search,
     "disc_list": call_disc_list,
@@ -6913,6 +7673,113 @@ def _send(payload):
     sys.stdout.flush()
 
 
+# KT-189 — requests flow through a queue fed by a reader thread so the
+# bridge can notice `notifications/cancelled` (and any follow-up request)
+# while a tool call is blocked in the bridge-side wait loop. Only the main
+# thread writes to stdout; the reader thread only parses and enqueues.
+_REQUEST_QUEUE: "queue.Queue[dict | None]" = queue.Queue()
+# id → monotonic arrival time. Entries expire so a cancellation landing
+# AFTER its response was sent can never poison a later reuse of the id.
+# Guarded by _CANCELLED_LOCK: the reader thread inserts/prunes while the
+# main thread checks/consumes.
+_CANCELLED_REQUEST_IDS: dict = {}
+_CANCELLED_LOCK = threading.Lock()
+_CANCELLATION_TTL_SECS = 600
+# Per-call context for the wait loop: the JSON-RPC id (to spot its own
+# cancellation) and the client's progressToken (to keep the call alive).
+_CURRENT_PROGRESS_TOKEN: dict = {"rid": None, "token": None}
+_QUEUE_EMPTY = object()
+
+
+def _is_cancelled(rid):
+    with _CANCELLED_LOCK:
+        ts = _CANCELLED_REQUEST_IDS.get(rid)
+        if ts is None:
+            return False
+        if time.monotonic() - ts > _CANCELLATION_TTL_SECS:
+            _CANCELLED_REQUEST_IDS.pop(rid, None)
+            return False
+        return True
+
+
+def _consume_cancellation(rid):
+    """Check-and-clear: a cancellation applies to exactly one request."""
+    if rid is None:
+        return False
+    with _CANCELLED_LOCK:
+        ts = _CANCELLED_REQUEST_IDS.pop(rid, None)
+        return ts is not None and time.monotonic() - ts <= _CANCELLATION_TTL_SECS
+
+
+def _stdin_reader():
+    for raw in sys.stdin:
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            req = json.loads(line)
+        except json.JSONDecodeError:
+            print(f"kronn-internal: bad JSON-RPC line ignored: {line[:120]}", file=sys.stderr)
+            continue
+        if not isinstance(req, dict):
+            continue
+        if (req.get("method") or "") == "notifications/cancelled":
+            params = req.get("params") or {}
+            rid = params.get("requestId")
+            # Generation guard (KT-189 review): a cancellation landing AFTER
+            # its request completed must not poison a legal reuse of the same
+            # JSON-RPC id. Only requests still in flight or still queued can
+            # be cancelled; anything else is a spec-sanctioned no-op.
+            if rid is not None and _cancellation_applies(rid):
+                now = time.monotonic()
+                with _CANCELLED_LOCK:
+                    # Lazy pruning keeps the dict bounded without a timer.
+                    for stale in [k for k, ts in _CANCELLED_REQUEST_IDS.items()
+                                  if now - ts > _CANCELLATION_TTL_SECS]:
+                        _CANCELLED_REQUEST_IDS.pop(stale, None)
+                    _CANCELLED_REQUEST_IDS[rid] = now
+            continue
+        _REQUEST_QUEUE.put(req)
+    _REQUEST_QUEUE.put(None)  # EOF sentinel — client is gone
+
+
+def _cancellation_applies(rid):
+    if _CURRENT_PROGRESS_TOKEN.get("rid") == rid:
+        return True
+    with _REQUEST_QUEUE.mutex:
+        return any(
+            isinstance(item, dict) and item.get("id") == rid
+            for item in _REQUEST_QUEUE.queue
+        )
+
+
+def _peek_request():
+    with _REQUEST_QUEUE.mutex:
+        return _REQUEST_QUEUE.queue[0] if _REQUEST_QUEUE.queue else _QUEUE_EMPTY
+
+
+def _service_control_traffic():
+    """Serve control-plane traffic inline during a bridge-side wait.
+
+    `ping`, `tools/list` and protocol notifications are answered right
+    here so a long wait never looks dead to the client and never costs a
+    model turn. Only a queued `tools/call` ("new_request") or stdin EOF
+    ("eof") preempts the wait. Returns the preemption reason or None.
+    """
+    while True:
+        head = _peek_request()
+        if head is _QUEUE_EMPTY:
+            return None
+        if head is None:
+            return "eof"
+        if (head.get("method") or "") == "tools/call":
+            return "new_request"
+        _REQUEST_QUEUE.get_nowait()
+        resp = _handle(head)
+        if resp is not None:
+            _send(resp)
+
+
 def _handle(req):
     method = req.get("method") or ""
     rid = req.get("id")
@@ -6964,7 +7831,7 @@ def _handle(req):
                     "Your tools, by area:\n"
                     "• Opaque IDs: when the user pastes an ID without naming its type, call `resolve_id` FIRST; it returns compact routing context and the object-specific tool to use next.\n"
                     "• Discussions (multi-agent threads): `disc_meta`/`disc_get_message`/`disc_search`/`disc_load_other`/`disc_create`/`disc_append`/`disc_join`/`disc_invite_peer`…\n"
-                    "• Planning: a discussion may have a shared plan made of prioritized, editable tasks. The user may refer to it naturally as “the plan”, “the tasks”, “what remains”, “the priority”, and similar wording. Use `plan_get` (compact current objective/plan) · `task_list` (compact filtered backlog) · `task_get` (FULL task) · `task_changes` (deltas) · `proposal_list`/`proposal_get` (durable proposals, read-only) · narrow writes `task_create`/`task_update`/`task_update_dod`/`task_link_discussion`/`task_add_blocker`. Read the relevant plan first. Apply unambiguous intent directly; otherwise propose a human-gated `kronn-plan-action` fence (`create`, `create_many`, `status`, `complete`, `unblock`, `open`). You may read and propose, but only a human accepts, rejects or decides a durable proposal. Never replace a requested plan update with a prose-only summary. Whenever tracked work starts or materially changes, keep its status, DoD and priority honest in the plan. Write only on a real change: never reload or rewrite an unchanged task merely to report progress. If the announced Planning tools are missing from your MCP surface, use the read-only `plan_snapshot` from `disc_join`, ask @user to reconnect the Kronn MCP, and never fabricate an update.\n"
+                    "• Planning: a discussion may have a shared plan made of prioritized, editable tasks. The user may refer to it naturally as “the plan”, “the tasks”, “what remains”, “the priority”, and similar wording. Use `plan_get` (compact current objective/plan) · `task_list` (compact filtered backlog) · `task_get` (FULL task) · `task_changes` (deltas) · `proposal_list`/`proposal_get` (durable proposals, read-only) · narrow writes `task_create`/`task_update`/`task_update_dod`/`task_link_discussion`/`task_add_blocker`. Read the relevant plan first. Immediately before any direct `task_create`, call `plan_get` again so a peer's recent write is visible. Apply unambiguous intent directly; otherwise propose a human-gated `kronn-plan-action` fence (`create`, `create_many`, `status`, `complete`, `unblock`, `open`). You may read and propose, but only a human accepts, rejects or decides a durable proposal. Never replace a requested plan update with a prose-only summary. Whenever tracked work starts or materially changes, keep its status, DoD and priority honest in the plan. Write only on a real change: never reload or rewrite an unchanged task merely to report progress. If the announced Planning tools are missing from your MCP surface, use the read-only `plan_snapshot` from `disc_join`, ask @user to reconnect the Kronn MCP, and never fabricate an update.\n"
                     "• Workflows (multi-step pipelines): `workflow_list` (compact) · `workflow_get` (FULL, every step) · `workflow_step_schema` (CANONICAL step schema as an untruncatable result — the closed 9 `step_type`s, per-type fields, runtime contracts; call before authoring) · `workflow_create_draft` · `workflow_clone`/`workflow_update`/`workflow_set_enabled` · `workflow_trigger`/`workflow_run_status` · run history `workflow_runs`/`workflow_run_get` · `workflow_active_runs`/`workflow_cancel_run`. Agent-step bindings (full CRUD): `skills_list`/`profiles_list`/`directives_list` enumerate valid ids; `skill_get`/`profile_get`/`directive_get` read FULL bodies; `skill_create`/`skill_update`/`skill_delete` (+ `profile_*`/`directive_*`) author & edit custom ones.\n"
                     "• Quick Prompts (reusable prompt templates): `qp_list` (no body) · `qp_get` (FULL incl `prompt_template` — read this to know what a QP does, or to run it yourself) · `qp_create_draft`/`qp_update`/`qp_delete` · `qp_run`/`qp_batch_run`.\n"
                     "• Quick APIs + API broker: `qa_list`/`qa_run`/`qa_create_draft`/`qa_update` · `mcp_list` → `api_call` (configured plugins, auth injected).\n"
@@ -6981,6 +7848,9 @@ def _handle(req):
     if method == "notifications/initialized":
         # Notifications carry no id and expect no response.
         return None
+    if method == "ping":
+        # MCP liveness probe — answered inline even mid-wait (KT-189).
+        return {"jsonrpc": "2.0", "id": rid, "result": {}}
     if method == "tools/list":
         return {"jsonrpc": "2.0", "id": rid, "result": {"tools": TOOLS}}
     if method == "tools/call":
@@ -6994,16 +7864,44 @@ def _handle(req):
                 "id": rid,
                 "error": {"code": -32601, "message": f"Unknown tool: {name}"},
             }
+        # Cancelled BEFORE dispatch: never execute — this is the only safe
+        # moment to drop a mutation, and a cancelled request gets no reply.
+        if rid is not None and _consume_cancellation(rid):
+            return None
+        # Cancellation AFTER dispatch is tool-dependent: the read-only wait
+        # suppresses its response (nothing happened), but a mutation that
+        # already ran MUST keep its terminal receipt — silently dropping it
+        # would invite a duplicating retry.
+        suppress_response_on_cancel = name == "disc_wait_for_peer"
+        this_call_sequence = None
+        was_cancelled = False
         try:
             global _CURRENT_RPC_SEQUENCE, _RPC_SEQUENCE
             previous_rpc_sequence = _CURRENT_RPC_SEQUENCE
             _RPC_SEQUENCE += 1
-            _CURRENT_RPC_SEQUENCE = _RPC_SEQUENCE
+            this_call_sequence = _RPC_SEQUENCE
+            _CURRENT_RPC_SEQUENCE = this_call_sequence
             _ack_pending_read_cursors(_CURRENT_RPC_SEQUENCE)
+            # KT-189 — expose this call's id + progressToken to the
+            # bridge-side wait loop (cancellation + keep-alive).
+            meta = params.get("_meta") or {}
+            _CURRENT_PROGRESS_TOKEN["rid"] = rid
+            _CURRENT_PROGRESS_TOKEN["token"] = (
+                meta.get("progressToken") if isinstance(meta, dict) else None
+            )
             try:
                 data = fn(args)
             finally:
                 _CURRENT_RPC_SEQUENCE = previous_rpc_sequence
+                _CURRENT_PROGRESS_TOKEN["rid"] = None
+                _CURRENT_PROGRESS_TOKEN["token"] = None
+                was_cancelled = rid is not None and _consume_cancellation(rid)
+                if was_cancelled:
+                    # Whatever this call staged never reached the model:
+                    # un-stage it so the next call cannot silently ack it.
+                    _discard_pending_read_cursors(this_call_sequence)
+            if was_cancelled and suppress_response_on_cancel:
+                return None
             return {
                 "jsonrpc": "2.0",
                 "id": rid,
@@ -7015,6 +7913,10 @@ def _handle(req):
                 },
             }
         except Exception as e:
+            # The inner finally already consumed the cancellation and purged
+            # this call's staged cursors; only the response decision remains.
+            if was_cancelled and suppress_response_on_cancel:
+                return None
             # Surface a structured error so the agent can either retry
             # with different args or fall back to asking the user.
             return {
@@ -7036,16 +7938,12 @@ def _handle(req):
 
 
 def main():
-    for raw in sys.stdin:
-        line = raw.strip()
-        if not line:
-            continue
-        try:
-            req = json.loads(line)
-        except json.JSONDecodeError:
-            # Stdin garbage — log to stderr and keep the loop alive.
-            print(f"kronn-internal: bad JSON-RPC line ignored: {line[:120]}", file=sys.stderr)
-            continue
+    reader = threading.Thread(target=_stdin_reader, daemon=True, name="stdin-reader")
+    reader.start()
+    while True:
+        req = _REQUEST_QUEUE.get()
+        if req is None:  # EOF — client closed our stdin
+            return
         resp = _handle(req)
         if resp is not None:
             _send(resp)

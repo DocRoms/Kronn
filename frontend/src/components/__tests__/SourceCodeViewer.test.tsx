@@ -4,6 +4,12 @@ import { projects } from '../../lib/api';
 import { SourceCodeViewer } from '../SourceCodeViewer';
 import type { SourceFileNode } from '../../types/generated';
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>(next => { resolve = next; });
+  return { promise, resolve };
+}
+
 vi.mock('../../lib/I18nContext', () => ({
   useT: () => ({
     t: (key: string, ...args: Array<string | number>) =>
@@ -135,6 +141,25 @@ describe('SourceCodeViewer', () => {
     expect(await screen.findByText('main.rs')).toBeInTheDocument();
   });
 
+  it('recovers from a transient source-tree failure when Retry succeeds', async () => {
+    vi.mocked(projects.listSourceFiles)
+      .mockRejectedValueOnce(new Error('temporary failure'))
+      .mockResolvedValue([{
+        path: 'src',
+        name: 'src',
+        is_dir: true,
+        children: [{ path: 'src/main.rs', name: 'main.rs', is_dir: false }],
+      }]);
+
+    render(<SourceCodeViewer projectId="project-1" />);
+    expect(await screen.findByText('projects.source.error')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'projects.docAi.retry' }));
+
+    expect(await screen.findByText('main.rs')).toBeInTheDocument();
+    expect(screen.queryByText('projects.source.error')).not.toBeInTheDocument();
+  });
+
   it('toggles Git annotations and displays author metadata per line', async () => {
     render(<SourceCodeViewer projectId="project-1" />);
     await screen.findByText('main.rs');
@@ -158,6 +183,40 @@ describe('SourceCodeViewer', () => {
     );
     expect(await screen.findByText('1 / 1')).toBeInTheDocument();
     expect(screen.getByText('projects.source.filesCount 1')).toBeInTheDocument();
+  });
+
+  it('ignores an older search response that resolves after the active query', async () => {
+    const older = deferred<Array<{ path: string; match_count: number }>>();
+    const newer = deferred<Array<{ path: string; match_count: number }>>();
+    vi.mocked(projects.searchSourceFiles)
+      .mockImplementationOnce(() => older.promise)
+      .mockImplementationOnce(() => newer.promise);
+
+    render(<SourceCodeViewer projectId="project-1" />);
+    const input = await screen.findByRole('textbox', { name: 'projects.source.search' });
+
+    fireEvent.change(input, { target: { value: 'older' } });
+    await waitFor(() => {
+      expect(projects.searchSourceFiles).toHaveBeenCalledWith('project-1', 'older');
+    });
+    fireEvent.change(input, { target: { value: 'newer' } });
+    await waitFor(() => {
+      expect(projects.searchSourceFiles).toHaveBeenCalledWith('project-1', 'newer');
+    });
+
+    await act(async () => {
+      newer.resolve([{ path: 'src/main.rs', match_count: 2 }]);
+      await newer.promise;
+    });
+    expect(await screen.findByText('1 / 2')).toBeInTheDocument();
+
+    await act(async () => {
+      older.resolve([{ path: 'README.md', match_count: 1 }]);
+      await older.promise;
+    });
+    expect(screen.getByText('1 / 2')).toBeInTheDocument();
+    expect(vi.mocked(projects.readSourceFile).mock.calls.at(-1))
+      .toEqual(['project-1', 'src/main.rs']);
   });
 
   it('navigates to the next highlighted occurrence', async () => {

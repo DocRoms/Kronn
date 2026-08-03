@@ -10,7 +10,7 @@
  * (per-disc, group-header, top-of-app aggregate, mark-all-read seed).
  */
 import { describe, it, expect } from 'vitest';
-import { unseenBasis } from '../SwipeableDiscItem';
+import { unseenBasis } from '../../lib/discussionUiUtils';
 import type { Discussion, DiscussionMessage } from '../../types/generated';
 
 const skel = {

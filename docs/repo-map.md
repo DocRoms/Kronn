@@ -28,7 +28,8 @@ Kronn/
 │       │   ├── discussions.rs  # Discussion CRUD + SSE streaming + orchestration (~2880L). make_agent_stream checkpoints partial_response every 30s/100 chunks. /stop cancels via cancel_registry. /dismiss-partial force-recovers (shared path with boot recovery)
 │       │   ├── disc_helpers.rs # Pure agent/text helpers (~320L, 15 tests): agent_prompt_budget, auth_mode_for, agent_display_name, smart_truncate, summary_threshold/cooldown, is_compact_agent, language_instruction, estimate_extra_context_len
 │       │   ├── disc_prompts.rs # Pure prompt builders (~625L, 9 tests): build_agent_prompt, build_orchestration_prompt, build_synthesis_prompt, OrchestrationContext struct
-│       │   ├── disc_git.rs     # Shared git+MCP prep for general and project discussions
+│       │   ├── disc_git.rs     # Discussion Git actions, optionally scoped to one declared CLI workspace
+│       │   ├── disc_workspace.rs # Per-joined-session worktree declaration, validation and compact room listing
 │       │   ├── contacts.rs     # Contacts CRUD + invite codes + network info + ping
 │       │   ├── ws.rs           # WebSocket handler — peer-to-peer presence + auto-add unknown peers + PartialResponseRecovered / BatchRunProgress / BatchRunFinished broadcasts
 │       │   ├── mcps.rs         # MCP 3-tier API: overview, configs CRUD, registry, refresh, secrets
@@ -51,6 +52,7 @@ Kronn/
 │       │   ├── migrations.rs   # Versioned migration runner (run before Mutex wrap)
 │       │   ├── projects.rs     # Project CRUD operations
 │       │   ├── discussions.rs  # Discussion + message CRUD (+ archive/rename via update_discussion)
+│       │   ├── discussion_workspaces.rs # Managed/external worktrees declared by joined CLI sessions
 │       │   ├── discussions_test.rs # 21 tests (CRUD, archive, title, messages, AgentType round-trip for all 6 agents + Custom, DB string stability)
 │       │   ├── mcps.rs         # MCP servers/configs/linkages CRUD, encryption, hashing
 │       │   ├── workflows.rs    # Workflow + WorkflowRun CRUD, run deletion (individual + bulk)
@@ -68,6 +70,7 @@ Kronn/
 │       │       ├── 012_mcp_general.sql       # Global MCP configs
 │       │       ├── 013_discussion_worktrees.sql # Worktree support for discussions
 │       │       ├── 014_summary_cache.sql     # Summary caching
+│       │       ├── 101_discussion_workspaces.sql # Multi-worktree ownership, session/task links and legacy backfill
 │       │       ├── 015_model_tier.sql        # ModelTier system
 │       │       ├── 016_message_model_tier.sql # Per-message model tier
 │       │       ├── 017_message_count.sql     # Message count tracking

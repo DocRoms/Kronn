@@ -5,6 +5,7 @@
 
 use anyhow::Result;
 use chrono::Utc;
+use std::future::Future;
 
 use crate::models::*;
 use crate::AppState;
@@ -47,6 +48,114 @@ pub enum RunEvent {
 
 /// Optional sender for real-time progress events.
 pub type EventSender = tokio::sync::mpsc::Sender<RunEvent>;
+
+/// Deliver one SSE event without ever coupling workflow liveness to the
+/// browser's read rate.
+///
+/// The channel is deliberately best-effort: a full buffer drops the live
+/// event, and a disconnected receiver is a no-op. Durable run state remains
+/// available from the database and terminal/step transitions are also
+/// broadcast over WebSocket. This includes terminal SSE events: stream close,
+/// the WebSocket broadcast and the persisted row are the reliable completion
+/// signals, so a future maintainer must not restore an awaited send here.
+fn try_emit_run_event(events_tx: Option<&EventSender>, event: RunEvent) {
+    if let Some(tx) = events_tx {
+        let _ = tx.try_send(event);
+    }
+}
+
+enum InFlightStepOutcome {
+    Completed(Box<StepOutcome>),
+    Cancelled,
+    TimedOut,
+}
+
+/// Race one in-flight executor against both operator cancellation and the
+/// workflow's absolute wall-clock deadline.
+///
+/// Ordering is deliberate when multiple branches become ready in the same
+/// scheduler turn: an explicit cancellation wins, a completed step is kept,
+/// and timeout is the final fallback.
+async fn await_in_flight_step<F>(
+    step_future: F,
+    cancel_token: &tokio_util::sync::CancellationToken,
+    deadline: tokio::time::Instant,
+) -> InFlightStepOutcome
+where
+    F: Future<Output = StepOutcome>,
+{
+    tokio::select! {
+        biased;
+        _ = cancel_token.cancelled() => InFlightStepOutcome::Cancelled,
+        outcome = step_future => InFlightStepOutcome::Completed(Box::new(outcome)),
+        _ = tokio::time::sleep_until(deadline) => InFlightStepOutcome::TimedOut,
+    }
+}
+
+fn workflow_timeout_deadline(
+    started_at: chrono::DateTime<Utc>,
+    timeout_seconds: u64,
+    now: chrono::DateTime<Utc>,
+) -> tokio::time::Instant {
+    let elapsed = (now - started_at)
+        .to_std()
+        .unwrap_or(std::time::Duration::ZERO);
+    let remaining = std::time::Duration::from_secs(timeout_seconds).saturating_sub(elapsed);
+    tokio::time::Instant::now() + remaining
+}
+
+pub const UNCERTAIN_SIDE_EFFECT_STATE_KEY: &str = "__kronn.uncertain_side_effect";
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+struct SideEffectIntent {
+    version: u8,
+    step_name: String,
+    step_index: usize,
+    step_type: String,
+    started_at: chrono::DateTime<Utc>,
+}
+
+fn uncertain_side_effect_type(step_type: &StepType) -> Option<&'static str> {
+    match step_type {
+        StepType::ApiCall => Some("ApiCall"),
+        StepType::BatchApiCall => Some("BatchApiCall"),
+        StepType::Notify => Some("Notify"),
+        StepType::Exec => Some("Exec"),
+        StepType::Agent
+        | StepType::BatchQuickPrompt
+        | StepType::Gate
+        | StepType::JsonData
+        | StepType::SubWorkflow => None,
+    }
+}
+
+fn record_side_effect_intent(
+    run: &mut WorkflowRun,
+    step: &WorkflowStep,
+    step_index: usize,
+) -> Result<bool> {
+    let Some(step_type) = uncertain_side_effect_type(&step.step_type) else {
+        return Ok(false);
+    };
+    let intent = SideEffectIntent {
+        version: 1,
+        step_name: step.name.clone(),
+        step_index,
+        step_type: step_type.to_string(),
+        started_at: Utc::now(),
+    };
+    run.state.insert(
+        UNCERTAIN_SIDE_EFFECT_STATE_KEY.to_string(),
+        serde_json::to_string(&intent)?,
+    );
+    Ok(true)
+}
+
+fn uncertain_side_effect_intent(run: &WorkflowRun) -> Option<SideEffectIntent> {
+    run.state
+        .get(UNCERTAIN_SIDE_EFFECT_STATE_KEY)
+        .and_then(|raw| serde_json::from_str(raw).ok())
+}
 
 /// 2026-06-11 (Phase 1b-ii) — LLM-calls budget shared across a sub-workflow
 /// tree. Without it, each child run reset its own `max_llm_calls` counter, so
@@ -102,7 +211,16 @@ pub(crate) fn next_step_index_for_resume(
         Some(last) => steps
             .iter()
             .position(|s| s.name == last.step_name)
-            .map(|i| i + 1)
+            .map(|i| {
+                if matches!(last.status, RunStatus::Running | RunStatus::Pending) {
+                    // A durable StepStart placeholder means the process died
+                    // before the step produced a terminal result. Resume must
+                    // re-run that step, not skip it as if it had completed.
+                    i
+                } else {
+                    i + 1
+                }
+            })
             .unwrap_or(steps.len()),
     }
 }
@@ -225,15 +343,9 @@ async fn execute_run_with_notify_policy(
 ) -> Result<()> {
     // Captured once: drives the attach-vs-create and the skip-cleanup paths.
     let is_inherited_workspace = inherited_workspace.is_some();
-    // Helper to send events (best-effort, ignore send errors)
-    let emit = |evt: RunEvent| {
-        let tx = events_tx.clone();
-        async move {
-            if let Some(tx) = tx {
-                let _ = tx.send(evt).await;
-            }
-        }
-    };
+    // SSE is an optional live projection, never part of the execution
+    // contract. A slow connected browser must not suspend the workflow.
+    let emit = |event: RunEvent| try_emit_run_event(events_tx.as_ref(), event);
 
     // 0.8.2 — Broadcast the run state to ALL connected WS clients so
     // WorkflowDetail pages opened in another tab pick up step transitions
@@ -412,7 +524,7 @@ async fn execute_run_with_notify_policy(
                                 crate::db::workflows::update_run_progress(conn, snap)
                             })
                             .await?;
-                            emit(RunEvent::RunError { error: msg }).await;
+                            emit(RunEvent::RunError { error: msg });
                             return Ok(());
                         }
                         tracing::warn!("Failed to create worktree, running in main tree: {}", e);
@@ -463,7 +575,7 @@ async fn execute_run_with_notify_policy(
                 let db_g = db.clone();
                 db_g.with_conn(move |conn| crate::db::workflows::update_run_progress(conn, snap))
                     .await?;
-                emit(RunEvent::RunError { error: msg }).await;
+                emit(RunEvent::RunError { error: msg });
                 return Ok(());
             }
         }
@@ -604,7 +716,7 @@ async fn execute_run_with_notify_policy(
                 let db_p = db.clone();
                 db_p.with_conn(move |conn| crate::db::workflows::update_run_progress(conn, snap))
                     .await?;
-                emit(RunEvent::RunError { error: msg }).await;
+                emit(RunEvent::RunError { error: msg });
                 return Ok(());
             }
         }
@@ -616,6 +728,16 @@ async fn execute_run_with_notify_policy(
     let mut stopped_by_guard = false;
     let mut paused_for_approval = false;
     let mut step_idx = next_step_index_for_resume(&workflow.steps, &run.step_results);
+    if run
+        .step_results
+        .last()
+        .is_some_and(|result| matches!(result.status, RunStatus::Running | RunStatus::Pending))
+    {
+        // StepStart is persisted for live observability. After a daemon crash
+        // that trailing row is evidence of an incomplete step, not history to
+        // keep alongside the retry. Replace it with the new attempt.
+        run.step_results.pop();
+    }
     let total_steps = workflow.steps.len();
     let max_total_iterations = max_iterations_for(total_steps); // safeguard against infinite Goto loops
     let mut iteration_count = 0;
@@ -715,8 +837,7 @@ async fn execute_run_with_notify_policy(
                 kind: GuardKind::Timeout,
                 threshold: resolved_guards.timeout_seconds,
                 actual: elapsed_secs,
-            })
-            .await;
+            });
             run.step_results.push(StepResult {
                 step_name: "__guard_timeout__".to_string(),
                 status: RunStatus::StoppedByGuard,
@@ -755,8 +876,7 @@ async fn execute_run_with_notify_policy(
                 kind: GuardKind::MaxLlmCalls,
                 threshold: budget.max_llm_calls() as u64,
                 actual: budget.llm_calls() as u64,
-            })
-            .await;
+            });
             run.step_results.push(StepResult {
                 step_name: "__guard_max_llm_calls__".to_string(),
                 status: RunStatus::StoppedByGuard,
@@ -812,8 +932,7 @@ async fn execute_run_with_notify_policy(
                 },
                 threshold: resolved_guards.loop_detection_max_revisits as u64,
                 actual: visit_count as u64,
-            })
-            .await;
+            });
             run.step_results.push(StepResult {
                 step_name: "__guard_loop_detection__".to_string(),
                 status: RunStatus::StoppedByGuard,
@@ -846,19 +965,82 @@ async fn execute_run_with_notify_policy(
             step.name
         );
 
+        // Journal the intent BEFORE invoking a mechanically side-effecting
+        // executor. If the process dies after the external effect commits but
+        // before the StepResult snapshot, boot reconciliation preserves this
+        // marker and manual resume fails closed instead of replaying blindly.
+        // A crash just before the effect may therefore ask for an unnecessary
+        // decision; that conservative false positive is intentional.
+        let side_effect_intent_recorded = record_side_effect_intent(run, step, step_idx)?;
+        if side_effect_intent_recorded {
+            let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
+            let intent_db = db.clone();
+            let persisted = intent_db
+                .with_conn(move |conn| crate::db::workflows::update_run_progress(conn, snap))
+                .await?;
+            if !persisted {
+                return Err(anyhow::anyhow!(
+                    "Run {} changed state before side-effect intent for step '{}' could be persisted; refusing to execute it",
+                    run.id,
+                    step.name
+                ));
+            }
+        }
+
+        // Persist an observable in-flight row BEFORE entering the executor.
+        // Until now StepStart existed only on SSE/WS; DB/MCP readers saw the
+        // exact same shape for "queued" and "Agent running". The placeholder
+        // is replaced in place by the terminal result below.
+        let step_started_at = Utc::now();
+        let in_flight_result_index = run.step_results.len();
+        let mut in_flight_result = StepResult {
+            step_name: step.name.clone(),
+            status: RunStatus::Running,
+            output: String::new(),
+            tokens_used: 0,
+            duration_ms: 0,
+            started_at: Some(step_started_at),
+            condition_result: None,
+            envelope_detected: None,
+            step_kind: None,
+            step_agent: None,
+            step_model: None,
+            step_api_plugin_slug: None,
+            step_api_endpoint_path: None,
+            is_rollback: false,
+            child_run_id: None,
+        };
+        apply_step_snapshot(
+            step,
+            &mut in_flight_result,
+            Some(&agents_config.model_tiers),
+        );
+        run.step_results.push(in_flight_result);
+        let start_snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
+        let start_db = db.clone();
+        let persisted = start_db
+            .with_conn(move |conn| crate::db::workflows::update_run_progress(conn, start_snap))
+            .await?;
+        if !persisted {
+            return Err(anyhow::anyhow!(
+                "Run {} changed state before StepStart for '{}' could be persisted",
+                run.id,
+                step.name
+            ));
+        }
+
         emit(RunEvent::StepStart {
             step_name: step.name.clone(),
             step_index: step_idx,
             total_steps,
-        })
-        .await;
+        });
         // 0.8.2 — cross-tab live update
         broadcast_run_state(&run.status, step_idx as i32, Some(step.name.clone()));
 
-        // Build the step's executor as a single future, then race it
-        // against `cancel_token.cancelled()`. When the user clicks Stop
-        // mid-step, the cancel branch wins, the executor future is
-        // dropped, and the kill_on_drop chain takes over:
+        // Build the step's executor as a single future, then race it against
+        // operator cancellation AND the workflow's absolute deadline. When
+        // either stop branch wins, the executor future is dropped and the
+        // kill_on_drop chain takes over:
         //   - Agent  → AgentProcess.child drops → SIGKILL
         //   - Exec   → tokio Command future drops → SIGKILL
         //   - HTTP   → reqwest cancels on drop (ApiCall, BatchApiCall, Notify)
@@ -984,15 +1166,17 @@ async fn execute_run_with_notify_policy(
                         // the step finishes (typical Agent step = 30-120s of
                         // silence). Spawn a forwarder that pumps each chunk from
                         // the agent's stdout into the SSE channel as a
-                        // `StepProgress` event. Bounded buffer (256) keeps a
-                        // slow client from back-pressuring the agent's stdout.
+                        // `StepProgress` event. Both bounded channels are
+                        // best-effort: once the SSE buffer is full, progress
+                        // chunks are dropped instead of back-pressuring the
+                        // agent or the workflow runner.
                         let (progress_tx, mut progress_rx) =
                             tokio::sync::mpsc::channel::<String>(256);
                         let forwarder_tx = events_tx.clone();
                         let forwarder = tokio::spawn(async move {
                             while let Some(text) = progress_rx.recv().await {
                                 if let Some(ref tx) = forwarder_tx {
-                                    let _ = tx.send(RunEvent::StepProgress { text }).await;
+                                    try_emit_run_event(Some(tx), RunEvent::StepProgress { text });
                                 }
                             }
                         });
@@ -1004,7 +1188,6 @@ async fn execute_run_with_notify_policy(
                         // retries, and any scheduling gap between steps —
                         // and the WorkflowDetail live-mini-dashboard then
                         // disagrees with RunDetail's `LiveStepStatus`.
-                        let step_started_at = Utc::now();
                         let outcome = execute_step(
                             step,
                             &project_path,
@@ -1017,10 +1200,6 @@ async fn execute_run_with_notify_policy(
                             Some(&agents_config.model_tiers),
                         )
                         .await;
-                        let mut outcome = outcome;
-                        if outcome.result.started_at.is_none() {
-                            outcome.result.started_at = Some(step_started_at);
-                        }
                         // execute_step took ownership of progress_tx and dropped
                         // it on return → the forwarder's recv() now yields None
                         // and the loop exits naturally. AWAIT it (don't abort —
@@ -1203,36 +1382,86 @@ async fn execute_run_with_notify_policy(
             }
         };
 
-        let mut outcome: StepOutcome = tokio::select! {
-            o = step_future => o,
-            _ = cancel_token.cancelled() => {
-                tracing::info!(
-                    "Workflow run {} cancelled mid-step '{}' — dropping in-flight executor",
-                    run.id, step.name
-                );
-                cancelled_by_user = true;
-                StepOutcome {
-                    result: StepResult {
-                        step_name: step.name.clone(),
-                        status: RunStatus::Cancelled,
-                        output: format!("Step '{}' cancelled by user mid-flight.", step.name),
-                        tokens_used: 0,
-                        duration_ms: step_start.elapsed().as_millis() as u64,
-                        started_at: None,
-            condition_result: None,
-                        envelope_detected: None,
-                        step_kind: None,
-                        step_agent: None,
-                        step_model: None,
-                        step_api_plugin_slug: None,
-                        step_api_endpoint_path: None,
-                        is_rollback: false,
-                        child_run_id: None,
-                    },
-                    condition_action: None,
+        let deadline =
+            workflow_timeout_deadline(run.started_at, resolved_guards.timeout_seconds, Utc::now());
+        let mut outcome: StepOutcome =
+            match await_in_flight_step(step_future, &cancel_token, deadline).await {
+                InFlightStepOutcome::Completed(outcome) => *outcome,
+                InFlightStepOutcome::Cancelled => {
+                    tracing::info!(
+                        "Workflow run {} cancelled mid-step '{}' — dropping in-flight executor",
+                        run.id,
+                        step.name
+                    );
+                    cancelled_by_user = true;
+                    StepOutcome {
+                        result: StepResult {
+                            step_name: step.name.clone(),
+                            status: RunStatus::Cancelled,
+                            output: format!("Step '{}' cancelled by user mid-flight.", step.name),
+                            tokens_used: 0,
+                            duration_ms: step_start.elapsed().as_millis() as u64,
+                            started_at: None,
+                            condition_result: None,
+                            envelope_detected: None,
+                            step_kind: None,
+                            step_agent: None,
+                            step_model: None,
+                            step_api_plugin_slug: None,
+                            step_api_endpoint_path: None,
+                            is_rollback: false,
+                            child_run_id: None,
+                        },
+                        condition_action: None,
+                    }
                 }
-            }
-        };
+                InFlightStepOutcome::TimedOut => {
+                    let elapsed_secs = (Utc::now() - run.started_at).num_seconds().max(0) as u64;
+                    let actual_secs = elapsed_secs.max(resolved_guards.timeout_seconds);
+                    tracing::warn!(
+                        target: "kronn::workflow_guard",
+                        run_id = %run.id,
+                        step = %step.name,
+                        kind = "Timeout",
+                        threshold_secs = resolved_guards.timeout_seconds,
+                        actual_secs,
+                        "Workflow run stopped by Timeout guard during an in-flight step"
+                    );
+                    emit(RunEvent::GuardTriggered {
+                        kind: GuardKind::Timeout,
+                        threshold: resolved_guards.timeout_seconds,
+                        actual: actual_secs,
+                    });
+                    stopped_by_guard = true;
+                    StepOutcome {
+                        result: StepResult {
+                            step_name: step.name.clone(),
+                            status: RunStatus::StoppedByGuard,
+                            output: format!(
+                            "Step '{}' stopped by workflow Timeout guard after {}s (limit {}s).",
+                            step.name, actual_secs, resolved_guards.timeout_seconds
+                        ),
+                            tokens_used: 0,
+                            duration_ms: step_start.elapsed().as_millis() as u64,
+                            started_at: None,
+                            condition_result: None,
+                            envelope_detected: None,
+                            step_kind: None,
+                            step_agent: None,
+                            step_model: None,
+                            step_api_plugin_slug: None,
+                            step_api_endpoint_path: None,
+                            is_rollback: false,
+                            child_run_id: None,
+                        },
+                        condition_action: None,
+                    }
+                }
+            };
+
+        if outcome.result.started_at.is_none() {
+            outcome.result.started_at = Some(step_started_at);
+        }
 
         // Snapshot "what actually ran" onto the result row FIRST, then seed
         // the template ctx from it — set_step_meta reads step_agent/step_model,
@@ -1324,8 +1553,7 @@ async fn execute_run_with_notify_policy(
         // Emit step done event
         emit(RunEvent::StepDone {
             step_result: outcome.result.clone(),
-        })
-        .await;
+        });
         // 0.8.2 — cross-tab live update. status reflects the new state
         // (WaitingApproval if the step was a Gate, else still Running).
         // The current_step is cleared since this step is now finished.
@@ -1470,7 +1698,24 @@ async fn execute_run_with_notify_policy(
             }
         }
 
-        run.step_results.push(outcome.result);
+        // Clear the intent in the SAME durable snapshot that records the
+        // StepResult. A crash before this write leaves the marker intact; a
+        // successful write proves the outcome and cursor together.
+        if side_effect_intent_recorded {
+            run.state.remove(UNCERTAIN_SIDE_EFFECT_STATE_KEY);
+        }
+        // Replace the durable Running placeholder atomically with the final
+        // result. Keeping one row per execution avoids duplicate timeline
+        // entries while still exposing the live step to MCP readers.
+        if let Some(slot) = run.step_results.get_mut(in_flight_result_index) {
+            *slot = outcome.result;
+        } else {
+            return Err(anyhow::anyhow!(
+                "Run {} lost its StepStart placeholder for '{}'",
+                run.id,
+                step.name
+            ));
+        }
 
         // Persist progress
         let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
@@ -1485,6 +1730,10 @@ async fn execute_run_with_notify_policy(
         // chain is intentional: a user-initiated stop shouldn't trigger
         // rollback semantics meant for failed-then-recover paths.
         if cancelled_by_user {
+            all_success = false;
+            break;
+        }
+        if stopped_by_guard {
             all_success = false;
             break;
         }
@@ -1840,8 +2089,7 @@ async fn execute_run_with_notify_policy(
                 step_name: rb_step.name.clone(),
                 step_index: run.step_results.len(),
                 total_steps: run.step_results.len() + 1,
-            })
-            .await;
+            });
 
             let mut rb_outcome: StepOutcome = match rb_step.step_type {
                 StepType::BatchQuickPrompt => {
@@ -1952,8 +2200,7 @@ async fn execute_run_with_notify_policy(
             let rb_failed = rb_outcome.result.status == RunStatus::Failed;
             emit(RunEvent::StepDone {
                 step_result: rb_outcome.result.clone(),
-            })
-            .await;
+            });
             run.step_results.push(rb_outcome.result);
 
             if rb_failed {
@@ -1979,8 +2226,7 @@ async fn execute_run_with_notify_policy(
     // Emit run done
     emit(RunEvent::RunDone {
         status: run.status.clone(),
-    })
-    .await;
+    });
     // 0.8.2 — cross-tab final state flip so any open WorkflowDetail can
     // clear its live indicator without polling.
     broadcast_run_state(&run.status, run.step_results.len() as i32 - 1, None);
@@ -2437,7 +2683,11 @@ pub(crate) async fn claim_interrupted_run_row(
 ///   - the preserved worktree is gone: resuming would silently fall back to
 ///     the MAIN checkout (execute_run's legacy resume fallback), which is
 ///     exactly the require_isolation hazard — refuse instead
-pub async fn claim_interrupted_run(state: &AppState, run: &mut WorkflowRun) -> Result<()> {
+pub async fn claim_interrupted_run(
+    state: &AppState,
+    run: &mut WorkflowRun,
+    retry_uncertain_effect: bool,
+) -> Result<()> {
     use anyhow::anyhow;
     if run.run_type == "subworkflow" || run.parent_run_id.is_some() {
         return Err(anyhow!(
@@ -2458,6 +2708,16 @@ pub async fn claim_interrupted_run(state: &AppState, run: &mut WorkflowRun) -> R
                 ws
             ));
         }
+    }
+    if let Some(intent) = uncertain_side_effect_intent(run) {
+        if !retry_uncertain_effect {
+            return Err(anyhow!(
+                "Step '{}' ({}) started before the crash, but its external effect has no durable result. Refusing an automatic replay; the operator must explicitly confirm retry_uncertain_effect.",
+                intent.step_name,
+                intent.step_type
+            ));
+        }
+        run.state.remove(UNCERTAIN_SIDE_EFFECT_STATE_KEY);
     }
     claim_interrupted_run_row(state, run).await
 }
@@ -2842,6 +3102,16 @@ mod tests {
         let steps = vec![fake_step("a"), fake_step("b"), fake_step("c")];
         let results = vec![fake_result("a"), fake_result("b")];
         assert_eq!(next_step_index_for_resume(&steps, &results), 2);
+    }
+
+    #[test]
+    fn interrupted_resume_retries_trailing_running_placeholder() {
+        let steps = vec![fake_step("a"), fake_step("b"), fake_step("c")];
+        let mut running = fake_result("b");
+        running.status = RunStatus::Running;
+        running.started_at = Some(Utc::now());
+        let results = vec![fake_result("a"), running];
+        assert_eq!(next_step_index_for_resume(&steps, &results), 1);
     }
 
     #[test]
@@ -3382,6 +3652,52 @@ mod tests {
 
     // ─── WorkflowGuards (Phase 1 — 0.7.0) ────────────────────────────────
 
+    fn successful_step_outcome() -> StepOutcome {
+        StepOutcome {
+            result: empty_result(),
+            condition_action: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn in_flight_step_stops_when_absolute_deadline_is_reached() {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let result =
+            await_in_flight_step(std::future::pending(), &cancel, tokio::time::Instant::now())
+                .await;
+        assert!(matches!(result, InFlightStepOutcome::TimedOut));
+    }
+
+    #[tokio::test]
+    async fn explicit_cancel_wins_when_cancel_and_deadline_are_both_ready() {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        cancel.cancel();
+        let result =
+            await_in_flight_step(std::future::pending(), &cancel, tokio::time::Instant::now())
+                .await;
+        assert!(matches!(result, InFlightStepOutcome::Cancelled));
+    }
+
+    #[tokio::test]
+    async fn completed_step_wins_over_deadline_in_the_same_scheduler_turn() {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let result = await_in_flight_step(
+            async { successful_step_outcome() },
+            &cancel,
+            tokio::time::Instant::now(),
+        )
+        .await;
+        assert!(matches!(result, InFlightStepOutcome::Completed(_)));
+    }
+
+    #[test]
+    fn workflow_deadline_is_immediate_after_timeout_elapsed() {
+        let started_at = Utc::now() - chrono::Duration::seconds(61);
+        let before = tokio::time::Instant::now();
+        let deadline = workflow_timeout_deadline(started_at, 60, Utc::now());
+        assert!(deadline <= before + std::time::Duration::from_millis(5));
+    }
+
     #[test]
     fn workflow_guards_default_resolves_to_backend_constants() {
         let g = WorkflowGuards::default().resolved();
@@ -3738,6 +4054,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn execute_run_finishes_when_the_sse_receiver_stays_full() {
+        let (state, tokens, agents) = test_state_and_configs();
+        let mut workflow = make_workflow_with_artifacts(Default::default());
+        workflow.id = "wf-full-sse".into();
+        workflow.steps = vec![
+            json_data_step("first", serde_json::json!({ "n": 1 })),
+            json_data_step("second", serde_json::json!({ "n": 2 })),
+        ];
+        let mut run = pending_run("run-full-sse", &workflow.id);
+        insert_wf_and_run(&state, &workflow, &run).await;
+
+        // Capacity one and an intentionally alive, non-consuming receiver:
+        // the first event fills the channel and every later event must drop.
+        let (events_tx, mut events_rx) = tokio::sync::mpsc::channel(1);
+        execute_run(
+            state.clone(),
+            &workflow,
+            &mut run,
+            &tokens,
+            &agents,
+            Some(events_tx),
+            None,
+            None,
+        )
+        .await
+        .expect("SSE backpressure must not affect workflow execution");
+
+        assert_eq!(run.status, RunStatus::Success);
+        assert!(matches!(
+            events_rx.try_recv(),
+            Ok(RunEvent::StepStart { .. })
+        ));
+        assert!(
+            events_rx.try_recv().is_err(),
+            "events after the full buffer are best-effort and may be dropped"
+        );
+        let persisted = state
+            .db
+            .with_conn(|conn| crate::db::workflows::get_run(conn, "run-full-sse"))
+            .await
+            .expect("read persisted run after saturated SSE")
+            .expect("persisted run exists");
+        assert_eq!(
+            persisted.status,
+            RunStatus::Success,
+            "the database remains the source of truth when SSE events drop"
+        );
+    }
+
+    #[test]
+    fn emitting_to_a_dropped_sse_receiver_is_a_noop() {
+        let (events_tx, events_rx) = tokio::sync::mpsc::channel(1);
+        drop(events_rx);
+
+        try_emit_run_event(
+            Some(&events_tx),
+            RunEvent::RunDone {
+                status: RunStatus::Success,
+            },
+        );
+
+        assert!(events_tx.is_closed());
+    }
+
+    #[tokio::test]
     async fn execute_run_drives_notify_chain_against_test_only_loopback_policy() {
         let received = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::<(String, String)>::new()));
         let received_by_server = received.clone();
@@ -3836,6 +4217,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn execute_run_stops_an_in_flight_notify_at_the_absolute_deadline() {
+        let app = axum::Router::new().route(
+            "/slow",
+            axum::routing::post(|| async {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                axum::Json(serde_json::json!({ "too_late": true }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind slow local webhook");
+        let port = listener.local_addr().expect("local address").port();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve slow local webhook");
+        });
+
+        let (state, tokens, agents) = test_state_and_configs();
+        let mut workflow = make_workflow_with_artifacts(Default::default());
+        workflow.id = "wf-timeout-in-flight".into();
+        workflow.guards = Some(WorkflowGuards {
+            timeout_seconds: Some(1),
+            ..WorkflowGuards::default()
+        });
+        workflow.steps = vec![notify_step(
+            "slow_notify",
+            format!("http://127.0.0.1:{port}/slow"),
+            "{}",
+        )];
+        let mut run = pending_run("run-timeout-in-flight", &workflow.id);
+        insert_wf_and_run(&state, &workflow, &run).await;
+
+        let started = tokio::time::Instant::now();
+        execute_run_with_notify_policy(
+            state.clone(),
+            &workflow,
+            &mut run,
+            &tokens,
+            &agents,
+            None,
+            None,
+            None,
+            NotifySecurityPolicy::AllowLoopbackForTests,
+        )
+        .await
+        .expect("timeout is a terminal run outcome, not an executor error");
+        server.abort();
+
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "the runner must drop the in-flight HTTP future at its deadline"
+        );
+        assert_eq!(run.status, RunStatus::StoppedByGuard);
+        assert_eq!(run.step_results.len(), 1);
+        assert_eq!(run.step_results[0].status, RunStatus::StoppedByGuard);
+        assert_eq!(run.step_results[0].step_name, "slow_notify");
+
+        let persisted = state
+            .db
+            .with_conn(|conn| crate::db::workflows::get_run(conn, "run-timeout-in-flight"))
+            .await
+            .expect("read persisted timeout run")
+            .expect("persisted timeout run exists");
+        assert_eq!(persisted.status, RunStatus::StoppedByGuard);
+        assert_eq!(persisted.step_results.len(), 1);
+        assert_eq!(persisted.step_results[0].status, RunStatus::StoppedByGuard);
+    }
+
+    #[tokio::test]
     async fn execute_run_records_failure_when_a_step_fails() {
         // A JsonData step with no payload fails (its executor returns a
         // failing StepResult). The orchestrator must surface that as a failed
@@ -3907,6 +4358,125 @@ mod tests {
     }
 
     #[test]
+    fn side_effect_journal_classification_is_explicit() {
+        for step_type in [
+            StepType::ApiCall,
+            StepType::BatchApiCall,
+            StepType::Notify,
+            StepType::Exec,
+        ] {
+            assert!(
+                uncertain_side_effect_type(&step_type).is_some(),
+                "{step_type:?} must fail closed after an uncertain crash"
+            );
+        }
+        for step_type in [
+            StepType::Agent,
+            StepType::BatchQuickPrompt,
+            StepType::Gate,
+            StepType::JsonData,
+            StepType::SubWorkflow,
+        ] {
+            assert!(
+                uncertain_side_effect_type(&step_type).is_none(),
+                "{step_type:?} must not acquire the mechanical-effect marker"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn uncertain_api_notify_and_exec_steps_refuse_automatic_resume() {
+        let (state, _tokens, _agents) = test_state_and_configs();
+
+        for (index, step_type) in [StepType::ApiCall, StepType::Notify, StepType::Exec]
+            .into_iter()
+            .enumerate()
+        {
+            let workflow_id = format!("wf-uncertain-{index}");
+            let run_id = format!("run-uncertain-{index}");
+            let mut workflow = make_workflow_with_artifacts(Default::default());
+            workflow.id = workflow_id.clone();
+            let mut step = fake_step(&format!("effect-{index}"));
+            step.step_type = step_type;
+            workflow.steps = vec![step.clone()];
+            let mut run = pending_run(&run_id, &workflow_id);
+            run.status = RunStatus::Running;
+            insert_wf_and_run(&state, &workflow, &run).await;
+
+            assert!(record_side_effect_intent(&mut run, &step, 0).unwrap());
+            let snapshot = crate::db::workflows::RunProgressSnapshot::from_run(&run);
+            let interrupted_id = run_id.clone();
+            state
+                .db
+                .with_conn(move |conn| {
+                    assert!(crate::db::workflows::update_run_progress(conn, snapshot)?);
+                    assert!(crate::db::workflows::claim_run_status(
+                        conn,
+                        &interrupted_id,
+                        &RunStatus::Running,
+                        &RunStatus::Interrupted,
+                    )?);
+                    Ok(())
+                })
+                .await
+                .unwrap();
+
+            let read_id = run_id.clone();
+            let mut interrupted = state
+                .db
+                .with_conn(move |conn| crate::db::workflows::get_run(conn, &read_id))
+                .await
+                .unwrap()
+                .expect("interrupted run exists");
+            let error = claim_interrupted_run(&state, &mut interrupted, false)
+                .await
+                .expect_err("uncertain external effect must not replay automatically");
+            assert!(error.to_string().contains("Refusing an automatic replay"));
+
+            let verify_id = run_id.clone();
+            let persisted = state
+                .db
+                .with_conn(move |conn| crate::db::workflows::get_run(conn, &verify_id))
+                .await
+                .unwrap()
+                .expect("refused run remains durable");
+            assert_eq!(persisted.status, RunStatus::Interrupted);
+            assert!(
+                persisted
+                    .state
+                    .contains_key(UNCERTAIN_SIDE_EFFECT_STATE_KEY),
+                "the unresolved marker remains available for the operator"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_uncertain_retry_is_still_claimed_exactly_once() {
+        let (state, _tokens, _agents) = test_state_and_configs();
+        let mut workflow = make_workflow_with_artifacts(Default::default());
+        workflow.id = "wf-uncertain-retry".into();
+        let mut step = fake_step("notify-once");
+        step.step_type = StepType::Notify;
+        workflow.steps = vec![step.clone()];
+        let mut run = pending_run("run-uncertain-retry", &workflow.id);
+        run.status = RunStatus::Interrupted;
+        assert!(record_side_effect_intent(&mut run, &step, 0).unwrap());
+        insert_wf_and_run(&state, &workflow, &run).await;
+
+        let mut first = run.clone();
+        let mut second = run;
+        let first_result = claim_interrupted_run(&state, &mut first, true).await;
+        let second_result = claim_interrupted_run(&state, &mut second, true).await;
+
+        assert!(first_result.is_ok());
+        assert!(second_result.is_err());
+        assert!(
+            !first.state.contains_key(UNCERTAIN_SIDE_EFFECT_STATE_KEY),
+            "the winning explicit retry clears the marker atomically with its claim"
+        );
+    }
+
+    #[test]
     fn record_step_completion_seeds_ctx_from_the_snapshot() {
         // Codex review (stab-1 blocker): the ctx was seeded BEFORE the
         // snapshot filled step_agent/step_model → `{{steps.X.agent}}` was
@@ -3956,8 +4526,8 @@ mod tests {
         // decides.
         let mut first_snapshot = run.clone();
         let mut second_snapshot = run.clone();
-        let first = claim_interrupted_run(&state, &mut first_snapshot).await;
-        let second = claim_interrupted_run(&state, &mut second_snapshot).await;
+        let first = claim_interrupted_run(&state, &mut first_snapshot, false).await;
+        let second = claim_interrupted_run(&state, &mut second_snapshot, false).await;
         assert!(first.is_ok(), "first caller wins the claim: {first:?}");
         let err = second.expect_err("second caller must lose").to_string();
         assert!(
@@ -3988,7 +4558,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            let err = claim_interrupted_run(&state, &mut run)
+            let err = claim_interrupted_run(&state, &mut run, false)
                 .await
                 .expect_err("non-Interrupted runs are not resumable")
                 .to_string();
@@ -4021,7 +4591,7 @@ mod tests {
         child.status = RunStatus::Interrupted;
         child.run_type = "subworkflow".into();
         child.parent_run_id = Some("run-parent".into());
-        let err = claim_interrupted_run(&state, &mut child)
+        let err = claim_interrupted_run(&state, &mut child, false)
             .await
             .unwrap_err()
             .to_string();
@@ -4033,7 +4603,7 @@ mod tests {
         let mut batch = pending_run("run-batch", "wf-x");
         batch.status = RunStatus::Interrupted;
         batch.run_type = "batch".into();
-        let err = claim_interrupted_run(&state, &mut batch)
+        let err = claim_interrupted_run(&state, &mut batch, false)
             .await
             .unwrap_err()
             .to_string();
@@ -4042,7 +4612,7 @@ mod tests {
         let mut gone = pending_run("run-gone-ws", "wf-x");
         gone.status = RunStatus::Interrupted;
         gone.workspace_path = Some("/nonexistent/kronn-worktree-a2".into());
-        let err = claim_interrupted_run(&state, &mut gone)
+        let err = claim_interrupted_run(&state, &mut gone, false)
             .await
             .unwrap_err()
             .to_string();
@@ -4105,7 +4675,7 @@ mod tests {
         run.workspace_path = Some(preserved_path.clone());
         insert_wf_and_run(&state, &wf, &run).await;
 
-        claim_interrupted_run(&state, &mut run)
+        claim_interrupted_run(&state, &mut run, false)
             .await
             .expect("claim");
         resume_interrupted_run(state.clone(), &wf, &mut run, &tokens, &agents, None)
@@ -4140,7 +4710,7 @@ mod tests {
         run.state.insert("survivor".into(), "kept".into());
         insert_wf_and_run(&state, &wf, &run).await;
 
-        claim_interrupted_run(&state, &mut run)
+        claim_interrupted_run(&state, &mut run, false)
             .await
             .expect("claim");
         resume_interrupted_run(state.clone(), &wf, &mut run, &tokens, &agents, None)

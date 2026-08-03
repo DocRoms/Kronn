@@ -1,4 +1,4 @@
-import { useCallback, useRef } from 'react';
+import { useCallback, useLayoutEffect, useRef } from 'react';
 
 /**
  * Buffer high-frequency stream chunks per key and flush them on the next
@@ -23,7 +23,9 @@ export function useRafBatchedStream(
   const bufferRef = useRef<Record<string, string>>({});
   const rafIdRef = useRef<number | null>(null);
   const flushRef = useRef(flush);
-  flushRef.current = flush;
+  useLayoutEffect(() => {
+    flushRef.current = flush;
+  }, [flush]);
 
   const flushBuffer = useCallback(() => {
     rafIdRef.current = null;

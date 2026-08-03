@@ -22,7 +22,7 @@ import { STT_MODELS, getSttModelId, setSttModelId } from '../lib/stt-models';
 import { TTS_VOICES, getTtsVoiceId, setTtsVoiceId } from '../lib/tts-models';
 import { setAuthToken } from '../lib/api';
 import { useTheme, type ThemeMode } from '../lib/ThemeContext';
-import { useLayoutDensity } from '../lib/LayoutDensityContext';
+import { useLayoutDensity } from '../lib/layoutDensity';
 import { AgentsSection } from '../components/settings/AgentsSection';
 import { HostDiscoverySection } from '../components/settings/HostDiscoverySection';
 import { TourProgressCta } from '../components/tour/TourProgressCta';
@@ -293,11 +293,14 @@ export function SettingsPage({
   const [serverMaxAgents, setServerMaxAgents] = useState(5);
   const [serverStallTimeout, setServerStallTimeout] = useState(5);
   const [serverDebugMode, setServerDebugMode] = useState(false);
+  const [discussionNotesEnabled, setDiscussionNotesEnabled] = useState(true);
   // True after the user just toggled debug_mode. Shows a "restart required"
   // callout because `tracing_subscriber`'s `EnvFilter` is frozen at startup
   // and the new level only kicks in on the next backend restart.
   const [debugModeNeedsRestart, setDebugModeNeedsRestart] = useState(false);
-  const [authToken, setAuthTokenState] = useState<string | null>(null);
+  const [authToken, setAuthTokenState] = useState<string | null>(() => (
+    localStorage.getItem('kronn_auth_token')
+  ));
   const [authVisible, setAuthVisible] = useState(false);
 
   // Internal API calls
@@ -313,16 +316,11 @@ export function SettingsPage({
       setServerMaxAgents(cfg.max_concurrent_agents);
       setServerStallTimeout(cfg.agent_stall_timeout_min ?? 5);
       setServerDebugMode(cfg.debug_mode ?? false);
+      setDiscussionNotesEnabled(cfg.discussion_notes_enabled ?? true);
     }
     return cfg;
   }), []);
 
-  // Auth token is loaded from localStorage (set when user activates auth).
-  // No need to fetch from backend — it's only returned once at activation.
-  useEffect(() => {
-    const stored = localStorage.getItem('kronn_auth_token');
-    if (stored) setAuthTokenState(stored);
-  }, []);
   useApi(() => configApi.getScanDepth().then(d => { if (d != null) setScanDepth(d); return d; }), []);
   useApi(() => configApi.getScanPaths().then(p => { if (p) setScanPaths(p); return p; }), []);
   useApi(() => configApi.getScanIgnore().then(p => { if (p) setScanIgnore(p); return p; }), []);
@@ -1447,6 +1445,38 @@ export function SettingsPage({
           <div className="flex-row gap-4 set-section-header-lg">
             <Server size={14} className="text-accent" />
             <span className="font-semibold text-lg">{t('config.server')}</span>
+          </div>
+
+          <div className="mb-8">
+            <div className="flex-row gap-3 mb-3">
+              <MessageSquare size={12} className="text-tertiary" />
+              <span className="label" style={{ marginBottom: 0 }}>{t('settings.discussionNotes')}</span>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={discussionNotesEnabled}
+              className="set-agent-access-switch"
+              onClick={async () => {
+                const previous = discussionNotesEnabled;
+                const next = !previous;
+                setDiscussionNotesEnabled(next);
+                try {
+                  await configApi.setServerConfig({ discussion_notes_enabled: next });
+                } catch (error) {
+                  setDiscussionNotesEnabled(previous);
+                  toast(t('common.actionFailed', userError(error)), 'error');
+                }
+              }}
+            >
+              <span className="set-toggle-track" data-on={discussionNotesEnabled}>
+                <span className="set-toggle-thumb" data-on={discussionNotesEnabled} style={{ left: discussionNotesEnabled ? 16 : 1 }} />
+              </span>
+              <span className={discussionNotesEnabled ? 'text-accent' : 'text-muted'}>
+                {discussionNotesEnabled ? t('config.enabled') : t('config.disabled')}
+              </span>
+            </button>
+            <p className="text-muted text-xs mt-2">{t('settings.discussionNotesHint')}</p>
           </div>
 
           {/* Auth Token */}

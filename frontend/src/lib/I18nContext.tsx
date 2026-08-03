@@ -1,5 +1,12 @@
-import { createContext, useContext, useState, useCallback, useEffect, type ReactNode } from 'react';
-import { type UILocale, getUILocale, setUILocale as persistLocale, t } from './i18n';
+import { createContext, useContext, useState, useCallback, useEffect, useRef, type ReactNode } from 'react';
+import {
+  type UILocale,
+  getUILocale,
+  isUILocale,
+  loadLocale,
+  setUILocale as persistLocale,
+  t,
+} from './i18n';
 import { config as configApi } from './api';
 
 interface I18nContextValue {
@@ -14,25 +21,26 @@ const I18nContext = createContext<I18nContextValue>({
   t: (key) => key,
 });
 
-const isValidLocale = (s: unknown): s is UILocale =>
-  s === 'fr' || s === 'en' || s === 'es';
-
 export function I18nProvider({ children }: { children: ReactNode }) {
   // Initial render: localStorage wins over "fr" default for snappy first paint.
   // The backend fetch below then corrects the value if the two disagree —
   // which is the scenario that bit Marie on Tauri Windows (WebView2 wiped
   // localStorage, so getUILocale() returned 'fr' even though backend had 'en').
   const [locale, setLocaleState] = useState<UILocale>(getUILocale);
+  const localeRequestRef = useRef(0);
 
   // Fetch the backend-stored UI locale once at mount and adopt it if it
   // differs from what localStorage returned. localStorage is also updated
   // so the next mount starts with the right value even before the fetch.
   useEffect(() => {
     let cancelled = false;
+    const requestId = ++localeRequestRef.current;
     configApi.getUiLanguage()
-      .then(backendLocale => {
-        if (cancelled) return;
-        if (isValidLocale(backendLocale) && backendLocale !== locale) {
+      .then(async backendLocale => {
+        if (cancelled || requestId !== localeRequestRef.current) return;
+        if (isUILocale(backendLocale) && backendLocale !== locale) {
+          await loadLocale(backendLocale);
+          if (cancelled || requestId !== localeRequestRef.current) return;
           persistLocale(backendLocale);
           setLocaleState(backendLocale);
         }
@@ -49,10 +57,15 @@ export function I18nProvider({ children }: { children: ReactNode }) {
   const setLocale = useCallback((l: UILocale) => {
     // Write both: localStorage for immediate re-render + fast reload,
     // backend for cross-reboot persistence (survives WebView2 wipes).
-    persistLocale(l);
-    setLocaleState(l);
-    configApi.saveUiLanguage(l).catch(e => {
-      console.warn('Failed to persist UI locale to backend:', e);
+    const requestId = ++localeRequestRef.current;
+    void loadLocale(l).then(() => {
+      if (requestId !== localeRequestRef.current) return;
+      persistLocale(l);
+      setLocaleState(l);
+      return configApi.saveUiLanguage(l);
+    }).catch(e => {
+      if (requestId !== localeRequestRef.current) return;
+      console.warn('Failed to load or persist UI locale:', e);
     });
   }, []);
 

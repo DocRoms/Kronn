@@ -7,6 +7,254 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.9.3]
+
+### Fixed
+
+- Discussion note visibility now uses an eye toggle beside the composer note
+  action instead of floating a sticky control over the message stream. The
+  portability E2E follows the header action panel's button semantics after its
+  accessibility refactor.
+- Discussion sidebars now group repeated batch runs under their originating
+  Quick Prompt instead of repeating the same large heading for every run.
+  The hierarchy stays identical for one or many runs — Quick Prompt, run, then
+  child discussions — while the lightweight, case-preserving prompt name and
+  a compact second line expose cumulative run/discussion totals. Prompt titles
+  now stay visually dominant over smaller, regular-weight run timestamps. Each
+  execution keeps only a timestamp, short run-id chip and progress row, with
+  redundant indentation removed so the row fits narrow sidebars; retry, review,
+  parent-workflow navigation and deletion move into one contextual menu.
+  Completed child discussions stay collapsed until requested, while active and
+  running batches still open automatically. Run expansion stays session-local
+  instead of accumulating ephemeral ids in preferences, and both sidebar
+  action disclosures move/restore keyboard focus without claiming unsupported
+  ARIA menu behavior.
+- Workflow automation now exposes complete, ordered Batch Quick Prompt results
+  to downstream steps without silently truncating large reviewer payloads, and
+  reports child token measurement as measured, partial or unavailable instead
+  of presenting an unknown cost as zero. Running steps persist their true start
+  time and current-step state, interrupted runs accept both an empty resume body
+  and `{}`, and API plugin failures identify stale configs, project-scope
+  mismatches, MCP/CLI-only plugins or unreadable credentials. MCP discovery
+  snapshots now include `captured_at` and document the exact `servers_with_api`
+  gate; SubWorkflow foreach execution is explicitly sequential because its
+  shared worktree cannot be parallelized safely.
+- The guided tour once again walks all 24 steps after the compact discussion
+  sidebar redesign: it opens the seeded demo through the row's real accessible
+  button, records every displayed step, and keeps the centered welcome card
+  inside half-screen windows. The discussion WebSocket indicator is also
+  exposed as a named status instead of an invalid labelled generic element.
+- Project details once again expose stale-document refresh actions and the live
+  audit step counter after the master/detail redesign. Automation navigation,
+  discussion portability and session/handoff E2E paths now tolerate real
+  running workflows and the intentional smart/canonical sidebar duplicates.
+- Addressing a joined CLI is no longer trapped by the short provider alias.
+  The mention menu shows each joined CLI under its real room alias
+  (`@codex-cli`, `@codex-cli-2`, …) instead of the bare provider trigger it
+  shared with the punctual agent, and a reply that answers a CLI-authored
+  message while mentioning the bare alias of that same provider is refused
+  with the exact corrective alias — the one case where the intent is
+  unambiguous. Identities are never substituted silently: the discussion
+  agent, the punctual agent and each joined CLI remain distinct, deterministic
+  targets, documented in the new identity matrix
+  (`docs/architecture/agent-identities.md`).
+
+### Added
+
+- Established the Token Economics baseline contract and its collector
+  (`backend/scripts/token_economics.py`). The tool aggregates local, read-only
+  usage metadata for Claude Code, Codex, Copilot, Kronn telemetry and RTK,
+  separating non-cached input, cache write/read, output, reasoning and an
+  estimated-cost placeholder; unavailable or insufficiently granular values
+  stay `null` and are never recorded as zero, and raw traffic is never
+  presented as billing. Telemetry
+  records are parsed locally in memory, while prompt content, secrets and file
+  bodies are never stored or exported. Claude streaming snapshots are
+  canonicalized without double-counting; Codex rollouts are deduplicated by
+  root thread and window delta; Copilot accepts both SQLite and ISO timestamps
+  with explicit coverage gaps; RTK includes complete UTC days only and fails
+  closed on malformed data. Canonical scenarios reject free-form export
+  labels and expose a completed-task denominator with per-agent normalized
+  KPIs. The deterministic, pseudonymized 30-day baseline is versioned under
+  `docs/research/` and validated by a strict schema: every null has a typed
+  reason, fixed-window coverage cannot drift when later events arrive, Codex
+  forks use ancestry-coherent deltas (divergence fails closed), and replay-only
+  forks are not counted as active. Old root sessions without a pre-window
+  counter boundary and timestamp-less Codex events on partial UTC boundary
+  days are omitted instead of being charged as in-window lifetime usage.
+  Structured data-gap IDs now back every unavailable/granularity null, Kronn's
+  traced-reply percentage is recomputed from the untraced counts, and scenario
+  canonicality is a strict boolean. Unreadable Claude or Codex telemetry now
+  fails its source closed, invalid JSON is disclosed instead of becoming a
+  clean measured zero when it is attributable to the requested window, and
+  future or timestamp-less later corruption cannot mutate a fixed historical
+  report. Repository-share nulls distinguish an unrequested filter from an
+  undefined zero-traffic ratio, and positive traffic is checked against its
+  activity counts and top-session ratios. Privacy-canary regressions cover
+  message text, tool inputs, local paths and session/request identifiers.
+  Contract: `docs/design/token-economics-baseline.md`.
+
+### Fixed
+
+- Discussion timelines now show subtle localized day separators, including a
+  dedicated “Today” label, without generating empty dates. Consecutive tool
+  calls that cross local midnight are split so the boundary remains visible.
+- Message editing now opens a full-width, comfortably tall editor instead of
+  shrinking to the intrinsic width of short messages. Long content scrolls in
+  a resizable area while save and cancel actions remain accessible on mobile.
+- Discussion headers now keep the conversation title on its own visible row.
+  The title edit action remains directly beside it, before contextual metadata.
+  Joined agents use a compact, horizontally scrollable participant strip; a
+  click opens their status, declared model and native resume action without
+  letting participant metadata cover the title or crowd narrow layouts.
+- The full audit now mechanically detects tracked package-manager caches,
+  runtime databases and agent-generated review/session outputs, injects a
+  bounded path list into the mandatory tech-debt pass and reports scan failures
+  instead of silently presenting them as clean. Untracked local artifacts,
+  documented Yarn zero-install caches and legitimate test fixtures remain out
+  of scope. Generated and binary artifacts use verifier-compatible bare-path
+  evidence instead of fabricated line-zero anchors; lossless Markdown escaping
+  preserves hostile filenames through rendering and disposition, and the Step
+  8 prompt carries the same repository-hygiene contract.
+- The repository root no longer ships agent session artifacts: the stray
+  `.pnpm-store/` database, eleven screenshot PNGs under `findings/` and two
+  raw session dumps are untracked, and `.gitignore` now covers the pnpm store
+  at every level plus the session-output paths. Merging this removes those
+  files from existing working trees — the pnpm store regenerates itself, and
+  anything worth keeping from `findings/` should be archived first.
+
+### Changed
+
+- Tightened the stateful-database E2E harness so live workflow activity no
+  longer turns Automation navigation into retries, guided-tour replay waits
+  for the mounted dashboard, and backend recovery is simulated locally. The
+  axe baseline was lowered to the measured release state and now rejects any
+  regression from 10 remaining serious contrast nodes (Projects 5, Plugins 1,
+  Automation 2, Settings 2); those nodes remain explicit accessibility debt,
+  not claimed fixes.
+- Playwright's billed real-agent canaries are now explicit opt-ins through
+  `KRONN_REAL_AGENT_E2E=1`. The default E2E regression command remains
+  deterministic and never launches every installed provider CLI or consumes
+  tokens merely because credentials happen to exist on the developer machine.
+- Began the contextual React warning cleanup without globally disabling any
+  rule. Ten isolated components now avoid synchronous state resets inside
+  effects; async viewer responses are keyed and generation-guarded so an older
+  search cannot replace the current result; source-tree retries recover their
+  loading and error states; local forms reset through component identity; and
+  the Quick Prompt diff helper has a Fast Refresh-safe module boundary. A
+  second tested batch isolates boot, Custom API, usage, Ollama and context
+  helpers from component-only modules; updates latest-callback refs during the
+  layout phase; performs initial async reads directly with unmount guards; and
+  preserves stale data during refreshes. A third batch moves discussion,
+  message, workflow, API-helper and toast utilities behind pure module
+  boundaries, eliminating the remaining Fast Refresh and non-null assertion
+  warnings. Together these batches reduce the frontend lint baseline from 164
+  to 92 warnings.
+- Split the 3,098-key UI dictionaries into lazy FR/EN/ES chunks. Kronn loads
+  only the active UI locale before first paint and preloads another locale
+  before a UI or agent-output language switch; the French initial i18n payload
+  falls from 239.17 kB to 89.16 kB gzip (about 63%) while parity lint and tests
+  continue to cover all languages. Added a bounded extraction roadmap for the
+  workflow wizard, workflow API handlers and anti-hallucination core, plus a
+  changelog rotation contract that preserves release-version checks.
+- `disc_wait_for_peer` now waits outside the model loop, indefinitely by
+  default. The MCP bridge chains server long-polls itself — honoring server
+  pacing, keeping presence honest, and emitting MCP progress heartbeats — and
+  returns to the model only on a real message, an interruption, or an OPT-IN
+  budget (`max_total_secs` / `KRONN_WAIT_TOTAL_SECS`). A quiet room therefore
+  no longer makes the bridge itself replay the CLI's full native context after
+  every server poll, and every immediate re-call instruction was removed from
+  the tool guidance and the join protocol. This is not yet a universal
+  end-to-end zero-turn guarantee: Claude Code backgrounds an MCP tool call at
+  120 seconds and emits a model-visible task notification. Agents are told not
+  to stack a second wait while that background task is still running; a true
+  zero-wake wait on that host requires a push channel outside tool calls and is
+  tracked after 0.9.3. Control-plane traffic (`ping`,
+  `tools/list`, notifications) is served inline during the wait without waking
+  the model; only a queued `tools/call` or stdin EOF preempts it. Cancellation
+  is category-aware: a request cancelled before dispatch never executes, a
+  mutation that already ran keeps its terminal receipt to prevent duplicating
+  retries, and a cancelled wait suppresses its response while un-staging its
+  read cursors so the next call can never acknowledge a delivery the model
+  never saw. Chained append waits keep a single short poll so posting stays
+  responsive. Requires reloading the kronn-internal MCP in connected CLIs to
+  take effect.
+- Multi-agent rooms now separate WAKING from SEEING. A joined CLI is woken
+  only by a turn addressed to its exact session (or an untargeted human turn
+  in a room whose joined CLIs are the designated responders); untargeted room
+  traffic and turns addressed to another responder no longer wake it — they
+  accumulate and attach to its next legitimate wake as bounded, explicitly
+  flagged `awareness` context, so no participant ever loses room history to
+  save tokens. Delivery is acknowledged in two phases (staged at emission,
+  committed by the model's next tool call, echoed as `ack_awareness_upto`):
+  the durable per-session cursor advances only on confirmed consumption, so a
+  cancelled call or a bridge crash replays the batch instead of skipping it.
+  Delivery follows a durable scan/offer/ack contract: wake responses persist
+  the offered high-water mark and acknowledgements are clamped to it, so an
+  oversized or racing ack can never skip a turn that was never shown. This
+  supersedes the interim lapsed-session catch-up developed during 0.9.3.
+- Added out-of-context discussion notes for humans and agents. Notes stay in
+  their chronological timeline without waking an agent or entering ordinary
+  prompts, room delivery, search, summaries or unread/dispatch state. They can
+  be shown or hidden globally, are available through a bounded
+  `disc_note_list` MCP read, preserve author, attachment, export/import and
+  federation metadata, and remain explicitly non-secret routing metadata.
+- Made direct Planning task creation safely retryable. `task_create` now accepts
+  a durable idempotency key, derives one from stable message provenance in the
+  MCP bridge, returns the existing task without duplicating its `created` event,
+  and rejects reuse with different content. Keys never derive from titles, so
+  two distinct tasks may still share a title. Agent instructions now require a
+  fresh `plan_get` immediately before direct creation to expose peer writes.
+- Added an explicit, fail-closed handoff for durable CLI discussion sessions.
+  After joining a new room, an agent can transfer its reload ownership only by
+  naming the exact previous room and confirming the move. Kronn atomically
+  closes the old auditable binding, opens the new one, rejects stale ownership,
+  and makes retries idempotent; `disc_find_by_session` then resumes the new room
+  after an MCP reload.
+- Added durable multi-worktree discussions for joined CLI agents. Each session
+  can declare its registered Git worktree through `kronn-internal`; Kronn
+  verifies the project repository, canonical path, branch and HEAD, prevents
+  cross-discussion ownership conflicts, and can link the checkout to a Planning
+  task. Discussion headers and task details expose the association, while the
+  Git panel explicitly selects the worktree used for status, diff, commit,
+  push, pull-request and terminal actions. Existing Isolated discussions are
+  migrated additively and keep their managed lock/unlock behavior. MCP
+  declarations report dirty/concurrent/invalid ownership blockers as structured
+  data, and a missing selected worktree fails visibly instead of falling back
+  to a different checkout.
+- Started the maintenance train with a synchronized `0.9.3` version bump and
+  an archived dependency, lint and security baseline.
+- Refreshed the compatible desktop/Tauri Rust dependency graph and upgraded the
+  spreadsheet reader from Calamine 0.35 to 0.36.
+- Adopted stable TypeScript 7.0.2 as the default native frontend compiler and
+  kept TypeScript 6 as an explicit API-compatibility sidecar for
+  typescript-eslint. Both compiler paths are CI-gated and a manifest regression
+  test prevents accidental alias drift. The frontend and root JavaScript
+  dependencies were refreshed to their current compatible releases, including
+  React, Playwright, ESLint, the Vite React plugin and the Tauri JavaScript API;
+  the Playwright CI image now matches the resolved runner version.
+- Added Oxlint as the fast first-pass frontend lint gate while retaining ESLint
+  as the authoritative rule set and its 92-warning ratchet. The measured pilot
+  and dependency/security outcome are archived in the 0.9.3 maintenance
+  baseline.
+- Hardened workflow liveness and crash recovery: absolute run deadlines now
+  stop steps already in flight, SSE backpressure can no longer suspend business
+  execution, and mechanically side-effecting steps journal a durable intent so
+  restart/resume fails closed until the operator explicitly accepts a replay.
+- Added durable, read-only dependency monitoring per project. The Overview
+  shows the last check and next due date, supports weekly, fortnightly, monthly
+  or manual cadence, persists results across restarts and invalidates them when
+  manifests change. A reusable weekly review also runs before every desktop
+  release, with security alerts kept visibly separate from ordinary version
+  drift; neither path ever applies an upgrade automatically.
+
+### Security
+
+- Removed the temporary `quick-xml` audit exceptions after upgrading every
+  desktop path to the patched 0.41 line, resolving RUSTSEC-2026-0194 and
+  RUSTSEC-2026-0195 while retaining the office-document size guard as defense
+  in depth.
+
 ## [0.9.2] - 2026-07-30
 
 ### Added

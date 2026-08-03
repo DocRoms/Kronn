@@ -467,6 +467,7 @@ fn portable_task_request(
 ) -> CreatePlanningTaskRequest {
     CreatePlanningTaskRequest {
         title: task.summary.title.clone(),
+        idempotency_key: None,
         description: task.description.clone(),
         status: task.summary.status,
         priority: task.summary.priority,
@@ -951,6 +952,7 @@ fn tour_demo_envelope(ui_language: &str) -> DiscussionExportEnvelope {
             DiscussionMessage {
                 id: user_message_id.clone(),
                 role: crate::models::MessageRole::User,
+                channel: crate::models::MessageChannel::Main,
                 content: prompt.into(),
                 agent_type: None,
                 timestamp: created_at,
@@ -970,6 +972,7 @@ fn tour_demo_envelope(ui_language: &str) -> DiscussionExportEnvelope {
             DiscussionMessage {
                 id: preview_message_id,
                 role: crate::models::MessageRole::Agent,
+                channel: crate::models::MessageChannel::Main,
                 content: preview_content,
                 agent_type: Some(crate::models::AgentType::ClaudeCode),
                 timestamp: created_at + chrono::Duration::seconds(1),
@@ -1353,6 +1356,7 @@ mod tests {
                 let source_message = DiscussionMessage {
                     id: "portable-message".into(),
                     role: crate::models::MessageRole::User,
+                    channel: crate::models::MessageChannel::Main,
                     content: "Bonjour avec pièce jointe".into(),
                     agent_type: None,
                     timestamp: Utc::now(),
@@ -1405,6 +1409,7 @@ mod tests {
                     conn,
                     &CreatePlanningTaskRequest {
                         title: "Portable task".into(),
+                        idempotency_key: None,
                         description: "Task body".into(),
                         status: crate::models::PlanningTaskStatus::InProgress,
                         priority: crate::models::PlanningTaskPriority::High,

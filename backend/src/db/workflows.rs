@@ -480,6 +480,7 @@ pub fn create_batch_run(
                 lint_report: None,
                 id: Uuid::new_v4().to_string(),
                 role: MessageRole::User,
+                channel: crate::models::MessageChannel::Main,
                 content: item.prompt.clone(),
                 agent_type: None,
                 timestamp: now,

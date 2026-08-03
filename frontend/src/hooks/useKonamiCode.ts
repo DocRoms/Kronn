@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useLayoutEffect, useRef } from 'react';
 
 /** Classic Konami code — the NES up-up-down-down-left-right-left-right-B-A
  *  sequence. Kept as `KeyboardEvent.key` strings so we don't have to worry
@@ -23,7 +23,10 @@ const KONAMI_SEQUENCE = [
  *  still succeeds on the second attempt without needing to pause. */
 export function useKonamiCode(onUnlock: () => void): void {
   const onUnlockRef = useRef(onUnlock);
-  onUnlockRef.current = onUnlock;
+
+  useLayoutEffect(() => {
+    onUnlockRef.current = onUnlock;
+  }, [onUnlock]);
 
   useEffect(() => {
     let pos = 0;

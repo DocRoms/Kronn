@@ -47,6 +47,7 @@ test('enriched handoff carries the plan and the task appears in Focus', async ({
   expect(createdBody?.success).toBe(true);
   discId = createdBody?.data?.id;
   expect(discId).toBeTruthy();
+  if (!discId) throw new Error('discussion creation returned no id');
 
   const taskCreated = await request.post('/api/planning/tasks', {
     data: {
@@ -107,8 +108,7 @@ test('enriched handoff carries the plan and the task appears in Focus', async ({
 
   const dashboard = new DashboardPage(page);
   await dashboard.goto();
-  await dashboard.navDiscussions.click();
-  await page.getByRole('button', { name: new RegExp(title) }).click();
+  await dashboard.openDiscussion(discId);
   await page.locator('.disc-plan-btn').click();
   await expect(page.locator('.plan-timeline-section[data-kind="upcoming"]')).toContainText(taskTitle);
 });

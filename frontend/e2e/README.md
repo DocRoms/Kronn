@@ -108,6 +108,24 @@ Pourquoi pas tout stubber : ça forcerait à maintenir un mirror de tous les end
 
 Pourquoi stubber au minimum : sans ces 2 stubs le splash hang (axum middleware mutex sous concurrent browser load — à investiguer côté backend hors scope E2E).
 
+### Canaris avec de vrais agents
+
+La commande E2E standard ne lance jamais un CLI agent externe : ces scénarios
+dépendent des credentials, des rate limits et facturent de vrais tokens. Ils
+restent disponibles comme canaris explicitement opt-in :
+
+```bash
+KRONN_REAL_AGENT_E2E=1 pnpm exec playwright test \
+  e2e/specs/per-agent-mcp-introspection.spec.ts \
+  e2e/specs/codex-real-introspection.spec.ts \
+  e2e/specs/docroms-attachment-real.spec.ts \
+  e2e/specs/audit-launch-smoke.spec.ts
+```
+
+Sans cette variable, les canaris sont signalés comme `skipped`; les scénarios
+hermétiques couvrant le rendu, le routage MCP et les pièces jointes restent
+actifs dans `pnpm test:e2e`.
+
 ## Ajouter une nouvelle spec
 
 ```ts
@@ -142,10 +160,10 @@ pnpm test:e2e:debug -- smoke.spec.ts
 
 Les artifacts (screenshots / videos / traces) sont dans `test-results/` (gitignored). Trace zip dispo pour les retries via `playwright show-trace test-results/.../trace.zip`.
 
-## CI (à venir Sprint 1.5 J4)
+## CI
 
-Pas encore intégré dans `.github/workflows/ci-test.yml`. Quand ce sera le cas :
-- 1 job dédié `e2e-test` avec image Playwright officielle
-- Backend Rust spawné dans le job (cargo run --release avec KRONN_DATA_DIR temporaire)
-- Vite auto-spawné par Playwright
-- Artefacts (videos / traces) uploadés en cas d'échec
+La suite est intégrée à `.github/workflows/ci-test.yml` avec l'image Playwright
+officielle alignée sur `@playwright/test`. Le backend Rust et Vite sont démarrés
+dans le job, et les artefacts de diagnostic sont conservés en cas d'échec. Les
+canaris agents réels restent désactivés tant que le job ne fournit pas
+explicitement `KRONN_REAL_AGENT_E2E=1` et les credentials correspondants.

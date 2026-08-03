@@ -241,6 +241,7 @@ pub async fn bootstrap(
         lint_report: None,
         id: Uuid::new_v4().to_string(),
         role: MessageRole::User,
+        channel: MessageChannel::Main,
         content: bootstrap_prompt,
         agent_type: None,
         timestamp: now,

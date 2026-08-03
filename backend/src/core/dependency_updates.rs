@@ -175,6 +175,8 @@ pub async fn inspect_dependency_updates(root: &Path) -> DependencyUpdateSummary 
         total_major,
         checked_at: Utc::now(),
         cached: false,
+        monitoring_interval_days: Some(7),
+        next_check_at: None,
     }
 }
 

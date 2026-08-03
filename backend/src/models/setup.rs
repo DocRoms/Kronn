@@ -153,6 +153,11 @@ pub struct ServerConfig {
     /// (drain, don't capture). See docs/research/continual-learning-0.10.0-spec.md §0.
     #[serde(default)]
     pub continual_learning_enabled: bool,
+    /// Show the per-message out-of-context note control in discussion
+    /// composers. Enabled by default; turning it off hides the authoring
+    /// affordance without deleting existing notes.
+    #[serde(default = "default_true")]
+    pub discussion_notes_enabled: bool,
     /// Debug mode — when true, the tracing subscriber is initialized at
     /// `debug` level instead of `info`, producing significantly more
     /// output on stdout. Lets users diagnose agent detection / project
@@ -592,6 +597,8 @@ pub struct ServerConfigPublic {
     pub avatar_email: Option<String>,
     pub bio: Option<String>,
     pub debug_mode: bool,
+    /// Whether discussion composers expose the out-of-context note control.
+    pub discussion_notes_enabled: bool,
     /// 0.8.6 phase 4 — default model tier for new disc/QP/WF agent steps.
     /// Mirrored from `ServerConfig.default_model_tier` so the frontend
     /// can pre-fill the tier picker on creation forms without an extra
@@ -613,6 +620,8 @@ pub struct UpdateServerConfigRequest {
     pub avatar_email: Option<String>,
     pub bio: Option<String>,
     pub debug_mode: Option<bool>,
+    #[serde(default)]
+    pub discussion_notes_enabled: Option<bool>,
     /// 0.8.6 phase 4 — `Some(tier)` writes the new default ; `None`
     /// keeps the existing value (standard PATCH semantic across this
     /// struct).

@@ -1,5 +1,9 @@
 # Discussion agent routing
 
+> Identity & addressing reference: `docs/architecture/agent-identities.md`
+> (every addressable identity, its exact alias, wake/awareness/reply/reload
+> behaviour — KT-211).
+
 Kronn routes human turns to durable **identities**, not provider names. Three
 responders may all be Codex without being interchangeable:
 
@@ -58,17 +62,39 @@ same transaction, and the dispatcher's final claim also checks that native
 mode is still enabled.
 [src: file: backend/src/db/agent_dispatch.rs:279-343]
 
-Current bridges send their durable session id on every wait. For those callers,
-an explicitly targeted User **or Agent** turn is returned only when an exact
-`cli` target matches that session; native `agent` targets never wake a
-same-provider CLI by coincidence. Hidden turns still advance
-`latest_sort_order`, so an unrelated CLI neither wakes nor loops on the same
-invisible message. Untargeted Agent turns remain room-visible for collaboration.
-Legacy bridges without a session id retain the old awareness projection during
-rolling upgrades.
-[src: file: backend/src/api/disc_invite.rs:713-790]
-[src: file: backend/src/api/disc_invite.rs:920-1065]
-[src: file: backend/scripts/disc-introspection-mcp.py:4086-4160]
+Current bridges send their durable session id on every wait (resolved by
+session id alone when the provider is unknown). Waking and seeing are separate
+concerns for those callers. A session is WOKEN only by a turn whose exact
+`cli` target matches it, or by an untargeted human turn in a room whose joined
+CLIs are the designated responders (no native agent). Everything else —
+untargeted User and Agent traffic, turns addressed to another responder —
+never wakes it: it accumulates and attaches to its next legitimate wake as
+bounded `awareness: true` context (at most 20 per wake, overflow counted in
+`awareness_omitted` and re-attached later). `@` therefore picks who answers;
+it never makes a turn invisible to the other participants, and a quiet or
+awareness-only window does not make the bridge return on its own. Legacy
+bridges without a session id retain the old room-visible projection during
+rolling upgrades. Host runtimes can still impose their own wake semantics:
+Claude Code 2.x backgrounds a tool call at 120 seconds and exposes a
+model-visible task notification. That notification is not permission to stack
+a second wait while the first remains active; true zero-turn silence on such a
+host needs an out-of-band push capability.
+[src: file: backend/src/api/disc_invite.rs]
+[src: file: backend/scripts/disc-introspection-mcp.py]
+
+Awareness delivery follows a scan / offer / ack contract with two durable
+per-session cursors. When a wake response attaches a batch, the server
+persists the OFFER high-water mark (`awareness_offered_upto`, migration 106).
+The bridge stages that value at emission, commits it on the model's next tool
+call, and echoes it back as `ack_awareness_upto`; only then does the acked
+cursor (`user_catchup_cursor`) advance, clamped to the offer — so a cancelled
+call, a bridge crash, an oversized or racing ack can only cause a bounded
+replay, never a skipped turn. Message revision events ride the same backlog.
+New and migrated sessions start both cursors at the room's current tip.
+[src: file: backend/src/db/sql/105_user_turn_catchup.sql]
+[src: file: backend/src/db/sql/106_awareness_offered_cursor.sql]
+[src: file: backend/src/api/disc_invite.rs]
+[src: file: backend/scripts/disc-introspection-mcp.py]
 
 ## Queue, restart, and edit/resend
 

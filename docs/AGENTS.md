@@ -20,6 +20,12 @@
 > If no context file exists for an MCP, **proceed normally** — do not block on a missing doc.
 > (Each MCP tool ships its own `description` field via JSON-RPC `tools/list` ; that's the in-band contract. Context files are an additional, optional layer of project-specific guidance.)
 
+> **Discussion notes are routing metadata, not secrets.**
+> Messages on the `note` channel stay visible to humans but are excluded from
+> ordinary agent context and room delivery. Read them only on explicit request
+> through the bounded `disc_note_list` tool; see
+> [`operations/mcp-servers/kronn-internal.md`](operations/mcp-servers/kronn-internal.md#out-of-context-discussion-notes).
+
 **Unknown term?** → `docs/glossary.md` first.
 
 This folder (`docs/`) contains structured project context (for both humans and AI agents). Use paths relative to repo root.
@@ -215,7 +221,7 @@ After completing a task: if you discovered something non-obvious (a gotcha, a mi
 | Layer | Technology |
 |-------|------------|
 | Backend | Rust (axum 0.8, tokio 1.x, serde 1, anyhow 1, rusqlite 0.39, ts-rs 12, reqwest 0.13, calamine 0.34, pdf-extract 0.10) |
-| Frontend | React 19 + TypeScript 6 (Vite 8 / rolldown, Lucide icons 1.x, Node >= 24 LTS) |
+| Frontend | React 19 + stable TypeScript 7 native compiler; TypeScript 6 alias retained for API-dependent lint tooling (Vite 8 / rolldown, Lucide icons 1.x, Node >= 24 LTS) |
 | Styling | CSS tokens + utility classes + component classes (`src/styles/`). Inline `style={{}}` only for dynamic values. No CSS framework |
 | i18n | Custom lightweight system (fr/en/es), localStorage, no external lib |
 | Type bridge | ts-rs (Rust → TypeScript) |
@@ -267,6 +273,10 @@ GitHub Actions workflow (`.github/workflows/ci-test.yml`) triggered on push to `
 - `test-frontend`: tsc --noEmit + pnpm test (Node 24 LTS)
 - `test-shell`: make test-shell (bats)
 - `security-scan`: cargo audit + pnpm audit
+
+`.github/workflows/dependency-review.yml` also runs weekly, on demand, and as a
+required precursor to every tagged desktop build. It reports security audits
+separately from ordinary version drift and only uses read-only/dry-run commands.
 
 ### AI audit pipeline (4-state badge system)
 

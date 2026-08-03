@@ -6,6 +6,7 @@ import type {
   AgentDetection,
   AgentType,
   MessageTarget,
+  MessageChannel,
   ParticipantView,
   Skill,
   Directive,
@@ -21,7 +22,7 @@ import { audioBufferToFloat32, transcribeAudio } from '../lib/stt-engine';
 import { loadDraft, saveDraft, clearDraft } from '../lib/chat-drafts';
 import { quoteMultilinePaste } from '../lib/quoteMultilinePaste';
 import { formatRelativeTime } from '../lib/relativeTime';
-import { discussions as discussionsApi, autoTriggersApi } from '../lib/api';
+import { discussions as discussionsApi, autoTriggersApi, config as configApi } from '../lib/api';
 import { detectTriggeredSkills } from '../lib/autoTriggers';
 import {
   MESSAGE_SEND_SETTLED_EVENT,
@@ -37,7 +38,7 @@ import {
   StopCircle, RotateCcw, Loader2,
   Cpu, Mic, MicOff, Phone, PhoneOff,
   Volume2, VolumeX, Check, Zap, FileText, Paperclip, Image, Reply,
-  CircleHelp,
+  CircleHelp, Eye, EyeOff, StickyNote,
 } from 'lucide-react';
 import { useIsMobile } from '../hooks/useMediaQuery';
 import { composerMentions, targetsFromComposerText } from '../lib/messageTargets';
@@ -94,6 +95,7 @@ export interface ChatInputProps {
     targets?: MessageTarget[],
     targetAll?: boolean,
     replyToMessageId?: string,
+    channel?: MessageChannel,
   ) => void;
   onStop: () => void;
   onOrchestrate: (agents: AgentType[], rounds: number, skillIds: string[], directiveIds: string[]) => void;
@@ -112,6 +114,9 @@ export interface ChatInputProps {
   onQueueQP?: (qp: QuickPrompt) => void;
   onCancelQueuedQP?: () => void;
   replyTarget?: DiscussionMessage | null;
+  hasDiscussionNotes?: boolean;
+  showDiscussionNotes?: boolean;
+  onToggleDiscussionNotes?: () => void;
   onCancelReply?: () => void;
   toast: ToastFn;
   t: (key: string, ...args: (string | number)[]) => string;
@@ -147,6 +152,9 @@ export function ChatInput({
   onQueueQP,
   onCancelQueuedQP,
   replyTarget = null,
+  hasDiscussionNotes = false,
+  showDiscussionNotes = true,
+  onToggleDiscussionNotes,
   onCancelReply,
   toast,
   t,
@@ -171,12 +179,24 @@ export function ChatInput({
 
   // ─── Internal state ──────────────────────────────────────────────────────
   const [chatInput, setChatInput] = useState('');
+  const [discussionNotesEnabled, setDiscussionNotesEnabled] = useState(false);
+  const [sendAsNote, setSendAsNote] = useState(false);
   const [cliParticipants, setCliParticipants] = useState<ParticipantView[]>([]);
   const [nativeAgentDisabled, setNativeAgentDisabled] = useState<boolean | null>(null);
   const chatInputValueRef = useRef('');
   const chatInputHasText = chatInput.trim().length > 0;
   const chatInputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    configApi.getServerConfig()
+      .then(serverConfig => setDiscussionNotesEnabled(serverConfig.discussion_notes_enabled ?? true))
+      .catch(error => console.warn('fetch discussion note setting failed:', error));
+  }, []);
+
+  useEffect(() => {
+    setSendAsNote(false);
+  }, [discussion?.id]);
   const replyAuthor = useMemo(() => {
     if (!replyTarget) return '';
     if (replyTarget.agent_type) {
@@ -620,7 +640,10 @@ export function ChatInput({
     if (!discussion || !inputVal.trim() || sendInFlightRef.current) return;
     sendInFlightRef.current = true;
     const msg = inputVal.trim();
-    const { targets, targetAll } = targetsFromComposerText(msg, AGENT_MENTIONS);
+    const channel: MessageChannel = sendAsNote ? 'note' : 'main';
+    const { targets, targetAll } = channel === 'main'
+      ? targetsFromComposerText(msg, AGENT_MENTIONS)
+      : { targets: [], targetAll: false };
 
     // ── Auto-trigger skills based on message keywords ──
     // Every skill can declare regex triggers in its frontmatter
@@ -631,13 +654,15 @@ export function ChatInput({
     // the update fails we still send the message (better to lose
     // the auto-activation than the whole message).
     const locale = discussion.language ?? 'fr';
-    const triggered = detectTriggeredSkills(
-      msg,
-      availableSkills,
-      discussion.skill_ids ?? [],
-      locale,
-      disabledAutoSkills,
-    );
+    const triggered = channel === 'main'
+      ? detectTriggeredSkills(
+          msg,
+          availableSkills,
+          discussion.skill_ids ?? [],
+          locale,
+          disabledAutoSkills,
+        )
+      : [];
     if (triggered.length > 0) {
       const nextSkillIds = [
         ...(discussion.skill_ids ?? []),
@@ -668,12 +693,17 @@ export function ChatInput({
     updateChatInput('');
     setMentionQuery(null);
     try {
-      onSend(
-        msg,
-        targets.length > 0 ? targets : undefined,
-        targetAll,
-        replyTarget?.id,
-      );
+      if (channel === 'note') {
+        onSend(msg, undefined, false, replyTarget?.id, channel);
+      } else {
+        onSend(
+          msg,
+          targets.length > 0 ? targets : undefined,
+          targetAll,
+          replyTarget?.id,
+        );
+      }
+      setSendAsNote(false);
     } finally {
       // Release the synchronous re-entry guard ONE microtask later — by
       // then either the parent has flipped `sending=true` (the prop-based
@@ -683,7 +713,7 @@ export function ChatInput({
       queueMicrotask(() => { sendInFlightRef.current = false; });
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [discussion, sending, onSend, updateChatInput, AGENT_MENTIONS, availableSkills, toast, t, disabledAutoSkills, replyTarget]);
+  }, [discussion, sending, onSend, updateChatInput, AGENT_MENTIONS, availableSkills, toast, t, disabledAutoSkills, replyTarget, sendAsNote]);
 
   handleSendMessageRef.current = handleSendMessage;
 
@@ -1086,7 +1116,10 @@ export function ChatInput({
                       className="disc-mention-item disc-mention-item-disabled"
                       aria-disabled="true"
                     >
-                      <Cpu size={12} style={{ color: agentColor(mention.type!) }} />
+                      <Cpu
+                        size={12}
+                        style={{ color: mention.type ? agentColor(mention.type) : undefined }}
+                      />
                       <span className="font-semibold">
                         {mention.displayTrigger}
                       </span>
@@ -1342,7 +1375,7 @@ export function ChatInput({
           // Editable WHILE the agent streams — typing + Enter queues a
           // follow-up (the parent routes it to useMessageQueue). Only a
           // hard-disabled composer (no usable agent) blocks input.
-          disabled={disabled}
+          disabled={disabled && !sendAsNote}
         />
 
         {/* Bottom toolbar inside composer */}
@@ -1395,6 +1428,36 @@ export function ChatInput({
             >
               {ttsEnabled ? <Volume2 size={15} /> : <VolumeX size={15} />}
             </button>
+
+            {discussionNotesEnabled && (
+              <span className="disc-note-tools" role="group" aria-label={t('disc.note.label')}>
+                <button
+                  type="button"
+                  className="disc-tool-btn"
+                  data-active={sendAsNote}
+                  data-color="warning"
+                  onClick={() => setSendAsNote(current => !current)}
+                  title={sendAsNote ? t('disc.note.sendAsMessage') : t('disc.note.sendAsNote')}
+                  aria-label={sendAsNote ? t('disc.note.sendAsMessage') : t('disc.note.sendAsNote')}
+                  aria-pressed={sendAsNote}
+                >
+                  <StickyNote size={15} />
+                </button>
+                {hasDiscussionNotes && onToggleDiscussionNotes && (
+                  <button
+                    type="button"
+                    className="disc-tool-btn disc-note-visibility-btn"
+                    data-color="warning"
+                    onClick={onToggleDiscussionNotes}
+                    title={showDiscussionNotes ? t('disc.note.hide') : t('disc.note.show')}
+                    aria-label={showDiscussionNotes ? t('disc.note.hide') : t('disc.note.show')}
+                    aria-pressed={showDiscussionNotes}
+                  >
+                    {showDiscussionNotes ? <Eye size={15} /> : <EyeOff size={15} />}
+                  </button>
+                )}
+              </span>
+            )}
 
             {/* Debate / multi-agent */}
             <div className="relative">

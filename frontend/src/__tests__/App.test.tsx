@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor, fireEvent } from '@testing-library/react';
-import { App, setRetryDelay, setStatusTimeout } from '../App';
+import { App } from '../App';
+import { setRetryDelay, setStatusTimeout } from '../lib/appBoot';
 
 // Mock the lazy-loaded pages to avoid loading the full component trees
 vi.mock('../pages/SetupWizard', () => ({

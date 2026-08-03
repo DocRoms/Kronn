@@ -1,8 +1,8 @@
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-#[derive(Debug, Clone, Serialize, TS, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, TS, PartialEq, Eq)]
 #[ts(export)]
 pub enum DependencyCheckStatus {
     UpToDate,
@@ -13,7 +13,7 @@ pub enum DependencyCheckStatus {
     TimedOut,
 }
 
-#[derive(Debug, Clone, Serialize, TS, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, TS, PartialEq, Eq)]
 #[ts(export)]
 pub struct DependencyUpdatePackage {
     pub name: String,
@@ -22,7 +22,7 @@ pub struct DependencyUpdatePackage {
     pub major: bool,
 }
 
-#[derive(Debug, Clone, Serialize, TS, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, TS, PartialEq, Eq)]
 #[ts(export)]
 pub struct DependencyManagerUpdate {
     pub manager: String,
@@ -34,7 +34,7 @@ pub struct DependencyManagerUpdate {
     pub packages: Vec<DependencyUpdatePackage>,
 }
 
-#[derive(Debug, Clone, Serialize, TS)]
+#[derive(Debug, Clone, Deserialize, Serialize, TS)]
 #[ts(export)]
 pub struct DependencyUpdateSummary {
     pub managers: Vec<DependencyManagerUpdate>,
@@ -42,4 +42,9 @@ pub struct DependencyUpdateSummary {
     pub total_major: u32,
     pub checked_at: DateTime<Utc>,
     pub cached: bool,
+    /// `None` means manual checks only; otherwise the persisted result is
+    /// refreshed opportunistically when the project overview is opened after
+    /// this many days. No package update command is ever executed.
+    pub monitoring_interval_days: Option<u16>,
+    pub next_check_at: Option<DateTime<Utc>>,
 }

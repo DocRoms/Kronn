@@ -20,6 +20,7 @@ function mkMsg(content: string, timestamp: string, idSuffix: string): Discussion
   return {
     id: `msg-${idSuffix}`,
     role: 'System',
+    channel: 'main',
     content,
     agent_type: null,
     timestamp,

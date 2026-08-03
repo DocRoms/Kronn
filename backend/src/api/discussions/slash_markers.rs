@@ -202,6 +202,7 @@ pub async fn resolve_markers(
                     from: Some(*from),
                     to: Some(*to),
                     force_refresh: *force_refresh,
+                    include_notes: false,
                 };
                 // Inline the body of the handler — we have an AppState,
                 // so we don't need to dispatch through the HTTP router.
@@ -267,6 +268,7 @@ async fn resolve_summarize_inline(
         from_idx,
         to_idx,
         &tokens_config,
+        false,
     )
     .await
     {

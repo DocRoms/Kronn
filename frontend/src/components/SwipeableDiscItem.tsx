@@ -1,25 +1,18 @@
-import { useState, useRef, memo } from 'react';
-import { ShieldCheck, Zap, Rocket, GitBranch, Loader2, Users, Users2, Square, Star, Link2, Download, AlertTriangle, Check } from 'lucide-react';
+import { useState, useRef, useEffect, memo } from 'react';
+import {
+  ShieldCheck, Zap, Rocket, GitBranch, Loader2, Users, Users2, Square, Star,
+  Link2, Download, AlertTriangle, Check, MoreHorizontal, Copy, Archive, Trash2,
+} from 'lucide-react';
 import type { Discussion } from '../types/generated';
 import { isValidationDisc, isBriefingDisc, isBootstrapDisc } from '../lib/constants';
 import { formatRelativeTime } from '../lib/relativeTime';
+import { sourceAgentShortLabel, unseenBasis } from '../lib/discussionUiUtils';
 import { gravatarUrl } from '../lib/gravatar';
 import { useT } from '../lib/I18nContext';
 import { MatrixText } from './MatrixText';
 import '../pages/DiscussionsPage.css';
 
 const SWIPE_THRESHOLD = 80;
-
-/** The "messages à lire" basis. Falls back to filtering the `messages` array
- *  (excluding System rows) only when the backend hasn't populated
- *  `non_system_message_count` yet — legacy clients hitting a fresh backend
- *  always get the field; the fallback covers the inverse during a partial
- *  rollout. `message_count` is the LAST resort. */
-export function unseenBasis(disc: Pick<Discussion, 'message_count' | 'messages' | 'non_system_message_count'>): number {
-  if (typeof disc.non_system_message_count === 'number') return disc.non_system_message_count;
-  if (disc.messages?.length) return disc.messages.filter(m => m.role !== 'System').length;
-  return disc.message_count ?? 0;
-}
 
 export interface SwipeableDiscItemProps {
   disc: Discussion;
@@ -41,6 +34,8 @@ export interface SwipeableDiscItemProps {
   onStop?: (discId: string) => void;
   /** Toggle pin/favorite on this discussion. */
   onTogglePin?: (discId: string, pinned: boolean) => void;
+  /** Project / workspace label used by cross-project shortcut sections. */
+  contextLabel?: string;
   t: (key: string, ...args: (string | number)[]) => string;
   archiveLabel?: string;
   /**
@@ -64,12 +59,19 @@ export interface SwipeableDiscItemProps {
 
 export const SwipeableDiscItem = memo(function SwipeableDiscItem({
   disc, isActive, lastSeenCount, isSending, isQueued = false, onSelect, onArchive, onDelete, onStop, t, archiveLabel,
-  sourceAgents, importedBy, selectionMode = false, isSelected = false, onToggleSelection,
+  sourceAgents, importedBy, selectionMode = false, isSelected = false, onToggleSelection, onTogglePin,
+  contextLabel,
 }: SwipeableDiscItemProps) {
   const [offsetX, setOffsetX] = useState(0);
   const [swiping, setSwiping] = useState(false);
   const startX = useRef(0);
   const currentX = useRef(0);
+  const suppressNextClickRef = useRef(false);
+  const actionMenuRef = useRef<HTMLDivElement>(null);
+  const actionMenuButtonRef = useRef<HTMLButtonElement>(null);
+  const [actionMenuOpen, setActionMenuOpen] = useState(false);
+  const [actionMenuPlacement, setActionMenuPlacement] = useState<'up' | 'down'>('down');
+  const [copied, setCopied] = useState(false);
   // Read the active UI locale so the relative time is rendered in the
   // right language. memo() guards against needless re-renders when the
   // locale is unchanged.
@@ -96,6 +98,10 @@ export const SwipeableDiscItem = memo(function SwipeableDiscItem({
     if (selectionMode) return;
     if (!swiping) return;
     setSwiping(false);
+    // Pointer gestures are followed by a synthetic click in browsers. The
+    // pointer branch owns this interaction; suppress that click so selection,
+    // archive or delete never fires twice.
+    suppressNextClickRef.current = true;
     if (offsetX > SWIPE_THRESHOLD) {
       onArchive(disc.id);
     } else if (offsetX < -SWIPE_THRESHOLD) {
@@ -104,6 +110,42 @@ export const SwipeableDiscItem = memo(function SwipeableDiscItem({
       onSelect(disc.id, unseenBasis(disc));
     }
     setOffsetX(0);
+  };
+
+  useEffect(() => {
+    if (!actionMenuOpen) return;
+    const closeFromOutside = (event: PointerEvent) => {
+      if (!actionMenuRef.current?.contains(event.target as Node)) setActionMenuOpen(false);
+    };
+    const closeFromKeyboard = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setActionMenuOpen(false);
+    };
+    window.addEventListener('pointerdown', closeFromOutside);
+    window.addEventListener('keydown', closeFromKeyboard);
+    return () => {
+      window.removeEventListener('pointerdown', closeFromOutside);
+      window.removeEventListener('keydown', closeFromKeyboard);
+    };
+  }, [actionMenuOpen]);
+
+  const handleOpenClick = () => {
+    if (suppressNextClickRef.current) {
+      suppressNextClickRef.current = false;
+      return;
+    }
+    if (selectionMode) onToggleSelection?.(disc.id);
+    else onSelect(disc.id, msgCount);
+  };
+
+  const copyDiscussionId = async () => {
+    try {
+      await navigator.clipboard.writeText(disc.id);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1200);
+    } catch {
+      // Clipboard permission failures leave the menu open so the user can
+      // retry; never show a false success state.
+    }
   };
 
   // The unread badge AND the visible "N msg" label track USER + AGENT messages
@@ -120,7 +162,7 @@ export const SwipeableDiscItem = memo(function SwipeableDiscItem({
   const label = offsetX > 30 ? (archiveLabel ?? t('disc.archive')) : offsetX < -30 ? t('disc.delete') : '';
 
   return (
-    <div className="disc-swipe-wrap">
+    <div className="disc-swipe-wrap" data-menu-open={actionMenuOpen}>
       <div
         className="disc-swipe-bg"
         style={{
@@ -135,47 +177,78 @@ export const SwipeableDiscItem = memo(function SwipeableDiscItem({
         data-tour-disc-id={disc.id}
         data-active={isActive}
         data-selected={selectionMode && isSelected}
-        // Accessibility: this row is interactive (click/Enter selects the
-        // discussion, swipe archives/deletes). Without role+tabIndex it's
-        // unreachable by keyboard. Pre-fix the JSX was a plain div with
-        // pointer handlers only — Alicia's audit (2026-05-09) flagged
-        // "no keyboard nav, no focus ring".
-        role={selectionMode ? 'checkbox' : 'button'}
-        tabIndex={0}
-        aria-current={!selectionMode && isActive ? 'true' : undefined}
-        aria-checked={selectionMode ? isSelected : undefined}
-        aria-label={`${disc.title} — ${msgCount} messages, ${disc.agent}`}
-        onClick={selectionMode ? () => onToggleSelection?.(disc.id) : undefined}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' || e.key === ' ') {
-            e.preventDefault();
-            if (selectionMode) onToggleSelection?.(disc.id);
-            else onSelect(disc.id, msgCount);
-          }
-        }}
         style={{
           transform: `translateX(${offsetX}px)`,
           transition: swiping ? 'none' : 'transform 0.25s ease-out',
         }}
-        onPointerDown={handlePointerDown}
-        onPointerMove={handlePointerMove}
-        onPointerUp={handlePointerUp}
-        onPointerCancel={() => { setSwiping(false); setOffsetX(0); }}
       >
-        {selectionMode && (
-          <span className="disc-item-selection-box" data-selected={isSelected} aria-hidden="true">
-            {isSelected && <Check size={11} />}
-          </span>
-        )}
-        <div className="disc-item-content">
+        <button
+          type="button"
+          className="disc-item-open"
+          role={selectionMode ? 'checkbox' : undefined}
+          aria-current={!selectionMode && isActive ? 'true' : undefined}
+          aria-checked={selectionMode ? isSelected : undefined}
+          aria-label={`${disc.title} — ${msgCount} messages, ${disc.agent}`}
+          onClick={handleOpenClick}
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerUp}
+          onPointerCancel={() => { setSwiping(false); setOffsetX(0); }}
+        >
+          {selectionMode && (
+            <span className="disc-item-selection-box" data-selected={isSelected} aria-hidden="true">
+              {isSelected && <Check size={11} />}
+            </span>
+          )}
+          {!selectionMode && (
+            <span
+              className="disc-item-status-dot"
+              data-state={isSending ? 'running' : isQueued ? 'queued' : showBadge ? 'unread' : 'idle'}
+              aria-hidden="true"
+            />
+          )}
+          <span className="disc-item-content">
           <div className="disc-item-title">
             {isValidationDisc(disc.title) && <ShieldCheck size={10} style={{ color: 'var(--kr-accent-ink)', flexShrink: 0 }} />}
             {isBriefingDisc(disc.title) && <Zap size={10} style={{ color: 'var(--kr-info)', flexShrink: 0 }} />}
             {isBootstrapDisc(disc.title) && <Rocket size={10} style={{ color: 'var(--kr-accent-ink)', flexShrink: 0 }} />}
-            {disc.workspace_mode === 'Isolated' && <GitBranch size={10} style={{ color: 'var(--kr-info)', flexShrink: 0 }} />}
-            {disc.shared_id && <Users2 size={10} style={{ color: 'var(--kr-success)', flexShrink: 0 }} />}
-            {/* Title text truncates; badge + star sit OUTSIDE the truncated
-                zone so they're always visible even on long titles.
+            {(disc.workspace_mode === 'Isolated'
+              || disc.shared_id
+              || (disc.participants?.length ?? 0) > 1) && (
+              <span className="disc-item-state-cluster">
+                {disc.workspace_mode === 'Isolated' && (
+                  <span
+                    className="disc-item-state-icon"
+                    title={t('disc.workspaceIsolated')}
+                    aria-label={t('disc.workspaceIsolated')}
+                    data-kind="workspace"
+                  >
+                    <GitBranch size={10} aria-hidden="true" />
+                  </span>
+                )}
+                {disc.shared_id ? (
+                  <span
+                    className="disc-item-state-icon"
+                    title={t('disc.sidebar.sharedDiscussion')}
+                    aria-label={t('disc.sidebar.sharedDiscussion')}
+                    data-kind="shared"
+                  >
+                    <Users2 size={10} aria-hidden="true" />
+                  </span>
+                ) : (disc.participants?.length ?? 0) > 1 ? (
+                  <span
+                    className="disc-item-state-icon"
+                    title={t('disc.sidebar.multiAgentDiscussion')}
+                    aria-label={t('disc.sidebar.multiAgentDiscussion')}
+                    data-kind="multi-agent"
+                  >
+                    <Users size={10} aria-hidden="true" />
+                  </span>
+                ) : null}
+              </span>
+            )}
+            {/* The state cluster stays before the flexible title so it is
+                discoverable without taking the title's trailing width.
                 0.8.5 — `title` attr exposes the disc id on hover so an
                 agent referring to `04a9c927` is one mouse-over away
                 (the full UUID is visible in the tooltip + searchable
@@ -185,61 +258,6 @@ export const SwipeableDiscItem = memo(function SwipeableDiscItem({
               title={t('disc.titleHoverTooltip', disc.title, disc.id)}
             ><MatrixText text={disc.title} /></span>
             {showBadge && <span className="disc-unseen-badge">{unseen}</span>}
-            {/* Pinned indicator (non-interactive) — just a small star to
-                show which discs are in Favorites. The toggle lives in
-                ChatHeader where there's room for a proper button. */}
-            {disc.pinned && <Star size={9} style={{ color: 'var(--kr-warning)', fill: 'var(--kr-warning)', flexShrink: 0 }} />}
-            {(sourceAgents ?? []).map(({ source_agent, diverged }) => (
-              <span
-                key={source_agent}
-                data-testid="disc-source-badge"
-                className="disc-source-badge"
-                title={diverged
-                  ? t('disc.source.divergedHint', source_agent)
-                  : t('disc.source.boundHint', source_agent)}
-                style={{
-                  display: 'inline-flex', alignItems: 'center', gap: 2,
-                  fontSize: 9, padding: '1px 4px', borderRadius: 4,
-                  background: diverged
-                    ? 'rgba(220, 53, 69, 0.15)'
-                    : 'var(--kr-bg-elevated, rgba(255,255,255,0.06))',
-                  color: diverged ? 'var(--kr-danger)' : 'var(--kr-text-secondary)',
-                  flexShrink: 0,
-                }}
-              >
-                {diverged ? <AlertTriangle size={8} /> : <Link2 size={8} />}
-                {t('disc.source.boundBadge', source_agent)}
-              </span>
-            ))}
-            {importedBy && (
-              <span
-                data-testid="disc-import-badge"
-                className="disc-source-badge"
-                title={importedBy.pseudo
-                  ? t('disc.import.byHint', importedBy.pseudo)
-                  : t('disc.import.anonymousHint')}
-                style={{
-                  display: 'inline-flex', alignItems: 'center', gap: 3,
-                  fontSize: 9, padding: '1px 4px', borderRadius: 4,
-                  background: 'var(--kr-bg-elevated, rgba(255,255,255,0.06))',
-                  color: 'var(--kr-text-secondary)',
-                  flexShrink: 0,
-                }}
-              >
-                {importedBy.avatarEmail
-                  ? <img
-                      src={gravatarUrl(importedBy.avatarEmail, 16)}
-                      alt=""
-                      width={10}
-                      height={10}
-                      style={{ borderRadius: '50%' }}
-                    />
-                  : <Download size={8} />}
-                {importedBy.pseudo
-                  ? t('disc.import.byBadge', importedBy.pseudo)
-                  : t('disc.import.anonymousBadge')}
-              </span>
-            )}
           </div>
           <div className="disc-item-meta">
             {/* Queued (throttled, not yet running): a static hourglass,
@@ -255,36 +273,152 @@ export const SwipeableDiscItem = memo(function SwipeableDiscItem({
               </span>
             )}
             {isSending && <Loader2 size={8} style={{ animation: 'spin 1s linear infinite', color: 'var(--kr-accent-ink)' }} />}
+            <span className="disc-item-meta-summary">
+              {contextLabel && (
+                <>
+                  {contextLabel}
+                  {' · '}
+                </>
+              )}
+              {msgCount} msg · {disc.agent}
+              {relativeWhen && (
+                <>
+                  {' · '}
+                  {/* Dates relatives — évite de confondre plusieurs
+                      discussions avec le même titre (quick prompts répétés). */}
+                  <span className="disc-item-relative-time" title={new Date(disc.updated_at).toLocaleString(locale)}>
+                    {relativeWhen}
+                  </span>
+                </>
+              )}
+            </span>
+            {((sourceAgents?.length ?? 0) > 0 || importedBy) && (
+              <span className="disc-source-badges" aria-label={t('disc.source.filterTooltip')}>
+                {(sourceAgents ?? []).map(({ source_agent, diverged }) => {
+                  const accessibleLabel = t('disc.source.boundBadge', source_agent);
+                  return (
+                    <span
+                      key={source_agent}
+                      data-testid="disc-source-badge"
+                      className="disc-source-badge disc-source-badge--compact"
+                      title={diverged
+                        ? t('disc.source.divergedHint', source_agent)
+                        : t('disc.source.boundHint', source_agent)}
+                      aria-label={accessibleLabel}
+                      data-diverged={diverged}
+                    >
+                      {diverged ? <AlertTriangle size={8} /> : <Link2 size={8} />}
+                      <span aria-hidden="true">{sourceAgentShortLabel(source_agent)}</span>
+                    </span>
+                  );
+                })}
+                {importedBy && (
+                  <span
+                    data-testid="disc-import-badge"
+                    className="disc-source-badge disc-source-badge--compact"
+                    title={importedBy.pseudo
+                      ? t('disc.import.byHint', importedBy.pseudo)
+                      : t('disc.import.anonymousHint')}
+                    aria-label={importedBy.pseudo
+                      ? t('disc.import.byBadge', importedBy.pseudo)
+                      : t('disc.import.anonymousBadge')}
+                  >
+                    {importedBy.avatarEmail
+                      ? <img
+                          src={gravatarUrl(importedBy.avatarEmail, 16)}
+                          alt=""
+                          width={10}
+                          height={10}
+                        />
+                      : <Download size={8} />}
+                    <span aria-hidden="true">IM</span>
+                  </span>
+                )}
+              </span>
+            )}
+          </div>
+          </span>
+        </button>
+        {!selectionMode && (
+          <div className="disc-item-actions" ref={actionMenuRef}>
             {isSending && onStop && (
               <button
                 type="button"
                 className="disc-item-stop-btn"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onStop(disc.id);
-                }}
+                onClick={() => onStop(disc.id)}
                 title={t('disc.stopAgent')}
                 aria-label={t('disc.stopAgent')}
               >
                 <Square size={8} style={{ fill: 'currentColor' }} />
               </button>
             )}
-            {(disc.participants?.length ?? 0) > 1 && (
-              <Users size={8} style={{ color: 'var(--kr-purple)' }} />
-            )}
-            {msgCount} msg · {disc.agent}
-            {relativeWhen && (
-              <>
-                {' · '}
-                {/* Dates relatives — évite de confondre plusieurs
-                    discussions avec le même titre (quick prompts répétés). */}
-                <span className="disc-item-relative-time" title={new Date(disc.updated_at).toLocaleString(locale)}>
-                  {relativeWhen}
-                </span>
-              </>
+            <button
+              ref={actionMenuButtonRef}
+              type="button"
+              className="disc-item-more-btn"
+              onClick={() => {
+                if (!actionMenuOpen) {
+                  const rect = actionMenuButtonRef.current?.getBoundingClientRect();
+                  setActionMenuPlacement(rect && window.innerHeight - rect.bottom < 180 ? 'up' : 'down');
+                }
+                setActionMenuOpen(open => !open);
+              }}
+              aria-label={t('disc.actions')}
+              aria-expanded={actionMenuOpen}
+              title={t('disc.actions')}
+            >
+              <MoreHorizontal size={14} />
+            </button>
+            {actionMenuOpen && (
+              <div
+                className="disc-item-action-menu"
+                role="menu"
+                data-placement={actionMenuPlacement}
+              >
+                {onTogglePin && (
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      onTogglePin(disc.id, !disc.pinned);
+                      setActionMenuOpen(false);
+                    }}
+                  >
+                    <Star size={12} />
+                    {t(disc.pinned ? 'disc.unpin' : 'disc.pin')}
+                  </button>
+                )}
+                <button type="button" role="menuitem" data-copied={copied} onClick={() => void copyDiscussionId()}>
+                  {copied ? <Check size={12} /> : <Copy size={12} />}
+                  {t('disc.copyId')}
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    onArchive(disc.id);
+                    setActionMenuOpen(false);
+                  }}
+                >
+                  <Archive size={12} />
+                  {archiveLabel ?? t('disc.archive')}
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="disc-item-action-danger"
+                  onClick={() => {
+                    onDelete(disc.id);
+                    setActionMenuOpen(false);
+                  }}
+                >
+                  <Trash2 size={12} />
+                  {t('disc.delete')}
+                </button>
+              </div>
             )}
           </div>
-        </div>
+        )}
       </div>
     </div>
   );

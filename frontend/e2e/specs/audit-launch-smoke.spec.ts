@@ -50,14 +50,14 @@ let projectPath: string | null = null;
 
 test.describe.configure({ timeout: 120_000, retries: 0 });
 
-// Skip in CI : the test calls POST /full-audit with `agent: "ClaudeCode"`
-// which expects a real Claude binary on PATH to spawn. GitHub runners
-// don't have Claude installed, so the subprocess spawn hangs/fails and
-// the cancel-then-idle polling never returns → 120s timeout × retries
-// inflates the whole CI run to ~16 minutes for nothing. This spec is
-// designed to run locally where the user has Claude installed; the
-// audit pipeline already has unit-test coverage on the runner side.
-test.skip(!!process.env.CI, 'real-agent spec — local-only (requires Claude binary on PATH)');
+// This calls POST /full-audit with `agent: "ClaudeCode"`: it launches a billed
+// external CLI and can keep the shared backend occupied if cancellation stalls.
+// Never infer permission from a locally installed binary; release operators opt
+// into this smoke deliberately after the hermetic audit regressions are green.
+test.skip(
+  process.env.KRONN_REAL_AGENT_E2E !== '1',
+  'real-agent spec — set KRONN_REAL_AGENT_E2E=1 (Claude credentials + billed tokens required)',
+);
 
 test.describe('Audit — SSE launch + cancel smoke', () => {
   test.beforeAll(({ request: _ }) => {

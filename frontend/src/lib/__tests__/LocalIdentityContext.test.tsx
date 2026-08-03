@@ -1,7 +1,8 @@
 import { act, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { config as configApi } from '../api';
-import { LocalIdentityProvider, useLocalIdentity } from '../LocalIdentityContext';
+import { LocalIdentityProvider } from '../LocalIdentityContext';
+import { useLocalIdentity } from '../localIdentity';
 
 vi.mock('../api', () => ({
   config: {

@@ -107,6 +107,9 @@ pub struct PeerJoinResponse {
     /// Title of the disc, surfaced in the agent's first reply so the
     /// human can verify it joined the right conversation.
     pub disc_title: String,
+    /// Number of out-of-context notes in the room. Their bodies are omitted
+    /// from join context and require an explicit note-list call.
+    pub note_count: u32,
     /// Last N messages already in the disc (default 10). Empty for a
     /// freshly-created topic.
     pub recent_messages: Vec<RecentMessagePreview>,
@@ -349,13 +352,19 @@ pub async fn peer_join(
                 |r| r.get(0),
             )?;
             let peer_count = db::discussion_sessions::count_active_participants(conn, &disc_id)?;
+            let note_count = conn.query_row(
+                "SELECT COUNT(*) FROM messages
+                 WHERE discussion_id = ?1 AND channel = 'note'",
+                rusqlite::params![&disc_id],
+                |row| row.get::<_, u32>(0),
+            )?;
 
             // Step 3 — recent messages (last 10, trimmed). Newest last
             // so the agent can read top→bottom.
             let mut stmt = conn.prepare(
                 "SELECT sort_order, role, agent_type, content, timestamp
                    FROM messages
-                  WHERE discussion_id = ?1
+                  WHERE discussion_id = ?1 AND channel = 'main'
                   ORDER BY sort_order DESC
                   LIMIT 10",
             )?;
@@ -399,6 +408,7 @@ pub async fn peer_join(
                 resume_token,
                 peer_count,
                 disc_title,
+                note_count,
                 recent_messages: rows,
                 plan_snapshot,
                 next_steps,
@@ -468,12 +478,19 @@ fn join_next_steps(disc_id: &str, disc_title: &str, peer_count: i64) -> String {
          human first.\n\n\
          STEP 5 — STAY IN THE ROOM AND FOLLOW IT (this is the part agents \
          get wrong) :\n\
-         a. Call `disc_wait_for_peer({{timeout_secs: 170}})` to block until \
-         someone posts something new.\n\
-         b. If it returns `timed_out: true` with NO new messages, that is \
-         NORMAL (the peer may still be thinking) — immediately call \
-         `disc_wait_for_peer` AGAIN. A quiet window is NOT the end of the \
-         conversation; never stop or leave just because a wait timed out.\n\
+         a. Call `disc_wait_for_peer()` to wait for the next message. The \
+         bridge chains quiet server polls instead of returning after each one. \
+         HOST CAVEAT: if your client says the tool call was moved to the \
+         background, the original wait is still active — do NOT start another \
+         wait. Wait for that task's terminal notification, then re-arm only if \
+         its completed result is quiet. Some hosts expose a model-visible \
+         background-task notification, so zero-turn silence is a host \
+         capability, not a universal bridge guarantee.\n\
+         b. If it returns `timed_out: true` with NO new messages (safety \
+         cap or interruption), that is NORMAL (the peer may still be \
+         thinking) — re-arm `disc_wait_for_peer` when you are ready to \
+         listen again. A quiet window is NOT the end of the conversation; \
+         never stop or leave just because a wait came back quiet.\n\
          c. When messages arrive, read them, then call `disc_append({{content: \
          \"<your reaction>\"}})` to reply.\n\
          d. If the room stays quiet and you have nothing to answer, do NOT \
@@ -741,6 +758,28 @@ pub struct WaitForPeerQuery {
     /// bounded like the join-time value; ignored without a session identity.
     #[serde(default)]
     pub conversation_id: Option<String>,
+    /// KT-189 — durable delivery acknowledgement for awareness turns. The
+    /// bridge sends the highest awareness `sort_order` whose delivery to the
+    /// model was CONFIRMED (two-phase: staged on emission, committed by the
+    /// model's next tool call). The server only advances the per-session
+    /// awareness cursor here — never at emission — so a response lost to a
+    /// cancellation or a bridge crash is replayed instead of skipped.
+    #[serde(default)]
+    pub ack_awareness_upto: Option<i64>,
+}
+
+/// KT-189 — upper bound of awareness turns attached to one wake. A chatty
+/// room can accumulate hundreds of turns between wakes; the batch stays
+/// readable and the omitted count says the rest (still unacked, so the
+/// remainder returns with the next wake).
+const AWARENESS_MAX_MESSAGES: usize = 20;
+
+fn is_zero_u32(value: &u32) -> bool {
+    *value == 0
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -784,6 +823,14 @@ pub struct WaitForPeerMessage {
     /// `None` for humans, native agents, imports and revision events.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply_target: Option<MessageTarget>,
+    /// KT-189 — `true` for a turn delivered as AWARENESS: it did not target
+    /// this CLI (untargeted room traffic, or a turn addressed to another
+    /// responder) and is attached, bounded and once, to a legitimate wake so
+    /// the session keeps full room context without being woken for it.
+    /// Context only: the caller must NOT answer it; the addressed responder
+    /// owns that turn.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub awareness: bool,
     /// Server-computed for the calling durable CLI session. A CLI answers only
     /// when this is true; matching the provider name is intentionally
     /// insufficient because `@codex` and `@codex · CLI` are distinct targets.
@@ -804,6 +851,17 @@ pub struct WaitForPeerResponse {
     /// `since_sort_order` when timed out). Lets the agent advance its
     /// `since` cursor without inspecting the messages.
     pub latest_sort_order: i64,
+    /// KT-189 — awareness turns beyond the per-wake attach cap. Non-zero means
+    /// older unseen turns exist that were NOT attached this time; they remain
+    /// unacked and return with the next wake, and the human-side transcript
+    /// remains the complete record.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub awareness_omitted: u32,
+    /// KT-189 — highest `sort_order` among the awareness turns attached to
+    /// this response. The bridge echoes it back as `ack_awareness_upto` once
+    /// the model's next tool call proves the delivery was consumed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub awareness_delivered_upto: Option<i64>,
     /// stab-3 — server-computed pacing: apply `next_delay_seconds` before
     /// the next wait, verbatim. Hot (short interval) while a User message is
     /// within the attention lease; otherwise the next DETERMINISTIC step of
@@ -816,13 +874,13 @@ pub struct WaitForPeerResponse {
     /// activity (generic label, no countdown). `None` on a delivery (the
     /// caller replies now, not later).
     pub next_poll_at: Option<String>,
-    /// How many turns in this window were addressed to someone else and so held
-    /// back from `messages`. `latest_sort_order` still counts them, otherwise the
-    /// caller would loop on a cursor gap — which makes "withheld by routing" and
-    /// "not read yet" indistinguishable from the cursor alone. Reporting the count
-    /// lets an agent say "3 turns were not for me" instead of looking deaf when a
-    /// human asks whether it saw their message. Excludes the caller's own appends:
-    /// it wrote those, they were never news.
+    /// How many window turns this response carries NEITHER as a wake NOR as
+    /// attached awareness — rows still gated by the awareness cap or the ack
+    /// cursor (they return with a later wake), and rows only visible to other
+    /// identities. `latest_sort_order` still counts them, otherwise the caller
+    /// would loop on a cursor gap. Excludes the caller's own appends: it wrote
+    /// those, they were never news. Since KT-189 nothing content-bearing is
+    /// permanently withheld: awareness delivery is deferred, not denied.
     pub withheld_by_routing: u32,
 }
 
@@ -923,7 +981,27 @@ pub async fn wait_for_peer(
                 Ok(
                     crate::db::discussion_sessions::find_active_session(conn, &agent, &session)?
                         .filter(|row| row.disc_id == did)
-                        .map(|row| row.id),
+                        .map(|row| (row.id, None)),
+                )
+            })
+            .await
+            .unwrap_or(None)
+    } else if let Some(caller_session_id) = session_id.as_ref() {
+        // KT-189 — a bridge whose provider is unresolved ("Unknown") omits
+        // exclude_agent_type but still identifies its durable session. It
+        // must get the modern wake/awareness contract, not the legacy
+        // wake-on-everything projection — and its presence (heartbeat,
+        // listening/reading/waiting states) must stay alive too, using the
+        // agent_type stored on its own session row.
+        let session = caller_session_id.clone();
+        let did = disc_id.clone();
+        state
+            .db
+            .with_read_conn(move |conn| {
+                Ok(
+                    crate::db::discussion_sessions::find_active_session_by_id(conn, &session)?
+                        .filter(|(_, session_disc, _)| *session_disc == did)
+                        .map(|(pk, _, agent_type)| (pk, Some(agent_type))),
                 )
             })
             .await
@@ -931,6 +1009,13 @@ pub async fn wait_for_peer(
     } else {
         None
     };
+    let (caller_session_pk, resolved_agent_type) = match caller_session_pk {
+        Some((pk, resolved)) => (Some(pk), resolved),
+        None => (None, None),
+    };
+    // Presence identity: the declared provider, or the one stored on the
+    // resolved session row when the bridge could not name its provider.
+    let presence_agent: Option<String> = exclude.clone().or(resolved_agent_type);
 
     // Liveness heartbeat (migration 064). The agent's idle loop calls
     // this every ≤90s with `exclude_agent_type = its own type` (so it
@@ -942,7 +1027,40 @@ pub async fn wait_for_peer(
     // 0.8.12 PR B — presence phase 1: an open wait IS the "listening"
     // fact. TTL = requested timeout + margin, so a crashed agent's
     // placeholder dies on its own (expiry read-side, no reaper).
-    if let (Some(agent_type), Some(caller_session_id)) = (exclude.as_ref(), session_id.as_ref()) {
+    // KT-189 — durable awareness acknowledgement: the bridge confirms the
+    // model consumed a previously attached awareness batch. This is the ONLY
+    // place the per-session awareness cursor advances; emission never moves
+    // it, so a cancelled/crashed delivery is replayed, never skipped.
+    // The value is CLAMPED to what one bounded batch from the current cursor
+    // can legitimately cover: an oversized ack (buggy or hostile client) must
+    // not skip turns that were never offered.
+    if let (Some(session_pk), Some(ack)) = (caller_session_pk, q.ack_awareness_upto) {
+        if let Err(e) = state
+            .db
+            .with_conn(move |conn| {
+                // Scan / OFFER / ack: the ack is clamped to the persisted
+                // offered cursor — what a wake response actually carried —
+                // never to what would merely be offerable now. A client can
+                // therefore never acknowledge (and skip) turns it was never
+                // shown, whether the ack is buggy, hostile, or racing new
+                // rows written between the offer and the ack.
+                let offered =
+                    crate::db::discussion_sessions::awareness_offered_upto(conn, session_pk)?;
+                crate::db::discussion_sessions::advance_user_catchup_cursor(
+                    conn,
+                    session_pk,
+                    ack.min(offered),
+                )
+            })
+            .await
+        {
+            tracing::warn!("wait_for_peer: awareness ack failed: {e}");
+        }
+    }
+
+    if let (Some(agent_type), Some(caller_session_id)) =
+        (presence_agent.as_ref(), session_id.as_ref())
+    {
         let disc_id_touch = disc_id.clone();
         let agent_touch = agent_type.clone();
         let sess_touch = caller_session_id.clone();
@@ -988,19 +1106,39 @@ pub async fn wait_for_peer(
     let mut observed_latest_order = since;
     // Assigned on every poll before any read; no initial value to shadow.
     let mut withheld_by_routing: u32;
+    // KT-189 — awareness turns beyond the per-wake cap, reported once.
+    // Assigned on every poll before any read (same pattern as
+    // `withheld_by_routing` above — an initial value would trip
+    // `unused_assignments` under `-D warnings`).
+    let mut awareness_omitted_total: u32;
+    let mut awareness_delivered_upto: Option<i64>;
     loop {
         let disc_id_clone = disc_id.clone();
         let exclude_clone = exclude.clone();
-        let messages: anyhow::Result<(Vec<WaitForPeerMessage>, i64, u32)> = state
+        #[allow(clippy::type_complexity)]
+        let messages: anyhow::Result<(Vec<WaitForPeerMessage>, i64, u32, u32, Option<i64>)> = state
             .db
             .with_conn(move |conn| {
+                let observed_latest: i64 = conn.query_row(
+                    "SELECT COALESCE(MAX(sort_order), ?2)
+                     FROM (
+                         SELECT sort_order FROM messages
+                         WHERE discussion_id = ?1 AND sort_order > ?2
+                         UNION ALL
+                         SELECT sort_order FROM message_revision_events
+                         WHERE discussion_id = ?1 AND sort_order > ?2
+                     )",
+                    rusqlite::params![&disc_id_clone, since],
+                    |row| row.get(0),
+                )?;
                 // Pull every message after `since` ; filter the
                 // exclude_agent_type in Rust to avoid threading an
                 // Option<String> through the SQL binder.
                 let mut stmt = conn.prepare(
                     "SELECT message_id, sort_order, role, agent_type, content, timestamp,
                             author_pseudo, event_type, target_message_id, target_agent,
-                            targets, author_agent_type, author_cli_session_id
+                            targets, author_agent_type, author_cli_session_id,
+                            native_fallback
                      FROM (
                          SELECT id AS message_id, sort_order, role, agent_type, content, timestamp,
                                 author_pseudo, NULL AS event_type,
@@ -1031,9 +1169,12 @@ pub async fn wait_for_peer(
                                     SELECT mca.cli_session_id
                                     FROM message_cli_authors mca
                                     WHERE mca.message_id = messages.id
-                                ) AS author_cli_session_id
+                                ) AS author_cli_session_id,
+                                native_fallback
                          FROM messages
-                         WHERE discussion_id = ?1 AND sort_order > ?2
+                         WHERE discussion_id = ?1
+                           AND sort_order > ?2
+                           AND channel = 'main'
                          UNION ALL
                          SELECT id AS message_id, sort_order, 'System' AS role, NULL AS agent_type,
                                 '[message_revised] ' || target_message_id || char(10) || content,
@@ -1055,9 +1196,19 @@ pub async fn wait_for_peer(
                                     ) AS ordered
                                 ) AS targets,
                                 NULL AS author_agent_type,
-                                NULL AS author_cli_session_id
+                                NULL AS author_cli_session_id,
+                                0 AS native_fallback
                          FROM message_revision_events
-                         WHERE discussion_id = ?1 AND sort_order > ?2
+                         WHERE discussion_id = ?1
+                           AND sort_order > ?2
+                           AND EXISTS (
+                               SELECT 1
+                               FROM messages revised_message
+                               WHERE revised_message.id =
+                                         message_revision_events.target_message_id
+                                 AND revised_message.discussion_id = ?1
+                                 AND revised_message.channel = 'main'
+                           )
                      )
                      ORDER BY sort_order ASC",
                 )?;
@@ -1123,14 +1274,10 @@ pub async fn wait_for_peer(
                             }),
                             targets,
                             reply_target,
+                            awareness: false,
                         })
                     })?
                     .collect::<rusqlite::Result<Vec<_>>>()?;
-                let observed_latest = rows
-                    .iter()
-                    .map(|message| message.sort_order)
-                    .max()
-                    .unwrap_or(since);
                 let no_agent_room =
                     crate::db::discussions::disc_is_no_agent(conn, &disc_id_clone)?;
                 let others: Vec<WaitForPeerMessage> = rows
@@ -1162,38 +1309,90 @@ pub async fn wait_for_peer(
                         }
                     })
                     .collect();
-                // Counted before the routing filter and after the own-append one,
-                // so the number means "addressed elsewhere", not "written by me".
+                // KT-189 — WAKE classification. A modern caller (exact durable
+                // session) is woken ONLY by a turn addressed to it, or by an
+                // untargeted User turn when the room has no native agent (the
+                // joined CLIs are then the designated responders). Everything
+                // else — untargeted Agent traffic, turns addressed to another
+                // responder — reaches the session as bounded AWARENESS context
+                // attached to its next legitimate wake, never as a wake of its
+                // own. Legacy callers without a session id keep the historical
+                // room-visible projection.
                 let peer_turns = others.len();
-                let filtered: Vec<WaitForPeerMessage> = others
+                let wake: Vec<WaitForPeerMessage> = others
                     .into_iter()
-                    // Current bridges identify their exact durable session.
-                    // Any explicitly targeted live turn is private dispatch
-                    // payload: `@codex` belongs to a native agent identity,
-                    // while only `@codex-cli[-N]` addresses this joined peer.
-                    // Untargeted Agent turns remain room-visible; untargeted
-                    // User turns remain visible only in no-agent rooms.
-                    // Legacy callers without a session id retain the historical
-                    // room-awareness projection.
                     .filter(|message| {
                         caller_session_pk.is_none()
                             || message.addressed_to_caller
                             || (message.targets.is_empty()
                                 && message.event_type.is_none()
-                                && (message.role != "User" || no_agent_room))
+                                && message.role == "User"
+                                && no_agent_room)
                     })
                     .collect();
-                let withheld = (peer_turns - filtered.len()) as u32;
-                Ok((filtered, observed_latest, withheld))
+                let mut awareness_omitted: u32 = 0;
+                let mut awareness_upto: Option<i64> = None;
+                let mut merged = wake;
+                // Awareness attaches only when something legitimately wakes
+                // the model — an awareness-only window must not end the wait.
+                // The scan starts at the durable per-session cursor, which
+                // only `ack_awareness_upto` advances: an unconsumed batch is
+                // re-attached to the next wake instead of being lost.
+                if let Some(session_pk) = caller_session_pk {
+                    if !merged.is_empty() {
+                        let cursor = crate::db::discussion_sessions::user_catchup_cursor(
+                            conn, session_pk,
+                        )?;
+                        let (awareness, omitted) = load_awareness_batch(
+                            conn,
+                            &disc_id_clone,
+                            session_pk,
+                            cursor,
+                            observed_latest,
+                            no_agent_room,
+                        )?;
+                        awareness_omitted = omitted;
+                        awareness_upto = awareness.iter().map(|m| m.sort_order).max();
+                        // Persist the OFFER (never the ack) at emission time:
+                        // this is the ceiling a later ack may reach.
+                        if let Some(upto) = awareness_upto {
+                            crate::db::discussion_sessions::advance_awareness_offered_upto(
+                                conn, session_pk, upto,
+                            )?;
+                        }
+                        // Deliver awareness before the wake turns and in
+                        // transcript order; skip any row already in the wake
+                        // batch (an addressed turn is actionable, not context).
+                        let wake_ids: std::collections::HashSet<String> =
+                            merged.iter().map(|m| m.message_id.clone()).collect();
+                        let mut combined: Vec<WaitForPeerMessage> = awareness
+                            .into_iter()
+                            .filter(|m| !wake_ids.contains(&m.message_id))
+                            .collect();
+                        combined.append(&mut merged);
+                        combined.sort_by_key(|m| m.sort_order);
+                        merged = combined;
+                    }
+                }
+                // Counted AFTER the awareness merge: a turn attached to this
+                // very response is delivered, not withheld. What remains are
+                // window rows carried by neither wake nor awareness (e.g.
+                // rows still gated by the awareness cap or ack cursor).
+                let delivered_in_window =
+                    merged.iter().filter(|m| m.sort_order > since).count();
+                let withheld = peer_turns.saturating_sub(delivered_in_window) as u32;
+                Ok((merged, observed_latest, withheld, awareness_omitted, awareness_upto))
             })
             .await;
 
         let messages = match messages {
-            Ok((messages, observed_latest, withheld)) => {
+            Ok((messages, observed_latest, withheld, omitted, upto)) => {
                 observed_latest_order = observed_latest_order.max(observed_latest);
                 // The query always re-reads from the same `since`, so the latest
                 // count covers the whole window rather than one poll of it.
                 withheld_by_routing = withheld;
+                awareness_omitted_total = omitted;
+                awareness_delivered_upto = upto;
                 messages
             }
             Err(e) => return Json(ApiResponse::err(format!("wait_for_peer db error: {e}"))),
@@ -1207,7 +1406,7 @@ pub async fn wait_for_peer(
             // instant the reply lands. An EMPTY timeout never sets this
             // (guard from the design debate: no fake "preparing" states).
             if let (Some(agent_type), Some(caller_session_id)) =
-                (exclude.as_ref(), session_id.as_ref())
+                (presence_agent.as_ref(), session_id.as_ref())
             {
                 let disc_id_act = disc_id.clone();
                 let agent_act = agent_type.clone();
@@ -1238,6 +1437,8 @@ pub async fn wait_for_peer(
                 // Delivery: the caller replies now, not after a pause.
                 next_poll_at: None,
                 withheld_by_routing,
+                awareness_omitted: awareness_omitted_total,
+                awareness_delivered_upto,
             }));
         }
 
@@ -1248,7 +1449,7 @@ pub async fn wait_for_peer(
             // window + margin so the participants UI shows "dormant" instead
             // of "disconnected" during the pause — and hand the intended
             // next-poll instant back to the MCP caller for its scheduling.
-            let next_poll_at = if let Some(ref agent_type) = exclude {
+            let next_poll_at = if let Some(ref agent_type) = presence_agent {
                 let waiting_ttl = pacing.next_delay_seconds as i64 + ACTIVITY_WAITING_MARGIN_SECS;
                 let next_poll_instant = chrono::Utc::now()
                     + chrono::Duration::seconds(pacing.next_delay_seconds as i64);
@@ -1296,11 +1497,169 @@ pub async fn wait_for_peer(
                 pacing,
                 next_poll_at,
                 withheld_by_routing,
+                // A quiet return carries no awareness by design: attaching it
+                // here would make the bridge wake the model for context alone.
+                awareness_omitted: 0,
+                awareness_delivered_upto: None,
             }));
         }
 
         sleep(Duration::from_millis(WAIT_POLL_INTERVAL_MS)).await;
     }
+}
+
+/// KT-189 — load the AWARENESS backlog of one session: main-channel turns in
+/// `(cursor, upto]` that did not and will not wake this CLI — untargeted room
+/// traffic and turns addressed to another responder — excluding the session's
+/// own appends and its wake classes. Oldest first, bounded to
+/// [`AWARENESS_MAX_MESSAGES`]; the second value counts the rows left unacked
+/// beyond the cap (they return with the next wake).
+fn load_awareness_batch(
+    conn: &rusqlite::Connection,
+    disc_id: &str,
+    session_pk: i64,
+    cursor: i64,
+    upto: i64,
+    no_agent_room: bool,
+) -> anyhow::Result<(Vec<WaitForPeerMessage>, u32)> {
+    let mut stmt = conn.prepare(
+        "SELECT message_id, sort_order, role, agent_type, content, timestamp,
+                author_pseudo, event_type, target_message_id, target_agent,
+                targets, author_cli_session_id
+         FROM (
+             SELECT id AS message_id, sort_order, role, agent_type, content,
+                    timestamp, author_pseudo, NULL AS event_type,
+                    NULL AS target_message_id, target_agent,
+                    (
+                        SELECT GROUP_CONCAT(
+                            ordered.target_kind || '|' ||
+                            ordered.agent_type || '|' ||
+                            COALESCE(ordered.cli_session_id, ''),
+                            ','
+                        )
+                        FROM (
+                            SELECT mt.target_kind, mt.agent_type, mt.cli_session_id
+                            FROM message_targets mt
+                            WHERE mt.message_id = messages.id
+                            ORDER BY mt.position ASC
+                        ) AS ordered
+                    ) AS targets,
+                    (
+                        SELECT mca.cli_session_id
+                        FROM message_cli_authors mca
+                        WHERE mca.message_id = messages.id
+                    ) AS author_cli_session_id
+             FROM messages
+             WHERE discussion_id = ?1
+               AND sort_order > ?2
+               AND sort_order <= ?3
+               AND channel = 'main'
+             UNION ALL
+             SELECT id AS message_id, sort_order, 'System' AS role,
+                    NULL AS agent_type,
+                    '[message_revised] ' || target_message_id || char(10) || content,
+                    created_at AS timestamp, NULL AS author_pseudo,
+                    'message_revised' AS event_type, target_message_id,
+                    trim(target_agent_json, '\"') AS target_agent,
+                    (
+                        SELECT GROUP_CONCAT(
+                            ordered.target_kind || '|' ||
+                            ordered.agent_type || '|' ||
+                            COALESCE(ordered.cli_session_id, ''),
+                            ','
+                        )
+                        FROM (
+                            SELECT mt.target_kind, mt.agent_type, mt.cli_session_id
+                            FROM message_targets mt
+                            WHERE mt.message_id = message_revision_events.target_message_id
+                            ORDER BY mt.position ASC
+                        ) AS ordered
+                    ) AS targets,
+                    NULL AS author_cli_session_id
+             FROM message_revision_events
+             WHERE discussion_id = ?1
+               AND sort_order > ?2
+               AND sort_order <= ?3
+               AND EXISTS (
+                   SELECT 1 FROM messages revised_message
+                   WHERE revised_message.id =
+                             message_revision_events.target_message_id
+                     AND revised_message.discussion_id = ?1
+                     AND revised_message.channel = 'main'
+               )
+         )
+         ORDER BY sort_order ASC",
+    )?;
+    let rows: Vec<(WaitForPeerMessage, Option<i64>)> = stmt
+        .query_map(rusqlite::params![disc_id, cursor, upto], |r| {
+            let targets = r
+                .get::<_, Option<String>>(10)?
+                .map(|serialized| {
+                    serialized
+                        .split(',')
+                        .filter_map(|target| {
+                            let mut fields = target.splitn(3, '|');
+                            let kind = match fields.next()? {
+                                "discussion_agent" => MessageTargetKind::DiscussionAgent,
+                                "cli" => MessageTargetKind::Cli,
+                                _ => MessageTargetKind::Agent,
+                            };
+                            let agent_type =
+                                crate::db::discussions::parse_agent_type(fields.next()?);
+                            let cli_session_id = fields.next().and_then(|value| value.parse().ok());
+                            Some(MessageTarget {
+                                kind,
+                                agent_type,
+                                cli_session_id,
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let author_cli_session_id = r.get::<_, Option<i64>>(11)?;
+            let addressed_to_caller = targets.iter().any(|target| {
+                target.kind == MessageTargetKind::Cli && target.cli_session_id == Some(session_pk)
+            });
+            let message = WaitForPeerMessage {
+                message_id: r.get(0)?,
+                sort_order: r.get(1)?,
+                role: r.get(2)?,
+                agent_type: r.get(3)?,
+                content: r.get(4)?,
+                timestamp: r.get(5)?,
+                author_pseudo: r.get(6)?,
+                event_type: r.get(7)?,
+                target_message_id: r.get(8)?,
+                target_agent: r.get(9)?,
+                target_agents: targets
+                    .iter()
+                    .map(|target| format!("{:?}", target.agent_type))
+                    .collect(),
+                addressed_to_caller,
+                targets,
+                reply_target: None,
+                awareness: true,
+            };
+            Ok((message, author_cli_session_id))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut batch: Vec<WaitForPeerMessage> = Vec::new();
+    let mut omitted: u32 = 0;
+    for (message, author_cli_session_id) in rows {
+        // Wake classes and the session's own appends are not awareness.
+        if author_cli_session_id == Some(session_pk)
+            || message.addressed_to_caller
+            || (message.targets.is_empty() && message.role == "User" && no_agent_room)
+        {
+            continue;
+        }
+        if batch.len() < AWARENESS_MAX_MESSAGES {
+            batch.push(message);
+        } else {
+            omitted += 1;
+        }
+    }
+    Ok((batch, omitted))
 }
 
 /// `GET /api/discussions/:id/participants`
@@ -1991,6 +2350,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn peer_join_reports_note_count_without_including_note_bodies() {
+        let state = make_state_with_disc("d-join-notes").await;
+        state
+            .db
+            .with_conn(|conn| {
+                let now = chrono::Utc::now().to_rfc3339();
+                conn.execute_batch(&format!(
+                    "INSERT INTO messages
+                         (id, discussion_id, role, channel, content, timestamp, sort_order)
+                     VALUES
+                         ('join-main', 'd-join-notes', 'User', 'main', 'visible turn', '{now}', 1),
+                         ('join-note', 'd-join-notes', 'User', 'note', 'private note body', '{now}', 2);"
+                ))?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let token = invite_peer(State(state.clone()), Path("d-join-notes".into()))
+            .await
+            .0
+            .data
+            .unwrap()
+            .token;
+
+        let data = peer_join(
+            State(state),
+            Json(PeerJoinRequest {
+                token,
+                agent_type: "Codex".into(),
+                session_id: "sess-notes".into(),
+                model: None,
+                conversation_id: None,
+            }),
+        )
+        .await
+        .0
+        .data
+        .unwrap();
+
+        assert_eq!(data.note_count, 1);
+        assert_eq!(data.recent_messages.len(), 1);
+        assert_eq!(data.recent_messages[0].preview, "visible turn");
+    }
+
+    #[tokio::test]
     async fn peer_resume_rotates_credential_and_keeps_one_participant_row() {
         let state = make_state_with_disc("d-resume-1").await;
         let token = invite_peer(State(state.clone()), Path("d-resume-1".to_string()))
@@ -2542,6 +2946,7 @@ mod tests {
                 exclude_agent_type: Some("Codex".into()),
                 session_id: None,
                 conversation_id: None,
+                ack_awareness_upto: None,
             }),
         )
         .await;
@@ -2568,6 +2973,7 @@ mod tests {
                 exclude_agent_type: Some("ClaudeCode".into()),
                 session_id: None,
                 conversation_id: None,
+                ack_awareness_upto: None,
             }),
         )
         .await;
@@ -2752,6 +3158,7 @@ mod tests {
                 exclude_agent_type: None,
                 session_id: None,
                 conversation_id: None,
+                ack_awareness_upto: None,
             }),
         )
         .await;
@@ -2762,6 +3169,58 @@ mod tests {
         assert_eq!(data.messages.len(), 1);
         assert_eq!(data.messages[0].content, "hello peer");
         assert_eq!(data.latest_sort_order, 5);
+    }
+
+    #[tokio::test]
+    async fn wait_hides_notes_but_advances_the_durable_cursor() {
+        let state = make_state_with_disc("d-wait-note").await;
+        state
+            .db
+            .with_conn(|conn| {
+                let now = chrono::Utc::now().to_rfc3339();
+                conn.execute(
+                    "INSERT INTO messages
+                        (id, discussion_id, role, channel, content, timestamp, sort_order)
+                     VALUES ('note-hidden', 'd-wait-note', 'User', 'note', 'do not deliver', ?1, 5)",
+                    rusqlite::params![&now],
+                )?;
+                conn.execute(
+                    "INSERT INTO message_revision_events (
+                         id, discussion_id, target_message_id,
+                         previous_content_hash, expected_revision, revision,
+                         content, idempotency_key, sort_order, created_at
+                     ) VALUES (
+                         'note-revision-hidden', 'd-wait-note', 'note-hidden',
+                         'hash-before', 'opaque-before', ?1,
+                         'still do not deliver', 'note-revision-key', 6, ?1
+                     )",
+                    rusqlite::params![now],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let data = wait_for_peer(
+            State(state),
+            Path("d-wait-note".into()),
+            Query(WaitForPeerQuery {
+                since_sort_order: Some(0),
+                timeout_secs: Some(1),
+                exclude_agent_type: None,
+                session_id: None,
+                conversation_id: None,
+                ack_awareness_upto: None,
+            }),
+        )
+        .await
+        .0
+        .data
+        .unwrap();
+
+        assert!(data.timed_out);
+        assert!(data.messages.is_empty());
+        assert_eq!(data.latest_sort_order, 6);
     }
 
     /// KT-43 — the promise is "no silent latency": a wait that is ALREADY
@@ -2785,6 +3244,7 @@ mod tests {
                     exclude_agent_type: None,
                     session_id: None,
                     conversation_id: None,
+                    ack_awareness_upto: None,
                 }),
             )
             .await;
@@ -2835,6 +3295,15 @@ mod tests {
             .with_conn(|conn| {
                 let now = chrono::Utc::now().to_rfc3339();
                 conn.execute(
+                    "INSERT INTO messages (
+                         id, discussion_id, role, channel, content, timestamp, sort_order
+                     ) VALUES (
+                         'user-target', 'd-wait-revision', 'User', 'main',
+                         'original content', ?1, 3
+                     )",
+                    rusqlite::params![&now],
+                )?;
+                conn.execute(
                     "INSERT INTO message_revision_events (
                          id, discussion_id, target_message_id,
                          previous_content_hash, expected_revision, revision,
@@ -2860,6 +3329,7 @@ mod tests {
                 exclude_agent_type: None,
                 session_id: None,
                 conversation_id: None,
+                ack_awareness_upto: None,
             }),
         )
         .await;
@@ -2911,6 +3381,7 @@ mod tests {
                 exclude_agent_type: Some("ClaudeCode".to_string()),
                 session_id: None,
                 conversation_id: None,
+                ack_awareness_upto: None,
             }),
         )
         .await;
@@ -2960,6 +3431,7 @@ mod tests {
                 exclude_agent_type: Some("Vibe".to_string()),
                 session_id: None,
                 conversation_id: None,
+                ack_awareness_upto: None,
             }),
         )
         .await
@@ -2989,6 +3461,7 @@ mod tests {
                 exclude_agent_type: Some("Codex".to_string()),
                 session_id: None,
                 conversation_id: None,
+                ack_awareness_upto: None,
             }),
         )
         .await
@@ -3071,6 +3544,7 @@ mod tests {
                 exclude_agent_type: Some("Vibe".to_string()),
                 session_id: Some("vibe-unrelated".to_string()),
                 conversation_id: None,
+                ack_awareness_upto: None,
             }),
         )
         .await
@@ -3098,6 +3572,7 @@ mod tests {
                 exclude_agent_type: Some("Codex".to_string()),
                 session_id: Some("codex-exact".to_string()),
                 conversation_id: None,
+                ack_awareness_upto: None,
             }),
         )
         .await
@@ -3125,6 +3600,697 @@ mod tests {
                 codex_session,
             )],
         );
+    }
+
+    #[tokio::test]
+    async fn wake_attaches_unseen_room_traffic_as_awareness_until_acked() {
+        // KT-189 — untargeted room traffic (User AND Agent turns) never wakes
+        // a joined CLI; it attaches ONCE ACKED-GATED to its next legitimate
+        // wake, flagged `awareness`, so the session keeps full room context
+        // at zero extra model turns.
+        let state = make_state_with_disc("d-awareness").await;
+        let session_pk = state
+            .db
+            .with_conn(|conn| {
+                let pk = crate::db::discussion_sessions::create_session(
+                    conn,
+                    "d-awareness",
+                    "ClaudeCode",
+                    Some("cli-a"),
+                    "peer",
+                )?;
+                let now = chrono::Utc::now().to_rfc3339();
+                conn.execute(
+                    "INSERT INTO messages (id, discussion_id, role, content,
+                         timestamp, sort_order)
+                     VALUES ('u-1', 'd-awareness', 'User', 'question one', ?1, 1)",
+                    rusqlite::params![now],
+                )?;
+                conn.execute(
+                    "INSERT INTO messages (id, discussion_id, role, content,
+                         agent_type, timestamp, sort_order)
+                     VALUES ('a-1', 'd-awareness', 'Agent', 'native answer',
+                         'Codex', ?1, 2)",
+                    rusqlite::params![now],
+                )?;
+                // The wake: a turn addressed to this exact CLI session.
+                conn.execute(
+                    "INSERT INTO messages (id, discussion_id, role, content,
+                         timestamp, sort_order)
+                     VALUES ('u-wake', 'd-awareness', 'User', 'for you', ?1, 3)",
+                    rusqlite::params![now],
+                )?;
+                crate::db::discussions::replace_message_targets(
+                    conn,
+                    "u-wake",
+                    &[crate::models::MessageTarget::cli(
+                        crate::models::AgentType::ClaudeCode,
+                        pk,
+                    )],
+                )?;
+                Ok(pk)
+            })
+            .await
+            .unwrap();
+
+        let first = wait_for_peer(
+            State(state.clone()),
+            Path("d-awareness".to_string()),
+            Query(WaitForPeerQuery {
+                since_sort_order: Some(0),
+                timeout_secs: Some(1),
+                exclude_agent_type: Some("ClaudeCode".to_string()),
+                session_id: Some("cli-a".to_string()),
+                conversation_id: None,
+                ack_awareness_upto: None,
+            }),
+        )
+        .await
+        .0
+        .data
+        .unwrap();
+        assert!(!first.timed_out);
+        let awareness: Vec<_> = first.messages.iter().filter(|m| m.awareness).collect();
+        assert_eq!(
+            awareness
+                .iter()
+                .map(|m| m.message_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["u-1", "a-1"],
+            "both untargeted turns attach as awareness, in transcript order"
+        );
+        assert!(awareness.iter().all(|m| !m.addressed_to_caller));
+        assert!(first
+            .messages
+            .iter()
+            .any(|m| m.message_id == "u-wake" && !m.awareness && m.addressed_to_caller));
+        assert_eq!(first.awareness_delivered_upto, Some(2));
+        assert_eq!(first.awareness_omitted, 0);
+
+        // Unacked: an identical wait (delivery lost, e.g. cancelled call)
+        // replays the SAME awareness batch instead of skipping it.
+        let replay = wait_for_peer(
+            State(state.clone()),
+            Path("d-awareness".to_string()),
+            Query(WaitForPeerQuery {
+                since_sort_order: Some(0),
+                timeout_secs: Some(1),
+                exclude_agent_type: Some("ClaudeCode".to_string()),
+                session_id: Some("cli-a".to_string()),
+                conversation_id: None,
+                ack_awareness_upto: None,
+            }),
+        )
+        .await
+        .0
+        .data
+        .unwrap();
+        assert_eq!(replay.messages.iter().filter(|m| m.awareness).count(), 2);
+
+        // Acked: the durable cursor advances and the batch never returns.
+        let acked = wait_for_peer(
+            State(state.clone()),
+            Path("d-awareness".to_string()),
+            Query(WaitForPeerQuery {
+                since_sort_order: Some(0),
+                timeout_secs: Some(1),
+                exclude_agent_type: Some("ClaudeCode".to_string()),
+                session_id: Some("cli-a".to_string()),
+                conversation_id: None,
+                ack_awareness_upto: Some(2),
+            }),
+        )
+        .await
+        .0
+        .data
+        .unwrap();
+        assert!(acked.messages.iter().all(|m| !m.awareness));
+        assert_eq!(acked.awareness_delivered_upto, None);
+        let _ = session_pk;
+    }
+
+    #[tokio::test]
+    async fn awareness_is_capped_and_the_remainder_returns_with_the_next_wake() {
+        let state = make_state_with_disc("d-awareness-cap").await;
+        let session_pk = state
+            .db
+            .with_conn(|conn| {
+                let pk = crate::db::discussion_sessions::create_session(
+                    conn,
+                    "d-awareness-cap",
+                    "ClaudeCode",
+                    Some("cli-cap"),
+                    "peer",
+                )?;
+                let now = chrono::Utc::now().to_rfc3339();
+                for sort_order in 1..=22_i64 {
+                    conn.execute(
+                        "INSERT INTO messages (id, discussion_id, role, content,
+                             timestamp, sort_order)
+                         VALUES (?1, 'd-awareness-cap', 'User', ?2, ?3, ?4)",
+                        rusqlite::params![
+                            format!("u-cap-{sort_order}"),
+                            format!("missed turn {sort_order}"),
+                            &now,
+                            sort_order,
+                        ],
+                    )?;
+                }
+                conn.execute(
+                    "INSERT INTO messages (id, discussion_id, role, content,
+                         timestamp, sort_order)
+                     VALUES ('u-wake-1', 'd-awareness-cap', 'User', 'ping', ?1, 23)",
+                    rusqlite::params![now],
+                )?;
+                crate::db::discussions::replace_message_targets(
+                    conn,
+                    "u-wake-1",
+                    &[crate::models::MessageTarget::cli(
+                        crate::models::AgentType::ClaudeCode,
+                        pk,
+                    )],
+                )?;
+                Ok(pk)
+            })
+            .await
+            .unwrap();
+
+        let first = wait_for_peer(
+            State(state.clone()),
+            Path("d-awareness-cap".to_string()),
+            Query(WaitForPeerQuery {
+                since_sort_order: Some(0),
+                timeout_secs: Some(1),
+                exclude_agent_type: Some("ClaudeCode".to_string()),
+                session_id: Some("cli-cap".to_string()),
+                conversation_id: None,
+                ack_awareness_upto: None,
+            }),
+        )
+        .await
+        .0
+        .data
+        .unwrap();
+        assert_eq!(
+            first.messages.iter().filter(|m| m.awareness).count(),
+            AWARENESS_MAX_MESSAGES,
+        );
+        assert_eq!(first.awareness_omitted, 2);
+        let upto = first.awareness_delivered_upto.unwrap();
+        assert_eq!(upto, AWARENESS_MAX_MESSAGES as i64);
+
+        // Ack DELIBERATELY beyond the offered batch (the cap ended at 20):
+        // the server must clamp to the last offerable row, so the remainder
+        // still returns with the next wake instead of being skipped.
+        let (second_pk,) = (session_pk,);
+        state
+            .db
+            .with_conn(move |conn| {
+                let now = chrono::Utc::now().to_rfc3339();
+                conn.execute(
+                    "INSERT INTO messages (id, discussion_id, role, content,
+                         timestamp, sort_order)
+                     VALUES ('u-wake-2', 'd-awareness-cap', 'User', 'ping 2', ?1, 24)",
+                    rusqlite::params![now],
+                )?;
+                crate::db::discussions::replace_message_targets(
+                    conn,
+                    "u-wake-2",
+                    &[crate::models::MessageTarget::cli(
+                        crate::models::AgentType::ClaudeCode,
+                        second_pk,
+                    )],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let second = wait_for_peer(
+            State(state),
+            Path("d-awareness-cap".to_string()),
+            Query(WaitForPeerQuery {
+                since_sort_order: Some(23),
+                timeout_secs: Some(1),
+                exclude_agent_type: Some("ClaudeCode".to_string()),
+                session_id: Some("cli-cap".to_string()),
+                conversation_id: None,
+                // Oversized on purpose — see comment above.
+                ack_awareness_upto: Some(upto + 4),
+            }),
+        )
+        .await
+        .0
+        .data
+        .unwrap();
+        let remainder: Vec<_> = second.messages.iter().filter(|m| m.awareness).collect();
+        assert_eq!(
+            remainder
+                .iter()
+                .map(|m| m.message_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["u-cap-21", "u-cap-22"],
+        );
+        assert_eq!(second.awareness_omitted, 0);
+    }
+
+    #[tokio::test]
+    async fn rows_arriving_between_offer_and_ack_are_never_acked_away() {
+        // KT-189 scan/offer/ack: a batch is offered (u-1), new awareness
+        // rows land BEFORE the client acks, and the ack overshoots them.
+        // The clamp to the persisted offered cursor must keep them alive
+        // for the next wake.
+        let state = make_state_with_disc("d-offer-race").await;
+        let session_pk = state
+            .db
+            .with_conn(|conn| {
+                let pk = crate::db::discussion_sessions::create_session(
+                    conn,
+                    "d-offer-race",
+                    "ClaudeCode",
+                    Some("cli-r"),
+                    "peer",
+                )?;
+                let now = chrono::Utc::now().to_rfc3339();
+                conn.execute(
+                    "INSERT INTO messages (id, discussion_id, role, content,
+                         timestamp, sort_order)
+                     VALUES ('u-1', 'd-offer-race', 'User', 'offered turn', ?1, 1)",
+                    rusqlite::params![now],
+                )?;
+                conn.execute(
+                    "INSERT INTO messages (id, discussion_id, role, content,
+                         timestamp, sort_order)
+                     VALUES ('u-wake-1', 'd-offer-race', 'User', 'ping', ?1, 2)",
+                    rusqlite::params![now],
+                )?;
+                crate::db::discussions::replace_message_targets(
+                    conn,
+                    "u-wake-1",
+                    &[crate::models::MessageTarget::cli(
+                        crate::models::AgentType::ClaudeCode,
+                        pk,
+                    )],
+                )?;
+                Ok(pk)
+            })
+            .await
+            .unwrap();
+
+        // Offer: the wake attaches u-1 (offered cursor → 1).
+        let offered = wait_for_peer(
+            State(state.clone()),
+            Path("d-offer-race".to_string()),
+            Query(WaitForPeerQuery {
+                since_sort_order: Some(0),
+                timeout_secs: Some(1),
+                exclude_agent_type: Some("ClaudeCode".to_string()),
+                session_id: Some("cli-r".to_string()),
+                conversation_id: None,
+                ack_awareness_upto: None,
+            }),
+        )
+        .await
+        .0
+        .data
+        .unwrap();
+        assert_eq!(offered.awareness_delivered_upto, Some(1));
+
+        // New awareness rows land BETWEEN the offer and the ack…
+        state
+            .db
+            .with_conn(move |conn| {
+                let now = chrono::Utc::now().to_rfc3339();
+                for (id, sort) in [("u-3", 3_i64), ("u-4", 4_i64)] {
+                    conn.execute(
+                        "INSERT INTO messages (id, discussion_id, role, content,
+                             timestamp, sort_order)
+                         VALUES (?1, 'd-offer-race', 'User', 'racing turn', ?2, ?3)",
+                        rusqlite::params![id, now, sort],
+                    )?;
+                }
+                let now2 = chrono::Utc::now().to_rfc3339();
+                conn.execute(
+                    "INSERT INTO messages (id, discussion_id, role, content,
+                         timestamp, sort_order)
+                     VALUES ('u-wake-2', 'd-offer-race', 'User', 'ping 2', ?1, 5)",
+                    rusqlite::params![now2],
+                )?;
+                crate::db::discussions::replace_message_targets(
+                    conn,
+                    "u-wake-2",
+                    &[crate::models::MessageTarget::cli(
+                        crate::models::AgentType::ClaudeCode,
+                        session_pk,
+                    )],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        // …and the buggy ack overshoots to 4: it must clamp to offered=1,
+        // so u-3/u-4 still arrive as awareness with this very wake.
+        let woken = wait_for_peer(
+            State(state),
+            Path("d-offer-race".to_string()),
+            Query(WaitForPeerQuery {
+                since_sort_order: Some(2),
+                timeout_secs: Some(1),
+                exclude_agent_type: Some("ClaudeCode".to_string()),
+                session_id: Some("cli-r".to_string()),
+                conversation_id: None,
+                ack_awareness_upto: Some(4),
+            }),
+        )
+        .await
+        .0
+        .data
+        .unwrap();
+        let awareness: Vec<_> = woken
+            .messages
+            .iter()
+            .filter(|m| m.awareness)
+            .map(|m| m.message_id.as_str())
+            .collect();
+        assert_eq!(awareness, vec!["u-3", "u-4"]);
+    }
+
+    #[tokio::test]
+    async fn session_id_only_caller_keeps_presence_alive() {
+        // KT-189 review residual 3: a bridge that cannot name its provider
+        // omits exclude_agent_type but still sends its session id. It must
+        // get the modern contract AND live presence (heartbeat + waiting
+        // state), using the agent_type stored on its own session row.
+        let state = make_state_with_disc("d-unknown-cli").await;
+        state
+            .db
+            .with_conn(|conn| {
+                let pk = crate::db::discussion_sessions::create_session(
+                    conn,
+                    "d-unknown-cli",
+                    "ClaudeCode",
+                    Some("cli-unknown"),
+                    "peer",
+                )?;
+                // Make last_seen visibly stale so the heartbeat bump shows.
+                conn.execute(
+                    "UPDATE discussion_sessions
+                        SET last_seen = '2000-01-01T00:00:00Z'
+                      WHERE id = ?1",
+                    rusqlite::params![pk],
+                )?;
+                let now = chrono::Utc::now().to_rfc3339();
+                // An untargeted Agent turn: must NOT wake a modern caller.
+                conn.execute(
+                    "INSERT INTO messages (id, discussion_id, role, content,
+                         agent_type, timestamp, sort_order)
+                     VALUES ('a-noise', 'd-unknown-cli', 'Agent', 'chatter',
+                         'Codex', ?1, 1)",
+                    rusqlite::params![now],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let response = wait_for_peer(
+            State(state.clone()),
+            Path("d-unknown-cli".to_string()),
+            Query(WaitForPeerQuery {
+                since_sort_order: Some(0),
+                timeout_secs: Some(1),
+                exclude_agent_type: None,
+                session_id: Some("cli-unknown".to_string()),
+                conversation_id: None,
+                ack_awareness_upto: None,
+            }),
+        )
+        .await
+        .0
+        .data
+        .unwrap();
+        // Modern contract applies: the untargeted Agent turn is not a wake.
+        assert!(
+            response.timed_out,
+            "session-id-only caller must not wake-all"
+        );
+        assert!(
+            response.next_poll_at.is_some(),
+            "waiting state was recorded"
+        );
+
+        let session = state
+            .db
+            .with_conn(|conn| {
+                crate::db::discussion_sessions::list_sessions(conn, "d-unknown-cli", false)
+            })
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_ne!(
+            session.last_seen.as_deref(),
+            Some("2000-01-01T00:00:00Z"),
+            "heartbeat bumped without exclude_agent_type"
+        );
+        assert!(
+            session.activity.is_some(),
+            "listening/waiting presence recorded without exclude_agent_type"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_ack_pointing_into_the_future_cannot_skip_unwritten_turns() {
+        // KT-189 fail-closed guard: ack=1e9 with a 3-row discussion must
+        // clamp to the tip, so awareness written AFTERWARDS still reaches
+        // the session with its next wake.
+        let state = make_state_with_disc("d-future-ack").await;
+        let session_pk = state
+            .db
+            .with_conn(|conn| {
+                let pk = crate::db::discussion_sessions::create_session(
+                    conn,
+                    "d-future-ack",
+                    "ClaudeCode",
+                    Some("cli-f"),
+                    "peer",
+                )?;
+                let now = chrono::Utc::now().to_rfc3339();
+                conn.execute(
+                    "INSERT INTO messages (id, discussion_id, role, content,
+                         timestamp, sort_order)
+                     VALUES ('u-old', 'd-future-ack', 'User', 'seen turn', ?1, 1)",
+                    rusqlite::params![now],
+                )?;
+                conn.execute(
+                    "INSERT INTO messages (id, discussion_id, role, content,
+                         timestamp, sort_order)
+                     VALUES ('u-wake-1', 'd-future-ack', 'User', 'ping', ?1, 2)",
+                    rusqlite::params![now],
+                )?;
+                crate::db::discussions::replace_message_targets(
+                    conn,
+                    "u-wake-1",
+                    &[crate::models::MessageTarget::cli(
+                        crate::models::AgentType::ClaudeCode,
+                        pk,
+                    )],
+                )?;
+                Ok(pk)
+            })
+            .await
+            .unwrap();
+
+        // Absurdly large ack BEFORE any offer: clamps to offered=0, a no-op.
+        let _ = wait_for_peer(
+            State(state.clone()),
+            Path("d-future-ack".to_string()),
+            Query(WaitForPeerQuery {
+                since_sort_order: Some(0),
+                timeout_secs: Some(1),
+                exclude_agent_type: Some("ClaudeCode".to_string()),
+                session_id: Some("cli-f".to_string()),
+                conversation_id: None,
+                ack_awareness_upto: Some(1_000_000_000),
+            }),
+        )
+        .await;
+
+        // New room traffic AFTER the oversized ack…
+        state
+            .db
+            .with_conn(move |conn| {
+                let now = chrono::Utc::now().to_rfc3339();
+                conn.execute(
+                    "INSERT INTO messages (id, discussion_id, role, content,
+                         timestamp, sort_order)
+                     VALUES ('u-later', 'd-future-ack', 'User', 'later context', ?1, 3)",
+                    rusqlite::params![now],
+                )?;
+                conn.execute(
+                    "INSERT INTO messages (id, discussion_id, role, content,
+                         timestamp, sort_order)
+                     VALUES ('u-wake-2', 'd-future-ack', 'User', 'ping 2', ?1, 4)",
+                    rusqlite::params![now],
+                )?;
+                crate::db::discussions::replace_message_targets(
+                    conn,
+                    "u-wake-2",
+                    &[crate::models::MessageTarget::cli(
+                        crate::models::AgentType::ClaudeCode,
+                        session_pk,
+                    )],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        // …must still arrive as awareness with the next wake.
+        let woken = wait_for_peer(
+            State(state),
+            Path("d-future-ack".to_string()),
+            Query(WaitForPeerQuery {
+                since_sort_order: Some(3),
+                timeout_secs: Some(1),
+                exclude_agent_type: Some("ClaudeCode".to_string()),
+                session_id: Some("cli-f".to_string()),
+                conversation_id: None,
+                ack_awareness_upto: None,
+            }),
+        )
+        .await
+        .0
+        .data
+        .unwrap();
+        assert!(woken
+            .messages
+            .iter()
+            .any(|m| m.message_id == "u-later" && m.awareness));
+    }
+
+    #[tokio::test]
+    async fn turns_for_another_responder_are_awareness_and_never_wake() {
+        // KT-189 sealed contract: `@` picks who WAKES and answers; it does
+        // not make the turn invisible to the other participants. A turn
+        // addressed to another responder reaches this CLI as awareness on
+        // its next wake — and an awareness-only window never ends the wait.
+        let state = make_state_with_disc("d-other-responder").await;
+        let session_pk = state
+            .db
+            .with_conn(|conn| {
+                let pk = crate::db::discussion_sessions::create_session(
+                    conn,
+                    "d-other-responder",
+                    "ClaudeCode",
+                    Some("cli-obs"),
+                    "peer",
+                )?;
+                let now = chrono::Utc::now().to_rfc3339();
+                conn.execute(
+                    "INSERT INTO messages (id, discussion_id, role, content,
+                         timestamp, sort_order)
+                     VALUES ('u-h', 'd-other-responder', 'User', 'context turn', ?1, 1)",
+                    rusqlite::params![now],
+                )?;
+                conn.execute(
+                    "INSERT INTO messages (id, discussion_id, role, content,
+                         timestamp, sort_order)
+                     VALUES ('u-codex', 'd-other-responder', 'User',
+                         'belongs to codex', ?1, 2)",
+                    rusqlite::params![now],
+                )?;
+                crate::db::discussions::replace_message_targets(
+                    conn,
+                    "u-codex",
+                    &[crate::models::MessageTarget::agent(
+                        crate::models::AgentType::Codex,
+                    )],
+                )?;
+                Ok(pk)
+            })
+            .await
+            .unwrap();
+
+        // Nothing addresses this CLI: the wait must time out with NOTHING —
+        // awareness alone never wakes a model.
+        let quiet = wait_for_peer(
+            State(state.clone()),
+            Path("d-other-responder".to_string()),
+            Query(WaitForPeerQuery {
+                since_sort_order: Some(0),
+                timeout_secs: Some(1),
+                exclude_agent_type: Some("ClaudeCode".to_string()),
+                session_id: Some("cli-obs".to_string()),
+                conversation_id: None,
+                ack_awareness_upto: None,
+            }),
+        )
+        .await
+        .0
+        .data
+        .unwrap();
+        assert!(quiet.timed_out);
+        assert!(quiet.messages.is_empty());
+        assert_eq!(quiet.withheld_by_routing, 2);
+
+        // A wake then carries BOTH earlier turns as awareness, including the
+        // one addressed to the other responder (visible, never actionable).
+        state
+            .db
+            .with_conn(move |conn| {
+                let now = chrono::Utc::now().to_rfc3339();
+                conn.execute(
+                    "INSERT INTO messages (id, discussion_id, role, content,
+                         timestamp, sort_order)
+                     VALUES ('u-wake', 'd-other-responder', 'User', 'your turn', ?1, 3)",
+                    rusqlite::params![now],
+                )?;
+                crate::db::discussions::replace_message_targets(
+                    conn,
+                    "u-wake",
+                    &[crate::models::MessageTarget::cli(
+                        crate::models::AgentType::ClaudeCode,
+                        session_pk,
+                    )],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let woken = wait_for_peer(
+            State(state),
+            Path("d-other-responder".to_string()),
+            Query(WaitForPeerQuery {
+                since_sort_order: Some(2),
+                timeout_secs: Some(1),
+                exclude_agent_type: Some("ClaudeCode".to_string()),
+                session_id: Some("cli-obs".to_string()),
+                conversation_id: None,
+                ack_awareness_upto: None,
+            }),
+        )
+        .await
+        .0
+        .data
+        .unwrap();
+        assert!(!woken.timed_out);
+        let awareness: Vec<_> = woken.messages.iter().filter(|m| m.awareness).collect();
+        assert_eq!(
+            awareness
+                .iter()
+                .map(|m| m.message_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["u-h", "u-codex"],
+        );
+        assert!(
+            awareness.iter().all(|m| !m.addressed_to_caller),
+            "awareness is context, never actionable"
+        );
+        assert!(woken
+            .messages
+            .iter()
+            .any(|m| m.message_id == "u-wake" && !m.awareness));
     }
 
     #[tokio::test]
@@ -3178,6 +4344,7 @@ mod tests {
                 exclude_agent_type: Some("Codex".to_string()),
                 session_id: Some("codex-a".to_string()),
                 conversation_id: None,
+                ack_awareness_upto: None,
             }),
         )
         .await
@@ -3201,6 +4368,7 @@ mod tests {
                 exclude_agent_type: Some("Codex".to_string()),
                 session_id: Some("codex-b".to_string()),
                 conversation_id: None,
+                ack_awareness_upto: None,
             }),
         )
         .await
@@ -3271,6 +4439,7 @@ mod tests {
                     exclude_agent_type: Some(agent_type.to_string()),
                     session_id: Some(session_id.to_string()),
                     conversation_id: None,
+                    ack_awareness_upto: None,
                 }),
             )
             .await
@@ -3297,6 +4466,7 @@ mod tests {
                 exclude_agent_type: None,
                 session_id: None,
                 conversation_id: None,
+                ack_awareness_upto: None,
             }),
         )
         .await;
@@ -3338,6 +4508,7 @@ mod tests {
                         exclude_agent_type: Some("Codex".to_string()),
                         session_id: Some("codex-late".to_string()),
                         conversation_id: cid,
+                        ack_awareness_upto: None,
                     }),
                 )
                 .await
@@ -3425,6 +4596,7 @@ mod tests {
                 exclude_agent_type: Some("ClaudeCode".to_string()),
                 session_id: Some("s-act".to_string()),
                 conversation_id: None,
+                ack_awareness_upto: None,
             }),
         )
         .await;
@@ -3527,6 +4699,7 @@ mod tests {
                 exclude_agent_type: Some("ClaudeCode".to_string()),
                 session_id: None,
                 conversation_id: None,
+                ack_awareness_upto: None,
             }),
         )
         .await;
@@ -3554,19 +4727,27 @@ mod tests {
         state
             .db
             .with_conn(|conn| {
-                crate::db::discussion_sessions::join_disc_session(
+                let pk = crate::db::discussion_sessions::join_disc_session(
                     conn,
                     "d-act-2",
                     "ClaudeCode",
                     "s-act2",
-                )
-                .map(|_| ())?;
+                )?;
                 let now = chrono::Utc::now().to_rfc3339();
                 conn.execute(
                     "INSERT INTO messages
                         (id, discussion_id, role, content, agent_type, timestamp, sort_order)
                      VALUES ('m-peer', 'd-act-2', 'Agent', 'peer msg', 'Codex', ?1, 5)",
                     rusqlite::params![now],
+                )?;
+                // KT-189: only a turn addressed to this exact CLI wakes it.
+                crate::db::discussions::replace_message_targets(
+                    conn,
+                    "m-peer",
+                    &[crate::models::MessageTarget::cli(
+                        crate::models::AgentType::ClaudeCode,
+                        pk,
+                    )],
                 )?;
                 Ok(())
             })
@@ -3582,6 +4763,7 @@ mod tests {
                 exclude_agent_type: Some("ClaudeCode".to_string()),
                 session_id: Some("s-act2".to_string()),
                 conversation_id: None,
+                ack_awareness_upto: None,
             }),
         )
         .await;

@@ -11,26 +11,18 @@
 // canonical `@user` label instead of blocking the render. The chip is a reading
 // aid, never a gate.
 
-import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { config as configApi } from './api';
-import { agentMentionColors, type AgentMentionColors } from './constants';
-
-export interface LocalIdentity {
-  /** Kronn pseudo (e.g. "Romu - mac"). `null` until fetched or when unset. */
-  pseudo: string | null;
-  /** Gravatar source e-mail. `null` when the user configured none. */
-  avatarEmail: string | null;
-  /** Optional user-configured colors for canonical agent mentions. */
-  mentionColors: AgentMentionColors;
-}
-
-const EMPTY: LocalIdentity = { pseudo: null, avatarEmail: null, mentionColors: {} };
+import { agentMentionColors } from './constants';
+import {
+  EMPTY_LOCAL_IDENTITY,
+  LocalIdentityContext,
+  type LocalIdentity,
+} from './localIdentity';
 const IDENTITY_RETRY_DELAY_MS = 5_000;
 
-const LocalIdentityContext = createContext<LocalIdentity>(EMPTY);
-
 export function LocalIdentityProvider({ children }: { children: ReactNode }) {
-  const [identity, setIdentity] = useState<LocalIdentity>(EMPTY);
+  const [identity, setIdentity] = useState<LocalIdentity>(EMPTY_LOCAL_IDENTITY);
 
   const refreshMentionColors = useCallback(() => {
     configApi
@@ -89,8 +81,4 @@ export function LocalIdentityProvider({ children }: { children: ReactNode }) {
       {children}
     </LocalIdentityContext.Provider>
   );
-}
-
-export function useLocalIdentity() {
-  return useContext(LocalIdentityContext);
 }

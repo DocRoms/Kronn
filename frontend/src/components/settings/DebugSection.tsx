@@ -48,7 +48,7 @@ export function DebugSection({
   const [lines, setLines] = useState<string[]>([]);
   const [buffered, setBuffered] = useState(0);
   const [capacity, setCapacity] = useState(0);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [follow, setFollow] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const viewerRef = useRef<HTMLPreElement | null>(null);
@@ -70,8 +70,22 @@ export function DebugSection({
 
   // Initial load + auto-refresh when following.
   useEffect(() => {
-    void refresh();
-  }, [refresh]);
+    let active = true;
+    debugApi.getLogs(TAIL_LINES)
+      .then(resp => {
+        if (!active) return;
+        setLines(resp.lines);
+        setBuffered(resp.buffered);
+        setCapacity(resp.capacity);
+      })
+      .catch(error => {
+        if (active) setError(error instanceof Error ? error.message : String(error));
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => { active = false; };
+  }, []);
 
   useEffect(() => {
     if (!follow) return;

@@ -304,6 +304,7 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       delete: resolve(undefined),
       update: resolve(undefined),
       nativeAgentMode: resolve({ disabled: false }),
+      workspaces: resolve([]),
       archive: resolve(undefined),
       unarchive: resolve(undefined),
       stop: resolve({ cancelled: false }),

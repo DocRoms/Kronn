@@ -10,13 +10,16 @@
 
 /* ── Sidebar ──────────────────────────────────────────── */
 .disc-sidebar {
-  width: 280px;
+  width: 360px;
+  min-width: 320px;
+  max-width: 460px;
   border-right: 1px solid var(--kr-border);
   background: var(--kr-bg-raised);
   display: flex;
   flex-direction: column;
   flex-shrink: 0;
-  overflow-x: hidden; /* belt-and-suspenders: never let a wide child push a h-scrollbar */
+  overflow: hidden;
+  resize: horizontal;
 }
 
 .disc-sidebar[data-mobile="true"] {
@@ -24,6 +27,9 @@
   inset: 0;
   z-index: var(--kr-z-modal);
   width: 100%;
+  min-width: 0;
+  max-width: none;
+  resize: none;
   background: var(--kr-bg-surface);
 }
 
@@ -50,11 +56,15 @@
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 14px 14px 10px;
+  gap: 10px;
+  padding: 13px 12px 10px;
   border-bottom: 1px solid var(--kr-border-light);
+  background: var(--kr-bg-surface);
 }
 
 .disc-sidebar-header-title {
+  min-width: 0;
+  flex: 1;
   font-weight: 600;
   font-size: var(--kr-fs-md);
 }
@@ -62,7 +72,7 @@
 .disc-sidebar-header-actions {
   display: flex;
   align-items: center;
-  gap: var(--kr-sp-3);
+  gap: 6px;
 }
 
 .disc-sidebar-header[data-selection-mode="true"] {
@@ -84,6 +94,82 @@
   color: var(--kr-error);
 }
 
+.disc-sidebar-header .disc-icon-btn {
+  min-width: 34px;
+  height: 34px;
+  justify-content: center;
+  padding: 0;
+}
+
+.disc-sidebar-header .disc-icon-btn.disc-sidebar-new-btn {
+  background: var(--kr-accent);
+  border-color: transparent;
+  color: var(--kr-text-on-accent, #fff);
+}
+
+.disc-sidebar-header .disc-icon-btn.disc-sidebar-new-btn:hover,
+.disc-sidebar-header .disc-icon-btn.disc-sidebar-new-btn:focus-visible {
+  background: var(--kr-accent-hover, var(--kr-accent));
+  color: var(--kr-text-on-accent, #fff);
+}
+
+.disc-sidebar-header-menu-wrap {
+  position: relative;
+}
+
+.disc-sidebar-header-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 80;
+  display: grid;
+  min-width: 220px;
+  padding: 5px;
+  border: 1px solid var(--kr-border-strong);
+  border-radius: var(--kr-r-md);
+  background: var(--kr-bg-elevated);
+  box-shadow: var(--kr-shadow-lg);
+}
+
+.disc-sidebar-header-menu > button {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: var(--kr-r-sm);
+  background: transparent;
+  color: var(--kr-text-secondary);
+  font: inherit;
+  font-size: var(--kr-fs-sm);
+  text-align: left;
+  cursor: pointer;
+}
+
+.disc-sidebar-header-menu > button:hover,
+.disc-sidebar-header-menu > button:focus-visible {
+  background: var(--kr-bg-hover);
+  color: var(--kr-text-primary);
+  outline: 2px solid transparent;
+}
+
+.disc-sidebar-header-menu > button:disabled {
+  opacity: 0.5;
+  cursor: wait;
+}
+
+.disc-sidebar-header-menu > button strong {
+  min-width: 20px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--kr-accent-bg);
+  color: var(--kr-accent-text);
+  font-size: var(--kr-fs-xs);
+  text-align: center;
+}
+
 .disc-sidebar-visually-hidden {
   position: absolute;
   width: 1px;
@@ -98,6 +184,8 @@
 
 .disc-sidebar-list {
   flex: 1;
+  display: flex;
+  flex-direction: column;
   overflow-y: auto;
   /* MUST be explicit: per the CSS overflow spec, when one axis is `auto` and
      the other is `visible`, the `visible` axis is forced to `auto` too — so
@@ -105,23 +193,167 @@
      a child is too wide (a long unbroken disc title, a wide badge row). Clip
      it instead; titles already ellipsize. (Fixes the intermittent h-scrollbar.) */
   overflow-x: hidden;
-  padding: var(--kr-sp-4) 0;
+  padding: 8px;
+}
+
+.disc-sidebar-list > * {
+  order: 4;
+}
+
+.disc-sidebar-section {
+  flex: 0 0 auto;
+  margin-bottom: 7px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  /* Row action menus must escape the card. Clipping here made the lower
+     actions look randomly missing even though their z-index was correct. */
+  overflow: visible;
+}
+
+.disc-smart-more {
+  width: calc(100% - 10px);
+  margin: 2px 5px 6px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: var(--kr-r-sm);
+  background: transparent;
+  color: var(--kr-text-muted);
+  font: inherit;
+  font-size: var(--kr-fs-xs);
+  text-align: left;
+  cursor: pointer;
+}
+
+.disc-smart-more:hover,
+.disc-smart-more:focus-visible {
+  background: var(--kr-bg-hover);
+  color: var(--kr-text-primary);
+  outline: 2px solid transparent;
+}
+
+.disc-sidebar-section[data-expanded="true"] {
+  border-color: var(--kr-border-light);
+  background: var(--kr-bg-surface);
+}
+
+/* `content-visibility: auto` creates paint containment for every virtualised
+   row. A menu can therefore be present and "visible" to the accessibility
+   tree while later rows/cards are painted over it. Lift the complete section
+   while one of its rows owns a popover, then temporarily disable containment
+   on that row so the menu actually reaches the foreground. */
+.disc-sidebar-section:has(.disc-swipe-wrap[data-menu-open="true"]) {
+  position: relative;
+  z-index: 60;
+}
+
+.disc-sidebar-follow-up {
+  order: 1;
+}
+
+.disc-sidebar-favorites {
+  order: 2;
+}
+
+.disc-sidebar-recent {
+  order: 3;
+}
+
+.disc-sidebar-projects {
+  order: 4;
+}
+
+.disc-sidebar-contacts {
+  order: 5;
+}
+
+.disc-sidebar-archives {
+  order: 6;
+}
+
+.disc-project-tree {
+  padding: 0 4px 6px;
+}
+
+.disc-sidebar-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 34px;
+  padding: 7px 12px;
+  border-top: 1px solid var(--kr-border-light);
+  background: var(--kr-bg-surface);
+  color: var(--kr-text-muted);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.disc-sidebar-footer > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.disc-sidebar-footer kbd {
+  display: inline-flex;
+  align-items: center;
+  min-height: 18px;
+  padding: 0 4px;
+  border: 1px solid var(--kr-border-strong);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  background: var(--kr-bg-elevated);
+  color: var(--kr-text-secondary);
+  font: inherit;
+}
+
+.disc-archives-more {
+  width: calc(100% - 28px);
+  margin: 4px 14px 8px;
+  padding: 7px 10px;
+  border: 1px solid var(--kr-border-subtle);
+  border-radius: var(--kr-r-sm);
+  background: var(--kr-bg-elevated);
+  color: var(--kr-text-secondary);
+  font-size: var(--kr-fs-xs);
+  cursor: pointer;
+}
+
+.disc-archives-more:hover,
+.disc-archives-more:focus-visible {
+  border-color: var(--kr-accent);
+  color: var(--kr-text-primary);
+  outline: 2px solid transparent;
 }
 
 /* ── Search filter ────────────────────────────────────── */
 .disc-search-wrap {
-  padding: 6px 14px 2px;
+  padding: 10px 12px 8px;
   border-bottom: 1px solid var(--kr-border-ghost);
+  background: var(--kr-bg-surface);
+}
+
+.disc-search-controls {
+  display: flex;
+  align-items: stretch;
+  gap: 7px;
 }
 
 .disc-search-box {
   display: flex;
   align-items: center;
+  min-width: 0;
+  flex: 1;
   gap: var(--kr-sp-3);
-  padding: 5px var(--kr-sp-4);
+  min-height: 36px;
+  padding: 5px 10px;
   border-radius: var(--kr-r-md);
-  background: var(--kr-bg-hover);
+  background: var(--kr-bg-input);
   border: 1px solid var(--kr-border-light);
+}
+
+.disc-search-box:focus-within {
+  border-color: var(--kr-accent);
+  box-shadow: 0 0 0 2px rgba(var(--kr-accent-rgb), 0.12);
 }
 
 .disc-search-icon {
@@ -149,27 +381,48 @@
   display: flex;
 }
 
-.disc-search-advanced {
+.disc-search-filter-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  gap: 5px;
   flex-shrink: 0;
-  width: 22px;
-  height: 22px;
-  margin: -3px -4px -3px 0;
-  padding: 0;
-  border: 0;
-  border-radius: var(--kr-r-sm);
-  background: transparent;
-  color: var(--kr-text-dim);
+  min-height: 36px;
+  padding: 0 9px;
+  border: 1px solid rgba(var(--kr-accent-rgb), 0.45);
+  border-radius: var(--kr-r-md);
+  background: var(--kr-accent-bg);
+  color: var(--kr-accent-text);
+  font: inherit;
+  font-size: var(--kr-fs-xs);
+  font-weight: 600;
   cursor: pointer;
 }
 
-.disc-search-advanced:hover,
-.disc-search-advanced:focus-visible {
-  background: var(--kr-accent-bg);
-  color: var(--kr-accent);
-  outline: none;
+.disc-search-filter-btn strong {
+  min-width: 16px;
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: var(--kr-accent);
+  color: var(--kr-text-on-accent, #fff);
+  font-size: 9px;
+}
+
+.disc-search-filter-btn:hover,
+.disc-search-filter-btn:focus-visible {
+  border-color: var(--kr-accent);
+  background: rgba(var(--kr-accent-rgb), 0.2);
+  outline: 2px solid transparent;
+}
+
+.disc-source-filter-select {
+  max-width: 100%;
+  margin-top: 7px !important;
+  padding: 4px 8px !important;
+  border-color: rgba(var(--kr-accent-rgb), 0.28) !important;
+  border-radius: 999px !important;
+  background: var(--kr-accent-bg) !important;
+  color: var(--kr-accent-text) !important;
 }
 
 /* ── Project / group headers ──────────────────────────── */
@@ -189,6 +442,11 @@
 
 .disc-group-header[data-no-border="true"] {
   border-top: none;
+}
+
+.disc-sidebar-header-count {
+  color: var(--kr-text-tertiary);
+  font-weight: 500;
 }
 
 .disc-group-btn {
@@ -219,6 +477,55 @@
   border-top: none;
 }
 
+.disc-sidebar-section > .disc-group-btn,
+.disc-sidebar-section > .disc-contacts-header .disc-group-btn {
+  min-height: 36px;
+  margin: 0;
+  padding: 0 9px;
+  border-top: 0;
+  color: var(--kr-text-secondary);
+  font-size: var(--kr-fs-sm);
+  font-weight: 700;
+  text-transform: none;
+  letter-spacing: 0.02em;
+}
+
+.disc-sidebar-section > .disc-group-btn:hover,
+.disc-sidebar-section > .disc-group-btn:focus-visible,
+.disc-sidebar-section > .disc-contacts-header .disc-group-btn:hover,
+.disc-sidebar-section > .disc-contacts-header .disc-group-btn:focus-visible {
+  background: var(--kr-bg-hover);
+  color: var(--kr-text-primary);
+  outline: 2px solid transparent;
+}
+
+.disc-sidebar-section .disc-group-unseen {
+  min-width: 18px;
+  margin-left: 0;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--kr-accent);
+  color: var(--kr-text-on-accent, #fff);
+  font-size: 10px;
+  font-weight: 700;
+  text-align: center;
+}
+
+.disc-sidebar-section .disc-group-count + .disc-group-unseen {
+  margin-left: 3px;
+}
+
+.disc-project-tree > div > .disc-group-btn,
+.disc-project-tree .disc-org-header {
+  min-height: 30px;
+  margin: 2px 4px 0;
+  width: calc(100% - 8px);
+  padding: 5px 7px;
+  border-top: 1px solid var(--kr-border-ghost);
+  border-radius: var(--kr-r-sm);
+  color: var(--kr-text-muted);
+}
+
 .disc-group-btn[data-variant="archive"] {
   color: var(--kr-text-tertiary);
 }
@@ -231,6 +538,114 @@
   border-top: 1px solid rgba(var(--kr-accent-rgb), 0.08);
 }
 
+/* One durable Quick Prompt heading for all of its executions. Runs below it
+   are deliberately smaller: the repeated QP name no longer consumes a full
+   row for every cron/manual launch. */
+.disc-group-btn[data-variant="batch-campaign"] {
+  align-items: flex-start;
+  width: calc(100% - 16px);
+  min-height: 0;
+  margin: 3px 8px 1px;
+  padding: 4px 7px 5px;
+  color: var(--kr-accent);
+  background: rgba(var(--kr-accent-rgb), 0.045);
+  border: 1px solid rgba(var(--kr-accent-rgb), 0.12);
+  border-radius: var(--kr-r-sm);
+  font-weight: 500;
+  letter-spacing: normal;
+  text-transform: none;
+}
+
+.disc-group-btn[data-variant="batch-campaign"]:hover {
+  background: rgba(var(--kr-accent-rgb), 0.09);
+  border-color: rgba(var(--kr-accent-rgb), 0.24);
+}
+
+.disc-batch-campaign-name {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--kr-fs-md);
+  font-weight: 500;
+  line-height: 1.2;
+}
+
+.disc-batch-campaign-icon {
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+
+.disc-group-btn[data-variant="batch-campaign"] .disc-chevron {
+  margin-top: 3px;
+}
+
+.disc-batch-campaign-content {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.disc-batch-campaign-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--kr-text-tertiary);
+  font-size: 0.65rem;
+  font-weight: 500;
+  line-height: 1;
+}
+
+.disc-batch-campaign-meta > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.disc-batch-campaign-runs {
+  margin: 0 8px 5px 18px;
+  padding-left: 5px;
+  border-left: 1px solid rgba(var(--kr-accent-rgb), 0.14);
+}
+
+.disc-batch-header[data-compact="true"] .disc-group-btn[data-variant="batch"] {
+  min-height: 26px;
+  gap: 5px;
+  padding: 3px 6px;
+  border-top-color: transparent;
+  color: var(--kr-text-muted);
+  font-weight: 500;
+}
+
+.disc-batch-run-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--kr-text-secondary);
+  font-size: var(--kr-fs-sm);
+  font-weight: 400;
+  letter-spacing: normal;
+  text-transform: none;
+}
+
+.disc-batch-run-id {
+  flex: 0 0 auto;
+  padding: 1px 5px;
+  border: 1px solid var(--kr-border-ghost);
+  border-radius: 999px;
+  background: rgba(var(--kr-accent-rgb), 0.035);
+  color: var(--kr-text-tertiary);
+  font-family: var(--kr-font-mono);
+  font-size: 0.61rem;
+  font-weight: 600;
+  line-height: 1.35;
+  letter-spacing: 0.01em;
+}
+
 .disc-group-count {
   font-weight: 400;
   /* Same contrast fix as .disc-contacts-meta — 0.5 fell under 4.5:1. */
@@ -238,124 +653,86 @@
   margin-left: auto;
 }
 
-/* Relative timestamp shown next to the batch group label — disambiguates
-   multiple batches of the same Quick Prompt (e.g. cron firing hourly).
-   Kept light-weight visually so it doesn't steal attention from the status pill. */
-.disc-batch-when {
-  font-size: 0.85em;
-  font-weight: 400;
-  color: var(--kr-text-ghost);
-  margin-left: 4px;
-  font-variant-numeric: tabular-nums;
-}
-
-/* Batch group header — flex row holding the toggle button + the trash icon.
-   The trash stays hidden until the user hovers the row, so it doesn't add
-   visual noise on every batch in a long list. */
+/* Batch run row: one toggle plus one contextual menu. Secondary actions no
+   longer stretch every historical run into a tall multi-line card. */
 .disc-batch-header {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 4px;
 }
 
-.disc-batch-delete {
+.disc-batch-menu {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.disc-batch-menu-trigger {
   display: flex;
   align-items: center;
   justify-content: center;
   width: 22px;
   height: 22px;
+  padding: 0;
   background: transparent;
-  border: 1px solid rgba(var(--kr-error-rgb), 0.2);
+  border: 1px solid transparent;
   border-radius: 6px;
-  color: rgba(var(--kr-error-rgb), 0.5);
+  color: var(--kr-text-tertiary);
   cursor: pointer;
-  /* Discreet by default on desktop, but visible enough that a hover or focus
-     reveal isn't strictly needed. Was opacity:0 + hover-reveal — that broke
-     touch devices entirely. Now: 35% always, 100% on hover/focus. */
-  opacity: 0.35;
-  transition: opacity 0.12s, background 0.12s, border-color 0.12s, color 0.12s;
+  opacity: 0.58;
+  transition: opacity 0.12s, background 0.12s, border-color 0.12s;
 }
 
-.disc-batch-header:hover .disc-batch-delete,
-.disc-batch-header:focus-within .disc-batch-delete,
-.disc-batch-delete:focus {
+.disc-batch-header:hover .disc-batch-menu-trigger,
+.disc-batch-menu-trigger:focus,
+.disc-batch-menu-trigger[aria-expanded="true"] {
   opacity: 1;
 }
 
-.disc-batch-delete:hover {
-  background: rgba(var(--kr-error-rgb), 0.12);
-  border-color: rgba(var(--kr-error-rgb), 0.5);
+.disc-batch-menu-trigger:hover,
+.disc-batch-menu-trigger[aria-expanded="true"] {
+  background: rgba(var(--kr-accent-rgb), 0.08);
+  border-color: rgba(var(--kr-accent-rgb), 0.18);
+}
+
+.disc-batch-menu-panel {
+  position: absolute;
+  z-index: 35;
+  top: calc(100% + 3px);
+  right: 0;
+  min-width: 176px;
+  padding: 4px;
+  background: var(--kr-bg-elevated, var(--kr-bg-surface));
+  border: 1px solid var(--kr-border-subtle);
+  border-radius: var(--kr-r-sm);
+  box-shadow: var(--kr-shadow-md);
+}
+
+.disc-batch-menu-panel > button {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  min-height: 28px;
+  padding: 5px 7px;
+  background: transparent;
+  border: 0;
+  border-radius: 5px;
+  color: var(--kr-text-secondary);
+  font-size: 0.76rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.disc-batch-menu-panel > button:hover,
+.disc-batch-menu-panel > button:focus-visible {
+  background: rgba(var(--kr-accent-rgb), 0.09);
+  color: var(--kr-text-primary);
+  outline: none;
+}
+
+.disc-batch-menu-panel > button[data-danger="true"] {
   color: var(--kr-error);
-}
-
-/* ── Retry batch button — same shape as delete, accent-coloured ─── */
-.disc-batch-retry,
-.disc-batch-review {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  font-size: 13px;
-  line-height: 1;
-  background: transparent;
-  border: 1px solid rgba(var(--kr-accent-rgb), 0.2);
-  border-radius: 6px;
-  color: rgba(var(--kr-accent-rgb), 0.55);
-  cursor: pointer;
-  opacity: 0.45;
-  transition: opacity 0.12s, background 0.12s, border-color 0.12s, color 0.12s;
-}
-
-.disc-batch-header:hover .disc-batch-retry,
-.disc-batch-header:focus-within .disc-batch-retry,
-.disc-batch-retry:focus,
-.disc-batch-header:hover .disc-batch-review,
-.disc-batch-header:focus-within .disc-batch-review,
-.disc-batch-review:focus {
-  opacity: 1;
-}
-
-.disc-batch-retry:hover,
-.disc-batch-review:hover {
-  background: rgba(var(--kr-accent-rgb), 0.12);
-  border-color: rgba(var(--kr-accent-rgb), 0.5);
-  color: var(--kr-accent);
-}
-
-/* Touch devices have no hover state — keep the icon visible so users can
-   tap it. The 35% default already does this on desktop too, so this is
-   mostly a safety net for explicit touch detection. */
-@media (hover: none) {
-  .disc-batch-delete {
-    opacity: 0.6;
-  }
-}
-
-/* Clickable pastille linking a batch group back to its spawning workflow run.
-   Lives on its own row under the batch folder header so users notice it
-   without it stealing focus from the folder's status pill. */
-.disc-batch-parent-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  padding: 2px 8px;
-  margin-top: 2px;
-  margin-bottom: 4px;
-  background: rgba(var(--kr-accent-rgb), 0.06);
-  border: 1px solid rgba(var(--kr-accent-rgb), 0.18);
-  border-radius: 10px;
-  font-size: 0.75rem;
-  font-weight: 500;
-  color: rgba(var(--kr-accent-rgb), 0.75);
-  cursor: pointer;
-  transition: background 0.12s, border-color 0.12s, color 0.12s;
-}
-
-.disc-batch-parent-pill:hover {
-  background: rgba(var(--kr-accent-rgb), 0.14);
-  border-color: rgba(var(--kr-accent-rgb), 0.38);
-  color: var(--kr-accent-ink);
 }
 
 /* Live status pill on the batch group header (⏳ 7/12, ✓ 12/12). */
@@ -551,6 +928,19 @@
   contain-intrinsic-size: auto 52px;
 }
 
+.disc-sidebar-section .disc-swipe-wrap,
+.disc-project-tree .disc-swipe-wrap {
+  margin: 2px 5px;
+  border-radius: 8px;
+}
+
+.disc-swipe-wrap[data-menu-open="true"] {
+  overflow: visible;
+  content-visibility: visible;
+  contain-intrinsic-size: none;
+  z-index: 30;
+}
+
 .disc-swipe-bg {
   position: absolute;
   inset: 0;
@@ -570,27 +960,63 @@
 .disc-item {
   display: flex;
   align-items: center;
-  gap: var(--kr-sp-4);
   width: 100%;
-  padding: 8px 14px 8px 22px;
   border: none;
   border-left: 2px solid transparent;
   color: var(--kr-text-tertiary);
-  cursor: pointer;
-  text-align: left;
   font-family: inherit;
-  touch-action: pan-y;
-  user-select: none;
   position: relative;
   z-index: 1;
-  background: var(--kr-bg-raised);
+  background: transparent;
+  transition: background 0.12s, color 0.12s;
+}
+
+.disc-item:hover,
+.disc-item:focus-within {
+  background: var(--kr-bg-hover);
+}
+
+.disc-item-open {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+  min-height: 52px;
+  padding: 7px 6px 7px 7px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  touch-action: pan-y;
+  user-select: none;
+}
+
+.disc-item-open:focus-visible {
+  outline: 2px solid var(--kr-accent);
+  outline-offset: -2px;
 }
 
 .disc-item[data-active="true"] {
-  background: rgba(var(--kr-accent-rgb), 0.18);
-  border-left-color: var(--kr-accent);
+  background: linear-gradient(
+    90deg,
+    rgba(var(--kr-accent-rgb), 0.22),
+    rgba(var(--kr-accent-rgb), 0.08)
+  );
+  border-left-color: transparent;
   color: var(--kr-text-primary);
   font-weight: 500;
+}
+
+.disc-item[data-active="true"]::after {
+  content: "";
+  position: absolute;
+  inset: 5px auto 5px -1px;
+  width: 3px;
+  border-radius: 3px;
+  background: var(--kr-accent);
 }
 
 .disc-item[data-selected="true"] {
@@ -615,6 +1041,126 @@
 .disc-item-selection-box[data-selected="true"] {
   border-color: var(--kr-accent);
   background: var(--kr-accent);
+}
+
+.disc-item-status-dot {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 8px;
+  border-radius: 50%;
+  background: var(--kr-text-faint);
+}
+
+.disc-item-status-dot[data-state="running"] {
+  background: var(--kr-success);
+  box-shadow: 0 0 0 3px rgba(var(--kr-success-rgb), 0.14);
+}
+
+.disc-item-status-dot[data-state="queued"] {
+  background: var(--kr-warning);
+}
+
+.disc-item-status-dot[data-state="unread"] {
+  background: var(--kr-accent);
+}
+
+.disc-item-actions {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 3px;
+  padding-right: 7px;
+}
+
+.disc-item-more-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--kr-r-sm);
+  background: transparent;
+  color: var(--kr-text-muted);
+  cursor: pointer;
+  /* Keep the affordance genuinely clickable before hover. With
+     `pointer-events: none`, the parent action wrapper won the initial hit-test:
+     the dots could appear while the pointer entered the row, yet a direct
+     click still targeted the wrapper and never opened the menu. */
+  opacity: 0.58;
+  pointer-events: auto;
+  transition: opacity 0.12s, background 0.12s, color 0.12s;
+}
+
+.disc-item:hover .disc-item-more-btn,
+.disc-item:focus-within .disc-item-more-btn,
+.disc-item-more-btn:hover,
+.disc-item-more-btn:focus-visible,
+.disc-item-more-btn[aria-expanded="true"] {
+  background: var(--kr-bg-hover);
+  color: var(--kr-text-primary);
+  opacity: 1;
+  outline: 2px solid transparent;
+}
+
+@media (hover: none) {
+  .disc-item-more-btn {
+    opacity: 0.7;
+    pointer-events: auto;
+  }
+}
+
+.disc-item-action-menu {
+  position: absolute;
+  top: 32px;
+  right: 0;
+  z-index: 40;
+  display: grid;
+  min-width: 178px;
+  padding: 5px;
+  border: 1px solid var(--kr-border-strong);
+  border-radius: var(--kr-r-md);
+  background: var(--kr-bg-elevated);
+  box-shadow: var(--kr-shadow-lg);
+}
+
+.disc-item-action-menu[data-placement="up"] {
+  top: auto;
+  bottom: 32px;
+}
+
+.disc-item-action-menu > button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 32px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: var(--kr-r-sm);
+  background: transparent;
+  color: var(--kr-text-secondary);
+  font: inherit;
+  font-size: var(--kr-fs-sm);
+  text-align: left;
+  cursor: pointer;
+}
+
+.disc-item-action-menu > button:hover,
+.disc-item-action-menu > button:focus-visible {
+  background: var(--kr-bg-hover);
+  color: var(--kr-text-primary);
+  outline: 2px solid transparent;
+}
+
+.disc-item-action-menu > button[data-copied="true"] {
+  color: var(--kr-success);
+}
+
+.disc-item-action-menu > .disc-item-action-danger {
+  color: var(--kr-error);
 }
 
 .disc-item-content {
@@ -642,6 +1188,36 @@
   flex: 1;
 }
 
+.disc-item-state-cluster {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 2px;
+}
+
+.disc-item-state-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: var(--kr-r-xs);
+  background: var(--kr-bg-elevated);
+  color: var(--kr-text-secondary);
+}
+
+.disc-item-state-icon[data-kind="workspace"] {
+  color: var(--kr-info);
+}
+
+.disc-item-state-icon[data-kind="shared"] {
+  color: var(--kr-success);
+}
+
+.disc-item-state-icon[data-kind="multi-agent"] {
+  color: var(--kr-purple);
+}
+
 .disc-item-meta {
   font-size: var(--kr-fs-xs);
   color: var(--kr-text-muted);
@@ -649,6 +1225,48 @@
   display: flex;
   align-items: center;
   gap: 4px;
+  min-width: 0;
+}
+
+.disc-item-meta-summary {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Provenance belongs to the secondary line. The former full-text
+   "Liée à Claude Code / Codex" pills lived beside the title and could leave
+   fewer than 40 px for a ticket name in a multi-agent room. Keep one compact
+   per-agent chip (KT-85), with the complete wording in title/aria-label. */
+.disc-source-badges {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex: 0 0 auto;
+}
+
+.disc-source-badge--compact {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 1px 3px;
+  border-radius: 4px;
+  background: var(--kr-bg-elevated, rgba(255, 255, 255, 0.06));
+  color: var(--kr-text-secondary);
+  font-size: 8px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.disc-source-badge--compact[data-diverged="true"] {
+  color: var(--kr-danger);
+  background: rgba(220, 53, 69, 0.15);
+}
+
+.disc-source-badge--compact img {
+  border-radius: 50%;
 }
 
 /* ⏹ Stop button inline on a disc that's currently Running. Appears next
@@ -976,11 +1594,24 @@
 }
 
 /* ── Contacts ─────────────────────────────────────────── */
+.disc-contacts-header {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.disc-contacts-toggle {
+  flex: 1;
+  min-width: 0;
+  width: auto;
+}
+
 .disc-contacts-meta {
   font-weight: 400;
   /* 0.5 dropped this secondary text under 4.5:1 (axe color-contrast). */
   opacity: 0.9;
   margin-left: auto;
+  padding: 0 8px 0 4px;
   display: flex;
   align-items: center;
   gap: 4px;
@@ -992,8 +1623,19 @@
   cursor: pointer;
   color: var(--kr-text-tertiary);
   padding: 0;
+  min-width: 28px;
+  min-height: 28px;
+  justify-content: center;
+  border-radius: var(--kr-r-sm);
   display: flex;
   align-items: center;
+}
+
+.disc-contact-add-btn:hover,
+.disc-contact-add-btn:focus-visible {
+  background: var(--kr-bg-hover);
+  color: var(--kr-text-primary);
+  outline: 2px solid transparent;
 }
 
 .disc-contact-add-form {
@@ -1197,9 +1839,10 @@ button.disc-contact-open {
 }
 
 .disc-chat-header-top {
-  display: flex;
-  align-items: center;
-  gap: var(--kr-sp-4);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
+  gap: 6px;
   min-width: 0;
 }
 
@@ -1225,31 +1868,8 @@ button.disc-contact-open {
   display: flex;
   align-items: center;
   min-width: 0;
-  flex-shrink: 0;
-}
-
-/* Two or more joined CLIs no longer compete with the discussion title/id for
- * the same horizontal line. Keep the compact one-line header for the common
- * 0–1 participant case, then promote the participant strip to its own row.
- * This preserves the title/id/actions and still lets a large room scroll its
- * participant strip without growing the whole page indefinitely. */
-.disc-chat-header-top:has(.disc-participants-list > .disc-participant-chip:nth-of-type(2)) {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  align-items: start;
-  gap: 6px;
-}
-
-.disc-chat-header-top:has(.disc-participants-list > .disc-participant-chip:nth-of-type(2))
-  .disc-chat-header-title,
-.disc-chat-header-top:has(.disc-participants-list > .disc-participant-chip:nth-of-type(2))
-  .disc-chat-header-presence {
   width: 100%;
-}
-
-.disc-chat-header-top:has(.disc-participants-list > .disc-participant-chip:nth-of-type(2))
-  .disc-chat-header-presence {
-  overflow: hidden;
+  overflow: visible;
 }
 
 /* 0.8.5 — short disc-id pill in ChatHeader. Click → copy full UUID
@@ -1669,6 +2289,43 @@ button.disc-contact-open {
 }
 
 /* ── Worktree badge ───────────────────────────────────── */
+.disc-session-worktree-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  max-width: 280px;
+  padding: 3px 6px;
+  border: 1px solid color-mix(in srgb, var(--kr-info) 35%, var(--kr-border));
+  border-radius: var(--kr-radius-pill);
+  background: color-mix(in srgb, var(--kr-info) 9%, var(--kr-bg-elevated));
+  color: var(--kr-text-secondary);
+  font-size: var(--kr-fs-2xs);
+}
+
+.disc-session-worktree-badge > span:first-of-type {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.disc-session-worktree-task {
+  padding: 1px 4px;
+  border-radius: var(--kr-radius-pill);
+  background: color-mix(in srgb, var(--kr-accent) 16%, transparent);
+  color: var(--kr-accent);
+  font-family: var(--kr-font-mono);
+}
+
+.disc-session-worktree-agent {
+  color: var(--kr-text-dim);
+}
+
+.disc-session-worktree-badge[data-state="missing"] {
+  border-color: color-mix(in srgb, var(--kr-error) 45%, var(--kr-border));
+  background: color-mix(in srgb, var(--kr-error) 10%, var(--kr-bg-elevated));
+}
+
 .disc-worktree-badge {
   font-size: var(--kr-fs-xs);
   padding: 1px 6px;
@@ -2077,6 +2734,31 @@ button.disc-contact-open {
   flex: 1;
   overflow-y: auto;
   padding: 20px 20px 10px;
+}
+
+.disc-message-date-separator {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-3);
+  margin: var(--kr-sp-5) 0 var(--kr-sp-4);
+  color: var(--kr-text-ghost);
+  font-size: var(--kr-fs-2xs);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.disc-message-date-separator::before,
+.disc-message-date-separator::after {
+  content: '';
+  height: 1px;
+  flex: 1;
+  background: var(--kr-border-light);
+}
+
+.disc-message-date-separator span {
+  flex: 0 0 auto;
+  padding: 0 var(--kr-sp-2);
 }
 
 /* Current-discussion full-text search. Kept outside the scrolling message
@@ -2683,6 +3365,10 @@ button.disc-contact-open {
   background: rgba(var(--kr-accent-rgb), 0.065);
 }
 
+.disc-msg-bubble[data-editing="true"] {
+  width: min(88%, 90ch);
+}
+
 .disc-msg-agent-label {
   display: flex;
   align-items: center;
@@ -3253,6 +3939,20 @@ button.disc-contact-open {
 .disc-tool-btn[data-active="true"][data-color="purple"] {
   background: rgba(var(--kr-purple-rgb), 0.12);
   color: var(--kr-purple);
+}
+
+.disc-tool-btn[data-active="true"][data-color="warning"] {
+  background: rgba(var(--kr-warning-rgb), 0.12);
+  color: var(--kr-warning);
+}
+
+.disc-note-tools {
+  display: inline-flex;
+  align-items: center;
+}
+
+.disc-note-visibility-btn {
+  margin-left: -2px;
 }
 
 /* ── Send / stop buttons ──────────────────────────────── */
@@ -5101,23 +5801,61 @@ button.disc-contact-open {
 }
 
 /* ── Edit message area ────────────────────────────────── */
+.disc-edit-layout {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--kr-sp-4);
+}
+
 .disc-edit-textarea {
+  box-sizing: border-box;
   width: 100%;
-  min-height: 60px;
-  padding: 8px;
+  min-height: 180px;
+  height: clamp(180px, 32vh, 420px);
+  max-height: 60vh;
+  padding: var(--kr-sp-4);
   border-radius: var(--kr-r-md);
   background: var(--kr-bg-hover-strong);
   border: 1px solid rgba(var(--kr-accent-rgb), 0.3);
   color: var(--kr-text-primary);
   font-family: inherit;
   font-size: var(--kr-fs-base);
+  line-height: 1.55;
+  overflow-y: auto;
   resize: vertical;
+  scrollbar-gutter: stable;
+}
+
+.disc-edit-textarea:focus {
+  border-color: var(--kr-accent);
+  box-shadow: 0 0 0 3px rgba(var(--kr-accent-rgb), 0.12);
+  outline: none;
 }
 
 .disc-edit-actions {
   display: flex;
+  flex-wrap: wrap;
+  flex-shrink: 0;
   gap: var(--kr-sp-3);
   justify-content: flex-end;
+}
+
+@media (max-width: 640px) {
+  .disc-msg-bubble[data-editing="true"] {
+    width: 100%;
+    max-width: 100%;
+  }
+
+  .disc-edit-textarea {
+    min-height: 140px;
+    height: 34vh;
+  }
+
+  .disc-edit-actions > button {
+    flex: 1 1 auto;
+    justify-content: center;
+  }
 }
 
 /* ── Full-access / model tier badges in message footer ── */
@@ -5792,4 +6530,95 @@ button.disc-contact-open {
   background: rgba(var(--kr-accent-rgb), 0.22);
   color: inherit;
   font-weight: 700;
+}
+
+/* Out-of-context discussion notes stay in their real chronological position
+   and are filtered from the composer toolbar instead of floating over the
+   message stream. */
+.disc-note-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--kr-sp-2);
+  width: min(92%, 860px);
+  margin: var(--kr-sp-1) auto;
+}
+
+.disc-note {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  border: 1px dashed rgba(var(--kr-warning-rgb), 0.35);
+  border-radius: var(--kr-r-md);
+  background: rgba(var(--kr-warning-rgb), 0.055);
+}
+
+.disc-note > summary {
+  display: grid;
+  grid-template-columns: auto minmax(80px, 1fr) auto;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  min-height: 34px;
+  padding: 6px var(--kr-sp-3);
+  list-style: none;
+  cursor: pointer;
+}
+
+.disc-note > summary::-webkit-details-marker {
+  display: none;
+}
+
+.disc-note-heading {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--kr-warning);
+  font-size: var(--kr-fs-xs);
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.disc-note-author,
+.disc-note-time {
+  color: var(--kr-text-dim);
+  font-size: var(--kr-fs-2xs);
+  font-weight: 400;
+}
+
+.disc-note-author::before {
+  content: "·";
+  margin-right: 5px;
+}
+
+.disc-note-excerpt {
+  overflow: hidden;
+  color: var(--kr-text-muted);
+  font-size: var(--kr-fs-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.disc-note-body {
+  padding: var(--kr-sp-2) var(--kr-sp-3) var(--kr-sp-3);
+  border-top: 1px solid rgba(var(--kr-warning-rgb), 0.18);
+  color: var(--kr-text-secondary);
+  font-size: var(--kr-fs-sm);
+}
+
+.disc-note-row > .disc-message-id-pill {
+  flex: 0 0 auto;
+  margin-top: 7px;
+}
+
+@media (max-width: 640px) {
+  .disc-note-row {
+    width: 100%;
+  }
+
+  .disc-note > summary {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .disc-note-excerpt {
+    grid-column: 1 / -1;
+  }
 }

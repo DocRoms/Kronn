@@ -85,9 +85,9 @@ describe('batchTriage (Markdown parser)', () => {
     const rows = buildBatchTriageRows([{
       ...baseDiscussion,
       messages: [
-        { id: 'u1', role: 'User', content: 'EW-1234', agent_type: null, timestamp: '2026-06-01T10:00:00Z', tokens_used: 0, auth_mode: null },
-        { id: 'a1', role: 'Agent', content: '## EW-OLD — Triage\n**Verdict :** Bloqué', agent_type: 'ClaudeCode', timestamp: '2026-06-01T10:01:00Z', tokens_used: 0, auth_mode: null },
-        { id: 'a2', role: 'Agent', content: MD_REPORT, agent_type: 'ClaudeCode', timestamp: '2026-06-01T10:02:00Z', tokens_used: 0, auth_mode: null },
+        { id: 'u1', role: 'User', channel: 'main', content: 'EW-1234', agent_type: null, timestamp: '2026-06-01T10:00:00Z', tokens_used: 0, auth_mode: null },
+        { id: 'a1', role: 'Agent', channel: 'main', content: '## EW-OLD — Triage\n**Verdict :** Bloqué', agent_type: 'ClaudeCode', timestamp: '2026-06-01T10:01:00Z', tokens_used: 0, auth_mode: null },
+        { id: 'a2', role: 'Agent', channel: 'main', content: MD_REPORT, agent_type: 'ClaudeCode', timestamp: '2026-06-01T10:02:00Z', tokens_used: 0, auth_mode: null },
       ],
     }]);
     expect(rows[0].result?.ticket_id).toBe('EW-7395');
@@ -98,7 +98,7 @@ describe('batchTriage (Markdown parser)', () => {
     const rows = buildBatchTriageRows([{
       ...baseDiscussion,
       messages: [
-        { id: 'a1', role: 'Agent', content: MD_REPORT, agent_type: 'ClaudeCode', timestamp: '2026-06-01T10:01:00Z', tokens_used: 0, auth_mode: null },
+        { id: 'a1', role: 'Agent', channel: 'main', content: MD_REPORT, agent_type: 'ClaudeCode', timestamp: '2026-06-01T10:01:00Z', tokens_used: 0, auth_mode: null },
       ],
     }]);
     const draft = buildContinuationDraft(rows[0]);

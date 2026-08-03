@@ -5,6 +5,7 @@ pub mod audit_runs;
 pub mod contacts;
 pub mod disc_source;
 pub mod discussion_sessions;
+pub mod discussion_workspaces;
 pub mod discussions;
 pub mod id_resolver;
 pub mod learnings;

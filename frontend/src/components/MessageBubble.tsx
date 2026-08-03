@@ -11,7 +11,7 @@ import {
 import ReactMarkdown from 'react-markdown';
 import { useTheme } from '../lib/ThemeContext';
 import { useT } from '../lib/I18nContext';
-import { useLocalIdentity } from '../lib/LocalIdentityContext';
+import { useLocalIdentity } from '../lib/localIdentity';
 import { MatrixText } from './MatrixText';
 import { DocPreview } from './DocPreview';
 import { DocDataExport } from './DocDataExport';
@@ -25,6 +25,11 @@ import type { DiscussionMessage, AgentType, QuickPrompt, ContextFile } from '../
 import { MessageAttachments } from './MessageAttachments';
 import { AGENT_LABELS, AGENT_MENTIONS, USER_MENTION_TRIGGER, agentColor } from '../lib/constants';
 import { gravatarUrl } from '../lib/gravatar';
+import {
+  splitInjectedContext,
+  splitMessageSeed,
+  stripAgentHandoff,
+} from '../lib/messageContent';
 import {
   Cpu, AlertTriangle, Zap, Loader2, Pause, Play,
   Key, Settings, Send, Pencil, RotateCcw, Check, Copy, Clock, ShieldCheck,
@@ -83,13 +88,13 @@ function splitAgentMentionText(value: string): MentionMdNode[] {
         ? USER_MENTION_URL
         : isAll
           ? '#kronn-all'
-          : `#kronn-agent-${mention!.type}${cliMatch ? '-cli' : ''}`,
+          : `#kronn-agent-${mention?.type ?? 'Unknown'}${cliMatch ? '-cli' : ''}`,
       children: [{
         type: 'text',
         value: isAll
           ? '@all'
           : cliMatch
-          ? `${mention!.trigger} · CLI${cliMatch[2] ? ` ${cliMatch[2]}` : ''}`
+          ? `${mention?.trigger ?? trigger} · CLI${cliMatch[2] ? ` ${cliMatch[2]}` : ''}`
           : trigger,
       }],
     });
@@ -134,30 +139,6 @@ function remarkAgentMentions() {
 // reaches the agent. The UI parses the marker out and renders the
 // seed inside a collapsed `<details>`-style toggle so the user isn't
 // forced to scroll past hundreds of lines of QP JSON + catalog.
-const RE_SEED = /<!--KRONN_SEED_START-->\s*([\s\S]*?)\s*<!--KRONN_SEED_END-->/;
-
-/**
- * Split a message body into a visible prefix + an optional collapsed
- * "seed" payload. Pure helper extracted for unit testing. When no
- * marker pair is found, the entire content is returned as `visible`
- * with `seed = null` — legacy messages stay untouched.
- */
-export function splitMessageSeed(content: string): { visible: string; seed: string | null } {
-  const m = content.match(RE_SEED);
-  if (!m) return { visible: content, seed: null };
-  // index is set when match succeeds; ts-narrow it for the slice.
-  const idx = m.index ?? 0;
-  const visible = content.slice(0, idx).trim();
-  return { visible, seed: m[1].trim() };
-}
-
-const RE_AGENT_HANDOFF = /^<!-- KRONN_AGENT_HANDOFF:[\s\S]*?-->\s*/;
-
-/** The handoff is agent-facing metadata carried by the first real user turn. */
-export function stripAgentHandoff(content: string): string {
-  return content.replace(RE_AGENT_HANDOFF, '');
-}
-
 /** Same short-id label used by discussion and workflow header pills. */
 function messageShortLabel(id: string): string {
   return `#${id.slice(0, 8)}`;
@@ -434,6 +415,7 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
       <div
         className="disc-msg-bubble"
         data-role={isUser ? 'user' : msg.role === 'System' ? 'system' : 'agent'}
+        data-editing={isEditing || undefined}
         data-variant={msg.role === 'System' ? (
           isKronnTool ? 'kronn-tool'
           : isKronnPlanning ? 'kronn-planning'
@@ -595,7 +577,11 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
             type="button"
             className="disc-reply-header"
             data-missing={!replyTarget || undefined}
-            onClick={() => replyTarget && onReplyNavigate?.(msg.reply_to_message_id!)}
+            onClick={() => {
+              if (replyTarget && msg.reply_to_message_id) {
+                onReplyNavigate?.(msg.reply_to_message_id);
+              }
+            }}
             disabled={!replyTarget || !onReplyNavigate}
             title={replyTarget ? t('disc.openReplyTarget') : t('disc.replyTargetMissing')}
           >
@@ -612,7 +598,7 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
         )}
         <div data-message-search-content>
         {isEditing ? (
-          <div className="flex-col gap-4">
+          <div className="disc-edit-layout">
             <textarea
               value={editingText}
               onChange={e => onEditTextChange(e.target.value)}
@@ -625,11 +611,13 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
                 }
               }}
               className="disc-edit-textarea"
+              aria-label={t('disc.editResend')}
+              rows={10}
               autoFocus
             />
             <div className="disc-edit-actions">
-              <button className="disc-icon-btn" style={{ fontSize: 11, padding: '4px 10px', color: 'var(--kr-text-faint)' }} onClick={onEditCancel}>{t('disc.cancel')}</button>
-              <button className="disc-scan-btn" style={{ fontSize: 11, padding: '4px 10px' }} onClick={onEditSubmit} disabled={!editingText.trim()}>
+              <button type="button" className="disc-icon-btn" style={{ fontSize: 11, padding: '4px 10px', color: 'var(--kr-text-faint)' }} onClick={onEditCancel}>{t('disc.cancel')}</button>
+              <button type="button" className="disc-scan-btn" style={{ fontSize: 11, padding: '4px 10px' }} onClick={onEditSubmit} disabled={!editingText.trim()}>
                 <Send size={10} /> {t('disc.resend')}
                 <span className="text-2xs opacity-50" style={{ marginLeft: 4 }}>Ctrl+Enter</span>
               </button>
@@ -1295,27 +1283,6 @@ export const MarkdownContent = memo(({
  *  or a block of context Kronn injected at variable-substitution time
  *  (`context`, e.g. a ticket payload), wrapped server-side in a
  *  `<!-- kronn:context title="…" -->…<!-- /kronn:context -->` marker. */
-export type MsgSegment =
-  | { kind: 'text'; body: string }
-  | { kind: 'context'; title: string; body: string };
-
-const INJECTED_CONTEXT_RE = /<!-- kronn:context title="([^"]*)" -->\n?([\s\S]*?)\n?<!-- \/kronn:context -->/g;
-
-/** Split a message into instruction text vs injected-context blocks. With no
- *  marker it returns a single text segment (old messages render unchanged). */
-export function splitInjectedContext(content: string): MsgSegment[] {
-  const segs: MsgSegment[] = [];
-  let last = 0;
-  for (const m of content.matchAll(INJECTED_CONTEXT_RE)) {
-    const idx = m.index ?? 0;
-    if (idx > last) segs.push({ kind: 'text', body: content.slice(last, idx) });
-    segs.push({ kind: 'context', title: m[1], body: m[2] });
-    last = idx + m[0].length;
-  }
-  if (last < content.length) segs.push({ kind: 'text', body: content.slice(last) });
-  return segs.length ? segs : [{ kind: 'text', body: content }];
-}
-
 /** Collapsible card for a block of injected context (a ticket, a file, …).
  *  Collapsed by default so the agent's instructions stay the visible signal;
  *  click to expand the (markdown-rendered) payload. */

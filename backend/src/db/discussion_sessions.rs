@@ -252,8 +252,13 @@ pub fn create_session(
     // message right after join would still trigger Kronn's auto-response.
     conn.execute(
         "INSERT INTO discussion_sessions
-            (disc_id, agent_type, session_id, role, status, joined_at, last_seen)
-         VALUES (?1, ?2, ?3, ?4, 'active', ?5, ?5)",
+            (disc_id, agent_type, session_id, role, status, joined_at, last_seen,
+             user_catchup_cursor, awareness_offered_upto)
+         VALUES (?1, ?2, ?3, ?4, 'active', ?5, ?5,
+                 COALESCE((SELECT MAX(m.sort_order) FROM messages m
+                            WHERE m.discussion_id = ?1), 0),
+                 COALESCE((SELECT MAX(m.sort_order) FROM messages m
+                            WHERE m.discussion_id = ?1), 0))",
         params![disc_id, agent_type, session_id, role, now],
     )?;
     Ok(conn.last_insert_rowid())
@@ -561,6 +566,26 @@ pub fn list_participant_views(conn: &Connection, disc_id: &str) -> Result<Vec<Pa
 /// pair. Used by the bridge when it gets a tool call and needs to
 /// verify the caller is still an active participant. Returns the
 /// session row so callers can also see `role` / `status`.
+/// KT-189 — resolve a live session by its durable session_id ALONE. A bridge
+/// whose provider could not be identified (agent_type "Unknown") still sends
+/// its session id; without this lookup it would fall back to the legacy
+/// wake-on-everything projection and burn a model turn per room message.
+pub fn find_active_session_by_id(
+    conn: &Connection,
+    session_id: &str,
+) -> Result<Option<(i64, String, String)>> {
+    let row = conn
+        .query_row(
+            "SELECT id, disc_id, agent_type FROM discussion_sessions
+              WHERE session_id = ?1 AND status != 'left'
+              LIMIT 1",
+            params![session_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    Ok(row)
+}
+
 pub fn find_active_session(
     conn: &Connection,
     agent_type: &str,
@@ -1146,8 +1171,13 @@ pub fn join_via_token(
         tx.execute(
             "INSERT INTO discussion_sessions
                 (disc_id, agent_type, session_id, role, status, joined_at,
-                 resume_token_hash, resume_rotated_at)
-             VALUES (?1, ?2, ?3, 'peer', 'active', ?4, ?5, ?4)",
+                 resume_token_hash, resume_rotated_at, user_catchup_cursor,
+                 awareness_offered_upto)
+             VALUES (?1, ?2, ?3, 'peer', 'active', ?4, ?5, ?4,
+                     COALESCE((SELECT MAX(m.sort_order) FROM messages m
+                                WHERE m.discussion_id = ?1), 0),
+                     COALESCE((SELECT MAX(m.sort_order) FROM messages m
+                                WHERE m.discussion_id = ?1), 0))",
             params![&disc_id, agent_type, session_id, &now, &resume_token_hash],
         )?;
         tx.last_insert_rowid()
@@ -1329,8 +1359,13 @@ pub fn join_disc_session(
     )?;
     conn.execute(
         "INSERT INTO discussion_sessions
-            (disc_id, agent_type, session_id, role, status, joined_at)
-         VALUES (?1, ?2, ?3, 'peer', 'active', ?4)",
+            (disc_id, agent_type, session_id, role, status, joined_at,
+             user_catchup_cursor, awareness_offered_upto)
+         VALUES (?1, ?2, ?3, 'peer', 'active', ?4,
+                 COALESCE((SELECT MAX(m.sort_order) FROM messages m
+                            WHERE m.discussion_id = ?1), 0),
+                 COALESCE((SELECT MAX(m.sort_order) FROM messages m
+                            WHERE m.discussion_id = ?1), 0))",
         params![disc_id, agent_type, session_id, now],
     )?;
     Ok(conn.last_insert_rowid())
@@ -1349,6 +1384,87 @@ fn sha256_hex(input: &str) -> String {
         out.push_str(&format!("{:02x}", b));
     }
     out
+}
+
+/// KT-157 — was this exact session still an eligible responder at `now`?
+/// Read BEFORE the wait's heartbeat bump: a `false` here means the session
+/// had lapsed (its listening lease or polling promise expired), i.e. the
+/// room may have routed untargeted User turns to the native in its absence —
+/// exactly the window the one-shot catch-up covers.
+pub fn session_is_eligible_now(conn: &Connection, session_pk: i64) -> Result<bool> {
+    let now = Utc::now().to_rfc3339();
+    let sql = format!(
+        "SELECT COUNT(*) FROM discussion_sessions
+          WHERE id = ?3 AND {RESPONDER_ELIGIBLE_PREDICATE}"
+    );
+    let n: i64 = conn.query_row(
+        &sql,
+        params![now, NEXT_POLL_GRACE.num_seconds(), session_pk],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// KT-157 — how many CLI sessions currently belong to the room, regardless
+/// of wait eligibility. Untargeted User turns dispatched to the native while
+/// this is > 0 are marked for one-shot catch-up delivery to returning CLIs.
+pub fn count_cli_sessions(conn: &Connection, disc_id: &str) -> Result<i64> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM discussion_sessions
+          WHERE disc_id = ?1 AND status = 'active'",
+        params![disc_id],
+        |r| r.get(0),
+    )?;
+    Ok(n)
+}
+
+/// KT-157 — the durable catch-up cursor of one session. Messages marked
+/// `native_fallback` with a sort_order above it have never been replayed to
+/// this session.
+pub fn user_catchup_cursor(conn: &Connection, session_pk: i64) -> Result<i64> {
+    let cursor: i64 = conn.query_row(
+        "SELECT user_catchup_cursor FROM discussion_sessions WHERE id = ?1",
+        params![session_pk],
+        |r| r.get(0),
+    )?;
+    Ok(cursor)
+}
+
+/// KT-189 — highest awareness sort_order any wake response actually OFFERED
+/// to this session. The ack cursor can never overtake it: a client cannot
+/// acknowledge turns no response carried.
+pub fn awareness_offered_upto(conn: &Connection, session_pk: i64) -> Result<i64> {
+    let offered: i64 = conn.query_row(
+        "SELECT awareness_offered_upto FROM discussion_sessions WHERE id = ?1",
+        params![session_pk],
+        |r| r.get(0),
+    )?;
+    Ok(offered)
+}
+
+/// KT-189 — record an awareness offer, monotonically (emission time, in the
+/// same connection as the response construction).
+pub fn advance_awareness_offered_upto(conn: &Connection, session_pk: i64, to: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE discussion_sessions
+            SET awareness_offered_upto = ?2
+          WHERE id = ?1 AND awareness_offered_upto < ?2",
+        params![session_pk, to],
+    )?;
+    Ok(())
+}
+
+/// KT-157 — advance the catch-up cursor, monotonically. A concurrent or
+/// replayed wait can never move it backwards, which is what makes the
+/// catch-up batch idempotent across MCP reloads and re-joins.
+pub fn advance_user_catchup_cursor(conn: &Connection, session_pk: i64, to: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE discussion_sessions
+            SET user_catchup_cursor = ?2
+          WHERE id = ?1 AND user_catchup_cursor < ?2",
+        params![session_pk, to],
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1537,6 +1653,7 @@ mod tests {
             lint_report: None,
             id: "u1".to_string(),
             role: crate::models::MessageRole::User,
+            channel: crate::models::MessageChannel::Main,
             content: "@ollama?".to_string(),
             agent_type: None,
             timestamp: Utc::now(),

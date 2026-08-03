@@ -534,6 +534,7 @@ async fn finish_dispatch_turn(
             lint_report: None,
             id: uuid::Uuid::new_v4().to_string(),
             role: crate::models::MessageRole::User,
+            channel: crate::models::MessageChannel::Main,
             content: render_chain_qp_prompt(
                 &qp.prompt_template,
                 qp.variables.first().map(|variable| variable.name.as_str()),

@@ -10,6 +10,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { ollama as ollamaApi, config as configApi } from '../../lib/api';
 import type { OllamaHealthResponse, OllamaModel, ModelTiersConfig } from '../../types/generated';
 import { RefreshCw, ExternalLink, Download, AlertTriangle, Loader2 } from 'lucide-react';
+import { SUGGESTED_MODELS } from './ollamaModels';
 import '../../pages/SettingsPage.css';
 
 interface OllamaCardProps {
@@ -19,30 +20,6 @@ interface OllamaCardProps {
 // Hardware tier of a suggested model — drives a badge so users don't pull a
 // 19 GB model onto an 8 GB no-GPU laptop. Kronn runs on Windows/WSL boxes with
 // no GPU too, not just beefy Macs.
-export type ModelTier = 'cpu' | 'mid' | 'power';
-
-export interface SuggestedModel {
-  /** Exact `ollama pull` tag. */
-  name: string;
-  /** Approx download size. */
-  size: string;
-  tier: ModelTier;
-  /** i18n key for the one-line description (FR/EN/ES). */
-  descKey: string;
-}
-
-// First-pull suggestions — tags + sizes VERIFIED against ollama.com/library
-// (2026-06). Ordered light → heavy so the no-GPU crowd sees a runnable option
-// first. Update here when the registry moves (it does, often).
-export const SUGGESTED_MODELS: SuggestedModel[] = [
-  { name: 'llama3.2:1b',       size: '~1.3 GB', tier: 'cpu',   descKey: 'ollama.model.llama32_1b' },
-  { name: 'llama3.2',          size: '~2 GB',   tier: 'cpu',   descKey: 'ollama.model.llama32' },
-  { name: 'qwen3:4b',          size: '~2.5 GB', tier: 'cpu',   descKey: 'ollama.model.qwen3_4b' },
-  { name: 'qwen2.5-coder:14b', size: '~9 GB',   tier: 'mid',   descKey: 'ollama.model.qwen25coder' },
-  { name: 'gemma3:27b',        size: '~17 GB',  tier: 'power', descKey: 'ollama.model.gemma3_27b' },
-  { name: 'qwen3:30b',         size: '~19 GB',  tier: 'power', descKey: 'ollama.model.qwen3_30b' },
-];
-
 /** Discreet "can my hardware run this model?" link.
  *
  *  Surfaced only on local-agent surfaces (Ollama card, the future
@@ -97,7 +74,33 @@ export function OllamaCard({ t }: OllamaCardProps) {
     }
   }, []);
 
-  useEffect(() => { refresh(); }, [refresh]);
+  useEffect(() => {
+    let active = true;
+    Promise.all([
+      ollamaApi.health(),
+      configApi.getModelTiers().catch(() => null),
+    ])
+      .then(async ([nextHealth, nextTiers]) => {
+        if (!active) return;
+        setHealth(nextHealth);
+        if (nextTiers) setTiers(nextTiers);
+        if (nextHealth.status === 'online') {
+          const nextModels = await ollamaApi.models();
+          if (active) setModels(nextModels.models);
+        } else {
+          setModels([]);
+        }
+      })
+      .catch(() => {
+        if (active) {
+          setHealth({ status: 'offline', version: null, endpoint: '', models_count: 0, hint: null });
+        }
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => { active = false; };
+  }, []);
 
   // Assign an installed model to a tier (economy/default/reasoning) — ISO with
   // the per-tier picking every other agent gets in AgentsSection. `null` clears

@@ -1,4 +1,5 @@
 use axum::{
+    body::Bytes,
     extract::{Path, Query, State},
     response::sse::{Event, Sse},
     Json,
@@ -543,6 +544,33 @@ pub(crate) fn count_misconfigured_steps(steps: &[WorkflowStep]) -> u32 {
         .count() as u32
 }
 
+/// `Workflow.concurrency_limit` limits overlapping *whole runs*. It has never
+/// been a foreach worker count. Refuse the ambiguous combination instead of
+/// accepting a value that looks like per-item parallelism but is ignored by
+/// the shared-worktree SubWorkflow executor.
+fn validate_sub_workflow_foreach_concurrency(
+    steps: &[WorkflowStep],
+    concurrency_limit: Option<u32>,
+) -> Result<(), String> {
+    let Some(limit) = concurrency_limit.filter(|limit| *limit > 1) else {
+        return Ok(());
+    };
+    let Some(step) = steps.iter().find(|step| {
+        step.step_type == StepType::SubWorkflow
+            && step
+                .sub_workflow_foreach_file
+                .as_deref()
+                .is_some_and(|path| !path.trim().is_empty())
+    }) else {
+        return Ok(());
+    };
+
+    Err(format!(
+        "Step SubWorkflow « {} » : `concurrency_limit: {limit}` controls overlapping complete workflow runs and cannot parallelize foreach items. SubWorkflow foreach is sequential in the shared worktree; remove the value (or set it to 1) and use BatchQuickPrompt for safe parallel fan-out.",
+        step.name
+    ))
+}
+
 /// Helper for `ApiCall` + `BatchApiCall`. `is_batch` adds the
 /// `batch_items_from` requirement on top of the shared API minimum.
 fn validate_api_call_minimum(s: &WorkflowStep, is_batch: bool) -> Result<(), String> {
@@ -871,6 +899,9 @@ pub async fn create(
     if let Err(e) = validate_required_fields_per_type(&req.on_failure) {
         return Json(ApiResponse::err(e));
     }
+    if let Err(e) = validate_sub_workflow_foreach_concurrency(&req.steps, req.concurrency_limit) {
+        return Json(ApiResponse::err(e));
+    }
     // 2026-06-11 Phase 1 — SubWorkflow graph: cycle/depth/dangling/no-gate.
     // A create can't be in a cycle with itself (its id doesn't exist yet),
     // so a placeholder start id is safe.
@@ -1145,6 +1176,12 @@ pub async fn update(
         updated_at: Utc::now(),
     };
 
+    if let Err(e) =
+        validate_sub_workflow_foreach_concurrency(&updated.steps, updated.concurrency_limit)
+    {
+        return Json(ApiResponse::err(e));
+    }
+
     let w = updated.clone();
     match state
         .db
@@ -1355,6 +1392,7 @@ fn validate_workflow_for_import(wf: &Workflow) -> Result<(), String> {
     validate_exec_steps(&wf.on_failure, &wf.exec_allowlist)?;
     validate_required_fields_per_type(&wf.steps)?;
     validate_required_fields_per_type(&wf.on_failure)?;
+    validate_sub_workflow_foreach_concurrency(&wf.steps, wf.concurrency_limit)?;
     Ok(())
 }
 
@@ -2642,6 +2680,26 @@ pub struct ResumeRunResponse {
     pub new_status: RunStatus,
 }
 
+#[derive(Debug, Default, serde::Deserialize, ts_rs::TS)]
+#[ts(export)]
+pub struct ResumeInterruptedRequest {
+    /// Explicit operator acknowledgement that a mechanically side-effecting
+    /// step may already have committed before the crash. False/missing keeps
+    /// the resume fail-closed.
+    #[serde(default)]
+    pub retry_uncertain_effect: bool,
+}
+
+fn parse_resume_interrupted_request(
+    payload: &[u8],
+) -> Result<ResumeInterruptedRequest, serde_json::Error> {
+    if payload.iter().all(u8::is_ascii_whitespace) {
+        Ok(ResumeInterruptedRequest::default())
+    } else {
+        serde_json::from_slice(payload)
+    }
+}
+
 /// POST /api/workflow-runs/:run_id/resume
 ///
 /// A2 — manually resume an `Interrupted` run (backend restart, crash). The
@@ -2652,7 +2710,16 @@ pub struct ResumeRunResponse {
 pub async fn resume_interrupted(
     State(state): State<AppState>,
     Path(run_id): Path<String>,
+    payload: Bytes,
 ) -> Json<ApiResponse<ResumeRunResponse>> {
+    let retry_uncertain_effect = match parse_resume_interrupted_request(&payload) {
+        Ok(request) => request.retry_uncertain_effect,
+        Err(error) => {
+            return Json(ApiResponse::err(format!(
+                "Invalid resume request JSON: {error}"
+            )))
+        }
+    };
     let run_id_for_db = run_id.clone();
     let mut run = match state
         .db
@@ -2687,7 +2754,10 @@ pub async fn resume_interrupted(
 
     // Validation + atomic claim — awaited, so the caller's answer reflects
     // whether THIS call won the run.
-    if let Err(e) = crate::workflows::runner::claim_interrupted_run(&state, &mut run).await {
+    if let Err(e) =
+        crate::workflows::runner::claim_interrupted_run(&state, &mut run, retry_uncertain_effect)
+            .await
+    {
         return Json(ApiResponse::err(e.to_string()));
     }
 
@@ -3712,6 +3782,26 @@ mod tests {
     // ── Delete cancels live child agents ──────────────────
     use std::sync::Arc;
     use tokio::sync::RwLock;
+
+    #[test]
+    fn foreach_rejects_ambiguous_workflow_concurrency_limit() {
+        let foreach = WorkflowStep {
+            name: "reviewers".into(),
+            step_type: StepType::SubWorkflow,
+            sub_workflow_id: Some("child".into()),
+            sub_workflow_foreach_file: Some(".kronn/tasks.json".into()),
+            ..Default::default()
+        };
+
+        assert!(
+            validate_sub_workflow_foreach_concurrency(std::slice::from_ref(&foreach), Some(1))
+                .is_ok()
+        );
+        let error = validate_sub_workflow_foreach_concurrency(&[foreach], Some(8))
+            .expect_err("foreach plus a limit above one must not be silently accepted");
+        assert!(error.contains("cannot parallelize foreach items"));
+        assert!(error.contains("BatchQuickPrompt"));
+    }
 
     async fn state_with_batch(run_id: &str, disc_ids: &[&str]) -> AppState {
         let db = Arc::new(crate::db::Database::open_in_memory().expect("in-memory DB"));

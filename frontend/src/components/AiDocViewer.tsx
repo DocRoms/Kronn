@@ -30,11 +30,36 @@ interface AiDocViewerProps {
 }
 
 export function AiDocViewer({ projectId, onDiscussFile, initialExpandFolder, banner }: AiDocViewerProps) {
+  return (
+    <AiDocViewerProject
+      key={`${projectId}:${initialExpandFolder ?? ''}`}
+      projectId={projectId}
+      onDiscussFile={onDiscussFile}
+      initialExpandFolder={initialExpandFolder}
+      banner={banner}
+    />
+  );
+}
+
+interface DocContentResult {
+  projectId: string;
+  path: string;
+  content: string | null;
+}
+
+interface DocSearchResult {
+  projectId: string;
+  query: string;
+  matches: Map<string, number>;
+}
+
+const EMPTY_DOC_SEARCH_RESULTS = new Map<string, number>();
+
+function AiDocViewerProject({ projectId, onDiscussFile, initialExpandFolder, banner }: AiDocViewerProps) {
   const { t } = useT();
   const [tree, setTree] = useState<AiFileNode[]>([]);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
-  const [content, setContent] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [contentResult, setContentResult] = useState<DocContentResult | null>(null);
   const [treeLoading, setTreeLoading] = useState(true);
   const [treeError, setTreeError] = useState(false);
   // Seed the expanded-dirs set so the legacy `ai/` root opens by default
@@ -59,83 +84,110 @@ export function AiDocViewer({ projectId, onDiscussFile, initialExpandFolder, ban
 
   // Search state
   const [searchQuery, setSearchQuery] = useState('');
-  const [searchResults, setSearchResults] = useState<Map<string, number>>(new Map());
-  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchResult, setSearchResult] = useState<DocSearchResult | null>(null);
   const [currentMatchIdx, setCurrentMatchIdx] = useState(0);
   const contentRef = useRef<HTMLDivElement>(null);
   const [renderKey, setRenderKey] = useState(0);
   const searchDebounceRef = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const treeLoadRef = useRef(0);
 
   // ─── Load tree ──────────────────────────────────────────────────────────
+  const readTree = useCallback(() => projectsApi.listAiFiles(projectId), [projectId]);
+
+  const applyTree = useCallback((files: AiFileNode[], generation: number) => {
+    if (treeLoadRef.current !== generation) return;
+    setTree(files);
+    setTreeLoading(false);
+    if (initialExpandFolder) {
+      const firstInFolder = findFirstFileUnder(files, initialExpandFolder);
+      if (firstInFolder) {
+        setSelectedPath(firstInFolder.path);
+        return;
+      }
+    }
+    const entry = findFile(files, 'docs/AGENTS.md')
+      ?? findFile(files, 'doc/AGENTS.md')
+      ?? findFile(files, 'ai/index.md');
+    if (entry) setSelectedPath(entry.path);
+  }, [initialExpandFolder]);
+
+  const rejectTree = useCallback((generation: number) => {
+    if (treeLoadRef.current !== generation) return;
+    setTreeError(true);
+    setTreeLoading(false);
+  }, []);
+
+  const fetchTree = useCallback(() => {
+    const generation = treeLoadRef.current + 1;
+    treeLoadRef.current = generation;
+    void readTree()
+      .then(files => applyTree(files, generation))
+      .catch(() => rejectTree(generation));
+  }, [applyTree, readTree, rejectTree]);
+
   const loadTree = useCallback(() => {
     setTreeLoading(true);
     setTreeError(false);
-    projectsApi.listAiFiles(projectId).then(files => {
-      setTree(files);
-      setTreeLoading(false);
-      // When the caller deep-linked to a folder (e.g. `docs/tech-debt`
-      // via the TD badge), preselect the first file inside it so the
-      // user lands on actual content instead of an empty pane. Falls
-      // through to the canonical entry-file logic when no match.
-      if (initialExpandFolder) {
-        const firstInFolder = findFirstFileUnder(files, initialExpandFolder);
-        if (firstInFolder) {
-          setSelectedPath(firstInFolder.path);
-          return;
-        }
-      }
-      // Pick the canonical entry file. Path-agnostic — backend's
-      // `listAiFiles` returns either `docs/AGENTS.md` (post-pivot),
-      // `doc/AGENTS.md`, or `ai/index.md` (legacy) depending on the
-      // project's layout. First match wins.
-      const entry =
-        findFile(files, 'docs/AGENTS.md')
-        ?? findFile(files, 'doc/AGENTS.md')
-        ?? findFile(files, 'ai/index.md');
-      if (entry) setSelectedPath(entry.path);
-    }).catch(() => {
-      // Distinguish a fetch FAILURE from a genuinely-empty docs tree: both
-      // used to render the identical "no documentation" message, so a
-      // transient 500 / network error looked exactly like "this project has
-      // no docs". Surface a retry-able error instead.
-      setTreeError(true);
-      setTreeLoading(false);
-    });
-  }, [projectId, initialExpandFolder]);
+    void fetchTree();
+  }, [fetchTree]);
 
-  useEffect(() => { loadTree(); }, [loadTree]);
+  useEffect(() => {
+    const generation = treeLoadRef.current + 1;
+    treeLoadRef.current = generation;
+    void readTree()
+      .then(files => applyTree(files, generation))
+      .catch(() => rejectTree(generation));
+    return () => { treeLoadRef.current += 1; };
+  }, [applyTree, readTree, rejectTree]);
 
   // ─── Load file content ─────────────────────────────────────────────────
   useEffect(() => {
-    if (!selectedPath) { setContent(null); return; }
-    setLoading(true);
+    if (!selectedPath) return;
+    let alive = true;
+    const path = selectedPath;
     projectsApi.readAiFile(projectId, selectedPath).then(res => {
-      setContent(res.content);
-      setLoading(false);
+      if (!alive) return;
+      setContentResult({ projectId, path, content: res.content });
       setRenderKey(k => k + 1);
-    }).catch(() => { setContent(null); setLoading(false); });
+    }).catch(() => {
+      if (alive) setContentResult({ projectId, path, content: null });
+    });
+    return () => { alive = false; };
   }, [projectId, selectedPath]);
 
   // ─── Backend search (debounced) ─────────────────────────────────────────
   useEffect(() => {
     if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
     const q = searchQuery.trim();
-    if (!q) {
-      setSearchResults(new Map());
-      setSearchLoading(false);
-      return;
-    }
-    setSearchLoading(true);
+    if (!q) return;
+    let active = true;
     searchDebounceRef.current = setTimeout(() => {
       projectsApi.searchAiFiles(projectId, q).then(results => {
+        if (!active) return;
         const map = new Map<string, number>();
         results.forEach(r => map.set(r.path, r.match_count));
-        setSearchResults(map);
-        setSearchLoading(false);
-      }).catch(() => { setSearchResults(new Map()); setSearchLoading(false); });
+        setSearchResult({ projectId, query: q, matches: map });
+      }).catch(() => {
+        if (active) setSearchResult({ projectId, query: q, matches: new Map() });
+      });
     }, 250);
-    return () => { if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current); };
+    return () => {
+      active = false;
+      if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
+    };
   }, [projectId, searchQuery]);
+
+  const contentIsCurrent = contentResult?.projectId === projectId
+    && contentResult.path === selectedPath;
+  const content = contentIsCurrent ? contentResult.content : null;
+  const loading = selectedPath !== null && !contentIsCurrent;
+  const trimmedSearchQuery = searchQuery.trim();
+  const searchIsCurrent = searchResult?.projectId === projectId
+    && searchResult.query === trimmedSearchQuery;
+  const searchResults = trimmedSearchQuery && searchIsCurrent
+    ? searchResult.matches
+    : EMPTY_DOC_SEARCH_RESULTS;
+  const searchLoading = Boolean(trimmedSearchQuery) && !searchIsCurrent;
 
   // ─── DOM highlighting (runs after markdown renders) ─────────────────────
   useEffect(() => {
@@ -155,8 +207,10 @@ export function AiDocViewer({ projectId, onDiscussFile, initialExpandFolder, ban
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchQuery, currentMatchIdx, renderKey]);
 
-  // ─── Reset match index on query or file change ─────────────────────────
-  useEffect(() => { setCurrentMatchIdx(0); }, [searchQuery, selectedPath]);
+  const selectPath = useCallback((path: string) => {
+    setSelectedPath(path);
+    setCurrentMatchIdx(0);
+  }, []);
 
   // ─── Ordered list of files with matches (for cross-file nav) ────────────
   const filesWithMatches = useMemo(() => {
@@ -210,7 +264,10 @@ export function AiDocViewer({ projectId, onDiscussFile, initialExpandFolder, ban
 
   const handleSearchKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (e.key === 'Enter') { e.preventDefault(); if (e.shiftKey) goPrev(); else goNext(); }
-    if (e.key === 'Escape') { setSearchQuery(''); }
+    if (e.key === 'Escape') {
+      setSearchQuery('');
+      setCurrentMatchIdx(0);
+    }
   }, [goNext, goPrev]);
 
   const toggleDir = useCallback((path: string) => {
@@ -293,14 +350,20 @@ export function AiDocViewer({ projectId, onDiscussFile, initialExpandFolder, ban
             <input
               type="text"
               value={searchQuery}
-              onChange={e => setSearchQuery(e.target.value)}
+              onChange={e => {
+                setSearchQuery(e.target.value);
+                setCurrentMatchIdx(0);
+              }}
               onKeyDown={handleSearchKeyDown}
               placeholder={t('projects.docAi.search')}
               className="aidoc-search-input"
             />
             {searchQuery && (
               <button
-                onClick={() => setSearchQuery('')}
+                onClick={() => {
+                  setSearchQuery('');
+                  setCurrentMatchIdx(0);
+                }}
                 className="aidoc-search-clear"
               >
                 <X size={10} />
@@ -343,7 +406,7 @@ export function AiDocViewer({ projectId, onDiscussFile, initialExpandFolder, ban
             <TreeNode
               key={node.path} node={node} selectedPath={selectedPath}
               expandedDirs={effectiveExpandedDirs}
-              onSelect={setSelectedPath} onToggleDir={toggleDir} depth={0}
+              onSelect={selectPath} onToggleDir={toggleDir} depth={0}
               searchResults={searchResults} isSearching={isSearching}
             />
           ))}

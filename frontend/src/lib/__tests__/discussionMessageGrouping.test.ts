@@ -15,6 +15,7 @@ function mkMsg(
   return {
     id: `msg-${idSuffix}`,
     role,
+    channel: 'main',
     content,
     agent_type: null,
     timestamp: `2026-05-22T15:00:${idSuffix.padStart(2, '0')}Z`,
@@ -130,6 +131,19 @@ describe('groupMessagesWithToolFold', () => {
     const items = groupMessagesWithToolFold(msgs);
     expect(items.map(i => i.kind)).toEqual(['message', 'tool-group', 'message']);
     expect((items[1] as { messages: DiscussionMessage[] }).messages).toHaveLength(3);
+  });
+
+  it('splits consecutive tool calls at a local calendar day boundary', () => {
+    const beforeMidnight = mkMsg('System', '[kronn-internal: qa_run({})]', '01');
+    beforeMidnight.timestamp = new Date(2026, 6, 29, 23, 59).toISOString();
+    const afterMidnight = mkMsg('System', '[agent-native: Read({})]', '02');
+    afterMidnight.timestamp = new Date(2026, 6, 30, 0, 1).toISOString();
+
+    const items = groupMessagesWithToolFold([beforeMidnight, afterMidnight]);
+
+    expect(items.map(item => item.kind)).toEqual(['tool-group', 'tool-group']);
+    expect((items[0] as { messages: DiscussionMessage[] }).messages).toEqual([beforeMidnight]);
+    expect((items[1] as { messages: DiscussionMessage[] }).messages).toEqual([afterMidnight]);
   });
 
   it('non-tool System messages (e.g. summary cached) do NOT join the buffer', () => {

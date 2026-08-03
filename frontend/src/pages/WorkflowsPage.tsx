@@ -1,4 +1,5 @@
 import { Fragment, useState, useRef, useMemo, useEffect, useCallback } from 'react';
+import { appendLiveBuffer } from '../lib/workflowUiUtils';
 import { useIsMobile } from '../hooks/useMediaQuery';
 import { useT } from '../lib/I18nContext';
 import { workflows as workflowsApi, discussions as discussionsApi, quickPrompts as quickPromptsApi, quickApis as quickApisApi, mcps as mcpsApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi } from '../lib/api';
@@ -77,18 +78,6 @@ const TRIGGER_LABELS: Record<string, string> = {
   tracker: 'Tracker',
   manual: 'Manuel',
 };
-
-/** FIFO-cap a live text buffer at `max` characters — keep the trailing
- *  window, drop the oldest content. Used to bound the live-progress feed
- *  on long Agent steps so React doesn't re-render a multi-MB `<pre>`.
- *
- *  Exported so unit tests cover the boundary cases (exact-fit, just over,
- *  much over, multibyte safety) without instantiating the full page. */
-export function appendLiveBuffer(prev: string, chunks: string, max: number): string {
-  const merged = prev + chunks;
-  if (merged.length <= max) return merged;
-  return merged.slice(merged.length - max);
-}
 
 const RUN_FETCH_PAGE_SIZE = 10;
 const RUN_FETCH_MAX_PAGE_SIZE = 500;

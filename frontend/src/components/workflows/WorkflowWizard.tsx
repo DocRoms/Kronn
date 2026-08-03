@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
+import { buildBlankStep } from '../../lib/workflowUiUtils';
 import { useT } from '../../lib/I18nContext';
 import { workflows as workflowsApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi, quickPrompts as quickPromptsApi, quickApis as quickApisApi, mcps as mcpsApi, config as configApi, ollama as ollamaApi } from '../../lib/api';
 import { ApiCallStepCard, type ApiPluginOption } from './ApiCallStepCard';
@@ -71,43 +72,6 @@ function parseCronExpr(expr: string): { every: number; unit: 'minutes' | 'hours'
 
   // Complex expression (e.g. "0 7,10,13,16,19 * * 1-5") — preserve raw
   return { every: 1, unit: 'days', at: `${hour.padStart(2, '0')}:${min.padStart(2, '0')}`, weekdays: [], raw: expr };
-}
-
-/**
- * 0.8.6 phase 4 — pure builder for a fresh blank workflow step.
- *
- * Extracted from the wizard's internal `blankStep` closure so unit
- * tests can pin the default-tier semantic directly :
- *   - `defaultTier === 'default' | null` → step JSON unchanged (no
- *     `agent_settings` field set ; the runner uses its built-in
- *     default model)
- *   - `defaultTier === 'economy' | 'reasoning'` → step gains
- *     `agent_settings: { tier: <chosen> }` so the runner overrides
- *     the model.
- *
- * Caller's `existingCount` becomes the step number in `step-{N+1}`,
- * so `addStep` (append) and `insertStep` (insert at index) both pass
- * `steps.length` and get a sensible auto-name.
- */
-export function buildBlankStep(
-  existingCount: number,
-  defaultTier: 'economy' | 'default' | 'reasoning' | null,
-): WorkflowStep {
-  const step: WorkflowStep = {
-    name: `step-${existingCount + 1}`,
-    step_type: { type: 'Agent' },
-    agent: 'ClaudeCode',
-    prompt_template: '',
-    mode: { type: 'Normal' },
-    // Default to Structured so chained steps can read `.data` / `.summary`
-    // from the very first save. Users can switch to Free text on terminal
-    // steps that don't feed anything downstream.
-    output_format: { type: 'Structured' },
-  };
-  if (defaultTier && defaultTier !== 'default') {
-    step.agent_settings = { tier: defaultTier };
-  }
-  return step;
 }
 
 export interface WorkflowWizardProps {

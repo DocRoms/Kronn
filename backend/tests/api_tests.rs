@@ -86,6 +86,80 @@ async fn planning_task_create_list_and_get_round_trip() {
 }
 
 #[tokio::test]
+async fn planning_task_create_is_idempotent_by_key_not_title() {
+    let app = test_app();
+    let first_request = serde_json::json!({
+        "title": "Same title is valid",
+        "description": "Original content",
+        "idempotency_key": "planning-create/retry-1"
+    });
+    let (_, first) = post_json(app.clone(), "/api/planning/tasks", first_request.clone()).await;
+    let (_, replay) = post_json(app.clone(), "/api/planning/tasks", first_request).await;
+    assert_eq!(first["success"], true, "{first}");
+    assert_eq!(replay["success"], true, "{replay}");
+    assert_eq!(replay["data"]["id"], first["data"]["id"]);
+    assert_eq!(
+        replay["data"]["events"]
+            .as_array()
+            .expect("events array")
+            .iter()
+            .filter(|event| event["action"] == "created")
+            .count(),
+        1,
+        "an idempotent replay must not append another created event"
+    );
+
+    let (_, conflict) = post_json(
+        app.clone(),
+        "/api/planning/tasks",
+        serde_json::json!({
+            "title": "Same title is valid",
+            "description": "Different content",
+            "idempotency_key": "planning-create/retry-1"
+        }),
+    )
+    .await;
+    assert_eq!(conflict["success"], false);
+    assert_eq!(conflict["error_code"], "conflict");
+    assert!(conflict["error"]
+        .as_str()
+        .unwrap()
+        .contains("different content"));
+
+    let (_, same_title_new_key) = post_json(
+        app.clone(),
+        "/api/planning/tasks",
+        serde_json::json!({
+            "title": "Same title is valid",
+            "description": "Original content",
+            "idempotency_key": "planning-create/retry-2"
+        }),
+    )
+    .await;
+    assert_eq!(same_title_new_key["success"], true);
+    assert_ne!(same_title_new_key["data"]["id"], first["data"]["id"]);
+
+    let concurrent_request = serde_json::json!({
+        "title": "Concurrent retry",
+        "idempotency_key": "planning-create/race-1"
+    });
+    let (left, right) = tokio::join!(
+        post_json(
+            app.clone(),
+            "/api/planning/tasks",
+            concurrent_request.clone()
+        ),
+        post_json(app, "/api/planning/tasks", concurrent_request)
+    );
+    assert_eq!(left.1["success"], true, "{}", left.1);
+    assert_eq!(right.1["success"], true, "{}", right.1);
+    assert_eq!(
+        left.1["data"]["id"], right.1["data"]["id"],
+        "concurrent retries must resolve to one row"
+    );
+}
+
+#[tokio::test]
 async fn planning_discussion_plan_replaces_the_primary_objective() {
     let state = test_state();
     state
@@ -4764,6 +4838,7 @@ async fn ws_drops_pre_presence_garbage_silently() {
         content: "hi".into(),
         timestamp: 0,
         role: kronn::models::MessageRole::User,
+        channel: kronn::models::MessageChannel::Main,
         agent_type: None,
         targets: vec![],
         target_agents: vec![],
@@ -4925,6 +5000,7 @@ async fn ws_rejects_non_presence_first_message() {
         content: "Injected message".into(),
         timestamp: 0,
         role: kronn::models::MessageRole::User,
+        channel: kronn::models::MessageChannel::Main,
         agent_type: None,
         targets: vec![],
         target_agents: vec![],
@@ -5201,6 +5277,7 @@ async fn ws_chat_message_inserts_into_shared_discussion() {
         content: "Hello from the other side!".into(),
         timestamp: now.timestamp_millis(),
         role: kronn::models::MessageRole::Agent,
+        channel: kronn::models::MessageChannel::Main,
         agent_type: Some(kronn::models::AgentType::ClaudeCode),
         targets: vec![
             kronn::models::MessageTarget::agent(kronn::models::AgentType::Codex),
@@ -5304,6 +5381,7 @@ async fn disc_sync_request_resends_missing_messages() {
         lint_report: None,
         id: "sync-msg-1".into(),
         role: kronn::models::MessageRole::Agent,
+        channel: kronn::models::MessageChannel::Main,
         content: "missed while offline".into(),
         agent_type: Some(kronn::models::AgentType::ClaudeCode),
         timestamp: chrono::Utc::now(),
@@ -5517,6 +5595,7 @@ async fn wait_for_peer_surfaces_same_agent_type_peer_but_not_own_local() {
         lint_report: None,
         id: id.into(),
         role: kronn::models::MessageRole::Agent,
+        channel: kronn::models::MessageChannel::Main,
         content: content.into(),
         agent_type: Some(kronn::models::AgentType::ClaudeCode),
         timestamp: chrono::Utc::now(),
@@ -5794,6 +5873,7 @@ async fn ws_chat_message_idempotent() {
         content: "This message should appear once".into(),
         timestamp: now.timestamp_millis(),
         role: kronn::models::MessageRole::User,
+        channel: kronn::models::MessageChannel::Main,
         agent_type: None,
         targets: vec![],
         target_agents: vec![],
@@ -7252,6 +7332,145 @@ async fn test_mode_enter_shape_matches_ts_envelope() {
 }
 
 // ─── 0.8.4 (#294) cross-agent memory route integration tests ──────────
+
+#[tokio::test]
+async fn disc_workspace_declaration_round_trips_through_http_and_rejects_other_repositories() {
+    let state = test_state();
+    let fixture = tempfile::tempdir().unwrap();
+    let repo = fixture.path().join("repo");
+    let worktree = fixture.path().join("worktree");
+    let unrelated = fixture.path().join("unrelated");
+    std::fs::create_dir_all(&repo).unwrap();
+    std::fs::create_dir_all(&unrelated).unwrap();
+
+    let git = |cwd: &std::path::Path, args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&repo, &["init"]);
+    git(&repo, &["config", "user.email", "tests@kronn.local"]);
+    git(&repo, &["config", "user.name", "Kronn Tests"]);
+    std::fs::write(repo.join("README.md"), "fixture").unwrap();
+    git(&repo, &["add", "README.md"]);
+    git(&repo, &["commit", "-m", "fixture"]);
+    git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "feature/http-workspace",
+            worktree.to_str().unwrap(),
+        ],
+    );
+    git(&unrelated, &["init"]);
+
+    let app = build_router_with_auth(state.clone(), false);
+    let (_, project) = post_json(
+        app.clone(),
+        "/api/projects/add-folder",
+        serde_json::json!({ "path": repo }),
+    )
+    .await;
+    assert_eq!(project["success"], true);
+    let project_id = project["data"]["id"].as_str().unwrap();
+
+    let (_, created) = post_json(
+        app.clone(),
+        "/api/disc/create",
+        serde_json::json!({
+            "title": "Workspace HTTP",
+            "agent": "Codex",
+            "project_id": project_id,
+            "source_agent": "Codex",
+            "source_session_id": "workspace-http-session",
+        }),
+    )
+    .await;
+    assert_eq!(created["success"], true);
+    let disc_id = created["data"]["disc_id"].as_str().unwrap();
+    let session_disc_id = disc_id.to_string();
+    state
+        .db
+        .with_conn(move |connection| {
+            kronn::db::discussion_sessions::create_session(
+                connection,
+                &session_disc_id,
+                "Codex",
+                Some("workspace-http-session"),
+                "peer",
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let (_, declared) = post_json(
+        app.clone(),
+        "/api/disc/workspace",
+        serde_json::json!({
+            "source_agent": "Codex",
+            "source_session_id": "workspace-http-session",
+            "workspace_path": worktree,
+        }),
+    )
+    .await;
+    assert_eq!(declared["success"], true, "{declared:?}");
+    assert_eq!(
+        declared["data"]["workspace"]["branch"],
+        "feature/http-workspace"
+    );
+    assert_eq!(declared["data"]["workspace"]["ownership"], "external");
+    assert_eq!(declared["data"]["workspace"]["state"], "attached");
+    assert!(declared["data"]["blockers"].as_array().unwrap().is_empty());
+
+    let (_, compact) = get_json(
+        app.clone(),
+        "/api/disc/workspace?source_agent=Codex&source_session_id=workspace-http-session",
+    )
+    .await;
+    assert_eq!(compact["success"], true);
+    assert_eq!(compact["data"]["disc_id"], disc_id);
+    assert_eq!(
+        compact["data"]["current"]["id"],
+        declared["data"]["workspace"]["id"]
+    );
+    assert_eq!(compact["data"]["workspaces"].as_array().unwrap().len(), 1);
+
+    let (_, room_list) = get_json(
+        app.clone(),
+        &format!("/api/discussions/{disc_id}/workspaces"),
+    )
+    .await;
+    assert_eq!(room_list["success"], true);
+    assert_eq!(room_list["data"][0]["branch"], "feature/http-workspace");
+
+    let (_, rejected) = post_json(
+        app,
+        "/api/disc/workspace",
+        serde_json::json!({
+            "source_agent": "Codex",
+            "source_session_id": "workspace-http-session",
+            "workspace_path": unrelated,
+        }),
+    )
+    .await;
+    assert_eq!(rejected["success"], false);
+    assert_eq!(rejected["error_code"], "validation");
+    assert!(rejected["error"]
+        .as_str()
+        .unwrap()
+        .contains("does not belong"));
+}
 
 #[tokio::test]
 async fn disc_create_round_trip_with_source_binding() {
@@ -9836,6 +10055,47 @@ mod cold_api_handlers_tests {
     }
 
     #[tokio::test]
+    async fn disc_get_message_exact_note_keeps_main_only_numeric_indices_and_neighbours() {
+        let state = test_state();
+        let disc_id = seed_disc_with_messages(&state, 3).await;
+        let did = disc_id.clone();
+        let note_id = state
+            .db
+            .with_conn(move |conn| {
+                let note_id = conn.query_row(
+                    "SELECT id FROM messages
+                     WHERE discussion_id = ?1 AND sort_order = 2",
+                    [&did],
+                    |row| row.get::<_, String>(0),
+                )?;
+                conn.execute(
+                    "UPDATE messages SET channel = 'note' WHERE id = ?1",
+                    [&note_id],
+                )?;
+                Ok(note_id)
+            })
+            .await
+            .unwrap();
+        let app = build_router_with_auth(state, false);
+
+        let (status, note) = get_json(
+            app.clone(),
+            &format!("/api/discussions/{disc_id}/message/{note_id}?before=1&after=1"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(note["data"]["channel"], "note");
+        assert_eq!(note["data"]["before"].as_array().unwrap().len(), 1);
+        assert_eq!(note["data"]["before"][0]["content"], "Message body 0");
+        assert_eq!(note["data"]["after"].as_array().unwrap().len(), 1);
+        assert_eq!(note["data"]["after"][0]["content"], "Message body 2");
+
+        let (_, numeric) = get_json(app, &format!("/api/discussions/{disc_id}/message/1")).await;
+        assert_eq!(numeric["data"]["channel"], "main");
+        assert_eq!(numeric["data"]["content"], "Message body 2");
+    }
+
+    #[tokio::test]
     async fn disc_get_message_rejects_oversized_context_window() {
         let state = test_state();
         let disc_id = seed_disc_with_messages(&state, 2).await;
@@ -11496,6 +11756,112 @@ mod cold_api_handlers_tests {
         assert_eq!(st, StatusCode::OK);
         assert_eq!(json["success"], serde_json::Value::Bool(true));
         assert_eq!(json["data"]["run_id"], run_id);
+    }
+
+    #[tokio::test]
+    async fn mcp_workflow_run_status_exposes_live_step_start() {
+        let state = test_state();
+        let run_id = seed_terminal_run(&state, kronn::models::RunStatus::Success).await;
+        let started_at = chrono::Utc::now() - chrono::Duration::seconds(90);
+        let step_result = kronn::models::StepResult {
+            step_name: "review_pack".into(),
+            status: kronn::models::RunStatus::Running,
+            output: String::new(),
+            tokens_used: 0,
+            duration_ms: 0,
+            started_at: Some(started_at),
+            condition_result: None,
+            envelope_detected: None,
+            step_kind: Some("Agent".into()),
+            step_agent: Some(kronn::models::AgentType::ClaudeCode),
+            step_model: None,
+            step_api_plugin_slug: None,
+            step_api_endpoint_path: None,
+            is_rollback: false,
+            child_run_id: None,
+        };
+        let run_for_update = run_id.clone();
+        state
+            .db
+            .with_conn(move |conn| {
+                conn.execute(
+                    "UPDATE workflow_runs SET status = 'Running', finished_at = NULL, step_results_json = ?2 WHERE id = ?1",
+                    rusqlite::params![run_for_update, serde_json::to_string(&vec![step_result])?],
+                )?;
+                Ok::<_, anyhow::Error>(())
+            })
+            .await
+            .unwrap();
+        let app = build_router_with_auth(state, false);
+
+        let uri = format!("/api/mcp/workflow-run-status/{run_id}");
+        let (status, json) = get_json(app, &uri).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["current_step"], "review_pack");
+        assert_eq!(json["data"]["steps"][0]["status"], "Running");
+        assert_eq!(
+            json["data"]["steps"][0]["started_at"],
+            started_at.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true)
+        );
+        assert!(json["data"]["steps"][0]["tokens_used"].is_null());
+        assert_eq!(json["data"]["steps"][0]["tokens_status"], "in_progress");
+        let observed_start = chrono::DateTime::parse_from_rfc3339(
+            json["data"]["steps"][0]["started_at"]
+                .as_str()
+                .expect("started_at string"),
+        )
+        .expect("RFC3339 started_at");
+        let alarm_threshold = chrono::Duration::seconds(60);
+        assert!(
+            chrono::Utc::now().signed_duration_since(observed_start) > alarm_threshold,
+            "negative control: a threshold below the live step age must alarm"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_workflow_run_status_keeps_queued_run_distinct_from_live_step() {
+        let state = test_state();
+        let run_id = seed_terminal_run(&state, kronn::models::RunStatus::Success).await;
+        let run_for_update = run_id.clone();
+        state
+            .db
+            .with_conn(move |conn| {
+                conn.execute(
+                    "UPDATE workflow_runs SET status = 'Running', finished_at = NULL, step_results_json = '[]' WHERE id = ?1",
+                    rusqlite::params![run_for_update],
+                )?;
+                Ok::<_, anyhow::Error>(())
+            })
+            .await
+            .unwrap();
+        let app = build_router_with_auth(state, false);
+
+        let uri = format!("/api/mcp/workflow-run-status/{run_id}");
+        let (status, json) = get_json(app, &uri).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json["data"]["current_step"].is_null());
+        assert_eq!(json["data"]["steps"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn resume_interrupted_accepts_empty_object_and_non_empty_json_bodies() {
+        for body in ["", "{}", r#"{"retry_uncertain_effect":false}"#] {
+            let state = test_state();
+            let run_id = seed_terminal_run(&state, kronn::models::RunStatus::Interrupted).await;
+            let app = build_router_with_auth(state, false);
+            let request = Request::builder()
+                .method("POST")
+                .uri(format!("/api/workflow-runs/{run_id}/resume"))
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap();
+            let response = app.oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "body={body:?}");
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(json["success"], true, "body={body:?}: {json}");
+            assert_eq!(json["data"]["new_status"], "Running");
+        }
     }
 
     #[tokio::test]

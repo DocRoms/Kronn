@@ -107,4 +107,18 @@ describe('useKonamiCode', () => {
 
     expect(onUnlock).toHaveBeenCalledTimes(2);
   });
+
+  it('uses the latest unlock callback after a rerender', () => {
+    const first = vi.fn();
+    const second = vi.fn();
+    const { rerender } = render(<TestHarness onUnlock={first} />);
+
+    rerender(<TestHarness onUnlock={second} />);
+    act(() => {
+      for (const k of KONAMI) fireKey(k);
+    });
+
+    expect(first).not.toHaveBeenCalled();
+    expect(second).toHaveBeenCalledTimes(1);
+  });
 });

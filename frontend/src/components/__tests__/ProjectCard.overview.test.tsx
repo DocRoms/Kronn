@@ -60,7 +60,10 @@ vi.mock('../../lib/api', () => buildApiMock({
       total_major: 1,
       checked_at: '2026-07-24T10:00:00Z',
       cached: false,
+      monitoring_interval_days: 7,
+      next_check_at: '2026-07-31T10:00:00Z',
     }),
+    setDependencyMonitoring: vi.fn().mockResolvedValue({ interval_days: 30 }),
   },
 }));
 vi.mock('../../lib/I18nContext', () => ({
@@ -141,6 +144,10 @@ describe('ProjectCard — repository overview', () => {
     expect(document.querySelectorAll('.project-overview-dependency-major').length).toBeGreaterThan(0);
     expect(document.querySelector('.project-overview-dependency-package-major'))
       .toHaveTextContent(/react 18\.3\.1 → 19\.1\.0/);
+    expect(screen.getByText(/projects\.master\.overview\.dependenciesCheckedAt/))
+      .toBeInTheDocument();
+    expect(screen.getByText(/projects\.master\.overview\.dependenciesNextCheckAt/))
+      .toBeInTheDocument();
 
     expect(screen.getByRole('link', { name: /projects\.master\.overview\.openRepository/ }))
       .toHaveAttribute('href', 'https://github.com/team/demo');
@@ -164,6 +171,15 @@ describe('ProjectCard — repository overview', () => {
       expect(projectsApi.dependencyUpdates).toHaveBeenCalledWith('p-overview', true),
     );
     expect(projectsApi.dependencyUpdates).toHaveBeenCalledTimes(2);
+
+    fireEvent.change(
+      screen.getByLabelText('projects.master.overview.dependenciesSchedule'),
+      { target: { value: '30' } },
+    );
+    await waitFor(() =>
+      expect(projectsApi.setDependencyMonitoring).toHaveBeenCalledWith('p-overview', 30),
+    );
+    await waitFor(() => expect(projectsApi.dependencyUpdates).toHaveBeenCalledTimes(3));
   });
 
   it('puts discussion/task counts in tabs and paginates recent discussions', async () => {

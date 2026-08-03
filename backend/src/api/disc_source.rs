@@ -1,6 +1,6 @@
 //! 0.8.4 (#294) — Cross-agent memory HTTP routes.
 //!
-//! 7 endpoints that let an external CLI agent (Claude Code, Cursor,
+//! HTTP endpoints that let an external CLI agent (Claude Code, Cursor,
 //! Codex, …) push its conversation history into Kronn so the SAME
 //! discussion thread can be picked up by a DIFFERENT agent later.
 //! Wired through `disc-introspection-mcp.py` so each route is also a
@@ -13,6 +13,7 @@
 //! - `POST /api/disc/append` — append messages, idempotent on
 //!   `(disc_id, source_msg_id)`.
 //! - `POST /api/disc/link` — bind an existing disc to a source session.
+//! - `POST /api/disc/transfer-session` — explicitly move one durable session.
 //! - `POST /api/disc/unlink` — release the binding.
 //! - `GET  /api/disc/find_by_session` — lookup by
 //!   (source_agent, source_session_id).
@@ -190,6 +191,8 @@ pub async fn disc_create(
 pub struct DiscAppendMessage {
     pub source_msg_id: String,
     pub role: MessageRole,
+    #[serde(default)]
+    pub channel: MessageChannel,
     pub content: String,
     #[serde(default)]
     pub agent_type: Option<AgentType>,
@@ -329,8 +332,10 @@ pub async fn disc_append(
     // are exempt — and the insert is NEVER blocked. The full report rides the
     // stored message (UI badge); the summary rides the response (tool result)
     // so the posting agent can self-correct.
-    let live_agent_append =
+    let single_agent_append =
         req.messages.len() == 1 && matches!(req.messages[0].role, MessageRole::Agent);
+    let live_agent_append =
+        single_agent_append && matches!(req.messages[0].channel, MessageChannel::Main);
     // KT-116 — live peer turns now carry the same durable identities as human
     // turns. The compatibility `target_agent` field is projected to one native
     // target only when an older bridge did not send `targets`.
@@ -356,7 +361,7 @@ pub async fn disc_append(
     // authored it. Provider identity alone cannot distinguish two Codex CLIs
     // joined to the same room. A missing/mismatched session fails closed: bulk
     // imports and unverifiable callers never acquire local CLI provenance.
-    let author_cli_session_id = if routing_candidate {
+    let author_cli_session_id = if single_agent_append && req.session_id.is_some() {
         match (req.messages[0].agent_type.as_ref(), req.session_id.as_ref()) {
             (Some(agent_type), Some(session_id)) => {
                 let did = req.disc_id.clone();
@@ -558,6 +563,7 @@ pub async fn disc_append(
             lint_report: live_lint_report.take(),
             id: Uuid::new_v4().to_string(),
             role: incoming.role.clone(),
+            channel: incoming.channel,
             content: incoming.content.clone(),
             agent_type: incoming.agent_type.clone(),
             timestamp: Utc::now(),
@@ -744,6 +750,28 @@ pub struct DiscLinkRequest {
     pub force_reassign: bool,
 }
 
+#[derive(Debug, Clone, Deserialize, TS)]
+#[ts(export)]
+pub struct DiscTransferSessionRequest {
+    pub from_disc_id: String,
+    pub to_disc_id: String,
+    pub source_agent: String,
+    pub source_session_id: String,
+    /// A transfer changes which room survives an MCP reload. Callers must make
+    /// that destructive ownership change explicit.
+    pub confirm_transfer: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct DiscTransferSessionResponse {
+    pub previous_disc_id: String,
+    pub disc_id: String,
+    pub session_bound: bool,
+    pub transferred: bool,
+    pub binding_version: i64,
+}
+
 /// `POST /api/disc/link`
 pub async fn disc_link(
     State(state): State<AppState>,
@@ -789,6 +817,67 @@ pub async fn disc_link(
     match result {
         Ok(_) => Json(ApiResponse::ok(true)),
         Err(e) => Json(ApiResponse::err(format!("DB error linking: {}", e))),
+    }
+}
+
+/// `POST /api/disc/transfer-session`
+pub async fn disc_transfer_session(
+    State(state): State<AppState>,
+    Json(req): Json<DiscTransferSessionRequest>,
+) -> Json<ApiResponse<DiscTransferSessionResponse>> {
+    let from_disc_id = req.from_disc_id.trim().to_string();
+    let to_disc_id = req.to_disc_id.trim().to_string();
+    let source_agent = req.source_agent.trim().to_string();
+    let source_session_id = req.source_session_id.trim().to_string();
+    if !req.confirm_transfer {
+        return Json(ApiResponse::err(
+            "confirm_transfer=true is required for an explicit session handoff",
+        ));
+    }
+    if from_disc_id.is_empty()
+        || to_disc_id.is_empty()
+        || source_agent.is_empty()
+        || source_session_id.is_empty()
+    {
+        return Json(ApiResponse::err(
+            "from_disc_id, to_disc_id, source_agent and source_session_id are required",
+        ));
+    }
+    if from_disc_id.chars().count() > 128
+        || to_disc_id.chars().count() > 128
+        || source_agent.chars().count() > 80
+        || source_session_id.chars().count() > 512
+    {
+        return Json(ApiResponse::err(
+            "session transfer identity exceeds the supported length",
+        ));
+    }
+
+    let response_from = from_disc_id.clone();
+    let response_to = to_disc_id.clone();
+    let result = state
+        .db
+        .with_conn(move |conn| {
+            crate::db::disc_source::transfer_source_binding(
+                conn,
+                &from_disc_id,
+                &to_disc_id,
+                &source_agent,
+                &source_session_id,
+            )
+        })
+        .await;
+    match result {
+        Ok(transferred) => Json(ApiResponse::ok(DiscTransferSessionResponse {
+            previous_disc_id: response_from,
+            disc_id: response_to,
+            session_bound: true,
+            transferred,
+            binding_version: crate::db::disc_source::SOURCE_BINDING_VERSION,
+        })),
+        Err(error) => Json(ApiResponse::err(format!(
+            "DB error transferring session: {error}"
+        ))),
     }
 }
 
@@ -936,6 +1025,8 @@ pub struct DiscSearchQuery {
     pub q: String,
     #[serde(default)]
     pub limit: Option<u32>,
+    #[serde(default)]
+    pub include_notes: bool,
 }
 
 /// `GET /api/disc/search?q=…&limit=…`
@@ -949,7 +1040,9 @@ pub async fn disc_search(
     let limit = q.limit.unwrap_or(20);
     let result = state
         .db
-        .with_conn(move |conn| crate::db::disc_source::search_discussions(conn, &q.q, limit))
+        .with_conn(move |conn| {
+            crate::db::disc_source::search_discussions(conn, &q.q, limit, q.include_notes)
+        })
         .await;
     match result {
         Ok(hits) => Json(ApiResponse::ok(hits)),
@@ -1023,6 +1116,8 @@ pub struct DiscLoadOtherQuery {
     pub from: Option<u32>,
     #[serde(default)]
     pub to: Option<u32>,
+    #[serde(default)]
+    pub include_notes: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -1030,6 +1125,7 @@ pub struct DiscLoadOtherQuery {
 pub struct DiscLoadOtherMessage {
     pub idx: u32,
     pub role: MessageRole,
+    pub channel: MessageChannel,
     pub content: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_type: Option<AgentType>,
@@ -1137,7 +1233,10 @@ pub async fn disc_load_other(
     let non_system: Vec<&DiscussionMessage> = disc
         .messages
         .iter()
-        .filter(|m| !matches!(m.role, MessageRole::System))
+        .filter(|m| {
+            !matches!(m.role, MessageRole::System)
+                && (q.include_notes || matches!(m.channel, MessageChannel::Main))
+        })
         .collect();
     let total = non_system.len() as u32;
     let from = q.from.unwrap_or(0).min(total);
@@ -1179,6 +1278,7 @@ pub async fn disc_load_other(
         .map(|(rel, m)| DiscLoadOtherMessage {
             idx: from + rel as u32,
             role: m.role.clone(),
+            channel: m.channel,
             content: m.content.clone(),
             agent_type: m.agent_type.clone(),
             timestamp: m.timestamp.to_rfc3339(),
@@ -1242,6 +1342,7 @@ mod tests {
         DiscAppendMessage {
             source_msg_id: id.into(),
             role: MessageRole::Agent,
+            channel: crate::models::MessageChannel::Main,
             content: content.into(),
             agent_type: Some(AgentType::Codex),
             targets: Vec::new(),
@@ -2402,6 +2503,7 @@ mod tests {
         let user = DiscAppendMessage {
             source_msg_id: "u1".into(),
             role: MessageRole::User,
+            channel: crate::models::MessageChannel::Main,
             content: "look at [src: file: src/ghost.rs:1]".into(),
             agent_type: None,
             targets: Vec::new(),

@@ -23,9 +23,9 @@ export function useApi<T>(
 ): UseApiState<T> {
   const [data, setData] = useState<T | null>(null);
   const [loading, setLoading] = useState(true);
+  const [hasLoaded, setHasLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const requestId = useRef(0);
-  const hasLoaded = useRef(false);
 
   const fetch = useCallback(async () => {
     const thisRequest = ++requestId.current;
@@ -37,7 +37,7 @@ export function useApi<T>(
       // Only apply result if this is still the latest request
       if (thisRequest === requestId.current) {
         setData(result);
-        hasLoaded.current = true;
+        setHasLoaded(true);
       }
     } catch (e) {
       if (thisRequest === requestId.current) {
@@ -66,7 +66,7 @@ export function useApi<T>(
   return {
     data,
     loading,
-    initialLoading: loading && !hasLoaded.current,
+    initialLoading: loading && !hasLoaded,
     error,
     refetch: fetch,
   };

@@ -70,7 +70,7 @@ const DISABLED_RULES = [
   'aria-allowed-attr',
 ];
 
-async function scanPage(page: Page, label: string): Promise<{ violations: Array<{ id: string; impact: string | null | undefined; nodes: number }> }> {
+async function scanPage(page: Page): Promise<{ violations: Array<{ id: string; impact: string | null | undefined; nodes: number; targets: string[] }> }> {
   const builder = new AxeBuilder({ page })
     .withTags(['wcag2a', 'wcag2aa', 'wcag21aa'])
     .disableRules(DISABLED_RULES);
@@ -80,6 +80,7 @@ async function scanPage(page: Page, label: string): Promise<{ violations: Array<
       id: v.id,
       impact: v.impact,
       nodes: v.nodes.length,
+      targets: v.nodes.flatMap(node => node.target.map(String)),
     })),
   };
 }
@@ -98,7 +99,7 @@ test.describe('a11y — axe-core scans main pages, fails on serious/critical', (
       await page.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => { /* may stay busy on long polls */ });
       await page.waitForTimeout(500);
 
-      const { violations } = await scanPage(page, route.name);
+      const { violations } = await scanPage(page);
       const seriousOrCritical = violations.filter(v => v.impact === 'serious' || v.impact === 'critical');
       const moderate = violations.filter(v => v.impact === 'moderate');
       const minor = violations.filter(v => v.impact === 'minor');
@@ -110,7 +111,7 @@ test.describe('a11y — axe-core scans main pages, fails on serious/critical', (
       console.log(`[a11y] ${route.name}: serious/critical=${seriousOrCritical.length}, moderate=${moderate.length}, minor=${minor.length}`);
       for (const v of seriousOrCritical) {
         // eslint-disable-next-line no-console
-        console.log(`  ✗ ${v.id} (${v.impact}) — ${v.nodes} node(s)`);
+        console.log(`  ✗ ${v.id} (${v.impact}) — ${v.nodes} node(s): ${v.targets.join(', ')}`);
       }
       for (const v of moderate) {
         // eslint-disable-next-line no-console

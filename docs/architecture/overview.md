@@ -2,6 +2,9 @@
 
 > Folder structure: `docs/repo-map.md`.
 
+> Progressive boundaries and file-splitting sequence:
+> [`code-hygiene-roadmap.md`](code-hygiene-roadmap.md).
+
 ## Apps / services (facts)
 
 Three Docker services behind nginx gateway:
@@ -79,7 +82,8 @@ Three Docker services behind nginx gateway:
 - **Title editing**: double-click or pencil icon in chat header for inline rename.
 - **Disabled agent detection**: if a discussion's agent is uninstalled or disabled, the text input is grayed out with a warning banner linking to agent config.
 - **Canonical mentions (0.9.2 / KT-47)**: agents address one another with the stable `@claude`, `@codex`, `@vibe`, `@gemini`, `@kiro`, `@copilot` and `@ollama` triggers, and address the local human as `@user` (rendered with the configured Kronn pseudo/Gravatar). The dispatch target is persisted separately from Markdown so the awaited responder is unambiguous. Settings stores an optional validated `#RRGGBB` color per agent; the global identity context applies it to message attribution and mention chips immediately, with the built-in palette as a safe fallback.
-- **Explicit external-session ownership (0.9.2 / KT-51)**: `discussions.source_agent + source_session_id` is a versioned (`source_binding_version = 1`) durable resume key, distinct from live `discussion_sessions` presence. Migration 092 closes legacy duplicate open owners and a partial unique index guarantees that one concrete CLI session owns at most one discussion. The header chip links/unlinks, displays and copies the full session id and reports connected vs offline; `/api/disc/session-status` exposes both durable ownership and current peer presence. `disc_link` refuses to transfer an already-owned session unless the caller explicitly sets `force_reassign`.
+- **Explicit external-session ownership (0.9.2 / KT-51, 0.9.3 / KT-148)**: `discussions.source_agent + source_session_id` is a versioned (`source_binding_version = 1`) durable resume key, distinct from live `discussion_sessions` presence. Migration 092 closes legacy duplicate open owners and a partial unique index guarantees that one concrete CLI session owns at most one discussion. The header chip links/unlinks, displays and copies the full session id and reports connected vs offline; `/api/disc/session-status` exposes both durable ownership and current peer presence. `disc_link` refuses to transfer an already-owned session by default. The MCP handoff contract `disc_transfer_session` additionally pins the expected previous room, requires explicit confirmation, restricts the destination to the room currently joined by that bridge, and atomically closes/opens the append-only source history so a reload resumes the new room without a silent steal.
+- **Idempotent direct Planning creates (0.9.3 / KT-115)**: migration 102 adds an optional unique `idempotency_key` and canonical request fingerprint to `planning_tasks`. `task_create` retries return the existing task only when the full normalized creation content matches; key reuse with different content is a conflict, while identical titles under distinct keys remain valid. The MCP bridge namespaces explicit keys to the current discussion or derives one from stable message provenance, and both Kronn-launched and joined agents are instructed to refresh `plan_get` immediately before a direct create.
 - **Agent switch**: the primary agent (`Discussion.agent`) can be changed mid-conversation via `PATCH /api/discussions/:id` with `{ agent: AgentType }`. On switch: agent is updated, `summary_cache` is invalidated (different agent = different budget), a User message is inserted prompting the new agent to summarize and continue, and `runAgent` is auto-triggered. UI: clickable agent name in chat header with dropdown of installed agents.
 - **Disc-first refactor (0.8.6 phase 2)**: a discussion is now a TOPIC, decoupled from agent sessions. Schema: `discussion_sessions(disc_id, agent_type, session_id, conversation_id, role 'owner'|'peer', status 'active'|'paused'|'left', joined_at, left_at)` links N CLI sessions to 1 disc. `session_id` identifies the Kronn bridge; nullable `conversation_id` is distinct native CLI metadata used only for a verified resume affordance. The form for creating a discussion exposes a checkbox "Launch an agent right away" (default ON, legacy 80% case unchanged). Unchecked → disc created empty, the user invites agents later from the header's `[+ Inviter]` button. Migration 060 backfills existing discs with `source_agent` set into one `'owner'` row each; migration 097 adds the native conversation id. The legacy `Discussion.agent` column stays for back-compat but `discussion_sessions` is now the source of truth for "who is in this room".
 - **Cross-agent collab (0.8.6 phase 2)**: N CLI agents (Claude Code, Codex, Gemini, Kiro, Vibe, Copilot…) can share one Kronn discussion in real time. Flow:
@@ -101,6 +105,17 @@ Three Docker services behind nginx gateway:
   - New MCP tools: `disc_join`, `disc_wait_for_peer`, `disc_leave`. `disc_append` extended with simple-mode `{content: "..."}` ; bulk-mode `{disc_id, messages: […]}` still works for cross-agent-memory transcript replay.
   - Doc fiche: `docs/operations/mcp-servers/kronn-internal.md`. `docs/AGENTS.md` rule relaxed: read the MCP context file IF it exists, otherwise proceed (was blocking on Codex's strict reading of the rule).
 - **Isolated workspace (worktree)**: discussions can run in `workspace_mode: "Isolated"`, creating a git worktree in `<repo>/.kronn-worktrees/` with a `kronn/<slug>` branch. The worktree isolates agent changes from the main working tree.
+  - **Multiple joined-CLI worktrees (0.9.3 / KT-140)**:
+    `discussion_workspaces` is an additive per-discussion/per-session registry.
+    Migration 101 backfills the legacy Isolated path/branch as a managed row
+    without removing the compatibility columns. Joined CLIs declare adopted
+    external worktrees through `disc_workspace_set`; the backend canonicalizes
+    the path, verifies the Git common directory against the primary and linked
+    project repositories, confirms the checkout is registered by
+    `git worktree list`, and records the real branch/HEAD. A partial unique
+    index prevents two discussions from claiming the same physical checkout.
+    The Git panel passes an explicit workspace id to every operation; no
+    selection preserves the legacy resolver.
   - **Lock/Unlock**: the worktree "locks" the branch (git forbids checkout elsewhere). User can **unlock** (`POST /discussions/:id/worktree-unlock`) to free the branch for testing in the main repo. **Lock** (`POST /discussions/:id/worktree-lock`) re-creates the worktree.
   - **Auto re-lock**: when sending a message to an unlocked Isolated discussion, the backend auto-attempts `reattach_worktree`. If the branch is still checked out in the main repo, an SSE error is returned and a persistent red banner is shown above the input (with a Retry button).
   - **Relative gitdir**: worktree cross-references use relative paths (`../../.git/worktrees/<name>`) so they work both inside Docker and on the host.
@@ -184,7 +199,9 @@ value-free audit event. See
 
 ### i18n (internationalization)
 - Lightweight custom translation system (no external lib).
-- 3 UI locales: `fr`, `en`, `es` — defined in `frontend/src/lib/i18n.ts`.
+- 3 UI locales: `fr`, `en`, `es`. Locale detection and lazy loading live in
+  `frontend/src/lib/i18n.ts`; dictionaries live in
+  `frontend/src/lib/i18n/locales/{fr,en,es}.ts`.
 - UI language stored in `localStorage` (`kronn:ui-locale`), separate from agent output language (backend config).
 - `I18nContext.tsx` provides `useT()` hook returning `t(key, ...args)` for components.
 - Translation keys use dot notation: `nav.projects`, `projects.search`, `config.tokens.title`, etc.
@@ -388,7 +405,8 @@ NoTemplate → TemplateInstalled → Audited → Validated
 
 **API endpoints:**
 - `POST /api/projects/bootstrap` — create project from scratch (dir + git init + template + discussion)
-- `GET /api/projects/:id/dependency-updates` — bounded dependency health summary; native read-only manager checks share a pinned Renovate local dry-run fallback when their runtime is unavailable or fails; add `?refresh=true` to bypass the six-hour, manifest-fingerprinted in-memory cache
+- `GET /api/projects/:id/dependency-updates` — bounded dependency health summary; native read-only manager checks share a pinned Renovate local dry-run fallback when their runtime is unavailable or fails. Results use a six-hour in-memory cache plus a durable manifest-fingerprinted project cache; the configured cadence (weekly by default) is evaluated only when the Overview is opened, so startup never scans repositories. Add `?refresh=true` to bypass both caches.
+- `PUT /api/projects/:id/dependency-updates` — configure the opportunistic dependency-review cadence (`interval_days`, 1–365, or `null` for manual-only). This changes scheduling only and never runs a package update.
 - `GET /api/projects/:id/source-files` — bounded source tree; add `?shallow=true` for the repository-root first pass used by progressive Code-view loading
 - `POST /api/projects/:id/install-template` — copy template, inject bootstrap
 - `POST /api/projects/:id/full-audit` — SSE streaming chained audit (16 steps)

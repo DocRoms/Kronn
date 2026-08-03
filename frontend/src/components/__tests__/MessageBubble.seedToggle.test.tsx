@@ -15,7 +15,7 @@
 import { describe, it, expect } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { useState } from 'react';
-import { splitMessageSeed, stripAgentHandoff } from '../MessageBubble';
+import { splitMessageSeed, stripAgentHandoff } from '../../lib/messageContent';
 
 describe('stripAgentHandoff', () => {
   it('hides only the leading agent-facing handoff from the human message', () => {

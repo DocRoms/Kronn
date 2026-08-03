@@ -40,7 +40,19 @@ export function UserContextEditor() {
     }
   };
 
-  useEffect(() => { refresh(); }, []);
+  useEffect(() => {
+    let active = true;
+    api.list()
+      .then(list => {
+        if (!active) return;
+        setFiles(list);
+        setListError(null);
+      })
+      .catch(error => {
+        if (active) setListError(error instanceof Error ? error.message : String(error));
+      });
+    return () => { active = false; };
+  }, []);
 
   const setRow = (name: string, state: RowState) =>
     setRowStates(prev => ({ ...prev, [name]: state }));

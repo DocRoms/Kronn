@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { SUGGESTED_MODELS } from '../OllamaCard';
-import { dictionaries } from '../../../lib/i18n';
+import { SUGGESTED_MODELS } from '../ollamaModels';
+import { dictionaries } from '../../../lib/i18n/testing';
 
 // Guards Kronn's hardcoded Ollama first-pull suggestions: real tags, a hardware
 // range that includes no-GPU machines, and full FR/EN/ES coverage.

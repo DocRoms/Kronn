@@ -282,8 +282,16 @@ pub async fn workflow_trigger(
 pub struct StepResultSummary {
     pub step_name: String,
     pub status: String,
+    pub started_at: Option<chrono::DateTime<Utc>>,
     pub duration_ms: u64,
-    pub tokens_used: u64,
+    /// `null` when the runtime cannot honestly measure this step. Consumers
+    /// must inspect `tokens_status` instead of treating an unknown value as 0.
+    pub tokens_used: Option<u64>,
+    /// Explicit measurement state for steps whose usage may be unavailable.
+    /// BatchQuickPrompt carries this in its structured envelope; legacy and
+    /// deterministic steps omit it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tokens_status: Option<String>,
     /// First ~200 chars of the step output (truncated for token economy).
     /// MCP callers fetch the full body via `GET /api/workflows/<id>/runs/<run_id>`
     /// only when they need it.
@@ -322,6 +330,27 @@ fn excerpt(s: &str) -> String {
     let mut out: String = s.chars().take(OUTPUT_EXCERPT_MAX_CHARS).collect();
     out.push('…');
     out
+}
+
+fn step_tokens_measurement(step: &StepResult) -> (Option<u64>, Option<String>) {
+    if matches!(step.status, RunStatus::Running | RunStatus::Pending) {
+        return (None, Some("in_progress".to_string()));
+    }
+    if step.step_kind.as_deref() != Some("BatchQuickPrompt") {
+        return (Some(step.tokens_used), None);
+    }
+    let status = crate::workflows::template::extract_step_envelope(&step.output)
+        .and_then(|envelope| serde_json::from_str::<serde_json::Value>(&envelope.data_json).ok())
+        .and_then(|data| {
+            data.get("tokens_status")
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+        });
+    match status.as_deref() {
+        Some("measured" | "partial") => (Some(step.tokens_used), status),
+        Some(_) => (None, status),
+        None => (None, Some("unavailable_legacy_batch".to_string())),
+    }
 }
 
 fn is_terminal_status(status: &RunStatus) -> bool {
@@ -392,13 +421,18 @@ pub async fn workflow_run_status(
     let steps: Vec<StepResultSummary> = run
         .step_results
         .iter()
-        .map(|s| StepResultSummary {
-            step_name: s.step_name.clone(),
-            status: format!("{:?}", s.status),
-            duration_ms: s.duration_ms,
-            tokens_used: s.tokens_used,
-            output_excerpt: excerpt(&s.output),
-            step_type: s.step_kind.clone(),
+        .map(|s| {
+            let (tokens_used, tokens_status) = step_tokens_measurement(s);
+            StepResultSummary {
+                step_name: s.step_name.clone(),
+                status: format!("{:?}", s.status),
+                started_at: s.started_at,
+                duration_ms: s.duration_ms,
+                tokens_used,
+                tokens_status,
+                output_excerpt: excerpt(&s.output),
+                step_type: s.step_kind.clone(),
+            }
         })
         .collect();
 
@@ -1150,6 +1184,43 @@ mod tests {
         let s = "é".repeat(250);
         let out = excerpt(&s);
         assert_eq!(out.chars().count(), OUTPUT_EXCERPT_MAX_CHARS + 1);
+    }
+
+    fn batch_step_result(tokens_used: u64, tokens_status: &str) -> StepResult {
+        StepResult {
+            step_name: "reviewers".into(),
+            status: RunStatus::Success,
+            output: format!(
+                "---STEP_OUTPUT---\n{{\"data\":{{\"tokens_status\":\"{tokens_status}\"}},\"status\":\"OK\",\"summary\":\"batch\"}}\n---END_STEP_OUTPUT---\n[SIGNAL: OK]"
+            ),
+            tokens_used,
+            duration_ms: 10,
+            started_at: Some(Utc::now()),
+            condition_result: None,
+            envelope_detected: Some(true),
+            step_kind: Some("BatchQuickPrompt".into()),
+            step_agent: None,
+            step_model: None,
+            step_api_plugin_slug: None,
+            step_api_endpoint_path: None,
+            is_rollback: false,
+            child_run_id: None,
+        }
+    }
+
+    #[test]
+    fn batch_token_measurement_never_exposes_unknown_as_zero() {
+        let unavailable = batch_step_result(0, "unavailable_children_not_measured");
+        assert_eq!(
+            step_tokens_measurement(&unavailable),
+            (None, Some("unavailable_children_not_measured".to_string()))
+        );
+
+        let measured = batch_step_result(42, "measured");
+        assert_eq!(
+            step_tokens_measurement(&measured),
+            (Some(42), Some("measured".to_string()))
+        );
     }
 
     #[test]

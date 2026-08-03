@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, useCallback } from 'react';
 import { getAuthToken } from '../lib/api';
 import type { WsMessage } from '../types/generated';
 
@@ -25,11 +25,17 @@ export function useWebSocket(
   const reconnectTimeout = useRef<ReturnType<typeof setTimeout>>(undefined);
   const backoff = useRef(1000);
   const onMessageRef = useRef(onMessage);
-  onMessageRef.current = onMessage;
   const onConnectRef = useRef(onConnect);
-  onConnectRef.current = onConnect;
 
-  const connect = useCallback(() => {
+  useLayoutEffect(() => {
+    onMessageRef.current = onMessage;
+  }, [onMessage]);
+
+  useLayoutEffect(() => {
+    onConnectRef.current = onConnect;
+  }, [onConnect]);
+
+  const connect = useCallback(function openSocket() {
     // Build WS URL from current page location
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const host = window.location.host;
@@ -83,7 +89,7 @@ export function useWebSocket(
       // Reconnect with exponential backoff
       reconnectTimeout.current = setTimeout(() => {
         backoff.current = Math.min(backoff.current * 2, 60000);
-        connect();
+        openSocket();
       }, backoff.current);
     };
 

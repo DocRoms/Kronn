@@ -121,6 +121,28 @@ describe('useWebSocket', () => {
     });
   });
 
+  it('uses the latest handlers without reconnecting the socket', () => {
+    const firstMessage = vi.fn();
+    const secondMessage = vi.fn();
+    const firstConnect = vi.fn();
+    const secondConnect = vi.fn();
+    const { rerender } = renderHook(
+      ({ onMessage, onConnect }) => useWebSocket(onMessage, onConnect),
+      { initialProps: { onMessage: firstMessage, onConnect: firstConnect } },
+    );
+    const socket = MockWebSocket.instances[0];
+
+    rerender({ onMessage: secondMessage, onConnect: secondConnect });
+    act(() => socket.simulateOpen());
+    act(() => socket.simulateMessage(JSON.stringify({ type: 'pong', timestamp: 42 })));
+
+    expect(MockWebSocket.instances).toHaveLength(1);
+    expect(firstConnect).not.toHaveBeenCalled();
+    expect(secondConnect).toHaveBeenCalledTimes(1);
+    expect(firstMessage).not.toHaveBeenCalled();
+    expect(secondMessage).toHaveBeenCalledWith({ type: 'pong', timestamp: 42 });
+  });
+
   it('ignores non-JSON messages', () => {
     const handler = vi.fn();
     renderHook(() => useWebSocket(handler));

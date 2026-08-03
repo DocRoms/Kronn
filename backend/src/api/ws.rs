@@ -560,6 +560,7 @@ fn handle_incoming_chat_message(
     content: &str,
     timestamp: i64,
     role: crate::models::MessageRole,
+    channel: crate::models::MessageChannel,
     agent_type: Option<crate::models::AgentType>,
     targets: Vec<crate::models::MessageTarget>,
     reply_to_message_id: Option<&str>,
@@ -618,6 +619,7 @@ fn handle_incoming_chat_message(
         lint_report: None,
         id: message_id.to_string(),
         role,
+        channel,
         content: content.to_string(),
         agent_type,
         timestamp: ts,
@@ -703,6 +705,7 @@ pub(crate) async fn ingest_relayable_frame(state: &AppState, msg: &WsMessage) ->
             content,
             timestamp,
             role,
+            channel,
             agent_type,
             target_agents,
             targets,
@@ -718,7 +721,7 @@ pub(crate) async fn ingest_relayable_frame(state: &AppState, msg: &WsMessage) ->
             } else {
                 targets.clone()
             };
-            let (sid, mid, pseudo, avatar, text, ts, r, at, targets, reply_to) = (
+            let (sid, mid, pseudo, avatar, text, ts, r, channel, at, targets, reply_to) = (
                 shared_discussion_id.clone(),
                 message_id.clone(),
                 from_pseudo.clone(),
@@ -726,6 +729,7 @@ pub(crate) async fn ingest_relayable_frame(state: &AppState, msg: &WsMessage) ->
                 content.clone(),
                 *timestamp,
                 role.clone(),
+                *channel,
                 agent_type.clone(),
                 resolved_targets,
                 reply_to_message_id.clone(),
@@ -742,6 +746,7 @@ pub(crate) async fn ingest_relayable_frame(state: &AppState, msg: &WsMessage) ->
                         &text,
                         ts,
                         r,
+                        channel,
                         at,
                         targets,
                         reply_to.as_deref(),
@@ -989,6 +994,7 @@ mod handshake_tests {
             content: "hello".into(),
             timestamp: 1,
             role: crate::models::MessageRole::User,
+            channel: crate::models::MessageChannel::Main,
             agent_type: None,
             target_agents: vec![],
             targets: vec![],
@@ -1160,6 +1166,7 @@ mod relay_dedup_tests {
             "hi",
             0,
             MessageRole::User,
+            crate::models::MessageChannel::Main,
             None,
             vec![],
             None,
@@ -1176,6 +1183,7 @@ mod relay_dedup_tests {
             "hi",
             0,
             MessageRole::User,
+            crate::models::MessageChannel::Main,
             None,
             vec![],
             None,
@@ -1191,6 +1199,7 @@ mod relay_dedup_tests {
             "hi",
             0,
             MessageRole::User,
+            crate::models::MessageChannel::Main,
             None,
             vec![],
             None,
@@ -1206,6 +1215,7 @@ mod relay_dedup_tests {
             "reply",
             1,
             MessageRole::User,
+            crate::models::MessageChannel::Main,
             None,
             vec![],
             Some("m1"),
@@ -1229,6 +1239,7 @@ mod relay_dedup_tests {
             "reply to missing",
             2,
             MessageRole::User,
+            crate::models::MessageChannel::Main,
             None,
             vec![],
             Some("missing"),
@@ -1242,5 +1253,44 @@ mod relay_dedup_tests {
             )
             .unwrap();
         assert!(missing_target.is_none());
+
+        assert!(handle_incoming_chat_message(
+            &c,
+            "shared-2",
+            "m4",
+            "Romu",
+            None,
+            "federated note",
+            3,
+            MessageRole::User,
+            crate::models::MessageChannel::Note,
+            None,
+            vec![],
+            None,
+        )
+        .unwrap());
+        let channel: String = c
+            .query_row("SELECT channel FROM messages WHERE id = 'm4'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let awaiting_agent: bool = c
+            .query_row(
+                "SELECT awaiting_agent FROM discussions WHERE shared_id = 'shared-2'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let dispatch_count: i64 = c
+            .query_row(
+                "SELECT COUNT(*) FROM agent_dispatch_jobs
+                 WHERE trigger_message_id = 'm4'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(channel, "note");
+        assert!(!awaiting_agent);
+        assert_eq!(dispatch_count, 0);
     }
 }

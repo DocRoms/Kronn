@@ -1,9 +1,18 @@
 use anyhow::Result;
 use chrono::Utc;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use super::parse_dt;
 use crate::models::*;
+
+pub const DEFAULT_DEPENDENCY_MONITORING_INTERVAL_DAYS: u16 = 7;
+
+#[derive(Debug, Clone)]
+pub struct DependencyMonitoringRecord {
+    pub interval_days: Option<u16>,
+    pub manifest_fingerprint: Option<u64>,
+    pub summary: Option<DependencyUpdateSummary>,
+}
 
 // ─── Projects ───────────────────────────────────────────────────────────────
 
@@ -190,6 +199,114 @@ pub fn replace_source_exclusions(
     Ok(true)
 }
 
+/// Load the durable dependency-monitoring state for one project.
+///
+/// A project without a row uses the safe default: an opportunistic weekly
+/// check when its overview is opened. `interval_days = None` is reserved for
+/// an explicit manual-only choice.
+pub fn get_dependency_monitoring(
+    conn: &Connection,
+    project_id: &str,
+) -> Result<DependencyMonitoringRecord> {
+    let row = conn
+        .query_row(
+            "SELECT interval_days, manifest_fingerprint, summary_json
+             FROM project_dependency_monitoring
+             WHERE project_id = ?1",
+            [project_id],
+            |row| {
+                Ok((
+                    row.get::<_, Option<i64>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            },
+        )
+        .optional()?;
+
+    let Some((interval_days, manifest_fingerprint, summary_json)) = row else {
+        return Ok(DependencyMonitoringRecord {
+            interval_days: Some(DEFAULT_DEPENDENCY_MONITORING_INTERVAL_DAYS),
+            manifest_fingerprint: None,
+            summary: None,
+        });
+    };
+
+    Ok(DependencyMonitoringRecord {
+        interval_days: interval_days.and_then(|days| u16::try_from(days).ok()),
+        manifest_fingerprint: manifest_fingerprint.and_then(|value| value.parse().ok()),
+        summary: summary_json.and_then(|value| serde_json::from_str(&value).ok()),
+    })
+}
+
+/// Persist the result of a read-only dependency scan without altering the
+/// configured cadence.
+pub fn save_dependency_scan(
+    conn: &Connection,
+    project_id: &str,
+    manifest_fingerprint: u64,
+    summary: &DependencyUpdateSummary,
+) -> Result<bool> {
+    let exists = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM projects WHERE id = ?1)",
+        [project_id],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if !exists {
+        return Ok(false);
+    }
+
+    conn.execute(
+        "INSERT INTO project_dependency_monitoring
+             (project_id, interval_days, manifest_fingerprint, summary_json, checked_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+         ON CONFLICT(project_id) DO UPDATE SET
+             manifest_fingerprint = excluded.manifest_fingerprint,
+             summary_json = excluded.summary_json,
+             checked_at = excluded.checked_at,
+             updated_at = excluded.updated_at",
+        params![
+            project_id,
+            i64::from(DEFAULT_DEPENDENCY_MONITORING_INTERVAL_DAYS),
+            manifest_fingerprint.to_string(),
+            serde_json::to_string(summary)?,
+            summary.checked_at.to_rfc3339(),
+        ],
+    )?;
+    Ok(true)
+}
+
+/// Configure periodic dependency checks. `None` means manual checks only.
+pub fn set_dependency_monitoring_interval(
+    conn: &Connection,
+    project_id: &str,
+    interval_days: Option<u16>,
+) -> Result<bool> {
+    let exists = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM projects WHERE id = ?1)",
+        [project_id],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if !exists {
+        return Ok(false);
+    }
+
+    conn.execute(
+        "INSERT INTO project_dependency_monitoring
+             (project_id, interval_days, updated_at)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT(project_id) DO UPDATE SET
+             interval_days = excluded.interval_days,
+             updated_at = excluded.updated_at",
+        params![
+            project_id,
+            interval_days.map(i64::from),
+            Utc::now().to_rfc3339(),
+        ],
+    )?;
+    Ok(true)
+}
+
 /// 0.8.3 — Replace the linked_repos list for a project.
 pub fn update_project_linked_repos(
     conn: &Connection,
@@ -288,4 +405,86 @@ pub fn delete_project_discussions(conn: &Connection, project_id: &str) -> Result
         params![project_id],
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod dependency_monitoring_tests {
+    use super::*;
+    use crate::db::migrations;
+    use chrono::TimeZone;
+
+    fn database_with_project() -> Connection {
+        let conn = Connection::open_in_memory().expect("in-memory database");
+        migrations::run(&conn).expect("migrations");
+        conn.execute(
+            "INSERT INTO projects (id, name, path, created_at, updated_at)
+             VALUES ('project-1', 'Project', '/tmp/project-1', ?1, ?1)",
+            [Utc::now().to_rfc3339()],
+        )
+        .expect("project");
+        conn
+    }
+
+    #[test]
+    fn dependency_monitoring_defaults_to_weekly_and_persists_manual_choice() {
+        let conn = database_with_project();
+        let initial = get_dependency_monitoring(&conn, "project-1").expect("initial state");
+        assert_eq!(
+            initial.interval_days,
+            Some(DEFAULT_DEPENDENCY_MONITORING_INTERVAL_DAYS)
+        );
+        assert!(initial.summary.is_none());
+
+        assert!(
+            set_dependency_monitoring_interval(&conn, "project-1", None).expect("set manual-only")
+        );
+        let manual = get_dependency_monitoring(&conn, "project-1").expect("manual state");
+        assert_eq!(manual.interval_days, None);
+    }
+
+    #[test]
+    fn saving_scan_preserves_cadence_and_round_trips_result() {
+        let conn = database_with_project();
+        set_dependency_monitoring_interval(&conn, "project-1", Some(14)).expect("set cadence");
+        let checked_at = Utc
+            .with_ymd_and_hms(2026, 7, 30, 10, 15, 0)
+            .single()
+            .expect("timestamp");
+        let summary = DependencyUpdateSummary {
+            managers: Vec::new(),
+            total_outdated: 0,
+            total_major: 0,
+            checked_at,
+            cached: false,
+            monitoring_interval_days: Some(14),
+            next_check_at: Some(checked_at + chrono::Duration::days(14)),
+        };
+
+        assert!(save_dependency_scan(&conn, "project-1", u64::MAX, &summary).expect("save scan"));
+        let stored = get_dependency_monitoring(&conn, "project-1").expect("stored scan");
+        assert_eq!(stored.interval_days, Some(14));
+        assert_eq!(stored.manifest_fingerprint, Some(u64::MAX));
+        let stored_summary = stored.summary.expect("summary");
+        assert_eq!(stored_summary.checked_at, checked_at);
+        assert_eq!(stored_summary.total_outdated, 0);
+    }
+
+    #[test]
+    fn dependency_monitoring_rejects_unknown_project() {
+        let conn = database_with_project();
+        assert!(
+            !set_dependency_monitoring_interval(&conn, "missing", Some(7))
+                .expect("unknown project")
+        );
+        let summary = DependencyUpdateSummary {
+            managers: Vec::new(),
+            total_outdated: 0,
+            total_major: 0,
+            checked_at: Utc::now(),
+            cached: false,
+            monitoring_interval_days: Some(7),
+            next_check_at: None,
+        };
+        assert!(!save_dependency_scan(&conn, "missing", 1, &summary).expect("unknown project"));
+    }
 }

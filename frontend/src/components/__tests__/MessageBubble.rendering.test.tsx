@@ -46,6 +46,7 @@ function makeMessage(overrides: Partial<DiscussionMessage> = {}): DiscussionMess
   return {
     id: 'msg-test',
     role: 'Agent',
+    channel: 'main',
     content: 'Some answer.',
     agent_type: 'ClaudeCode',
     timestamp: '2026-05-29T10:30:00.000Z',
@@ -677,6 +678,9 @@ describe('MessageBubble — edit mode', () => {
     const ta = container.querySelector('textarea.disc-edit-textarea') as HTMLTextAreaElement;
     expect(ta).not.toBeNull();
     expect(ta.value).toBe('edited text');
+    expect(ta).toHaveAttribute('rows', '10');
+    expect(ta).toHaveAccessibleName('disc.editResend');
+    expect(ta.closest('.disc-msg-bubble')).toHaveAttribute('data-editing', 'true');
   });
 
   it('fires onEditTextChange while typing', () => {

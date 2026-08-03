@@ -33,6 +33,7 @@ import type {
   DiscussionNativeAgentMode,
   DiscussionMeta,
   DiscussionSession,
+  DiscussionWorkspace,
   ParticipantView,
   CreateDiscussionRequest,
   SendMessageRequest,
@@ -117,6 +118,7 @@ import type {
   OllamaModelsResponse,
   DecideRunRequest,
   DecideRunResponse,
+  ResumeInterruptedRequest,
   ImportWorkflowRequest,
   ImportQuickPromptRequest,
   VersionCheck,
@@ -647,7 +649,7 @@ export const config = {
   restoreRecovery: (passphrase: string, recoveryCode?: string) =>
     api<void>('POST', '/config/recovery/restore', { passphrase, recovery_code: recoveryCode || null }),
   getServerConfig: () => api<ServerConfigPublic>('GET', '/config/server'),
-  setServerConfig: (req: { domain?: string; max_concurrent_agents?: number; agent_stall_timeout_min?: number; pseudo?: string; avatar_email?: string; bio?: string; debug_mode?: boolean; default_model_tier?: 'economy' | 'default' | 'reasoning'; default_summary_strategy?: 'Auto' | 'OnDemand' | 'Off' }) => api<void>('POST', '/config/server', req),
+  setServerConfig: (req: { domain?: string; max_concurrent_agents?: number; agent_stall_timeout_min?: number; pseudo?: string; avatar_email?: string; bio?: string; debug_mode?: boolean; discussion_notes_enabled?: boolean; default_model_tier?: 'economy' | 'default' | 'reasoning'; default_summary_strategy?: 'Auto' | 'OnDemand' | 'Off' }) => api<void>('POST', '/config/server', req),
   regenerateAuthToken: () => api<string>('POST', '/config/auth-token/regenerate'),
 };
 
@@ -899,6 +901,12 @@ export const projects = {
     api<GitStatusResponse>('GET', `/projects/${id}/git-status${refreshLanguages ? '?refresh=true' : ''}`),
   dependencyUpdates: (id: string, refresh = false) =>
     api<DependencyUpdateSummary>('GET', `/projects/${id}/dependency-updates${refresh ? '?refresh=true' : ''}`),
+  setDependencyMonitoring: (id: string, intervalDays: number | null) =>
+    api<{ interval_days: number | null }>(
+      'PUT',
+      `/projects/${id}/dependency-updates`,
+      { interval_days: intervalDays },
+    ),
   gitDiff: (id: string, path: string, committed = false) => api<{ path: string; diff: string }>('GET', `/projects/${id}/git-diff?path=${encodeURIComponent(path)}${committed ? '&committed=true' : ''}`),
   gitCreateBranch: (id: string, req: { name: string }) => api<{ branch: string }>('POST', `/projects/${id}/git-branch`, req),
   gitCommit: (id: string, req: { files: string[]; message: string; amend?: boolean; sign?: boolean }) => api<{ hash: string; message: string }>('POST', `/projects/${id}/git-commit`, req),
@@ -1497,13 +1505,26 @@ export const discussions = {
   },
 
   // ── Discussion-scoped git operations ──
-  gitStatus: (id: string) => api<GitStatusResponse>('GET', `/discussions/${id}/git-status`),
-  gitDiff: (id: string, path: string, committed = false) => api<{ path: string; diff: string }>('GET', `/discussions/${id}/git-diff?path=${encodeURIComponent(path)}${committed ? '&committed=true' : ''}`),
-  gitCommit: (id: string, req: { files: string[]; message: string; amend?: boolean; sign?: boolean }) => api<{ hash: string; message: string }>('POST', `/discussions/${id}/git-commit`, req),
-  gitPush: (id: string) => api<{ success: boolean; message: string }>('POST', `/discussions/${id}/git-push`, {}),
-  createPr: (id: string, req: { title: string; body?: string; base?: string }) => api<{ url: string }>('POST', `/discussions/${id}/git-pr`, req),
-  prTemplate: (id: string) => api<{ template: string; source: string }>('GET', `/discussions/${id}/pr-template`),
-  exec: (id: string, command: string) => api<{ stdout: string; stderr: string; exit_code: number }>('POST', `/discussions/${id}/exec`, { command }),
+  workspaces: (id: string) =>
+    api<DiscussionWorkspace[]>('GET', `/discussions/${id}/workspaces`),
+  gitStatus: (id: string, workspaceId?: string) =>
+    api<GitStatusResponse>('GET', `/discussions/${id}/git-status${workspaceId ? `?workspace_id=${encodeURIComponent(workspaceId)}` : ''}`),
+  gitDiff: (id: string, path: string, committed = false, workspaceId?: string) => {
+    const query = new URLSearchParams({ path });
+    if (committed) query.set('committed', 'true');
+    if (workspaceId) query.set('workspace_id', workspaceId);
+    return api<{ path: string; diff: string }>('GET', `/discussions/${id}/git-diff?${query.toString()}`);
+  },
+  gitCommit: (id: string, req: { files: string[]; message: string; amend?: boolean; sign?: boolean }, workspaceId?: string) =>
+    api<{ hash: string; message: string }>('POST', `/discussions/${id}/git-commit`, { ...req, workspace_id: workspaceId }),
+  gitPush: (id: string, workspaceId?: string) =>
+    api<{ success: boolean; message: string }>('POST', `/discussions/${id}/git-push`, { workspace_id: workspaceId }),
+  createPr: (id: string, req: { title: string; body?: string; base?: string }, workspaceId?: string) =>
+    api<{ url: string }>('POST', `/discussions/${id}/git-pr`, { ...req, workspace_id: workspaceId }),
+  prTemplate: (id: string, workspaceId?: string) =>
+    api<{ template: string; source: string }>('GET', `/discussions/${id}/pr-template${workspaceId ? `?workspace_id=${encodeURIComponent(workspaceId)}` : ''}`),
+  exec: (id: string, command: string, workspaceId?: string) =>
+    api<{ stdout: string; stderr: string; exit_code: number }>('POST', `/discussions/${id}/exec`, { command, workspace_id: workspaceId }),
   worktreeUnlock: (id: string) => api<string>('POST', `/discussions/${id}/worktree-unlock`, {}),
   worktreeLock: (id: string) => api<string>('POST', `/discussions/${id}/worktree-lock`, {}),
   // High-level "try this version in my IDE" flow — orchestrates unlock +
@@ -1914,9 +1935,9 @@ export const workflows = {
     ),
   /** A2 — resume an Interrupted run (backend restart/crash). Atomic claim
    *  backend-side: a double-click gets one resume + one error. */
-  resumeRun: (runId: string) =>
+  resumeRun: (runId: string, request: ResumeInterruptedRequest = { retry_uncertain_effect: false }) =>
     api<{ run_id: string; new_status: string }>(
-      'POST', `/workflow-runs/${runId}/resume`, {}
+      'POST', `/workflow-runs/${runId}/resume`, request
     ),
   /** 0.7.0 Phase 4 — submit operator's decision on a paused (Gate) run.
    *  `decision` ∈ "approve" | "request_changes" | "reject".

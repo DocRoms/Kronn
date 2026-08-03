@@ -67,7 +67,7 @@ impl Severity {
 }
 
 /// One mechanical signal surfaced to Step 8. `evidence` is a concrete,
-/// human-verifiable anchor (`file:line` or a count) so the agent can
+/// human-verifiable anchor (`file`, `file:line`, or a count) so the agent can
 /// confirm it instead of trusting the detector.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DetectedSignal {
@@ -77,7 +77,7 @@ pub struct DetectedSignal {
     pub dimension: &'static str,
     pub severity: Severity,
     pub title: String,
-    /// `path:line` or a count summary — always verifiable.
+    /// `path`, `path:line`, or a count summary — always verifiable.
     pub evidence: String,
 }
 
@@ -105,6 +105,7 @@ pub fn run_detectors(project_path: &Path) -> Vec<DetectedSignal> {
     out.extend(detect_blank_without_noopener(project_path));
     out.extend(detect_csp_unsafe(project_path));
     out.extend(detect_missing_community_files(project_path));
+    out.extend(detect_tracked_repo_artifacts(project_path));
     // Stable order: severity first, then detector id, then evidence.
     out.sort_by(|a, b| {
         a.severity
@@ -122,6 +123,7 @@ pub const DETECTOR_IDS: &[&str] = &[
     "blank-noopener",
     "csp-unsafe",
     "missing-community-files",
+    "tracked-repo-artifacts",
 ];
 
 // ─── Detector 1: test gap ────────────────────────────────────────────────
@@ -401,6 +403,186 @@ fn root_has_file(root: &Path, rel_lower: &str) -> bool {
     true
 }
 
+// ─── Detector 5: tracked repository artifacts ───────────────────────────
+
+/// Tracked package-manager caches, runtime databases and ad-hoc review
+/// outputs are repository hygiene debt. Only `git ls-files` entries are
+/// considered: an untracked local screenshot or cache is a developer-state
+/// concern, not a finding against the project.
+fn detect_tracked_repo_artifacts(root: &Path) -> Vec<DetectedSignal> {
+    let output = match crate::core::cmd::sync_cmd("git")
+        .args(["-C"])
+        .arg(root)
+        .args(["ls-files", "-z", "--cached"])
+        .output()
+    {
+        Ok(output) => output,
+        Err(error) => return vec![tracked_artifact_scan_unavailable(error.to_string())],
+    };
+    if !output.status.success() {
+        return vec![tracked_artifact_scan_unavailable(format!(
+            "git ls-files exited with {}",
+            output.status
+        ))];
+    }
+
+    tracked_artifacts_from_listing(&output.stdout, yarn_zero_install_is_documented(root))
+}
+
+fn tracked_artifacts_from_listing(listing: &[u8], yarn_zero_install: bool) -> Vec<DetectedSignal> {
+    let mut out = Vec::new();
+    let mut truncated = 0usize;
+    let mut undecodable = 0usize;
+    for raw in listing.split(|byte| *byte == 0) {
+        let Ok(path) = std::str::from_utf8(raw) else {
+            if !raw.is_empty() {
+                undecodable += 1;
+            }
+            continue;
+        };
+        if path.is_empty() {
+            continue;
+        }
+        let Some(kind) = tracked_artifact_kind(path, yarn_zero_install) else {
+            continue;
+        };
+        if out.len() >= MAX_PER_DETECTOR {
+            truncated += 1;
+            continue;
+        }
+        out.push(DetectedSignal {
+            detector_id: "tracked-repo-artifacts",
+            dimension: "Maintainability",
+            severity: Severity::Low,
+            title: format!("Tracked {kind} should stay outside source control"),
+            // A bare path is the honest citation for generated/binary files:
+            // the source verifier accepts existence-only file evidence, while
+            // a synthetic line 0 is outside its valid line contract.
+            evidence: path.to_string(),
+        });
+    }
+    if truncated > 0 {
+        out.push(DetectedSignal {
+            detector_id: "tracked-repo-artifacts",
+            dimension: "Maintainability",
+            severity: Severity::Low,
+            title: "more tracked repository artifacts not shown (cap reached)".into(),
+            evidence: format!(
+                "+{truncated} additional tracked artifacts beyond the first {MAX_PER_DETECTOR}"
+            ),
+        });
+    }
+    if undecodable > 0 {
+        out.push(DetectedSignal {
+            detector_id: "tracked-repo-artifacts",
+            dimension: "Maintainability",
+            severity: Severity::Low,
+            title: "Tracked paths could not all be classified".into(),
+            evidence: format!("{undecodable} non-UTF-8 tracked path(s) skipped"),
+        });
+    }
+    out
+}
+
+fn tracked_artifact_scan_unavailable(reason: String) -> DetectedSignal {
+    DetectedSignal {
+        detector_id: "tracked-repo-artifacts",
+        dimension: "Maintainability",
+        severity: Severity::Low,
+        title: "Tracked repository artifacts could not be evaluated".into(),
+        evidence: reason.chars().take(240).collect(),
+    }
+}
+
+fn yarn_zero_install_is_documented(root: &Path) -> bool {
+    let config = std::fs::read_to_string(root.join(".yarnrc.yml")).unwrap_or_default();
+    if !config.lines().any(|line| {
+        let compact = line.split('#').next().unwrap_or_default().replace(' ', "");
+        compact.eq_ignore_ascii_case("enableGlobalCache:false")
+    }) {
+        return false;
+    }
+
+    ["README.md", "README", "CONTRIBUTING.md"]
+        .iter()
+        .filter_map(|name| std::fs::read_to_string(root.join(name)).ok())
+        .map(|text| text.to_ascii_lowercase())
+        .any(|text| {
+            text.contains("zero-install")
+                || text.contains("zero install")
+                || text.contains("offline mirror")
+        })
+}
+
+fn tracked_artifact_kind(path: &str, yarn_zero_install: bool) -> Option<&'static str> {
+    let lower = path.to_ascii_lowercase();
+    let parts: Vec<&str> = lower.split('/').collect();
+    let first = parts.first().copied().unwrap_or_default();
+    let file = parts.last().copied().unwrap_or_default();
+
+    let package_cache = lower.starts_with(".pnpm-store/")
+        || lower.contains("/.pnpm-store/")
+        || lower.starts_with(".npm/")
+        || lower.contains("/.npm/")
+        || (!yarn_zero_install
+            && (lower.starts_with(".yarn/cache/") || lower.contains("/.yarn/cache/")))
+        || lower.starts_with(".gradle/caches/")
+        || lower.contains("/.gradle/caches/")
+        || lower.starts_with(".cargo/registry/")
+        || lower.contains("/.cargo/registry/");
+    if package_cache {
+        return Some("package-manager cache");
+    }
+
+    let generated_result = matches!(first, "findings" | "playwright-report" | "test-results")
+        && matches!(
+            Path::new(file).extension().and_then(|ext| ext.to_str()),
+            Some("png" | "jpg" | "jpeg" | "webp" | "zip" | "trace" | "html" | "json")
+        );
+    if generated_result {
+        return Some("generated review/test output");
+    }
+
+    if parts.len() == 1 {
+        let ad_hoc_note = (file.ends_with(".md") || file.ends_with(".txt"))
+            && (file.contains("audit_review")
+                || file.contains("audit-review")
+                || file.contains("session-notes")
+                || file.contains("session_notes")
+                || file.starts_with("handoff")
+                || file.ends_with("-expanded.md"));
+        if ad_hoc_note {
+            return Some("ad-hoc audit/session note");
+        }
+    }
+
+    let runtime_db = file.ends_with(".db")
+        || file.ends_with(".sqlite")
+        || file.ends_with(".sqlite3")
+        || file.ends_with(".db-wal")
+        || file.ends_with(".db-shm")
+        || file.ends_with(".sqlite-wal")
+        || file.ends_with(".sqlite-shm");
+    let runtime_sidecar = file.ends_with("-wal") || file.ends_with("-shm");
+    let runtime_log_dump =
+        file.ends_with(".log") || file.ends_with(".trace") || file.ends_with(".dump");
+    let in_runtime_location = parts.len() == 1
+        || parts.iter().any(|part| {
+            matches!(
+                *part,
+                "cache" | "caches" | ".cache" | "runtime" | "state" | "tmp" | "temp"
+            )
+        });
+    if (runtime_db || runtime_sidecar) && in_runtime_location {
+        return Some("runtime database");
+    }
+    if runtime_log_dump && in_runtime_location {
+        return Some("runtime log/dump");
+    }
+
+    None
+}
+
 // ─── Disposition gate (chantier 1b) ──────────────────────────────────────
 
 /// The output surface anchor we look for to decide a signal was "disposed"
@@ -417,6 +599,13 @@ fn disposition_anchor(sig: &DetectedSignal) -> Option<String> {
         if !line.is_empty() && line.bytes().all(|b| b.is_ascii_digit()) {
             return Some(path.to_lowercase());
         }
+    }
+    // Tracked artifacts deliberately use an existence-only bare path because
+    // generated/binary files do not have a meaningful source line.
+    if sig.detector_id == "tracked-repo-artifacts"
+        && sig.title.ends_with("should stay outside source control")
+    {
+        return Some(sig.evidence.to_lowercase());
     }
     // Count / structural signals: fall back to a stable keyword.
     let kw = match sig.detector_id {
@@ -452,13 +641,19 @@ pub fn undisposed_signals<'a>(
     let mut seen_anchors = std::collections::HashSet::new();
     let mut out = Vec::new();
     for sig in signals {
-        let Some(anchor) = disposition_anchor(sig) else {
+        let Some(raw_anchor) = disposition_anchor(sig) else {
             continue;
         };
-        if !seen_anchors.insert(anchor.clone()) {
+        // Repository-controlled paths are escaped before entering the Markdown
+        // prompt. Use that exact lossless rendered form as the single canonical
+        // disposition key. For ordinary paths it equals the raw path; for a
+        // hostile path it avoids cross-form collisions (`a|b` vs literal
+        // `a&#124;b`) while letting the agent faithfully copy the detector table.
+        let rendered_anchor = escape_markdown_table_cell(&raw_anchor).to_lowercase();
+        if !seen_anchors.insert(rendered_anchor.clone()) {
             continue; // already accounted for this file/keyword
         }
-        if !haystack.contains(&anchor) {
+        if !haystack.contains(&rendered_anchor) {
             out.push(sig);
         }
     }
@@ -476,7 +671,7 @@ pub fn render_signals_block(signals: &[DetectedSignal]) -> String {
     out.push_str("## Deterministic detector signals (ground-truth anchors)\n\n");
     out.push_str(
         "Kronn ran cheap mechanical detectors over the project source BEFORE this step. \
-Each signal below is a verifiable anchor (`file:line` / count). **For every signal you MUST do ONE of:** \
+Each signal below is a verifiable anchor (`file` / `file:line` / count). **For every signal you MUST do ONE of:** \
 (a) emit/refresh a TD, (b) fold it into a baseline-checklist note, or (c) justify dismissal in the \
 `## Dimension coverage` matrix with a verifiable reason. A signal silently ignored = **incomplete audit**. \
 These detectors do NOT replace your own scan — they only anchor the dimensions they cover.\n\n",
@@ -490,10 +685,10 @@ These detectors do NOT replace your own scan — they only anchor the dimensions
         for s in signals {
             out.push_str(&format!(
                 "| {} | {} | {} | `{}` |\n",
-                s.severity.label(),
-                s.dimension,
-                s.title,
-                s.evidence
+                escape_markdown_table_cell(s.severity.label()),
+                escape_markdown_table_cell(s.dimension),
+                escape_markdown_table_cell(&s.title),
+                escape_markdown_table_cell(&s.evidence)
             ));
         }
         out.push('\n');
@@ -504,6 +699,26 @@ These detectors do NOT replace your own scan — they only anchor the dimensions
         DETECTOR_IDS.join(", ")
     ));
     out
+}
+
+fn escape_markdown_table_cell(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            // Escape ampersands and backslashes too, otherwise a literal
+            // `&#124;` or `\n` path collides with rendered `|` or newline.
+            '&' => escaped.push_str("&#38;"),
+            '\\' => escaped.push_str("&#92;"),
+            '|' => escaped.push_str("&#124;"),
+            '`' => escaped.push_str("&#96;"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            ch if ch.is_control() => escaped.push_str(&format!("\\u{{{:04X}}}", ch as u32)),
+            ch => escaped.push(ch),
+        }
+    }
+    escaped
 }
 
 // ─── Internals ───────────────────────────────────────────────────────────
@@ -732,6 +947,180 @@ mod tests {
         );
     }
 
+    // ── tracked repository artifacts ──
+    fn init_git(root: &Path) {
+        let status = crate::core::cmd::sync_cmd("git")
+            .args(["init", "-q"])
+            .current_dir(root)
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    fn git_add_all(root: &Path) {
+        let status = crate::core::cmd::sync_cmd("git")
+            .args(["add", "--", "."])
+            .current_dir(root)
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    #[test]
+    fn tracked_repo_artifacts_cover_kronn_hygiene_regression() {
+        let t = proj();
+        init_git(t.path());
+        write(t.path(), ".pnpm-store/v11/index.db", "db");
+        write(t.path(), ".pnpm-store/v11/index.db-wal", "wal");
+        write(t.path(), "PLAYWRIGHT_AUDIT_REVIEW.md", "review");
+        write(t.path(), "docroms-card-expanded.md", "notes");
+        write(t.path(), "findings/01-drawer.png", "png");
+        write(t.path(), "README.md", "# kept");
+        write(t.path(), "docs/assets/product.png", "png");
+        write(t.path(), "tests/fixtures/seed.db", "fixture");
+        git_add_all(t.path());
+
+        let signals = detect_tracked_repo_artifacts(t.path());
+        let evidence = signals
+            .iter()
+            .map(|signal| signal.evidence.as_str())
+            .collect::<Vec<_>>();
+        for expected in [
+            ".pnpm-store/v11/index.db",
+            ".pnpm-store/v11/index.db-wal",
+            "PLAYWRIGHT_AUDIT_REVIEW.md",
+            "docroms-card-expanded.md",
+            "findings/01-drawer.png",
+        ] {
+            assert!(
+                evidence.contains(&expected),
+                "missing signal for {expected}"
+            );
+        }
+        assert!(!evidence.iter().any(|path| path.contains("README.md")));
+        assert!(!evidence.iter().any(|path| path.contains("docs/assets")));
+        assert!(!evidence.iter().any(|path| path.contains("tests/fixtures")));
+    }
+
+    #[test]
+    fn untracked_local_artifacts_do_not_fire() {
+        let t = proj();
+        init_git(t.path());
+        write(t.path(), "findings/local.png", "png");
+        write(t.path(), "session-notes.md", "notes");
+        assert!(detect_tracked_repo_artifacts(t.path()).is_empty());
+    }
+
+    #[test]
+    fn tracked_repo_artifact_scan_failure_is_explicit() {
+        let t = proj();
+        let signals = detect_tracked_repo_artifacts(t.path());
+        assert_eq!(signals.len(), 1);
+        assert!(signals[0].title.contains("could not be evaluated"));
+        assert!(signals[0].evidence.contains("git ls-files exited"));
+        assert_eq!(
+            disposition_anchor(&signals[0]).as_deref(),
+            Some("tracked repository artifacts could not be evaluated")
+        );
+    }
+
+    #[test]
+    fn non_utf8_tracked_paths_make_the_scan_explicitly_partial() {
+        let signals = tracked_artifacts_from_listing(b"runtime/\xff.log\0README.md\0", false);
+        assert!(signals.iter().any(|signal| {
+            signal.title == "Tracked paths could not all be classified"
+                && signal.evidence == "1 non-UTF-8 tracked path(s) skipped"
+        }));
+    }
+
+    #[test]
+    fn tracked_repo_artifacts_cover_nested_runtime_outputs_and_sidecars() {
+        let t = proj();
+        init_git(t.path());
+        for path in [
+            "runtime/app.log",
+            "state/session.dump",
+            "tmp/run.trace",
+            "cache/database-wal",
+            "state/database-shm",
+            "runtime/cache.sqlite3-wal",
+        ] {
+            write(t.path(), path, "generated");
+        }
+        git_add_all(t.path());
+
+        let evidence = detect_tracked_repo_artifacts(t.path())
+            .into_iter()
+            .map(|signal| signal.evidence)
+            .collect::<Vec<_>>();
+        for path in [
+            "runtime/app.log",
+            "state/session.dump",
+            "tmp/run.trace",
+            "cache/database-wal",
+            "state/database-shm",
+            "runtime/cache.sqlite3-wal",
+        ] {
+            assert!(evidence.iter().any(|item| item == path), "missing {path}");
+        }
+    }
+
+    #[test]
+    fn documented_yarn_zero_install_cache_is_not_repository_debt() {
+        let t = proj();
+        init_git(t.path());
+        write(t.path(), ".yarnrc.yml", "enableGlobalCache: false\n");
+        write(
+            t.path(),
+            "README.md",
+            "This repository intentionally uses Yarn zero-install.\n",
+        );
+        write(t.path(), ".yarn/cache/react.zip", "offline cache");
+        git_add_all(t.path());
+
+        assert!(detect_tracked_repo_artifacts(t.path()).is_empty());
+    }
+
+    #[test]
+    fn undocumented_yarn_cache_is_reported() {
+        let t = proj();
+        init_git(t.path());
+        write(t.path(), ".yarnrc.yml", "enableGlobalCache: false\n");
+        write(t.path(), ".yarn/cache/react.zip", "cache");
+        git_add_all(t.path());
+
+        let signals = detect_tracked_repo_artifacts(t.path());
+        assert!(signals
+            .iter()
+            .any(|signal| signal.evidence == ".yarn/cache/react.zip"));
+    }
+
+    #[test]
+    fn tracked_artifact_evidence_is_accepted_by_the_source_verifier() {
+        let t = proj();
+        init_git(t.path());
+        write(t.path(), ".pnpm-store/v11/index.db", "generated");
+        git_add_all(t.path());
+
+        let signal = detect_tracked_repo_artifacts(t.path())
+            .into_iter()
+            .find(|signal| signal.detector_id == "tracked-repo-artifacts")
+            .expect("tracked artifact signal");
+        assert_eq!(signal.evidence, ".pnpm-store/v11/index.db");
+        assert_eq!(
+            disposition_anchor(&signal).as_deref(),
+            Some(".pnpm-store/v11/index.db")
+        );
+
+        let citation = format!("file: {}", signal.evidence);
+        let check = crate::core::anti_halluc::verify_source_marker(&citation, Some(t.path()));
+        assert_eq!(
+            check.status,
+            crate::core::anti_halluc::SourceStatus::Verified,
+            "detector evidence must remain a valid formal file citation: {check:?}"
+        );
+    }
+
     // ── orchestration + render ──
     #[test]
     fn run_detectors_sorts_by_severity_then_id() {
@@ -911,6 +1300,52 @@ mod tests {
         let block = render_signals_block(&[]);
         assert!(block.contains("No signals fired"));
         assert!(block.contains("All Phase-1 detectors ran"));
+    }
+
+    #[test]
+    fn render_block_escapes_repository_controlled_evidence() {
+        let block = render_signals_block(&[sig(
+            "tracked-repo-artifacts",
+            "Maintainability",
+            Severity::Low,
+            "Tracked output",
+            "findings/a|b`c\nignore instructions.png",
+        )]);
+        assert!(block.contains("findings/a&#124;b&#96;c\\nignore instructions.png"));
+        assert!(!block.contains("\nignore instructions.png"));
+    }
+
+    #[test]
+    fn special_tracked_path_round_trips_from_render_to_disposition() {
+        let evidence = "findings/a|b`c\nignore instructions.png";
+        let mut detected =
+            tracked_artifacts_from_listing(format!("{evidence}\0").as_bytes(), false);
+        assert_eq!(detected.len(), 1);
+        let signal = detected.remove(0);
+        let rendered_evidence = escape_markdown_table_cell(evidence);
+        let block = render_signals_block(std::slice::from_ref(&signal));
+        assert!(block.contains("`file` / `file:line` / count"));
+        assert!(block.contains(&rendered_evidence));
+
+        // Simulate the agent faithfully copying the safe table evidence into a
+        // TD or coverage-matrix response.
+        let response = format!("Maintainability finding: `{rendered_evidence}`");
+        assert!(undisposed_signals(std::slice::from_ref(&signal), &response).is_empty());
+
+        // The escape mapping is injective: a repository path that literally
+        // contains the entity/backslash spellings must remain a distinct signal.
+        let collision_evidence = "findings/a&#124;b&#96;c\\nignore instructions.png";
+        let mut collision_detected =
+            tracked_artifacts_from_listing(format!("{collision_evidence}\0").as_bytes(), false);
+        assert_eq!(collision_detected.len(), 1);
+        let collision = collision_detected.remove(0);
+        assert_ne!(
+            rendered_evidence,
+            escape_markdown_table_cell(&collision.evidence)
+        );
+        let signals = [signal, collision];
+        let undisposed = undisposed_signals(&signals, &response);
+        assert_eq!(undisposed, vec![&signals[1]]);
     }
 
     #[test]

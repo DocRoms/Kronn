@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { liveStepWaitingKey } from '../WorkflowDetail';
+import { liveStepWaitingKey } from '../../../lib/workflowUiUtils';
 
 // 0.8.8 — the live-run "step in progress" placeholder must not claim an agent
 // is starting on a deterministic step (the reported bug: an ApiCall `fetch`

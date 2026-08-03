@@ -25,6 +25,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useT } from '../lib/I18nContext';
 import { quickPrompts as quickPromptsApi } from '../lib/api';
 import type { QuickPromptVersion, QuickPromptVersionMetrics } from '../types/generated';
+import { diffLines } from '../lib/qp-history-diff';
 import { History, X, ChevronRight, ChevronDown, Trash2 } from 'lucide-react';
 import './QPHistoryDrawer.css';
 
@@ -35,6 +36,16 @@ interface Props {
    *  Mirrors `AuditRecapPanel.refreshTrigger`. */
   refreshTrigger?: number;
 }
+
+interface HistoryLoadResult {
+  key: string;
+  history: QuickPromptVersion[];
+  metrics: QuickPromptVersionMetrics[];
+  error: string | null;
+}
+
+const EMPTY_QP_HISTORY: QuickPromptVersion[] = [];
+const EMPTY_QP_METRICS: QuickPromptVersionMetrics[] = [];
 
 /** Pertinence-Δ noise floor. Below this many launches per side, the
  *  Δ% chip is hidden (renders "—" instead). */
@@ -88,46 +99,20 @@ function computeDelta(
   return Math.round(((cur - prev) / prev) * 100);
 }
 
-/** Side-by-side line diff. Splits both strings on `\n` and pads the
- *  shorter list. Each row carries a `kind`:
- *    - 'same'    : both sides have identical text
- *    - 'changed' : both sides have text but they differ
- *    - 'added'   : only `next` has text (left side empty)
- *    - 'removed' : only `prev` has text (right side empty)
- *  Pure helper, exported for unit testing. */
-export interface DiffRow {
-  prev: string;
-  next: string;
-  kind: 'same' | 'changed' | 'added' | 'removed';
-}
-export function diffLines(prev: string, next: string): DiffRow[] {
-  const pLines = prev.split('\n');
-  const nLines = next.split('\n');
-  const max = Math.max(pLines.length, nLines.length);
-  const out: DiffRow[] = [];
-  for (let i = 0; i < max; i++) {
-    const p = pLines[i] ?? '';
-    const n = nLines[i] ?? '';
-    let kind: DiffRow['kind'];
-    if (p === n) kind = 'same';
-    else if (p === '') kind = 'added';
-    else if (n === '') kind = 'removed';
-    else kind = 'changed';
-    out.push({ prev: p, next: n, kind });
-  }
-  return out;
-}
-
 export default function QPHistoryDrawer({ qpId, qpName, refreshTrigger }: Props) {
   const { t, locale } = useT();
   const [drawerOpen, setDrawerOpen] = useState(false);
-  const [history, setHistory] = useState<QuickPromptVersion[]>([]);
-  const [metrics, setMetrics] = useState<QuickPromptVersionMetrics[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [historyLoad, setHistoryLoad] = useState<HistoryLoadResult | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
   const [expandedVersion, setExpandedVersion] = useState<number | null>(null);
   const [diffOpen, setDiffOpen] = useState<number | null>(null);
   const [deletingVersion, setDeletingVersion] = useState<number | null>(null);
+  const requestKey = `${qpId}:${refreshTrigger ?? 0}`;
+  const loadIsCurrent = drawerOpen && historyLoad?.key === requestKey;
+  const history = loadIsCurrent ? historyLoad.history : EMPTY_QP_HISTORY;
+  const metrics = loadIsCurrent ? historyLoad.metrics : EMPTY_QP_METRICS;
+  const loading = drawerOpen && !loadIsCurrent;
+  const error = actionError ?? (loadIsCurrent ? historyLoad.error : null);
 
   /**
    * 0.8.5 — delete an archived version after user confirmation.
@@ -147,13 +132,17 @@ export default function QPHistoryDrawer({ qpId, qpName, refreshTrigger }: Props)
         quickPromptsApi.history(qpId),
         quickPromptsApi.metrics(qpId),
       ]);
-      setHistory(hist ?? []);
-      setMetrics(met ?? []);
+      setHistoryLoad({
+        key: requestKey,
+        history: hist ?? [],
+        metrics: met ?? [],
+        error: null,
+      });
       setVersionCount((hist ?? []).length);
       if (expandedVersion === version_index) setExpandedVersion(null);
       if (diffOpen === version_index) setDiffOpen(null);
     } catch (e) {
-      setError(String((e as Error).message ?? e));
+      setActionError(String((e as Error).message ?? e));
     } finally {
       setDeletingVersion(null);
     }
@@ -163,8 +152,7 @@ export default function QPHistoryDrawer({ qpId, qpName, refreshTrigger }: Props)
   useEffect(() => {
     if (!drawerOpen) return;
     let cancelled = false;
-    setLoading(true);
-    setError(null);
+    const key = requestKey;
     (async () => {
       try {
         const [hist, met] = await Promise.all([
@@ -172,16 +160,25 @@ export default function QPHistoryDrawer({ qpId, qpName, refreshTrigger }: Props)
           quickPromptsApi.metrics(qpId),
         ]);
         if (cancelled) return;
-        setHistory(hist ?? []);
-        setMetrics(met ?? []);
+        setHistoryLoad({
+          key,
+          history: hist ?? [],
+          metrics: met ?? [],
+          error: null,
+        });
       } catch (e) {
-        if (!cancelled) setError(String((e as Error).message ?? e));
-      } finally {
-        if (!cancelled) setLoading(false);
+        if (!cancelled) {
+          setHistoryLoad({
+            key,
+            history: [],
+            metrics: [],
+            error: String((e as Error).message ?? e),
+          });
+        }
       }
     })();
     return () => { cancelled = true; };
-  }, [drawerOpen, qpId, refreshTrigger]);
+  }, [drawerOpen, qpId, requestKey]);
 
   // Close on Escape.
   useEffect(() => {
@@ -222,7 +219,10 @@ export default function QPHistoryDrawer({ qpId, qpName, refreshTrigger }: Props)
         type="button"
         className="qph-cta"
         data-testid="qp-history-toggle"
-        onClick={() => setDrawerOpen(true)}
+        onClick={() => {
+          setActionError(null);
+          setDrawerOpen(true);
+        }}
         title={t('qp.history.openTitle', qpName)}
       >
         <History size={12} />

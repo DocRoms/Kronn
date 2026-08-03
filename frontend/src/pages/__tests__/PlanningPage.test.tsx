@@ -68,6 +68,7 @@ function detail(task: PlanningTaskSummary = summary()): PlanningTaskDetail {
 describe('PlanningPage', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    sessionStorage.clear();
     mocks.list.mockResolvedValue({
       items: [
         summary(),
@@ -161,6 +162,39 @@ describe('PlanningPage', () => {
 
     await waitFor(() => expect(mocks.get).toHaveBeenCalledWith('task-1'));
     expect(await screen.findByDisplayValue('Move the runtime forward.')).toBeInTheDocument();
+  });
+
+  it('opens a linked discussion with the exact workspace selected for its Git panel', async () => {
+    const linked = detail();
+    linked.workspaces = [{
+      id: 'workspace-2',
+      disc_id: 'disc-2',
+      branch: 'feature/kt-140',
+      state: 'attached',
+      ownership: 'external',
+      session_agent_type: 'Codex',
+    }];
+    mocks.get.mockResolvedValue(linked);
+    const onNavigateDiscussion = vi.fn();
+    render(
+      <PlanningPage
+        projects={[]}
+        discussions={[]}
+        toast={vi.fn()}
+        onNavigateDiscussion={onNavigateDiscussion}
+      />,
+    );
+
+    fireEvent.click(await screen.findByText('Upgrade PHP'));
+    fireEvent.click(await screen.findByText('feature/kt-140'));
+
+    expect(onNavigateDiscussion).toHaveBeenCalledWith('disc-2');
+    expect(JSON.parse(
+      sessionStorage.getItem('kronn:discussion-workspace-target') ?? '{}',
+    )).toEqual({
+      discussionId: 'disc-2',
+      workspaceId: 'workspace-2',
+    });
   });
 
   it('creates a subtask from the detail panel with inherited priority and project links', async () => {

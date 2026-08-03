@@ -92,6 +92,13 @@ test.describe('Backend status pill — surfaces health failures + auto-recovers'
     // BackendStatus component schedules a setTimeout(POLL_INTERVAL_MS
     // + jitter) after each check — worst case 35s. We give it 60s.
     await page.unroute('**/api/health');
+    await page.route('**/api/health', route => {
+      void route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ ok: true, in_docker: false, version: 'e2e' }),
+      });
+    });
     await expect(pill, 'pill should detach once /api/health recovers').toHaveCount(0, { timeout: 60_000 });
   });
 });

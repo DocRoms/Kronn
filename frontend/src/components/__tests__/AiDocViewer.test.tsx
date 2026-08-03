@@ -4,8 +4,9 @@
 // tree renders with docs/ open and the README surfaced at the root.
 
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { buildApiMock } from '../../test/apiMock';
+import { projects } from '../../lib/api';
 
 // Tree is inlined in the factory (vi.mock is hoisted above module consts).
 vi.mock('../../lib/api', () => buildApiMock({
@@ -35,10 +36,17 @@ vi.mock('../../lib/api', () => buildApiMock({
         'Body text.',
       ].join('\n'),
     }),
+    searchAiFiles: vi.fn().mockResolvedValue([]),
   },
 }));
 
 import { AiDocViewer } from '../AiDocViewer';
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>(next => { resolve = next; });
+  return { promise, resolve };
+}
 
 describe('AiDocViewer — docs/ root folder + project README', () => {
   it('shows the docs/ folder expanded with its top-level contents, plus the root README', async () => {
@@ -74,5 +82,36 @@ describe('AiDocViewer — docs/ root folder + project README', () => {
     // The <script> is sanitized away — neither executed nor shown as text.
     expect((window as unknown as Record<string, unknown>).__xss_doc).toBeUndefined();
     expect(document.body.textContent).not.toContain('window.__xss_doc');
+  });
+
+  it('keeps the newest search result when an older request resolves last', async () => {
+    const older = deferred<Array<{ path: string; match_count: number }>>();
+    const newer = deferred<Array<{ path: string; match_count: number }>>();
+    vi.mocked(projects.searchAiFiles)
+      .mockImplementationOnce(() => older.promise)
+      .mockImplementationOnce(() => newer.promise);
+
+    const { container } = render(<AiDocViewer projectId="p1" />);
+    await screen.findByText('AGENTS.md');
+    const input = container.querySelector<HTMLInputElement>('.aidoc-search-input');
+    expect(input).not.toBeNull();
+
+    fireEvent.change(input!, { target: { value: 'older' } });
+    await waitFor(() => expect(projects.searchAiFiles).toHaveBeenCalledWith('p1', 'older'));
+    fireEvent.change(input!, { target: { value: 'newer' } });
+    await waitFor(() => expect(projects.searchAiFiles).toHaveBeenCalledWith('p1', 'newer'));
+
+    await act(async () => {
+      newer.resolve([{ path: 'docs/AGENTS.md', match_count: 2 }]);
+      await newer.promise;
+    });
+    expect(await screen.findByText('1 / 2')).toBeInTheDocument();
+
+    await act(async () => {
+      older.resolve([{ path: 'README.md', match_count: 1 }]);
+      await older.promise;
+    });
+    expect(screen.getByText('1 / 2')).toBeInTheDocument();
+    expect(container.querySelector('.aidoc-search-results .text-dim')).toBeNull();
   });
 });

@@ -51,13 +51,11 @@ export function Dropdown<V extends string = string>({
   const current = options.find(o => o.value === value);
   const displayLabel = current?.label ?? fallbackLabel ?? placeholder ?? value ?? '';
 
-  // Sync highlight when external value changes while closed.
-  useEffect(() => {
-    if (!open) {
-      const idx = options.findIndex(o => o.value === value);
-      if (idx >= 0) setHighlight(idx);
-    }
-  }, [value, options, open]);
+  const openDropdown = () => {
+    const selectedIndex = options.findIndex(option => option.value === value);
+    if (selectedIndex >= 0) setHighlight(selectedIndex);
+    setOpen(true);
+  };
 
   // Click outside → close.
   useEffect(() => {
@@ -106,7 +104,7 @@ export function Dropdown<V extends string = string>({
     if (!open) {
       if (e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === 'Enter' || e.key === ' ') {
         e.preventDefault();
-        setOpen(true);
+        openDropdown();
       }
       return;
     }
@@ -153,7 +151,11 @@ export function Dropdown<V extends string = string>({
         aria-controls={open ? listId : undefined}
         aria-label={ariaLabel}
         disabled={disabled}
-        onClick={() => !disabled && setOpen(o => !o)}
+        onClick={() => {
+          if (disabled) return;
+          if (open) setOpen(false);
+          else openDropdown();
+        }}
         data-testid={testId}
       >
         <span className="kr-dropdown-trigger-label">{displayLabel}</span>

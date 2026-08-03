@@ -3,10 +3,16 @@ import { Bot, X, Send, Sparkles, Loader2, Minus, Maximize2, ChevronDown, Clipboa
 import '../aiHelper.css';
 import { discussions as discussionsApi } from '../../lib/api';
 import { AGENT_LABELS, agentColor } from '../../lib/constants';
-import { t as translate, type UILocale } from '../../lib/i18n';
+import { isLocaleLoaded, loadLocale, t as translate, type UILocale } from '../../lib/i18n';
 import type { AgentType, McpServer, WorkflowStep } from '../../types/generated';
-import { authSlotsForServer, managedHeaderNames, managedQueryNames, stripManagedHeaders, stripManagedQuery } from './apiCallAuth';
+import { authSlotsForServer } from './apiCallAuth';
 import { tipsForSlug } from './apiCallPluginTips';
+import {
+  KRONN_APPLY_RX,
+  applyToStep,
+  buildContextBlock,
+  parseApplyBlocks,
+} from './apiCallAiHelperUtils';
 
 type Translator = (key: string, ...args: (string | number)[]) => string;
 
@@ -58,151 +64,6 @@ type Phase = 'closed' | 'chatting';
 interface ChatMessage {
   role: 'user' | 'assistant';
   text: string;
-}
-
-interface ApplySuggestion {
-  /** Position in the streaming text — used to deduplicate when we re-parse. */
-  signature: string;
-  parsed: Record<string, unknown>;
-  applied: boolean;
-}
-
-// Matches blocks of the form
-//   KRONN:APPLY
-//   ```json
-//   { ... }
-//   ```
-// The whitespace is intentionally permissive — agents tend to format slightly
-// differently each time, but the marker word + fenced JSON pair is the
-// invariant we lock onto.
-const KRONN_APPLY_RX = /KRONN:APPLY\s*```json\s*([\s\S]*?)```/g;
-
-/** Extract the structured suggestion blocks from a streaming assistant
- *  message. Malformed JSON is silently skipped — the agent will get the
- *  formatting right on the next attempt and we don't want to spam the user
- *  with parse errors. Exported only so the parser can be unit-tested
- *  directly; the React component uses it internally. */
-export function parseApplyBlocks(text: string): ApplySuggestion[] {
-  const out: ApplySuggestion[] = [];
-  for (const m of text.matchAll(KRONN_APPLY_RX)) {
-    try {
-      const parsed = JSON.parse(m[1]) as Record<string, unknown>;
-      out.push({ signature: m[1].trim(), parsed, applied: false });
-    } catch {
-      /* incomplete or malformed block — wait for the next chunk */
-    }
-  }
-  return out;
-}
-
-/** Map a parsed KRONN:APPLY object onto a `WorkflowStep` partial. We
- *  intentionally only accept the documented surface (endpoint, method, query,
- *  headers, body, extract) so a hallucinating agent cannot rewrite arbitrary
- *  fields like `agent` or `prompt_template`.
- *
- *  When `server` is provided, auth-managed slots (e.g. Chartbeat's `apikey`
- *  query param) are stripped silently. The backend already injects them
- *  from the plugin's encrypted env at request build time — letting an agent
- *  push `apikey: 'VOTRE_API_KEY'` into the user's step would shadow the
- *  real value and produce a 401 the user can't easily diagnose. */
-export function applyToStep(
-  parsed: Record<string, unknown>,
-  step: WorkflowStep,
-  server: McpServer | null = null,
-): Partial<WorkflowStep> {
-  const updates: Partial<WorkflowStep> = {};
-  const managedQ = managedQueryNames(server);
-  const managedH = managedHeaderNames(server);
-
-  if (typeof parsed.endpoint === 'string') {
-    updates.api_endpoint_path = parsed.endpoint;
-  }
-  if (typeof parsed.method === 'string') {
-    updates.api_method = parsed.method.toUpperCase();
-  }
-  if (parsed.query && typeof parsed.query === 'object' && !Array.isArray(parsed.query)) {
-    const raw: Record<string, string> = {};
-    for (const [k, v] of Object.entries(parsed.query as Record<string, unknown>)) {
-      raw[k] = typeof v === 'string' ? v : JSON.stringify(v);
-    }
-    updates.api_query = stripManagedQuery(raw, managedQ);
-  }
-  if (parsed.headers && typeof parsed.headers === 'object' && !Array.isArray(parsed.headers)) {
-    const raw: Record<string, string> = {};
-    for (const [k, v] of Object.entries(parsed.headers as Record<string, unknown>)) {
-      raw[k] = typeof v === 'string' ? v : JSON.stringify(v);
-    }
-    updates.api_headers = stripManagedHeaders(raw, managedH);
-  }
-  if (parsed.body !== undefined && parsed.body !== null) {
-    updates.api_body = typeof parsed.body === 'string' ? parsed.body : JSON.stringify(parsed.body);
-  }
-  if (typeof parsed.extract === 'string') {
-    updates.api_extract = {
-      path: parsed.extract,
-      fallback: step.api_extract?.fallback ?? null,
-      fail_on_empty: step.api_extract?.fail_on_empty ?? false,
-    };
-  }
-  return updates;
-}
-
-/** Truncate a JSON value when echoed into a prompt. The agent doesn't need
- *  the entire 500-page Jira response — first ~1.5kB is plenty to recognise
- *  the shape and pick fields. */
-function truncateJson(value: unknown, max = 1500): string {
-  const s = JSON.stringify(value, null, 2);
-  if (s == null) return '(null)';
-  return s.length > max ? `${s.slice(0, max)}\n… [truncated, ${s.length - max} chars omitted]` : s;
-}
-
-/** Snapshot of "what the user is currently looking at" — re-built fresh on
- *  every send so the agent's view of the step is never stale. Format kept
- *  human-readable on purpose; the agent reasons better with prose than with
- *  raw JSON dumps for small things like a 3-line query. */
-export function buildContextBlock(
-  server: McpServer | null,
-  step: WorkflowStep,
-  lastTestResponse?: unknown,
-  lastTestError?: string | null,
-  t?: Translator,
-): string {
-  // Fallback translator used by unit tests that don't pass one — keeps the
-  // pure-function tests independent of the i18n provider.
-  const tr: Translator = t ?? ((k: string) => k);
-  const baseUrl = server?.api_spec?.base_url ?? tr('wf.apicall.helper.sys.unknown');
-  const apiName = server?.name ?? tr('wf.apicall.helper.sys.noPlugin');
-  const currentEndpoint = step.api_endpoint_path ?? tr('wf.apicall.helper.sys.none');
-  const currentMethod = step.api_method ?? tr('wf.apicall.helper.sys.default');
-  const currentQuery = step.api_query ? JSON.stringify(step.api_query) : tr('wf.apicall.helper.sys.empty');
-  const currentHeaders = step.api_headers ? JSON.stringify(step.api_headers) : tr('wf.apicall.helper.sys.none');
-  const currentBody = step.api_body ? step.api_body : tr('wf.apicall.helper.sys.none');
-  const currentExtract = step.api_extract?.path ?? tr('wf.apicall.helper.sys.none');
-
-  const lines = [
-    tr('wf.apicall.helper.sys.ctxHeader'),
-    `- API : ${apiName} (${baseUrl})`,
-    `- endpoint : ${currentEndpoint}`,
-    `- method   : ${currentMethod}`,
-    `- query    : ${currentQuery}`,
-    `- headers  : ${currentHeaders}`,
-    `- body     : ${currentBody}`,
-    `- extract  : ${currentExtract}`,
-  ];
-
-  if (lastTestError) {
-    lines.push('', tr('wf.apicall.helper.sys.ctxLastFail'), lastTestError);
-  } else if (lastTestResponse !== undefined && lastTestResponse !== null) {
-    lines.push(
-      '',
-      tr('wf.apicall.helper.sys.ctxLastOk'),
-      '```json',
-      truncateJson(lastTestResponse),
-      '```',
-    );
-  }
-
-  return lines.join('\n');
 }
 
 /** Build the auth-info block injected into every prompt: tells the agent
@@ -273,9 +134,10 @@ export function ApiCallAiHelper({
   // (Settings → Output language) — separate from the UI locale. We build a
   // dedicated translator for the system prompt + injected context that
   // resolves keys against `configLanguage`, while `t` keeps driving UI labels.
+  const agentLocale = toUILocale(configLanguage);
   const agentT = useCallback<Translator>(
-    (key, ...args) => translate(toUILocale(configLanguage), key, ...args),
-    [configLanguage],
+    (key, ...args) => translate(agentLocale, key, ...args),
+    [agentLocale],
   );
   const [phase, setPhase] = useState<Phase>('closed');
   // Active agent for the current chat. Defaults to the first installed
@@ -407,6 +269,7 @@ export function ApiCallAiHelper({
     setMessages([]);
     setError(null);
     try {
+      if (!isLocaleLoaded(agentLocale)) await loadLocale(agentLocale);
       // `project_id: null` is accepted — this is an ephemeral, one-shot
       // helper conversation. The real context the agent needs is the API
       // spec (`selectedServer`), which is already baked into the system
@@ -426,7 +289,7 @@ export function ApiCallAiHelper({
       console.error('[ApiCallAiHelper] startWithAgent failed:', e);
       setError(String(e));
     }
-  }, [projectId, selectedServer, step, lastTestResponse, lastTestError, t, configLanguage, agentT]);
+  }, [projectId, selectedServer, step, lastTestResponse, lastTestError, t, configLanguage, agentLocale, agentT]);
 
   // Re-bind the ref every time startWithAgent's identity changes (when
   // any of its deps change). switchAgent reads this ref so it can call
@@ -449,6 +312,16 @@ export function ApiCallAiHelper({
     setStreaming(true);
 
     // The agent reads this context — must be in its reply language, not the UI's.
+    try {
+      if (!isLocaleLoaded(agentLocale)) await loadLocale(agentLocale);
+    } catch (e) {
+      setMessages(prev => prev.slice(0, -2));
+      setInput(userText);
+      setError(String(e));
+      streamingRef.current = false;
+      setStreaming(false);
+      return;
+    }
     const contextBlock = buildContextBlock(selectedServer, step, lastTestResponse, lastTestError, agentT);
     const enriched = `${contextBlock}\n\n${agentT('wf.apicall.helper.sys.userQuestion')}\n${userText}`;
 
@@ -476,7 +349,7 @@ export function ApiCallAiHelper({
       },
       controller.signal,
     );
-  }, [input, discussionId, selectedServer, step, lastTestResponse, lastTestError, agentT]);
+  }, [input, discussionId, selectedServer, step, lastTestResponse, lastTestError, agentLocale, agentT]);
 
   const stopStream = useCallback(() => {
     abortRef.current?.abort();

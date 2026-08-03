@@ -17,7 +17,11 @@ import { beforeEach, describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent, act, waitFor } from '@testing-library/react';
 import { ChatInput } from '../ChatInput';
 import type { AgentDetection, Discussion } from '../../types/generated';
-import { discussions as discussionsApi } from '../../lib/api';
+import {
+  autoTriggersApi,
+  discussions as discussionsApi,
+  config as configApi,
+} from '../../lib/api';
 
 vi.mock('../../lib/stt-engine', () => ({
   audioBufferToFloat32: vi.fn(),
@@ -38,24 +42,28 @@ const disc: Discussion = {
   created_at: '2026-05-28T00:00:00Z', updated_at: '2026-05-28T00:00:00Z',
 } as unknown as Discussion;
 
-function mount(
+async function mount(
   onSend: ReturnType<typeof vi.fn>,
   sending = false,
   agents: AgentDetection[] = [],
 ) {
   const t = (k: string, ...a: unknown[]) => (a.length ? `${k}(${a.join('|')})` : k);
-  return render(
-    <ChatInput
-      discussion={disc} agents={agents} sending={sending} disabled={false}
-      ttsEnabled={false} ttsState="idle" worktreeError={null}
-      availableSkills={[]} availableDirectives={[]}
-      onSend={onSend as never} onStop={vi.fn()} onOrchestrate={vi.fn()}
-      onTtsToggle={vi.fn()} onWorktreeErrorDismiss={vi.fn()}
-      onWorktreeRetry={vi.fn()} isAgentRestricted={() => false}
-      contextFiles={[]} uploadingFiles={false}
-      toast={vi.fn() as never} t={t}
-    />,
-  );
+  let view!: ReturnType<typeof render>;
+  await act(async () => {
+    view = render(
+      <ChatInput
+        discussion={disc} agents={agents} sending={sending} disabled={false}
+        ttsEnabled={false} ttsState="idle" worktreeError={null}
+        availableSkills={[]} availableDirectives={[]}
+        onSend={onSend as never} onStop={vi.fn()} onOrchestrate={vi.fn()}
+        onTtsToggle={vi.fn()} onWorktreeErrorDismiss={vi.fn()}
+        onWorktreeRetry={vi.fn()} isAgentRestricted={() => false}
+        contextFiles={[]} uploadingFiles={false}
+        toast={vi.fn() as never} t={t}
+      />,
+    );
+  });
+  return view;
 }
 
 function typeText(value: string) {
@@ -73,8 +81,32 @@ function sendButton(): HTMLButtonElement {
 
 describe('ChatInput — send-race guard (P0-10)', () => {
   beforeEach(() => {
+    vi.spyOn(autoTriggersApi, 'listDisabled').mockResolvedValue([]);
     vi.spyOn(discussionsApi, 'participants').mockResolvedValue([]);
     vi.spyOn(discussionsApi, 'nativeAgentMode').mockResolvedValue({ disabled: false });
+    vi.spyOn(configApi, 'getServerConfig').mockResolvedValue({
+      discussion_notes_enabled: true,
+    } as never);
+  });
+
+  it('sends an out-of-context note without mention routing', async () => {
+    const onSend = vi.fn();
+    await mount(onSend);
+    await waitFor(() => expect(
+      screen.getByLabelText('disc.note.sendAsNote'),
+    ).toBeInTheDocument());
+
+    fireEvent.click(screen.getByLabelText('disc.note.sendAsNote'));
+    typeText('@ollama piste à garder');
+    fireEvent.click(sendButton());
+
+    expect(onSend).toHaveBeenCalledWith(
+      '@ollama piste à garder',
+      undefined,
+      false,
+      undefined,
+      'note',
+    );
   });
 
   it('routes a joined CLI autocomplete alias to the exact durable session', async () => {
@@ -89,7 +121,7 @@ describe('ChatInput — send-race guard (P0-10)', () => {
       left_at: null,
     }] as never);
     const onSend = vi.fn();
-    mount(onSend, false, [{
+    await mount(onSend, false, [{
       agent_type: 'Codex',
       installed: true,
       runtime_available: false,
@@ -98,9 +130,11 @@ describe('ChatInput — send-race guard (P0-10)', () => {
 
     await waitFor(() => {
       fireEvent.change(screen.getByRole('textbox'), { target: { value: '@codex-c' } });
-      expect(screen.getByText('@codex')).toBeInTheDocument();
+      // KT-211: the joined CLI entry displays its REAL room alias, never
+      // the bare provider trigger it shares with the punctual agent.
+      expect(screen.getByText('@codex-cli')).toBeInTheDocument();
     });
-    fireEvent.mouseDown(screen.getByText('@codex'));
+    fireEvent.mouseDown(screen.getByText('@codex-cli'));
     expect(screen.getByRole<HTMLInputElement>('textbox').value).toBe('@codex-cli ');
     fireEvent.click(sendButton());
 
@@ -124,7 +158,7 @@ describe('ChatInput — send-race guard (P0-10)', () => {
       left_at: null,
     }] as never);
     vi.spyOn(discussionsApi, 'nativeAgentMode').mockResolvedValue({ disabled: true });
-    mount(vi.fn(), false, [
+    await mount(vi.fn(), false, [
       {
         agent_type: 'ClaudeCode',
         installed: true,
@@ -166,7 +200,7 @@ describe('ChatInput — send-race guard (P0-10)', () => {
     );
   });
 
-  it('routes every installed mention once in the order written by the human', () => {
+  it('routes every installed mention once in the order written by the human', async () => {
     const onSend = vi.fn();
     const agents = [
       {
@@ -182,7 +216,7 @@ describe('ChatInput — send-race guard (P0-10)', () => {
         enabled: true,
       },
     ] as AgentDetection[];
-    mount(onSend, false, agents);
+    await mount(onSend, false, agents);
     typeText('@codex tu peux confronter @claude si tu veux');
 
     act(() => { fireEvent.click(sendButton()); });
@@ -198,9 +232,9 @@ describe('ChatInput — send-race guard (P0-10)', () => {
     );
   });
 
-  it('two synchronous clicks fire onSend only ONCE', () => {
+  it('two synchronous clicks fire onSend only ONCE', async () => {
     const onSend = vi.fn();
-    mount(onSend);
+    await mount(onSend);
     typeText('hello race');
 
     // Fire two clicks in the same tick — pre-fix this produced two
@@ -216,10 +250,10 @@ describe('ChatInput — send-race guard (P0-10)', () => {
     expect(onSend).toHaveBeenCalledWith('hello race', undefined, false, undefined);
   });
 
-  it('Enter then Enter in quick succession only fires onSend once', () => {
+  it('Enter then Enter in quick succession only fires onSend once', async () => {
     // Same race via keyboard — Enter is the dominant send path.
     const onSend = vi.fn();
-    mount(onSend);
+    await mount(onSend);
     const ta = typeText('keyboard race') as HTMLTextAreaElement;
 
     act(() => {
@@ -232,7 +266,7 @@ describe('ChatInput — send-race guard (P0-10)', () => {
 
   it('after a microtask flush, the user can send again', async () => {
     const onSend = vi.fn();
-    mount(onSend);
+    await mount(onSend);
     typeText('first message');
     act(() => { fireEvent.click(sendButton()); });
     expect(onSend).toHaveBeenCalledTimes(1);
@@ -254,14 +288,14 @@ describe('ChatInput — send-race guard (P0-10)', () => {
   // tests above (which use the success path) — the failure path is just
   // a stricter assertion on the same useRef + queueMicrotask cleanup logic.
 
-  it('sending=true from the parent swaps the send button for a stop button (UI guard)', () => {
+  it('sending=true from the parent swaps the send button for a stop button (UI guard)', async () => {
     // The prop-based guard manifests as a JSX swap : send button is
     // REPLACED by a stop button while in-flight. That's an even stronger
     // guarantee than `disabled={sending}` (user physically can't click
     // send → no race possible). Pin the swap so a regression that
     // removes the ternary is caught here too.
     const onSend = vi.fn();
-    const { rerender } = mount(onSend, /* sending */ false);
+    const { rerender } = await mount(onSend, /* sending */ false);
     expect(screen.queryByLabelText('Send message')).not.toBeNull();
     expect(screen.queryByLabelText('disc.stopThinking')).toBeNull();
 

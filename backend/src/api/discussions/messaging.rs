@@ -240,6 +240,81 @@ pub async fn send_message(
         }
     }
 
+    if matches!(req.channel, MessageChannel::Note) {
+        let (author_pseudo, author_avatar_email) = {
+            let config = state.config.read().await;
+            (
+                config.server.pseudo.clone(),
+                config.server.avatar_email.clone(),
+            )
+        };
+        let note = DiscussionMessage {
+            model: None,
+            lint_report: None,
+            id: message_id.clone(),
+            role: MessageRole::User,
+            channel: MessageChannel::Note,
+            content: req.content,
+            agent_type: None,
+            timestamp: Utc::now(),
+            tokens_used: 0,
+            auth_mode: None,
+            model_tier: None,
+            cost_usd: None,
+            author_pseudo,
+            author_avatar_email,
+            source_msg_id: None,
+            duration_ms: None,
+            target_agent: None,
+            reply_to_message_id,
+        };
+        let did = id.clone();
+        let outcome = state
+            .db
+            .with_conn(move |conn| {
+                let outcome = crate::db::discussions::insert_note_message(conn, &did, &note)?;
+                if matches!(
+                    &outcome,
+                    crate::db::discussions::InsertUserMessageOutcome::Inserted { .. }
+                ) {
+                    if let Err(error) =
+                        crate::db::discussions::link_pending_context_files_to_message(
+                            conn, &did, &note.id,
+                        )
+                    {
+                        tracing::warn!(
+                            "Failed to link pending context files to note {}: {error}",
+                            note.id
+                        );
+                    }
+                }
+                Ok(outcome)
+            })
+            .await;
+        return match outcome {
+            Ok(crate::db::discussions::InsertUserMessageOutcome::Inserted {
+                message,
+                sort_order,
+                ..
+            }) => {
+                crate::api::federation::federate_message(&state, &id, &message).await;
+                sse_events(vec![accepted_event(&message_id, sort_order, false)])
+            }
+            Ok(crate::db::discussions::InsertUserMessageOutcome::Duplicate { sort_order }) => {
+                sse_events(vec![accepted_event(&message_id, sort_order, true)])
+            }
+            Ok(crate::db::discussions::InsertUserMessageOutcome::PartialPending) => {
+                unreachable!("notes never participate in partial-response recovery")
+            }
+            Err(error) => {
+                tracing::error!("Failed to save out-of-context note: {error}");
+                sse_events(vec![Event::default().event("error").data(
+                    serde_json::json!({ "error": "Failed to save note" }).to_string(),
+                )])
+            }
+        };
+    }
+
     let requested_targets = normalized_targets(
         req.targets.clone(),
         req.target_agents.clone(),
@@ -281,6 +356,14 @@ pub async fn send_message(
         && routes
             .iter()
             .all(|route| matches!(route, DispatchRoute::JoinedPeers));
+    // KT-157 — candidate for one-shot CLI catch-up: untargeted, main channel,
+    // owned by the native principal. The CLI-presence check runs inside the
+    // insert transaction, next to the row it marks.
+    let mark_native_fallback = targets.is_empty()
+        && matches!(req.channel, MessageChannel::Main)
+        && routes
+            .iter()
+            .any(|route| matches!(route, DispatchRoute::NativePrincipal));
 
     // Read user identity from config for message attribution
     let (author_pseudo, author_avatar_email) = {
@@ -297,6 +380,7 @@ pub async fn send_message(
         lint_report: None,
         id: message_id.clone(),
         role: MessageRole::User,
+        channel: req.channel,
         content: req.content.clone(),
         agent_type: None,
         timestamp: Utc::now(),
@@ -335,6 +419,7 @@ pub async fn send_message(
                 &msg,
                 &targets_clone,
                 &dispatch_specs,
+                mark_native_fallback,
             )?;
             if matches!(
                 &outcome,
@@ -691,7 +776,7 @@ pub async fn run_agent(
             let has_user_message: bool = conn.query_row(
                 "SELECT EXISTS(
                     SELECT 1 FROM messages
-                    WHERE discussion_id = ?1 AND role = 'User'
+                    WHERE discussion_id = ?1 AND role = 'User' AND channel = 'main'
                 )",
                 [&enqueue_discussion_id],
                 |row| row.get(0),
@@ -965,6 +1050,7 @@ mod tests {
             Path(disc.to_string()),
             Json(SendMessageRequest {
                 content: "hello peers".into(),
+                channel: MessageChannel::Main,
                 targets: vec![MessageTarget::cli(AgentType::Codex, cli_session_id)],
                 target_all: false,
                 target_agents: vec![],
@@ -1034,6 +1120,7 @@ mod tests {
             Path(disc.to_string()),
             Json(SendMessageRequest {
                 content: "only once".into(),
+                channel: MessageChannel::Main,
                 targets: vec![MessageTarget::cli(AgentType::Codex, cli_session_id)],
                 target_all: false,
                 target_agents: vec![],
@@ -1052,6 +1139,7 @@ mod tests {
             Path(disc.to_string()),
             Json(SendMessageRequest {
                 content: "only once".into(),
+                channel: MessageChannel::Main,
                 targets: vec![MessageTarget::cli(AgentType::Codex, cli_session_id)],
                 target_all: false,
                 target_agents: vec![],
@@ -1107,6 +1195,7 @@ mod tests {
                     &DiscussionMessage {
                         id: message_id.into(),
                         role: MessageRole::User,
+                        channel: MessageChannel::Main,
                         content: "before".into(),
                         timestamp: Utc::now(),
                         model: None,
@@ -1203,6 +1292,7 @@ mod tests {
             Path(disc.to_string()),
             Json(SendMessageRequest {
                 content: "human only".into(),
+                channel: MessageChannel::Main,
                 targets: vec![],
                 target_all: false,
                 target_agents: vec![],
@@ -1243,6 +1333,7 @@ mod tests {
             Path(disc.to_string()),
             Json(SendMessageRequest {
                 content: "@codex peux-tu vérifier ?".into(),
+                channel: MessageChannel::Main,
                 targets: vec![],
                 target_all: false,
                 target_agents: vec![],
@@ -1298,6 +1389,7 @@ mod tests {
             Path(disc.to_string()),
             Json(SendMessageRequest {
                 content: "must not persist".into(),
+                channel: MessageChannel::Main,
                 targets: vec![],
                 target_all: false,
                 target_agents: vec![],
@@ -1351,6 +1443,7 @@ mod tests {
             Path(disc.to_string()),
             Json(SendMessageRequest {
                 content: "Follow-up".into(),
+                channel: MessageChannel::Main,
                 targets: vec![],
                 target_all: false,
                 target_agents: vec![],
@@ -1382,6 +1475,7 @@ mod tests {
             Path(disc.to_string()),
             Json(SendMessageRequest {
                 content: "Follow-up".into(),
+                channel: MessageChannel::Main,
                 targets: vec![],
                 target_all: false,
                 target_agents: vec![],
@@ -1413,6 +1507,7 @@ mod tests {
                 let first = DiscussionMessage {
                     id: "d9158714-19d4-4dbf-9b7d-0839c93458b7".into(),
                     role: MessageRole::User,
+                    channel: MessageChannel::Main,
                     content: "first".into(),
                     timestamp: Utc::now(),
                     model: None,
@@ -1855,6 +1950,7 @@ mod tests {
                     &DiscussionMessage {
                         id: "user-batch-relock".into(),
                         role: MessageRole::User,
+                        channel: MessageChannel::Main,
                         content: "run batch child".into(),
                         timestamp: Utc::now(),
                         model: None,

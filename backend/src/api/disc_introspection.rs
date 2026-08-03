@@ -75,6 +75,7 @@ pub struct DiscussionMessageRead {
     /// Stable compact reference accepted by `disc_get_message`.
     pub message_ref: String,
     pub role: MessageRole,
+    pub channel: MessageChannel,
     pub content: String,
     pub agent_type: Option<AgentType>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -119,6 +120,33 @@ pub struct MessageWindowQuery {
     pub before: u32,
     #[serde(default)]
     pub after: u32,
+}
+
+#[derive(Debug, Default, Deserialize, TS)]
+#[ts(export)]
+pub struct DiscussionNoteListQuery {
+    #[serde(default)]
+    pub cursor: Option<i64>,
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct DiscussionNote {
+    pub sort_order: i64,
+    pub message: DiscussionMessage,
+    pub attachments: Vec<MessageAttachment>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct DiscussionNoteListResponse {
+    pub discussion_id: String,
+    pub total_notes: u32,
+    pub notes: Vec<DiscussionNote>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<i64>,
 }
 
 /// stab-1 (Romu) — EXPLICIT long-poll pacing contract, returned by
@@ -262,6 +290,9 @@ pub struct SummarizeRequest {
     /// range. Useful when the agent thinks the cached summary is stale.
     #[serde(default)]
     pub force_refresh: bool,
+    /// Include out-of-context notes in this explicit audit-style read.
+    #[serde(default)]
+    pub include_notes: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -342,17 +373,25 @@ fn resolve_message_selector(
     messages: &[DiscussionMessage],
     selector: &str,
 ) -> Result<usize, String> {
-    let total = messages.len();
     if let Ok(n) = selector.parse::<i64>() {
+        let main_indices = messages
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, message)| {
+                matches!(message.channel, MessageChannel::Main).then_some(idx)
+            })
+            .collect::<Vec<_>>();
+        let total = main_indices.len();
         if n >= 0 {
             let idx = n as usize;
-            return (idx < total)
-                .then_some(idx)
+            return main_indices
+                .get(idx)
+                .copied()
                 .ok_or_else(|| format!("Index {} out of range (total {})", idx, total));
         }
         let from_end = n.unsigned_abs() as usize;
         return (from_end <= total)
-            .then_some(total - from_end)
+            .then(|| main_indices[total - from_end])
             .ok_or_else(|| format!("Negative index {} out of range (total {})", n, total));
     }
 
@@ -492,23 +531,37 @@ pub async fn disc_get_message(
             disk_path: f.disk_path,
         })
         .collect();
-    let before_start = resolved_idx.saturating_sub(window.before as usize);
-    let before = disc.messages[before_start..resolved_idx]
+    let main_messages = disc
+        .messages
         .iter()
         .enumerate()
-        .map(|(offset, message)| context_item(before_start + offset, message))
+        .filter(|(_, message)| matches!(message.channel, MessageChannel::Main))
+        .collect::<Vec<_>>();
+    let main_position = main_messages
+        .iter()
+        .position(|(physical_idx, _)| *physical_idx == resolved_idx);
+    let insertion_position =
+        main_messages.partition_point(|(physical_idx, _)| *physical_idx < resolved_idx);
+    let before_end = main_position.unwrap_or(insertion_position);
+    let before_start = before_end.saturating_sub(window.before as usize);
+    let before = main_messages[before_start..before_end]
+        .iter()
+        .enumerate()
+        .map(|(offset, (_, message))| context_item(before_start + offset, message))
         .collect();
-    let after_end = (resolved_idx + 1 + window.after as usize).min(total);
-    let after = disc.messages[resolved_idx + 1..after_end]
+    let after_start = main_position.map_or(insertion_position, |position| position + 1);
+    let after_end = (after_start + window.after as usize).min(main_messages.len());
+    let after = main_messages[after_start..after_end]
         .iter()
         .enumerate()
-        .map(|(offset, message)| context_item(resolved_idx + 1 + offset, message))
+        .map(|(offset, (_, message))| context_item(after_start + offset, message))
         .collect();
     Json(ApiResponse::ok(DiscussionMessageRead {
-        idx: resolved_idx as u32,
+        idx: main_position.map_or(resolved_idx as u32, |position| position as u32),
         id: msg.id.clone(),
         message_ref: short_message_ref(&msg.id),
         role: msg.role.clone(),
+        channel: msg.channel,
         content: msg.content.clone(),
         agent_type: msg.agent_type.clone(),
         reply_to_message_id: msg.reply_to_message_id.clone(),
@@ -519,6 +572,67 @@ pub async fn disc_get_message(
         before,
         after,
     }))
+}
+
+/// `GET /api/discussions/{id}/notes`
+///
+/// Dedicated, bounded note reader. Ordinary history tools stay silent by
+/// default; callers opt into this channel deliberately.
+pub async fn disc_note_list(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<DiscussionNoteListQuery>,
+) -> Json<ApiResponse<DiscussionNoteListResponse>> {
+    let cursor = query.cursor.unwrap_or(-1);
+    let limit = query.limit.unwrap_or(50).clamp(1, 100);
+    let did = id.clone();
+    let result = state
+        .db
+        .with_conn(move |conn| {
+            let total_notes = crate::db::discussions::count_notes(conn, &did)?;
+            let mut rows = crate::db::discussions::list_notes(conn, &did, cursor, limit + 1)?;
+            let has_more = rows.len() > limit as usize;
+            if has_more {
+                rows.truncate(limit as usize);
+            }
+            let next_cursor = has_more
+                .then(|| rows.last().map(|(sort_order, _)| *sort_order))
+                .flatten();
+            let rows = rows
+                .into_iter()
+                .map(|(sort_order, message)| {
+                    let attachments =
+                        crate::db::discussions::list_context_files_for_message(conn, &message.id)?
+                            .into_iter()
+                            .map(|file| MessageAttachment {
+                                id: file.id,
+                                filename: file.filename,
+                                mime_type: file.mime_type,
+                                disk_path: file.disk_path,
+                            })
+                            .collect();
+                    Ok((sort_order, message, attachments))
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            Ok((total_notes, rows, next_cursor))
+        })
+        .await;
+    match result {
+        Ok((total_notes, rows, next_cursor)) => Json(ApiResponse::ok(DiscussionNoteListResponse {
+            discussion_id: id,
+            total_notes,
+            notes: rows
+                .into_iter()
+                .map(|(sort_order, message, attachments)| DiscussionNote {
+                    sort_order,
+                    message,
+                    attachments,
+                })
+                .collect(),
+            next_cursor,
+        })),
+        Err(error) => Json(ApiResponse::err(format!("DB error: {error}"))),
+    }
 }
 
 /// `POST /api/discussions/{id}/summarize`
@@ -555,7 +669,10 @@ pub async fn disc_summarize(
     let total_non_system = disc
         .messages
         .iter()
-        .filter(|m| !matches!(m.role, MessageRole::System))
+        .filter(|m| {
+            !matches!(m.role, MessageRole::System)
+                && (req.include_notes || matches!(m.channel, MessageChannel::Main))
+        })
         .count() as u32;
     let from_idx = req.from.unwrap_or(0).min(total_non_system);
     let to_idx = req.to.unwrap_or(total_non_system).min(total_non_system);
@@ -573,7 +690,7 @@ pub async fn disc_summarize(
     //      `summary_up_to_msg_idx`. Kept for backward compatibility
     //      with disc rows generated before migration 048.
     //   3. Miss → run the inline summariser, cache the result.
-    if !req.force_refresh {
+    if !req.force_refresh && !req.include_notes {
         let did_for_lookup = id.clone();
         if let Ok(Some((cached, t))) = state
             .db
@@ -610,6 +727,7 @@ pub async fn disc_summarize(
         from_idx,
         to_idx,
         &tokens_config,
+        req.include_notes,
     )
     .await
     {
@@ -621,20 +739,22 @@ pub async fn disc_summarize(
             let summary_clone = s.clone();
             let model_name_clone = model_name.clone();
             let did = id.clone();
-            let _ = state
-                .db
-                .with_conn(move |conn| {
-                    crate::db::discussions::upsert_ranged_summary(
-                        conn,
-                        &did,
-                        from_idx,
-                        to_idx,
-                        &summary_clone,
-                        t,
-                        model_name_clone.as_deref(),
-                    )
-                })
-                .await;
+            if !req.include_notes {
+                let _ = state
+                    .db
+                    .with_conn(move |conn| {
+                        crate::db::discussions::upsert_ranged_summary(
+                            conn,
+                            &did,
+                            from_idx,
+                            to_idx,
+                            &summary_clone,
+                            t,
+                            model_name_clone.as_deref(),
+                        )
+                    })
+                    .await;
+            }
             Json(ApiResponse::ok(SummarizeResponse {
                 summary: s,
                 from_idx,

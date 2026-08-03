@@ -1,6 +1,7 @@
-import { useState, useMemo, useRef, useDeferredValue, useEffect, useCallback } from 'react';
+import { useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import '../pages/DiscussionsPage.css';
-import { SwipeableDiscItem, unseenBasis } from './SwipeableDiscItem';
+import { SwipeableDiscItem } from './SwipeableDiscItem';
+import { unseenBasis } from '../lib/discussionUiUtils';
 import { GlobalSearchPanel } from './GlobalSearchPanel';
 import type { Discussion, Project, Contact, BatchRunSummary, MessageSearchHit } from '../types/generated';
 import { projects as projectsApi } from '../lib/api';
@@ -9,7 +10,9 @@ import { gravatarUrl } from '../lib/gravatar';
 import { formatRelativeTime } from '../lib/relativeTime';
 import type { ToastFn } from '../hooks/useToast';
 import {
-  Folder, ChevronLeft, ChevronRight, Plus, X, MessageSquare, Archive, Search, SlidersHorizontal, Users2, Trash2, Star, CheckCheck, ListChecks, LogIn, Loader2, Upload,
+  Folder, ChevronLeft, ChevronRight, Plus, X, MessageSquare, Archive, Search,
+  SlidersHorizontal, Users2, Trash2, Star, CheckCheck, ListChecks, LogIn,
+  Loader2, Upload, CircleDot, Clock3, MoreHorizontal,
 } from 'lucide-react';
 
 export interface DiscussionSidebarProps {
@@ -79,6 +82,11 @@ export interface DiscussionSidebarProps {
   /** Ref-setter so parent can expand groups when navigating to a discussion */
   collapsedGroups: Set<string>;
   onToggleGroup: (key: string) => void;
+  /** Batch-run expansion is intentionally separate from persisted group
+   *  collapse preferences: run ids are ephemeral and would otherwise grow
+   *  localStorage forever. */
+  openBatchRuns?: ReadonlySet<string>;
+  onToggleBatchRun?: (runId: string) => void;
   /** Desktop only: collapse sidebar into a thin rail */
   onCollapse?: () => void;
   /** 0.8.3 (#277) — bulk-seed every discussion's last-seen counter to
@@ -103,6 +111,8 @@ export interface DiscussionSidebarProps {
  *  ~1000 and the cold render from 4500 ms to under 500 ms. Search bypasses
  *  the cap (the user is explicitly hunting). */
 const PROJECT_LOOSE_LIMIT = 10;
+const SMART_SECTION_LIMIT = 5;
+const EMPTY_BATCH_RUNS: ReadonlySet<string> = new Set();
 
 function formatBatchParent(summary: BatchRunSummary | undefined, t: (k: string, ...a: (string | number)[]) => string): string | null {
   if (!summary) return null;
@@ -150,6 +160,8 @@ export function DiscussionSidebar({
   onReviewBatch,
   collapsedGroups,
   onToggleGroup,
+  openBatchRuns = EMPTY_BATCH_RUNS,
+  onToggleBatchRun = () => {},
   onCollapse,
   onMarkAllRead,
   onOpenGlobalSearch,
@@ -159,16 +171,12 @@ export function DiscussionSidebar({
   onOpenGlobalSearchResult,
 }: DiscussionSidebarProps) {
   // ─── Sidebar-only state ───────────────────────────────────────────────
-  // Search input — kept fresh for the controlled input. The actual filter
-  // pipeline reads `deferredSearch` (React 19), which lags behind the input
-  // value during heavy renders. Result: the keystroke commits immediately
-  // (no input lag), and the expensive 4500-row filter / sort happens in a
-  // lower-priority render that React can interrupt if the user keeps typing.
-  // Measured before fix on a 250-projects / 500-discussions seed: 2233 ms
-  // per keystroke. Goal: <100 ms perceived latency.
+  // One global query shared by the compact entry field and the result panel.
+  // Typing does NOT filter/remount the potentially huge local tree: Enter (or
+  // the filter button) opens the bounded backend search over title, id and
+  // message content. This keeps keystrokes instant on 500+ discussions and
+  // matches what the placeholder promises.
   const [discSearchFilter, setDiscSearchFilter] = useState('');
-  const deferredSearch = useDeferredValue(discSearchFilter);
-  const searchLower = deferredSearch.toLowerCase();
 
   // Map batch run_id → parent workflow meta. Built from props so the parent
   // can refetch (e.g. on WS batch progress events) and the sidebar updates.
@@ -178,6 +186,7 @@ export function DiscussionSidebar({
     return m;
   }, [batchSummaries]);
   const [showArchives, setShowArchives] = useState(false);
+  const [archivedVisibleCount, setArchivedVisibleCount] = useState(50);
   const [showAddContact, setShowAddContact] = useState(false);
   const [addContactCode, setAddContactCode] = useState('');
   const [showJoin, setShowJoin] = useState(false);
@@ -189,6 +198,7 @@ export function DiscussionSidebar({
   // mounts the rest of its discs on demand. Search still shows all
   // matches because the user is explicitly hunting.
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(() => new Set());
+  const [expandedSmartSections, setExpandedSmartSections] = useState<Set<string>>(() => new Set());
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
   const [bulkActionBusy, setBulkActionBusy] = useState(false);
@@ -196,6 +206,75 @@ export function DiscussionSidebar({
   const importInputRef = useRef<HTMLInputElement>(null);
   const importInFlightRef = useRef(false);
   const [importing, setImporting] = useState(false);
+  const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
+  const headerMenuRef = useRef<HTMLDivElement>(null);
+  const headerMenuTriggerRef = useRef<HTMLButtonElement>(null);
+  const [openBatchMenuRunId, setOpenBatchMenuRunId] = useState<string | null>(null);
+  const batchMenuRef = useRef<HTMLDivElement>(null);
+  const batchMenuTriggerRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
+  const searchInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!headerMenuOpen) return;
+    headerMenuRef.current?.querySelector<HTMLButtonElement>('.disc-sidebar-header-menu > button')?.focus();
+    const closeFromOutside = (event: PointerEvent) => {
+      if (!headerMenuRef.current?.contains(event.target as Node)) setHeaderMenuOpen(false);
+    };
+    const closeFromKeyboard = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      setHeaderMenuOpen(false);
+      requestAnimationFrame(() => headerMenuTriggerRef.current?.focus());
+    };
+    window.addEventListener('pointerdown', closeFromOutside);
+    window.addEventListener('keydown', closeFromKeyboard);
+    return () => {
+      window.removeEventListener('pointerdown', closeFromOutside);
+      window.removeEventListener('keydown', closeFromKeyboard);
+    };
+  }, [headerMenuOpen]);
+
+  useEffect(() => {
+    if (!openBatchMenuRunId) return;
+    batchMenuRef.current?.querySelector<HTMLButtonElement>('.disc-batch-menu-panel > button')?.focus();
+    const closeFromOutside = (event: PointerEvent) => {
+      if (!batchMenuRef.current?.contains(event.target as Node)) setOpenBatchMenuRunId(null);
+    };
+    const closeFromKeyboard = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      const runId = openBatchMenuRunId;
+      setOpenBatchMenuRunId(null);
+      requestAnimationFrame(() => batchMenuTriggerRefs.current.get(runId)?.focus());
+    };
+    window.addEventListener('pointerdown', closeFromOutside);
+    window.addEventListener('keydown', closeFromKeyboard);
+    return () => {
+      window.removeEventListener('pointerdown', closeFromOutside);
+      window.removeEventListener('keydown', closeFromKeyboard);
+    };
+  }, [openBatchMenuRunId]);
+
+  const handleSidebarKeyboard = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    const target = event.target as HTMLElement;
+    const isTextControl = target.matches('input, textarea, select, [contenteditable="true"]');
+    if (event.key === '/' && !isTextControl && !globalSearchOpen) {
+      event.preventDefault();
+      searchInputRef.current?.focus();
+      return;
+    }
+    if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
+    if (isTextControl) return;
+    const rows = Array.from(
+      event.currentTarget.querySelectorAll<HTMLButtonElement>('.disc-item-open:not([disabled])'),
+    ).filter(row => row.offsetParent !== null);
+    if (rows.length === 0) return;
+    const current = rows.indexOf(document.activeElement as HTMLButtonElement);
+    const direction = event.key === 'ArrowDown' ? 1 : -1;
+    const next = current < 0
+      ? (direction > 0 ? 0 : rows.length - 1)
+      : (current + direction + rows.length) % rows.length;
+    event.preventDefault();
+    rows[next]?.focus();
+  };
 
   const toggleSelection = useCallback((discId: string) => {
     setSelectedIds(previous => {
@@ -314,20 +393,10 @@ export function DiscussionSidebar({
     return Array.from(set).sort();
   }, [sourceBindings]);
 
-  // 0.8.4 (#294) — combined predicate for the disc list filters.
-  // Search OR source — both AND'd. Used by every render site below
-  // so they stay in lockstep with the source filter.
+  // 0.8.4 (#294) — local predicate for the optional source filter. The main
+  // search field is intentionally absent here: it is a real global backend
+  // search, not a client-side card filter.
   const matchesFilters = (d: Discussion): boolean => {
-    // 0.8.5 — search input also matches an id prefix (hex, lower-case).
-    // Lets the user paste / type a short id (`04a9c927` from an agent
-    // summary) into the search and land directly on the disc. The
-    // ChatHeader pill copies that same prefix-friendly form. We keep
-    // the title substring match too — both fire on the same query.
-    if (searchLower) {
-      const titleHit = d.title.toLowerCase().includes(searchLower);
-      const idHit = d.id.toLowerCase().startsWith(searchLower);
-      if (!titleHit && !idHit) return false;
-    }
     if (sourceFilter) {
       const bind = sourceBindings.get(d.id);
       if (!bind || !bind.some(b => b.source_agent === sourceFilter)) return false;
@@ -467,11 +536,109 @@ export function DiscussionSidebar({
   };
 
   // ─── Render ───────────────────────────────────────────────────────────
+  const contactsGroupKey = '__contacts__';
+  const contactsCollapsed = collapsedGroups.has(contactsGroupKey) && !showJoin && !showAddContact;
+  const onlineContactCount = contacts.filter(contact => contactsOnline[contact.id]).length;
+  const smartCandidates = discussions.filter(disc => !disc.archived && matchesFilters(disc));
+  const projectNameById = new Map(projects.map(project => [project.id, project.name]));
+  const projectsGroupKey = '__projects__';
+  const projectsCollapsed = collapsedGroups.has(projectsGroupKey);
+  const canonicalUnseen = smartCandidates.reduce((sum, disc) => {
+    if (disc.id === activeId) return sum;
+    return sum + Math.max(0, unseenBasis(disc) - (lastSeenMsgCount[disc.id] ?? 0));
+  }, 0);
+  // Smart shortcuts earn their duplication only when the canonical tree is
+  // genuinely large. On a small workspace, Projects/General already fits on
+  // screen; rendering the same rows twice adds noise and duplicate keyboard
+  // targets. Selection mode also stays canonical so one discussion maps to one
+  // checkbox.
+  const smartSectionsEnabled =
+    !selectionMode && discussions.filter(disc => !disc.archived).length >= 20;
+  const followUpDiscussions = (smartSectionsEnabled ? smartCandidates : [])
+    .filter((disc) => {
+      if (sendingMap[disc.id] || isQueuedDisc(disc)) return true;
+      // A favorite has its own stable shortcut section. Keep it out of the
+      // unread catch-all so Favoris does not disappear on a fresh workspace
+      // where every old discussion is technically unseen.
+      if (disc.pinned) return false;
+      if (disc.id === activeId) return false;
+      return unseenBasis(disc) > (lastSeenMsgCount[disc.id] ?? 0);
+    })
+    .sort(byLiveThenRecent);
+  const followUpIds = new Set(followUpDiscussions.map(disc => disc.id));
+  const favoriteDiscussions = (selectionMode ? [] : smartCandidates)
+    .filter(disc => disc.pinned && !followUpIds.has(disc.id))
+    .sort(byLiveThenRecent);
+  const favoriteIds = new Set(favoriteDiscussions.map(disc => disc.id));
+  const recentDiscussions = (smartSectionsEnabled ? smartCandidates : [])
+    .filter(disc => !followUpIds.has(disc.id) && !favoriteIds.has(disc.id))
+    .sort((a, b) => b.updated_at.localeCompare(a.updated_at))
+    .slice(0, 10);
+
+  const renderSmartRows = (rows: Discussion[], keyPrefix: string) => rows.map(disc => (
+    <SwipeableDiscItem
+      key={`${keyPrefix}-${disc.id}`}
+      disc={disc}
+      isActive={disc.id === activeId}
+      lastSeenCount={lastSeenMsgCount[disc.id] ?? 0}
+      isSending={!!sendingMap[disc.id]}
+      isQueued={isQueuedDisc(disc)}
+      selectionMode={selectionMode}
+      isSelected={selectedIds.has(disc.id)}
+      onToggleSelection={toggleSelection}
+      onSelect={onSelect}
+      onArchive={onArchive}
+      onDelete={onDelete}
+      onStop={onStopDiscussion}
+      onTogglePin={onTogglePin}
+      t={t}
+      contextLabel={disc.project_id ? projectNameById.get(disc.project_id) : t('disc.noProject')}
+      sourceAgents={sourceBindings.get(disc.id)}
+      importedBy={importProvenance.get(disc.id) ?? null}
+    />
+  ));
+  const renderSmartSectionRows = (rows: Discussion[], keyPrefix: string) => {
+    const expanded = expandedSmartSections.has(keyPrefix);
+    const visible = expanded ? rows : rows.slice(0, SMART_SECTION_LIMIT);
+    const hiddenCount = rows.length - visible.length;
+    return (
+      <>
+        {renderSmartRows(visible, keyPrefix)}
+        {hiddenCount > 0 && (
+          <button
+            type="button"
+            className="disc-show-more-btn disc-smart-more"
+            onClick={() => setExpandedSmartSections(previous => {
+              const next = new Set(previous);
+              next.add(keyPrefix);
+              return next;
+            })}
+          >
+            + {hiddenCount} {t('disc.showMore')}
+          </button>
+        )}
+      </>
+    );
+  };
+
   return (
-    <div className="disc-sidebar" data-mobile={isMobile}>
+    <div
+      className="disc-sidebar"
+      data-mobile={isMobile}
+      onKeyDown={handleSidebarKeyboard}
+    >
       <div className="disc-sidebar-header" data-selection-mode={selectionMode}>
         <span className="disc-sidebar-header-title">
-          {selectionMode ? t('disc.bulk.selected', selectedIds.size) : 'Discussions'}
+          {selectionMode ? (
+            t('disc.bulk.selected', selectedIds.size)
+          ) : (
+            <>
+              Discussions
+              <span className="disc-sidebar-header-count">
+                {' · '}{discussions.length}
+              </span>
+            </>
+          )}
         </span>
         <div className="disc-sidebar-header-actions">
           {selectionMode ? (
@@ -509,86 +676,105 @@ export function DiscussionSidebar({
             </>
           ) : (
             <>
-              {/* 0.8.3 (#277) — "Mark all as read" button. Only rendered
-                  when (a) the parent wired the handler AND (b) there's at
-                  least one unread message anywhere (archived + batch
-                  children + active included). Without (b) the button is
-                  just clutter on a clean inbox; without (a) it'd be a
-                  dead button. Title carries the count so users know what
-                  they'd clear before clicking. */}
-              {onMarkAllRead && totalUnseenAll > 0 && (
-                <button
-                  className="disc-icon-btn"
-                  onClick={onMarkAllRead}
-                  aria-label={t('disc.markAllRead')}
-                  title={t('disc.markAllReadTooltip', totalUnseenAll)}
-                >
-                  <CheckCheck size={14} />
-                </button>
-              )}
-              {(onBulkArchive || onBulkDelete) && discussions.length > 0 && (
-                <button
-                  type="button"
-                  className="disc-icon-btn"
-                  onClick={() => setSelectionMode(true)}
-                  aria-label={t('disc.bulk.start')}
-                  title={t('disc.bulk.start')}
-                >
-                  <ListChecks size={14} />
-                </button>
-              )}
               {onImportDiscussion && (
-                <>
-                  {/* The labelled control is the button below, which opens this
-                      picker programmatically. Left in the a11y tree it is an
-                      unlabelled form field — an axe `label` violation, and a
-                      focus stop that announces nothing. */}
-                  <input
-                    ref={importInputRef}
-                    type="file"
-                    accept=".json,.kronn-discussion.json,application/json"
-                    className="disc-sidebar-visually-hidden"
-                    tabIndex={-1}
-                    aria-hidden="true"
-                    onChange={async event => {
-                      const file = event.target.files?.[0];
-                      event.target.value = '';
-                      if (!file || importInFlightRef.current) return;
-                      importInFlightRef.current = true;
-                      setImporting(true);
-                      try {
-                        await onImportDiscussion(file);
-                      } catch (error) {
-                        toast(t('disc.portability.importError', String(error)), 'error');
-                      } finally {
-                        importInFlightRef.current = false;
-                        setImporting(false);
-                      }
-                    }}
-                  />
-                  <button
-                    type="button"
-                    className="disc-icon-btn"
-                    disabled={importing}
-                    onClick={() => importInputRef.current?.click()}
-                    aria-label={t('disc.portability.import')}
-                    title={t('disc.portability.importHint')}
-                  >
-                    {importing ? <Loader2 size={14} className="spin" /> : <Upload size={14} />}
-                  </button>
-                </>
+                <input
+                  ref={importInputRef}
+                  type="file"
+                  accept=".json,.kronn-discussion.json,application/json"
+                  className="disc-sidebar-visually-hidden"
+                  tabIndex={-1}
+                  aria-hidden="true"
+                  onChange={async event => {
+                    const file = event.target.files?.[0];
+                    event.target.value = '';
+                    if (!file || importInFlightRef.current) return;
+                    importInFlightRef.current = true;
+                    setImporting(true);
+                    try {
+                      await onImportDiscussion(file);
+                    } catch (error) {
+                      toast(t('disc.portability.importError', String(error)), 'error');
+                    } finally {
+                      importInFlightRef.current = false;
+                      setImporting(false);
+                    }
+                  }}
+                />
               )}
               <button
                 type="button"
-                className="disc-icon-btn"
+                className="disc-icon-btn disc-sidebar-new-btn"
                 data-tour-id="new-disc-btn"
                 onClick={onNewDiscussion}
                 aria-label={t('disc.new')}
                 title={t('disc.new')}
               >
-                <Plus size={14} />
+                <Plus size={16} />
                 <span className="disc-sidebar-visually-hidden">{t('disc.new')}</span>
               </button>
+              <div className="disc-sidebar-header-menu-wrap" ref={headerMenuRef}>
+                <button
+                  type="button"
+                  className="disc-icon-btn"
+                  ref={headerMenuTriggerRef}
+                  onClick={() => setHeaderMenuOpen(open => !open)}
+                  aria-label={t('disc.sidebar.moreActions')}
+                  aria-expanded={headerMenuOpen}
+                  aria-controls="disc-sidebar-header-actions"
+                  title={t('disc.sidebar.moreActions')}
+                >
+                  <MoreHorizontal size={16} />
+                </button>
+                {headerMenuOpen && (
+                  <div
+                    id="disc-sidebar-header-actions"
+                    className="disc-sidebar-header-menu"
+                    role="group"
+                    aria-label={t('disc.sidebar.moreActions')}
+                  >
+                    {onMarkAllRead && totalUnseenAll > 0 && (
+                      <button
+                        type="button"
+                        aria-label={t('disc.markAllRead')}
+                        title={t('disc.markAllReadTooltip', totalUnseenAll)}
+                        onClick={() => {
+                          onMarkAllRead();
+                          setHeaderMenuOpen(false);
+                        }}
+                      >
+                        <CheckCheck size={13} />
+                        <span>{t('disc.markAllRead')}</span>
+                        <strong>{totalUnseenAll}</strong>
+                      </button>
+                    )}
+                    {(onBulkArchive || onBulkDelete) && discussions.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSelectionMode(true);
+                          setHeaderMenuOpen(false);
+                        }}
+                      >
+                        <ListChecks size={13} />
+                        <span>{t('disc.bulk.start')}</span>
+                      </button>
+                    )}
+                    {onImportDiscussion && (
+                      <button
+                        type="button"
+                        disabled={importing}
+                        onClick={() => {
+                          importInputRef.current?.click();
+                          setHeaderMenuOpen(false);
+                        }}
+                      >
+                        {importing ? <Loader2 size={13} className="spin" /> : <Upload size={13} />}
+                        <span>{t('disc.portability.import')}</span>
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
               {isMobile && (
                 <button className="disc-icon-btn" onClick={onClose} aria-label="Close sidebar"><X size={16} /></button>
               )}
@@ -618,40 +804,46 @@ export function DiscussionSidebar({
         />
       )}
 
-      {/* KT-70 — one search entry point. The field filters discussion titles
-          and ids immediately; the sliders expand that SAME query into the
-          server-side message search instead of presenting a second magnifier
-          in the header. */}
+      {/* KT-70 / KT-90 — one search entry point. Enter runs the backend query
+          over titles, ids and every message; Filtres opens the same result
+          panel with its advanced controls. The local tree never remounts on
+          each keystroke. */}
       <div className="disc-search-wrap" hidden={globalSearchOpen}>
-        <div className="disc-search-box">
-          <Search size={11} className="disc-search-icon" />
-          <input
-            type="text"
-            className="disc-search-input"
-            value={discSearchFilter}
-            onChange={e => setDiscSearchFilter(e.target.value)}
-            placeholder={t('disc.searchPlaceholder')}
-            onKeyDown={event => {
-              if (event.key === 'Enter' && onOpenGlobalSearch) {
-                event.preventDefault();
-                onOpenGlobalSearch();
-              }
-            }}
-          />
-          {discSearchFilter && (
-            <button
-              onClick={() => setDiscSearchFilter('')}
-              className="disc-search-clear"
-              aria-label={t('disc.searchClear')}
-              title={t('disc.searchClear')}
-            >
-              <X size={10} />
-            </button>
-          )}
+        <div className="disc-search-controls">
+          <div className="disc-search-box">
+            <Search size={13} className="disc-search-icon" />
+            <input
+              ref={searchInputRef}
+              type="text"
+              className="disc-search-input"
+              value={discSearchFilter}
+              onChange={e => setDiscSearchFilter(e.target.value)}
+              placeholder={t('disc.globalSearch.placeholder')}
+              aria-label={t('disc.globalSearch.placeholder')}
+              aria-keyshortcuts="/"
+              onKeyDown={event => {
+                if (event.key === 'Enter' && onOpenGlobalSearch) {
+                  event.preventDefault();
+                  onOpenGlobalSearch();
+                }
+              }}
+            />
+            {discSearchFilter && (
+              <button
+                type="button"
+                onClick={() => setDiscSearchFilter('')}
+                className="disc-search-clear"
+                aria-label={t('disc.searchClear')}
+                title={t('disc.searchClear')}
+              >
+                <X size={10} />
+              </button>
+            )}
+          </div>
           {onOpenGlobalSearch && (
             <button
               type="button"
-              className="disc-search-advanced"
+              className="disc-search-filter-btn"
               onClick={onOpenGlobalSearch}
               aria-label={t('disc.globalSearch.open')}
               title={t('disc.globalSearch.open')}
@@ -659,6 +851,8 @@ export function DiscussionSidebar({
               data-tour-id="global-search-open"
             >
               <SlidersHorizontal size={12} />
+              <span>{t('disc.sidebar.filters')}</span>
+              {sourceFilter && <strong>1</strong>}
             </button>
           )}
         </div>
@@ -691,35 +885,114 @@ export function DiscussionSidebar({
 
       {/* Discussion list grouped by project */}
       <div className="disc-sidebar-list" hidden={globalSearchOpen}>
-        {/* Contacts section — always visible */}
-        <div>
-          <div className="disc-group-header" data-no-border="true">
-            <Users2 size={10} /> {t('contacts.title')}
+        {followUpDiscussions.length > 0 && (() => {
+          const isCollapsed = collapsedGroups.has('__follow_up__');
+          return (
+            <div
+              className="disc-sidebar-section disc-sidebar-follow-up"
+              data-expanded={!isCollapsed}
+            >
+              <button
+                type="button"
+                className="disc-group-btn"
+                data-no-border="true"
+                onClick={() => onToggleGroup('__follow_up__')}
+                aria-expanded={!isCollapsed}
+              >
+                <ChevronRight size={10} className="disc-chevron" data-expanded={!isCollapsed} />
+                <CircleDot size={10} />
+                <span>{t('disc.followUp')}</span>
+                <span className="disc-group-unseen">{followUpDiscussions.length}</span>
+              </button>
+              {!isCollapsed && renderSmartSectionRows(followUpDiscussions, 'follow')}
+            </div>
+          );
+        })()}
+
+        {recentDiscussions.length > 0 && (() => {
+          const isCollapsed = collapsedGroups.has('__recent__');
+          return (
+            <div
+              className="disc-sidebar-section disc-sidebar-recent"
+              data-expanded={!isCollapsed}
+            >
+              <button
+                type="button"
+                className="disc-group-btn"
+                data-no-border="true"
+                onClick={() => onToggleGroup('__recent__')}
+                aria-expanded={!isCollapsed}
+              >
+                <ChevronRight size={10} className="disc-chevron" data-expanded={!isCollapsed} />
+                <Clock3 size={10} />
+                <span>{t('disc.recent')}</span>
+                <span className="disc-group-count">{recentDiscussions.length}</span>
+              </button>
+              {!isCollapsed && renderSmartSectionRows(recentDiscussions, 'recent')}
+            </div>
+          );
+        })()}
+
+        {/* Contacts remain immediately reachable but no longer consume the
+            first screen permanently on large workspaces. The same persisted
+            group-state mechanism as projects/favorites keeps the interaction
+            predictable across reloads. Add/join actions are siblings of the
+            toggle (never nested interactive controls). */}
+        <div
+          className="disc-sidebar-section disc-sidebar-contacts"
+          data-expanded={!contactsCollapsed}
+        >
+          <div className="disc-contacts-header">
+            <button
+              type="button"
+              className="disc-group-btn disc-contacts-toggle"
+              data-no-border="true"
+              onClick={() => onToggleGroup(contactsGroupKey)}
+              aria-expanded={!contactsCollapsed}
+            >
+              <ChevronRight size={10} className="disc-chevron" data-expanded={!contactsCollapsed} />
+              <Users2 size={10} />
+              <span>{t('contacts.title')}</span>
+              {contacts.length > 0 && (
+                <span className="disc-group-count">
+                  {onlineContactCount}/{contacts.length}
+                </span>
+              )}
+            </button>
             <span className="disc-contacts-meta">
               {contacts.length > 0 && (
-                <>
-                  <span className="disc-ws-dot" data-connected={wsConnected} title={wsConnected ? t('contacts.wsConnected') : t('contacts.wsDisconnected')} />
-                  {contacts.filter(c => contactsOnline[c.id]).length}/{contacts.length}
-                </>
+                <span
+                  className="disc-ws-dot"
+                  role="status"
+                  data-connected={wsConnected}
+                  title={wsConnected ? t('contacts.wsConnected') : t('contacts.wsDisconnected')}
+                  aria-label={wsConnected ? t('contacts.wsConnected') : t('contacts.wsDisconnected')}
+                />
               )}
               {onJoinByCode && (
                 <button
+                  type="button"
                   onClick={() => { setShowJoin(p => !p); setShowAddContact(false); }}
                   className="disc-contact-add-btn"
                   title={t('contacts.joinByCode')}
+                  aria-label={t('contacts.joinByCode')}
                 >
                   <LogIn size={12} />
                 </button>
               )}
               <button
+                type="button"
                 onClick={() => { setShowAddContact(p => !p); setShowJoin(false); }}
                 className="disc-contact-add-btn"
                 title={t('contacts.add')}
+                aria-label={t('contacts.add')}
               >
                 <Plus size={12} />
               </button>
             </span>
           </div>
+          {!contactsCollapsed && (
+            <>
           {/* Join a discussion by code — unified local/cross-instance join */}
           {showJoin && (
             <div className="disc-contact-add-form">
@@ -819,19 +1092,22 @@ export function DiscussionSidebar({
               </div>
             );
           })}
+            </>
+          )}
         </div>
 
-        {/* Pinned / Favorites — always at the top, cross-project, collapsible
-            like every other group (search bypasses the collapse). During an
-            active search/source filter, only matching favorites show (and the
-            section hides entirely if none match) — otherwise every pinned
-            disc stayed visible and buried the actual search results. */}
+        {/* Pinned / Favorites — cross-project and collapsible. The optional
+            source filter applies locally; the primary query renders in the
+            dedicated global-results panel above. */}
         {(() => {
-          const pinned = discussions.filter(d => d.pinned && !d.archived && matchesFilters(d));
+          const pinned = favoriteDiscussions;
           if (pinned.length === 0) return null;
-          const isCollapsed = collapsedGroups.has('__favorites__') && !deferredSearch;
+          const isCollapsed = collapsedGroups.has('__favorites__');
           return (
-            <div>
+            <div
+              className="disc-sidebar-section disc-sidebar-favorites"
+              data-expanded={!isCollapsed}
+            >
               <button
                 className="disc-group-btn"
                 data-no-border="true"
@@ -843,38 +1119,42 @@ export function DiscussionSidebar({
                 <span style={{ fontWeight: 600, fontSize: 'var(--kr-fs-sm)' }}>{t('disc.favorites')}</span>
                 <span className="disc-group-count">{pinned.length}</span>
               </button>
-              {!isCollapsed && pinned.sort(byLiveThenRecent).map(disc => (
-                <SwipeableDiscItem
-                  key={`pin-${disc.id}`}
-                  disc={disc}
-                  isActive={disc.id === activeId}
-                  lastSeenCount={lastSeenMsgCount[disc.id] ?? 0}
-                  isSending={!!sendingMap[disc.id]}
-                  isQueued={isQueuedDisc(disc)}
-                  selectionMode={selectionMode}
-                  isSelected={selectedIds.has(disc.id)}
-                  onToggleSelection={toggleSelection}
-                  onSelect={onSelect}
-                  onArchive={onArchive}
-                  onDelete={onDelete}
-                  onStop={onStopDiscussion}
-                  onTogglePin={onTogglePin}
-                  t={t}
-                  sourceAgents={sourceBindings.get(disc.id)}
-                  importedBy={importProvenance.get(disc.id) ?? null}
-                />
-              ))}
+              {!isCollapsed && renderSmartSectionRows(pinned.sort(byLiveThenRecent), 'pin')}
             </div>
           );
         })()}
 
+        {/* Canonical discussion tree. Smart sections above are shortcuts only;
+            Projects remains the complete, non-duplicated source of truth. */}
+        {smartCandidates.length > 0 && (
+          <div
+            className="disc-sidebar-section disc-sidebar-projects"
+            data-expanded={!projectsCollapsed}
+          >
+            <button
+              type="button"
+              className="disc-group-btn"
+              data-no-border="true"
+              onClick={() => onToggleGroup(projectsGroupKey)}
+              aria-expanded={!projectsCollapsed}
+            >
+              <ChevronRight size={10} className="disc-chevron" data-expanded={!projectsCollapsed} />
+              <Folder size={10} />
+              <span>{t('projects.title')}</span>
+              <span className="disc-group-count">{smartCandidates.length}</span>
+              {canonicalUnseen > 0 && (
+                <span className="disc-group-unseen">{canonicalUnseen}</span>
+              )}
+            </button>
+            {!projectsCollapsed && (
+              <div className="disc-project-tree">
         {/* Global discussions (no project) */}
         {(() => {
-          // Filter up front so the header + count + visibility all reflect the
-          // search (an empty "Général" group no longer shows during search).
+          // Filter up front so header/count visibility follows the optional
+          // source filter.
           const globalDiscs = (activeDiscByProject.get(null) ?? []).filter(matchesFilters);
           if (globalDiscs.length === 0) return null;
-          const isCollapsed = collapsedGroups.has('__global__') && !deferredSearch;
+          const isCollapsed = collapsedGroups.has('__global__');
           return (
             <div>
               <button
@@ -884,7 +1164,7 @@ export function DiscussionSidebar({
                 aria-expanded={!isCollapsed}
               >
                 <ChevronRight size={10} className="disc-chevron" data-expanded={!isCollapsed} />
-                <MessageSquare size={10} /> {t('disc.general')}
+                <MessageSquare size={10} /> {t('disc.noProject')}
                 <span className="disc-group-count">{globalDiscs.length}</span>
                 {(unseenByGroup.get('__global__') ?? 0) > 0 && (
                   <span className="disc-group-unseen">{unseenByGroup.get('__global__')}</span>
@@ -917,10 +1197,8 @@ export function DiscussionSidebar({
 
         {/* Project discussions — grouped by org */}
         {(() => {
-          // `.filter(matchesFilters)` is a no-op when no search/source filter is
-          // active (matchesFilters returns true for all), but during a search it
-          // hides folders that contain zero matching discs — the user no longer
-          // has to scroll past empty project/org headers to find their results.
+          // `.filter(matchesFilters)` is a no-op when no source filter is
+          // active; otherwise it hides folders with no matching discussion.
           const visibleProjects = projects.filter(p => !isHiddenPath(p.path) && (activeDiscByProject.get(p.id) ?? []).filter(matchesFilters).length > 0);
           // Build org groups
           const orgMap = new Map<string, typeof visibleProjects>();
@@ -940,7 +1218,7 @@ export function DiscussionSidebar({
 
           return sortedOrgs.map(([orgName, orgProjects]) => {
             const orgKey = `org::${orgName}`;
-            const isOrgCollapsed = collapsedGroups.has(orgKey) && !deferredSearch;
+            const isOrgCollapsed = collapsedGroups.has(orgKey);
             const orgDiscCount = orgProjects.reduce((sum, p) => sum + (activeDiscByProject.get(p.id) ?? []).filter(matchesFilters).length, 0);
             // Color from org name hash (same as Dashboard)
             const orgColor = orgName === localLabel ? 'var(--kr-text-dim)'
@@ -968,7 +1246,7 @@ export function DiscussionSidebar({
                   // Auto-expand a project folder when its active disc is in
                   // it — same reasoning as the batch auto-expand below.
                   const projContainsActive = projDiscs.some(d => d.id === activeId);
-                  const isCollapsed = collapsedGroups.has(proj.id) && !deferredSearch && !projContainsActive;
+                  const isCollapsed = collapsedGroups.has(proj.id) && !projContainsActive;
                   return (
                     <div key={proj.id}>
                       <button
@@ -1027,10 +1305,51 @@ export function DiscussionSidebar({
                             return rank(a) - rank(b)
                               || b.discs[0].updated_at.localeCompare(a.discs[0].updated_at);
                           });
+                        // A Quick Prompt may produce many batch runs. Showing the QP
+                        // title once per run made large projects unreadable, so runs
+                        // sharing the same durable QP id live under one campaign row.
+                        // Missing summaries stay isolated by run id: grouping by a
+                        // fallback title would accidentally merge unrelated batches.
+                        const campaignMap = new Map<string, {
+                          key: string;
+                          label: string;
+                          icon: string;
+                          runs: typeof batchGroups;
+                        }>();
+                        for (const batch of batchGroups) {
+                          const summary = batchMetaById.get(batch.runId);
+                          const qpId = summary?.quick_prompt_id;
+                          const key = qpId ? `qp-batches::${qpId}` : `batch-only::${batch.runId}`;
+                          const fallbackTitle = batch.discs[0].title.split('—')[0].trim();
+                          const existing = campaignMap.get(key);
+                          if (existing) {
+                            existing.runs.push(batch);
+                          } else {
+                            campaignMap.set(key, {
+                              key,
+                              label: summary?.quick_prompt_name ?? fallbackTitle,
+                              icon: summary?.quick_prompt_icon || '📦',
+                              runs: [batch],
+                            });
+                          }
+                        }
+                        const batchCampaigns = Array.from(campaignMap.values()).sort((a, b) => {
+                          const rank = (campaign: typeof a) => campaign.runs.some(run => run.anySending)
+                            ? 0
+                            : campaign.runs.some(run => run.queued > 0) ? 1 : 2;
+                          return rank(a) - rank(b)
+                            || b.runs[0].discs[0].updated_at.localeCompare(a.runs[0].discs[0].updated_at);
+                        });
                         return (
                           <>
-                            {/* Batch groups first — dépliables, collapsed by default */}
-                            {batchGroups.map(bg => {
+                            {/* Batch campaigns first. Every QP keeps the same
+                                QP → run → discussion hierarchy, even with one run. */}
+                            {batchCampaigns.map(campaign => {
+                              const campaignCollapsed = collapsedGroups.has(campaign.key)
+                                && !campaign.runs.some(run => run.discs.some(disc => disc.id === activeId))
+                                && !campaign.runs.some(run => run.anySending || run.queued > 0);
+                              const campaignTotal = campaign.runs.reduce((sum, run) => sum + run.total, 0);
+                              const renderRun = (bg: typeof batchGroups[number]) => {
                               const batchKey = `batch::${bg.runId}`;
                               // Auto-expand a batch folder when one of its
                               // children is the currently-active disc.
@@ -1041,21 +1360,13 @@ export function DiscussionSidebar({
                               // they conclude "only one agent ran" even
                               // though N siblings exist inside the folder.
                               const containsActive = bg.discs.some(d => d.id === activeId);
-                              const isBatchCollapsed = collapsedGroups.has(batchKey) && !containsActive;
+                              const isLive = bg.anySending || bg.queued > 0;
+                              // Child discussions are expensive and noisy. A run opens
+                              // only on explicit request, or automatically while active.
+                              const isBatchCollapsed = !openBatchRuns.has(bg.runId)
+                                && !containsActive
+                                && !isLive;
                               const summaryForLabel = batchMetaById.get(bg.runId);
-                              // Folder label: prefer the Quick Prompt name (the campaign)
-                              // over the first child disc title (one ticket among N,
-                              // misleading — was showing "EW-7100" for a 50-disc batch).
-                              // Falls back to the old disc-title derivation if we don't
-                              // have the summary yet (e.g. fetch in flight on first render).
-                              const firstTitle = bg.discs[0].title;
-                              const qpIcon = summaryForLabel?.quick_prompt_icon;
-                              const qpName = summaryForLabel?.quick_prompt_name;
-                              // When a QP icon is available we use IT as the folder
-                              // glyph instead of the generic 📦 — avoids stacking two
-                              // emojis like "📦 🎯 Analyse...".
-                              const folderGlyph = qpIcon || '📦';
-                              const label = qpName ?? firstTitle.split('—')[0].trim();
                               // Relative timestamp of the batch — disambiguates between
                               // multiple batches of the same QP (e.g. cron firing every 10min).
                               // We use the earliest disc's created_at since that's when the batch
@@ -1068,6 +1379,7 @@ export function DiscussionSidebar({
                                 try { return new Date(batchStartIso).toLocaleString(lang); }
                                 catch { return batchStartIso; }
                               })();
+                              const shortRunId = bg.runId.replaceAll('-', '').slice(0, 8);
                               // While active, split "en cours" from "en file"
                               // so a big batch reads honestly (e.g. "⏳ 3/23 · 5▶ · 15⏸")
                               // instead of 23 identical spinners.
@@ -1081,105 +1393,128 @@ export function DiscussionSidebar({
                               const summary = batchMetaById.get(bg.runId);
                               const parentLabel = formatBatchParent(summary, t);
                               const parentWorkflowId = summary?.parent_workflow_id ?? null;
+                              const hasBatchMenu = Boolean(
+                                onReviewBatch
+                                || (onRetryBatch && summaryForLabel?.quick_prompt_id)
+                                || (parentLabel && parentWorkflowId && onNavigateWorkflow)
+                                || onDeleteBatch,
+                              );
                               return (
                                 <div key={batchKey} className="disc-batch-wrap" data-batch-key={batchKey}>
-                                  <div className="disc-batch-header" style={{ marginLeft: 12 }}>
+                                  <div
+                                    className="disc-batch-header"
+                                    data-compact="true"
+                                  >
                                     <button
                                       className="disc-group-btn"
                                       data-variant="batch"
-                                      onClick={() => onToggleGroup(batchKey)}
+                                      onClick={() => onToggleBatchRun(bg.runId)}
                                       aria-expanded={!isBatchCollapsed}
                                       style={{ marginLeft: 0, flex: 1 }}
-                                      title={`${label} — ${batchWhenAbs}`}
+                                      title={batchWhenAbs}
                                     >
                                       <ChevronRight size={10} className="disc-chevron" data-expanded={!isBatchCollapsed} />
-                                      {folderGlyph} {label}
-                                      {batchWhen && (
-                                        <span className="disc-batch-when" title={batchWhenAbs}>
-                                          · {batchWhen}
-                                        </span>
-                                      )}
+                                      <span className="disc-batch-run-label">
+                                        <Clock3 size={10} aria-hidden="true" />
+                                        {batchWhen || t('disc.batchRun')}
+                                      </span>
+                                      <span className="disc-batch-run-id" title={bg.runId}>
+                                        {t('disc.batchRunId', shortRunId)}
+                                      </span>
                                       <span className="disc-group-count" data-batch-status={(bg.anySending || bg.queued > 0) ? 'running' : 'done'}>
                                         {statusPill}
                                       </span>
                                     </button>
-                                    {onRetryBatch && summaryForLabel?.quick_prompt_id && (
-                                      <button
-                                        type="button"
-                                        className="disc-batch-retry"
-                                        title={t('disc.batchRetryHint', bg.total)}
-                                        aria-label={t('disc.batchRetryHint', bg.total)}
-                                        onClick={(e) => {
-                                          e.stopPropagation();
-                                          if (confirm(t('disc.batchRetryConfirm', bg.total, label))) {
-                                            const qpId = summaryForLabel?.quick_prompt_id;
-                                            if (!qpId) return;
-                                            onRetryBatch(bg.runId, qpId, bg.discs.map(d => d.id));
-                                          }
-                                        }}
+                                    {hasBatchMenu && (
+                                      <div
+                                        className="disc-batch-menu"
+                                        ref={openBatchMenuRunId === bg.runId ? batchMenuRef : undefined}
                                       >
-                                        ↻
-                                      </button>
-                                    )}
-                                    {onReviewBatch && (
-                                      <button
-                                        type="button"
-                                        className="disc-batch-review"
-                                        title={t('disc.batchReviewHint', bg.total)}
-                                        aria-label={t('disc.batchReviewHint', bg.total)}
-                                        onClick={(e) => {
-                                          e.stopPropagation();
-                                          onReviewBatch(bg.runId, label, bg.discs.map(d => d.id));
-                                        }}
-                                      >
-                                        <ListChecks size={11} />
-                                      </button>
-                                    )}
-                                    {onDeleteBatch && (
-                                      <button
-                                        type="button"
-                                        className="disc-batch-delete"
-                                        title={t('disc.batchDeleteHint', bg.total)}
-                                        aria-label={t('disc.batchDeleteHint', bg.total)}
-                                        onClick={(e) => {
-                                          e.stopPropagation();
-                                          // Native confirm — keeps the dependency
-                                          // surface tiny. Future polish: a styled
-                                          // modal with the disc preview list.
-                                          if (confirm(t('disc.batchDeleteConfirm', bg.total, label))) {
-                                            onDeleteBatch(bg.runId, bg.total);
-                                          }
-                                        }}
-                                      >
-                                        <Trash2 size={11} />
-                                      </button>
+                                        <button
+                                          type="button"
+                                          className="disc-batch-menu-trigger"
+                                          ref={(node) => {
+                                            if (node) batchMenuTriggerRefs.current.set(bg.runId, node);
+                                            else batchMenuTriggerRefs.current.delete(bg.runId);
+                                          }}
+                                          aria-label={t('disc.batchMoreActions')}
+                                          aria-expanded={openBatchMenuRunId === bg.runId}
+                                          aria-controls={`batch-actions-${bg.runId}`}
+                                          onClick={(event) => {
+                                            event.stopPropagation();
+                                            setOpenBatchMenuRunId(current => current === bg.runId ? null : bg.runId);
+                                          }}
+                                        >
+                                          <MoreHorizontal size={14} />
+                                        </button>
+                                        {openBatchMenuRunId === bg.runId && (
+                                          <div
+                                            id={`batch-actions-${bg.runId}`}
+                                            className="disc-batch-menu-panel"
+                                            role="group"
+                                            aria-label={t('disc.batchMoreActions')}
+                                          >
+                                            {parentLabel && parentWorkflowId && onNavigateWorkflow && (
+                                              <button
+                                                type="button"
+                                                onClick={() => {
+                                                  setOpenBatchMenuRunId(null);
+                                                  onNavigateWorkflow(parentWorkflowId);
+                                                }}
+                                              >
+                                                ↗ <span>{parentLabel}</span>
+                                              </button>
+                                            )}
+                                            {onReviewBatch && (
+                                              <button
+                                                type="button"
+                                                onClick={() => {
+                                                  setOpenBatchMenuRunId(null);
+                                                  onReviewBatch(bg.runId, campaign.label, bg.discs.map(d => d.id));
+                                                }}
+                                              >
+                                                <ListChecks size={12} /> <span>{t('disc.batchReviewAction')}</span>
+                                              </button>
+                                            )}
+                                            {onRetryBatch && summaryForLabel?.quick_prompt_id && (
+                                              <button
+                                                type="button"
+                                                onClick={() => {
+                                                  setOpenBatchMenuRunId(null);
+                                                  if (confirm(t('disc.batchRetryConfirm', bg.total, campaign.label))) {
+                                                    const qpId = summaryForLabel.quick_prompt_id;
+                                                    if (qpId) onRetryBatch(bg.runId, qpId, bg.discs.map(d => d.id));
+                                                  }
+                                                }}
+                                              >
+                                                ↻ <span>{t('disc.batchRetryAction')}</span>
+                                              </button>
+                                            )}
+                                            {onDeleteBatch && (
+                                              <button
+                                                type="button"
+                                                data-danger="true"
+                                                onClick={() => {
+                                                  setOpenBatchMenuRunId(null);
+                                                  if (confirm(t('disc.batchDeleteConfirm', bg.total, campaign.label))) {
+                                                    onDeleteBatch(bg.runId, bg.total);
+                                                  }
+                                                }}
+                                              >
+                                                <Trash2 size={12} /> <span>{t('disc.batchDeleteAction')}</span>
+                                              </button>
+                                            )}
+                                          </div>
+                                        )}
+                                      </div>
                                     )}
                                   </div>
-                                  {parentLabel && parentWorkflowId && onNavigateWorkflow && (
-                                    <button
-                                      type="button"
-                                      className="disc-batch-parent-pill"
-                                      style={{ marginLeft: 24 }}
-                                      onClick={(e) => {
-                                        // stopPropagation isn't strictly needed (we're not
-                                        // nested in another button), but future refactors
-                                        // could move this inside the group button — keeping
-                                        // it defensive.
-                                        e.stopPropagation();
-                                        onNavigateWorkflow(parentWorkflowId);
-                                      }}
-                                      title={t('disc.batchParentClickHint')}
-                                    >
-                                      ↗ {parentLabel}
-                                    </button>
-                                  )}
                                   {!isBatchCollapsed && (
                                     // Wrapper with a left "tree line" + indent so the
                                     // batch children read as "inside" the 📦 folder,
                                     // not as siblings of the loose discs below.
                                     <div className="disc-batch-children">
-                                      {/* Sorted copy — bg.discs order feeds the
-                                          folder label fallback, don't mutate. */}
+                                      {/* Sorted copy keeps the source group stable. */}
                                       {[...bg.discs].sort(byLiveThenRecent).map(disc => (
                                         <SwipeableDiscItem
                                           key={disc.id}
@@ -1195,11 +1530,64 @@ export function DiscussionSidebar({
                                           onArchive={onArchive}
                                           onDelete={onDelete}
                                           onStop={onStopDiscussion}
+                                          onTogglePin={onTogglePin}
                                           t={t}
                                           sourceAgents={sourceBindings.get(disc.id)}
                                           importedBy={importProvenance.get(disc.id) ?? null}
                                         />
                                       ))}
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                              };
+
+                              return (
+                                <div
+                                  key={campaign.key}
+                                  className="disc-batch-campaign"
+                                  data-batch-campaign-key={campaign.key}
+                                >
+                                  <button
+                                    type="button"
+                                    className="disc-group-btn"
+                                    data-variant="batch-campaign"
+                                    onClick={() => onToggleGroup(campaign.key)}
+                                    aria-expanded={!campaignCollapsed}
+                                    title={campaign.label}
+                                  >
+                                    <ChevronRight
+                                      size={10}
+                                      className="disc-chevron"
+                                      data-expanded={!campaignCollapsed}
+                                    />
+                                    <span className="disc-batch-campaign-icon" aria-hidden="true">{campaign.icon}</span>
+                                    <span className="disc-batch-campaign-content">
+                                      <span className="disc-batch-campaign-name" title={campaign.label}>
+                                        {campaign.label}
+                                      </span>
+                                      <span
+                                        className="disc-batch-campaign-meta"
+                                        aria-label={t('disc.batchCampaignStats', campaign.runs.length, campaignTotal)}
+                                      >
+                                        <span
+                                          aria-hidden="true"
+                                          title={t('disc.batchRunsTotalTitle', campaign.runs.length)}
+                                        >
+                                          🔀 {campaign.runs.length}
+                                        </span>
+                                        <span
+                                          aria-hidden="true"
+                                          title={t('disc.batchDiscussionsTotalTitle', campaignTotal)}
+                                        >
+                                          💬 {campaignTotal}
+                                        </span>
+                                      </span>
+                                    </span>
+                                  </button>
+                                  {!campaignCollapsed && (
+                                    <div className="disc-batch-campaign-runs">
+                                      {campaign.runs.map(renderRun)}
                                     </div>
                                   )}
                                 </div>
@@ -1210,7 +1598,7 @@ export function DiscussionSidebar({
                                 explicit-expand bypass the cap. */}
                             {(() => {
                               const isExpanded = expandedProjects.has(proj.id);
-                              const showAll = isExpanded || !!deferredSearch;
+                              const showAll = isExpanded;
                               // Live-first BEFORE the cap: a running disc must
                               // never be hidden behind "afficher plus".
                               const orderedLoose = [...loose].sort(byLiveThenRecent);
@@ -1270,6 +1658,10 @@ export function DiscussionSidebar({
             );
           });
         })()}
+              </div>
+            )}
+          </div>
+        )}
 
         {discussions.length === 0 && (
           <div className="disc-empty">{t('disc.empty')}</div>
@@ -1277,7 +1669,10 @@ export function DiscussionSidebar({
 
         {/* Archives section */}
         {archivedDiscussions.length > 0 && (
-          <div>
+          <div
+            className="disc-sidebar-section disc-sidebar-archives"
+            data-expanded={showArchives}
+          >
             <button
               className="disc-group-btn"
               data-variant="archive"
@@ -1288,28 +1683,57 @@ export function DiscussionSidebar({
               <Archive size={10} /> {t('disc.archived')}
               <span className="disc-group-count">{archivedDiscussions.length}</span>
             </button>
-            {(showArchives || !!deferredSearch) && archivedDiscussions.filter(matchesFilters).sort((a, b) => b.updated_at.localeCompare(a.updated_at)).map(disc => (
-              <SwipeableDiscItem
-                key={disc.id}
-                disc={disc}
-                isActive={disc.id === activeId}
-                lastSeenCount={lastSeenMsgCount[disc.id] ?? 0}
-                isSending={!!sendingMap[disc.id]}
-                isQueued={isQueuedDisc(disc)}
-                selectionMode={selectionMode}
-                isSelected={selectedIds.has(disc.id)}
-                onToggleSelection={toggleSelection}
-                onSelect={onSelect}
-                onArchive={onUnarchive}
-                onDelete={onDelete}
-                archiveLabel={t('disc.unarchive')}
-                t={t}
-                sourceAgents={sourceBindings.get(disc.id)}
-                importedBy={importProvenance.get(disc.id) ?? null}
-              />
-            ))}
+            {showArchives && (() => {
+              const orderedArchives = archivedDiscussions
+                .filter(matchesFilters)
+                .sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+              const visibleArchives = orderedArchives.slice(0, archivedVisibleCount);
+              const hiddenArchiveCount = orderedArchives.length - visibleArchives.length;
+              return (
+                <>
+                  {visibleArchives.map(disc => (
+                    <SwipeableDiscItem
+                      key={disc.id}
+                      disc={disc}
+                      isActive={disc.id === activeId}
+                      lastSeenCount={lastSeenMsgCount[disc.id] ?? 0}
+                      isSending={!!sendingMap[disc.id]}
+                      isQueued={isQueuedDisc(disc)}
+                      selectionMode={selectionMode}
+                      isSelected={selectedIds.has(disc.id)}
+                      onToggleSelection={toggleSelection}
+                      onSelect={onSelect}
+                      onArchive={onUnarchive}
+                      onDelete={onDelete}
+                      onTogglePin={onTogglePin}
+                      archiveLabel={t('disc.unarchive')}
+                      t={t}
+                      sourceAgents={sourceBindings.get(disc.id)}
+                      importedBy={importProvenance.get(disc.id) ?? null}
+                    />
+                  ))}
+                  {hiddenArchiveCount > 0 && (
+                    <button
+                      type="button"
+                      className="disc-show-more-btn disc-archives-more"
+                      onClick={() => setArchivedVisibleCount(count => count + 50)}
+                    >
+                      + {Math.min(50, hiddenArchiveCount)} {t('disc.showMore')}
+                    </button>
+                  )}
+                </>
+              );
+            })()}
           </div>
         )}
+      </div>
+      <div className="disc-sidebar-footer" hidden={globalSearchOpen}>
+        <span>{t('disc.sidebar.compact')}</span>
+        <span>
+          <kbd>↑↓</kbd> {t('disc.sidebar.navigate')}
+          <span aria-hidden="true"> · </span>
+          <kbd>/</kbd> {t('disc.sidebar.searchShortcut')}
+        </span>
       </div>
     </div>
   );

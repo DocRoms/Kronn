@@ -21,7 +21,7 @@ const PAGE_SIZE = 20;
  *  wall of text — so mark every occurrence instead of leaving the reader to
  *  scan. Split on the term rather than injecting HTML: a query is user input
  *  and must never reach the DOM as markup. */
-export function highlightTerm(snippet: string, term: string): React.ReactNode[] {
+function highlightTerm(snippet: string, term: string): React.ReactNode[] {
   const needle = term.trim();
   if (!needle) return [snippet];
   const lowerSnippet = snippet.toLowerCase();
@@ -82,6 +82,10 @@ export function GlobalSearchPanel({
   const inputRef = useRef<HTMLInputElement>(null);
   // Guards against a slow first page landing after a newer search started.
   const runIdRef = useRef(0);
+  // Opening the global panel from the sidebar with Enter must perform the
+  // search the user just asked for, not force a second Enter on an identical
+  // field. A ref keeps later filter/query edits explicit.
+  const initialSearchStartedRef = useRef(false);
 
   useEffect(() => { inputRef.current?.focus(); }, []);
 
@@ -124,6 +128,12 @@ export function GlobalSearchPanel({
       if (runId === runIdRef.current) setLoading(false);
     }
   }, [query, projectId, author, since, until]);
+
+  useEffect(() => {
+    if (initialSearchStartedRef.current || !initialQuery.trim()) return;
+    initialSearchStartedRef.current = true;
+    void run(0);
+  }, [initialQuery, run]);
 
   const submit = (event: React.FormEvent) => {
     event.preventDefault();

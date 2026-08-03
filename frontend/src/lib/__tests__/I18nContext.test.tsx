@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { I18nProvider, useT } from '../I18nContext';
+import { __setLocaleLoadersForTests, loadLocale, type TranslationDict } from '../i18n';
 
 // Test component that displays locale and a translation
 function TestConsumer() {
@@ -71,5 +72,35 @@ describe('I18nContext', () => {
 
     expect(screen.getByTestId('locale')).toHaveTextContent('en');
     expect(screen.getByTestId('translation')).toHaveTextContent('Projects');
+  });
+
+  it('keeps the last requested locale when lazy chunks resolve out of order', async () => {
+    let resolveEn!: (module: { default: TranslationDict }) => void;
+    let resolveEs!: (module: { default: TranslationDict }) => void;
+    const restore = __setLocaleLoadersForTests({
+      fr: async () => ({ default: { 'nav.projects': 'Projets' } }),
+      en: () => new Promise(done => { resolveEn = done; }),
+      es: () => new Promise(done => { resolveEs = done; }),
+    });
+    try {
+      const user = userEvent.setup();
+      render(
+        <I18nProvider>
+          <TestConsumer />
+        </I18nProvider>
+      );
+
+      await user.click(screen.getByTestId('switch-en'));
+      await user.click(screen.getByTestId('switch-es'));
+      await act(async () => resolveEs({ default: { 'nav.projects': 'Proyectos' } }));
+      await waitFor(() => expect(screen.getByTestId('locale')).toHaveTextContent('es'));
+
+      await act(async () => resolveEn({ default: { 'nav.projects': 'Projects' } }));
+      expect(screen.getByTestId('locale')).toHaveTextContent('es');
+      expect(localStorage.getItem('kronn:ui-locale')).toBe('es');
+    } finally {
+      restore();
+      await Promise.all([loadLocale('fr'), loadLocale('en'), loadLocale('es')]);
+    }
   });
 });

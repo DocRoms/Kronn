@@ -26,11 +26,11 @@ vi.mock('../../lib/api', () => ({
 }));
 
 import {
-  CustomApiAiHelper,
   applyToCustomForm,
   buildSystemPrompt,
   buildContextBlock,
-} from '../CustomApiAiHelper';
+} from '../customApiAiHelperUtils';
+import { CustomApiAiHelper } from '../CustomApiAiHelper';
 import type { AgentType } from '../../types/generated';
 
 const t = (key: string, ...args: (string | number)[]) => {

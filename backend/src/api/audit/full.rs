@@ -1833,6 +1833,7 @@ pub async fn full_audit(
             lint_report: None,
             id: Uuid::new_v4().to_string(),
             role: MessageRole::User,
+            channel: MessageChannel::Main,
             content: validation_prompt,
             agent_type: None,
             timestamp: now,

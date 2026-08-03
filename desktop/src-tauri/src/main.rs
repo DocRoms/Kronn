@@ -585,7 +585,7 @@ async fn start_backend(port: u16, dist_dir: std::path::PathBuf) -> anyhow::Resul
     // Partial response recovery: convert dangling checkpoints to Agent messages.
     let recovered = state
         .db
-        .with_conn(|conn| kronn::db::discussions::recover_partial_responses(conn))
+        .with_conn(kronn::db::discussions::recover_partial_responses)
         .await;
     if let Ok(ids) = recovered {
         if !ids.is_empty() {

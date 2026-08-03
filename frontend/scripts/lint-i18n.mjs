@@ -15,7 +15,7 @@
  *
  * Usage:
  *   node frontend/scripts/lint-i18n.mjs
- *   pnpm i18n:lint
+ *   pnpm run lint:i18n
  *
  * Exits non-zero on missing keys; warnings only for unused keys.
  */
@@ -25,15 +25,14 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT = join(fileURLToPath(import.meta.url), '..', '..');
 const SRC = join(ROOT, 'src');
-const I18N_PATH = join(SRC, 'lib', 'i18n.ts');
+const I18N_DIR = join(SRC, 'lib', 'i18n', 'locales');
 
 // ── 1. Parse locale dictionaries ──────────────────────────────────────────
-const i18nText = readFileSync(I18N_PATH, 'utf-8');
-
 // Each locale is a `const fr: TranslationDict = { ... };` block. We walk
-// the file once and slice out each block by its declaration line + the
-// matching closing `};` at column 0.
+// its dedicated lazy module and slice out the block by its declaration line +
+// the matching closing `};` at column 0.
 function extractLocaleBlock(name) {
+  const i18nText = readFileSync(join(I18N_DIR, `${name}.ts`), 'utf-8');
   const startMatch = i18nText.match(new RegExp(`^const ${name}: TranslationDict = \\{`, 'm'));
   if (!startMatch) throw new Error(`Locale '${name}' not found`);
   const startIdx = startMatch.index + startMatch[0].length;
@@ -114,7 +113,7 @@ const T_LITERAL = /\bt\(\s*['"]([\w.\-:]+)['"]/g;
 const T_TEMPLATE = /\bt\(\s*`/g;
 const T_VAR = /\bt\(\s*[a-zA-Z_$][\w$]*\s*[,)]/g;
 for (const file of walk(SRC)) {
-  if (file === I18N_PATH) continue; // don't self-scan the dictionary
+  if (file.startsWith(I18N_DIR)) continue; // don't self-scan dictionaries
   const text = readFileSync(file, 'utf-8');
   let m;
   T_LITERAL.lastIndex = 0;

@@ -572,11 +572,64 @@ async fn execute_api_call_step_with_db_inner(
         } else {
             resolved_pid.clone()
         };
+        let diagnostic_config_id = config_id.to_string();
+        let diagnostic_slug = slug.to_string();
+        let diagnostic_pid = resolved_pid.clone();
+        let diagnostic_secret = secret.clone();
+        let diagnostic = state
+            .db
+            .with_conn(move |conn| -> anyhow::Result<String> {
+                let Some(config) = crate::db::mcps::get_config(conn, &diagnostic_config_id)? else {
+                    return Ok(format!(
+                        "config `{diagnostic_config_id}` does not exist; call mcp_list again and use a current configs[].config_id"
+                    ));
+                };
+                if config.server_id != diagnostic_slug {
+                    return Ok(format!(
+                        "config `{diagnostic_config_id}` belongs to server `{}`, not requested plugin `{diagnostic_slug}`; use the matching configs[].server_id",
+                        config.server_id
+                    ));
+                }
+                if !config.is_global
+                    && !config.project_ids.iter().any(|project_id| project_id == &diagnostic_pid)
+                {
+                    let scopes = if config.project_ids.is_empty() {
+                        "no project".to_string()
+                    } else {
+                        config.project_ids.join(", ")
+                    };
+                    return Ok(format!(
+                        "config `{diagnostic_config_id}` is scoped to [{scopes}], not project `{}`; link it to the workflow project or make it global",
+                        if diagnostic_pid.is_empty() { "(global)" } else { &diagnostic_pid }
+                    ));
+                }
+                let servers = crate::db::mcps::list_servers(conn)?;
+                let Some(server) = servers.iter().find(|server| server.id == config.server_id) else {
+                    return Ok(format!(
+                        "server `{}` referenced by config `{diagnostic_config_id}` is missing from the registry; refresh or reinstall the plugin",
+                        config.server_id
+                    ));
+                };
+                if server.api_spec.is_none() {
+                    return Ok(format!(
+                        "server `{}` currently has no api_spec, so it is MCP/CLI-only and cannot execute an ApiCall; verify servers_with_api from a fresh mcp_list",
+                        server.id
+                    ));
+                }
+                if crate::db::mcps::decrypt_env(&config.env_encrypted, &diagnostic_secret).is_err() {
+                    return Ok(format!(
+                        "config `{diagnostic_config_id}` is correctly scoped but its encrypted configuration cannot be opened; re-save the plugin credentials"
+                    ));
+                }
+                Ok("plugin/config passed static checks but was absent from the active snapshot; retry after a fresh mcp_list and inspect captured_at".to_string())
+            })
+            .await
+            .unwrap_or_else(|error| format!("diagnostic lookup failed: {error}"));
         return fail(
             step,
             start,
             format!(
-                "API plugin `{slug}` / config `{config_id}` not active on project `{pid_label}`"
+                "API plugin `{slug}` / config `{config_id}` unavailable on project `{pid_label}`: {diagnostic}"
             ),
         );
     };
@@ -3886,6 +3939,37 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].source, "workflow");
         assert!(rows[0].run_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn unavailable_plugin_reports_a_stale_or_missing_config_actionably() {
+        let state = test_app_state();
+        state.config.write().await.encryption_secret = Some("test-secret".into());
+        let step = WorkflowStep {
+            name: "stale-config".into(),
+            step_type: StepType::ApiCall,
+            api_plugin_slug: Some("missing-plugin".into()),
+            api_config_id: Some("missing-config".into()),
+            api_endpoint_path: Some("/items".into()),
+            api_method: Some("GET".into()),
+            ..Default::default()
+        };
+
+        let outcome = execute_api_call_step_with_db(
+            &step,
+            Some("proj-1"),
+            &state,
+            &TemplateContext::new(),
+            SecurityPolicy::production(),
+        )
+        .await;
+
+        assert_eq!(outcome.result.status, RunStatus::Failed);
+        assert!(outcome
+            .result
+            .output
+            .contains("config `missing-config` does not exist"));
+        assert!(outcome.result.output.contains("call mcp_list again"));
     }
 
     // ── api_body typed injection (whole-placeholder) ────────────────────

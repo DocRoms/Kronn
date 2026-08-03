@@ -309,6 +309,7 @@ pub async fn orchestrate(
                 lint_report: None,
                 id: Uuid::new_v4().to_string(),
                 role: MessageRole::System,
+                channel: MessageChannel::Main,
                 content: sys_text.clone(),
                 agent_type: None,
                 timestamp: Utc::now(),
@@ -529,6 +530,7 @@ pub async fn orchestrate(
                                 lint_report: None,
                                 id: Uuid::new_v4().to_string(),
                                 role: MessageRole::Agent,
+                                channel: MessageChannel::Main,
                                 content: result.response.clone(),
                                 agent_type: Some(agent_type.clone()),
                                 timestamp: Utc::now(),
@@ -649,6 +651,7 @@ pub async fn orchestrate(
                             lint_report: None,
                             id: Uuid::new_v4().to_string(),
                             role: MessageRole::Agent,
+                            channel: MessageChannel::Main,
                             content: format!("[Synthesis]\n\n{}", result.response),
                             agent_type: Some(primary_agent_type.clone()),
                             timestamp: Utc::now(),
@@ -788,7 +791,10 @@ pub(super) async fn maybe_generate_summary(
     let non_system_msgs: Vec<&crate::models::DiscussionMessage> = disc
         .messages
         .iter()
-        .filter(|m| !matches!(m.role, MessageRole::System))
+        .filter(|m| {
+            matches!(m.channel, crate::models::MessageChannel::Main)
+                && !matches!(m.role, MessageRole::System)
+        })
         .collect();
     let non_system_count = non_system_msgs.len() as u32;
 
@@ -973,6 +979,7 @@ pub(super) async fn maybe_generate_summary(
                                 lint_report: None,
                                 id: uuid::Uuid::new_v4().to_string(),
                                 role: MessageRole::System,
+                                channel: MessageChannel::Main,
                                 content: format!(
                                     "summary cached | model: {} | {} chars | {} messages",
                                     model_name2,
@@ -1040,6 +1047,7 @@ pub async fn generate_summary_on_demand(
     from_idx: u32,
     to_idx: u32,
     tokens: &TokensConfig,
+    include_notes: bool,
 ) -> Result<(String, u64, Option<String>), String> {
     use crate::agents::runner;
     use crate::api::disc_helpers::agent_display_name;
@@ -1050,7 +1058,10 @@ pub async fn generate_summary_on_demand(
     let non_system: Vec<&DiscussionMessage> = disc
         .messages
         .iter()
-        .filter(|m| !matches!(m.role, MessageRole::System))
+        .filter(|m| {
+            (include_notes || matches!(m.channel, crate::models::MessageChannel::Main))
+                && !matches!(m.role, MessageRole::System)
+        })
         .collect();
     let total = non_system.len() as u32;
     let from = from_idx.min(total) as usize;

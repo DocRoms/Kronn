@@ -100,10 +100,24 @@ describe('ChatHeader — shared agent switcher', () => {
   beforeEach(() => {
     vi.mocked(discussionsApi.update).mockReset().mockResolvedValue(undefined);
     vi.mocked(discussionsApi.nativeAgentMode).mockReset().mockResolvedValue({ disabled: false });
+    vi.mocked(discussionsApi.workspaces).mockReset().mockResolvedValue([]);
   });
 
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  it('keeps the title edit action immediately beside the visible title', () => {
+    renderHeader();
+
+    const title = document.querySelector('.disc-chat-header-title-text');
+    const edit = screen.getByRole('button', { name: 'disc.editTitle' });
+    const id = screen.getByRole('button', { name: 'disc.idPillTooltip' });
+
+    expect(title?.nextElementSibling).toBe(edit);
+    expect(edit.nextElementSibling).toBe(id);
+    expect(edit.closest('.disc-chat-header-title')).not.toBeNull();
+    expect(edit.closest('.disc-chat-header-presence')).toBeNull();
   });
 
   it('uses the workflow picker and persists a usable agent directly', async () => {
@@ -140,6 +154,32 @@ describe('ChatHeader — shared agent switcher', () => {
   it('is disabled while the discussion is sending', () => {
     renderHeader({ sending: true });
     expect(screen.getByRole('button', { name: 'disc.switchAgent' })).toBeDisabled();
+  });
+
+  it('shows declared joined-CLI worktrees in the discussion header', async () => {
+    vi.mocked(discussionsApi.workspaces).mockResolvedValue([{
+      id: 'workspace-1',
+      disc_id: 'disc-agent-switch',
+      session_pk: 42,
+      session_agent_type: 'Codex',
+      task_id: 'task-140',
+      task_reference: 'KT-140',
+      project_id: 'project-1',
+      workspace_path: '/tmp/kronn-kt140',
+      canonical_path: '/tmp/kronn-kt140',
+      branch: 'feature/kt140',
+      head_sha: 'abc123',
+      ownership: 'external',
+      state: 'attached',
+      created_at: '2026-01-01',
+      updated_at: '2026-01-01',
+    }]);
+
+    renderHeader();
+
+    expect(await screen.findByText('feature/kt140')).toBeInTheDocument();
+    expect(screen.getByText('KT-140')).toBeInTheDocument();
+    expect(screen.getByText('Codex')).toBeInTheDocument();
   });
 
   it('keeps the choices open and reports the API error', async () => {
