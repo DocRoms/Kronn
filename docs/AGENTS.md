@@ -83,6 +83,7 @@ Full spec: [`docs/conventions/agents-md-format-v1.md`](conventions/agents-md-for
 | testing / quality | `docs/testing-quality.md` |
 | coding rules | `docs/coding-rules.md` |
 | known issues / tech debt | `docs/inconsistencies-tech-debt.md` |
+| onboarding catalogue + courses (newcomer learning paths) | `docs/onboarding.md` (index) + `docs/onboarding/NN-<slug>.md` (generated courses) |
 | Architecture decisions | `docs/decisions.md` |
 | term definitions / project jargon | `docs/glossary.md` |
 

@@ -1068,6 +1068,76 @@ pub async fn read_doc_asset(
     }
 }
 
+/// Max size we'll read for an inline source-file preview (1 MB — mentor
+/// resources point at readable files, not build artifacts / binaries).
+const MAX_REPO_FILE_BYTES: u64 = 1024 * 1024;
+
+/// GET /api/projects/:id/repo-file?path=src/foo.rs
+/// Read ANY text file from the project's checkout so the Mode Mentor "resources"
+/// block can preview a referenced repo file. Unlike `read_ai_file` this is NOT
+/// confined to docs — but it stays read-only, size-capped, UTF-8 only, and the
+/// resolved path MUST canonicalize INSIDE the project root (rejects `..` /
+/// symlink escape).
+pub async fn read_repo_file(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<AiFileQuery>,
+) -> Json<ApiResponse<AiFileContent>> {
+    if query.path.is_empty()
+        || query.path.contains("..")
+        || query.path.starts_with('/')
+        || query.path.starts_with('\\')
+    {
+        return Json(ApiResponse::err("Invalid path"));
+    }
+
+    let project = match state
+        .db
+        .with_conn(move |conn| crate::db::projects::get_project(conn, &id))
+        .await
+    {
+        Ok(Some(p)) => p,
+        Ok(None) => return Json(ApiResponse::err("Project not found")),
+        Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
+    };
+
+    let project_path_str = project.path.clone();
+    let rel = query.path.clone();
+
+    let result = tokio::task::spawn_blocking(move || -> Result<AiFileContent, String> {
+        let root = scanner::resolve_host_path(&project_path_str);
+        let canon_root = root
+            .canonicalize()
+            .map_err(|_| "project root not found".to_string())?;
+        let canon = root
+            .join(&rel)
+            .canonicalize()
+            .map_err(|_| "file not found".to_string())?;
+        // Reject symlinks / `..` that escape the project root.
+        if !canon.starts_with(&canon_root) {
+            return Err("path escapes the project".to_string());
+        }
+        let meta = std::fs::metadata(&canon).map_err(|_| "cannot read file".to_string())?;
+        if !meta.is_file() {
+            return Err("not a file".to_string());
+        }
+        if meta.len() > MAX_REPO_FILE_BYTES {
+            return Err("file too large to preview".to_string());
+        }
+        // UTF-8 only — a binary file just isn't previewable text.
+        let content =
+            std::fs::read_to_string(&canon).map_err(|_| "file is not readable text".to_string())?;
+        Ok(AiFileContent { path: rel, content })
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
+
+    match result {
+        Ok(c) => Json(ApiResponse::ok(c)),
+        Err(e) => Json(ApiResponse::err(e)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

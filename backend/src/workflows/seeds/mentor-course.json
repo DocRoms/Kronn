@@ -1,0 +1,119 @@
+{
+  "id": "mentor-course",
+  "name": "Mode Mentor — génération de cours (onboarding)",
+  "project_id": null,
+  "trigger": {
+    "type": "Manual"
+  },
+  "steps": [
+    {
+      "name": "generate_course",
+      "step_type": {
+        "type": "Agent"
+      },
+      "agent": "ClaudeCode",
+      "output_format": {
+        "type": "TypedSchema",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "objective": {
+              "type": "string"
+            },
+            "chapters": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "title": {
+                    "type": "string"
+                  },
+                  "explanation": {
+                    "type": "string"
+                  },
+                  "checkpoints": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "question": {
+                          "type": "string"
+                        },
+                        "options": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "answer": {
+                          "type": "integer"
+                        },
+                        "explanations": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "reveal": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                },
+                "required": [
+                  "title",
+                  "explanation"
+                ]
+              }
+            },
+            "level": {
+              "type": "string"
+            },
+            "prerequisites": {
+              "type": "string"
+            },
+            "references": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "objective",
+            "chapters"
+          ]
+        }
+      },
+      "prompt_template": "Tu es un formateur pour développeurs débutants, style OpenClassrooms (posture EXPLICATIVE : tu montres et expliques le VRAI code du projet — il n'y a pas de solution à cacher). Tu prépares un COURS d'onboarding AUTO-SUFFISANT : une fois généré, il sera lu SEUL, sans toi, comme un chapitre de MOOC.\n\nSOURCE :\n- Si un ticket est fourni (ticket_key = \"{{ticket_key}}\"), récupère-le via l'outil disponible et base-toi dessus.\n- Sinon, pars du SUJET : \"{{subject}}\".\n\nANCRAGE DANS LE VRAI CODE (obligatoire) :\n- Explore la doc IA (docs/AGENTS.md, repo-map.md, glossary.md) et OUVRE réellement les fichiers que tu cites.\n- N'inclus un extrait de code, un chemin de fichier ou un nom de symbole QUE si tu l'as réellement lu dans le repo. N'invente JAMAIS un chemin, un nom de fonction ni un numéro de ligne. Cite par SYMBOLE (« la struct AppState dans backend/src/lib.rs »), pas par numéro de ligne codé en dur (fragile, périmé au moindre ajout) — voir la citation-grammar de docs/AGENTS.md.\n- Si le sujet suppose une techno absente du repo, corrige-le et bâtis le cours sur l'équivalent réel présent.\n\nNIVEAU & AUDIENCE (en-tête auto-suffisant) :\n- En sortie, renseigne `level` (ex. « débutant », « intermédiaire »), `prerequisites` (les notions supposées connues, ex. « bases de Rust et de l'async, React + TypeScript » — ou « Aucun ») et `references` (les VRAIS chemins de fichiers/docs du repo réellement utilisés).\n- Calibre profondeur, vocabulaire et rythme sur le niveau. Si le sujet exige un langage/paradigme (ex. Rust, async) que l'apprenti ne maîtrise probablement pas, DIS-LE explicitement dès le premier chapitre et donne un mini-rappel, plutôt que de le laisser deviner qu'il est largué.\n\nSTRUCTURE (français, 4 à 8 chapitres COURTS et progressifs) :\n- objective : un TITRE COURT (≤ 10 mots), un acquis avec un verbe d'action (« Comprendre le flux de données X ») — PAS de phrase « À la fin tu sauras… », pas de sous-propositions, pas de point final.\n- PREMIER chapitre = CADRE : pour qui est ce cours, les prérequis, et un mini-glossaire des termes-clés qui reviendront.\n- chapters : chaque chapitre = { title, explanation, checkpoints }. `checkpoints` est une LISTE : un chapitre de contenu en a UN, le chapitre de Révision en a PLUSIEURS (un par question).\n\nRÈGLES PAR CHAPITRE (explanation) :\n- COMMENCE par le mini-objectif (« À la fin de ce chapitre, tu sauras… ») puis le POURQUOI avant le comment.\n- CHARGE COGNITIVE : au plus 2-3 concepts NOUVEAUX par chapitre ; s'il en faut plus, découpe en deux chapitres. Vise ~150-300 mots d'explication. Un détail secondaire (note de version/migration) va dans une aparté courte, pas dans le fil principal.\n- Entre un chapitre « carte » (dossiers, vue d'ensemble) et un chapitre « code » (types, structs), insère une phrase-palier de transition — ne saute jamais d'une carte de dossiers à du code dense sans échelon.\n- DÉFINIS chaque terme technique à sa PREMIÈRE occurrence, en 5-8 mots entre parenthèses (ex. « mode WAL (journalisation qui autorise les lectures pendant l'écriture) »).\n- Le corps EXÉCUTE réellement l'objectif annoncé : si l'objectif promet de « tracer une requête de bout en bout », montre le fil COMPLET (URL → routeur → handler → état lu), pas trois extraits isolés.\n- N'ÉLIDE JAMAIS (/* … */, // …) le fragment de code qui PORTE le concept du chapitre ; n'élide que le répétitif. Montre au moins un exemple complet et réaliste (ex. route → handler nommé).\n- GESTE PRATIQUE (quand c'est pertinent, best-effort) : puisque l'objectif est de « prendre en main », propose quand tu le peux un geste concret à faire — commande exacte + ce que l'apprenti doit OBSERVER/vérifier (décris ce qui DOIT se passer ; NE fabrique PAS une sortie exacte que tu n'as pas réellement exécutée — si tu montres une sortie, marque-la « (illustratif, à confirmer) ») + 1-2 pièges de dépannage (« si ça casse, vérifie… »). N'impose PAS de geste pratique aux chapitres purement CADRE/glossaire ni au chapitre RÉVISION.\n\nCHECKPOINT (au moins UN par chapitre de contenu, dans `checkpoints`) :\n- Chaque entrée de `checkpoints` est soit un QUIZ { question, options (3-4 ; évite le vrai/faux à 2 options), answer (index base 0), explanations }, soit un EXERCICE { question, reveal } sans options, où l'apprenti PRODUIT une réponse de tête.\n- Vise au moins un checkpoint sur trois de type EXERCICE (rappel actif) : produire de tête ancre mieux que reconnaître une option.\n- Un checkpoint ne teste QUE du matériel explicitement exposé plus haut DANS LE MÊME CHAPITRE. Les distracteurs ET leurs explications ne citent QUE des notions déjà introduites — jamais un concept surgi de nulle part.\n- QUALITÉ DES DISTRACTEURS : chaque MAUVAISE option est une MÉPRISE COURANTE et tentante (concept voisin, règle sur-généralisée, vrai-en-Docker-faux-en-natif). INTERDIT : les distracteurs absurdes ou hors-sujet qu'aucun apprenti ne cocherait (ils rendent la bonne réponse évidente). Si tu ne trouves pas 3 méprises plausibles, mets 2 options fortes plutôt qu'une 3e bidon.\n- explanations = tableau ALIGNÉ sur options (même longueur, même ordre) : pour CHAQUE option, une phrase qui CORRIGE la méprise (pas seulement « faux »). C'est le feedback montré après le choix.\n- VARIE la position de la bonne réponse d'un checkpoint à l'autre : `answer` ne doit pas retomber systématiquement sur le même index.\n- RÉCUPÉRATION ESPACÉE ENTRELACÉE : à partir du 3e chapitre, glisse de temps en temps dans le checkpoint UNE question de rappel portant sur un chapitre ANTÉRIEUR, en plus de la question du chapitre courant.\n\nCHAPITRE FINAL DE RÉVISION :\n- Termine par un chapitre « Révision » dont le tableau `checkpoints` contient un QUIZ CUMULATIF : une question par chapitre précédent, dans le désordre (chacune un QUIZ structuré { question, options, answer, explanations }). Le corrigé (bonne réponse + feedback par option) est rendu automatiquement — n'écris PAS de <details> ni de corrigé à la main dans l'explanation. Garde l'explanation de ce chapitre courte (une phrase d'intro). Varie la position des bonnes réponses d'une question à l'autre.\n\nChapitres digestes : mieux vaut 6 chapitres clairs qu'un pavé. Réponds en JSON strict selon ton format."
+    }
+  ],
+  "actions": [],
+  "safety": {
+    "sandbox": false,
+    "require_approval": false
+  },
+  "workspace_config": null,
+  "concurrency_limit": null,
+  "guards": {
+    "timeout_seconds": 900
+  },
+  "variables": [
+    {
+      "name": "subject",
+      "label": "Sujet du cours (vide si ticket)",
+      "placeholder": "",
+      "required": false
+    },
+    {
+      "name": "ticket_key",
+      "label": "Clé du ticket (vide si sujet libre)",
+      "placeholder": "",
+      "required": false
+    }
+  ],
+  "enabled": true,
+  "created_at": "2026-01-01T00:00:00Z",
+  "updated_at": "2026-01-01T00:00:00Z"
+}

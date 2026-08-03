@@ -85,7 +85,7 @@ const mkProject = (id: string, name: string, repo_url: string | null = null): Pr
   token_override: null,
   ai_config: { detected: false, configs: [] },
   audit_status: 'NoTemplate',
-  ai_todo_count: 0, tech_debt_count: 0, needs_docs_migration: false, path_exists: true,
+  ai_todo_count: 0, tech_debt_count: 0, onboarding_count: 0, needs_docs_migration: false, path_exists: true,
   created_at: '2026-05-15T10:00:00Z',
   updated_at: '2026-05-15T10:00:00Z',
 });

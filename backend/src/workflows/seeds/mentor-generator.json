@@ -1,0 +1,97 @@
+{
+  "id": "mentor-generator",
+  "name": "Mode Mentor — génération de parcours",
+  "project_id": null,
+  "trigger": {
+    "type": "Manual"
+  },
+  "steps": [
+    {
+      "name": "generate",
+      "step_type": {
+        "type": "Agent"
+      },
+      "agent": "ClaudeCode",
+      "output_format": {
+        "type": "TypedSchema",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "objective": {
+              "type": "string"
+            },
+            "criteria": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "resources": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "title": {
+                    "type": "string"
+                  },
+                  "url": {
+                    "type": "string"
+                  },
+                  "kind": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "title",
+                  "url",
+                  "kind"
+                ]
+              }
+            },
+            "target_archi": {
+              "type": "string"
+            },
+            "target_tests": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "objective",
+            "criteria",
+            "resources",
+            "target_archi",
+            "target_tests"
+          ]
+        }
+      },
+      "prompt_template": "Tu prépares un parcours d'apprentissage « Mode Mentor » pour un développeur débutant. Il lui sera ouvert directement.\n\nSOURCE :\n- Si un ticket est fourni (ticket_key = \"{{ticket_key}}\"), récupère son titre + description via l'outil disponible (getJiraIssue / api_call) et base-toi dessus.\n- Sinon, pars du SUJET LIBRE : \"{{subject}}\".\n\nTu peux explorer la doc IA du projet (docs/AGENTS.md, repo-map.md, glossary.md) et les fichiers pour ancrer le contenu dans le vrai code. Ne cite un chemin de fichier ou une URL QUE s'il est réel et vérifié (ouvre le fichier / vérifie le chemin) ; n'invente JAMAIS un chemin ni un numéro de ligne (cf. la citation-grammar de docs/AGENTS.md).\n\nPRODUIS un brouillon de parcours, en français, adapté à un débutant :\n- objective : un TITRE COURT (≤ 10 mots), formulé comme un acquis avec un verbe d'action (« Configurer le cache Fastly », « Comprendre les TwigComponents ») — c'est le titre du parcours : PAS de phrase « À la fin tu sauras … », pas de sous-propositions, pas de point final.\n- criteria : 3 à 5 critères de réussite COURTS et vérifiables — UNE ligne chacun (≤ 10 mots, style checklist), jamais de paragraphe.\n- resources : 3 à 4 ressources à lire (doc officielle, article, ou fichier du repo). Chaque ressource = {title, url, kind} avec kind ∈ {doc, article, repo}. URLs RÉELLES et vérifiées ; pour un fichier du repo, url = chemin relatif réel (pas inventé).\n- target_archi : la cible « où on va », sous forme d'un DIAGRAMME Mermaid décrivant l'architecture attendue (composants/modules et leurs relations, flux de données) — le CONTRAT, pas l'implémentation. Règles STRICTES : (1) commence directement par une racine Mermaid, de préférence `flowchart TD` ou `flowchart LR` ; (2) n'entoure PAS le diagramme de balises ``` ni d'aucun texte : ce champ contient UNIQUEMENT la source Mermaid ; (3) garde-le simple et lisible (5 à 10 nœuds max), libellés courts en français ; (4) mets des responsabilités/rôles dans les nœuds, jamais de code d'implémentation.\n- target_tests : les tests d'acceptation « comment on saura que c'est bon » (en pseudo, given/when/then).\n\nNe donne PAS la solution : la cible décrit le contrat, pas le code. Réponds en JSON strict selon ton format."
+    }
+  ],
+  "actions": [],
+  "safety": {
+    "sandbox": false,
+    "require_approval": false
+  },
+  "workspace_config": null,
+  "concurrency_limit": null,
+  "guards": {
+    "timeout_seconds": 900
+  },
+  "variables": [
+    {
+      "name": "subject",
+      "label": "Sujet libre (vide si ticket)",
+      "placeholder": "",
+      "required": false
+    },
+    {
+      "name": "ticket_key",
+      "label": "Clé du ticket (vide si sujet libre)",
+      "placeholder": "",
+      "required": false
+    }
+  ],
+  "enabled": true,
+  "created_at": "2026-01-01T00:00:00Z",
+  "updated_at": "2026-01-01T00:00:00Z"
+}

@@ -996,8 +996,8 @@ describe('DiscussionsPage', () => {
   });
 
   it('groups project discussions by org when multiple orgs exist', async () => {
-    const proj1 = { id: 'p1', name: 'web-app', path: '/repos/web-app', repo_url: 'git@github.com:acme-org/web-app.git', token_override: null, ai_config: { detected: false, configs: [] }, audit_status: 'NoTemplate' as AiAuditStatus, ai_todo_count: 0, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', path_exists: true, tech_debt_count: 0, needs_docs_migration: false };
-    const proj2 = { id: 'p2', name: 'api-server', path: '/repos/api-server', repo_url: 'git@github.com:johndoe/api-server.git', token_override: null, ai_config: { detected: false, configs: [] }, audit_status: 'NoTemplate' as AiAuditStatus, ai_todo_count: 0, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', path_exists: true, tech_debt_count: 0, needs_docs_migration: false };
+    const proj1 = { id: 'p1', name: 'web-app', path: '/repos/web-app', repo_url: 'git@github.com:acme-org/web-app.git', token_override: null, ai_config: { detected: false, configs: [] }, audit_status: 'NoTemplate' as AiAuditStatus, ai_todo_count: 0, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', path_exists: true, tech_debt_count: 0, onboarding_count: 0, needs_docs_migration: false };
+    const proj2 = { id: 'p2', name: 'api-server', path: '/repos/api-server', repo_url: 'git@github.com:johndoe/api-server.git', token_override: null, ai_config: { detected: false, configs: [] }, audit_status: 'NoTemplate' as AiAuditStatus, ai_todo_count: 0, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', path_exists: true, tech_debt_count: 0, onboarding_count: 0, needs_docs_migration: false };
 
     const disc1 = { ...makeListDiscussion('d1', 1), project_id: 'p1', messages: [{ id: 'm1', role: 'User' as const, content: 'test', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null }] };
     const disc2 = { ...makeListDiscussion('d2', 1), project_id: 'p2', messages: [{ id: 'm2', role: 'User' as const, content: 'test', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null }] };
@@ -2727,7 +2727,7 @@ describe('DiscussionsPage', () => {
     repo_url: null, token_override: null,
     ai_config: { detected: false, configs: [] },
     audit_status,
-    ai_todo_count: 0, tech_debt_count: 0, needs_docs_migration: false, path_exists: true,
+    ai_todo_count: 0, tech_debt_count: 0, onboarding_count: 0, needs_docs_migration: false, path_exists: true,
     default_skill_ids: [],
     briefing_notes: briefing ?? null,
     linked_repos: [],

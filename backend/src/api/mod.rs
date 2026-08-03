@@ -23,6 +23,7 @@ pub mod id_resolver;
 pub mod learnings;
 pub mod mcp_remote;
 pub mod mcps;
+pub mod mentor;
 pub mod ollama;
 pub mod openapi;
 pub mod planning;

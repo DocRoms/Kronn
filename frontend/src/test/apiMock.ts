@@ -40,6 +40,7 @@ export const API_NAMESPACES = [
   'mcps',
   'discussions',
   'planning',
+  'mentor',
   'workflows',
   'quickPrompts',
   'quickApis',
@@ -87,6 +88,7 @@ interface DefaultMock {
   mcps: Record<string, AnyFn>;
   discussions: Record<string, AnyFn>;
   planning: Record<string, AnyFn>;
+  mentor: Record<string, AnyFn>;
   workflows: Record<string, AnyFn>;
   quickPrompts: Record<string, AnyFn>;
   quickApis: Record<string, AnyFn>;
@@ -358,6 +360,17 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
         stats: { ready: 0, blocked: 0, in_progress: 0, ideas: 0, done: 0, later: 0 },
       }),
       changes: resolve([]),
+    },
+
+    mentor: {
+      listParcours: resolve([]),
+      getParcours: resolve(null),
+      deleteParcours: resolve(true),
+      submit: resolve(null),
+      hint: resolve(null),
+      advance: resolve(null),
+      completeChapter: resolve(null),
+      onboardingCatalog: resolve([]),
     },
 
     workflows: {

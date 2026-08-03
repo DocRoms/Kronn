@@ -310,12 +310,21 @@ pub(crate) fn enrich_audit_status(project: &mut Project) {
         project.audit_status = crate::models::AiAuditStatus::default();
         project.ai_todo_count = 0;
         project.tech_debt_count = 0;
+        project.onboarding_count = 0;
         project.needs_docs_migration = false;
         return;
     }
     project.audit_status = scanner::detect_audit_status(&project.path);
     project.ai_todo_count = scanner::count_ai_todos(&project.path);
     project.tech_debt_count = scanner::count_tech_debt(&project.path);
+    // Count onboarding topics from docs/onboarding.md (0 when absent) so the card
+    // can badge it and the Mentor catalogue can list only projects that have it.
+    project.onboarding_count = {
+        let file = scanner::detect_docs_dir(&resolved).join("onboarding.md");
+        std::fs::read_to_string(&file)
+            .map(|md| crate::core::onboarding_registry::parse_registry(&md).len() as u32)
+            .unwrap_or(0)
+    };
     project.needs_docs_migration = scanner::needs_docs_migration(&resolved);
     crate::core::docs_migration::backfill_docs_index(&resolved);
     // Self-heal `{{PROJECT_NAME}}` / `{{STACK_SUMMARY}}` / `{{TEST_CMD}}`
@@ -517,6 +526,7 @@ mod tests {
             audit_status: Default::default(),
             ai_todo_count: 0,
             tech_debt_count: 0,
+            onboarding_count: 0,
             needs_docs_migration: false,
             path_exists: true,
             default_skill_ids: vec![],

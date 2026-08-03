@@ -1,0 +1,29 @@
+{
+  "id": "mentor-bilan",
+  "name": "Mode Mentor — synthèse de clôture",
+  "project_id": null,
+  "trigger": { "type": "Manual" },
+  "steps": [
+    {
+      "name": "synthese",
+      "step_type": { "type": "Agent" },
+      "agent": "ClaudeCode",
+      "profile_ids": ["mentor-prof"],
+      "output_format": { "type": "FreeText" },
+      "prompt_template": "Tu clôtures un parcours d'apprentissage (Mode Mentor). Rédige une SYNTHÈSE DE CLÔTURE bienveillante, destinée à l'apprenti pour garder une trace de ce qu'il a appris. Ici la posture est EXPLICATIVE : le travail est fini, il n'y a plus de solution à cacher — tu peux nommer les concepts et les nommer clairement.\n\nSUJET / OBJECTIF DU PARCOURS :\n{{subject}}\n\nPOSTURE : {{mode}}\n\nCONTEXTE DU PARCOURS (critères de réussite, ressources, et — en posture mentor — le bilan écrit par l'apprenti lui-même ainsi que son plan / son code ; en posture onboarding — les chapitres du cours) :\n---\n{{context}}\n---\n\nCONSIGNES :\n- Si l'apprenti a rédigé son propre bilan, PARS DE SES MOTS : reprends et valorise ce qu'il a compris, puis comble seulement les vrais trous — sans le réprimander et sans tout réécrire à sa place.\n- Structure en Markdown, avec ces sections (titres `##`) : « Ce que tu as accompli », « Concepts clés à retenir », « Points de vigilance / à approfondir », « Où réutiliser ce que tu as appris » (le TRANSFERT : d'autres situations ou contextes où le même concept/pattern s'applique, et les signaux pour le reconnaître ailleurs), « Pour aller plus loin » (renvoie aux ressources).\n- Court et dense (250 à 350 mots), tutoiement, ton chaleureux mais précis. Pas de remplissage.\n- Réponds en français, en Markdown uniquement (pas de préambule du type « Voici la synthèse »)."
+    }
+  ],
+  "actions": [],
+  "safety": { "sandbox": false, "require_approval": false },
+  "workspace_config": null,
+  "concurrency_limit": null,
+  "guards": { "timeout_seconds": 900 },
+  "variables": [
+    { "name": "subject", "label": "Sujet / objectif du parcours", "placeholder": "", "required": true },
+    { "name": "mode", "label": "Posture (mentor|onboarding)", "placeholder": "", "required": true },
+    { "name": "context", "label": "Contexte assemblé du parcours", "placeholder": "", "required": false }
+  ],
+  "enabled": true,
+  "created_at": "2026-01-01T00:00:00Z",
+  "updated_at": "2026-01-01T00:00:00Z"
+}

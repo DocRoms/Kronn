@@ -61,6 +61,12 @@ describe('isRuntimeToken — namespace exclusion', () => {
     expect(isRuntimeToken('state.last_review')).toBe(true);
     expect(isRuntimeToken('batch.item.title')).toBe(true);
     expect(isRuntimeToken('batch.index')).toBe(true);
+    // Per-item fan-out aliases — resolved at run time, never launch variables.
+    // Regression: a BatchApiCall path `/repos/{{item.owner}}/.../{{item.number}}`
+    // used to make the launch modal prompt for item.owner/repo/number.
+    expect(isRuntimeToken('item.owner')).toBe(true);
+    expect(isRuntimeToken('item.number')).toBe(true);
+    expect(isRuntimeToken('current_task.number')).toBe(true);
     expect(isRuntimeToken('issue.title')).toBe(true);
     expect(isRuntimeToken('artifacts.review')).toBe(true);
   });

@@ -1,0 +1,14 @@
+-- 074 — Mode Mentor: structured parcours state on a discussion.
+--
+-- The "Mode Mentor" feature turns a discussion into a guided learning parcours
+-- (comprehension → resources → target → plan → code → bilan). The per-parcours
+-- state — current phase, per-block content, gating (which blocks are unlocked),
+-- validation status, and the hint-ladder level consumed — is held as a JSON blob
+-- on the discussion row (serialized like `participants_json`), so a parcours is
+-- fully described by its disc + this one column.
+--
+-- NULL = an ordinary discussion (not a mentor parcours). Kept OUT of the big
+-- `Discussion` struct hydration on purpose (same rationale as `no_agent` /
+-- `diverged_at`): read/written via dedicated accessors so we don't thread it
+-- through every query site.
+ALTER TABLE discussions ADD COLUMN mentor_state TEXT;

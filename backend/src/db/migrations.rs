@@ -377,6 +377,19 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "100_message_cli_authors",
         include_str!("sql/100_message_cli_authors.sql"),
     ),
+    // Authored on the Mode Mentor feature branch as `074_mentor_state` and
+    // already applied under that name on dev DBs; kept immutable (never renamed
+    // to 101+) so those DBs skip it instead of re-running the ADD COLUMN. Placed
+    // last because it was integrated after main reached migration 100.
+    ("074_mentor_state", include_str!("sql/074_mentor_state.sql")),
+    // One-shot repair of discussions.next_message_seq counters that desynced
+    // before insert_message became self-healing — a stale counter re-allocated
+    // an existing sort_order, tripped the 082 UNIQUE index, and silently blocked
+    // disc_append on the affected discussions.
+    (
+        "101_message_seq_resync",
+        include_str!("sql/101_message_seq_resync.sql"),
+    ),
 ];
 
 /// Run all migrations, optionally backing up the database file first.

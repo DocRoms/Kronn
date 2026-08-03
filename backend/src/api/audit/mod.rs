@@ -1047,6 +1047,61 @@ Apply the marker discipline (`TODO: verify` only if you couldn't check; `TODO: a
     },
 ];
 
+pub(crate) const ONBOARDING_STEPS: &[AnalysisStep] = &[
+    AnalysisStep {
+        target_file: "docs/onboarding.md",
+        prompt: "\
+You are running a FOCUSED ONBOARDING AUDIT. Your job is to PROPOSE onboarding course topics \
+for developers new to this codebase and APPEND them to `docs/onboarding.md` — the onboarding \
+registry (a doc-IA artifact, mirror of the tech-debt registry). Output ONLY onboarding topics; \
+do NOT touch source code or any other doc file.\n\n\
+\
+# A. WHAT MAKES A GOOD ONBOARDING TOPIC\n\
+A topic is a self-contained subject a newcomer should learn to become productive. Prioritise:\n\
+- **Core subsystems** to understand first (entry points, the main domain model, the request/render lifecycle).\n\
+- **Complex or high-leverage modules** — many moving parts, central to the app.\n\
+- **Undocumented / tribal-knowledge areas** — logic not explained anywhere under `docs/`.\n\
+- **High-churn zones** — run `git log --format= --name-only --since='6 months ago' | sort | uniq -c | sort -rn | head -20`. FALLBACK: if that yields fewer than ~30 commits or a non-discriminating count (every file = 1 → shallow/flattened history), do NOT rank by churn — use directory size, the presence of a dedicated `docs/architecture/*` doc (a subsystem with its own doc = high-leverage), and the density of `Contract`/interface/registry files (a sign of a complex, extensible subsystem).\n\
+Read `docs/AGENTS.md` and `docs/repo-map.md` FIRST to align with the project's own vocabulary and structure. \
+Name any EXTERNAL systems or sibling repos the codebase talks to (from the docs/config) — they belong in the topology topic below even though their code isn't in this repo. \
+Anchor EVERY topic in REAL files that exist in the repo (verify each path with Glob/ls — a reference to a non-existent file is a fabrication).\n\n\
+\
+# B. SHAPE IT AS A CURRICULUM (not a flat list)\n\
+Assign each topic a `Type`:\n\
+- `tronc` — 2 to 4 MANDATORY topics (~day 1-3), the shared mental model everyone needs first. ALWAYS include: (a) a Day-1 SETUP topic (how to run + test the project locally), (b) the end-to-end LIFECYCLE (how the core unit — a page/request/entity — is produced from entry point to output), (c) the TOPOLOGY (which apps/modules exist + where the data comes from, including the external systems/repos named above).\n\
+- `branche` — on-demand specializations, one per complex subsystem or business domain. Each branche MUST name its trunk prerequisite in `Prérequis`.\n\
+- `capstone` — EXACTLY ONE: a first real end-to-end task that traverses the whole trunk. PREFER an existing tutorial/example under `docs/examples/` (or similar) — name that file and frame it as a guided exercise; only invent one if none exists.\n\
+- `culture` — ONE topic: the team's non-negotiable norms (build/test tooling, quality gates, \"how we don't break CI\") — meant to be seen early.\n\
+Keep `Niveau` consistent with `Type`: tronc = débutant→intermédiaire, branche = intermédiaire→avancé, capstone = intermédiaire (synthesis, not new theory), culture = débutant. The first trunk topic has `Prérequis : aucun`.\n\n\
+\
+# C. ANTI-REPETITION (priors)\n\
+Read the EXISTING `docs/onboarding.md` first. Do NOT duplicate a topic already present — whether curated by a human OR proposed by a previous audit run. Only append genuinely NEW subjects. \
+NEVER delete, reorder, or rewrite existing sections: the human curates them, you only add.\n\n\
+\
+# D. OUTPUT FORMAT (exact — a deterministic parser reads this)\n\
+Emit topics in learning order: all `tronc` first, then `branche` (best-first), then the `capstone`, then `culture`. \
+Append each new topic as a level-2 (`##`) section, written in the SAME language as the existing registry \
+(if the file is empty/absent, use the project's documentation language). Precede EACH proposed topic with a one-line HTML comment marking it AI-proposed with today's date:\n\n\
+`<!-- proposé par l'audit onboarding (YYYY-MM-DD) -->`\n\
+`## <Topic title>`\n\
+`- **Type** : tronc | branche | capstone | culture`\n\
+`- **Niveau** : débutant | intermédiaire | avancé`\n\
+`- **Périmètre** : one sentence — what the learner will understand.`\n\
+`- **Prérequis** : prerequisites (name the trunk topic for a branche/capstone), or \"aucun\".`\n\
+`- **Références** : ` followed by real file paths, comma-separated, each wrapped in backticks.\n\n\
+Then one short paragraph on why the topic matters and what the course covers.\n\
+If `docs/onboarding.md` does NOT exist, CREATE it: an H1 title, a one-line intro blockquote, then the topics.\n\
+Do NOT write course BODIES or create any file under `docs/onboarding/`: you only append catalogue entries here. The actual chapter content is generated on demand and persisted automatically to `docs/onboarding/NN-<slug>.md` (with a `- **Cours** :` link added back to the matching section) by the Mode Mentor generator — never by this audit. Leave any existing `- **Cours** :` bullets untouched.\n\n\
+\
+# E. CAP\n\
+Aim for a compact curriculum: a small trunk (2-4), a handful of branches (best-first), exactly one capstone, one culture topic — typically 6 to 10 topics total. Quality over quantity. \
+Do NOT invent subjects the codebase doesn't support.\n\n\
+\
+Do NOT emit commentary, summary, or step-numbering. Write the file silently and stop.",
+        sources: &["__GIT_HEAD__", "docs/AGENTS.md", "docs/repo-map.md"],
+    },
+];
+
 /// Dispatch table for `LaunchAuditRequest.kind`. Returns the step
 /// slice to drive the agent through. For `Custom`, callers should
 /// inline the user-supplied prompt rather than going through this fn.
@@ -1211,6 +1266,7 @@ pub(crate) fn kind_to_steps(kind: crate::models::AuditKind) -> &'static [Analysi
         AuditKind::Database => DATABASE_STEPS,
         AuditKind::ApiDesign => API_DESIGN_STEPS,
         AuditKind::CodeQuality => CODE_QUALITY_STEPS,
+        AuditKind::Onboarding => ONBOARDING_STEPS,
         // Custom is handled at the call site: it builds a one-off
         // AnalysisStep from req.custom_prompt rather than using a const.
         AuditKind::Custom => &[],
@@ -1329,6 +1385,7 @@ mod kind_dispatch_tests {
             AuditKind::Database,
             AuditKind::ApiDesign,
             AuditKind::CodeQuality,
+            AuditKind::Onboarding,
         ] {
             let steps = kind_to_steps(kind);
             assert_eq!(

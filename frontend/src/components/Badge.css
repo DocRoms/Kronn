@@ -1,0 +1,18 @@
+/* Shared outline badge — see components/Badge.tsx. Border + text share the tone
+   colour via currentColor; transparent fill; no uppercase (kept for section
+   headers only). Icons inside inherit the tone. */
+.kr-badge {
+  display: inline-flex; align-items: center; gap: var(--kr-sp-2);
+  flex: none; white-space: nowrap;
+  font-size: var(--kr-fs-xs); font-weight: 600; line-height: 1.5;
+  padding: 1px var(--kr-sp-4); border-radius: var(--kr-r-sm);
+  background: transparent; border: 1px solid currentColor;
+}
+.kr-badge svg { flex: none; }
+
+.kr-badge-neutral { color: var(--kr-text-muted); }
+.kr-badge-faint   { color: var(--kr-text-faint); }
+.kr-badge-accent  { color: var(--kr-accent); }
+.kr-badge-success { color: var(--kr-success); }
+.kr-badge-warning { color: var(--kr-warning); }
+.kr-badge-purple  { color: var(--kr-purple); }

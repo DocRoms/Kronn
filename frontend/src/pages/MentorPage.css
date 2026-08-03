@@ -1,0 +1,763 @@
+/* Mode Mentor — parcours page (increment 4a).
+   Built entirely on --kr-* design tokens so it follows the active theme
+   (incl. the Euronews secret theme, which turns --kr-accent blue). */
+
+.mentor-page {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: var(--kr-sp-10) var(--kr-sp-9) 80px;
+  color: var(--kr-text-primary);
+  font-family: var(--kr-font-sans);
+}
+
+/* ── Loader / hero shared bits (see the Landing section below) ──────────── */
+.mentor-loader-icon {
+  width: 56px; height: 56px; flex: none;
+  display: grid; place-items: center;
+  border-radius: var(--kr-r-2xl);
+  background: var(--kr-accent-bg-strong);
+  color: var(--kr-accent);
+}
+.mentor-loader-hint { color: var(--kr-text-faint); font-size: var(--kr-fs-sm); margin-top: var(--kr-sp-4); }
+/* Create panel — a distinct surface (border + padding) so the controls read as
+   one deliberate step instead of floating inputs. Width-capped so it never
+   stretches in the full-width dashboard. */
+.mentor-create {
+  display: flex; flex-direction: column; gap: var(--kr-sp-5);
+  width: 100%; max-width: 640px; margin: var(--kr-sp-6) auto 0; text-align: left;
+  padding: var(--kr-sp-7); background: var(--kr-bg-surface);
+  border: 1px solid var(--kr-border); border-radius: var(--kr-r-xl);
+}
+.mentor-loader-error { color: var(--kr-error); font-size: var(--kr-fs-md); }
+
+/* ── Landing: hero (empty/loading) vs dashboard (populated) ─────────────────
+   Empty/loading → a narrow centred hero. Populated → full-width dashboard that
+   follows the layout-density cap on `.dash-main` (small/medium/large) instead
+   of the page's default 960px. */
+.mentor-landing:not(.is-populated) { max-width: 560px; }
+.mentor-landing.is-populated { max-width: none; }
+
+.mentor-landing-head { display: flex; align-items: center; gap: var(--kr-sp-6); }
+/* Hero: icon on top, everything stacked + centred. */
+.mentor-landing:not(.is-populated) .mentor-landing-head {
+  flex-direction: column; text-align: center; gap: var(--kr-sp-5); margin-top: 6vh;
+}
+/* Dashboard: compact row header with a divider under it; CTA pushed right. */
+.mentor-landing.is-populated .mentor-landing-head {
+  padding-bottom: var(--kr-sp-6); margin-bottom: var(--kr-sp-7);
+  border-bottom: 1px solid var(--kr-border); text-align: left;
+}
+.mentor-landing.is-populated .mentor-loader-icon { width: 40px; height: 40px; border-radius: var(--kr-r-xl); }
+.mentor-landing-head-txt { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.mentor-landing.is-populated .mentor-landing-head-txt { flex: 1; }
+.mentor-landing-title { font-size: var(--kr-fs-3xl); font-weight: 650; margin: 0; }
+.mentor-landing.is-populated .mentor-landing-title { font-size: var(--kr-fs-2xl); }
+/* No hard cap in the dashboard header (it has room → 1 line); only the narrow
+   hero needs a reading cap so the sentence doesn't sprawl. */
+.mentor-landing-sub { color: var(--kr-text-muted); font-size: var(--kr-fs-md); margin: 0; }
+.mentor-landing:not(.is-populated) .mentor-landing-sub { max-width: 54ch; }
+.mentor-landing.is-populated .mentor-landing-cta { margin-left: auto; flex: none; }
+/* Guiding line shown under the hero when the list is empty. */
+.mentor-empty-lead { max-width: 44ch; margin: 0 auto; text-align: center; color: var(--kr-text-muted); font-size: var(--kr-fs-md); line-height: 1.55; }
+
+.mentor-input {
+  flex: 1;
+  background: var(--kr-bg-input);
+  border: 1px solid var(--kr-border-medium);
+  border-radius: var(--kr-r-lg);
+  padding: var(--kr-sp-5) var(--kr-sp-6);
+  color: var(--kr-text-primary);
+  font-size: var(--kr-fs-md);
+  font-family: inherit;
+}
+.mentor-input:focus-visible { outline: 2px solid var(--kr-accent); outline-offset: 1px; }
+
+.mentor-btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: var(--kr-sp-3);
+  background: var(--kr-accent); color: var(--kr-text-on-accent);
+  border: none; border-radius: var(--kr-r-lg);
+  padding: var(--kr-sp-5) var(--kr-sp-8);
+  font-size: var(--kr-fs-md); font-weight: 600; font-family: inherit;
+  cursor: pointer; white-space: nowrap;
+}
+.mentor-btn:hover:not(:disabled) { filter: brightness(1.08); }
+.mentor-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.mentor-btn-ghost {
+  background: transparent; color: var(--kr-accent);
+  border: 1px solid var(--kr-accent-border);
+  border-radius: var(--kr-r-lg);
+  padding: var(--kr-sp-4) var(--kr-sp-7);
+  font-size: var(--kr-fs-md); font-weight: 600; font-family: inherit; cursor: pointer;
+}
+.mentor-btn-ghost:hover { background: var(--kr-accent-bg-hover); }
+/* Keyboard focus ring on the core interactive controls that lacked one
+   (buttons, clickable rail step, code-viewer affordances). Matches the accent
+   ring already used on inputs / quiz options / topic cards. */
+.mentor-btn:focus-visible,
+.mentor-btn-ghost:focus-visible,
+.mentor-step:focus-visible,
+.mentor-code-refresh:focus-visible,
+.mentor-code-file-row:focus-visible,
+.mentor-file-close:focus-visible { outline: 2px solid var(--kr-accent); outline-offset: 2px; }
+
+/* ── Header ───────────────────────────────────────────────────────────── */
+.mentor-header { padding: var(--kr-sp-8) 0 var(--kr-sp-6); border-bottom: 1px solid var(--kr-border); }
+.mentor-eyebrow {
+  display: flex; align-items: center; gap: var(--kr-sp-6);
+  font-family: var(--kr-font-mono); font-size: var(--kr-fs-sm);
+  text-transform: uppercase; letter-spacing: 0.06em; color: var(--kr-text-faint);
+}
+.mentor-ticket { color: var(--kr-accent); font-weight: 600; }
+.mentor-exit { margin-left: auto; padding: var(--kr-sp-2) var(--kr-sp-5); font-size: var(--kr-fs-sm); }
+.mentor-h1 {
+  font-size: var(--kr-fs-4xl); font-weight: 650; line-height: 1.2;
+  margin: var(--kr-sp-6) 0 var(--kr-sp-7); text-wrap: balance; max-width: 68ch;
+}
+
+.mentor-criteria { list-style: none; padding: 0; margin: 0; display: grid; gap: var(--kr-sp-3); max-width: 92ch; }
+.mentor-criteria li { display: flex; gap: var(--kr-sp-4); align-items: flex-start; font-size: var(--kr-fs-md); color: var(--kr-text-secondary); }
+.mentor-crit-k { color: var(--kr-accent); flex: none; margin-top: 2px; }
+
+.mentor-progress-row { display: flex; align-items: center; gap: var(--kr-sp-8); margin-top: var(--kr-sp-9); flex-wrap: wrap; }
+/* Compact "n/total" step tally — the primary progress cue on mobile, where the
+   clickable rail is hidden (< 900px). */
+.mentor-progress-tally { font-family: var(--kr-font-mono); font-size: var(--kr-fs-sm); color: var(--kr-text-secondary); font-weight: 600; font-variant-numeric: tabular-nums; }
+.mentor-guard {
+  display: inline-flex; align-items: center; gap: var(--kr-sp-3);
+  font-size: var(--kr-fs-sm); color: var(--kr-text-muted);
+  background: transparent; border: 1px solid var(--kr-border);
+  padding: var(--kr-sp-2) var(--kr-sp-6); border-radius: var(--kr-r-sm);
+}
+.mentor-guard-ic { color: var(--kr-success); }
+
+/* ── Blocks ───────────────────────────────────────────────────────────── */
+.mentor-stream { display: flex; flex-direction: column; gap: var(--kr-sp-9); margin-top: var(--kr-sp-10); }
+.mentor-block {
+  background: var(--kr-bg-raised); border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-2xl); overflow: hidden; box-shadow: var(--kr-shadow-sm);
+}
+.mentor-block-locked { opacity: 0.6; }
+.mentor-bhead { display: flex; align-items: center; gap: var(--kr-sp-6); padding: var(--kr-sp-7) var(--kr-sp-9); border-bottom: 1px solid var(--kr-border); }
+.mentor-bnum {
+  flex: none; width: 26px; height: 26px; border-radius: var(--kr-r-md);
+  display: grid; place-items: center;
+  font-family: var(--kr-font-mono); font-size: var(--kr-fs-md); font-weight: 700;
+  background: var(--kr-accent-bg-strong); color: var(--kr-accent);
+}
+.mentor-btitle { font-weight: 600; font-size: var(--kr-fs-xl); }
+.mentor-spacer { flex: 1; }
+.mentor-bbody { padding: var(--kr-sp-9); }
+
+/* Square outline tags (status / block state). Border + text share the
+ * semantic color via currentColor; transparent fill; no hover. */
+.mentor-pill {
+  display: inline-flex; align-items: center; gap: var(--kr-sp-3);
+  font-size: var(--kr-fs-xs); font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em;
+  padding: 2px var(--kr-sp-5); border-radius: var(--kr-r-sm);
+  background: transparent; border: 1px solid currentColor; white-space: nowrap;
+}
+.mentor-pill-dot { width: 5px; height: 5px; border-radius: var(--kr-r-full); background: currentColor; }
+.mentor-pill-ok { color: var(--kr-success); }
+.mentor-pill-warn { color: var(--kr-warning); }
+.mentor-pill-locked { color: var(--kr-text-faint); }
+.mentor-pill-live { color: var(--kr-accent); }
+
+.mentor-empty { color: var(--kr-text-faint); font-size: var(--kr-fs-md); font-style: italic; margin: 0; }
+
+
+/* locked body */
+.mentor-locked { text-align: center; color: var(--kr-text-faint); padding: var(--kr-sp-8); display: flex; flex-direction: column; align-items: center; gap: var(--kr-sp-4); }
+.mentor-locked p { margin: 0; font-size: var(--kr-fs-md); max-width: 44ch; }
+
+/* resources */
+.mentor-res-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: var(--kr-sp-6); }
+.mentor-res {
+  display: flex; gap: var(--kr-sp-5); align-items: flex-start; text-align: left;
+  background: var(--kr-bg-surface); border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-lg); padding: var(--kr-sp-6) var(--kr-sp-7);
+  font-family: inherit; color: var(--kr-text-primary);
+}
+.mentor-res:hover { border-color: var(--kr-border-strong); }
+.mentor-res.read { border-color: color-mix(in srgb, var(--kr-success) 45%, var(--kr-border)); }
+.mentor-res-check {
+  flex: none; width: 18px; height: 18px; margin-top: 1px;
+  display: grid; place-items: center; border-radius: var(--kr-r-sm);
+  border: 1.5px solid var(--kr-border-heavy); color: var(--kr-text-on-accent);
+  background: transparent; cursor: pointer; padding: 0;
+}
+.mentor-res-check:disabled { cursor: default; }
+.mentor-res-check:focus-visible { outline: 2px solid var(--kr-accent); outline-offset: 1px; }
+.mentor-res-check[aria-checked="true"] { background: var(--kr-success); border-color: var(--kr-success); }
+.mentor-res-link {
+  flex: 1; min-width: 0; text-decoration: none; color: inherit; cursor: pointer;
+  border-radius: var(--kr-r-sm);
+  /* Reset native <button> chrome so a repo-file resource looks like the <a>
+   * variant instead of a light-grey box with near-invisible text. */
+  appearance: none; -webkit-appearance: none; background: transparent;
+  border: none; padding: 0; margin: 0; font: inherit; text-align: left;
+}
+.mentor-res-link:hover .mentor-res-title { text-decoration: underline; }
+.mentor-res-link:focus-visible { outline: 2px solid var(--kr-accent); outline-offset: 2px; }
+.mentor-res-body { display: block; }
+.mentor-res-kind { font-family: var(--kr-font-mono); font-size: var(--kr-fs-xs); text-transform: uppercase; letter-spacing: 0.05em; color: var(--kr-text-faint); }
+.mentor-res-path { display: block; font-family: var(--kr-font-mono); font-size: var(--kr-fs-xs); color: var(--kr-text-muted); margin-top: var(--kr-sp-4); overflow-wrap: anywhere; }
+.mentor-res-title { display: block; font-size: var(--kr-fs-md); font-weight: 600; margin-top: 2px; }
+/* Read → strike the title (like the artifact); the checkbox already turns green. */
+.mentor-res.read .mentor-res-title { text-decoration: line-through; color: var(--kr-text-faint); }
+
+/* target */
+/* Single column: the archi diagram and the acceptance tests each take full
+ * width (a Gherkin block half-width was cramped and hard to read). */
+.mentor-target-grid { display: grid; grid-template-columns: 1fr; gap: var(--kr-sp-6); }
+.mentor-panel { border: 1px solid var(--kr-border); border-radius: var(--kr-r-lg); overflow: hidden; }
+/* The archi diagram spans the full row (a graph needs the width); the tests
+ * panel then wraps onto its own line below. */
+.mentor-panel-diagram { grid-column: 1 / -1; }
+/* Flatten the shared Mermaid renderer's own box so it sits flush under the
+ * panel header instead of drawing a second nested card. */
+.mentor-panel-diagram .kronn-mermaid { margin: 0; border: none; border-radius: 0; }
+
+/* ── ③ Architecture panel — branded canvas (levier 2) ──────────────────
+ * Frame the Mermaid diagram like the mockup's `.arch`: an inset canvas
+ * with breathing room + a caption footer, so it reads as a deliberate
+ * schematic rather than a bare graph touching the panel edges. */
+.mentor-panel-diagram .kronn-mermaid-svg {
+  padding: var(--kr-sp-6) var(--kr-sp-5);
+  background: var(--kr-bg-raised);
+}
+.mentor-arch-caption {
+  margin: 0;
+  padding: var(--kr-sp-4) var(--kr-sp-6);
+  border-top: 1px solid var(--kr-border);
+  background: var(--kr-bg-elevated);
+  font-size: var(--kr-fs-sm);
+  color: var(--kr-text-faint);
+}
+
+/* ── ③ Architecture diagram — re-skin the neutral Mermaid palette with
+ * Kronn tokens (levier 1). Mermaid injects id-scoped <style> rules
+ * (ID specificity), so every override needs `!important` to win —
+ * these token-based rules then track the light/dark theme for free. */
+/* Rectangular shapes → elevated chip with soft rounded corners
+ * (`rx`/`ry` are CSS-settable on SVG <rect> in Chromium). */
+.mentor-panel-diagram .kronn-mermaid-svg svg .node rect,
+.mentor-panel-diagram .kronn-mermaid-svg svg .node circle,
+.mentor-panel-diagram .kronn-mermaid-svg svg .node .label-container {
+  fill: var(--kr-bg-elevated) !important;
+  stroke: var(--kr-border-strong) !important;
+  rx: 8px !important;
+  ry: 8px !important;
+}
+/* Decision nodes render as <polygon> (diamond) — accent-highlight them so
+ * every branch point stands out across all generated diagrams (heuristic:
+ * catches rhombus/hexagon; plain boxes stay <rect>). */
+.mentor-panel-diagram .kronn-mermaid-svg svg .node polygon {
+  fill: var(--kr-accent-bg-strong) !important;
+  stroke: var(--kr-accent) !important;
+}
+.mentor-panel-diagram .kronn-mermaid-svg svg .cluster rect {
+  fill: var(--kr-bg-surface) !important;
+  stroke: var(--kr-border) !important;
+}
+.mentor-panel-diagram .kronn-mermaid-svg svg .nodeLabel,
+.mentor-panel-diagram .kronn-mermaid-svg svg .nodeLabel p,
+.mentor-panel-diagram .kronn-mermaid-svg svg .node text {
+  color: var(--kr-text-primary) !important;
+  fill: var(--kr-text-primary) !important;
+}
+.mentor-panel-diagram .kronn-mermaid-svg svg .flowchart-link,
+.mentor-panel-diagram .kronn-mermaid-svg svg .edgePath .path,
+.mentor-panel-diagram .kronn-mermaid-svg svg .edgePath path {
+  stroke: var(--kr-border-heavy) !important;
+}
+.mentor-panel-diagram .kronn-mermaid-svg svg marker path {
+  fill: var(--kr-border-heavy) !important;
+  stroke: var(--kr-border-heavy) !important;
+}
+.mentor-panel-diagram .kronn-mermaid-svg svg .edgeLabel,
+.mentor-panel-diagram .kronn-mermaid-svg svg .edgeLabel p {
+  color: var(--kr-text-muted) !important;
+  fill: var(--kr-text-muted) !important;
+  background: var(--kr-bg-raised) !important;
+}
+.mentor-panel-diagram .kronn-mermaid-svg svg .edgeLabel rect {
+  fill: var(--kr-bg-raised) !important;
+  opacity: 1 !important;
+}
+.mentor-panel-h { font-size: var(--kr-fs-sm); font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--kr-text-muted); padding: var(--kr-sp-4) var(--kr-sp-6); background: var(--kr-bg-elevated); border-bottom: 1px solid var(--kr-border); }
+.mentor-pre {
+  /* `--kr-bg-code` is dark in EVERY theme, so the text must be a fixed light
+     colour — `--kr-text-secondary` goes dark on the light-family themes and
+     printed dark-on-dark. Matches the `.hljs` base in styles/syntax.css (and
+     wins deterministically over it regardless of stylesheet load order, since
+     the value is identical). */
+  margin: 0; padding: var(--kr-sp-6); background: var(--kr-bg-code); color: #abb2bf;
+  font-family: var(--kr-font-mono); font-size: var(--kr-fs-base); line-height: 1.6;
+  overflow-x: auto; white-space: pre-wrap; overflow-wrap: anywhere;
+}
+
+@media (max-width: 720px) {
+  .mentor-target-grid { grid-template-columns: 1fr; }
+}
+
+/* ── Live mentor→censeur turn (increment 4b) ──────────────────────────── */
+.mentor-turn {
+  margin-top: var(--kr-sp-6);
+  display: flex; flex-direction: column; gap: var(--kr-sp-5);
+}
+.mentor-turn-input {
+  width: 100%; resize: vertical; min-height: 84px;
+  background: var(--kr-bg-input);
+  border: 1px solid var(--kr-border-medium);
+  border-radius: var(--kr-r-lg);
+  padding: var(--kr-sp-5) var(--kr-sp-6);
+  color: var(--kr-text-primary);
+  font-family: var(--kr-font-sans); font-size: var(--kr-fs-md); line-height: 1.55;
+}
+.mentor-turn-input:focus-visible { outline: 2px solid var(--kr-accent); outline-offset: 1px; }
+.mentor-turn-input:disabled { opacity: 0.6; cursor: not-allowed; }
+.mentor-turn-actions { display: flex; align-items: center; gap: var(--kr-sp-5); flex-wrap: wrap; }
+.mentor-turn-note { color: var(--kr-text-faint); font-size: var(--kr-fs-sm); font-style: italic; margin: 0; }
+.mentor-turn-wait { color: var(--kr-text-faint); font-size: var(--kr-fs-xs); margin: 2px 0 0; opacity: 0.8; }
+.mentor-turn-error { color: var(--kr-error); font-size: var(--kr-fs-sm); margin: 0; }
+
+/* Mentor reply / guardrail notice, styled as a margin note. */
+.mentor-note {
+  border-left: 3px solid var(--kr-accent);
+  background: var(--kr-accent-bg-strong);
+  border-radius: 0 var(--kr-r-lg) var(--kr-r-lg) 0;
+  padding: var(--kr-sp-5) var(--kr-sp-6);
+}
+.mentor-note p { margin: var(--kr-sp-3) 0 0; font-size: var(--kr-fs-md); color: var(--kr-text-primary); line-height: 1.55; white-space: pre-wrap; }
+.mentor-note-from { display: inline-flex; align-items: center; gap: var(--kr-sp-3); font-size: var(--kr-fs-sm); font-weight: 700; color: var(--kr-accent); }
+.mentor-note-filtered { border-left-color: var(--kr-warning); background: rgba(var(--kr-warning-rgb), 0.12); }
+.mentor-note-filtered .mentor-note-from { color: var(--kr-warning); }
+
+/* Bilan — framing note above the learner's self-assessment. */
+.mentor-bilan-intro {
+  margin: 0 0 var(--kr-sp-5);
+  font-size: var(--kr-fs-sm);
+  color: var(--kr-text-faint);
+  line-height: 1.55;
+}
+
+/* Closure synthesis — the mentor's keepable recap at the end of a parcours. */
+.mentor-synth {
+  margin-top: var(--kr-sp-7);
+  border: 1px solid var(--kr-accent);
+  background: var(--kr-accent-bg-strong);
+  border-radius: var(--kr-r-lg);
+  padding: var(--kr-sp-6);
+}
+.mentor-synth-head { display: flex; align-items: center; justify-content: space-between; gap: var(--kr-sp-5); margin-bottom: var(--kr-sp-4); }
+.mentor-synth-title { display: inline-flex; align-items: center; gap: var(--kr-sp-3); font-size: var(--kr-fs-sm); font-weight: 700; color: var(--kr-accent); }
+.mentor-synth-body { font-size: var(--kr-fs-md); color: var(--kr-text-primary); line-height: 1.6; }
+
+/* ⑤ Code — project-linked file-change review panel. */
+.mentor-code-review {
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-lg);
+  background: var(--kr-bg-subtle);
+  margin-bottom: var(--kr-sp-5);
+  overflow: hidden;
+}
+.mentor-code-head {
+  display: flex; align-items: center; gap: var(--kr-sp-4);
+  padding: var(--kr-sp-4) var(--kr-sp-5);
+  border-bottom: 1px solid var(--kr-border);
+}
+.mentor-code-title { display: inline-flex; align-items: center; gap: var(--kr-sp-3); font-size: var(--kr-fs-sm); font-weight: 700; color: var(--kr-text-primary); }
+.mentor-code-branch { font-family: var(--kr-font-mono); font-size: var(--kr-fs-xs); color: var(--kr-accent); background: var(--kr-accent-bg-strong); padding: 2px 8px; border-radius: var(--kr-r-sm); }
+.mentor-code-refresh { display: inline-flex; background: transparent; border: none; color: var(--kr-text-faint); cursor: pointer; padding: 2px; }
+.mentor-code-refresh:hover:not(:disabled) { color: var(--kr-accent); }
+
+.mentor-code-files { list-style: none; margin: 0; padding: 0; }
+.mentor-code-file { border-bottom: 1px solid var(--kr-border); }
+.mentor-code-file:last-child { border-bottom: none; }
+.mentor-code-file-row {
+  display: flex; align-items: center; gap: var(--kr-sp-3); width: 100%;
+  padding: var(--kr-sp-4) var(--kr-sp-5); background: transparent; border: none;
+  cursor: pointer; text-align: left; color: var(--kr-text-primary); font-size: var(--kr-fs-sm);
+}
+.mentor-code-file-row:hover { background: var(--kr-accent-bg-strong); }
+.mentor-code-caret { color: var(--kr-text-faint); transition: transform 0.15s; flex: none; }
+.mentor-code-caret.open { transform: rotate(90deg); }
+.mentor-code-badge {
+  flex: none; width: 18px; text-align: center; font-family: var(--kr-font-mono);
+  font-size: var(--kr-fs-xs); font-weight: 700; border-radius: var(--kr-r-sm); color: var(--kr-text-on-accent);
+  background: var(--kr-text-faint);
+}
+.mentor-code-badge.s-m { background: var(--kr-warning); }
+.mentor-code-badge.s-a { background: var(--kr-success); }
+.mentor-code-badge.s-d { background: var(--kr-error); }
+.mentor-code-badge.s-r { background: var(--kr-accent); }
+.mentor-code-path { font-family: var(--kr-font-mono); font-size: var(--kr-fs-xs); word-break: break-all; }
+.mentor-code-tag { margin-left: auto; flex: none; font-size: var(--kr-fs-xs); color: var(--kr-text-faint); border: 1px solid var(--kr-border); padding: 1px 6px; border-radius: var(--kr-r-sm); }
+
+.mentor-code-diff {
+  margin: 0; padding: var(--kr-sp-4) var(--kr-sp-5);
+  background: var(--kr-bg-code, var(--kr-bg-subtle));
+  font-family: var(--kr-font-mono); font-size: var(--kr-fs-xs); line-height: 1.5;
+  overflow-x: auto; border-top: 1px solid var(--kr-border);
+}
+.mentor-code-diff .d-line { white-space: pre; }
+.mentor-code-diff .d-add { color: var(--kr-success); background: rgba(var(--kr-success-rgb), 0.10); }
+.mentor-code-diff .d-del { color: var(--kr-error); background: rgba(var(--kr-error-rgb), 0.10); }
+.mentor-code-diff .d-hunk { color: var(--kr-accent); }
+.mentor-code-diff .d-meta { color: var(--kr-text-faint); }
+
+/* Persisted per-block dialogue (learner submission + mentor reply). */
+.mentor-history { display: flex; flex-direction: column; gap: var(--kr-sp-5); margin-bottom: var(--kr-sp-5); }
+.mentor-exchange { display: flex; flex-direction: column; gap: var(--kr-sp-3); }
+.mentor-learner-turn {
+  border-left: 3px solid var(--kr-border-strong, var(--kr-border));
+  background: var(--kr-bg-subtle);
+  border-radius: 0 var(--kr-r-lg) var(--kr-r-lg) 0;
+  padding: var(--kr-sp-4) var(--kr-sp-5);
+}
+.mentor-note-you { color: var(--kr-text-secondary); }
+.mentor-learner-sub {
+  margin: var(--kr-sp-3) 0 0; font-size: var(--kr-fs-md); color: var(--kr-text-primary);
+  line-height: 1.55; white-space: pre-wrap; word-break: break-word;
+  max-height: 320px; overflow: auto; font-family: inherit;
+}
+/* Folded code submission (large diff) — a clickable summary. */
+.mentor-sub-details { margin-top: var(--kr-sp-3); }
+.mentor-sub-summary {
+  cursor: pointer; font-size: var(--kr-fs-sm); color: var(--kr-accent);
+  font-weight: 600; user-select: none; list-style: revert;
+}
+.mentor-sub-summary:hover { text-decoration: underline; }
+.mentor-sub-details[open] .mentor-sub-summary { margin-bottom: var(--kr-sp-2); }
+.mentor-sub-details .mentor-learner-sub {
+  font-family: var(--kr-font-mono); font-size: var(--kr-fs-xs); line-height: 1.5;
+}
+
+/* ── Clickable step rail (2-column parcours layout) ── */
+.mentor-layout { display: grid; grid-template-columns: 232px 1fr; gap: var(--kr-sp-9); align-items: start; margin-top: var(--kr-sp-7); }
+.mentor-main { min-width: 0; }
+@media (max-width: 900px) {
+  .mentor-layout { grid-template-columns: 1fr; }
+  .mentor-rail { display: none; }
+}
+
+/* Parcours view only (not the landing list): widen so the rail + full-width
+   content fit. Pairs with `body[data-mentor-wide] .dash-main` lifting the shell
+   cap (1000px by default). The listing keeps the default `.mentor-page` width. */
+.mentor-parcours { max-width: 1180px; }
+/* Only lift the default-density cap (1000px). Medium (1400) / large (unlimited)
+   already have room — don't shrink them. */
+html:not([data-density="medium"]):not([data-density="large"]) body[data-mentor-wide] .dash-main { max-width: 1180px; }
+
+/* Sticky top must clear the app's sticky top nav (`.dash-nav`, ~53px tall). */
+.mentor-rail { position: sticky; top: 66px; display: flex; flex-direction: column; gap: 2px; }
+.mentor-rail-h {
+  font-size: var(--kr-fs-xs); letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--kr-text-faint); font-weight: 700; margin: 0 0 var(--kr-sp-4) var(--kr-sp-3);
+}
+.mentor-step {
+  display: flex; gap: var(--kr-sp-4); align-items: flex-start; width: 100%; text-align: left;
+  padding: var(--kr-sp-3) var(--kr-sp-4); border: none; background: transparent;
+  border-radius: var(--kr-r-md); cursor: pointer; color: var(--kr-text-secondary);
+}
+.mentor-step:hover { background: var(--kr-bg-subtle); }
+.mentor-step-active { background: var(--kr-bg-elevated); box-shadow: inset 0 0 0 1px var(--kr-border); color: var(--kr-text-primary); }
+.mentor-step-dot {
+  width: 22px; height: 22px; border-radius: var(--kr-r-full); flex: none;
+  display: grid; place-items: center; font-family: var(--kr-font-mono); font-size: var(--kr-fs-xs);
+  font-weight: 700; background: var(--kr-bg-elevated); color: var(--kr-text-faint);
+  box-shadow: inset 0 0 0 1px var(--kr-border);
+}
+.mentor-step-done .mentor-step-dot { background: var(--kr-success); color: #fff; box-shadow: none; }
+.mentor-step-active .mentor-step-dot { background: var(--kr-accent); color: var(--kr-text-on-accent); box-shadow: none; }
+.mentor-step-locked .mentor-step-dot { color: var(--kr-text-faint); opacity: 0.7; }
+.mentor-step-locked { color: var(--kr-text-faint); }
+.mentor-step-lbl { font-size: var(--kr-fs-sm); line-height: 1.3; padding-top: 2px; font-weight: 500; }
+.mentor-step-sub { display: block; font-size: var(--kr-fs-xs); color: var(--kr-text-faint); font-weight: 400; margin-top: 1px; }
+
+.mentor-spin { animation: mentor-spin 0.9s linear infinite; }
+@keyframes mentor-spin { to { transform: rotate(360deg); } }
+
+/* ── Selectable item (shared) ─────────────────────────────────────────────
+   Common interaction states for the posture toggle, onboarding project items
+   and topic cards. Each keeps its own background / radius / padding / layout;
+   only cursor + border + hover/focus/active are factored here. */
+.mentor-selectable { cursor: pointer; font-family: inherit; color: var(--kr-text-primary); border: 1px solid var(--kr-border); }
+.mentor-selectable:hover { border-color: var(--kr-border-strong); }
+.mentor-selectable:focus-visible { outline: 2px solid var(--kr-accent); outline-offset: 1px; }
+.mentor-selectable.active { border-color: var(--kr-accent); background: var(--kr-accent-bg-strong); }
+
+/* ── Posture toggle (create form) ─────────────────────────────────────── */
+.mentor-mode-toggle { display: flex; gap: var(--kr-sp-3); }
+.mentor-mode-opt {
+  flex: 1; display: flex; flex-direction: column; align-items: flex-start; gap: var(--kr-sp-2);
+  text-align: left; background: var(--kr-bg-surface);
+  border-radius: var(--kr-r-lg); padding: var(--kr-sp-5) var(--kr-sp-6);
+}
+.mentor-mode-name { font-weight: 700; font-size: var(--kr-fs-md); display: inline-flex; align-items: center; gap: var(--kr-sp-3); }
+.mentor-mode-opt.active .mentor-mode-name { color: var(--kr-accent); }
+.mentor-mode-desc { font-size: var(--kr-fs-sm); color: var(--kr-text-muted); line-height: 1.4; }
+
+/* ── Onboarding posture (chapters) ────────────────────────────────────── */
+.mentor-guard-course .mentor-guard-ic { color: var(--kr-accent); }
+.mentor-chapter-explanation {
+  font-size: var(--kr-fs-lg); color: var(--kr-text-primary); line-height: 1.6;
+  word-break: break-word;
+}
+/* Markdown rendered inside a chapter explanation (headings, lists, tables, code). */
+.mentor-md > :first-child { margin-top: 0; }
+.mentor-md > :last-child { margin-bottom: 0; }
+.mentor-md p { margin: 0 0 var(--kr-sp-5); }
+.mentor-md ul, .mentor-md ol { margin: 0 0 var(--kr-sp-5); padding-left: 1.4em; }
+.mentor-md li { margin: 2px 0; }
+.mentor-md h1, .mentor-md h2, .mentor-md h3, .mentor-md h4 { margin: var(--kr-sp-6) 0 var(--kr-sp-4); line-height: 1.3; }
+.mentor-md code {
+  /* Inline code sits on the always-dark `--kr-bg-code` chip, so it needs an
+     explicit light colour too (else it inherits the dark body text and goes
+     dark-on-dark on the light-family themes). */
+  font-family: var(--kr-font-mono); font-size: 0.9em; color: #abb2bf;
+  background: var(--kr-bg-code); padding: 1px 5px; border-radius: var(--kr-r-sm);
+}
+.mentor-md pre {
+  background: var(--kr-bg-code); padding: var(--kr-sp-6); border-radius: var(--kr-r-md);
+  overflow-x: auto; margin: 0 0 var(--kr-sp-5);
+}
+.mentor-md pre code { background: none; padding: 0; }
+.mentor-md a { color: var(--kr-accent); }
+.mentor-md blockquote {
+  margin: 0 0 var(--kr-sp-5); padding-left: var(--kr-sp-6);
+  border-left: 3px solid var(--kr-border-strong); color: var(--kr-text-muted);
+}
+/* Table wrapper scrolls on narrow widths instead of overflowing the page. */
+.mentor-md table {
+  border-collapse: collapse; width: 100%; margin: 0 0 var(--kr-sp-5);
+  font-size: var(--kr-fs-base); display: block; overflow-x: auto;
+}
+.mentor-md th, .mentor-md td {
+  border: 1px solid var(--kr-border); padding: var(--kr-sp-4) var(--kr-sp-5); text-align: left;
+}
+.mentor-md th { background: var(--kr-bg-elevated); font-weight: 600; }
+/* "Marquer comme terminé" — breathe away from the checkpoint box above it. */
+.mentor-chapter-actions { margin-top: var(--kr-sp-10); }
+/* Learner's saved answer to an open-question checkpoint (read-only, on a done chapter). */
+.mentor-chapter-answer {
+  margin: 0; padding: var(--kr-sp-6); white-space: pre-wrap; word-break: break-word;
+  font-size: var(--kr-fs-base); color: var(--kr-text-secondary); line-height: 1.55;
+}
+/* "Cours terminé — bravo" — same outline-tag look as the status/block badges. */
+.mentor-course-done { display: flex; justify-content: center; margin-top: var(--kr-sp-6); }
+
+/* #4b — end-of-course targeted review (spaced re-test of struggled chapters). */
+.mentor-review {
+  margin-top: var(--kr-sp-7);
+  padding-top: var(--kr-sp-6);
+  border-top: 1px dashed var(--kr-border);
+}
+.mentor-review-h {
+  display: flex; align-items: center; gap: var(--kr-sp-3);
+  font-weight: 600; color: var(--kr-warning);
+}
+.mentor-review-intro {
+  margin: var(--kr-sp-3) 0 var(--kr-sp-5);
+  font-size: var(--kr-fs-sm); color: var(--kr-text-dim);
+}
+.mentor-checkpoint {
+  margin-top: var(--kr-sp-7); padding: var(--kr-sp-6) var(--kr-sp-7);
+  background: var(--kr-bg-surface); border: 1px solid var(--kr-border); border-radius: var(--kr-r-lg);
+  display: flex; flex-direction: column; gap: var(--kr-sp-5);
+}
+.mentor-checkpoint-h { display: inline-flex; align-items: center; gap: var(--kr-sp-3); font-size: var(--kr-fs-sm); font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--kr-accent); }
+.mentor-checkpoint-q { margin: 0; font-size: var(--kr-fs-lg); font-weight: 600; color: var(--kr-text-primary); }
+.mentor-quiz { display: flex; flex-direction: column; gap: var(--kr-sp-4); }
+.mentor-quiz-opt {
+  text-align: left; cursor: pointer; font-family: inherit; font-size: var(--kr-fs-md);
+  background: var(--kr-bg-raised); border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-md); padding: var(--kr-sp-5) var(--kr-sp-6); color: var(--kr-text-primary);
+}
+.mentor-quiz-opt:hover:not(:disabled) { border-color: var(--kr-border-strong); }
+.mentor-quiz-opt:focus-visible { outline: 2px solid var(--kr-accent); outline-offset: 1px; }
+.mentor-quiz-opt:disabled { cursor: default; }
+.mentor-quiz-opt.correct { border-color: var(--kr-success); background: rgba(var(--kr-success-rgb), 0.12); color: var(--kr-success); }
+.mentor-quiz-opt.wrong { border-color: var(--kr-warning); background: rgba(var(--kr-warning-rgb), 0.12); color: var(--kr-warning); }
+.mentor-quiz-fb { margin: 0; font-size: var(--kr-fs-sm); font-weight: 600; color: var(--kr-warning); }
+.mentor-quiz-fb.ok { color: var(--kr-success); }
+
+/* ── Onboarding catalogue (registry) ──────────────────────────────────── */
+.mentor-catalog { display: flex; flex-direction: column; gap: var(--kr-sp-3); }
+.mentor-catalog-panel {
+  border: 1px solid var(--kr-border); border-radius: var(--kr-r-lg);
+  padding: var(--kr-sp-5) var(--kr-sp-6); background: var(--kr-bg-surface);
+  display: flex; flex-direction: column; gap: var(--kr-sp-4);
+}
+.mentor-catalog-h { display: inline-flex; align-items: center; gap: var(--kr-sp-3); font-size: var(--kr-fs-sm); font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--kr-accent); }
+
+/* #1/#2 — onboarding "start here" + cursus progress hero. */
+.mentor-onb-hero {
+  display: flex; flex-direction: column; gap: var(--kr-sp-3);
+  padding: var(--kr-sp-4) var(--kr-sp-5);
+  border: 1px solid rgba(var(--kr-accent-rgb), 0.2);
+  border-radius: var(--kr-r-md);
+  background: var(--kr-accent-bg-hover);
+}
+.mentor-onb-progress { display: flex; align-items: center; gap: var(--kr-sp-4); }
+.mentor-onb-bar { flex: 1; height: 6px; border-radius: 999px; background: rgba(var(--kr-accent-rgb), 0.15); overflow: hidden; }
+.mentor-onb-bar > span { display: block; height: 100%; background: var(--kr-accent); border-radius: 999px; transition: width 0.3s ease; }
+.mentor-onb-count { font-size: var(--kr-fs-xs); font-weight: 600; color: var(--kr-text-dim); white-space: nowrap; }
+.mentor-onb-cta { align-self: flex-start; }
+.mentor-onb-done { display: inline-flex; align-items: center; gap: var(--kr-sp-3); font-weight: 600; color: var(--kr-success); }
+/* "Prochaine étape" is a shared Badge now; keep only the whole-card highlight. */
+.mentor-topic.next { border-color: rgba(var(--kr-accent-rgb), 0.4); }
+@media (prefers-reduced-motion: reduce) { .mentor-onb-bar > span { transition: none; } }
+.mentor-catalog-list { display: flex; flex-direction: column; gap: var(--kr-sp-3); }
+.mentor-catalog-group { display: flex; flex-direction: column; gap: var(--kr-sp-2); }
+.mentor-catalog-group + .mentor-catalog-group { margin-top: var(--kr-sp-4); }
+.mentor-catalog-group-h { display: inline-flex; align-items: center; gap: var(--kr-sp-2); font-size: var(--kr-fs-xs); font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--kr-text-faint); margin-bottom: var(--kr-sp-1); }
+.mentor-topic-kind { color: var(--kr-accent); flex-shrink: 0; }
+.mentor-project-list { display: flex; flex-direction: column; gap: var(--kr-sp-2); }
+.mentor-project-item {
+  display: flex; align-items: center; justify-content: space-between; gap: var(--kr-sp-3);
+  width: 100%; text-align: left; background: var(--kr-bg-raised);
+  border-radius: var(--kr-r-md); padding: var(--kr-sp-3) var(--kr-sp-4);
+}
+.mentor-project-name { display: inline-flex; align-items: center; gap: var(--kr-sp-2); font-weight: 600; }
+.mentor-project-count { font-size: var(--kr-fs-xs); color: var(--kr-text-faint); flex-shrink: 0; }
+.mentor-topic {
+  display: flex; flex-direction: column; gap: var(--kr-sp-2); text-align: left;
+  background: var(--kr-bg-raised); border-radius: var(--kr-r-md);
+  padding: var(--kr-sp-4) var(--kr-sp-6);
+}
+.mentor-topic-top { display: flex; align-items: center; gap: var(--kr-sp-4); }
+.mentor-topic-title { flex: 1; min-width: 0; font-weight: 600; font-size: var(--kr-fs-md); }
+/* Level Badge: positioning only (colour/border come from the shared Badge). */
+.mentor-topic-level { margin-left: auto; }
+.mentor-topic-scope { font-size: var(--kr-fs-sm); color: var(--kr-text-muted); line-height: 1.4; }
+/* Bottom row: refs on the left, status Badges ("prochaine étape" / parcours
+   state) pushed to the bottom-right so every card's tags line up on one edge. */
+.mentor-topic-bottom { display: flex; align-items: center; gap: var(--kr-sp-4); }
+.mentor-topic-refs { font-size: var(--kr-fs-xs); color: var(--kr-text-faint); font-family: var(--kr-font-mono); }
+.mentor-topic-tags { margin-left: auto; flex-shrink: 0; display: inline-flex; align-items: center; gap: var(--kr-sp-3); }
+
+/* ── Landing list of parcours ─────────────────────────────────────────── */
+.mentor-plist { width: 100%; display: flex; flex-direction: column; gap: var(--kr-sp-6); text-align: left; }
+/* Responsive card grid — width from the layout-density config becomes columns
+   (auto-fill), cards never stretch. The "Terminés" divider spans the full row. */
+.mentor-pgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: var(--kr-sp-5); align-items: stretch; }
+.mentor-pgrid .mentor-plist-sub { grid-column: 1 / -1; }
+.mentor-plist-h { font-size: var(--kr-fs-sm); font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--kr-text-faint); }
+/* "Terminés" sub-section divider inside a list / project group. */
+.mentor-plist-sub { margin-top: var(--kr-sp-4); font-size: var(--kr-fs-xs); font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--kr-text-faint); }
+/* Project filter chips above the list. */
+.mentor-filter { display: flex; flex-wrap: wrap; gap: var(--kr-sp-3); }
+.mentor-filter-chip {
+  cursor: pointer; font-family: inherit; font-size: var(--kr-fs-sm); font-weight: 600;
+  color: var(--kr-text-muted); background: var(--kr-bg-raised);
+  border: 1px solid var(--kr-border); border-radius: 999px; padding: var(--kr-sp-2) var(--kr-sp-5);
+}
+.mentor-filter-chip:hover { border-color: var(--kr-border-strong); }
+.mentor-filter-chip:focus-visible { outline: 2px solid var(--kr-accent); outline-offset: 1px; }
+.mentor-filter-chip.active { color: var(--kr-accent); border-color: var(--kr-accent); background: var(--kr-accent-bg-strong); }
+/* Per-project grouping of the parcours list. */
+.mentor-pgroup { display: flex; flex-direction: column; gap: var(--kr-sp-4); }
+.mentor-pgroup-h {
+  display: flex; align-items: center; gap: var(--kr-sp-4); margin-top: var(--kr-sp-4);
+  font-size: var(--kr-fs-sm); font-weight: 700; color: var(--kr-text-secondary);
+}
+.mentor-pgroup-n {
+  font-size: var(--kr-fs-xs); font-weight: 600; color: var(--kr-text-faint);
+  background: var(--kr-bg-elevated); border-radius: var(--kr-r-sm); padding: 0 var(--kr-sp-4);
+}
+/* Card tile — vertical layout so a grid of them reads cleanly (mode + level on
+   top, kind eyebrow, title, footer with status + full-width progress bar). */
+.mentor-pcard {
+  display: flex; flex-direction: column; gap: var(--kr-sp-4); text-align: left; height: 100%;
+  cursor: pointer; font-family: inherit; color: var(--kr-text-primary);
+  background: var(--kr-bg-raised); border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-lg); padding: var(--kr-sp-6);
+}
+.mentor-pcard:hover { border-color: var(--kr-accent-border); background: var(--kr-accent-bg-hover); }
+.mentor-pcard:focus-visible { outline: 2px solid var(--kr-accent); outline-offset: 1px; }
+/* Non-openable card (generating / failed): no click affordance, no hover shift. */
+.mentor-pcard-static { cursor: default; }
+.mentor-pcard-static:hover { border-color: var(--kr-border); background: var(--kr-bg-raised); }
+
+/* Top row: mode Badge (left), level Badge + delete (right). */
+.mentor-pcard-top { display: flex; align-items: center; gap: var(--kr-sp-4); }
+.mentor-pcard-top-end { margin-left: auto; display: inline-flex; align-items: center; gap: var(--kr-sp-3); }
+/* Curriculum kind eyebrow, just above the title ("le type devant le titre"). */
+.mentor-pcard-kind { display: inline-flex; align-items: center; gap: var(--kr-sp-2); font-size: var(--kr-fs-xs); font-weight: 600; color: var(--kr-text-faint); }
+.mentor-pcard-kind svg { color: var(--kr-accent); }
+/* Title clamps to 2 lines so tiles keep an even height. */
+.mentor-pcard-title { font-weight: 600; font-size: var(--kr-fs-md); line-height: 1.35; display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+/* Footer pinned to the bottom → even footers across a row of tiles. */
+.mentor-pcard-foot { display: flex; flex-direction: column; gap: var(--kr-sp-4); margin-top: auto; }
+.mentor-pcard-foot-row { display: flex; align-items: center; justify-content: space-between; gap: var(--kr-sp-4); }
+.mentor-pcard-del { flex: none; display: inline-flex; padding: var(--kr-sp-2); background: transparent; border: none; border-radius: var(--kr-r-md); color: var(--kr-text-faint); cursor: pointer; }
+.mentor-pcard-del:hover { color: var(--kr-error); background: var(--kr-bg-subtle); }
+.mentor-pcard-del:focus-visible { outline: 2px solid var(--kr-accent); outline-offset: 2px; }
+.mentor-pcard-err { font-size: var(--kr-fs-sm); color: var(--kr-warning); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mentor-pcard-status { font-size: var(--kr-fs-sm); color: var(--kr-text-muted); }
+.mentor-pcard-status.st-done { color: var(--kr-success); }
+.mentor-pcard-status.st-open { color: var(--kr-accent); }
+.mentor-pcard-status.st-generating { color: var(--kr-accent); display: inline-flex; align-items: center; gap: 4px; }
+.mentor-pcard-status.st-failed { color: var(--kr-warning); }
+/* Progress bar — full tile width so bars align across all cards. Clean pill:
+   dark track, solid accent fill with a barely-there top sheen (no glow / no
+   white-mix, which blooms on bright accents like the lime default theme). */
+.mentor-pcard-bar { width: 100%; height: 6px; border-radius: 999px; background: var(--kr-bg-elevated); overflow: hidden; }
+.mentor-pcard-bar > span {
+  display: block; height: 100%; border-radius: 999px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.12), rgba(255, 255, 255, 0) 60%),
+    var(--kr-accent);
+  transition: width 0.45s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.mentor-pcard-bar.done > span {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.12), rgba(255, 255, 255, 0) 60%),
+    var(--kr-success);
+}
+.mentor-pcard-count { font-family: var(--kr-font-mono); font-size: var(--kr-fs-sm); color: var(--kr-text-muted); font-variant-numeric: tabular-nums; }
+
+/* ── Block advance bar ────────────────────────────────────────────────── */
+.mentor-advance-bar { margin-top: var(--kr-sp-6); padding-top: var(--kr-sp-6); border-top: 1px dashed var(--kr-border); }
+.mentor-advance-hint { font-size: var(--kr-fs-sm); color: var(--kr-text-muted); }
+/* "Passer outre" — self-serve override, pushed to the far right of the advance bar. */
+.mentor-force { margin-left: auto; color: var(--kr-text-faint); display: inline-flex; align-items: center; gap: var(--kr-sp-2); }
+
+/* "Débloqué manuellement" — last element of a self-served block. */
+.mentor-forced-note {
+  margin-top: var(--kr-sp-6);
+  display: flex; align-items: center; gap: var(--kr-sp-3);
+  padding: var(--kr-sp-4) var(--kr-sp-5);
+  font-size: var(--kr-fs-sm); color: var(--kr-warning);
+  background: var(--kr-warning-bg);
+  border: 1px solid rgba(var(--kr-warning-rgb), 0.25);
+  border-radius: var(--kr-r-lg);
+}
+.mentor-forced-note svg { flex: none; }
+
+@media (prefers-reduced-motion: reduce) {
+  .mentor-pcard-bar > span { transition: none; }
+  .mentor-spin { animation: none; }
+}
+
+/* Repo-file preview modal (Mode Mentor "resources" → project file). */
+.mentor-file-overlay {
+  position: fixed; inset: 0; z-index: 9000; display: flex; align-items: center; justify-content: center;
+  background: rgba(0, 0, 0, 0.55); padding: var(--kr-sp-8);
+}
+.mentor-file-modal {
+  display: flex; flex-direction: column; width: min(900px, 100%); max-height: 85vh;
+  background: var(--kr-bg-surface); border: 1px solid var(--kr-border); border-radius: var(--kr-r-lg); overflow: hidden;
+}
+.mentor-file-head {
+  display: flex; align-items: center; gap: var(--kr-sp-5); padding: var(--kr-sp-5) var(--kr-sp-6);
+  background: var(--kr-bg-elevated); border-bottom: 1px solid var(--kr-border);
+}
+.mentor-file-path { flex: 1; min-width: 0; font-family: var(--kr-font-mono); font-size: var(--kr-fs-sm); color: var(--kr-text-secondary); overflow-wrap: anywhere; }
+.mentor-file-close { flex: none; background: transparent; border: none; color: var(--kr-text-muted); cursor: pointer; display: inline-flex; }
+.mentor-file-close:hover { color: var(--kr-text-primary); }
+.mentor-file-pre { margin: 0; overflow: auto; white-space: pre; }
+.mentor-file-loading, .mentor-file-error { margin: 0; padding: var(--kr-sp-7); font-size: var(--kr-fs-sm); }
+.mentor-file-loading { color: var(--kr-text-muted); display: inline-flex; align-items: center; gap: var(--kr-sp-4); }
+.mentor-file-error { color: var(--kr-warning); }

@@ -775,6 +775,11 @@ pub async fn get_server_config(
         debug_mode: config.server.debug_mode,
         default_model_tier: config.server.default_model_tier,
         default_summary_strategy: config.server.default_summary_strategy,
+        mentor_turn_workflow_id: config.server.mentor_turn_workflow_id.clone(),
+        mentor_generator_workflow_id: config.server.mentor_generator_workflow_id.clone(),
+        mentor_course_workflow_id: config.server.mentor_course_workflow_id.clone(),
+        mentor_hint_workflow_id: config.server.mentor_hint_workflow_id.clone(),
+        mentor_bilan_workflow_id: config.server.mentor_bilan_workflow_id.clone(),
     }))
 }
 
@@ -832,6 +837,23 @@ pub async fn set_server_config(
     // 0.8.6 phase 4 — default summary strategy. Same PATCH semantic.
     if let Some(strategy) = req.default_summary_strategy {
         config.server.default_summary_strategy = strategy;
+    }
+    // Mode Mentor — wire (or rewire) the mentor→censeur turn workflow. Empty
+    // string clears it (feature reverts to viewer + state-machine only).
+    if let Some(id) = req.mentor_turn_workflow_id {
+        config.server.mentor_turn_workflow_id = if id.is_empty() { None } else { Some(id) };
+    }
+    if let Some(id) = req.mentor_generator_workflow_id {
+        config.server.mentor_generator_workflow_id = if id.is_empty() { None } else { Some(id) };
+    }
+    if let Some(id) = req.mentor_course_workflow_id {
+        config.server.mentor_course_workflow_id = if id.is_empty() { None } else { Some(id) };
+    }
+    if let Some(id) = req.mentor_hint_workflow_id {
+        config.server.mentor_hint_workflow_id = if id.is_empty() { None } else { Some(id) };
+    }
+    if let Some(id) = req.mentor_bilan_workflow_id {
+        config.server.mentor_bilan_workflow_id = if id.is_empty() { None } else { Some(id) };
     }
     match config::save(&config).await {
         Ok(_) => Json(ApiResponse::ok(())),
