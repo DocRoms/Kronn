@@ -547,6 +547,9 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
                     ApiEndpoint { path: "/rest/api/3/field".into(),                        method: "GET".into(),  description: "[SCHEMA · fields] All fields visible to the user, including custom fields with their `customfield_NNNNN` ids. Use this to map `Story Points` → `customfield_10016` before searching.".into() },
                     // ── Filters ─────────────────────────────────────────
                     ApiEndpoint { path: "/rest/api/3/filter/search".into(),                method: "GET".into(),  description: "[FILTERS] User-saved JQL filters. Query: `accountId=...&filterName=Backlog`. Surfaces the JQL of each filter in `jql`.".into() },
+                    // ── Dev status (linked PRs / branches / commits) ────
+                    ApiEndpoint { path: "/rest/dev-status/1.0/issue/summary".into(),       method: "GET".into(),  description: "[DEV · summary] Aggregate dev-panel counts for ONE issue (NUMERIC issueId — GET `/rest/api/2/issue/{key}?fields=id` first). Query: `issueId=<numericId>`. Read `summary.pullrequest.byInstanceType` to get the EXACT instance key (e.g. `oAuth-com.github.integration.production`) that `detail` needs as `applicationType` — the generic label `GitHub` matches nothing and returns empty. count=0 ⇒ no linked PRs.".into() },
+                    ApiEndpoint { path: "/rest/dev-status/1.0/issue/detail".into(),        method: "GET".into(),  description: "[DEV · linked PRs] Development-panel detail for ONE issue. Query: `issueId=<numericId>&dataType=pullrequest&applicationType=<EXACT instance key from summary.byInstanceType, NOT `GitHub`>` → `{detail:[{pullRequests:[{url,status,name}]}]}` with status = OPEN | MERGED | DECLINED. Use `dataType=repository` for branches/commits. Private/undocumented but stable on Cloud; needs GitHub-for-Jira wired for data to appear.".into() },
                 ],
             }),
         },

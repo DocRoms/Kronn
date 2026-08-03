@@ -534,6 +534,36 @@ mod tests {
     }
 
     #[test]
+    fn atlassian_dev_status_endpoint_declared() {
+        // Regression guard: the "Estimation temps gagné IA" Quick Prompt
+        // resolves a ticket's linked PRs through Jira's dev-status panel.
+        // That endpoint must stay allow-listed or api_call refuses it at run
+        // time (the ApiCall allow-list is derived from this spec).
+        let reg = builtin_registry();
+        let m = reg
+            .iter()
+            .find(|m| m.id == "mcp-atlassian")
+            .expect("mcp-atlassian must be in the registry");
+        let api = m
+            .api_spec
+            .as_ref()
+            .expect("Atlassian must be hybrid (REST spec present)");
+        // Both dev-status steps must be allow-listed: `summary` exposes the
+        // exact instance key (`applicationType`), `detail` returns the PRs.
+        for path in [
+            "/rest/dev-status/1.0/issue/summary",
+            "/rest/dev-status/1.0/issue/detail",
+        ] {
+            let endpoint = api
+                .endpoints
+                .iter()
+                .find(|e| e.path == path)
+                .unwrap_or_else(|| panic!("dev-status endpoint {path} must be declared"));
+            assert_eq!(endpoint.method, "GET", "{path} is a read-only endpoint");
+        }
+    }
+
+    #[test]
     fn tavily_mcp_configuration() {
         let reg = builtin_registry();
         let m = reg.iter().find(|m| m.id == "mcp-tavily").unwrap();
