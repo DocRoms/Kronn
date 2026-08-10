@@ -285,6 +285,10 @@ mod tests {
             discussion_notes_enabled: true,
             default_model_tier: crate::models::ModelTier::Default,
             default_summary_strategy: crate::models::SummaryStrategy::Off,
+            agent_handoffs_enabled: false,
+            agent_handoff_paid_limit: 1,
+            agent_handoff_paid_unlimited: false,
+            agent_handoff_blocked_agents: vec![],
         }
     }
 

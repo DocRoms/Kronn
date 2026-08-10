@@ -6,7 +6,7 @@
 // 3. online, 0 models → Pull suggestions
 // 4. online + models → Model picker dropdown
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, type ReactNode } from 'react';
 import { ollama as ollamaApi, config as configApi } from '../../lib/api';
 import type { OllamaHealthResponse, OllamaModel, ModelTiersConfig } from '../../types/generated';
 import { RefreshCw, ExternalLink, Download, AlertTriangle, Loader2 } from 'lucide-react';
@@ -15,6 +15,8 @@ import '../../pages/SettingsPage.css';
 
 interface OllamaCardProps {
   t: (key: string, ...args: (string | number)[]) => string;
+  modelCostSuffix?: (model: string) => string;
+  headerAccessory?: ReactNode;
 }
 
 // Hardware tier of a suggested model — drives a badge so users don't pull a
@@ -40,7 +42,7 @@ function CaniRunHint({ t }: { t: (key: string) => string }) {
   );
 }
 
-export function OllamaCard({ t }: OllamaCardProps) {
+export function OllamaCard({ t, modelCostSuffix, headerAccessory }: OllamaCardProps) {
   const [health, setHealth] = useState<OllamaHealthResponse | null>(null);
   const [models, setModels] = useState<OllamaModel[]>([]);
   const [loading, setLoading] = useState(true);
@@ -155,9 +157,12 @@ export function OllamaCard({ t }: OllamaCardProps) {
           <span className="set-ollama-status" style={{ color: statusColor }}>
             {loading ? <Loader2 size={10} className="spin" /> : statusLabel}
           </span>
-          <button className="set-icon-btn" onClick={refresh} title={t('ollama.refresh')} aria-label={t('ollama.refresh')} style={{ marginLeft: 'auto' }}>
-            <RefreshCw size={11} className={loading ? 'spin' : ''} />
-          </button>
+          <div className="set-ollama-header-actions">
+            {headerAccessory}
+            <button className="set-icon-btn" onClick={refresh} title={t('ollama.refresh')} aria-label={t('ollama.refresh')}>
+              <RefreshCw size={11} className={loading ? 'spin' : ''} />
+            </button>
+          </div>
         </div>
       </div>
 
@@ -259,6 +264,8 @@ export function OllamaCard({ t }: OllamaCardProps) {
                     </span>
                     <select
                       className="set-ollama-tier-select"
+                      data-model-tier-agent="Ollama"
+                      data-model-tier={tier}
                       value={tiers?.ollama?.[tier] ?? ''}
                       disabled={savingTier === tier}
                       onChange={e => pickTierModel(tier, e.target.value || null)}
@@ -266,7 +273,9 @@ export function OllamaCard({ t }: OllamaCardProps) {
                     >
                       <option value="">{t('ollama.tierAuto')}</option>
                       {models.map(m => (
-                        <option key={m.name} value={m.name}>{m.name} · {m.size}</option>
+                        <option key={m.name} value={m.name}>
+                          {m.name} · {m.size}{modelCostSuffix?.(m.name) ?? ''}
+                        </option>
                       ))}
                     </select>
                   </label>

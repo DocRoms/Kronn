@@ -232,16 +232,53 @@ export function useTourPositioning(
   ]);
 
   useEffect(() => {
-    const initialMeasureFrame = requestAnimationFrame(measure);
+    let trackedTarget: HTMLElement | null = null;
+    let trackedGeometry = '';
+    let layoutTrackingFrame = 0;
+
+    const readTargetGeometry = () => {
+      if (!selector) return { target: null, geometry: '' };
+      const target = document.querySelector<HTMLElement>(selector);
+      if (!target) return { target: null, geometry: 'missing' };
+      const rect = target.getBoundingClientRect();
+      return {
+        target,
+        geometry: `${rect.top}:${rect.left}:${rect.width}:${rect.height}`,
+      };
+    };
+
+    // A target can move without emitting scroll or resize. This happens on
+    // data-heavy pages when an API response fills a section above the current
+    // coachmark: the target's own size is unchanged, but its viewport position
+    // is not. Track the actual rect while the tour is visible and only remeasure
+    // when it changes, so the spotlight cannot remain pinned to stale geometry.
+    const trackTargetLayout = () => {
+      const current = readTargetGeometry();
+      if (current.target !== trackedTarget || current.geometry !== trackedGeometry) {
+        trackedTarget = current.target;
+        trackedGeometry = current.geometry;
+        measure();
+      }
+      layoutTrackingFrame = requestAnimationFrame(trackTargetLayout);
+    };
+
+    const initialMeasureFrame = requestAnimationFrame(() => {
+      measure();
+      const current = readTargetGeometry();
+      trackedTarget = current.target;
+      trackedGeometry = current.geometry;
+      layoutTrackingFrame = requestAnimationFrame(trackTargetLayout);
+    });
     window.addEventListener('resize', measure);
     window.addEventListener('scroll', measure, true);
     return () => {
       cancelAnimationFrame(initialMeasureFrame);
+      cancelAnimationFrame(layoutTrackingFrame);
       window.removeEventListener('resize', measure);
       window.removeEventListener('scroll', measure, true);
       cleanupPrev();
     };
-  }, [cleanupPrev, measure]);
+  }, [cleanupPrev, measure, selector]);
 
   return result;
 }

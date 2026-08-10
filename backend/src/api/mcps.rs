@@ -143,7 +143,9 @@ async fn probe_plugin(
         );
     }
     if available.contains(&PluginInterface::Cli) {
-        checks.push(probe_cli(server, preference == PluginInterface::Cli || only_interface).await);
+        // CLI-wrapper authentication remains a runtime prerequisite when its
+        // tools are surfaced through MCP (`glab mcp serve`, `fastly-mcp`).
+        checks.push(probe_cli(server, env, true).await);
     }
 
     build_probe_response(&server.id, checks)
@@ -267,12 +269,16 @@ async fn probe_mcp(
     }
 }
 
-async fn probe_cli(server: &McpServer, required: bool) -> McpProbeCheck {
+async fn probe_cli(
+    server: &McpServer,
+    env: &std::collections::HashMap<String, String>,
+    required: bool,
+) -> McpProbeCheck {
     let result = match server.id.as_str() {
-        "mcp-fastly" => run_probe_command("fastly", &["auth", "token"])
+        "mcp-fastly" => run_probe_command("fastly", &["auth", "token"], env)
             .await
             .map(|_| ()),
-        "mcp-gitlab" => run_probe_command("glab", &["auth", "status"])
+        "mcp-gitlab" => run_probe_command("glab", &["auth", "status"], env)
             .await
             .map(|_| ()),
         _ => Err("No authenticated CLI probe is declared for this plugin".into()),
@@ -463,9 +469,15 @@ async fn probe_mcp_streamable(url: &str) -> Result<(), String> {
     Ok(())
 }
 
-async fn run_probe_command(command: &str, args: &[&str]) -> Result<Vec<u8>, String> {
+async fn run_probe_command(
+    command: &str,
+    args: &[&str],
+    env: &std::collections::HashMap<String, String>,
+) -> Result<Vec<u8>, String> {
     let mut process = crate::core::cmd::async_cmd(command);
-    process.args(args);
+    process
+        .args(args)
+        .envs(env.iter().filter(|(_, value)| !value.trim().is_empty()));
     process.kill_on_drop(true);
     let output = tokio::time::timeout(std::time::Duration::from_secs(8), process.output())
         .await
@@ -2915,6 +2927,7 @@ mod tests {
             command: "arbitrary-command".into(),
             args: vec!["--dangerous".into()],
             inject: TokenInjection::BearerHeader,
+            fallback_env_key: Some("ARBITRARY_TOKEN".into()),
         };
         let error = validate_custom_auth(&auth).unwrap_err();
         assert!(error.contains("trusted built-in"));

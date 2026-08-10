@@ -152,7 +152,7 @@ import {
 } from '../../lib/api';
 import { DiscussionsPage } from '../DiscussionsPage';
 import { findRenderedTextRanges } from '../../lib/discussionMessageSearch';
-import type { AgentDetection, AiAuditStatus, Discussion, Project } from '../../types/generated';
+import type { AgentDetection, AgentType, AiAuditStatus, Discussion, Project } from '../../types/generated';
 import type { ToastFn } from '../../hooks/useToast';
 
 const noop = () => {};
@@ -370,6 +370,94 @@ describe('DiscussionsPage', () => {
     // The "thinking" / running indicator should be visible
     const body = document.body.textContent ?? '';
     expect(body).toContain('ClaudeCode');
+  });
+
+  it('shows one live placeholder for every agent in a general multi-model turn', async () => {
+    const fullDisc: Discussion = {
+      ...makeListDiscussion('d-plural', 1),
+      agent: 'LiteLlm',
+      participants: ['LiteLlm', 'Ollama'],
+      awaiting_agent: true,
+      messages: [
+        {
+          id: 'u-plural', role: 'User', channel: 'main',
+          content: 'Vous devriez connaître vos points forts et faibles.',
+          agent_type: null, timestamp: '2026-08-10T09:53:05Z', tokens_used: 0, auth_mode: null,
+        },
+      ],
+    };
+    vi.mocked(discussionsApi.get).mockResolvedValue(fullDisc);
+    const lifted = liftedProps();
+    lifted.sendingMap = { 'd-plural': true };
+    lifted.streamingMap = { 'd-plural': '' };
+
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[fullDisc]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        initialActiveDiscussionId="d-plural"
+        {...lifted}
+      />
+    );
+
+    expect(screen.getByTestId('streaming-agent-LiteLlm')).toHaveTextContent('LiteLLM');
+    expect(screen.getByTestId('pending-agent-Ollama')).toHaveTextContent('Ollama');
+    expect(screen.getAllByText("Agent en cours d'exécution...")).toHaveLength(2);
+  });
+
+  it('keeps overlapping reply slots attached to their own turns and reorders a late reply', async () => {
+    const fullDisc = {
+      ...makeListDiscussion('d-overlap', 5),
+      agent: 'LiteLlm' as const,
+      participants: ['LiteLlm', 'Ollama', 'Codex'] as AgentType[],
+      awaiting_agent: true,
+      messages: [
+        { id: 'u-old', role: 'User' as const, channel: 'main' as const, content: 'Premier tour', agent_type: null, timestamp: '2026-08-10T11:07:48Z', tokens_used: 0, auth_mode: null },
+        { id: 'a-fast', role: 'Agent' as const, channel: 'main' as const, content: 'Lite rapide', agent_type: 'LiteLlm' as const, reply_to_message_id: 'u-old', timestamp: '2026-08-10T11:07:58Z', tokens_used: 1, auth_mode: 'local' },
+        { id: 'u-new', role: 'User' as const, channel: 'main' as const, content: 'Second tour', agent_type: null, timestamp: '2026-08-10T11:08:25Z', tokens_used: 0, auth_mode: null },
+        { id: 'a-late', role: 'Agent' as const, channel: 'main' as const, content: 'Ollama lent', agent_type: 'Ollama' as const, reply_to_message_id: 'u-old', timestamp: '2026-08-10T11:08:52Z', tokens_used: 1, auth_mode: 'local' },
+      ],
+      active_agent_dispatches: [
+        { id: 'new-lite', trigger_message_id: 'u-new', agent_type: 'LiteLlm' as const, status: 'Running' },
+        { id: 'new-ollama', trigger_message_id: 'u-new', agent_type: 'Ollama' as const, status: 'Pending' },
+        { id: 'new-codex', trigger_message_id: 'u-new', agent_type: 'Codex' as const, status: 'Pending' },
+      ],
+    };
+    vi.mocked(discussionsApi.get).mockResolvedValue(fullDisc);
+
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[fullDisc]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        initialActiveDiscussionId="d-overlap"
+        {...liftedProps()}
+      />,
+    );
+
+    const lateReply = screen.getByText('Ollama lent').closest('.disc-msg-row');
+    const secondTurn = screen.getByText('Second tour').closest('.disc-msg-row');
+    expect(lateReply).not.toBeNull();
+    expect(secondTurn).not.toBeNull();
+    expect((lateReply as Node).compareDocumentPosition(secondTurn as Node) & Node.DOCUMENT_POSITION_FOLLOWING)
+      .toBeTruthy();
+
+    expect(screen.getByTestId('pending-agent-LiteLlm')).toHaveAttribute('data-reply-trigger', 'u-new');
+    expect(screen.getByTestId('pending-agent-Ollama')).toHaveAttribute('data-reply-trigger', 'u-new');
+    expect(screen.getByTestId('pending-agent-Codex')).toHaveAttribute('data-reply-trigger', 'u-new');
   });
 
   it('restores active discussion on remount via initialActiveDiscussionId', async () => {

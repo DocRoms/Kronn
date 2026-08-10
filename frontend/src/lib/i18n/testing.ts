@@ -3,5 +3,6 @@
 import fr from './locales/fr';
 import en from './locales/en';
 import es from './locales/es';
+import zh from './locales/zh';
 
-export const dictionaries = { fr, en, es } as const;
+export const dictionaries = { fr, en, es, zh } as const;

@@ -119,6 +119,7 @@ pub async fn execute_step(
     // the BUILT-IN fallback (opus) instead of the configured model (fable).
     // Discussions already plumb this (streaming.rs:484); workflows now do too.
     model_tiers: Option<&crate::models::setup::ModelTiersConfig>,
+    lite_llm_base_url: Option<&str>,
 ) -> StepOutcome {
     let start = Instant::now();
 
@@ -241,6 +242,7 @@ pub async fn execute_step(
             tokens_config,
             full_access,
             model_tiers,
+            lite_llm_base_url,
             progress_tx.as_ref(),
         )
         .await
@@ -309,6 +311,7 @@ pub async fn execute_step(
                             tokens_config,
                             full_access,
                             model_tiers,
+                            lite_llm_base_url,
                             None,
                         )
                         .await;
@@ -381,6 +384,7 @@ pub async fn execute_step(
                                 tokens_config,
                                 full_access,
                                 model_tiers,
+                                lite_llm_base_url,
                                 None,
                             )
                             .await;
@@ -470,7 +474,8 @@ pub async fn execute_step(
                     let pre_debate = final_output.clone();
                     match run_multi_agent_debate(
                         step, &mar, &final_output, project_path, work_dir,
-                        tokens_config, full_access, model_tiers, progress_tx.as_ref(),
+                        tokens_config, full_access, model_tiers, lite_llm_base_url,
+                        progress_tx.as_ref(),
                     ).await {
                         Ok((converged, debate_tokens)) => {
                             total_tokens += debate_tokens;
@@ -738,6 +743,7 @@ async fn run_agent_with_timeout(
     tokens_config: &TokensConfig,
     full_access: bool,
     model_tiers: Option<&crate::models::setup::ModelTiersConfig>,
+    lite_llm_base_url: Option<&str>,
     progress_tx: Option<&ProgressSender>,
 ) -> Result<AgentOutput> {
     // 30 min default — generous safety net rather than aggressive ceiling.
@@ -768,6 +774,7 @@ async fn run_agent_with_timeout(
             .and_then(|s| s.tier)
             .unwrap_or_default(),
         model_tiers,
+        lite_llm_base_url,
         ollama_format: ollama_format.as_ref(),
         // Explicit per-step model (from the wizard's model picker) — now
         // actually consumed at run time, not just stamped for display.
@@ -1017,6 +1024,7 @@ async fn run_multi_agent_debate(
     tokens_config: &TokensConfig,
     full_access: bool,
     model_tiers: Option<&crate::models::setup::ModelTiersConfig>,
+    lite_llm_base_url: Option<&str>,
     progress_tx: Option<&ProgressSender>,
 ) -> Result<(String, u64)> {
     let max_rounds = cfg.max_rounds.unwrap_or(3).clamp(1, 5);
@@ -1076,6 +1084,7 @@ async fn run_multi_agent_debate(
             tokens_config,
             full_access,
             model_tiers,
+            lite_llm_base_url,
             progress_tx,
         )
         .await?;
@@ -1121,6 +1130,7 @@ async fn run_multi_agent_debate(
             tokens_config,
             full_access,
             model_tiers,
+            lite_llm_base_url,
             progress_tx,
         )
         .await?;
@@ -1450,6 +1460,7 @@ mod tests {
         // duplicated here because it's `fn` private in the sibling module
         // and we want this test file standalone.
         WorkflowStep {
+            id: None,
             name: "t".into(),
             step_type: crate::models::StepType::Agent,
             description: None,

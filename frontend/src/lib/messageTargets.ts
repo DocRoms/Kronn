@@ -1,9 +1,12 @@
 import type {
+  ActiveAgentDispatch,
   AgentType,
+  Discussion,
+  DiscussionMessage,
   MessageTarget,
   ParticipantView,
 } from '../types/generated';
-import { AGENT_MENTIONS } from './constants';
+import { AGENT_MENTIONS, mentionedAgents } from './constants';
 
 export interface ComposerMention {
   /** Stable token inserted in the textarea (`@codex-cli`, for example). */
@@ -135,4 +138,137 @@ export function targetsFromComposerText(
     targets.push(mention.target);
   }
   return { targets, targetAll };
+}
+
+/** Native responders attached to a discussion, in stable reply order.
+ * Joined CLI sessions are intentionally excluded: `@all` remains the explicit
+ * way to address every native and CLI participant at once. */
+export function nativeDiscussionTargets(
+  discussion: Pick<Discussion, 'agent' | 'participants'>,
+): MessageTarget[] {
+  const agents = [discussion.agent, ...discussion.participants];
+  return agents
+    .filter((agent, index) => agents.indexOf(agent) === index)
+    .map(agent => ({
+      kind: agent === discussion.agent ? 'discussion_agent' : 'agent',
+      agent_type: agent,
+      cli_session_id: null,
+    }));
+}
+
+export interface PendingAgentReply {
+  id: string;
+  triggerMessageId: string;
+  agent: AgentType;
+  status: string;
+}
+
+type DiscussionWithActiveDispatches = Discussion & {
+  active_agent_dispatches?: ActiveAgentDispatch[];
+};
+
+/** Durable reply slots, keyed by dispatch rather than agent type. Two turns
+ * can therefore both wait for Ollama without collapsing into one placeholder.
+ * The fallback keeps rolling-upgrade compatibility with an older backend. */
+export function pendingAgentReplies(
+  discussion: DiscussionWithActiveDispatches,
+): PendingAgentReply[] {
+  if ('active_agent_dispatches' in discussion) {
+    return (discussion.active_agent_dispatches ?? []).map(dispatch => ({
+      id: dispatch.id,
+      triggerMessageId: dispatch.trigger_message_id,
+      agent: dispatch.agent_type,
+      status: dispatch.status,
+    }));
+  }
+
+  let latestUserIndex = -1;
+  for (let index = discussion.messages.length - 1; index >= 0; index -= 1) {
+    const message = discussion.messages[index];
+    if (message.role === 'User' && message.channel === 'main') {
+      latestUserIndex = index;
+      break;
+    }
+  }
+  if (latestUserIndex < 0) return [];
+
+  const latestUser = discussion.messages[latestUserIndex];
+  const routingText = proseOnly(latestUser.content);
+  let requested = mentionedAgents(routingText);
+  if (/(^|[^\p{L}\p{N}_-])@all(?=$|[^\p{L}\p{N}_-])/iu.test(routingText)) {
+    requested = [discussion.agent, ...discussion.participants];
+  } else if (requested.length === 0) {
+    const nativeParticipants = nativeDiscussionTargets(discussion).map(target => target.agent_type);
+    requested = nativeParticipants.length > 1
+      ? nativeParticipants
+      : [latestUser.target_agent ?? discussion.agent];
+  }
+
+  const answered = new Set<AgentType>();
+  for (const message of discussion.messages.slice(latestUserIndex + 1)) {
+    if ((message.role === 'Agent' || message.role === 'System') && message.agent_type) {
+      answered.add(message.agent_type);
+    }
+  }
+  return requested.filter((agent, index) => (
+    requested.indexOf(agent) === index && !answered.has(agent)
+  )).map(agent => ({
+    id: `legacy:${latestUser.id}:${agent}`,
+    triggerMessageId: latestUser.id,
+    agent,
+    status: 'Pending',
+  }));
+}
+
+/** Display projection for overlapping turns. The database remains strictly
+ * append-only, but a late native reply linked to an older User message belongs
+ * to that conversational turn and must render before newer questions. */
+export function messagesInConversationOrder(
+  messages: DiscussionMessage[],
+): DiscussionMessage[] {
+  const mainUserIds = new Set(
+    messages
+      .filter(message => message.role === 'User' && message.channel === 'main')
+      .map(message => message.id),
+  );
+  const turnRankByUserId = new Map<string, number>();
+  const messageById = new Map(messages.map(message => [message.id, message]));
+  const naturalTurnRank: number[] = [];
+  let currentTurnRank = -1;
+
+  for (const message of messages) {
+    if (message.role === 'User' && message.channel === 'main') {
+      currentTurnRank += 1;
+      turnRankByUserId.set(message.id, currentTurnRank);
+    }
+    naturalTurnRank.push(currentTurnRank);
+  }
+
+  const linkedTurnRank = (message: DiscussionMessage): number | undefined => {
+    if ((message.role !== 'Agent' && message.role !== 'System') || !message.reply_to_message_id) {
+      return undefined;
+    }
+    const visited = new Set<string>();
+    let parentId: string | undefined = message.reply_to_message_id;
+    while (parentId && !visited.has(parentId) && visited.size < 16) {
+      visited.add(parentId);
+      if (mainUserIds.has(parentId)) return turnRankByUserId.get(parentId);
+      const parent = messageById.get(parentId);
+      if (!parent || (parent.role !== 'Agent' && parent.role !== 'System')) return undefined;
+      parentId = parent.reply_to_message_id ?? undefined;
+    }
+    return undefined;
+  };
+
+  return messages
+    .map((message, index) => {
+      const linkedTurn = linkedTurnRank(message);
+      return {
+        message,
+        index,
+        turnRank: linkedTurn ?? naturalTurnRank[index],
+      };
+    })
+    .sort((left, right) => left.turnRank - right.turnRank || left.index - right.index)
+    .map(entry => entry.message);
 }

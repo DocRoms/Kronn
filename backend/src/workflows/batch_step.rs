@@ -1535,6 +1535,7 @@ mod tests {
     /// Build a minimal `BatchQuickPrompt` step pointing at the seeded QP.
     fn batch_step(qp_id: &str, wait_for_completion: bool) -> WorkflowStep {
         WorkflowStep {
+            id: None,
             step_type: StepType::BatchQuickPrompt,
             output_format: StepOutputFormat::default(),
             description: None,

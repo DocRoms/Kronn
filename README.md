@@ -23,11 +23,11 @@
   <img src="docs/screenshots/kronn-projects.en.png" alt="Kronn dashboard, sidebar with Projects/Discussions/Plugins/Workflows/Config tabs, three demo projects listed (acme-blog, demo-monorepo, sample-rust-cli) each with AI-context status and audit counters" />
 </p>
 
-**Run Claude Code, Codex, Gemini, Ollama (100% local) and 3 other AI coding CLIs from one self-hosted dashboard, with shared MCPs, secrets, and repeatable workflows.**
+**Run Claude Code, Codex, Gemini, Ollama (100% local), LiteLLM and 3 other AI coding agents from one self-hosted dashboard, with shared MCPs, secrets, and repeatable workflows.**
 
 **Smaller prompts, more code where code is enough: fewer hallucinations, lower token bill, eco-design by default.**
 
-> **Status: 0.9.3 (current release).** Functional but pre-1.0. Breaking changes happen between minor versions; patch versions are safe.
+> **Status: 0.9.4 (current release).** Functional but pre-1.0. Breaking changes happen between minor versions; patch versions are safe.
 > **License: AGPL-3.0.** Using Kronn locally to build *your own* product is fine; the copyleft only kicks in if you distribute a modified Kronn to others. See [License notes](#license-notes-agpl-3-0).
 
 ## Contents
@@ -52,7 +52,9 @@ If you've ever:
 - **Watched a 500-line mega-prompt half-hallucinate 12 different tasks**. Kronn lets you decompose: deterministic code where it's mechanical (API, exec, webhooks, zero tokens), small focused AI prompts only where reasoning matters, each one validated via compare-agents before it ships.
 - **Wanted AI on your code but NOT your code on Anthropic**. Plug [Ollama](https://ollama.com), run Llama / Gemma / Qwen locally. **$0 API cost, $0 data leak**, same UI.
 
-Kronn is a **self-hosted control plane for AI coding agents**: Claude Code, Codex, Vibe, Gemini CLI, Kiro, GitHub Copilot CLI, and Ollama. Backend in Rust, frontend in React, secrets in an encrypted vault on your machine.
+Kronn is a **self-hosted control plane for AI coding agents**: Claude Code, Codex, Vibe, Gemini CLI, Kiro, GitHub Copilot CLI, Ollama, and LiteLLM. Backend in Rust, frontend in React, secrets in an encrypted vault on your machine.
+
+The interface is available in English, French, Spanish and Simplified Chinese. Its language is independent from the output language assigned to new agent discussions.
 
 > **Already happy with one CLI?** Kronn pays off the moment you add a second agent or want to replay a prompt across N files. It's the layer above your single assistant.
 
@@ -81,7 +83,7 @@ This is what makes Kronn different from Cursor (one prompt, one agent) and from 
 
 ## Quick start
 
-**Prerequisite:** at least one agent installed locally (Claude Code, Codex, Vibe, Kiro, Gemini CLI, GitHub Copilot CLI) or [Ollama](https://ollama.com) for fully-local models. Kronn drives the runtime you already use; it does not ship its own LLM. The setup wizard auto-detects what's on your `$PATH` with an `npx` runtime fallback for npm-published agents.
+**Prerequisite:** at least one local CLI agent, [Ollama](https://ollama.com) for fully-local models, or an existing LiteLLM proxy. Kronn drives the runtime you already use; it does not ship its own LLM. The setup wizard auto-detects what's on your `$PATH` with an `npx` runtime fallback for npm-published agents.
 
 ### Desktop app: recommended for solo use
 
@@ -90,7 +92,7 @@ Download the installer for your OS from [Releases](https://github.com/DocRoms/Kr
 ### From source: one command
 
 ```bash
-git clone --branch 0.9.3 --depth 1 https://github.com/DocRoms/Kronn.git   # latest stable release
+git clone --branch 0.9.4 --depth 1 https://github.com/DocRoms/Kronn.git   # latest stable release
 cd Kronn
 ./kronn start        # guided setup & launch (Docker)
 ```
@@ -121,7 +123,7 @@ app, Docker deployment and a bare `make run-backend` do not require it.
 Requires Docker + Docker Compose. On Windows, WSL2 (Docker Engine inside WSL works, Docker Desktop optional).
 
 ```bash
-git clone --branch 0.9.3 --depth 1 https://github.com/DocRoms/Kronn.git   # latest stable release
+git clone --branch 0.9.4 --depth 1 https://github.com/DocRoms/Kronn.git   # latest stable release
 cd Kronn
 ./kronn start
 # → http://localhost:3140
@@ -183,6 +185,8 @@ project view and discussion plan always lead back to one source of truth.
 ### 4. Stay 100% local with Ollama
 
 Run Llama 3, Gemma, Qwen, Codestral on your machine via Ollama as a first-class agent. Same Discussions / Quick Prompts / Workflows surface, Kronn just routes the calls to `http://localhost:11434/v1/` instead of the cloud. Pick your default model right from Settings. **Zero token bill, zero code leaving your laptop.**
+
+Already route models through LiteLLM? Declare the endpoint and optional key, test the connection, then map the models reported by your proxy to Kronn's Economy / Default / Reasoning tiers. Ollama and LiteLLM can both call Kronn's native tools from a discussion.
 
 
 ### 5. Burn tokens only where they earn their cost
@@ -329,7 +333,7 @@ Three independent layers injected into the agent's system prompt:
 | **n8n** | Generic automation, no agent context, no MCP | When AI is one step among others, not the orchestrator itself |
 | **Temporal** | Durable execution at massive scale (Uber/Stripe-grade) with replay + signals; overkill for orchestrating CLI agents on a laptop, no AI primitives | When you want the workflow pattern without Temporal's operational footprint |
 | **LangGraph** | Python in-process, no CLI agents, no MCP plumbing, no compare-agents | When you want to orchestrate the real CLIs (Claude, Codex…) with their own caches/sessions |
-| **LiteLLM** | LLM API router, but no workflow or CLI agents | Complementary: you can put LiteLLM behind a Kronn `Agent` step |
+| **LiteLLM** | LLM API router, but no workflow or CLI-agent control plane | Kronn uses your LiteLLM proxy as a first-class discussion/workflow agent while adding projects, tools and orchestration |
 
 ---
 

@@ -676,6 +676,61 @@ pub fn set_disc_no_agent(conn: &Connection, disc_id: &str, no_agent: bool) -> Re
     Ok(affected > 0)
 }
 
+pub fn get_disc_agent_handoffs_disabled(conn: &Connection, disc_id: &str) -> Result<Option<bool>> {
+    Ok(get_disc_agent_handoff_policy(conn, disc_id)?.map(|policy| policy.0))
+}
+
+pub fn get_disc_agent_handoff_policy(
+    conn: &Connection,
+    disc_id: &str,
+) -> Result<Option<(bool, bool)>> {
+    let value = conn
+        .query_row(
+            "SELECT agent_handoffs_disabled, agent_handoffs_unlimited
+             FROM discussions WHERE id = ?1",
+            params![disc_id],
+            |row| Ok((row.get::<_, i64>(0)? != 0, row.get::<_, i64>(1)? != 0)),
+        )
+        .optional()?;
+    Ok(value)
+}
+
+pub fn set_disc_agent_handoffs_disabled(
+    conn: &Connection,
+    disc_id: &str,
+    disabled: bool,
+) -> Result<bool> {
+    let affected = conn.execute(
+        "UPDATE discussions
+         SET agent_handoffs_disabled = ?2, updated_at = ?3
+         WHERE id = ?1",
+        params![disc_id, disabled as i32, Utc::now().to_rfc3339()],
+    )?;
+    Ok(affected > 0)
+}
+
+pub fn set_disc_agent_handoff_policy(
+    conn: &Connection,
+    disc_id: &str,
+    disabled: Option<bool>,
+    unlimited: Option<bool>,
+) -> Result<bool> {
+    let affected = conn.execute(
+        "UPDATE discussions
+         SET agent_handoffs_disabled = COALESCE(?2, agent_handoffs_disabled),
+             agent_handoffs_unlimited = COALESCE(?3, agent_handoffs_unlimited),
+             updated_at = ?4
+         WHERE id = ?1",
+        params![
+            disc_id,
+            disabled.map(i32::from),
+            unlimited.map(i32::from),
+            Utc::now().to_rfc3339()
+        ],
+    )?;
+    Ok(affected > 0)
+}
+
 pub fn delete_discussion(conn: &Connection, id: &str) -> Result<bool> {
     let affected = conn.execute("DELETE FROM discussions WHERE id = ?1", params![id])?;
     Ok(affected > 0)
@@ -1074,6 +1129,226 @@ fn insert_message_with_targets_dispatches_and_cli_author(
     Ok(sort_order)
 }
 
+pub const MAX_LOCAL_AGENT_HANDOFFS_PER_TURN: u32 = 8;
+pub const MAX_AGENT_HANDOFF_DEPTH: u32 = 2;
+
+#[derive(Debug)]
+pub struct NativeAgentMessageOutcome {
+    pub sort_order: i64,
+    pub dispatched_agents: Vec<AgentType>,
+}
+
+fn agent_handoff_root(
+    conn: &Connection,
+    discussion_id: &str,
+    reply_to_message_id: Option<&str>,
+) -> Result<Option<(String, u32)>> {
+    let Some(mut current_id) = reply_to_message_id.map(str::to_owned) else {
+        return Ok(None);
+    };
+    let mut depth = 1;
+    for _ in 0..16 {
+        let parent = conn
+            .query_row(
+                "SELECT role, reply_to_message_id
+                 FROM messages
+                 WHERE discussion_id = ?1 AND id = ?2",
+                params![discussion_id, current_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+            )
+            .optional()?;
+        let Some((role, reply_to)) = parent else {
+            return Ok(None);
+        };
+        match role.as_str() {
+            "User" => return Ok(Some((current_id, depth))),
+            "Agent" if depth < MAX_AGENT_HANDOFF_DEPTH => {
+                let Some(parent_id) = reply_to else {
+                    return Ok(None);
+                };
+                current_id = parent_id;
+                depth += 1;
+            }
+            _ => return Ok(None),
+        }
+    }
+    Ok(None)
+}
+
+fn agent_handoff_counts_for_root(
+    conn: &Connection,
+    discussion_id: &str,
+    root_user_id: &str,
+) -> Result<(u32, u32)> {
+    let prefix = format!("agent-handoff:{root_user_id}:%");
+    let mut statement = conn.prepare(
+        "SELECT agent_override_json
+         FROM agent_dispatch_jobs
+         WHERE discussion_id = ?1 AND dedupe_key LIKE ?2",
+    )?;
+    let existing = statement
+        .query_map(params![discussion_id, prefix], |row| {
+            row.get::<_, Option<String>>(0)
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut local_count = 0;
+    let mut paid_count = 0;
+    for agent_json in existing.into_iter().flatten() {
+        if let Ok(agent) = serde_json::from_str::<AgentType>(&agent_json) {
+            if agent == AgentType::Ollama {
+                local_count += 1;
+            } else {
+                paid_count += 1;
+            }
+        }
+    }
+    Ok((local_count, paid_count))
+}
+
+pub fn agent_handoff_paid_count_for_reply(
+    conn: &Connection,
+    discussion_id: &str,
+    reply_to_message_id: Option<&str>,
+) -> Result<u32> {
+    let Some((root_user_id, _)) = agent_handoff_root(conn, discussion_id, reply_to_message_id)?
+    else {
+        return Ok(0);
+    };
+    Ok(agent_handoff_counts_for_root(conn, discussion_id, &root_user_id)?.1)
+}
+
+/// Persist a native reply and its bounded explicit agent delegations as one
+/// unit. Every paid/unknown dispatch is charged against the originating user
+/// turn; Ollama has a larger but still finite local ceiling.
+#[allow(clippy::too_many_arguments)]
+pub fn insert_native_agent_message_with_handoffs(
+    conn: &Connection,
+    discussion_id: &str,
+    msg: &DiscussionMessage,
+    child_run_was_success: bool,
+    dispatch_job_id: Option<&str>,
+    source_agent: &AgentType,
+    candidate_agents: &[AgentType],
+    globally_enabled: bool,
+    paid_limit: Option<u32>,
+) -> Result<NativeAgentMessageOutcome> {
+    let transaction = conn.unchecked_transaction()?;
+    let (no_agent, discussion_disabled, primary_agent, participants_json): (
+        i64,
+        i64,
+        String,
+        String,
+    ) = transaction.query_row(
+        "SELECT no_agent, agent_handoffs_disabled, agent, participants_json
+         FROM discussions WHERE id = ?1",
+        [discussion_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    )?;
+    let mut attached_agents =
+        serde_json::from_str::<Vec<AgentType>>(&participants_json).unwrap_or_default();
+    let primary_agent = parse_agent_type(&primary_agent);
+    if !attached_agents.contains(&primary_agent) {
+        attached_agents.push(primary_agent);
+    }
+
+    let mut allowed = Vec::new();
+    let root =
+        if child_run_was_success && globally_enabled && no_agent == 0 && discussion_disabled == 0 {
+            agent_handoff_root(
+                &transaction,
+                discussion_id,
+                msg.reply_to_message_id.as_deref(),
+            )?
+        } else {
+            None
+        };
+    if let Some((root_user_id, _depth)) = root {
+        let (mut local_count, mut paid_count) =
+            agent_handoff_counts_for_root(&transaction, discussion_id, &root_user_id)?;
+        for agent in candidate_agents {
+            if agent == source_agent || !attached_agents.contains(agent) || allowed.contains(agent)
+            {
+                continue;
+            }
+            let admitted = if *agent == AgentType::Ollama {
+                if local_count >= MAX_LOCAL_AGENT_HANDOFFS_PER_TURN {
+                    false
+                } else {
+                    local_count += 1;
+                    true
+                }
+            } else if paid_limit.is_some_and(|limit| paid_count >= limit.min(5)) {
+                false
+            } else {
+                paid_count += 1;
+                true
+            };
+            if admitted {
+                allowed.push(agent.clone());
+            }
+        }
+
+        let sort_order = insert_message(&transaction, discussion_id, msg)?;
+        transaction.execute(
+            "UPDATE messages
+             SET agent_run_succeeded = ?2, agent_dispatch_job_id = ?3
+             WHERE id = ?1",
+            params![msg.id, child_run_was_success as i64, dispatch_job_id],
+        )?;
+        if !allowed.is_empty() {
+            let targets = allowed
+                .iter()
+                .cloned()
+                .map(MessageTarget::agent)
+                .collect::<Vec<_>>();
+            replace_message_targets(&transaction, &msg.id, &targets)?;
+            let empty_chain = Vec::new();
+            for agent in &allowed {
+                let dedupe_key = format!(
+                    "agent-handoff:{root_user_id}:{}:{}",
+                    msg.id,
+                    format_agent_type(agent)
+                );
+                let job_id = uuid::Uuid::new_v4().to_string();
+                super::agent_dispatch::enqueue(
+                    &transaction,
+                    super::agent_dispatch::NewAgentDispatchJob {
+                        id: &job_id,
+                        discussion_id,
+                        trigger_message_id: &msg.id,
+                        trigger_sort_order: sort_order,
+                        dedupe_key: &dedupe_key,
+                        agent_override: Some(agent),
+                        chain_prompt_ids: &empty_chain,
+                        batch_item: None,
+                        group_id: None,
+                        group_concurrency_limit: None,
+                    },
+                )?;
+            }
+            set_awaiting_agent(&transaction, discussion_id, true)?;
+        }
+        transaction.commit()?;
+        return Ok(NativeAgentMessageOutcome {
+            sort_order,
+            dispatched_agents: allowed,
+        });
+    }
+
+    let sort_order = insert_message(&transaction, discussion_id, msg)?;
+    transaction.execute(
+        "UPDATE messages
+         SET agent_run_succeeded = ?2, agent_dispatch_job_id = ?3
+         WHERE id = ?1",
+        params![msg.id, child_run_was_success as i64, dispatch_job_id],
+    )?;
+    transaction.commit()?;
+    Ok(NativeAgentMessageOutcome {
+        sort_order,
+        dispatched_agents: Vec::new(),
+    })
+}
+
 fn insert_user_message_with_agent_handoff_inner(
     conn: &Connection,
     discussion_id: &str,
@@ -1395,6 +1670,21 @@ fn list_all_messages(
     }
 
     Ok(map)
+}
+
+pub fn latest_main_user_message_id(
+    conn: &Connection,
+    discussion_id: &str,
+) -> Result<Option<String>> {
+    conn.query_row(
+        "SELECT id FROM messages
+         WHERE discussion_id = ?1 AND role = 'User' AND channel = 'main'
+         ORDER BY sort_order DESC LIMIT 1",
+        [discussion_id],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(Into::into)
 }
 
 pub fn list_messages(conn: &Connection, discussion_id: &str) -> Result<Vec<DiscussionMessage>> {
@@ -2534,6 +2824,7 @@ pub(crate) fn parse_agent_type(s: &str) -> AgentType {
         "Kiro" => AgentType::Kiro,
         "CopilotCli" => AgentType::CopilotCli,
         "Ollama" => AgentType::Ollama,
+        "LiteLlm" => AgentType::LiteLlm,
         _ => AgentType::Custom,
     }
 }
@@ -2547,6 +2838,7 @@ fn format_agent_type(a: &AgentType) -> String {
         AgentType::Kiro => "Kiro".into(),
         AgentType::CopilotCli => "CopilotCli".into(),
         AgentType::Ollama => "Ollama".into(),
+        AgentType::LiteLlm => "LiteLlm".into(),
         AgentType::Custom => "Custom".into(),
     }
 }

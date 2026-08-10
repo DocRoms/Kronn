@@ -30,7 +30,9 @@ import type {
   ImportPluginBundleRequest,
   ImportPluginBundleReport,
   Discussion,
+  ActiveAgentDispatch,
   DiscussionNativeAgentMode,
+  DiscussionAgentHandoffMode,
   DiscussionMeta,
   DiscussionSession,
   DiscussionWorkspace,
@@ -116,6 +118,11 @@ import type {
   BatchRunQuickApiResponse,
   OllamaHealthResponse,
   OllamaModelsResponse,
+  LiteLlmHealthResponse,
+  LiteLlmModelFailuresResponse,
+  LiteLlmModelRetryResponse,
+  LiteLlmModelsResponse,
+  LiteLlmTestResponse,
   DecideRunRequest,
   DecideRunResponse,
   ResumeInterruptedRequest,
@@ -649,7 +656,7 @@ export const config = {
   restoreRecovery: (passphrase: string, recoveryCode?: string) =>
     api<void>('POST', '/config/recovery/restore', { passphrase, recovery_code: recoveryCode || null }),
   getServerConfig: () => api<ServerConfigPublic>('GET', '/config/server'),
-  setServerConfig: (req: { domain?: string; max_concurrent_agents?: number; agent_stall_timeout_min?: number; pseudo?: string; avatar_email?: string; bio?: string; debug_mode?: boolean; discussion_notes_enabled?: boolean; default_model_tier?: 'economy' | 'default' | 'reasoning'; default_summary_strategy?: 'Auto' | 'OnDemand' | 'Off' }) => api<void>('POST', '/config/server', req),
+  setServerConfig: (req: { domain?: string; max_concurrent_agents?: number; agent_stall_timeout_min?: number; pseudo?: string; avatar_email?: string; bio?: string; debug_mode?: boolean; discussion_notes_enabled?: boolean; default_model_tier?: 'economy' | 'default' | 'reasoning'; default_summary_strategy?: 'Auto' | 'OnDemand' | 'Off'; agent_handoffs_enabled?: boolean; agent_handoff_paid_limit?: number; agent_handoff_paid_unlimited?: boolean; agent_handoff_blocked_agents?: AgentType[] }) => api<void>('POST', '/config/server', req),
   regenerateAuthToken: () => api<string>('POST', '/config/auth-token/regenerate'),
 };
 
@@ -1322,12 +1329,17 @@ export const discussions = {
    *  (incl. background/batch children). Polled so a run still working after you
    *  navigate away keeps showing as running, instead of looking dead. */
   getRunning: () => api<string[]>('GET', '/discussions/running'),
-  get: (id: string) => api<Discussion>('GET', `/discussions/${id}`),
+  get: (id: string) => api<Discussion & { active_agent_dispatches?: ActiveAgentDispatch[] }>(
+    'GET',
+    `/discussions/${id}`,
+  ),
   create: (req: CreateDiscussionRequest) => api<Discussion>('POST', '/discussions', req),
   delete: (id: string) => api<void>('DELETE', `/discussions/${id}`),
-  update: (id: string, body: { title?: string; archived?: boolean; pinned?: boolean; skill_ids?: string[]; profile_ids?: string[]; directive_ids?: string[]; project_id?: string | null; tier?: ModelTier; agent?: AgentType; summary_strategy?: 'Auto' | 'OnDemand' | 'Off'; no_agent?: boolean }) => api<void>('PATCH', `/discussions/${id}`, body),
+  update: (id: string, body: { title?: string; archived?: boolean; pinned?: boolean; skill_ids?: string[]; profile_ids?: string[]; directive_ids?: string[]; project_id?: string | null; tier?: ModelTier; agent?: AgentType; summary_strategy?: 'Auto' | 'OnDemand' | 'Off'; no_agent?: boolean; agent_handoffs_disabled?: boolean; agent_handoffs_unlimited?: boolean }) => api<void>('PATCH', `/discussions/${id}`, body),
   nativeAgentMode: (id: string) =>
     api<DiscussionNativeAgentMode>('GET', `/discussions/${id}/native-agent`),
+  agentHandoffMode: (id: string) =>
+    api<DiscussionAgentHandoffMode>('GET', `/discussions/${id}/agent-handoffs`),
   share: (id: string, contactIds: string[]) => api<string>('POST', `/discussions/${id}/share`, { contact_ids: contactIds }),
   /** Unified "join by code": paste any `kr-join-…` token and the backend
    *  resolves it LOCAL or cross-instance. If it isn't a local room, the backend
@@ -2262,6 +2274,21 @@ export const usage = {
 export const ollama = {
   health: () => api<OllamaHealthResponse>('GET', '/ollama/health'),
   models: () => api<OllamaModelsResponse>('GET', '/ollama/models'),
+};
+
+// ─── LiteLLM (OpenAI-compatible proxy) ─────────────────────────────────────
+
+export const liteLlm = {
+  health: () => api<LiteLlmHealthResponse>('GET', '/lite-llm/health'),
+  models: () => api<LiteLlmModelsResponse>('GET', '/lite-llm/models'),
+  modelFailures: () => api<LiteLlmModelFailuresResponse>('GET', '/lite-llm/model-failures'),
+  forgetModelFailure: (model: string) =>
+    api<boolean>('DELETE', '/lite-llm/model-failures', { model }),
+  retryModel: (model: string) =>
+    api<LiteLlmModelRetryResponse>('POST', '/lite-llm/model-failures/retry', { model }),
+  /// `api_key: null` keeps the stored credential; `''` clears it.
+  test: (body: { base_url: string; api_key: string | null }) =>
+    api<LiteLlmTestResponse>('POST', '/lite-llm/test', body),
 };
 
 // 0.8.6 (#24) — Unified API call logs.

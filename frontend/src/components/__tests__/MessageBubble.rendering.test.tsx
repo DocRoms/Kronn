@@ -38,7 +38,12 @@ vi.mock('../../lib/api', async () => {
   };
 });
 
-import { MessageBubble, MarkdownContent, type MessageBubbleProps } from '../MessageBubble';
+import {
+  MessageBubble,
+  MarkdownContent,
+  type MessageBubbleProps,
+} from '../MessageBubble';
+import { parseModelErrorEvent } from '../../lib/modelErrorEvent';
 import { config as configApi } from '../../lib/api';
 import type { DiscussionMessage, MessageRole } from '../../types/generated';
 
@@ -157,7 +162,7 @@ describe('MessageBubble — role-based bubble variant', () => {
     expect(header).toHaveTextContent('#87654321');
   });
 
-  it('shows every reply as a compact backlink on the original message', () => {
+  it('shows human and agent replies as backlinks without exposing native tool events', () => {
     const onReplyNavigate = vi.fn();
     const original = makeMessage({ id: 'original', role: 'User' });
     const agentReply = makeMessage({
@@ -174,8 +179,14 @@ describe('MessageBubble — role-based bubble variant', () => {
       content: 'Human follow-up',
       reply_to_message_id: original.id,
     });
+    const nativeToolEvent = makeMessage({
+      id: 'reply-tool',
+      role: 'System',
+      content: '[agent-native: Read({})]',
+      reply_to_message_id: original.id,
+    });
     renderBubble(original, {
-      replies: [agentReply, humanReply],
+      replies: [agentReply, nativeToolEvent, humanReply],
       onReplyNavigate,
       t: (key: string, ...args: (string | number)[]) => `${key} ${args.join(' ')}`,
     });
@@ -186,6 +197,16 @@ describe('MessageBubble — role-based bubble variant', () => {
     expect(backlinks[1]).toHaveTextContent('@Peer');
     fireEvent.click(backlinks[1]);
     expect(onReplyNavigate).toHaveBeenCalledWith(humanReply.id);
+  });
+
+  it('keeps a System reply relationship internal to thread ordering', () => {
+    renderBubble(makeMessage({
+      role: 'System',
+      content: '[agent-native: Bash({})]',
+      reply_to_message_id: '12345678-source',
+    }));
+
+    expect(screen.queryByText('disc.inReplyTo')).not.toBeInTheDocument();
   });
 
   it('tags an error System message with data-variant="error"', () => {
@@ -742,6 +763,58 @@ describe('MessageBubble — inline CTAs', () => {
     );
     fireEvent.click(screen.getByText('disc.editTimeout'));
     expect(onNavigate).toHaveBeenCalledWith('settings', { scrollTo: 'settings-server' });
+  });
+
+  it('renders a compact model error with collapsible diagnostics and a tier shortcut', () => {
+    const onNavigate = vi.fn();
+    const content = '[kronn:model-error]\n' + JSON.stringify({
+      kind: 'model_error',
+      status: 404,
+      summary: 'LiteLlm returned HTTP 404 for model-a.',
+      detail: 'LiteLLM error 404 Not Found: nested upstream details',
+      tier: 'default',
+    });
+    sessionStorage.removeItem('kronn:model-config-target');
+    renderBubble(makeMessage({
+      role: 'System',
+      content,
+      agent_type: 'LiteLlm',
+      model: 'model-a',
+      model_tier: 'default',
+    }), { onNavigate });
+
+    expect(screen.getByTestId('disc-model-error-content')).toHaveTextContent('HTTP 404');
+    expect(screen.getByText('disc.modelErrorDetails')).toBeInTheDocument();
+    expect(screen.getByText(/nested upstream details/)).toBeInTheDocument();
+    fireEvent.click(screen.getByText('disc.changeTierModel'));
+
+    expect(onNavigate).toHaveBeenCalledWith('settings', { scrollTo: 'settings-agent-config' });
+    expect(JSON.parse(sessionStorage.getItem('kronn:model-config-target') ?? '{}')).toEqual({
+      agentType: 'LiteLlm',
+      tier: 'default',
+    });
+  });
+
+  it('rejects malformed model-error events instead of hiding their raw content', () => {
+    expect(parseModelErrorEvent('[kronn:model-error]\n{"status":404}')).toBeNull();
+    expect(parseModelErrorEvent('ordinary system error')).toBeNull();
+  });
+
+  it('upgrades a legacy raw LiteLLM 404 into the same compact CTA', () => {
+    const onNavigate = vi.fn();
+    renderBubble(makeMessage({
+      role: 'System',
+      content: 'Erreur: LiteLLM error 404 Not Found: giant nested payload',
+      agent_type: 'LiteLlm',
+      model: 'legacy-model',
+      model_tier: null,
+    }), { onNavigate });
+
+    expect(screen.getByTestId('disc-model-error-content')).toHaveTextContent('disc.modelErrorSummary');
+    fireEvent.click(screen.getByText('disc.changeTierModel'));
+    expect(JSON.parse(sessionStorage.getItem('kronn:model-config-target') ?? '{}')).toEqual({
+      agentType: 'LiteLlm', tier: 'default',
+    });
   });
 });
 

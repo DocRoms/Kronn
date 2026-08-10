@@ -17,13 +17,13 @@ import {
 type Translator = (key: string, ...args: (string | number)[]) => string;
 
 /** Coerce a backend "output language" string to a UI locale supported by the
- *  i18n dictionary. Backend allows fr/en/es/zh/br but only fr/en/es have
+ *  i18n dictionary. Backend allows fr/en/es/zh/br but only fr/en/es/zh have
  *  translations; for the rest we fall back to English (the most universal
  *  language that all dictionaries cover). The agent will still reply in the
  *  full backend language because the discussion's `language` param is
  *  forwarded as-is. */
 function toUILocale(lang: string | undefined): UILocale {
-  if (lang === 'fr' || lang === 'en' || lang === 'es') return lang;
+  if (lang === 'fr' || lang === 'en' || lang === 'es' || lang === 'zh') return lang;
   return 'en';
 }
 

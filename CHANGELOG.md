@@ -7,6 +7,50 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.9.4]
+
+### Added
+
+- LiteLLM is now a first-class agent. Kronn installs the proxy, validates its
+  endpoint and optional encrypted key, discovers the models it actually
+  exposes, and maps them independently to Economy, Default and Reasoning tiers.
+  The OpenAI SSE transport shares the HTTP-agent execution path with Ollama
+  behind a codec boundary.
+- Ollama and LiteLLM agents can use Kronn tools through native tool-calling
+  frames. The bounded in-process loop exposes compact `mcp_list`, `qa_list`,
+  `qa_run` and `api_call` primitives, keeps credentials server-side, renders
+  tool traces in the discussion and stops after eight round-trips.
+- The UI now ships a complete Simplified Chinese locale as a fourth lazy-loaded
+  dictionary. Browser detection, local/backend persistence, parity linting and
+  locale-aware AI helpers all recognise `zh`; interface language remains
+  independent from the output language assigned to new discussions.
+
+### Changed
+
+- Settings now follow the product hierarchy: Identity first, then Agents,
+  beta context features, Capabilities and Interface. Agent defaults are
+  readable choice cards; economy and measured usage/cost sit together; model
+  tiers and mention colours live on each agent card. Skills, Directives and
+  Agent profiles share one searchable capability surface with kind and origin
+  filters, including a clear Kronn/personal distinction.
+- Identity, Sourcing, Continual Learning and Interface use the same panel and
+  contextual-help language. Help now states the exact scope of bio, global
+  context, summaries, reasoning defaults and output-language injection, while
+  the unstable continual-learning mode carries a prominent warning. Voice,
+  project discovery/context, recovery, server, diagnostics and data controls
+  are grouped into explicit Experience & projects and System & data sections.
+- Workflow steps now have durable UUIDs distinct from their editable aliases.
+  Existing workflows are backfilled automatically, imports receive fresh step
+  identities, and every workflow surface exposes the UUID with the same
+  compact copied-state feedback as IDs elsewhere in the application.
+
+### Fixed
+
+- Kronn now detects when Vibe workspace trust would silently reject the
+  `.vibe/config.toml` MCP configuration it just wrote. The sync path, agent
+  card and `kronn doctor` report the blocked directory and remediation without
+  modifying Vibe's trust store.
+
 ## [0.9.3]
 
 ### Fixed

@@ -1729,6 +1729,7 @@ fn sample_workflow(id: &str) -> Workflow {
         project_id: None,
         trigger: WorkflowTrigger::Manual,
         steps: vec![WorkflowStep {
+            id: None,
             step_type: StepType::default(),
             output_format: StepOutputFormat::default(),
             description: None,
@@ -3756,6 +3757,7 @@ fn workflow_multi_step_roundtrip() {
         trigger: WorkflowTrigger::Manual,
         steps: vec![
             WorkflowStep {
+                id: None,
                 step_type: StepType::default(),
                 output_format: StepOutputFormat::default(),
                 description: None,
@@ -3813,6 +3815,7 @@ fn workflow_multi_step_roundtrip() {
                 multi_agent_review: None,
             },
             WorkflowStep {
+                id: None,
                 step_type: StepType::default(),
                 output_format: StepOutputFormat::default(),
                 description: None,
@@ -3873,6 +3876,7 @@ fn workflow_multi_step_roundtrip() {
                 multi_agent_review: None,
             },
             WorkflowStep {
+                id: None,
                 step_type: StepType::default(),
                 output_format: StepOutputFormat::default(),
                 description: None,
@@ -3974,9 +3978,17 @@ fn workflow_update_steps_count() {
     let mut wf = sample_workflow("wu1");
     assert_eq!(wf.steps.len(), 1);
     crate::db::workflows::insert_workflow(&conn, &wf).unwrap();
+    let original_step_id = crate::db::workflows::get_workflow(&conn, "wu1")
+        .unwrap()
+        .unwrap()
+        .steps[0]
+        .id
+        .clone()
+        .expect("insert assigns a durable step id");
 
     // Add a second step
     wf.steps.push(WorkflowStep {
+        id: None,
         step_type: StepType::default(),
         output_format: StepOutputFormat::default(),
         description: None,
@@ -4039,6 +4051,15 @@ fn workflow_update_steps_count() {
         .unwrap()
         .unwrap();
     assert_eq!(loaded.steps.len(), 2);
+    assert_eq!(
+        loaded.steps[0].id.as_deref(),
+        Some(original_step_id.as_str())
+    );
+    assert!(uuid::Uuid::parse_str(loaded.steps[1].id.as_deref().unwrap()).is_ok());
+    assert_ne!(
+        loaded.steps[1].id.as_deref(),
+        Some(original_step_id.as_str())
+    );
     assert_eq!(loaded.steps[1].name, "step2");
     assert_eq!(loaded.steps[1].prompt_template, "Second step");
 }

@@ -2,7 +2,7 @@
  * Format a date as a compact relative / absolute string for the discussion
  * sidebar. We use native `Intl.RelativeTimeFormat` + `Intl.DateTimeFormat`
  * so there's no new runtime dependency, and the output follows the user's
- * active Kronn language (FR/EN/ES).
+ * active Kronn language (FR/EN/ES/ZH).
  *
  * Rules:
  * - < 60s → "à l'instant" / "just now" / "ahora"
@@ -26,24 +26,27 @@ export function formatRelativeTime(iso: string, lang: string = 'fr'): string {
   const diffDay = Math.round(diffHour / 24);
 
   // Normalize lang to a BCP 47 tag Intl accepts
-  const locale = lang === 'en' ? 'en' : lang === 'es' ? 'es' : 'fr';
+  const locale = lang === 'en' ? 'en' : lang === 'es' ? 'es' : lang === 'zh' ? 'zh-CN' : 'fr';
 
   // Future dates (clock skew, etc.) → treat as "just now"
   if (diffSec < 60) {
     if (locale === 'en') return 'just now';
     if (locale === 'es') return 'ahora';
+    if (locale === 'zh-CN') return '刚刚';
     return "à l'instant";
   }
 
   if (diffMin < 60) {
     if (locale === 'en') return `${diffMin}m ago`;
     if (locale === 'es') return `hace ${diffMin} min`;
+    if (locale === 'zh-CN') return `${diffMin} 分钟前`;
     return `il y a ${diffMin} min`;
   }
 
   if (diffHour < 24) {
     if (locale === 'en') return `${diffHour}h ago`;
     if (locale === 'es') return `hace ${diffHour} h`;
+    if (locale === 'zh-CN') return `${diffHour} 小时前`;
     return `il y a ${diffHour} h`;
   }
 
@@ -51,10 +54,12 @@ export function formatRelativeTime(iso: string, lang: string = 'fr'): string {
     if (diffDay === 1) {
       if (locale === 'en') return 'yesterday';
       if (locale === 'es') return 'ayer';
+      if (locale === 'zh-CN') return '昨天';
       return 'hier';
     }
     if (locale === 'en') return `${diffDay}d ago`;
     if (locale === 'es') return `hace ${diffDay} d`;
+    if (locale === 'zh-CN') return `${diffDay} 天前`;
     return `il y a ${diffDay} j`;
   }
 

@@ -168,7 +168,7 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             // install required).
             tags: vec!["cli".into(), "git".into(), "ci".into(), "code".into()],
             token_url: Some("https://gitlab.com/-/user_settings/personal_access_tokens".into()),
-            token_help: Some("Requires glab CLI (brew install glab / winget install glab). GITLAB_TOKEN: PAT with api scope. GITLAB_HOST: your GitLab hostname (e.g. gitlab.company.com). Leave GITLAB_HOST empty for gitlab.com.".into()),
+            token_help: Some("Requires the glab CLI. Recommended: authenticate locally with `glab auth login` and verify with `glab auth status`; Kronn reuses that session for MCP and repository discovery. As an optional fallback, Kronn can store an encrypted `GITLAB_TOKEN` (PAT with api scope) and `GITLAB_HOST`; when present, these values are supplied to glab for this plugin configuration.".into()),
             publisher: "GitLab".into(),
             official: true,
             alt_packages: vec!["@modelcontextprotocol/server-gitlab".into()],
@@ -1569,7 +1569,7 @@ Official docs: https://dev.mailjet.com/email/reference/
             // bucket (Anthropic-shipped servers, third-party MCP-only).
             tags: vec!["cli".into(), "api".into(), "cdn".into(), "cache".into(), "infrastructure".into(), "edge".into(), "waf".into()],
             token_url: Some("https://manage.fastly.com/account/personal/tokens".into()),
-            token_help: Some("Kronn bundles the Fastly CLI and official MCP server. Authenticate once with `fastly auth login`, then verify the active identity with `fastly auth list`. Kronn reuses that local CLI credential in memory for both MCP and deterministic API calls; no token is copied into plugin settings.".into()),
+            token_help: Some("Kronn bundles the Fastly CLI and official MCP server. Recommended: authenticate locally with `fastly auth login`, then verify the active token with `fastly auth list`. You may also store an encrypted `FASTLY_API_TOKEN` in Kronn as an optional fallback; it is used when the local CLI cannot resolve a token.".into()),
             publisher: "Fastly".into(),
             official: true,
             alt_packages: vec![],
@@ -1674,6 +1674,7 @@ the final report so the user can judge for themselves.
                     inject: TokenInjection::CustomHeader {
                         name: "Fastly-Key".into(),
                     },
+                    fallback_env_key: Some("FASTLY_API_TOKEN".into()),
                 },
                 docs_url: Some("https://www.fastly.com/documentation/reference/api/".into()),
                 config_keys: vec![],

@@ -23,6 +23,7 @@ describe('formatRelativeTime', () => {
     expect(formatRelativeTime('2026-04-10T13:55:00Z', 'fr')).toBe('il y a 5 min');
     expect(formatRelativeTime('2026-04-10T13:55:00Z', 'en')).toBe('5m ago');
     expect(formatRelativeTime('2026-04-10T13:55:00Z', 'es')).toBe('hace 5 min');
+    expect(formatRelativeTime('2026-04-10T13:55:00Z', 'zh')).toBe('5 分钟前');
   });
 
   it('returns hours for <24h', () => {
@@ -34,11 +35,13 @@ describe('formatRelativeTime', () => {
     expect(formatRelativeTime('2026-04-09T14:00:00Z', 'fr')).toBe('hier');
     expect(formatRelativeTime('2026-04-09T14:00:00Z', 'en')).toBe('yesterday');
     expect(formatRelativeTime('2026-04-09T14:00:00Z', 'es')).toBe('ayer');
+    expect(formatRelativeTime('2026-04-09T14:00:00Z', 'zh')).toBe('昨天');
   });
 
   it('returns days for 2–6 days ago', () => {
     expect(formatRelativeTime('2026-04-07T14:00:00Z', 'fr')).toBe('il y a 3 j');
     expect(formatRelativeTime('2026-04-07T14:00:00Z', 'en')).toBe('3d ago');
+    expect(formatRelativeTime('2026-04-07T14:00:00Z', 'zh')).toBe('3 天前');
   });
 
   it('returns short date for ≥ 7 days ago (same year)', () => {

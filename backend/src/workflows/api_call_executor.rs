@@ -689,13 +689,25 @@ async fn resolve_dynamic_auth(
                     env.insert("__token_error__".into(), e.to_string());
                 }
             }
-        } else if let ApiAuthKind::CliToken { command, args, .. } = &spec.auth {
+        } else if let ApiAuthKind::CliToken {
+            command,
+            args,
+            fallback_env_key,
+            ..
+        } = &spec.auth
+        {
             match resolve_cli_token(command, args).await {
                 Ok(token) => {
                     env.insert("__cli_token__".into(), token);
                 }
                 Err(e) => {
-                    env.insert("__cli_token_error__".into(), e);
+                    if let Some(token) =
+                        configured_cli_token_fallback(env, fallback_env_key.as_deref())
+                    {
+                        env.insert("__cli_token__".into(), token);
+                    } else {
+                        env.insert("__cli_token_error__".into(), e);
+                    }
                 }
             }
         }
@@ -737,6 +749,17 @@ async fn resolve_cli_token(command: &str, args: &[String]) -> Result<String, Str
         ));
     }
     Ok(token)
+}
+
+fn configured_cli_token_fallback(
+    env: &HashMap<String, String>,
+    fallback_env_key: Option<&str>,
+) -> Option<String> {
+    fallback_env_key
+        .and_then(|key| env.get(key))
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
 }
 
 /// Builds a `ResolvedAuth` from the plugin's declared `ApiAuthKind` plus
@@ -1867,6 +1890,7 @@ mod tests {
 
     fn mk_step(endpoint_path: &str) -> WorkflowStep {
         WorkflowStep {
+            id: None,
             name: "fetch".into(),
             step_type: StepType::ApiCall,
             description: None,
@@ -2025,6 +2049,7 @@ mod tests {
             inject: TokenInjection::CustomHeader {
                 name: "Fastly-Key".into(),
             },
+            fallback_env_key: Some("FASTLY_API_TOKEN".into()),
         };
         let out = resolve_auth(&auth, &env).unwrap();
         assert_eq!(
@@ -2047,9 +2072,24 @@ mod tests {
             inject: TokenInjection::CustomHeader {
                 name: "Fastly-Key".into(),
             },
+            fallback_env_key: Some("FASTLY_API_TOKEN".into()),
         };
         let error = resolve_auth(&auth, &env).unwrap_err();
         assert!(error.contains("credential CLI unavailable"));
+    }
+
+    #[test]
+    fn cli_token_fallback_ignores_blanks_and_returns_encrypted_config_value() {
+        let mut env = HashMap::new();
+        env.insert("FASTLY_API_TOKEN".into(), "  stored-secret  ".into());
+        assert_eq!(
+            configured_cli_token_fallback(&env, Some("FASTLY_API_TOKEN")).as_deref(),
+            Some("stored-secret")
+        );
+
+        env.insert("FASTLY_API_TOKEN".into(), "   ".into());
+        assert!(configured_cli_token_fallback(&env, Some("FASTLY_API_TOKEN")).is_none());
+        assert!(configured_cli_token_fallback(&env, None).is_none());
     }
 
     #[test]

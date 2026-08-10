@@ -1,6 +1,6 @@
 {
   "name": "kronn-frontend",
-  "version": "0.9.3",
+  "version": "0.9.4",
   "private": true,
   "type": "module",
   "engines": {
@@ -30,7 +30,7 @@
     "@tanstack/react-virtual": "^3.14.9",
     "highlight.js": "^11.11.1",
     "lucide-react": "^1.28.0",
-    "mermaid": "^11.16.0",
+    "mermaid": "^11.16.1",
     "node-emoji": "^2.2.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",

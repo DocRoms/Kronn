@@ -19,6 +19,11 @@ fastly auth login
 fastly auth list
 ```
 
+This local CLI session is the recommended source. As a recovery option, the
+plugin configuration may store an encrypted `FASTLY_API_TOKEN` in Kronn. The
+deterministic API broker uses it only when `fastly auth token` fails; it is never
+rendered in an agent prompt or returned by the broker.
+
 Use the plugin drawer's readiness action to check four distinct layers:
 Fastly CLI, active authentication, a real authenticated API request, and the
 official MCP executable. CLI, authentication and API are required for Fastly's

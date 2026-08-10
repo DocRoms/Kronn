@@ -495,7 +495,7 @@ mod tests {
         );
         assert!(
             m.env_keys.is_empty(),
-            "Official Fastly MCP uses CLI profiles, not env vars"
+            "Fastly's optional fallback is declared by CliToken, not as a required env key"
         );
         assert!(m.tags.contains(&"cdn".to_string()));
         assert!(m.tags.contains(&"api".to_string()));
@@ -524,13 +524,27 @@ mod tests {
                 command,
                 args,
                 inject: TokenInjection::CustomHeader { name },
+                fallback_env_key,
             } => {
                 assert_eq!(command, "fastly");
                 assert_eq!(args, &["auth".to_string(), "token".to_string()]);
                 assert_eq!(name, "Fastly-Key");
+                assert_eq!(fallback_env_key.as_deref(), Some("FASTLY_API_TOKEN"));
             }
             auth => panic!("unexpected Fastly auth: {auth:?}"),
         }
+    }
+
+    #[test]
+    fn gitlab_mcp_recommends_current_cli_auth_and_keeps_kronn_values_optional() {
+        let reg = builtin_registry();
+        let gitlab = reg.iter().find(|m| m.id == "mcp-gitlab").unwrap();
+        let help = gitlab.token_help.as_deref().unwrap();
+        assert!(help.contains("glab auth login"));
+        assert!(help.contains("glab auth status"));
+        assert!(help.contains("optional fallback"));
+        assert!(gitlab.env_keys.contains(&"GITLAB_TOKEN".to_string()));
+        assert!(gitlab.env_keys.contains(&"GITLAB_HOST".to_string()));
     }
 
     #[test]

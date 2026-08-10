@@ -86,6 +86,89 @@ async fn planning_task_create_list_and_get_round_trip() {
 }
 
 #[tokio::test]
+async fn planning_task_create_can_target_a_discussion_without_orphans() {
+    let state = test_state();
+    state
+        .db
+        .with_conn(|connection| {
+            let now = chrono::Utc::now().to_rfc3339();
+            connection.execute(
+                "INSERT INTO discussions (id, title, created_at, updated_at)
+                 VALUES ('agent-created-disc', 'Agent-created', ?1, ?1)",
+                [&now],
+            )?;
+            connection.execute(
+                "INSERT INTO discussions (id, title, created_at, updated_at)
+                 VALUES ('other-disc', 'Other', ?1, ?1)",
+                [&now],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let app = build_router_with_auth(state, false);
+
+    let create_request = serde_json::json!({
+        "title": "Generate the requested plan",
+        "discussion_id": "agent-created-disc",
+        "idempotency_key": "target-discussion/retry-1"
+    });
+    let (_, created) = post_json(app.clone(), "/api/planning/tasks", create_request.clone()).await;
+    let (_, replayed) = post_json(app.clone(), "/api/planning/tasks", create_request).await;
+    assert_eq!(created["success"], true, "{created}");
+    assert_eq!(replayed["success"], true, "{replayed}");
+    assert_eq!(replayed["data"]["id"], created["data"]["id"]);
+    assert_eq!(
+        created["data"]["discussion_ids"],
+        serde_json::json!(["agent-created-disc"])
+    );
+    assert_eq!(
+        replayed["data"]["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|event| event["action"] == "discussion_linked")
+            .count(),
+        1
+    );
+
+    let (_, plan) = get_json(app.clone(), "/api/discussions/agent-created-disc/plan").await;
+    assert_eq!(plan["data"]["active"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        plan["data"]["active"][0]["task"]["id"],
+        created["data"]["id"]
+    );
+
+    let (_, target_conflict) = post_json(
+        app.clone(),
+        "/api/planning/tasks",
+        serde_json::json!({
+            "title": "Generate the requested plan",
+            "discussion_id": "other-disc",
+            "idempotency_key": "target-discussion/retry-1"
+        }),
+    )
+    .await;
+    assert_eq!(target_conflict["success"], false);
+    assert_eq!(target_conflict["error_code"], "conflict");
+
+    let (_, rejected) = post_json(
+        app.clone(),
+        "/api/planning/tasks",
+        serde_json::json!({
+            "title": "Do not create an orphan",
+            "discussion_id": "missing-disc"
+        }),
+    )
+    .await;
+    assert_eq!(rejected["success"], false);
+    assert_eq!(rejected["error_code"], "not_found");
+
+    let (_, listed) = get_json(app, "/api/planning/tasks").await;
+    assert_eq!(listed["data"]["items"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn planning_task_create_is_idempotent_by_key_not_title() {
     let app = test_app();
     let first_request = serde_json::json!({
@@ -341,6 +424,66 @@ async fn delete_json(app: Router, uri: &str) -> (StatusCode, Value) {
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let json: Value = serde_json::from_slice(&body).unwrap();
     (status, json)
+}
+
+/// Send a DELETE request with a JSON body and return (status, parsed JSON body).
+async fn delete_json_body(app: Router, uri: &str, body: Value) -> (StatusCode, Value) {
+    let req = Request::builder()
+        .method("DELETE")
+        .uri(uri)
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+
+    let mut req = req;
+    req.extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            45678,
+        ))));
+    let resp = app.oneshot(req).await.unwrap();
+    let status = resp.status();
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    (status, json)
+}
+
+#[tokio::test]
+async fn lite_llm_model_failure_can_be_forgotten_for_the_current_endpoint() {
+    let state = test_state();
+    let endpoint = "http://litellm.test:4000";
+    state.config.write().await.agents.lite_llm.base_url = Some(endpoint.to_string());
+    state
+        .db
+        .with_conn(move |connection| {
+            kronn::db::lite_llm_model_failures::record(
+                connection,
+                endpoint,
+                "vertex_ai/mistral-large-2411",
+                410,
+                "kronn:model-not-in-catalogue",
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let app = build_router_with_auth(state, false);
+
+    let (_, before) = get_json(app.clone(), "/api/lite-llm/model-failures").await;
+    assert_eq!(before["data"]["failures"].as_array().unwrap().len(), 1);
+
+    let (status, forgotten) = delete_json_body(
+        app.clone(),
+        "/api/lite-llm/model-failures",
+        serde_json::json!({ "model": "vertex_ai/mistral-large-2411" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(forgotten["success"], true);
+    assert_eq!(forgotten["data"], true);
+
+    let (_, after) = get_json(app, "/api/lite-llm/model-failures").await;
+    assert!(after["data"]["failures"].as_array().unwrap().is_empty());
 }
 
 /// Send a PATCH request with a JSON body and return (status, parsed JSON body).
@@ -2317,6 +2460,82 @@ async fn discussion_native_agent_mode_round_trips_through_http() {
 }
 
 #[tokio::test]
+async fn discussion_agent_handoff_mode_round_trips_through_http() {
+    let state = test_state();
+    {
+        let mut config = state.config.write().await;
+        config.server.agent_handoffs_enabled = true;
+        config.server.agent_handoff_paid_limit = 2;
+    }
+    state
+        .db
+        .with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO discussions
+                 (id, title, agent, language, participants_json, created_at,
+                  updated_at, message_count, workspace_mode)
+                 VALUES ('d-handoff-mode', 'Handoffs', 'Codex', 'fr', '[]',
+                         datetime('now'), datetime('now'), 0, 'Direct')",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let app = build_router_with_auth(state, false);
+
+    let (_, initial) = get_json(
+        app.clone(),
+        "/api/discussions/d-handoff-mode/agent-handoffs",
+    )
+    .await;
+    assert_eq!(initial["data"]["global_enabled"], true);
+    assert_eq!(initial["data"]["effective_enabled"], true);
+    assert_eq!(initial["data"]["unlimited_override"], false);
+    assert_eq!(initial["data"]["paid_limit"], 2);
+
+    let (_, updated) = patch_json(
+        app.clone(),
+        "/api/discussions/d-handoff-mode",
+        serde_json::json!({
+            "agent_handoffs_disabled": false,
+            "agent_handoffs_unlimited": true
+        }),
+    )
+    .await;
+    assert_eq!(updated["success"], true);
+    let (_, unlimited) = get_json(
+        app.clone(),
+        "/api/discussions/d-handoff-mode/agent-handoffs",
+    )
+    .await;
+    assert_eq!(unlimited["data"]["unlimited_override"], true);
+    assert!(unlimited["data"]["paid_limit"].is_null());
+
+    let (_, updated) = patch_json(
+        app.clone(),
+        "/api/discussions/d-handoff-mode",
+        serde_json::json!({
+            "agent_handoffs_disabled": true,
+            "agent_handoffs_unlimited": false
+        }),
+    )
+    .await;
+    assert_eq!(updated["success"], true);
+    let (_, persisted) = get_json(
+        app.clone(),
+        "/api/discussions/d-handoff-mode/agent-handoffs",
+    )
+    .await;
+    assert_eq!(persisted["data"]["disabled"], true);
+    assert_eq!(persisted["data"]["unlimited_override"], false);
+    assert_eq!(persisted["data"]["effective_enabled"], false);
+
+    let (_, missing) = get_json(app, "/api/discussions/missing/agent-handoffs").await;
+    assert_eq!(missing["success"], false);
+}
+
+#[tokio::test]
 async fn discussions_create_uses_default_language() {
     let state = test_state();
 
@@ -3433,6 +3652,39 @@ async fn server_config_returns_defaults() {
     assert!(json["data"]["port"].is_number());
     assert!(json["data"]["max_concurrent_agents"].is_number());
     assert!(json["data"]["auth_enabled"].is_boolean());
+    assert_eq!(json["data"]["agent_handoffs_enabled"], false);
+    assert_eq!(json["data"]["agent_handoff_paid_limit"], 1);
+    assert_eq!(json["data"]["agent_handoff_paid_unlimited"], false);
+    assert_eq!(
+        json["data"]["agent_handoff_blocked_agents"],
+        serde_json::json!([])
+    );
+}
+
+#[tokio::test]
+async fn server_config_updates_and_clamps_agent_handoff_budget() {
+    let app = test_app();
+    let (_, updated) = post_json(
+        app.clone(),
+        "/api/config/server",
+        serde_json::json!({
+            "agent_handoffs_enabled": true,
+            "agent_handoff_paid_limit": 99,
+            "agent_handoff_paid_unlimited": true,
+            "agent_handoff_blocked_agents": ["ClaudeCode", "LiteLlm", "ClaudeCode"]
+        }),
+    )
+    .await;
+    assert_eq!(updated["success"], true);
+
+    let (_, persisted) = get_json(app, "/api/config/server").await;
+    assert_eq!(persisted["data"]["agent_handoffs_enabled"], true);
+    assert_eq!(persisted["data"]["agent_handoff_paid_limit"], 5);
+    assert_eq!(persisted["data"]["agent_handoff_paid_unlimited"], true);
+    assert_eq!(
+        persisted["data"]["agent_handoff_blocked_agents"],
+        serde_json::json!(["ClaudeCode", "LiteLlm"])
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

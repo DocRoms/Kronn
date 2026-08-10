@@ -7,7 +7,7 @@
 // Now each list (Profiles, Skills, Directives) is collapsed behind its
 // own toggle, mirroring NewDiscussionForm. Only ONE expanded at a time.
 
-import { describe, it, expect, vi } from 'vitest';
+import { beforeEach, describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { buildApiMock } from '../../test/apiMock';
 
@@ -17,9 +17,16 @@ vi.mock('../../lib/I18nContext', () => ({
 }));
 
 import { DiscussionSettingsPanel } from '../DiscussionSettingsPanel';
+import { discussions as discussionsApi } from '../../lib/api';
 import type { Discussion, Skill, AgentProfile, Directive } from '../../types/generated';
 
 const noop = () => {};
+
+beforeEach(() => {
+  vi.mocked(discussionsApi.agentHandoffMode).mockReset();
+  vi.mocked(discussionsApi.agentHandoffMode).mockImplementation(() => new Promise(() => {}));
+  vi.mocked(discussionsApi.update).mockClear();
+});
 
 function makeDiscussion(over: Partial<Discussion> = {}): Discussion {
   return {
@@ -81,6 +88,9 @@ describe('DiscussionSettingsPanel — collapsed context sections', () => {
     expect(container.querySelector('.disc-tool-panel.disc-settings-panel')).toBeInTheDocument();
     expect(screen.getByText('disc.settingsPanel')).toBeInTheDocument();
     expect(screen.getByText('Claude Code')).toBeInTheDocument();
+    expect(
+      screen.getByText('disc.agentHandoffTitle').closest('.disc-settings-overview'),
+    ).not.toBeNull();
   });
 
   it('renders all three section toggles but no chip walls by default', () => {
@@ -141,5 +151,82 @@ describe('DiscussionSettingsPanel — collapsed context sections', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /Alice/ }));
     expect(onShare).toHaveBeenCalledWith(['contact-1']);
+  });
+
+  it('shows the conversation kill switch disabled when the global opt-in is off', async () => {
+    vi.mocked(discussionsApi.agentHandoffMode).mockResolvedValueOnce({
+      global_enabled: false,
+      disabled: false,
+      unlimited_override: false,
+      effective_enabled: false,
+      paid_limit: 1,
+    });
+    renderPanel();
+    const defaultMode = await screen.findByRole('radio', { name: 'disc.agentHandoffMode.default' });
+    expect(defaultMode).toBeDisabled();
+    expect(screen.getByText('disc.agentHandoffGlobalOff')).toBeInTheDocument();
+    expect(screen.getByText('disc.agentHandoffCliUnaffected')).toBeInTheDocument();
+  });
+
+  it('can keep agents separate for only this discussion', async () => {
+    vi.mocked(discussionsApi.agentHandoffMode)
+      .mockResolvedValueOnce({
+      global_enabled: true,
+      disabled: false,
+      unlimited_override: false,
+      effective_enabled: true,
+      paid_limit: 1,
+      })
+      .mockResolvedValueOnce({
+        global_enabled: true,
+        disabled: true,
+        unlimited_override: false,
+        effective_enabled: false,
+        paid_limit: 1,
+      });
+    const update = vi.mocked(discussionsApi.update);
+    update.mockResolvedValueOnce(undefined);
+    renderPanel();
+
+    const blocked = await screen.findByRole('radio', { name: 'disc.agentHandoffMode.disabled' });
+    expect(blocked).not.toBeDisabled();
+    expect(screen.getByText('disc.agentHandoffChainLimited')).toBeInTheDocument();
+    fireEvent.click(blocked);
+
+    expect(update).toHaveBeenCalledWith('d-1', {
+      agent_handoffs_disabled: true,
+      agent_handoffs_unlimited: false,
+    });
+    expect(await screen.findByText('disc.agentHandoffDiscussionOff')).toBeInTheDocument();
+  });
+
+  it('can remove the financial limit for one discussion with a warning', async () => {
+    vi.mocked(discussionsApi.agentHandoffMode)
+      .mockResolvedValueOnce({
+        global_enabled: true,
+        disabled: false,
+        unlimited_override: false,
+        effective_enabled: true,
+        paid_limit: 2,
+      })
+      .mockResolvedValueOnce({
+        global_enabled: true,
+        disabled: false,
+        unlimited_override: true,
+        effective_enabled: true,
+        paid_limit: null,
+      });
+    vi.mocked(discussionsApi.update).mockResolvedValueOnce(undefined);
+    renderPanel();
+
+    fireEvent.click(await screen.findByRole('radio', { name: 'disc.agentHandoffMode.unlimited' }));
+
+    expect(discussionsApi.update).toHaveBeenCalledWith('d-1', {
+      agent_handoffs_disabled: false,
+      agent_handoffs_unlimited: true,
+    });
+    expect(await screen.findByRole('alert')).toHaveTextContent('disc.agentHandoffUnlimitedWarning');
+    expect(screen.getByText('disc.agentHandoffChainUnlimited')).toBeInTheDocument();
+    expect(screen.getByText('disc.agentHandoffCliUnaffected')).toBeInTheDocument();
   });
 });

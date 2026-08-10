@@ -4,6 +4,7 @@ import remarkGfm from 'remark-gfm';
 import { ShieldCheck, BookOpen, ChevronRight } from 'lucide-react';
 import { config as configApi } from '../../lib/api';
 import type { ToastFn } from '../../hooks/useToast';
+import { ContextHelp } from '../ContextHelp';
 import { Dropdown } from '../Dropdown';
 import '../../pages/SettingsPage.css';
 
@@ -74,79 +75,104 @@ export function AntiHallucSection({ toast, t }: AntiHallucSectionProps) {
   };
 
   return (
-    <div id="settings-sourcing" className="set-card">
+    <div id="settings-sourcing" className="set-card set-beta-feature-card" data-feature="sourcing">
       <div className="set-section">
         <div className="flex-row gap-4 set-section-header-lg">
           <ShieldCheck size={14} className="text-accent" />
           <span className="font-semibold text-lg">{t('settings.sourcingTitle')}</span>
           <span className="set-beta-badge" title={t('settings.betaBadgeHint')}>{t('settings.betaBadge')}</span>
+          <ContextHelp title={t('settings.sourcingScopeTitle')} align="end">
+            <p>{t('settings.sourcingScopeLaunched')}</p>
+            <p>{t('settings.sourcingScopeExternal')}</p>
+          </ContextHelp>
         </div>
         <p className="set-hint">
           {t('settings.sourcingIntro')}
         </p>
 
-        <div style={{ marginTop: 8, marginBottom: 16 }}>
-          <button
-            type="button"
-            onClick={toggleSpec}
-            className="set-icon-btn"
-            style={{ padding: '6px 10px', fontSize: 11, display: 'inline-flex', alignItems: 'center', gap: 6 }}
-            aria-expanded={specOpen}
-            aria-controls="settings-sourcing-spec"
-            aria-busy={specLoading}
-            disabled={specLoading}
-            data-testid="settings-sourcing-spec-toggle"
-          >
-            <ChevronRight
-              size={10}
-              className="set-sourcing-spec-chev"
-              style={{ transform: specOpen ? 'rotate(90deg)' : 'none' }}
-            />
-            <BookOpen size={11} />
-            {specLoading ? t('settings.sourcingSpecLoading') : t('settings.sourcingSpecToggle')}
-          </button>
-          {specOpen && (
-            <div
-              id="settings-sourcing-spec"
-              role="region"
-              aria-label={t('settings.sourcingSpecRegion')}
-              tabIndex={0}
-              data-testid="settings-sourcing-spec"
-              className="set-sourcing-spec"
-            >
-              {specError ? (
-                <div className="text-danger" style={{ fontSize: 12 }}>
-                  {t('settings.sourcingSpecError')}
-                </div>
-              ) : specContent ? (
-                <ReactMarkdown remarkPlugins={remarkPlugins}>{specContent}</ReactMarkdown>
-              ) : null}
+        <div className="set-beta-feature-stack">
+          <section className="set-beta-feature-panel" data-kind="control">
+            <div className="set-beta-feature-panel-head">
+              <div className="set-beta-feature-panel-icon"><ShieldCheck size={16} /></div>
+              <div className="flex-1">
+                <h3>{t('settings.antiHalluc')}</h3>
+                <p>{t('settings.antiHallucHint')}</p>
+              </div>
+              <div className="set-beta-feature-select">
+                <span>{t('settings.sourcingModeLabel')}</span>
+                <Dropdown<AhMode>
+                  value={mode}
+                  options={[
+                    { value: 'off', label: t('settings.ahModeOff') },
+                    { value: 'warn', label: t('settings.ahModeWarn') },
+                    { value: 'enforce', label: t('settings.ahModeEnforce') },
+                  ]}
+                  onChange={onModeChange}
+                  ariaLabel={t('settings.antiHalluc')}
+                  testId="settings-anti-hallucination-mode"
+                />
+              </div>
             </div>
-          )}
-        </div>
 
-        <div className="flex-row gap-4 mb-3" style={{ alignItems: 'baseline', flexWrap: 'wrap' }}>
-          <span className="label mb-0">{t('settings.antiHalluc')}</span>
-          <div style={{ width: 240 }}>
-            <Dropdown<AhMode>
-              value={mode}
-              options={[
-                { value: 'off', label: t('settings.ahModeOff') },
-                { value: 'warn', label: t('settings.ahModeWarn') },
-                { value: 'enforce', label: t('settings.ahModeEnforce') },
-              ]}
-              onChange={onModeChange}
-              ariaLabel={t('settings.antiHalluc')}
-              testId="settings-anti-hallucination-mode"
-            />
-          </div>
-        </div>
+            <div className="set-beta-mode-list">
+              {([
+                ['off', 'settings.ahModeOff', 'settings.ahExplainOff'],
+                ['warn', 'settings.ahModeWarn', 'settings.ahExplainWarn'],
+                ['enforce', 'settings.ahModeEnforce', 'settings.ahExplainEnforce'],
+              ] as const).map(([value, label, description]) => (
+                <div key={value} className="set-beta-mode-item" data-mode={value} data-active={mode === value}>
+                  <span className="set-beta-mode-mark" aria-hidden="true" />
+                  <div>
+                    <strong>{t(label)}</strong>
+                    <p>{t(description)}</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </section>
 
-        <ul className="set-hint-sm" style={{ marginTop: 4, paddingLeft: 18, lineHeight: 1.6 }}>
-          <li><strong>{t('settings.ahModeOff')}</strong> — {t('settings.ahExplainOff')}</li>
-          <li><strong>{t('settings.ahModeWarn')}</strong> — {t('settings.ahExplainWarn')}</li>
-          <li><strong>{t('settings.ahModeEnforce')}</strong> — {t('settings.ahExplainEnforce')}</li>
-        </ul>
+          <section className="set-beta-feature-panel" data-kind="reference">
+            <button
+              type="button"
+              onClick={toggleSpec}
+              className="set-beta-reference-toggle"
+              aria-expanded={specOpen}
+              aria-controls="settings-sourcing-spec"
+              aria-busy={specLoading}
+              disabled={specLoading}
+              data-testid="settings-sourcing-spec-toggle"
+            >
+              <span className="set-beta-reference-icon"><BookOpen size={15} /></span>
+              <span className="flex-1">
+                <strong>{specLoading ? t('settings.sourcingSpecLoading') : t('settings.sourcingSpecToggle')}</strong>
+                <small>{t('settings.sourcingSpecHint')}</small>
+              </span>
+              <ChevronRight
+                size={14}
+                className="set-sourcing-spec-chev"
+                style={{ transform: specOpen ? 'rotate(90deg)' : 'none' }}
+              />
+            </button>
+            {specOpen && (
+              <div
+                id="settings-sourcing-spec"
+                role="region"
+                aria-label={t('settings.sourcingSpecRegion')}
+                tabIndex={0}
+                data-testid="settings-sourcing-spec"
+                className="set-sourcing-spec"
+              >
+                {specError ? (
+                  <div className="text-danger" style={{ fontSize: 12 }}>
+                    {t('settings.sourcingSpecError')}
+                  </div>
+                ) : specContent ? (
+                  <ReactMarkdown remarkPlugins={remarkPlugins}>{specContent}</ReactMarkdown>
+                ) : null}
+              </div>
+            )}
+          </section>
+        </div>
       </div>
     </div>
   );

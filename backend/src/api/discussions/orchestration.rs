@@ -229,7 +229,7 @@ pub async fn orchestrate(
         None
     };
 
-    let (tokens, agent_access, model_tiers_config) = {
+    let (tokens, agent_access, model_tiers_config, lite_llm_base_url) = {
         let config = state.config.read().await;
         let access_map: std::collections::HashMap<String, bool> = agents
             .iter()
@@ -239,6 +239,7 @@ pub async fn orchestrate(
             config.tokens.clone(),
             access_map,
             config.agents.model_tiers.clone(),
+            config.agents.lite_llm.base_url.clone(),
         )
     };
 
@@ -382,6 +383,7 @@ pub async fn orchestrate(
                 mcp_context_override: global_mcp_context.as_deref(),
                 tier: disc_tier,
                 model_tiers: Some(&model_tiers_config),
+                lite_llm_base_url: lite_llm_base_url.as_deref(),
                 // Internal summarisation pass — keep disc_id off to avoid
                 // recursion (agent shouldn't call disc_summarize on itself
                 // while running this very prompt).
@@ -466,6 +468,7 @@ pub async fn orchestrate(
                     mcp_context_override: global_mcp_context.as_deref(),
                     tier: disc_tier,
                     model_tiers: Some(&model_tiers_config),
+                    lite_llm_base_url: lite_llm_base_url.as_deref(),
                     context_files_prompt: &companion_context,
                     discussion_id: Some(&id),
                     ..runner::AgentStartConfig::new(agent_type, &project_path, &prompt, &tokens)
@@ -615,6 +618,7 @@ pub async fn orchestrate(
                 mcp_context_override: global_mcp_context.as_deref(),
                 tier: disc_tier,
                 model_tiers: Some(&model_tiers_config),
+                lite_llm_base_url: lite_llm_base_url.as_deref(),
                 context_files_prompt: &companion_context,
                 discussion_id: Some(&id),
                 ..runner::AgentStartConfig::new(
@@ -914,15 +918,19 @@ pub(super) async fn maybe_generate_summary(
     };
 
     // Use the discussion's own agent in Economy tier
-    let model_tiers = {
+    let (model_tiers, lite_llm_base_url) = {
         let config = state.config.read().await;
-        config.agents.model_tiers.clone()
+        (
+            config.agents.model_tiers.clone(),
+            config.agents.lite_llm.base_url.clone(),
+        )
     };
 
     match runner::start_agent_with_config(runner::AgentStartConfig {
         mcp_context_override: Some(""),
         tier: crate::models::ModelTier::Economy,
         model_tiers: Some(&model_tiers),
+        lite_llm_base_url: lite_llm_base_url.as_deref(),
         ..runner::AgentStartConfig::new(agent_type, "", &summary_prompt, tokens)
     })
     .await
@@ -1127,14 +1135,18 @@ pub async fn generate_summary_on_demand(
             block_truncated
         ),
     };
-    let model_tiers = {
+    let (model_tiers, lite_llm_base_url) = {
         let cfg = state.config.read().await;
-        cfg.agents.model_tiers.clone()
+        (
+            cfg.agents.model_tiers.clone(),
+            cfg.agents.lite_llm.base_url.clone(),
+        )
     };
     let mut process = runner::start_agent_with_config(runner::AgentStartConfig {
         mcp_context_override: Some(""),
         tier: ModelTier::Economy,
         model_tiers: Some(&model_tiers),
+        lite_llm_base_url: lite_llm_base_url.as_deref(),
         ..runner::AgentStartConfig::new(&disc.agent, "", &summary_prompt, tokens)
     })
     .await

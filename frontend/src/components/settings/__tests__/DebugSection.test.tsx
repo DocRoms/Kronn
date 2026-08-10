@@ -76,10 +76,12 @@ afterEach(() => {
 function renderCard(props?: Partial<Parameters<typeof DebugSection>[0]>) {
   const setServerDebugMode = vi.fn();
   const setDebugModeNeedsRestart = vi.fn();
+  const setDiscussionNotesEnabled = vi.fn();
   const toast = vi.fn();
   return {
     setServerDebugMode,
     setDebugModeNeedsRestart,
+    setDiscussionNotesEnabled,
     toast,
     ...render(
       <DebugSection
@@ -87,6 +89,8 @@ function renderCard(props?: Partial<Parameters<typeof DebugSection>[0]>) {
         setServerDebugMode={setServerDebugMode}
         debugModeNeedsRestart={false}
         setDebugModeNeedsRestart={setDebugModeNeedsRestart}
+        discussionNotesEnabled={true}
+        setDiscussionNotesEnabled={setDiscussionNotesEnabled}
         toast={toast}
         t={t}
         {...props}
@@ -94,6 +98,29 @@ function renderCard(props?: Partial<Parameters<typeof DebugSection>[0]>) {
     ),
   };
 }
+
+describe('DebugSection — out-of-context discussion notes', () => {
+  it('persists the composer toggle from the Debug card', async () => {
+    const { setDiscussionNotesEnabled } = renderCard();
+
+    fireEvent.click(screen.getByRole('switch', { name: 'settings.discussionNotes' }));
+
+    expect(setDiscussionNotesEnabled).toHaveBeenCalledWith(false);
+    await waitFor(() => expect(configApi.setServerConfig).toHaveBeenCalledWith({
+      discussion_notes_enabled: false,
+    }));
+  });
+
+  it('restores the previous state when persistence fails', async () => {
+    configApi.setServerConfig.mockRejectedValueOnce(new Error('offline'));
+    const { setDiscussionNotesEnabled, toast } = renderCard();
+
+    fireEvent.click(screen.getByRole('switch', { name: 'settings.discussionNotes' }));
+
+    await waitFor(() => expect(setDiscussionNotesEnabled).toHaveBeenLastCalledWith(true));
+    expect(toast).toHaveBeenCalledWith('common.actionFailed(offline)', 'error');
+  });
+});
 
 describe('DebugSection — mount', () => {
   it('fetches log lines on mount', async () => {

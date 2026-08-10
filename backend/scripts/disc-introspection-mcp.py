@@ -336,6 +336,10 @@ TOOLS = [
         "description": (
             "Create one planning task. Keep quick creation compact: title is "
             "required; status defaults to idea and priority to normal. The "
+            "new task is linked to the current discussion by default; pass "
+            "`discussion_id` to target another existing discussion. An "
+            "explicit target works even when this runtime has no bound "
+            "discussion or reports `rejoin_required`. The "
             "bridge records this MCP client's agent identity in the event log. "
             "Immediately before a direct create, call `plan_get` again so a "
             "peer's recent write is visible. Use direct writes only when the "
@@ -348,9 +352,13 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "title": {"type": "string"},
+                "discussion_id": {
+                    "type": "string",
+                    "description": "Existing discussion to receive the task. Defaults to the discussion bound to this MCP runtime.",
+                },
                 "idempotency_key": {
                     "type": "string",
-                    "description": "Stable caller key for this one logical create; scoped to the current discussion by the bridge.",
+                    "description": "Stable caller key for this one logical create; scoped to the effective target discussion by the bridge.",
                 },
                 "description": {"type": "string"},
                 "status": {
@@ -3991,7 +3999,12 @@ def call_task_create(args):
     title = (args.get("title") or "").strip()
     if not title:
         raise RuntimeError("task_create: title is required")
-    body = {"title": title, "actor": _planning_actor(args)}
+    discussion_id = _planning_discussion_id(args)
+    body = {
+        "title": title,
+        "discussion_id": discussion_id,
+        "actor": _planning_actor(args),
+    }
     for key in (
         "description", "status", "priority", "parent_id", "project_ids",
         "tags", "definition_of_done", "links",
@@ -4010,7 +4023,7 @@ def call_task_create(args):
     else:
         stable_provenance = None
     if stable_provenance is not None:
-        scoped = f"{_disc_id()}\0{stable_provenance}".encode("utf-8")
+        scoped = f"{discussion_id}\0{stable_provenance}".encode("utf-8")
         body["idempotency_key"] = (
             "mcp-task-create:" + hashlib.sha256(scoped).hexdigest()
         )
@@ -7813,7 +7826,7 @@ def _handle(req):
                 # Tool-surface version, intentionally distinct from the Kronn
                 # app release. Bumping it tells clients that cache tools/list
                 # to refresh after the Planning contract was added.
-                "serverInfo": {"name": "kronn-internal", "version": "0.3.0"},
+                "serverInfo": {"name": "kronn-internal", "version": "0.3.1"},
                 # Top-level orientation the client surfaces to the model: WHAT
                 # Kronn is + a MAP of the tool surface by area + how to navigate
                 # it, so an agent doesn't have to reverse-engineer capabilities

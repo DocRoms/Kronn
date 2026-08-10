@@ -15,7 +15,7 @@
  * full-mount tests with mocked usage API.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, act, cleanup, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, act, cleanup, waitFor, within } from '@testing-library/react';
 
 const { usageApi } = vi.hoisted(() => ({
   usageApi: {
@@ -41,15 +41,36 @@ beforeEach(() => {
     rows: [
       {
         period: '2026-05-28',
+        agent: 'all',
+        models_used: ['claude-opus-4-7', 'gpt-4o'],
+        model_breakdowns: [
+          {
+            model_name: 'claude-opus-4-7', input_tokens: 5500,
+            output_tokens: 500, cache_creation_tokens: 500,
+            cache_read_tokens: 3500, total_tokens: 10000, cost: 0.30,
+          },
+          {
+            model_name: 'gpt-4o', input_tokens: 1500,
+            output_tokens: 500, cache_creation_tokens: 0,
+            cache_read_tokens: 500, total_tokens: 2500, cost: 0.12,
+          },
+        ],
+        input_tokens: 7000,
+        output_tokens: 1000,
+        cache_creation_tokens: 500,
+        cache_read_tokens: 4000,
         total_cost: 0.42,
         total_tokens: 12500,
-        per_model: {
-          'claude-opus-4-7': { tokens: 10000, cost: 0.30 },
-          'gpt-4o': { tokens: 2500, cost: 0.12 },
-        },
       },
     ],
-    totals: { total_cost: 0.42, total_tokens: 12500 },
+    totals: {
+      input_tokens: 7000,
+      output_tokens: 1000,
+      cache_creation_tokens: 500,
+      cache_read_tokens: 4000,
+      total_cost: 0.42,
+      total_tokens: 12500,
+    },
     agents_detected: ['claude', 'codex'],
   });
 });
@@ -112,27 +133,137 @@ describe('UsageSection — mount', () => {
     await waitFor(() => expect(usageApi.get).toHaveBeenCalledWith('daily'));
   });
 
+  it('filters totals by agent and limits model choices to that agent', async () => {
+    render(<UsageSection />);
+    const agentSelect = await screen.findByTestId('usage-agent-filter');
+
+    await act(async () => {
+      fireEvent.change(agentSelect, { target: { value: 'claude' } });
+    });
+
+    expect(screen.getByTestId('usage-total-cost')).toHaveTextContent('$0.30');
+    expect(screen.getByTestId('usage-model-filter')).toHaveValue('all');
+    expect(screen.getByRole('option', { name: 'claude-opus-4-7' })).toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: 'gpt-4o' })).not.toBeInTheDocument();
+    expect(screen.queryByTestId('usage-agent-codex')).not.toBeInTheDocument();
+  });
+
+  it('filters exact token components and cost by model', async () => {
+    render(<UsageSection />);
+    const modelSelect = await screen.findByTestId('usage-model-filter');
+
+    await act(async () => {
+      fireEvent.change(modelSelect, { target: { value: 'gpt-4o' } });
+      fireEvent.click(screen.getByTestId('usage-details-toggle'));
+    });
+
+    expect(screen.getByTestId('usage-total-cost')).toHaveTextContent('$0.12');
+    const cells = screen.getByTestId('usage-table').querySelectorAll('tbody td');
+    expect(cells[1]).toHaveTextContent('2k');
+    expect(cells[2]).toHaveTextContent('500');
+    expect(cells[3]).toHaveTextContent('500');
+    expect(cells[4]).toHaveTextContent('3k');
+  });
+
+  it('switches between analysis rankings and usage details', async () => {
+    render(<UsageSection />);
+    await screen.findByTestId('usage-agent-filter');
+
+    expect(screen.queryByTestId('usage-analysis')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('usage-analysis-toggle'));
+
+    expect(screen.getByTestId('usage-analysis')).toBeInTheDocument();
+    expect(screen.queryByTestId('usage-table')).not.toBeInTheDocument();
+    expect(screen.getByText('usage.analysis.efficiencyTop')).toBeInTheDocument();
+    expect(screen.getByText('usage.analysis.tipRtk')).toBeInTheDocument();
+    expect(screen.getByText('usage.analysis.tipApi')).toBeInTheDocument();
+    expect(screen.getByText('usage.analysis.tipLocal')).toBeInTheDocument();
+
+    const mostUsed = within(screen.getByTestId('usage-analysis-most-used'));
+    const mostUsedRows = mostUsed.getAllByRole('listitem');
+    expect(mostUsedRows).toHaveLength(2);
+    expect(mostUsedRows[0]).toHaveTextContent('1');
+    expect(mostUsedRows[0]).toHaveTextContent('claude-opus-4-7');
+    expect(mostUsedRows[0]).toHaveTextContent('10k usage.analysis.tokens');
+    expect(mostUsedRows[0]).toHaveTextContent('$0.30');
+    expect(mostUsedRows[1]).toHaveTextContent('2');
+    expect(mostUsedRows[1]).toHaveTextContent('gpt-4o');
+    expect(mostUsedRows[1]).toHaveTextContent('3k usage.analysis.tokens');
+    expect(mostUsedRows[1]).toHaveTextContent('$0.12');
+
+    const leastExpensive = within(screen.getByTestId('usage-analysis-least-expensive'));
+    expect(leastExpensive.getAllByRole('listitem')[0]).toHaveTextContent('gpt-4o');
+    expect([...document.querySelectorAll('.set-usage-efficiency-rank')]
+      .map(rank => rank.textContent)).toEqual(['1', '2']);
+
+    fireEvent.click(screen.getByTestId('usage-details-toggle'));
+    expect(screen.queryByTestId('usage-analysis')).not.toBeInTheDocument();
+    expect(screen.getByTestId('usage-table')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId('usage-details-toggle'));
+    expect(screen.queryByTestId('usage-table')).not.toBeInTheDocument();
+  });
+
   it('handles a usage.get failure without crashing the card', async () => {
     usageApi.get.mockRejectedValueOnce(new Error('boom'));
     render(<UsageSection />);
     await waitFor(() => expect(usageApi.get).toHaveBeenCalled());
     // The card stays mounted — no throw escaped to the test.
     expect(screen.getByTestId('usage-section')).toBeDefined();
+    expect(screen.getByTestId('usage-error')).toHaveTextContent('usage.errorRead');
+  });
+
+  it('turns a missing ccusage binary into a useful state', async () => {
+    usageApi.get.mockRejectedValueOnce(new Error('ccusage not available (ENOENT)'));
+    render(<UsageSection />);
+
+    expect(await screen.findByTestId('usage-error')).toHaveTextContent('usage.errorToolMissing');
+  });
+
+  it('explains that the report is local and global', async () => {
+    render(<UsageSection />);
+    fireEvent.click(screen.getByRole('button', { name: 'usage.infoTitle' }));
+
+    expect(screen.getByText('usage.infoLocal')).toBeInTheDocument();
+    expect(screen.getByText('usage.infoScope')).toBeInTheDocument();
   });
 
   it('renders empty placeholder when periods is empty', async () => {
     usageApi.get.mockResolvedValueOnce({
       period_kind: 'daily',
-      periods: [],
-      total_cost_usd: 0,
-      total_tokens: 0,
+      rows: [],
+      totals: {
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_creation_tokens: 0,
+        cache_read_tokens: 0,
+        total_cost: 0,
+        total_tokens: 0,
+      },
+      agents_detected: [],
     });
     render(<UsageSection />);
-    await waitFor(() => expect(usageApi.get).toHaveBeenCalled());
+    expect(await screen.findByTestId('usage-empty')).toHaveTextContent('usage.empty');
   });
 });
 
 describe('UsageSection — period switching', () => {
+  it('resets agent and model filters when the report period changes', async () => {
+    render(<UsageSection />);
+    const agentSelect = await screen.findByTestId('usage-agent-filter');
+    await act(async () => {
+      fireEvent.change(agentSelect, { target: { value: 'claude' } });
+      fireEvent.change(screen.getByTestId('usage-model-filter'), {
+        target: { value: 'claude-opus-4-7' },
+      });
+      fireEvent.click(screen.getByTestId('usage-period-weekly'));
+    });
+
+    await waitFor(() => expect(usageApi.get).toHaveBeenCalledWith('weekly'));
+    expect(screen.getByTestId('usage-agent-filter')).toHaveValue('all');
+    expect(screen.getByTestId('usage-model-filter')).toHaveValue('all');
+  });
+
   it('switches to weekly on selector change', async () => {
     render(<UsageSection />);
     await waitFor(() => expect(usageApi.get).toHaveBeenCalledWith('daily'));

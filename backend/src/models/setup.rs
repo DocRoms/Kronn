@@ -18,7 +18,7 @@ pub struct AppConfig {
     /// Separate from `ui_language` below which controls the Kronn UI locale.
     #[serde(default = "default_language")]
     pub language: String,
-    /// UI language (FR/EN/ES) for the React frontend. Persisted here so a
+    /// UI language (FR/EN/ES/ZH) for the React frontend. Persisted here so a
     /// Tauri WebView2 localStorage wipe doesn't reset the user's choice
     /// every time the app updates or Windows rotates the WebView2 profile.
     /// Frontend still writes to localStorage as a fast-path + fallback when
@@ -196,6 +196,23 @@ pub struct ServerConfig {
     /// discs keep their saved value (no retroactive change).
     #[serde(default = "default_summary_strategy_off")]
     pub default_summary_strategy: crate::models::SummaryStrategy,
+    /// Allow an agent's final prose to explicitly hand work to another
+    /// attached agent through a canonical `@alias`. Opt-in because one
+    /// generated reply can otherwise start additional paid runs.
+    #[serde(default)]
+    pub agent_handoffs_enabled: bool,
+    /// Maximum paid or cost-unknown handoffs spawned from one originating
+    /// human turn. Ollama is local and uses a separate fixed safety ceiling.
+    #[serde(default = "default_agent_handoff_paid_limit")]
+    pub agent_handoff_paid_limit: u32,
+    /// Remove the paid/unknown per-turn quota while keeping the structural
+    /// loop guards (attached agents only and bounded delegation depth).
+    #[serde(default)]
+    pub agent_handoff_paid_unlimited: bool,
+    /// Agents that cannot be started automatically from another agent's
+    /// generated reply. Empty keeps the historical allow-all behaviour.
+    #[serde(default)]
+    pub agent_handoff_blocked_agents: Vec<AgentType>,
 }
 
 /// Serde default for [`ServerConfig::default_summary_strategy`].
@@ -203,6 +220,10 @@ pub struct ServerConfig {
 /// disabled" — the new safer default shipped 0.8.6 phase 4.
 fn default_summary_strategy_off() -> crate::models::SummaryStrategy {
     crate::models::SummaryStrategy::Off
+}
+
+fn default_agent_handoff_paid_limit() -> u32 {
+    1
 }
 
 fn default_global_context_mode() -> String {
@@ -344,6 +365,8 @@ pub struct AgentsConfig {
     pub copilot_cli: AgentConfig,
     #[serde(default)]
     pub ollama: AgentConfig,
+    #[serde(default)]
+    pub lite_llm: AgentConfig,
     /// Per-agent model tier overrides (Economy/Reasoning model names).
     #[serde(default)]
     pub model_tiers: ModelTiersConfig,
@@ -360,6 +383,7 @@ impl AgentsConfig {
             AgentType::Vibe => self.vibe.full_access,
             AgentType::CopilotCli => self.copilot_cli.full_access,
             AgentType::Ollama => self.ollama.full_access,
+            AgentType::LiteLlm => self.lite_llm.full_access,
             _ => false,
         }
     }
@@ -372,6 +396,7 @@ impl AgentsConfig {
             || self.vibe.full_access
             || self.copilot_cli.full_access
             || self.ollama.full_access
+            || self.lite_llm.full_access
     }
 
     /// Returns true if at least one agent is marked as installed.
@@ -399,6 +424,13 @@ pub struct AgentConfig {
     /// `None` keeps the built-in frontend color.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mention_color: Option<String>,
+    /// Where to reach an agent that is a server rather than a binary. Only
+    /// LiteLLM uses it today: its proxy can live anywhere, so the endpoint is
+    /// the user's to declare. The matching credential lives in `TokensConfig`
+    /// under the `litellm` provider, never here — this struct is serialised
+    /// to the frontend.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
 }
 
 // ─── Model tiers ──────────────────────────────────────────────────────────
@@ -455,6 +487,8 @@ pub struct ModelTiersConfig {
     pub copilot_cli: ModelTierConfig,
     #[serde(default)]
     pub ollama: ModelTierConfig,
+    #[serde(default)]
+    pub lite_llm: ModelTierConfig,
 }
 
 // ─── Setup wizard ─────────────────────────────────────────────────────────
@@ -525,6 +559,9 @@ pub struct AgentDetection {
     ///   - `"vibe.sdk_fallback"` — Vibe SDK signature mismatch detected
     ///     (sentinel file present); the runner falls back to direct API
     ///     mode, losing the local-tools (bash/file I/O) capability.
+    ///   - `"vibe.project_config_untrusted"` — Vibe's workspace-trust store
+    ///     rejects a `.vibe` directory Kronn manages, so it loads none of
+    ///     the MCP servers Kronn wrote there.
     ///
     /// `None` means "no degradation detected, agent is healthy".
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -555,9 +592,17 @@ pub enum AgentType {
     GeminiCli,
     Kiro,
     CopilotCli,
-    /// Local LLM via Ollama (0.4.0). CLI: `ollama run <model>`.
-    /// Zero tokens, zero cost. MCP via prompt injection (Phase 1).
+    /// Local LLM via Ollama (0.4.0). Runs over the HTTP `/api/chat` path,
+    /// not a CLI process. Zero tokens, zero cost, and **no tools**: MCP
+    /// servers are deliberately not described to it (doing so produced
+    /// hallucinated tool calls — see `start_agent_with_config`). Tracked in
+    /// TD-20260808-http-agents-no-tool-calling.
     Ollama,
+    /// OpenAI-compatible proxy (LiteLLM). Same HTTP execution path as Ollama,
+    /// different wire format (`OpenAiCodec`). "Installed" means the `litellm`
+    /// binary is present; "reachable" means the proxy is actually running,
+    /// which the health endpoint reports separately.
+    LiteLlm,
     Custom,
 }
 
@@ -609,6 +654,10 @@ pub struct ServerConfigPublic {
     /// `Off` by default in 0.8.6 onwards. UI surfaces an explanation of
     /// when to re-enable (small-context agents without MCP access).
     pub default_summary_strategy: crate::models::SummaryStrategy,
+    pub agent_handoffs_enabled: bool,
+    pub agent_handoff_paid_limit: u32,
+    pub agent_handoff_paid_unlimited: bool,
+    pub agent_handoff_blocked_agents: Vec<AgentType>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -631,4 +680,12 @@ pub struct UpdateServerConfigRequest {
     /// `None` keeps the existing value.
     #[serde(default)]
     pub default_summary_strategy: Option<crate::models::SummaryStrategy>,
+    #[serde(default)]
+    pub agent_handoffs_enabled: Option<bool>,
+    #[serde(default)]
+    pub agent_handoff_paid_limit: Option<u32>,
+    #[serde(default)]
+    pub agent_handoff_paid_unlimited: Option<bool>,
+    #[serde(default)]
+    pub agent_handoff_blocked_agents: Option<Vec<AgentType>>,
 }

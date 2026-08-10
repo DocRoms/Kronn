@@ -1,4 +1,5 @@
 pub mod agent_api;
+pub mod agent_tools;
 pub mod agents;
 pub mod ai_docs;
 pub mod api_call_logs;
@@ -22,6 +23,7 @@ pub mod federation;
 pub mod git_ops;
 pub mod id_resolver;
 pub mod learnings;
+pub mod lite_llm;
 pub mod mcp_remote;
 pub mod mcps;
 pub mod ollama;

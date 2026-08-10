@@ -324,19 +324,19 @@ describe('CompressionSection', () => {
     expect(screen.getByText('87%')).toBeInTheDocument();
   });
 
-  it('sobriety info button toggles a paragraph about responsible AI usage', () => {
+  it('opens the responsible AI note in the shared contextual-help popup', () => {
     render(
       <CompressionSection
         agents={[mkAgent({ agent_type: 'ClaudeCode', rtk_hook_configured: false })]}
         t={t}
       />,
     );
-    // Collapsed by default.
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     expect(screen.queryByText('config.rtk.sobrietyBody')).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /config\.rtk\.sobrietyTitle/ }));
-    expect(screen.getByText('config.rtk.sobrietyBody')).toBeInTheDocument();
-    // Re-click collapses.
-    fireEvent.click(screen.getByRole('button', { name: /config\.rtk\.sobrietyTitle/ }));
+    expect(screen.getByRole('dialog')).toHaveTextContent('config.rtk.sobrietyBody');
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     expect(screen.queryByText('config.rtk.sobrietyBody')).not.toBeInTheDocument();
   });
 

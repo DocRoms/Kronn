@@ -11,6 +11,23 @@ use super::{AgentType, ModelTier};
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
+pub struct ActiveAgentDispatch {
+    pub id: String,
+    pub trigger_message_id: String,
+    pub agent_type: AgentType,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct DiscussionDetail {
+    #[serde(flatten)]
+    pub discussion: Discussion,
+    pub active_agent_dispatches: Vec<ActiveAgentDispatch>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
 pub struct Discussion {
     pub id: String,
     pub project_id: Option<String>,
@@ -340,12 +357,31 @@ pub struct UpdateDiscussionRequest {
     /// peers remain participants and continue receiving turns.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub no_agent: Option<bool>,
+    /// Disable generated agent-to-agent handoffs for this discussion even
+    /// when the global opt-in is enabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_handoffs_disabled: Option<bool>,
+    /// Remove the financial quota for this discussion only. The global master
+    /// switch, per-agent blocks and structural loop guards still apply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_handoffs_unlimited: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct DiscussionNativeAgentMode {
     pub disabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct DiscussionAgentHandoffMode {
+    pub global_enabled: bool,
+    pub disabled: bool,
+    pub unlimited_override: bool,
+    pub effective_enabled: bool,
+    /// `None` means no financial quota; structural loop guards still apply.
+    pub paid_limit: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]

@@ -46,6 +46,10 @@ pub fn estimate_cost(agent_type: &str, tokens_used: u64) -> Option<f64> {
         },
         // Ollama — local inference, zero cost
         "Ollama" => return Some(0.0),
+        // LiteLLM proxies arbitrary upstreams; the real price depends on the
+        // model behind it, which we don't know here. 0.0 would be a lie for a
+        // proxied cloud model, so report "unknown" instead.
+        "LiteLlm" => return None,
         _ => return None,
     };
 

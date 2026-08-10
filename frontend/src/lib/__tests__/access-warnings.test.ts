@@ -14,7 +14,9 @@ const ACCESS_KEYS = [
 ] as const;
 
 describe('access warning i18n keys', () => {
-  for (const locale of ['fr', 'en', 'es'] as const) {
+  const locales = ['fr', 'en', 'es', 'zh'] as const;
+
+  for (const locale of locales) {
     describe(`locale: ${locale}`, () => {
       for (const key of ACCESS_KEYS) {
         it(`has key "${key}"`, () => {
@@ -28,20 +30,20 @@ describe('access warning i18n keys', () => {
   }
 
   it('restrictedAgent supports interpolation in all locales', () => {
-    for (const locale of ['fr', 'en', 'es'] as const) {
+    for (const locale of locales) {
       const val = t(locale, 'config.restrictedAgent', 'Codex');
       expect(val).toContain('Codex');
     }
   });
 
-  it('fullAccessBadge is "Full access" in all locales', () => {
-    for (const locale of ['fr', 'en', 'es'] as const) {
-      expect(t(locale, 'config.fullAccessBadge')).toBe('Full access');
+  it('fullAccessBadge resolves in all locales', () => {
+    for (const locale of locales) {
+      expect(t(locale, 'config.fullAccessBadge')).not.toBe('config.fullAccessBadge');
     }
   });
 
   it('agentDisabled supports interpolation in all locales', () => {
-    for (const locale of ['fr', 'en', 'es'] as const) {
+    for (const locale of locales) {
       const val = t(locale, 'disc.agentDisabled', 'Claude Code');
       expect(val).toContain('Claude Code');
       expect(val).not.toBe('disc.agentDisabled');
@@ -84,6 +86,7 @@ const defaultModelTiers = {
   vibe: { economy: null, reasoning: null },
   copilot_cli: { economy: null, reasoning: null },
   ollama: { economy: null, reasoning: null },
+  lite_llm: { economy: null, reasoning: null },
 };
 
 const makeConfig = (overrides: Partial<Record<'claude' | 'codex' | 'gemini' | 'kiro' | 'vibe' | 'copilot', boolean>>): AgentsConfig => ({
@@ -94,6 +97,7 @@ const makeConfig = (overrides: Partial<Record<'claude' | 'codex' | 'gemini' | 'k
   vibe: { path: null, installed: false, version: null, full_access: overrides.vibe ?? false },
   copilot_cli: { path: null, installed: false, version: null, full_access: overrides.copilot ?? false },
   ollama: { path: null, installed: false, version: null, full_access: false },
+  lite_llm: { path: null, installed: false, version: null, full_access: false },
   model_tiers: defaultModelTiers,
 });
 

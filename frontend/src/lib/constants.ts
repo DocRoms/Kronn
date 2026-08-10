@@ -13,6 +13,7 @@ export const AGENT_COLORS: Record<string, string> = {
   CopilotCli: '#238636',
   'GitHub Copilot': '#238636',
   Ollama: '#60A5FA',
+  LiteLlm: '#14B8A6',
 };
 
 export const AGENT_LABELS: Record<string, string> = {
@@ -23,9 +24,10 @@ export const AGENT_LABELS: Record<string, string> = {
   Kiro: 'Kiro',
   CopilotCli: 'GitHub Copilot',
   Ollama: 'Ollama',
+  LiteLlm: 'LiteLLM',
 };
 
-export const ALL_AGENT_TYPES: AgentType[] = ['ClaudeCode', 'Codex', 'Vibe', 'GeminiCli', 'Kiro', 'CopilotCli', 'Ollama'];
+export const ALL_AGENT_TYPES: AgentType[] = ['ClaudeCode', 'Codex', 'Vibe', 'GeminiCli', 'Kiro', 'CopilotCli', 'Ollama', 'LiteLlm'];
 
 export const AGENT_MENTIONS: ReadonlyArray<{
   trigger: string;
@@ -39,6 +41,7 @@ export const AGENT_MENTIONS: ReadonlyArray<{
   { trigger: '@kiro', type: 'Kiro', label: 'Kiro' },
   { trigger: '@copilot', type: 'CopilotCli', label: 'GitHub Copilot' },
   { trigger: '@ollama', type: 'Ollama', label: 'Ollama' },
+  { trigger: '@litellm', type: 'LiteLlm', label: 'LiteLLM' },
 ];
 
 /** Return every canonical agent mention found in text, once each and in the

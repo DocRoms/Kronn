@@ -20,7 +20,7 @@ import type { ToastFn } from '../../hooks/useToast';
 // Note: lucide-react 1.x removed brand icons (Github, Gitlab, …) — use
 // `ExternalLink` for the GitHub-issue CTA. Brand icons live in
 // `simple-icons` if we ever want to re-add them.
-import { AlertTriangle, Bug, Copy, ExternalLink, Pause, Play, RefreshCw, Trash2 } from 'lucide-react';
+import { AlertTriangle, Bug, Copy, ExternalLink, MessageSquare, Pause, Play, RefreshCw, Trash2 } from 'lucide-react';
 import '../../pages/SettingsPage.css';
 
 export interface DebugSectionProps {
@@ -28,6 +28,8 @@ export interface DebugSectionProps {
   setServerDebugMode: (v: boolean) => void;
   debugModeNeedsRestart: boolean;
   setDebugModeNeedsRestart: (v: boolean) => void;
+  discussionNotesEnabled: boolean;
+  setDiscussionNotesEnabled: (v: boolean) => void;
   toast: ToastFn;
   t: (key: string, ...args: (string | number)[]) => string;
 }
@@ -42,6 +44,8 @@ export function DebugSection({
   setServerDebugMode,
   debugModeNeedsRestart,
   setDebugModeNeedsRestart,
+  discussionNotesEnabled,
+  setDiscussionNotesEnabled,
   toast,
   t,
 }: DebugSectionProps) {
@@ -216,6 +220,44 @@ export function DebugSection({
               </span>
             </div>
           )}
+        </div>
+
+        <div className="mt-8">
+          <div className="flex-row gap-4 mb-3" style={{ alignItems: 'center' }}>
+            <MessageSquare size={12} className="text-tertiary" />
+            <span className="label" style={{ marginBottom: 0 }}>{t('settings.discussionNotes')}</span>
+            <button
+              type="button"
+              role="switch"
+              aria-label={t('settings.discussionNotes')}
+              aria-checked={discussionNotesEnabled}
+              className="set-agent-access-switch"
+              style={{ marginLeft: 'auto' }}
+              onClick={async () => {
+                const previous = discussionNotesEnabled;
+                const next = !previous;
+                setDiscussionNotesEnabled(next);
+                try {
+                  await configApi.setServerConfig({ discussion_notes_enabled: next });
+                } catch (error) {
+                  setDiscussionNotesEnabled(previous);
+                  toast(t('common.actionFailed', userError(error)), 'error');
+                }
+              }}
+            >
+              <span className="set-toggle-track" data-on={discussionNotesEnabled}>
+                <span
+                  className="set-toggle-thumb"
+                  data-on={discussionNotesEnabled}
+                  style={{ left: discussionNotesEnabled ? 16 : 1 }}
+                />
+              </span>
+              <span className={discussionNotesEnabled ? 'text-accent' : 'text-muted'}>
+                {discussionNotesEnabled ? t('config.enabled') : t('config.disabled')}
+              </span>
+            </button>
+          </div>
+          <div className="set-hint-xs">{t('settings.discussionNotesHint')}</div>
         </div>
 
         {/* Live viewer — always visible (we capture at info even when

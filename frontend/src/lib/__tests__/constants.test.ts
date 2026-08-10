@@ -1,7 +1,34 @@
 import { describe, it, expect } from 'vitest';
-import { AGENT_COLORS, AGENT_LABELS, ALL_AGENT_TYPES, agentColor, agentMentionColors, mentionedAgents, getProjectGroup, isHiddenPath, isUsable, isValidationDisc, isBriefingDisc, isBootstrapDisc, agentSupportsIntrospection, isTrackerMcp, TRACKER_MCP_NEEDLES, parseRepoUrl, buildOldestIssueRequest, inferTrackerSlugFromRepoUrl, RTK_APPLICABLE, isRtkActive } from '../constants';
+import { AGENT_COLORS, AGENT_LABELS, AGENT_MENTIONS, ALL_AGENT_TYPES, agentColor, agentMentionColors, mentionedAgents, getProjectGroup, isHiddenPath, isUsable, isValidationDisc, isBriefingDisc, isBootstrapDisc, agentSupportsIntrospection, isTrackerMcp, TRACKER_MCP_NEEDLES, parseRepoUrl, buildOldestIssueRequest, inferTrackerSlugFromRepoUrl, RTK_APPLICABLE, isRtkActive } from '../constants';
 
 describe('constants', () => {
+  describe('agent registry completeness', () => {
+    // LiteLLM shipped with an AgentType, a card and a working tool loop, but
+    // no `@litellm` in the composer — invisible until a user typed "@".
+    // These four lists must move together.
+    it('every agent type has a label, a colour and a mention trigger', () => {
+      for (const at of ALL_AGENT_TYPES) {
+        expect(AGENT_LABELS[at], `AGENT_LABELS is missing ${at}`).toBeDefined();
+        expect(AGENT_COLORS[at], `AGENT_COLORS is missing ${at}`).toBeDefined();
+        expect(
+          AGENT_MENTIONS.find(m => m.type === at),
+          `AGENT_MENTIONS is missing ${at} — it will not appear in the "@" picker`,
+        ).toBeDefined();
+      }
+    });
+
+    it('every mention trigger maps to a declared agent type', () => {
+      for (const m of AGENT_MENTIONS) {
+        expect(ALL_AGENT_TYPES, `${m.trigger} points at unknown type ${m.type}`)
+          .toContain(m.type);
+        expect(m.trigger.startsWith('@')).toBe(true);
+      }
+      // Triggers must be unique, or the picker offers the same key twice.
+      const triggers = AGENT_MENTIONS.map(m => m.trigger);
+      expect(new Set(triggers).size).toBe(triggers.length);
+    });
+  });
+
   describe('AGENT_COLORS', () => {
     it('has colors for all agent types', () => {
       for (const at of ALL_AGENT_TYPES) {
@@ -69,18 +96,20 @@ describe('constants', () => {
   });
 
   describe('ALL_AGENT_TYPES', () => {
-    it('contains the 7 real agent types — Custom is intentionally excluded', () => {
+    it('contains the 8 real agent types — Custom is intentionally excluded', () => {
       // ALL_AGENT_TYPES lists only the concrete, installable agent types.
       // AgentType (from generated.ts) also includes "Custom" (an 8th variant)
       // which is a generic escape-hatch type, not a selectable agent in the UI.
-      // Therefore ALL_AGENT_TYPES has 7 entries and Custom is excluded on purpose.
-      expect(ALL_AGENT_TYPES).toHaveLength(7);
+      // Therefore ALL_AGENT_TYPES has 8 entries and Custom is excluded on purpose.
+      expect(ALL_AGENT_TYPES).toHaveLength(8);
       expect(ALL_AGENT_TYPES).toContain('ClaudeCode');
       expect(ALL_AGENT_TYPES).toContain('Codex');
       expect(ALL_AGENT_TYPES).toContain('Vibe');
       expect(ALL_AGENT_TYPES).toContain('GeminiCli');
       expect(ALL_AGENT_TYPES).toContain('Kiro');
       expect(ALL_AGENT_TYPES).toContain('CopilotCli');
+      expect(ALL_AGENT_TYPES).toContain('Ollama');
+      expect(ALL_AGENT_TYPES).toContain('LiteLlm');
       expect(ALL_AGENT_TYPES).not.toContain('Custom');
     });
   });
@@ -270,7 +299,7 @@ describe('constants', () => {
       // If a new agent is added to the Rust enum but not to ALL_AGENT_TYPES
       // in constants.ts, this test fails. The generated.ts union is the
       // source of truth from the backend.
-      const knownFromGenerated: string[] = ['ClaudeCode', 'Codex', 'Vibe', 'GeminiCli', 'Kiro', 'CopilotCli', 'Ollama'];
+      const knownFromGenerated: string[] = ['ClaudeCode', 'Codex', 'Vibe', 'GeminiCli', 'Kiro', 'CopilotCli', 'Ollama', 'LiteLlm'];
       expect(ALL_AGENT_TYPES.sort()).toEqual(knownFromGenerated.sort());
     });
 

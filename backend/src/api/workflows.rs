@@ -910,13 +910,18 @@ pub async fn create(
     }
 
     let now = Utc::now();
+    let mut steps = req.steps;
+    let mut on_failure = req.on_failure;
+    let mut used_step_ids = std::collections::HashSet::new();
+    normalize_step_ids(&mut steps, None, &mut used_step_ids);
+    normalize_step_ids(&mut on_failure, None, &mut used_step_ids);
     let wf = Workflow {
         pinned: false,
         id: Uuid::new_v4().to_string(),
         name: req.name,
         project_id: req.project_id,
         trigger: req.trigger,
-        steps: req.steps,
+        steps,
         actions: req.actions,
         safety: req.safety.unwrap_or(WorkflowSafety {
             sandbox: false,
@@ -928,7 +933,7 @@ pub async fn create(
         concurrency_limit: req.concurrency_limit,
         guards: req.guards,
         artifacts: req.artifacts,
-        on_failure: req.on_failure,
+        on_failure,
         exec_allowlist: req.exec_allowlist,
         variables: req.variables,
         // 0.8.5 — accept an `enabled: false` from the request for the
@@ -1155,19 +1160,31 @@ pub async fn update(
         }
     }
 
+    let mut steps = req.steps.unwrap_or_else(|| existing.steps.clone());
+    let mut on_failure = req
+        .on_failure
+        .unwrap_or_else(|| existing.on_failure.clone());
+    let mut used_step_ids = std::collections::HashSet::new();
+    normalize_step_ids(&mut steps, Some(&existing.steps), &mut used_step_ids);
+    normalize_step_ids(
+        &mut on_failure,
+        Some(&existing.on_failure),
+        &mut used_step_ids,
+    );
+
     let updated = Workflow {
         id: existing.id,
         name: req.name.unwrap_or(existing.name),
         project_id: req.project_id.unwrap_or(existing.project_id),
         trigger: req.trigger.unwrap_or(existing.trigger),
-        steps: req.steps.unwrap_or(existing.steps),
+        steps,
         actions: req.actions.unwrap_or(existing.actions),
         safety: req.safety.unwrap_or(existing.safety),
         workspace_config: req.workspace_config.or(existing.workspace_config),
         concurrency_limit: req.concurrency_limit.or(existing.concurrency_limit),
         guards: req.guards.or(existing.guards),
         artifacts: req.artifacts.unwrap_or(existing.artifacts),
-        on_failure: req.on_failure.unwrap_or(existing.on_failure),
+        on_failure,
         exec_allowlist: req.exec_allowlist.unwrap_or(existing.exec_allowlist),
         variables: req.variables.unwrap_or(existing.variables),
         enabled: req.enabled.unwrap_or(existing.enabled),
@@ -1196,6 +1213,37 @@ pub async fn update(
             "Workflow not found",
         )),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
+    }
+}
+
+fn normalize_step_ids(
+    steps: &mut [WorkflowStep],
+    previous: Option<&[WorkflowStep]>,
+    used: &mut std::collections::HashSet<String>,
+) {
+    for (index, step) in steps.iter_mut().enumerate() {
+        let previous_id = previous.and_then(|old_steps| {
+            old_steps
+                .iter()
+                .find(|old| old.name == step.name)
+                .or_else(|| old_steps.get(index))
+                .and_then(|old| old.id.as_ref())
+        });
+        let submitted_id = step.id.as_ref().filter(|candidate| {
+            previous.is_some_and(|old_steps| {
+                old_steps
+                    .iter()
+                    .any(|old| old.id.as_ref() == Some(*candidate))
+            })
+        });
+        let candidate = submitted_id.or(previous_id).filter(|candidate| {
+            Uuid::parse_str(candidate).is_ok() && !used.contains(candidate.as_str())
+        });
+        let id = candidate
+            .cloned()
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
+        used.insert(id.clone());
+        step.id = Some(id);
     }
 }
 
@@ -1516,6 +1564,9 @@ pub async fn import_workflow(
         let new_id = wf_id_remap[&w.id].clone();
         for steps in [&mut w.steps, &mut w.on_failure] {
             for s in steps.iter_mut() {
+                // Imported workflows are new local resources: their step IDs
+                // must not retain identities from another instance.
+                s.id = Some(Uuid::new_v4().to_string());
                 // sub_workflow_id → the remapped child (leave untouched when it
                 // points at a pre-existing workflow on this instance).
                 if let Some(sid) = s.sub_workflow_id.as_ref() {
@@ -2118,11 +2169,13 @@ pub async fn test_step(
         AgentType::Vibe => agents.vibe.full_access,
         AgentType::CopilotCli => agents.copilot_cli.full_access,
         AgentType::Ollama => agents.ollama.full_access,
+        AgentType::LiteLlm => agents.lite_llm.full_access,
         AgentType::Custom => false,
     };
     // Owned clone for the spawned task — the Test button must resolve model
     // tiers exactly like a real run (run-9 finding: overrides were dropped).
     let model_tiers = agents.model_tiers.clone();
+    let lite_llm_base_url = agents.lite_llm.base_url.clone();
 
     // In dry_run mode, prepend a simulation preamble. The preamble is
     // adaptive so it does not fight the output contract downstream steps rely on:
@@ -2174,6 +2227,7 @@ pub async fn test_step(
             &agent_extra_context,
             Some(progress_tx),
             Some(&model_tiers),
+            lite_llm_base_url.as_deref(),
         )
         .await;
 
@@ -3493,6 +3547,7 @@ pub async fn suggestions(
                 .step_prompts
                 .iter()
                 .map(|(step_name, prompt, structured)| WorkflowStep {
+                    id: None,
                     name: step_name.to_string(),
                     step_type: StepType::Agent,
                     description: None,
@@ -3801,6 +3856,67 @@ mod tests {
             .expect_err("foreach plus a limit above one must not be silently accepted");
         assert!(error.contains("cannot parallelize foreach items"));
         assert!(error.contains("BatchQuickPrompt"));
+    }
+
+    #[test]
+    fn step_ids_are_real_uuids_and_survive_alias_changes() {
+        let mut created = vec![
+            WorkflowStep {
+                name: "fetch".into(),
+                ..Default::default()
+            },
+            WorkflowStep {
+                name: "reshape".into(),
+                ..Default::default()
+            },
+        ];
+        let mut used = std::collections::HashSet::new();
+        normalize_step_ids(&mut created, None, &mut used);
+
+        let fetch_id = created[0].id.clone().unwrap();
+        let reshape_id = created[1].id.clone().unwrap();
+        assert!(Uuid::parse_str(&fetch_id).is_ok());
+        assert!(Uuid::parse_str(&reshape_id).is_ok());
+        assert_ne!(fetch_id, reshape_id);
+
+        let mut edited = created.clone();
+        edited[0].name = "triage".into();
+        let mut used = std::collections::HashSet::new();
+        normalize_step_ids(&mut edited, Some(&created), &mut used);
+
+        assert_eq!(edited[0].id.as_deref(), Some(fetch_id.as_str()));
+        assert_eq!(edited[1].id.as_deref(), Some(reshape_id.as_str()));
+        assert_eq!(edited[0].name, "triage");
+    }
+
+    #[test]
+    fn step_ids_reject_submitted_unknown_and_duplicate_values() {
+        let existing_id = Uuid::new_v4().to_string();
+        let previous = vec![WorkflowStep {
+            id: Some(existing_id.clone()),
+            name: "fetch".into(),
+            ..Default::default()
+        }];
+        let attacker_id = Uuid::new_v4().to_string();
+        let mut edited = vec![
+            WorkflowStep {
+                id: Some(attacker_id.clone()),
+                name: "fetch".into(),
+                ..Default::default()
+            },
+            WorkflowStep {
+                id: Some(existing_id.clone()),
+                name: "new-step".into(),
+                ..Default::default()
+            },
+        ];
+        let mut used = std::collections::HashSet::new();
+        normalize_step_ids(&mut edited, Some(&previous), &mut used);
+
+        assert_eq!(edited[0].id.as_deref(), Some(existing_id.as_str()));
+        assert_ne!(edited[1].id.as_deref(), Some(existing_id.as_str()));
+        assert_ne!(edited[1].id.as_deref(), Some(attacker_id.as_str()));
+        assert!(Uuid::parse_str(edited[1].id.as_deref().unwrap()).is_ok());
     }
 
     async fn state_with_batch(run_id: &str, disc_ids: &[&str]) -> AppState {
@@ -4177,6 +4293,7 @@ mod tests {
 
     fn mk_step(name: &str, kind: StepType) -> WorkflowStep {
         WorkflowStep {
+            id: None,
             name: name.into(),
             step_type: kind,
             description: None,

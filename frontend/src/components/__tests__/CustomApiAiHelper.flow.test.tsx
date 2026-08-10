@@ -113,6 +113,7 @@ describe('CustomApiAiHelper — send message', () => {
       fr: async () => ({ default: {} }),
       en: async () => { throw new Error('locale chunk unavailable'); },
       es: async () => ({ default: {} }),
+      zh: async () => ({ default: {} }),
     });
     try {
       const textarea = screen.getByPlaceholderText(/mcp.custom.helper.inputPlaceholder/) as HTMLTextAreaElement;
@@ -124,7 +125,7 @@ describe('CustomApiAiHelper — send message', () => {
       expect(streamMock).not.toHaveBeenCalled();
     } finally {
       restore();
-      await Promise.all([loadLocale('fr'), loadLocale('en'), loadLocale('es')]);
+      await Promise.all([loadLocale('fr'), loadLocale('en'), loadLocale('es'), loadLocale('zh')]);
     }
   });
 

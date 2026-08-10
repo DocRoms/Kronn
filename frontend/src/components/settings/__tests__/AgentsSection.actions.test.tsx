@@ -28,6 +28,8 @@ const {
   detectMock,
   setAgentAccessMock,
   setAgentMentionColorMock,
+  usageGetMock,
+  getModelTiersMock,
 } = vi.hoisted(() => ({
   getServerConfigMock: vi.fn(),
   installMock: vi.fn(),
@@ -36,6 +38,8 @@ const {
   detectMock: vi.fn(),
   setAgentAccessMock: vi.fn(),
   setAgentMentionColorMock: vi.fn(),
+  usageGetMock: vi.fn(),
+  getModelTiersMock: vi.fn(),
 }));
 
 vi.mock('../../../lib/api', () => buildApiMock({
@@ -43,12 +47,16 @@ vi.mock('../../../lib/api', () => buildApiMock({
     getServerConfig: getServerConfigMock as never,
     setAgentAccess: setAgentAccessMock as never,
     setAgentMentionColor: setAgentMentionColorMock as never,
+    getModelTiers: getModelTiersMock as never,
   },
   agents: {
     install: installMock as never,
     uninstall: uninstallMock as never,
     toggle: toggleMock as never,
     detect: detectMock as never,
+  },
+  usage: {
+    get: usageGetMock as never,
   },
 }));
 
@@ -116,12 +124,64 @@ beforeEach(() => {
   setAgentAccessMock.mockResolvedValue(undefined);
   setAgentMentionColorMock.mockReset();
   setAgentMentionColorMock.mockResolvedValue(undefined);
+  usageGetMock.mockReset();
+  usageGetMock.mockResolvedValue({
+    period_kind: 'monthly',
+    rows: [],
+    totals: {
+      input_tokens: 0, output_tokens: 0,
+      cache_creation_tokens: 0, cache_read_tokens: 0,
+      total_tokens: 0, total_cost: 0,
+    },
+    agents_detected: [],
+  });
+  const emptyTier = { economy: null, default: null, reasoning: null };
+  getModelTiersMock.mockReset();
+  getModelTiersMock.mockResolvedValue({
+    claude_code: { economy: 'haiku', default: 'sonnet', reasoning: 'opus' },
+    codex: { ...emptyTier },
+    gemini_cli: { ...emptyTier },
+    kiro: { ...emptyTier },
+    vibe: { ...emptyTier },
+    copilot_cli: { ...emptyTier },
+    ollama: { ...emptyTier },
+    lite_llm: { ...emptyTier },
+  });
+  sessionStorage.removeItem('kronn:model-config-target');
 });
 
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
   cleanup();
+  sessionStorage.removeItem('kronn:model-config-target');
+});
+
+describe('AgentsSection — model-error deep link', () => {
+  it('focuses the exact agent and reasoning-tier picker left by a System CTA', async () => {
+    sessionStorage.setItem('kronn:model-config-target', JSON.stringify({
+      agentType: 'ClaudeCode',
+      tier: 'reasoning',
+    }));
+    renderSection({
+      agents: [makeAgent({
+        name: 'AgentClaude',
+        agent_type: 'ClaudeCode',
+        installed: true,
+        enabled: true,
+      })],
+    });
+
+    await waitFor(() => {
+      const select = document.querySelector<HTMLSelectElement>(
+        '[data-model-tier-agent="ClaudeCode"][data-model-tier="reasoning"]',
+      );
+      expect(select).toBeTruthy();
+      expect(document.activeElement).toBe(select);
+      expect(select?.classList.contains('set-model-tier-focus')).toBe(true);
+    });
+    expect(sessionStorage.getItem('kronn:model-config-target')).toBeNull();
+  });
 });
 
 describe('AgentsSection — install action', () => {
@@ -253,9 +313,11 @@ describe('AgentsSection — full-access switch', () => {
       vibe: { ...blank },
       copilot_cli: { ...blank },
       ollama: { ...blank },
+      lite_llm: { ...blank },
       model_tiers: {
         claude_code: { ...blankTier }, codex: { ...blankTier }, gemini_cli: { ...blankTier },
         kiro: { ...blankTier }, vibe: { ...blankTier }, copilot_cli: { ...blankTier }, ollama: { ...blankTier },
+        lite_llm: { ...blankTier },
       },
       ...over,
     };
@@ -324,6 +386,111 @@ describe('AgentsSection — full-access switch', () => {
   });
 });
 
+describe('AgentsSection — observed model costs', () => {
+  it('adds an approximate monthly ccUsage rate only to observed models', async () => {
+    usageGetMock.mockResolvedValueOnce({
+      period_kind: 'monthly',
+      rows: [{
+        period: '2026-08',
+        agent: 'claude',
+        models_used: ['claude-sonnet-4-5', 'claude-opus-4-7'],
+        model_breakdowns: [
+          {
+            model_name: 'claude-sonnet-4-5',
+            input_tokens: 500_000,
+            output_tokens: 100_000,
+            cache_creation_tokens: 100_000,
+            cache_read_tokens: 300_000,
+            total_tokens: 1_000_000,
+            cost: 12.345,
+          },
+          {
+            model_name: 'claude-opus-4-7',
+            input_tokens: 250_000,
+            output_tokens: 50_000,
+            cache_creation_tokens: 50_000,
+            cache_read_tokens: 150_000,
+            total_tokens: 500_000,
+            cost: 12.345,
+          },
+        ],
+        input_tokens: 750_000,
+        output_tokens: 150_000,
+        cache_creation_tokens: 150_000,
+        cache_read_tokens: 450_000,
+        total_tokens: 1_500_000,
+        total_cost: 24.69,
+      }],
+      totals: {
+        input_tokens: 750_000,
+        output_tokens: 150_000,
+        cache_creation_tokens: 150_000,
+        cache_read_tokens: 450_000,
+        total_tokens: 1_500_000,
+        total_cost: 24.69,
+      },
+      agents_detected: ['claude'],
+    });
+
+    renderSection({
+      agents: [makeAgent({
+        name: 'AgentClaude', agent_type: 'ClaudeCode', installed: true, enabled: true,
+      })],
+    });
+
+    await waitFor(() => expect(usageGetMock).toHaveBeenCalledWith('monthly'));
+    await waitFor(() => {
+      const sonnetOptions = screen.getAllByRole('option')
+        .filter(option => option.getAttribute('value') === 'sonnet');
+      expect(sonnetOptions.length).toBeGreaterThan(0);
+      expect(sonnetOptions.every(option => (
+        option.textContent?.includes('≈')
+        && option.textContent.includes('config.modelCostObserved:$12.3')
+      ))).toBe(true);
+    });
+
+    const fableOptions = screen.getAllByRole('option')
+      .filter(option => option.getAttribute('value') === 'fable');
+    expect(fableOptions.every(option => !option.textContent?.includes('≈'))).toBe(true);
+    expect(screen.getByRole('button', { name: 'config.modelCostObservedTitle' })).toBeTruthy();
+
+    expect(screen.getByTestId('model-cost-display')).toBeTruthy();
+    expect(screen.getByRole('link', { name: /ccusage/i })).toHaveAttribute(
+      'href',
+      'https://github.com/ccusage/ccusage',
+    );
+    fireEvent.click(screen.getByTestId('model-cost-mode-relative'));
+    expect(screen.getByTestId('model-cost-reference')).toHaveValue('claude-sonnet-4-5');
+    const relativeSonnetOptions = screen.getAllByRole('option')
+      .filter(option => option.getAttribute('value') === 'sonnet');
+    expect(relativeSonnetOptions.every(option => option.textContent?.includes('≈ ×1'))).toBe(true);
+    const relativeOpusOptions = screen.getAllByRole('option')
+      .filter(option => option.getAttribute('value') === 'opus');
+    expect(relativeOpusOptions.every(option => option.textContent?.includes('≈ ×2'))).toBe(true);
+
+    fireEvent.change(screen.getByTestId('model-cost-reference'), {
+      target: { value: 'claude-opus-4-7' },
+    });
+    const rebasedSonnetOptions = screen.getAllByRole('option')
+      .filter(option => option.getAttribute('value') === 'sonnet');
+    expect(rebasedSonnetOptions.every(option => option.textContent?.includes('≈ ×0.5'))).toBe(true);
+  });
+
+  it('offers every known model in every reasoning tier', async () => {
+    renderSection({
+      agents: [makeAgent({
+        name: 'AgentClaude', agent_type: 'ClaudeCode', installed: true, enabled: true,
+      })],
+    });
+
+    const expectedModels = ['', 'haiku', 'sonnet', 'fable', 'opus'];
+    for (const tier of ['economy', 'default', 'reasoning']) {
+      const select = await screen.findByLabelText(`disc.modelTier ${tier}`);
+      expect([...select.querySelectorAll('option')].map(option => option.value)).toEqual(expectedModels);
+    }
+  });
+});
+
 describe('AgentsSection — configurable mention colors', () => {
   it('uses the configured mention color as the matching agent card accent', () => {
     const agentAccess = {
@@ -349,6 +516,7 @@ describe('AgentsSection — configurable mention colors', () => {
     const card = container.querySelector<HTMLElement>('[data-agent-type="ClaudeCode"]');
     expect(card?.style.getPropertyValue('--agent-color')).toBe('#123abc');
     expect(card?.querySelector('.set-agent-card-header')).toBeTruthy();
+    expect(card?.querySelector('[data-testid="mention-color-ClaudeCode"]')).toBeTruthy();
     expect(card?.querySelector('.set-agent-panel-access')).toHaveTextContent('config.fullAccessBadge');
     expect(card?.querySelector('.set-agent-panel-auth')).toHaveTextContent('config.apiKeys');
   });
@@ -371,12 +539,33 @@ describe('AgentsSection — configurable mention colors', () => {
     expect(card).toHaveClass('set-agent-row-ollama');
     expect(card?.style.getPropertyValue('--agent-color').toLowerCase()).toBe('#60a5fa');
     expect(card?.querySelector('.set-ollama-card')).toBeTruthy();
+    expect(card?.querySelector('.set-ollama-header-actions [data-testid="mention-color-Ollama"]')).toBeTruthy();
+  });
+
+  it('aligns the LiteLLM mention color with its right-hand header actions', async () => {
+    const { container } = renderSection({
+      agents: [makeAgent({
+        name: 'LiteLLM',
+        agent_type: 'LiteLlm',
+        installed: true,
+        runtime_available: true,
+        enabled: true,
+      })],
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const card = container.querySelector<HTMLElement>('[data-agent-type="LiteLlm"]');
+    expect(card?.querySelector('.set-ollama-header-actions [data-testid="mention-color-LiteLlm"]')).toBeTruthy();
   });
 
   it('persists the selected agent color, refreshes config, and notifies renderers', async () => {
     const eventSpy = vi.fn();
     window.addEventListener('kronn:agent-mention-colors-changed', eventSpy);
-    const { refetchAgentAccess, toastFn } = renderSection();
+    const { refetchAgentAccess, toastFn } = renderSection({
+      agents: [makeAgent({ name: 'AgentCodex', agent_type: 'Codex' })],
+    });
 
     fireEvent.change(screen.getByTestId('mention-color-Codex'), {
       target: { value: '#123abc' },
@@ -396,7 +585,9 @@ describe('AgentsSection — configurable mention colors', () => {
 
   it('restores the displayed color when persistence fails', async () => {
     setAgentMentionColorMock.mockRejectedValueOnce(new Error('offline'));
-    const { toastFn } = renderSection();
+    const { toastFn } = renderSection({
+      agents: [makeAgent({ name: 'AgentCodex', agent_type: 'Codex' })],
+    });
     const input = screen.getByTestId<HTMLInputElement>('mention-color-Codex');
     expect(input.value).toBe('#10a37f');
 

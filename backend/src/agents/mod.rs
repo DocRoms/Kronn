@@ -19,7 +19,9 @@ async fn run_shell_cmd(cmd: &str) -> Result<std::process::Output> {
     }
 }
 
+pub mod chat_codec;
 pub mod runner;
+pub mod tools;
 
 /// Cache for runtime probe results (npx availability).
 /// Key: binary name, Value: (available, probed_at)
@@ -86,6 +88,20 @@ const KNOWN_AGENTS: &[AgentDef] = &[
         binary: "ollama",
         origin: "US",
         install_cmd: "curl -fsSL https://ollama.com/install.sh | sh",
+    },
+    // Like Ollama, this is a server: the binary being present means
+    // "installed", not "reachable" — the health endpoint reports the latter.
+    //
+    // The fastapi bound is not cosmetic. litellm 1.95.0 declares
+    // `fastapi<1.0,>=0.136.3`, but 0.140 dropped `get_flat_dependant`, which
+    // its proxy imports — resolving to the newest allowed version installs a
+    // proxy that dies on startup. Pin until upstream tightens its own range.
+    AgentDef {
+        name: "LiteLLM",
+        agent_type: AgentType::LiteLlm,
+        binary: "litellm",
+        origin: "US",
+        install_cmd: "uv tool install 'litellm[proxy]' --with 'fastapi<0.140'",
     },
 ];
 
@@ -432,13 +448,16 @@ pub fn apply_configured_status(agents: &mut [AgentDetection], config: &AppConfig
 
 /// Surface a per-agent runtime-degradation warning to the frontend.
 ///
-/// Today only Vibe sets one: when `vibe-runner.py` has hit the SDK
-/// signature mismatch in this boot cycle, it writes a sentinel file
-/// (cf. `_sdk_sentinel_path` in the runner). Subsequent agent calls
-/// skip the SDK probe and run via the direct Mistral API path —
-/// faster, but without local tools (bash, file I/O, MCP). The UI
-/// shows a yellow note in Settings → Agents so the user knows
-/// they're in fallback mode without having to read backend logs.
+/// Both cases today are Vibe, and both are silent by nature — the agent
+/// starts fine and simply has fewer capabilities than the config implies:
+///
+///   - `vibe.sdk_fallback` — `vibe-runner.py` hit the SDK signature
+///     mismatch this boot cycle and wrote a sentinel (cf.
+///     `_sdk_sentinel_path`). Later calls skip the SDK probe and use the
+///     direct Mistral API: faster, but with no local tools.
+///   - `vibe.project_config_untrusted` — Vibe's trust store rejects a
+///     `.vibe` directory Kronn manages, so it loads none of the MCP
+///     servers listed in the file it can plainly see.
 ///
 /// Returns the i18n key the frontend will resolve, or `None` when the
 /// agent is running in its primary mode.
@@ -469,10 +488,17 @@ fn detect_runtime_warning(agent_type: &AgentType) -> Option<String> {
     };
     let sentinel = std::path::Path::new(&base).join(format!("kronn-vibe-no-sdk-{}", uid_suffix));
     if sentinel.exists() {
-        Some("vibe.sdk_fallback".to_string())
-    } else {
-        None
+        return Some("vibe.sdk_fallback".to_string());
     }
+    // A revoked workspace trust makes Vibe ignore the config Kronn writes, so
+    // the agent starts with none of its MCP servers and nothing says why.
+    // Read from the trust store itself — no project list needed.
+    if crate::core::vibe_trust::TrustStore::load()
+        .is_some_and(|store| !store.blocked_kronn_configs().is_empty())
+    {
+        return Some("vibe.project_config_untrusted".to_string());
+    }
+    None
 }
 
 /// Probe whether an agent is runnable via npx/uvx, with caching.
@@ -483,9 +509,10 @@ async fn probe_runtime(def: &AgentDef) -> bool {
         AgentType::Codex => Some("@openai/codex"),
         AgentType::GeminiCli => Some("@google/gemini-cli"),
         AgentType::CopilotCli => Some("@github/copilot"),
-        AgentType::Vibe => None,   // uvx, handled differently
-        AgentType::Kiro => None,   // Native binary, no npx package
-        AgentType::Ollama => None, // Native binary, own installer
+        AgentType::Vibe => None,    // uvx, handled differently
+        AgentType::Kiro => None,    // Native binary, no npx package
+        AgentType::Ollama => None,  // Native binary, own installer
+        AgentType::LiteLlm => None, // uv tool, not npx
         AgentType::Custom => None,
     };
 
@@ -796,7 +823,7 @@ fn install_prerequisite(agent_type: &AgentType) -> Option<(&'static str, &'stati
                 "Node.js is required. Install it from https://nodejs.org",
             ))
         }
-        AgentType::Vibe => Some((
+        AgentType::Vibe | AgentType::LiteLlm => Some((
             "uv",
             "uv is required. Install it from https://docs.astral.sh/uv",
         )),
@@ -853,6 +880,7 @@ pub async fn uninstall_agent(agent_type: &AgentType) -> Result<String> {
         AgentType::Ollama => "sudo rm -f $(which ollama)",
         #[cfg(windows)]
         AgentType::Ollama => "winget uninstall Ollama.Ollama",
+        AgentType::LiteLlm => "uv tool uninstall litellm",
         AgentType::Custom => anyhow::bail!("Cannot uninstall custom agents"),
     };
 
@@ -1214,6 +1242,7 @@ mod tests {
             AgentType::Kiro,
             AgentType::CopilotCli,
             AgentType::Ollama,
+            AgentType::LiteLlm,
         ];
         for agent_type in &all_types {
             let found = KNOWN_AGENTS.iter().any(|a| {

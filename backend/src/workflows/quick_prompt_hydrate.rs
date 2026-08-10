@@ -162,6 +162,7 @@ mod tests {
 
     fn blank_step(quick_prompt_id: Option<String>) -> WorkflowStep {
         WorkflowStep {
+            id: None,
             name: "agent_step".to_string(),
             step_type: StepType::Agent,
             description: None,

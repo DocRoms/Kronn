@@ -15,6 +15,10 @@ describe('i18n', () => {
       expect(t('es', 'nav.projects')).toBe('Proyectos');
     });
 
+    it('returns Simplified Chinese translation', () => {
+      expect(t('zh', 'nav.projects')).toBe('项目');
+    });
+
     it('falls back to French for unknown locale', () => {
       expect(t('xx' as UILocale, 'nav.projects')).toBe('Projets');
     });
@@ -33,9 +37,9 @@ describe('i18n', () => {
   });
 
   describe('UI_LOCALES', () => {
-    it('has fr, en, es', () => {
+    it('has fr, en, es, zh', () => {
       const codes = UI_LOCALES.map(l => l.code);
-      expect(codes).toEqual(['fr', 'en', 'es']);
+      expect(codes).toEqual(['fr', 'en', 'es', 'zh']);
     });
 
     it('each locale has label and flag', () => {
@@ -52,7 +56,7 @@ describe('i18n', () => {
       // jsdom's navigator.language is 'en-US' → detection returns 'en'
       // (no more hardcoded French default). A supported browser lang wins.
       expect(getUILocale()).toBe(detectBrowserLocale());
-      expect(['fr', 'en', 'es']).toContain(getUILocale());
+      expect(UI_LOCALES.map(locale => locale.code)).toContain(getUILocale());
     });
 
     it('persists and retrieves locale', () => {
@@ -60,6 +64,8 @@ describe('i18n', () => {
       expect(getUILocale()).toBe('en');
       setUILocale('es');
       expect(getUILocale()).toBe('es');
+      setUILocale('zh');
+      expect(getUILocale()).toBe('zh');
       // cleanup
       localStorage.clear();
     });

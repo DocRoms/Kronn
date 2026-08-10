@@ -396,6 +396,10 @@ fn full_access_for_returns_per_agent_setting() {
             full_access: true,
             ..Default::default()
         },
+        lite_llm: AgentConfig {
+            full_access: false,
+            ..Default::default()
+        },
         model_tiers: Default::default(),
     };
     assert!(config.full_access_for(&AgentType::ClaudeCode));
@@ -403,6 +407,7 @@ fn full_access_for_returns_per_agent_setting() {
     assert!(config.full_access_for(&AgentType::GeminiCli));
     assert!(config.full_access_for(&AgentType::Vibe));
     assert!(config.full_access_for(&AgentType::Ollama));
+    assert!(!config.full_access_for(&AgentType::LiteLlm));
     assert!(!config.full_access_for(&AgentType::CopilotCli));
     assert!(!config.full_access_for(&AgentType::Custom));
 }
@@ -673,6 +678,7 @@ fn workflow_step_api_call_roundtrip() {
     query.insert("jql".into(), "project = KRONN".into());
 
     let step = WorkflowStep {
+        id: None,
         name: "fetch_issues".into(),
         step_type: StepType::ApiCall,
         description: Some("Pull open bugs".into()),

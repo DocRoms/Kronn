@@ -169,6 +169,7 @@ describe('ApiCallAiHelper — send message', () => {
       fr: async () => ({ default: {} }),
       en: async () => { throw new Error('locale chunk unavailable'); },
       es: async () => ({ default: {} }),
+      zh: async () => ({ default: {} }),
     });
     try {
       const textarea = screen.getByPlaceholderText(/wf.apicall.helper.inputPlaceholder/) as HTMLTextAreaElement;
@@ -180,7 +181,7 @@ describe('ApiCallAiHelper — send message', () => {
       expect(streamMock).not.toHaveBeenCalled();
     } finally {
       restore();
-      await Promise.all([loadLocale('fr'), loadLocale('en'), loadLocale('es')]);
+      await Promise.all([loadLocale('fr'), loadLocale('en'), loadLocale('es'), loadLocale('zh')]);
     }
   });
 

@@ -1,12 +1,13 @@
 // ─── Kronn i18n — lightweight translation system ───────────────────────────
 // UI language (stored in localStorage) is separate from agent output language (stored in backend config).
 
-export type UILocale = 'fr' | 'en' | 'es';
+export type UILocale = 'fr' | 'en' | 'es' | 'zh';
 
 export const UI_LOCALES: { code: UILocale; label: string; flag: string }[] = [
   { code: 'fr', label: 'Français', flag: '🇫🇷' },
   { code: 'en', label: 'English', flag: '🇬🇧' },
   { code: 'es', label: 'Español', flag: '🇪🇸' },
+  { code: 'zh', label: '简体中文', flag: '🇨🇳' },
 ];
 
 const STORAGE_KEY = 'kronn:ui-locale';
@@ -14,7 +15,7 @@ const STORAGE_KEY = 'kronn:ui-locale';
 export function getUILocale(): UILocale {
   try {
     const stored = localStorage.getItem(STORAGE_KEY);
-    if (stored && ['fr', 'en', 'es'].includes(stored)) return stored as UILocale;
+    if (isUILocale(stored)) return stored;
   } catch { /* no localStorage available — fall back to browser detection */ }
   return detectBrowserLocale();
 }
@@ -30,7 +31,7 @@ export function detectBrowserLocale(): UILocale {
         : [];
     for (const l of langs) {
       const base = String(l).toLowerCase().split('-')[0];
-      if (base === 'fr' || base === 'en' || base === 'es') return base;
+      if (isUILocale(base)) return base;
     }
   } catch { /* navigator unavailable */ }
   return 'en';
@@ -53,6 +54,7 @@ const defaultLocaleLoaders: Record<UILocale, LocaleLoader> = {
   fr: () => import('./i18n/locales/fr'),
   en: () => import('./i18n/locales/en'),
   es: () => import('./i18n/locales/es'),
+  zh: () => import('./i18n/locales/zh'),
 };
 
 let localeLoaders = defaultLocaleLoaders;
@@ -60,7 +62,7 @@ const loadedDictionaries: Partial<Record<UILocale, TranslationDict>> = {};
 const pendingLoads: Partial<Record<UILocale, Promise<TranslationDict>>> = {};
 
 export function isUILocale(value: unknown): value is UILocale {
-  return value === 'fr' || value === 'en' || value === 'es';
+  return value === 'fr' || value === 'en' || value === 'es' || value === 'zh';
 }
 
 /** Load one locale chunk once. A rejected chunk is evicted so a retry can succeed. */
@@ -103,13 +105,13 @@ export function __setLocaleLoadersForTests(loaders: Record<UILocale, LocaleLoade
     throw new Error('Locale loader overrides are test-only');
   }
   localeLoaders = loaders;
-  for (const locale of ['fr', 'en', 'es'] as const) {
+  for (const { code: locale } of UI_LOCALES) {
     delete loadedDictionaries[locale];
     delete pendingLoads[locale];
   }
   return () => {
     localeLoaders = defaultLocaleLoaders;
-    for (const locale of ['fr', 'en', 'es'] as const) {
+    for (const { code: locale } of UI_LOCALES) {
       delete loadedDictionaries[locale];
       delete pendingLoads[locale];
     }

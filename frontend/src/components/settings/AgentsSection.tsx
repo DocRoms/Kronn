@@ -1,15 +1,16 @@
-import { useState, useEffect, useRef, type CSSProperties } from 'react';
-import { config as configApi, agents as agentsApi } from '../../lib/api';
+import { useState, useEffect, useRef, type CSSProperties, type ReactNode } from 'react';
+import { config as configApi, agents as agentsApi, usage as usageApi } from '../../lib/api';
 import { userError } from '../../lib/userError';
 import { OllamaCard } from './OllamaCard';
+import { LiteLlmCard } from './LiteLlmCard';
 import { CompressionSection } from './CompressionSection';
+import { ContextHelp } from '../ContextHelp';
 import { useApi } from '../../hooks/useApi';
-import type { AgentDetection, AgentsConfig, AgentType, ModelTiersConfig } from '../../types/generated';
+import type { AgentDetection, AgentsConfig, AgentType, ModelTiersConfig, UsageReport } from '../../types/generated';
 import type { ToastFn } from '../../hooks/useToast';
 import { isUpdateAvailable } from '../../lib/version';
 import {
   AGENT_LABELS,
-  ALL_AGENT_TYPES,
   agentColor,
   agentMentionColors,
   type AgentMentionColors,
@@ -18,9 +19,31 @@ import {
   Key, AlertTriangle, Save,
   Plus, Trash2, Download, Check,
   Loader2, RefreshCw, X, Eye, EyeOff, Play, StopCircle,
-  ExternalLink, FolderSearch, ArrowUpCircle, Copy,
+  ExternalLink, FolderSearch, ArrowUpCircle, Copy, Gauge, FileText, Palette, GitFork, Info,
 } from 'lucide-react';
+import {
+  ALL_USAGE_FILTER,
+  CCUSAGE_GITHUB_URL,
+  analyzeUsageReport,
+  observedModelCostPerMillion,
+  usageModels,
+} from './usageFilters';
 import '../../pages/SettingsPage.css';
+
+function formatObservedCost(usdPerMillion: number): string {
+  if (usdPerMillion === 0) return '$0.00';
+  if (usdPerMillion < 0.01) return '< $0.01';
+  if (usdPerMillion >= 100) return `$${usdPerMillion.toFixed(0)}`;
+  if (usdPerMillion >= 10) return `$${usdPerMillion.toFixed(1)}`;
+  return `$${usdPerMillion.toFixed(2)}`;
+}
+
+function formatCostMultiplier(multiplier: number): string {
+  if (multiplier === 0) return '0';
+  if (multiplier < 0.1) return multiplier.toFixed(2);
+  if (multiplier < 10) return Number(multiplier.toFixed(1)).toString();
+  return Math.round(multiplier).toString();
+}
 
 interface AgentsSectionProps {
   agents: AgentDetection[];
@@ -30,6 +53,7 @@ interface AgentsSectionProps {
   refetchAgentAccess: () => void;
   toast: ToastFn;
   t: (key: string, ...args: (string | number)[]) => string;
+  usagePanel?: ReactNode;
   /** Backend runs in the Docker container → an install would land in the
    *  container, not on the host. We disable the Install button and point to
    *  the host-side `kronn` CLI instead. Default false (native/Tauri). */
@@ -43,6 +67,7 @@ export function AgentsSection({
   refetchAgentAccess,
   toast,
   t,
+  usagePanel,
   inDocker = false,
 }: AgentsSectionProps) {
   const [installing, setInstalling] = useState<string | null>(null);
@@ -51,6 +76,9 @@ export function AgentsSection({
   const [tokenVisible, setTokenVisible] = useState<Set<string>>(new Set());
   const [tierEditing, setTierEditing] = useState<Record<string, { economy: string; default: string; reasoning: string }>>({});
   const [mentionColorOverrides, setMentionColorOverrides] = useState<AgentMentionColors>({});
+  const [usageReport, setUsageReport] = useState<UsageReport | null>(null);
+  const [costDisplayMode, setCostDisplayMode] = useState<'absolute' | 'relative'>('absolute');
+  const [costReferenceModel, setCostReferenceModel] = useState('');
   // When set to an agent name, the per-agent update modal is shown. The
   // modal is small + global to the section (rather than per-row state) so
   // we never re-render rows on its open/close — keeps the agent grid
@@ -59,24 +87,76 @@ export function AgentsSection({
 
   const { data: tokenConfig, refetch: refetchTokens } = useApi(() => configApi.getTokens(), []);
 
-  // 0.8.6 phase 4 — global default tier + summary strategy (applied to
-  // NEW disc / QP / WF agent steps when the form doesn't explicitly
-  // pick one). Strict semantic (cf. backend `ServerConfig.
-  // default_model_tier` rustdoc) — never retroactive. Loaded once on
-  // mount, written back on every change via setServerConfig PATCH.
+  // The model tier is a creation-time default for new discussions / QPs /
+  // workflow Agent steps. The summary strategy seeds new discussions too,
+  // but its Off value also acts as the backend's global auto-summary kill
+  // switch for existing discussions. Loaded once on mount, written back on
+  // every change via setServerConfig PATCH.
   const [defaultTier, setDefaultTier] = useState<'economy' | 'default' | 'reasoning' | null>(null);
   const [defaultSummaryStrategy, setDefaultSummaryStrategy] = useState<'Auto' | 'OnDemand' | 'Off' | null>(null);
+  const [agentHandoffsEnabled, setAgentHandoffsEnabled] = useState<boolean | null>(null);
+  const [agentHandoffPaidLimit, setAgentHandoffPaidLimit] = useState(1);
+  const [agentHandoffPaidUnlimited, setAgentHandoffPaidUnlimited] = useState(false);
+  const [agentHandoffBlockedAgents, setAgentHandoffBlockedAgents] = useState<AgentType[]>([]);
   useEffect(() => {
     configApi.getServerConfig().then(cfg => {
       if (cfg) {
         setDefaultTier(cfg.default_model_tier ?? 'default');
         setDefaultSummaryStrategy(cfg.default_summary_strategy ?? 'Off');
+        setAgentHandoffsEnabled(cfg.agent_handoffs_enabled ?? false);
+        setAgentHandoffPaidLimit(cfg.agent_handoff_paid_limit ?? 1);
+        setAgentHandoffPaidUnlimited(cfg.agent_handoff_paid_unlimited ?? false);
+        setAgentHandoffBlockedAgents(cfg.agent_handoff_blocked_agents ?? []);
       }
     }).catch(() => {
       setDefaultTier('default');
       setDefaultSummaryStrategy('Off');
+      setAgentHandoffsEnabled(false);
     });
   }, []);
+
+  useEffect(() => {
+    let active = true;
+    usageApi.get('monthly')
+      .then(report => {
+        if (active && report.rows.length > 0) setUsageReport(report);
+      })
+      .catch(() => {
+        // Model prices are optional context; the dedicated ccUsage card owns
+        // the actionable unavailable/error state.
+      });
+    return () => { active = false; };
+  }, []);
+
+  const observedCostModels = usageReport
+    ? usageModels(usageReport, ALL_USAGE_FILTER).flatMap(model => {
+        const cost = observedModelCostPerMillion(usageReport, model);
+        return cost === null ? [] : [{ model, cost }];
+      })
+    : [];
+  const relativeReferenceModels = observedCostModels.filter(model => model.cost > 0);
+  const defaultReferenceModel = usageReport
+    ? analyzeUsageReport(usageReport)?.mostUsed[0]?.modelName ?? ''
+    : '';
+  const effectiveReferenceModel = costReferenceModel
+    || (relativeReferenceModels.some(model => model.model === defaultReferenceModel)
+      ? defaultReferenceModel
+      : relativeReferenceModels[0]?.model ?? '');
+  const referenceCost = usageReport && effectiveReferenceModel
+    ? observedModelCostPerMillion(usageReport, effectiveReferenceModel)
+    : null;
+
+  const modelCostSuffix = (model: string): string => {
+    if (!usageReport) return '';
+    const observedCost = observedModelCostPerMillion(usageReport, model);
+    if (observedCost === null) return '';
+    if (costDisplayMode === 'relative') {
+      return referenceCost !== null && referenceCost > 0
+        ? ` · ≈ ×${formatCostMultiplier(observedCost / referenceCost)}`
+        : '';
+    }
+    return ` · ≈ ${t('config.modelCostObserved', formatObservedCost(observedCost))}`;
+  };
 
   const mentionColors: AgentMentionColors = {
     ...agentMentionColors(agentAccess),
@@ -127,6 +207,52 @@ export function AgentsSection({
     }
   };
 
+  const saveAgentHandoffsEnabled = async (enabled: boolean) => {
+    const previous = agentHandoffsEnabled;
+    setAgentHandoffsEnabled(enabled);
+    try {
+      await configApi.setServerConfig({ agent_handoffs_enabled: enabled });
+      toast(t('config.saved'), 'success');
+    } catch {
+      setAgentHandoffsEnabled(previous);
+      toast(t('config.saveError'), 'error');
+    }
+  };
+
+  const saveAgentHandoffPaidLimit = async (value: number | 'unlimited') => {
+    const previousLimit = agentHandoffPaidLimit;
+    const previousUnlimited = agentHandoffPaidUnlimited;
+    const unlimited = value === 'unlimited';
+    if (!unlimited) setAgentHandoffPaidLimit(value);
+    setAgentHandoffPaidUnlimited(unlimited);
+    try {
+      await configApi.setServerConfig({
+        agent_handoff_paid_unlimited: unlimited,
+        ...(!unlimited ? { agent_handoff_paid_limit: value } : {}),
+      });
+      toast(t('config.saved'), 'success');
+    } catch {
+      setAgentHandoffPaidLimit(previousLimit);
+      setAgentHandoffPaidUnlimited(previousUnlimited);
+      toast(t('config.saveError'), 'error');
+    }
+  };
+
+  const saveAgentHandoffTarget = async (agent: AgentType, allowed: boolean) => {
+    const previous = agentHandoffBlockedAgents;
+    const next = allowed
+      ? previous.filter(blocked => blocked !== agent)
+      : previous.includes(agent) ? previous : [...previous, agent];
+    setAgentHandoffBlockedAgents(next);
+    try {
+      await configApi.setServerConfig({ agent_handoff_blocked_agents: next });
+      toast(t('config.saved'), 'success');
+    } catch {
+      setAgentHandoffBlockedAgents(previous);
+      toast(t('config.saveError'), 'error');
+    }
+  };
+
   // Load model tiers once. Pre-fix the loop only seeded 5 of the 7 agents
   // (copilot_cli + ollama were missing), so when the user opened the
   // tier dropdowns for those two agents the inputs showed empty even
@@ -137,13 +263,46 @@ export function AgentsSection({
     configApi.getModelTiers().then(tiers => {
       if (tiers) {
         const editing: Record<string, { economy: string; default: string; reasoning: string }> = {};
-        for (const key of ['claude_code', 'codex', 'gemini_cli', 'kiro', 'vibe', 'copilot_cli', 'ollama'] as const) {
+        for (const key of ['claude_code', 'codex', 'gemini_cli', 'kiro', 'vibe', 'copilot_cli', 'ollama', 'lite_llm'] as const) {
           editing[key] = { economy: tiers[key]?.economy ?? '', default: tiers[key]?.default ?? '', reasoning: tiers[key]?.reasoning ?? '' };
         }
         setTierEditing(editing);
       }
     }).catch(() => {});
   }, []);
+
+  // System model-error messages leave a short-lived deep-link target before
+  // navigating here. The dedicated LiteLLM/Ollama cards load asynchronously,
+  // so retry briefly, then focus + animate the exact agent/tier picker rather
+  // than dropping the user at the top of a long settings section.
+  useEffect(() => {
+    if (Object.keys(tierEditing).length === 0) return;
+    let target: { agentType?: string; tier?: string } | null = null;
+    try {
+      target = JSON.parse(sessionStorage.getItem('kronn:model-config-target') ?? 'null');
+    } catch { /* malformed/stale browser state: ignore */ }
+    if (!target?.agentType || !['economy', 'default', 'reasoning'].includes(target.tier ?? '')) return;
+
+    let attempts = 0;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const focusTarget = () => {
+      const select = Array.from(document.querySelectorAll<HTMLSelectElement>('[data-model-tier-agent]'))
+        .find(element => element.dataset.modelTierAgent === target?.agentType
+          && element.dataset.modelTier === target?.tier);
+      if (!select && attempts++ < 30) {
+        timer = setTimeout(focusTarget, 200);
+        return;
+      }
+      if (!select) return;
+      try { sessionStorage.removeItem('kronn:model-config-target'); } catch { /* ignore */ }
+      select.scrollIntoView?.({ behavior: 'smooth', block: 'center' });
+      select.focus({ preventScroll: true });
+      select.classList.add('set-model-tier-focus');
+      timer = setTimeout(() => select.classList.remove('set-model-tier-focus'), 2200);
+    };
+    focusTarget();
+    return () => { if (timer) clearTimeout(timer); };
+  }, [tierEditing]);
 
   // Synchronous re-entry guard — `setInstalling(...)` is async-rendered,
   // so two fast clicks on the same install button (or two different ones)
@@ -171,34 +330,31 @@ export function AgentsSection({
     }
   };
 
-  return (
-    <div>
-      <div>
-        <div className="flex-row gap-4 mb-4" style={{ justifyContent: 'flex-end' }}>
-          <button
-            className="set-discover-btn"
-            title={t('config.discoverKeys')}
-            onClick={async () => {
-              try {
-                const res = await configApi.discoverKeys();
-                if (res.imported_count > 0) {
-                  toast(t('config.discoverKeysFound').replace('{0}', String(res.discovered.length)).replace('{1}', String(res.imported_count)), 'success');
-                  refetchTokens();
-                } else if (res.discovered.length > 0) {
-                  toast(t('config.discoverKeysFound').replace('{0}', String(res.discovered.length)).replace('{1}', '0'), 'info');
-                } else {
-                  toast(t('config.discoverKeysNone'), 'info');
-                }
-              } catch { toast(t('config.discoverKeysNone'), 'error'); }
-            }}
-          >
-            <FolderSearch size={10} /> {t('config.discoverKeys')}
-          </button>
-          <button className="set-icon-btn" onClick={() => refetchAgents()} title={t('config.refresh')} aria-label={t('config.refresh')}>
-            <RefreshCw size={12} />
-          </button>
-        </div>
+  const renderMentionColorControl = (agentType: AgentType) => {
+    const color = agentColor(agentType, mentionColors);
+    return (
+      <label
+        className="set-agent-mention-control"
+        style={{ '--mention-color': color } as CSSProperties}
+        title={t('config.mentionColorFor', AGENT_LABELS[agentType])}
+      >
+        <Palette size={12} aria-hidden="true" />
+        <span>@{AGENT_LABELS[agentType]}</span>
+        <input
+          type="color"
+          value={color}
+          onChange={event => saveMentionColor(agentType, event.target.value)}
+          aria-label={t('config.mentionColorFor', AGENT_LABELS[agentType])}
+          data-testid={`mention-color-${agentType}`}
+        />
+      </label>
+    );
+  };
 
+  const activeAgentCount = agents.filter(agent => agent.enabled && (agent.installed || agent.runtime_available)).length;
+
+  return (
+    <div className="set-agents-section">
         {(() => {
           const isWSL = agents.some(a => a.host_label === 'WSL');
           const hasDockerAgent = agents.some(a => a.installed && !a.host_managed);
@@ -210,140 +366,324 @@ export function AgentsSection({
           ) : null;
         })()}
 
-        <CompressionSection agents={agents} onActivated={refetchAgents} toast={toast} t={t} />
-
-        <div className="set-mention-colors" data-testid="agent-mention-colors">
-          <div>
-            <div className="font-semibold text-sm">{t('config.mentionColors')}</div>
-            <p className="text-xs text-muted">{t('config.mentionColorsHint')}</p>
+        <section className="set-agent-defaults" data-testid="agent-defaults">
+          <div className="set-agent-defaults-head">
+            <div>
+              <div className="font-semibold text-base">{t('config.agentDefaultsTitle')}</div>
+              <p className="set-hint">{t('config.agentDefaultsHint')}</p>
+            </div>
           </div>
-          <div className="set-mention-colors-grid">
-            {ALL_AGENT_TYPES.map(agentType => {
-              const color = agentColor(agentType, mentionColors);
-              return (
-                <label
-                  key={agentType}
-                  className="set-mention-color"
-                  style={{ '--mention-color': color } as CSSProperties}
+          <div className="set-agent-defaults-grid">
+            <div className="set-agent-default-card" data-testid="default-tier-section">
+              <div className="set-agent-default-title">
+                <Gauge size={15} aria-hidden="true" />
+                <span>{t('config.defaultTierLabel')}</span>
+              </div>
+              <p>{t('config.defaultTierHint')}</p>
+              <div className="set-agent-choice-list" role="radiogroup" aria-label={t('config.defaultTierLabel')}>
+                {(['economy', 'default', 'reasoning'] as const).map(tier => {
+                  const labels = {
+                    economy: t('disc.tier.economy'),
+                    default: t('disc.tier.default'),
+                    reasoning: t('disc.tier.reasoning'),
+                  };
+                  const icons = {
+                    economy: '⚡',
+                    default: '🎯',
+                    reasoning: '🧠',
+                  };
+                  const active = defaultTier === tier;
+                  return (
+                    <button
+                      key={tier}
+                      type="button"
+                      role="radio"
+                      aria-checked={active}
+                      className="set-agent-choice"
+                      data-active={active}
+                      data-testid={`default-tier-btn-${tier}`}
+                      onClick={() => saveDefaultTier(tier)}
+                      disabled={defaultTier === null}
+                    >
+                      <span className="set-agent-choice-mark" aria-hidden="true" />
+                      <span>
+                        <strong>
+                          <span className="set-agent-choice-icon" aria-hidden="true">{icons[tier]}</span>
+                          {labels[tier]}
+                        </strong>
+                        <small>{t(`config.defaultTier.${tier}Hint`)}</small>
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="set-agent-default-card" data-testid="default-summary-section">
+              <div className="set-agent-default-title">
+                <FileText size={15} aria-hidden="true" />
+                <span>{t('config.defaultSummaryLabel')}</span>
+                <ContextHelp title={t('config.defaultSummaryInfoTitle')} align="end">
+                  <p>{t('config.defaultSummaryInfoHistory')}</p>
+                  <p>{t('config.defaultSummaryInfoMcp')}</p>
+                </ContextHelp>
+              </div>
+              <p>{t('config.defaultSummaryHint')}</p>
+              <div className="set-agent-choice-list" role="radiogroup" aria-label={t('config.defaultSummaryLabel')}>
+                {(['Off', 'Auto', 'OnDemand'] as const).map(strategy => {
+                  const labels = {
+                    Off: t('config.summaryOff'),
+                    Auto: t('config.summaryAuto'),
+                    OnDemand: t('config.summaryOnDemand'),
+                  };
+                  const active = defaultSummaryStrategy === strategy;
+                  return (
+                    <button
+                      key={strategy}
+                      type="button"
+                      role="radio"
+                      aria-checked={active}
+                      className="set-agent-choice"
+                      data-active={active}
+                      data-testid={`default-summary-btn-${strategy.toLowerCase()}`}
+                      onClick={() => saveDefaultSummary(strategy)}
+                      disabled={defaultSummaryStrategy === null || strategy === 'OnDemand'}
+                      data-coming-soon={strategy === 'OnDemand'}
+                    >
+                      <span className="set-agent-choice-mark" aria-hidden="true" />
+                      <span>
+                        <strong>
+                          {labels[strategy]}
+                          {strategy === 'OnDemand' && (
+                            <span className="set-agent-choice-soon">{t('config.comingSoon')}</span>
+                          )}
+                        </strong>
+                        <small>{t(`config.defaultSummary.${strategy.toLowerCase()}Hint`)}</small>
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="set-agent-default-card set-agent-handoff-card" data-testid="agent-handoff-section">
+              <div className="set-agent-default-title">
+                <GitFork size={15} aria-hidden="true" />
+                <span>{t('config.agentHandoffTitle')}</span>
+                <span className="set-agent-handoff-status" data-enabled={agentHandoffsEnabled === true}>
+                  {agentHandoffsEnabled ? t('config.agentHandoffOn') : t('config.agentHandoffOff')}
+                </span>
+              </div>
+              <p>{t('config.agentHandoffHint')}</p>
+              <div className="set-agent-handoff-controls">
+                <button
+                  type="button"
+                  className="set-agent-handoff-toggle"
+                  data-enabled={agentHandoffsEnabled === true}
+                  aria-pressed={agentHandoffsEnabled === true}
+                  disabled={agentHandoffsEnabled === null}
+                  onClick={() => void saveAgentHandoffsEnabled(!agentHandoffsEnabled)}
                 >
-                  <input
-                    type="color"
-                    value={color}
-                    onChange={event => saveMentionColor(agentType, event.target.value)}
-                    aria-label={t('config.mentionColorFor', AGENT_LABELS[agentType])}
-                    data-testid={`mention-color-${agentType}`}
-                  />
-                  <span>@{AGENT_LABELS[agentType]}</span>
+                  <span className="set-toggle-track" data-on={agentHandoffsEnabled === true}>
+                    <span className="set-toggle-thumb" data-on={agentHandoffsEnabled === true} />
+                  </span>
+                  <span>
+                    <strong>{t('config.agentHandoffToggle')}</strong>
+                    <small>{t('config.agentHandoffToggleHint')}</small>
+                  </span>
+                </button>
+                <label className="set-agent-handoff-limit">
+                  <span>{t('config.agentHandoffPaidLimit')}</span>
+                  <select
+                    value={agentHandoffPaidUnlimited ? 'unlimited' : String(agentHandoffPaidLimit)}
+                    disabled={agentHandoffsEnabled !== true}
+                    onChange={event => void saveAgentHandoffPaidLimit(
+                      event.target.value === 'unlimited' ? 'unlimited' : Number(event.target.value),
+                    )}
+                  >
+                    {[0, 1, 2, 3, 4, 5].map(limit => (
+                      <option key={limit} value={limit}>
+                        {limit === 0
+                          ? t('config.agentHandoffPaidLimitZero')
+                          : limit === 1
+                            ? t('config.agentHandoffPaidLimitOne')
+                            : t('config.agentHandoffPaidLimitMany', limit)}
+                      </option>
+                    ))}
+                    <option value="unlimited">{t('config.agentHandoffPaidLimitUnlimited')}</option>
+                  </select>
+                  <small>{t('config.agentHandoffPaidLimitHint')}</small>
                 </label>
-              );
-            })}
+              </div>
+              {agentHandoffsEnabled === false && (
+                <div className="set-agent-handoff-off-note" role="status">
+                  <X size={15} aria-hidden="true" />
+                  <span>
+                    <strong>{t('config.agentHandoffDisabledTitle')}</strong>
+                    <small>{t('config.agentHandoffDisabledHint')}</small>
+                  </span>
+                </div>
+              )}
+              {agentHandoffsEnabled && agentHandoffPaidUnlimited && (
+                <div className="set-agent-handoff-warning" role="alert">
+                  <AlertTriangle size={16} aria-hidden="true" />
+                  <span>
+                    <strong>{t('config.agentHandoffUnlimitedWarningTitle')}</strong>
+                    <small>{t('config.agentHandoffUnlimitedWarning')}</small>
+                  </span>
+                </div>
+              )}
+              <div className="set-agent-handoff-targets">
+                <div className="set-agent-handoff-targets-copy">
+                  <strong>{t('config.agentHandoffTargetsTitle')}</strong>
+                  <small>{t('config.agentHandoffTargetsHint')}</small>
+                </div>
+                <div className="set-agent-handoff-target-grid">
+                  {agents.map(agent => {
+                    const allowed = !agentHandoffBlockedAgents.includes(agent.agent_type);
+                    const local = agent.agent_type === 'Ollama';
+                    return (
+                      <button
+                        key={agent.agent_type}
+                        type="button"
+                        className="set-agent-handoff-target"
+                        data-allowed={allowed}
+                        aria-pressed={allowed}
+                        disabled={agentHandoffsEnabled !== true}
+                        onClick={() => void saveAgentHandoffTarget(agent.agent_type, !allowed)}
+                      >
+                        <span className="set-agent-handoff-target-check" aria-hidden="true">
+                          {allowed ? <Check size={11} /> : <X size={11} />}
+                        </span>
+                        <span>
+                          <strong>{AGENT_LABELS[agent.agent_type] ?? agent.name}</strong>
+                          <small>{t(local ? 'config.agentHandoffTargetLocal' : 'config.agentHandoffTargetPaid')}</small>
+                        </span>
+                        <span className="set-agent-handoff-target-state">
+                          {t(agentHandoffsEnabled !== true
+                            ? 'config.agentHandoffTargetInactive'
+                            : allowed
+                              ? 'config.agentHandoffTargetAllowed'
+                              : 'config.agentHandoffTargetBlocked')}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+              <div className="set-agent-handoff-cli-note" role="note">
+                <Info size={15} aria-hidden="true" />
+                <span>
+                  <strong>{t('config.agentHandoffCliTitle')}</strong>
+                  <small>{t('config.agentHandoffCliHint')}</small>
+                </span>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <div className="set-agent-economy-grid">
+          <CompressionSection agents={agents} onActivated={refetchAgents} toast={toast} t={t} />
+          {usagePanel}
+        </div>
+
+        <div className="set-agent-list-head">
+          <div>
+            <div className="set-agent-list-title">
+              <span className="font-semibold text-base">{t('config.agentFleetTitle')}</span>
+              <span className="set-agent-active-count">{t('config.agentActiveCount', activeAgentCount, agents.length)}</span>
+            </div>
+            <p className="set-hint">{t('config.agentFleetHint')}</p>
+          </div>
+          <div className="set-agent-list-actions">
+            <button
+              className="set-discover-btn"
+              title={t('config.discoverKeys')}
+              onClick={async () => {
+                try {
+                  const res = await configApi.discoverKeys();
+                  if (res.imported_count > 0) {
+                    toast(t('config.discoverKeysFound').replace('{0}', String(res.discovered.length)).replace('{1}', String(res.imported_count)), 'success');
+                    refetchTokens();
+                  } else if (res.discovered.length > 0) {
+                    toast(t('config.discoverKeysFound').replace('{0}', String(res.discovered.length)).replace('{1}', '0'), 'info');
+                  } else {
+                    toast(t('config.discoverKeysNone'), 'info');
+                  }
+                } catch { toast(t('config.discoverKeysNone'), 'error'); }
+              }}
+            >
+              <FolderSearch size={10} /> {t('config.discoverKeys')}
+            </button>
+            <button className="set-icon-btn" onClick={() => refetchAgents()} title={t('config.refresh')} aria-label={t('config.refresh')}>
+              <RefreshCw size={12} />
+            </button>
           </div>
         </div>
 
-        {/* 0.8.6 phase 4 — Default model tier for new disc / QP / WF
-            agent steps. Strict semantic — never retroactive. Sibling of
-            the RTK CompressionSection above ; both live in the "Mode IA"
-            card because they're the two cross-cutting agent-cost knobs. */}
-        <div
-          className="set-default-tier-section"
-          data-testid="default-tier-section"
-          style={{
-            padding: '14px 16px',
-            marginBottom: 12,
-            borderRadius: 'var(--kr-radius-md, 8px)',
-            background: 'var(--kr-bg-card-subtle, transparent)',
-            border: '1px solid var(--kr-border-subtle, transparent)',
-          }}
-        >
-          <div className="flex-row gap-2 mb-2">
-            <span style={{ fontSize: 14 }}>🎯</span>
-            <span className="font-semibold text-sm">{t('config.defaultTierLabel')}</span>
-          </div>
-          <p className="text-xs text-muted mb-2" style={{ marginTop: 0 }}>
-            {t('config.defaultTierHint')}
-          </p>
-          <div className="flex-row gap-1" role="radiogroup" aria-label={t('config.defaultTierLabel')}>
-            {(['economy', 'default', 'reasoning'] as const).map(tier => {
-              const tierIcons: Record<typeof tier, string> = { economy: '⚡', default: '🎯', reasoning: '🧠' };
-              const tierLabels: Record<typeof tier, string> = {
-                economy: t('disc.tier.economy'),
-                default: t('disc.tier.default'),
-                reasoning: t('disc.tier.reasoning'),
-              };
-              const active = defaultTier === tier;
-              return (
+        {observedCostModels.length > 0 && (
+          <div className="set-agent-cost-display" data-testid="model-cost-display">
+            <div className="set-agent-cost-display-copy">
+              <strong>
+                {t('config.modelCostDisplayTitle')}{' '}
+                <a
+                  href={CCUSAGE_GITHUB_URL}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="set-compression-link"
+                >
+                  ccusage <ExternalLink size={10} />
+                </a>
+              </strong>
+              <span>{t('config.modelCostDisplayHint')}</span>
+            </div>
+            <div className="set-agent-cost-display-controls">
+              <div
+                className="set-agent-cost-mode"
+                role="radiogroup"
+                aria-label={t('config.modelCostDisplayTitle')}
+              >
                 <button
-                  key={tier}
                   type="button"
                   role="radio"
-                  aria-checked={active}
-                  className="disc-tier-btn"
-                  data-active={active}
-                  data-testid={`default-tier-btn-${tier}`}
-                  onClick={() => saveDefaultTier(tier)}
-                  disabled={defaultTier === null}
-                  title={tierLabels[tier]}
+                  aria-checked={costDisplayMode === 'absolute'}
+                  data-active={costDisplayMode === 'absolute'}
+                  data-testid="model-cost-mode-absolute"
+                  onClick={() => setCostDisplayMode('absolute')}
                 >
-                  <span style={{ marginRight: 4 }}>{tierIcons[tier]}</span>
-                  {tierLabels[tier]}
+                  {t('config.modelCostModeAbsolute')}
                 </button>
-              );
-            })}
-          </div>
-        </div>
-
-        {/* 0.8.6 phase 4 — Default summary strategy. Auto-summary used
-            to fire after every reply ; flipped to OFF by default in
-            0.8.6 since modern agents have large context + MCP access
-            to fetch older history on demand. Re-enable for small-
-            context agents that can't ask Kronn for context themselves. */}
-        <div
-          className="set-default-summary-section"
-          data-testid="default-summary-section"
-          style={{
-            padding: '14px 16px',
-            marginBottom: 12,
-            borderRadius: 'var(--kr-radius-md, 8px)',
-            background: 'var(--kr-bg-card-subtle, transparent)',
-            border: '1px solid var(--kr-border-subtle, transparent)',
-          }}
-        >
-          <div className="flex-row gap-2 mb-2">
-            <span style={{ fontSize: 14 }}>📝</span>
-            <span className="font-semibold text-sm">{t('config.defaultSummaryLabel')}</span>
-          </div>
-          <p className="text-xs text-muted mb-2" style={{ marginTop: 0 }}>
-            {t('config.defaultSummaryHint')}
-          </p>
-          <div className="flex-row gap-1" role="radiogroup" aria-label={t('config.defaultSummaryLabel')}>
-            {(['Off', 'Auto', 'OnDemand'] as const).map(strategy => {
-              const icons: Record<typeof strategy, string> = { Off: '🚫', Auto: '🔄', OnDemand: '👋' };
-              const labels: Record<typeof strategy, string> = {
-                Off: t('config.summaryOff'),
-                Auto: t('config.summaryAuto'),
-                OnDemand: t('config.summaryOnDemand'),
-              };
-              const active = defaultSummaryStrategy === strategy;
-              return (
                 <button
-                  key={strategy}
                   type="button"
                   role="radio"
-                  aria-checked={active}
-                  className="disc-tier-btn"
-                  data-active={active}
-                  data-testid={`default-summary-btn-${strategy.toLowerCase()}`}
-                  onClick={() => saveDefaultSummary(strategy)}
-                  disabled={defaultSummaryStrategy === null}
-                  title={labels[strategy]}
+                  aria-checked={costDisplayMode === 'relative'}
+                  data-active={costDisplayMode === 'relative'}
+                  data-testid="model-cost-mode-relative"
+                  disabled={relativeReferenceModels.length === 0}
+                  onClick={() => setCostDisplayMode('relative')}
                 >
-                  <span style={{ marginRight: 4 }}>{icons[strategy]}</span>
-                  {labels[strategy]}
+                  {t('config.modelCostModeRelative')}
                 </button>
-              );
-            })}
+              </div>
+              {costDisplayMode === 'relative' && effectiveReferenceModel && (
+                <label className="set-agent-cost-reference">
+                  <span>{t('config.modelCostReference')}</span>
+                  <select
+                    value={effectiveReferenceModel}
+                    onChange={event => setCostReferenceModel(event.target.value)}
+                    data-testid="model-cost-reference"
+                  >
+                    {relativeReferenceModels.map(model => (
+                      <option key={model.model} value={model.model}>
+                        {model.model} · ≈ {formatObservedCost(model.cost)}/M
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
+            </div>
           </div>
-        </div>
+        )}
 
         {inDocker && (
           <div className="set-agent-runtime-warning" role="note">
@@ -361,7 +701,29 @@ export function AgentsSection({
                 data-agent-type="Ollama"
                 style={{ '--agent-color': agentColor('Ollama', mentionColors) } as CSSProperties}
               >
-                <OllamaCard t={t} />
+                <OllamaCard
+                  t={t}
+                  modelCostSuffix={modelCostSuffix}
+                  headerAccessory={renderMentionColorControl('Ollama')}
+                />
+              </div>
+            );
+          }
+          // LiteLLM is the other server-shaped agent: same dedicated-card
+          // treatment, but connection-first since nothing is auto-detectable.
+          if (agent.agent_type === 'LiteLlm') {
+            return (
+              <div
+                key="litellm"
+                className="set-agent-row set-agent-row-ollama"
+                data-agent-type="LiteLlm"
+                style={{ '--agent-color': agentColor('LiteLlm', mentionColors) } as CSSProperties}
+              >
+                <LiteLlmCard
+                  t={t}
+                  modelCostSuffix={modelCostSuffix}
+                  headerAccessory={renderMentionColorControl('LiteLlm')}
+                />
               </div>
             );
           }
@@ -570,8 +932,10 @@ export function AgentsSection({
                   "runtime OK — via npx" hint above and is offered for a real
                   install, so the user isn't told an agent they never installed
                   is "Activé". */}
-              {agent.installed ? (
-                <div className="set-agent-actions">
+              <div className="set-agent-actions">
+                {renderMentionColorControl(agent.agent_type)}
+                {agent.installed ? (
+                  <>
                   <button
                     className="set-enable-btn"
                     data-on={agent.enabled}
@@ -614,21 +978,22 @@ export function AgentsSection({
                   >
                     <Trash2 size={11} />
                   </button>
-                </div>
-              ) : (
-                <button
-                  className="set-install-btn set-agent-install-btn"
-                  onClick={() => handleInstallAgent(agent)}
-                  disabled={installing !== null || inDocker}
-                  title={inDocker ? t('config.dockerInstallTooltip', agent.install_command ?? '') : undefined}
-                >
-                  {installing === agent.name ? (
-                    <><Loader2 size={10} className="set-spin" /> ...</>
-                  ) : (
-                    <><Download size={10} /> Installer</>
-                  )}
-                </button>
-              )}
+                  </>
+                ) : (
+                  <button
+                    className="set-install-btn set-agent-install-btn"
+                    onClick={() => handleInstallAgent(agent)}
+                    disabled={installing !== null || inDocker}
+                    title={inDocker ? t('config.dockerInstallTooltip', agent.install_command ?? '') : undefined}
+                  >
+                    {installing === agent.name ? (
+                      <><Loader2 size={10} className="set-spin" /> ...</>
+                    ) : (
+                      <><Download size={10} /> Installer</>
+                    )}
+                  </button>
+                )}
+              </div>
             </div>
             <div className="set-agent-card-body">
             {perm && (agent.installed || agent.runtime_available) && (
@@ -825,11 +1190,15 @@ export function AgentsSection({
             })()}
             {/* Model tier configuration */}
             {(agent.installed || agent.runtime_available) && (() => {
-              const agentKey = agent.agent_type === 'ClaudeCode' ? 'claude_code'
-                : agent.agent_type === 'Codex' ? 'codex'
-                : agent.agent_type === 'GeminiCli' ? 'gemini_cli'
-                : agent.agent_type === 'Kiro' ? 'kiro'
-                : 'vibe';
+              const agentKey = ({
+                ClaudeCode: 'claude_code',
+                Codex: 'codex',
+                GeminiCli: 'gemini_cli',
+                Kiro: 'kiro',
+                Vibe: 'vibe',
+                CopilotCli: 'copilot_cli',
+              } as Partial<Record<AgentType, string>>)[agent.agent_type];
+              if (!agentKey) return null;
               const editing = tierEditing[agentKey];
               if (!editing) return null;
 
@@ -838,47 +1207,38 @@ export function AgentsSection({
               // option label so "Par défaut (…)" never lies about what actually
               // runs. `null` = the agent's own default (no --model flag).
               const knownModels: Record<string, {
-                economy: string[]; default: string[]; reasoning: string[];
+                options: string[];
                 fallbackEconomy: string | null; fallbackDefault: string | null; fallbackReasoning: string | null;
                 modelsUrl: string;
               }> = {
                 claude_code: {
-                  economy: ['haiku', 'sonnet'],
-                  default: ['sonnet', 'fable', 'opus', 'haiku'],
-                  // Fable 5 (released 2026) is the new top model. Listed
-                  // first so it surfaces for new tier picks; the built-in
-                  // fallback stays `opus` (label below stays truthful via
-                  // fallbackReasoning). Verified: the claude CLI accepts
-                  // the `fable` alias for --model (tested 2026-06-10).
-                  reasoning: ['fable', 'opus', 'sonnet'],
+                  options: ['haiku', 'sonnet', 'fable', 'opus'],
                   fallbackEconomy: 'haiku', fallbackDefault: 'sonnet', fallbackReasoning: 'opus',
                   modelsUrl: 'https://docs.anthropic.com/en/docs/about-claude/models',
                 },
                 codex: {
-                  // 2026-07 refresh: the gpt-5.6 generation (sol = frontier,
-                  // terra = balanced, luna = fast/affordable) + 5.5/5.4 line.
-                  economy: ['gpt-5.6-luna', 'gpt-5.4-mini', 'gpt-5-codex-mini'],
-                  default: ['gpt-5.6-terra', 'gpt-5.5', 'gpt-5.4'],
-                  reasoning: ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.5', 'gpt-5.4'],
+                  options: [
+                    'gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol',
+                    'gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-5-codex-mini',
+                  ],
                   fallbackEconomy: 'gpt-5.6-luna', fallbackDefault: null, fallbackReasoning: 'gpt-5.6-sol',
                   modelsUrl: 'https://developers.openai.com/codex/models',
                 },
                 gemini_cli: {
-                  economy: ['gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-3-flash-preview'],
-                  default: ['gemini-3.1-pro-preview', 'gemini-2.5-flash'],
-                  reasoning: ['gemini-3.1-pro-preview', 'gemini-2.5-pro'],
+                  options: [
+                    'gemini-2.5-flash-lite', 'gemini-2.5-flash',
+                    'gemini-3-flash-preview', 'gemini-2.5-pro', 'gemini-3.1-pro-preview',
+                  ],
                   fallbackEconomy: 'gemini-2.5-flash', fallbackDefault: null, fallbackReasoning: 'gemini-3.1-pro-preview',
                   modelsUrl: 'https://ai.google.dev/gemini-api/docs/models',
                 },
-                kiro: { economy: [], default: [], reasoning: [], fallbackEconomy: null, fallbackDefault: null, fallbackReasoning: null, modelsUrl: '' },
-                vibe: { economy: [], default: [], reasoning: [], fallbackEconomy: null, fallbackDefault: null, fallbackReasoning: null, modelsUrl: '' },
+                kiro: { options: [], fallbackEconomy: null, fallbackDefault: null, fallbackReasoning: null, modelsUrl: '' },
+                vibe: { options: [], fallbackEconomy: null, fallbackDefault: null, fallbackReasoning: null, modelsUrl: '' },
                 copilot_cli: {
                   // Copilot's enabled models depend on the account and its
                   // policy. Keep only current CLI identifiers here; an empty
                   // tier lets Copilot choose an account-compatible model.
-                  economy: ['auto', 'claude-sonnet-4-5', 'claude-sonnet-4', 'gpt-5'],
-                  default: ['auto', 'claude-sonnet-4-5', 'claude-sonnet-4', 'gpt-5'],
-                  reasoning: ['auto', 'gpt-5', 'claude-sonnet-4-5', 'claude-sonnet-4'],
+                  options: ['auto', 'claude-sonnet-4-5', 'claude-sonnet-4', 'gpt-5'],
                   fallbackEconomy: null, fallbackDefault: null, fallbackReasoning: null,
                   modelsUrl: 'https://docs.github.com/en/copilot',
                 },
@@ -905,6 +1265,7 @@ export function AgentsSection({
                   vibe: tierOf('vibe'),
                   copilot_cli: tierOf('copilot_cli'),
                   ollama: tierOf('ollama'),
+                  lite_llm: tierOf('lite_llm'),
                 };
                 try { await configApi.setModelTiers(newTiers); toast(t('config.saved'), 'success'); } catch { toast(t('config.saveError'), 'error'); }
               };
@@ -918,6 +1279,8 @@ export function AgentsSection({
                     <span className="text-2xs" style={{ color: iconColor, width: 14 }} title={field}>{icon}</span>
                     <select
                       className="set-tier-select"
+                      data-model-tier-agent={agent.agent_type}
+                      data-model-tier={field}
                       value={editing[field]}
                       onChange={e => saveTiers(field, e.target.value)}
                       aria-label={t('disc.modelTier') + ' ' + field}
@@ -925,9 +1288,11 @@ export function AgentsSection({
                       {/* Empty value = the backend built-in fallback (passed in
                           so the label matches runner.rs, not just options[0]).
                           No fallback = the agent's own default model. */}
-                      <option value="">{t('config.defaultModel')}{fallback ? ` (${fallback})` : ''}</option>
+                      <option value="">
+                        {t('config.defaultModel')}{fallback ? ` (${fallback}${modelCostSuffix(fallback)})` : ''}
+                      </option>
                       {options.map(m => (
-                        <option key={m} value={m}>{m}</option>
+                        <option key={m} value={m}>{m}{modelCostSuffix(m)}</option>
                       ))}
                     </select>
                   </div>
@@ -938,6 +1303,11 @@ export function AgentsSection({
                 <div className="set-agent-panel set-agent-panel-models">
                   <div className="set-agent-section-title">
                     <span>{t('disc.modelTier')}</span>
+                    {usageReport && (
+                      <ContextHelp title={t('config.modelCostObservedTitle')}>
+                        <p>{t('config.modelCostObservedHelp')}</p>
+                      </ContextHelp>
+                    )}
                     {models.modelsUrl && (
                       <a href={models.modelsUrl} target="_blank" rel="noopener noreferrer"
                         title={t('config.viewModels')}
@@ -947,9 +1317,9 @@ export function AgentsSection({
                     )}
                   </div>
                   <div className="flex-row gap-5">
-                    {renderSelect('economy', models.economy, '\u26A1', 'rgba(var(--kr-success-rgb), 0.6)', models.fallbackEconomy)}
-                    {renderSelect('default', models.default, '\uD83C\uDFAF', 'rgba(var(--kr-info-rgb), 0.6)', models.fallbackDefault)}
-                    {renderSelect('reasoning', models.reasoning, '\uD83E\uDDE0', 'rgba(var(--kr-warning-amber-rgb), 0.6)', models.fallbackReasoning)}
+                    {renderSelect('economy', models.options, '\u26A1', 'rgba(var(--kr-success-rgb), 0.6)', models.fallbackEconomy)}
+                    {renderSelect('default', models.options, '\uD83C\uDFAF', 'rgba(var(--kr-info-rgb), 0.6)', models.fallbackDefault)}
+                    {renderSelect('reasoning', models.options, '\uD83E\uDDE0', 'rgba(var(--kr-warning-amber-rgb), 0.6)', models.fallbackReasoning)}
                   </div>
                 </div>
               );
@@ -971,7 +1341,6 @@ export function AgentsSection({
             <a href="https://kiro.dev/docs/cli/custom-agents/configuration-reference/" target="_blank" rel="noopener noreferrer">Kiro — Agent Configuration</a>
           </div>
         </div>
-      </div>
 
       {/* Per-agent update modal — opened from the freshness pill on a
        *  given agent row. Surfaces the same install_command the backend

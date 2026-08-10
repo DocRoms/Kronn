@@ -81,6 +81,7 @@ describe('I18nContext', () => {
       fr: async () => ({ default: { 'nav.projects': 'Projets' } }),
       en: () => new Promise(done => { resolveEn = done; }),
       es: () => new Promise(done => { resolveEs = done; }),
+      zh: async () => ({ default: { 'nav.projects': '项目' } }),
     });
     try {
       const user = userEvent.setup();
@@ -100,7 +101,7 @@ describe('I18nContext', () => {
       expect(localStorage.getItem('kronn:ui-locale')).toBe('es');
     } finally {
       restore();
-      await Promise.all([loadLocale('fr'), loadLocale('en'), loadLocale('es')]);
+      await Promise.all([loadLocale('fr'), loadLocale('en'), loadLocale('es'), loadLocale('zh')]);
     }
   });
 });

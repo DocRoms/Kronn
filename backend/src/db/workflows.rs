@@ -8,6 +8,40 @@ use crate::models::*;
 // ─── Helper ─────────────────────────────────────────────────────────────────
 use super::parse_dt;
 
+fn steps_with_durable_ids(
+    steps: &[WorkflowStep],
+    previous: Option<&[WorkflowStep]>,
+    used: &mut std::collections::HashSet<String>,
+) -> Vec<WorkflowStep> {
+    steps
+        .iter()
+        .cloned()
+        .enumerate()
+        .map(|(index, mut step)| {
+            let previous_id = previous.and_then(|old_steps| {
+                old_steps
+                    .iter()
+                    .find(|old| old.name == step.name)
+                    .or_else(|| old_steps.get(index))
+                    .and_then(|old| old.id.as_ref())
+            });
+            let submitted_id = step
+                .id
+                .as_ref()
+                .filter(|id| Uuid::parse_str(id).is_ok() && !used.contains(id.as_str()));
+            let preserved_id =
+                previous_id.filter(|id| Uuid::parse_str(id).is_ok() && !used.contains(id.as_str()));
+            let id = submitted_id
+                .or(preserved_id)
+                .cloned()
+                .unwrap_or_else(|| Uuid::new_v4().to_string());
+            used.insert(id.clone());
+            step.id = Some(id);
+            step
+        })
+        .collect()
+}
+
 fn parse_run_status(s: &str) -> RunStatus {
     match s {
         "Pending" => RunStatus::Pending,
@@ -614,6 +648,9 @@ pub fn create_batch_run(
 }
 
 pub fn insert_workflow(conn: &Connection, wf: &Workflow) -> Result<()> {
+    let mut used_step_ids = std::collections::HashSet::new();
+    let steps = steps_with_durable_ids(&wf.steps, None, &mut used_step_ids);
+    let on_failure = steps_with_durable_ids(&wf.on_failure, None, &mut used_step_ids);
     conn.execute(
         "INSERT INTO workflows (id, name, project_id, trigger_json, steps_json, actions_json,
          safety_json, workspace_config_json, concurrency_limit, enabled, created_at, updated_at, guards, artifacts, on_failure, exec_allowlist, variables, pinned)
@@ -623,7 +660,7 @@ pub fn insert_workflow(conn: &Connection, wf: &Workflow) -> Result<()> {
             wf.name,
             wf.project_id,
             serde_json::to_string(&wf.trigger)?,
-            serde_json::to_string(&wf.steps)?,
+            serde_json::to_string(&steps)?,
             serde_json::to_string(&wf.actions)?,
             serde_json::to_string(&wf.safety)?,
             wf.workspace_config.as_ref().map(serde_json::to_string).transpose()?,
@@ -633,7 +670,7 @@ pub fn insert_workflow(conn: &Connection, wf: &Workflow) -> Result<()> {
             wf.updated_at.to_rfc3339(),
             wf.guards.as_ref().map(serde_json::to_string).transpose()?,
             if wf.artifacts.is_empty() { None } else { Some(serde_json::to_string(&wf.artifacts)?) },
-            if wf.on_failure.is_empty() { None } else { Some(serde_json::to_string(&wf.on_failure)?) },
+            if on_failure.is_empty() { None } else { Some(serde_json::to_string(&on_failure)?) },
             if wf.exec_allowlist.is_empty() { None } else { Some(serde_json::to_string(&wf.exec_allowlist)?) },
             // 0.6.0 UX pass — same NULL-vs-empty discipline. Empty
             // variables = no manual launch form. NULL on disk so a
@@ -650,6 +687,20 @@ pub fn insert_workflow(conn: &Connection, wf: &Workflow) -> Result<()> {
 /// a TYPED signal, so callers never string-match the error message.
 /// Reporting success on 0 rows would silently drop the caller's edit.
 pub fn update_workflow(conn: &Connection, wf: &Workflow) -> Result<bool> {
+    let previous = get_workflow(conn, &wf.id)?;
+    let mut used_step_ids = std::collections::HashSet::new();
+    let steps = steps_with_durable_ids(
+        &wf.steps,
+        previous.as_ref().map(|workflow| workflow.steps.as_slice()),
+        &mut used_step_ids,
+    );
+    let on_failure = steps_with_durable_ids(
+        &wf.on_failure,
+        previous
+            .as_ref()
+            .map(|workflow| workflow.on_failure.as_slice()),
+        &mut used_step_ids,
+    );
     let n = conn.execute(
         "UPDATE workflows SET name = ?2, project_id = ?3, trigger_json = ?4, steps_json = ?5,
          actions_json = ?6, safety_json = ?7, workspace_config_json = ?8,
@@ -661,7 +712,7 @@ pub fn update_workflow(conn: &Connection, wf: &Workflow) -> Result<bool> {
             wf.name,
             wf.project_id,
             serde_json::to_string(&wf.trigger)?,
-            serde_json::to_string(&wf.steps)?,
+            serde_json::to_string(&steps)?,
             serde_json::to_string(&wf.actions)?,
             serde_json::to_string(&wf.safety)?,
             wf.workspace_config
@@ -677,10 +728,10 @@ pub fn update_workflow(conn: &Connection, wf: &Workflow) -> Result<bool> {
             } else {
                 Some(serde_json::to_string(&wf.artifacts)?)
             },
-            if wf.on_failure.is_empty() {
+            if on_failure.is_empty() {
                 None
             } else {
-                Some(serde_json::to_string(&wf.on_failure)?)
+                Some(serde_json::to_string(&on_failure)?)
             },
             if wf.exec_allowlist.is_empty() {
                 None

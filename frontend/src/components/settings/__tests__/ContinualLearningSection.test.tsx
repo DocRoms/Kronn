@@ -25,17 +25,21 @@ describe('ContinualLearningSection', () => {
   it('loads the current toggle state (OFF) on mount', async () => {
     render(<ContinualLearningSection toast={vi.fn()} t={t} />);
     await waitFor(() => expect(configApi.getContinualLearningEnabled).toHaveBeenCalled());
-    const cb = screen.getByRole('checkbox') as HTMLInputElement;
-    expect(cb.checked).toBe(false);
+    const toggle = screen.getByRole('switch');
+    expect(toggle).toHaveAttribute('aria-checked', 'false');
+    expect(document.querySelector('#settings-continual-learning .set-beta-feature-panel')).toBeInTheDocument();
     // beta badge present (it's opt-in / beta)
     expect(screen.getByText('settings.betaBadge')).toBeInTheDocument();
+    const warning = screen.getByTestId('continual-learning-risk-warning');
+    expect(warning).toHaveTextContent('settings.clRiskTitle');
+    expect(warning).toHaveTextContent('settings.clRiskBody');
   });
 
   it('reflects ON when the backend reports enabled', async () => {
     configApi.getContinualLearningEnabled.mockResolvedValue(true);
     render(<ContinualLearningSection toast={vi.fn()} t={t} />);
     await waitFor(() => {
-      expect((screen.getByRole('checkbox') as HTMLInputElement).checked).toBe(true);
+      expect(screen.getByRole('switch')).toHaveAttribute('aria-checked', 'true');
     });
   });
 
@@ -43,7 +47,7 @@ describe('ContinualLearningSection', () => {
     const toast = vi.fn();
     render(<ContinualLearningSection toast={toast} t={t} />);
     await waitFor(() => expect(configApi.getContinualLearningEnabled).toHaveBeenCalled());
-    fireEvent.click(screen.getByRole('checkbox'));
+    fireEvent.click(screen.getByRole('switch'));
     expect(configApi.saveContinualLearningEnabled).toHaveBeenCalledWith(true);
     await waitFor(() => expect(toast).toHaveBeenCalledWith('settings.clSaved', 'success'));
   });
@@ -53,9 +57,9 @@ describe('ContinualLearningSection', () => {
     configApi.saveContinualLearningEnabled.mockRejectedValue(new Error('boom'));
     render(<ContinualLearningSection toast={toast} t={t} />);
     await waitFor(() => expect(configApi.getContinualLearningEnabled).toHaveBeenCalled());
-    const cb = screen.getByRole('checkbox') as HTMLInputElement;
-    fireEvent.click(cb);
+    const toggle = screen.getByRole('switch');
+    fireEvent.click(toggle);
     await waitFor(() => expect(toast).toHaveBeenCalledWith('settings.clSaveError', 'error'));
-    expect(cb.checked).toBe(false); // reverted
+    expect(toggle).toHaveAttribute('aria-checked', 'false'); // reverted
   });
 });

@@ -47,7 +47,12 @@ import {
   Menu, X, Clock, ExternalLink, Search, ChevronUp, ChevronDown,
 } from 'lucide-react';
 import { useIsMobile } from '../hooks/useMediaQuery';
-import { composerMentions, targetsFromComposerText } from '../lib/messageTargets';
+import {
+  composerMentions,
+  messagesInConversationOrder,
+  pendingAgentReplies,
+  targetsFromComposerText,
+} from '../lib/messageTargets';
 
 function newClientMessageId(): string {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
@@ -65,6 +70,105 @@ function newClientMessageId(): string {
   bytes[8] = (bytes[8] & 0x3f) | 0x80;
   const hex = Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+function PendingAgentReplyBubble({
+  agent,
+  triggerMessageId,
+}: {
+  agent: AgentType;
+  triggerMessageId: string;
+}) {
+  const { t } = useT();
+  return (
+    <div
+      className="disc-msg-row"
+      data-role="agent"
+      data-reply-trigger={triggerMessageId}
+      data-testid={`pending-agent-${agent}`}
+      aria-live="polite"
+    >
+      <div className="disc-msg-bubble" data-role="agent">
+        <div className="disc-msg-agent-label" style={{ color: agentColor(agent) }}>
+          <Cpu size={10} /> {AGENT_LABELS[agent] ?? agent}
+          <Loader2 size={10} style={{ animation: 'spin 1s linear infinite', marginLeft: 4 }} />
+        </div>
+        <div className="disc-streaming-waiting">
+          <span className="disc-pulse-dot" />
+          {t('disc.running')}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function StreamingAgentReplyBubble({
+  agent,
+  triggerMessageId,
+  elapsed,
+  text,
+  logs,
+  showLogs,
+  onToggleLogs,
+}: {
+  agent: AgentType;
+  triggerMessageId: string;
+  elapsed: number;
+  text: string;
+  logs: string[];
+  showLogs: boolean;
+  onToggleLogs: () => void;
+}) {
+  const { t } = useT();
+  return (
+    <div
+      className="disc-msg-row"
+      data-role="agent"
+      data-reply-trigger={triggerMessageId}
+      data-testid={`streaming-agent-${agent}`}
+      aria-live="polite"
+    >
+      <div className="disc-msg-bubble" data-role="agent">
+        <div className="disc-msg-agent-label" style={{ color: agentColor(agent), justifyContent: 'space-between' }}>
+          <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+            <Cpu size={10} /> {AGENT_LABELS[agent] ?? agent}
+            <Loader2 size={10} style={{ animation: 'spin 1s linear infinite', marginLeft: 4 }} />
+          </span>
+          <span className="disc-streaming-elapsed">
+            {elapsed >= 60
+              ? `${Math.floor(elapsed / 60)}m${String(elapsed % 60).padStart(2, '0')}s`
+              : `${elapsed}s`}
+          </span>
+        </div>
+        {text ? (
+          <div className="disc-streaming-md">
+            <MarkdownContent content={text} />
+          </div>
+        ) : (
+          <div className="disc-streaming-waiting" aria-live="assertive">
+            <span className="disc-pulse-dot" />
+            {t('disc.running')}
+            {logs.length > 0 && (
+              <span className="disc-streaming-log-hint">— {logs.at(-1)?.slice(0, 60)}</span>
+            )}
+          </div>
+        )}
+        {logs.length > 0 && (
+          <div style={{ marginTop: 6 }}>
+            <button className="disc-logs-toggle" onClick={onToggleLogs}>
+              <ChevronRight size={10} className="disc-chevron" data-expanded={showLogs} />
+              {t('disc.logs')} ({logs.length})
+            </button>
+            {showLogs && (
+              <div className="disc-logs-panel">
+                {logs.map((log, index) => <div key={index}>{log}</div>)}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
 }
 
 interface MessageSearchMatch {
@@ -347,6 +451,7 @@ export function DiscussionsPage({
   // discussion's default — the bubble must say "Codex" while it spins,
   // not the default agent. Cleared when the stream ends.
   const [streamingTargetMap, setStreamingTargetMap] = useState<Record<string, AgentType>>({});
+  const [streamingTurnMap, setStreamingTurnMap] = useState<Record<string, string>>({});
   const [collapsedDiscGroups, setCollapsedDiscGroups] = useState<Set<string>>(() => {
     try {
       const saved = localStorage.getItem('kronn:discCollapsedGroups');
@@ -793,6 +898,31 @@ export function DiscussionsPage({
   }, [activeDiscussion, agents]);
 
   const sending = activeDiscussionId ? !!sendingMap[activeDiscussionId] : false;
+  const pendingReplySlots = useMemo(() => {
+    if (!activeDiscussion || (!sending && !activeDiscussion.awaiting_agent)) return [];
+    const durable = pendingAgentReplies(activeDiscussion);
+    const triggerMessageId = streamingTurnMap[activeDiscussion.id];
+    const streamingAgent = streamingTargetMap[activeDiscussion.id] ?? activeDiscussion.agent;
+    if (!sending || !triggerMessageId || durable.some(reply => (
+      reply.triggerMessageId === triggerMessageId && reply.agent === streamingAgent
+    ))) {
+      return durable;
+    }
+    return [...durable, {
+      id: `optimistic:${triggerMessageId}:${streamingAgent}`,
+      triggerMessageId,
+      agent: streamingAgent,
+      status: 'Running',
+    }];
+  }, [activeDiscussion, sending, streamingTargetMap, streamingTurnMap]);
+  const visibleStreamingReply = activeDiscussion && sending
+    ? pendingReplySlots.find(reply => (
+        reply.triggerMessageId === streamingTurnMap[activeDiscussion.id]
+        && reply.agent === (streamingTargetMap[activeDiscussion.id] ?? activeDiscussion.agent)
+      ))
+      ?? pendingReplySlots.find(reply => reply.status === 'Running')
+      ?? pendingReplySlots[0]
+    : undefined;
   const streamingText = activeDiscussionId ? (streamingMap[activeDiscussionId] ?? '') : '';
   // Deferred value for markdown rendering — every SSE chunk pushes a new
   // streamingText, and ReactMarkdown re-parses the whole buffer each time.
@@ -1316,6 +1446,7 @@ export function DiscussionsPage({
     // final state converges and no duplicate is left behind.
     const streamedText = streamingMap[discId];
     const targetAgent = streamingTargetMap[discId];
+    const triggerMessageId = streamingTurnMap[discId];
     if (streamedText && streamedText.length > 0) {
       setLoadedDiscussions(prev => {
         const disc = prev[discId];
@@ -1338,6 +1469,7 @@ export function DiscussionsPage({
               timestamp: new Date().toISOString(),
               tokens_used: 0,
               auth_mode: null,
+              reply_to_message_id: triggerMessageId ?? null,
             }],
             message_count: disc.message_count + 1,
             non_system_message_count: disc.non_system_message_count + 1,
@@ -1355,7 +1487,11 @@ export function DiscussionsPage({
       const { [discId]: _drop, ...rest } = prev;
       return rest;
     });
-  }, [cleanupStreamBase, refetchDiscussions, refetchProjects, reloadDiscussion, streamingMap, streamingTargetMap]);
+    setStreamingTurnMap(prev => {
+      const { [discId]: _drop, ...rest } = prev;
+      return rest;
+    });
+  }, [cleanupStreamBase, refetchDiscussions, refetchProjects, reloadDiscussion, streamingMap, streamingTargetMap, streamingTurnMap]);
 
   // Called by ChatHeader after any inline API update (title, skills, profiles, etc.)
   const handleDiscussionUpdated = useCallback(() => {
@@ -1778,6 +1914,7 @@ export function DiscussionsPage({
     const controller = new AbortController();
     setReplyToMessageId(null);
     abortControllers.current[discId] = controller;
+    setStreamingTurnMap(prev => ({ ...prev, [discId]: clientMessageId }));
     setStreamingMap(prev => ({ ...prev, [discId]: '' }));
     // Track the pinged agent so the streaming placeholder ("Codex · Agent
     // running…") shows the right name and color while we wait for the first
@@ -3052,9 +3189,10 @@ export function DiscussionsPage({
               onScroll={handleMessagesScroll}
             >
               {(() => {
-                const msgs = showDiscussionNotes
+                const sourceMessages = showDiscussionNotes
                   ? activeDiscussion.messages
                   : activeDiscussion.messages.filter(message => message.channel !== 'note');
+                const msgs = messagesInConversationOrder(sourceMessages);
                 // Pre-compute indices and timestamps in O(n) instead of O(n²)
                 let lastUserIdx = -1;
                 let lastAgentIdx = -1;
@@ -3105,10 +3243,70 @@ export function DiscussionsPage({
                   repliesByTarget.set(message.reply_to_message_id, replies);
                 }
                 const items = groupMessagesWithToolFold(msgs, { isAutoPrompt });
+                const mainUserIds = new Set(
+                  msgs
+                    .filter(message => message.role === 'User' && message.channel === 'main')
+                    .map(message => message.id),
+                );
+                const lastMessageByTurn = new Map<string, string>();
+                let currentTurnId: string | null = null;
+                for (const message of msgs) {
+                  if (message.role === 'User' && message.channel === 'main') {
+                    currentTurnId = message.id;
+                  }
+                  const linkedTurn = (message.role === 'Agent' || message.role === 'System')
+                    && message.reply_to_message_id
+                    && mainUserIds.has(message.reply_to_message_id)
+                    ? message.reply_to_message_id
+                    : null;
+                  const turnId = linkedTurn ?? currentTurnId;
+                  if (!turnId) continue;
+                  lastMessageByTurn.set(turnId, message.id);
+                }
+                const pendingByAnchor = new Map<string, typeof pendingReplySlots>();
+                for (const reply of pendingReplySlots) {
+                  const anchorId = lastMessageByTurn.get(reply.triggerMessageId)
+                    ?? reply.triggerMessageId;
+                  const replies = pendingByAnchor.get(anchorId) ?? [];
+                  replies.push(reply);
+                  pendingByAnchor.set(anchorId, replies);
+                }
+                const renderPendingAfter = (messageIds: string[]) => {
+                  if (orchState[activeDiscussion.id]?.active) return null;
+                  const replies = messageIds.flatMap(messageId => pendingByAnchor.get(messageId) ?? []);
+                  return replies.map(reply => (
+                    sending && reply.id === visibleStreamingReply?.id
+                      ? (
+                          <StreamingAgentReplyBubble
+                            key={reply.id}
+                            agent={reply.agent}
+                            triggerMessageId={reply.triggerMessageId}
+                            elapsed={sendingElapsed}
+                            text={deferredStreamingText}
+                            logs={agentLogs}
+                            showLogs={showLogs}
+                            onToggleLogs={() => setShowLogs(value => !value)}
+                          />
+                        )
+                      : (
+                          <PendingAgentReplyBubble
+                            key={reply.id}
+                            agent={reply.agent}
+                            triggerMessageId={reply.triggerMessageId}
+                          />
+                        )
+                  ));
+                };
                 let previousDayKey: string | null = null;
                 return items.map(item => {
                   const firstMessage = item.kind === 'tool-group' ? item.messages[0] : item.msg;
-                  const dayKey = localCalendarDayKey(firstMessage.timestamp);
+                  const linkedDayAnchor = (firstMessage.role === 'Agent' || firstMessage.role === 'System')
+                    && firstMessage.reply_to_message_id
+                    ? messagesById.get(firstMessage.reply_to_message_id)
+                    : null;
+                  const dayKey = localCalendarDayKey(
+                    linkedDayAnchor?.timestamp ?? firstMessage.timestamp,
+                  );
                   const startsDay = dayKey !== null && dayKey !== previousDayKey;
                   if (dayKey !== null) previousDayKey = dayKey;
                   const separator = startsDay ? (
@@ -3120,6 +3318,7 @@ export function DiscussionsPage({
                   ) : null;
 
                   if (item.kind === 'tool-group') {
+                    const pending = renderPendingAfter(item.messages.map(message => message.id));
                     return (
                       <Fragment key={`tools-${item.messages[0].id}`}>
                         {separator}
@@ -3128,11 +3327,13 @@ export function DiscussionsPage({
                           targetMessageId={globalSearchTarget?.messageId}
                           t={t}
                         />
+                        {pending}
                       </Fragment>
                     );
                   }
                   const { msg, idx } = item;
                   if (msg.channel === 'note') {
+                    const pending = renderPendingAfter([msg.id]);
                     return (
                       <Fragment key={msg.id}>
                         {separator}
@@ -3141,9 +3342,11 @@ export function DiscussionsPage({
                           discussionId={activeDiscussion.id}
                           t={t}
                         />
+                        {pending}
                       </Fragment>
                     );
                   }
+                  const pending = renderPendingAfter([msg.id]);
                   return (
                     <Fragment key={msg.id}>
                       {separator}
@@ -3192,75 +3395,10 @@ export function DiscussionsPage({
                         onReplyNavigate={handleReplyNavigate}
                         t={t}
                       />
+                      {pending}
                     </Fragment>
                   );
                 });
-              })()}
-
-              {/* Streaming: single agent mode */}
-              {sending && !orchState[activeDiscussion.id]?.active && (() => {
-                // The pinged agent (e.g. @codex) takes precedence over the
-                // discussion's default — without this, the streaming
-                // placeholder lies about who's actually responding.
-                const streamingAgent = streamingTargetMap[activeDiscussion.id] ?? activeDiscussion.agent;
-                return (
-                <div className="disc-msg-row" data-role="agent" aria-live="polite">
-                  <div className="disc-msg-bubble" data-role="agent">
-                    <div className="disc-msg-agent-label" style={{ color: agentColor(streamingAgent), justifyContent: 'space-between' }}>
-                      <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                        <Cpu size={10} /> {AGENT_LABELS[streamingAgent] ?? streamingAgent}
-                        <Loader2 size={10} style={{ animation: 'spin 1s linear infinite', marginLeft: 4 }} />
-                      </span>
-                      <span className="disc-streaming-elapsed">
-                        {sendingElapsed >= 60
-                          ? `${Math.floor(sendingElapsed / 60)}m${String(sendingElapsed % 60).padStart(2, '0')}s`
-                          : `${sendingElapsed}s`}
-                      </span>
-                    </div>
-                    {streamingText ? (
-                      // Render the streamed buffer as markdown so headings,
-                      // tables, code blocks, etc. show progressively instead
-                      // of as raw `#` and `**` until the stream finishes.
-                      // The renderer is tolerant of half-finished syntax —
-                      // an unclosed `**` or code fence just renders the
-                      // partial state and snaps into place when the closer
-                      // arrives in the next chunk.
-                      <div className="disc-streaming-md">
-                        <MarkdownContent content={deferredStreamingText} />
-                      </div>
-                    ) : (
-                      <div className="disc-streaming-waiting" aria-live="assertive">
-                        <span className="disc-pulse-dot" />
-                        {t('disc.running')}
-                        {agentLogs.length > 0 && (
-                          <span className="disc-streaming-log-hint">
-                            — {agentLogs[agentLogs.length - 1]?.slice(0, 60)}
-                          </span>
-                        )}
-                      </div>
-                    )}
-                    {/* Agent logs panel */}
-                    {agentLogs.length > 0 && (
-                      <div style={{ marginTop: 6 }}>
-                        <button
-                          className="disc-logs-toggle"
-                          onClick={() => setShowLogs(v => !v)}
-                        >
-                          <ChevronRight size={10} className="disc-chevron" data-expanded={showLogs} />
-                          {t('disc.logs')} ({agentLogs.length})
-                        </button>
-                        {showLogs && (
-                          <div className="disc-logs-panel">
-                            {agentLogs.map((log, i) => (
-                              <div key={i}>{log}</div>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                </div>
-                );
               })()}
 
               {/* Streaming: orchestration mode */}

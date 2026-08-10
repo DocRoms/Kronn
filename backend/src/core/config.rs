@@ -295,6 +295,10 @@ pub fn default_config() -> AppConfig {
             // ServerConfig field docs for rationale (modern agents
             // have large context + MCP access, no auto-summary needed).
             default_summary_strategy: crate::models::SummaryStrategy::Off,
+            agent_handoffs_enabled: false,
+            agent_handoff_paid_limit: 1,
+            agent_handoff_paid_unlimited: false,
+            agent_handoff_blocked_agents: vec![],
         },
         tokens: TokensConfig {
             anthropic: None,
@@ -335,6 +339,7 @@ pub fn default_config() -> AppConfig {
                 version: None,
                 full_access: false,
                 mention_color: None,
+                base_url: None,
             },
             codex: AgentConfig {
                 path: None,
@@ -342,12 +347,14 @@ pub fn default_config() -> AppConfig {
                 version: None,
                 full_access: false,
                 mention_color: None,
+                base_url: None,
             },
             gemini_cli: AgentConfig::default(),
             kiro: AgentConfig::default(),
             vibe: AgentConfig::default(),
             copilot_cli: AgentConfig::default(),
             ollama: AgentConfig::default(),
+            lite_llm: AgentConfig::default(),
             model_tiers: Default::default(),
         },
         language: "fr".into(),

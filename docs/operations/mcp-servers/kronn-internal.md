@@ -126,9 +126,15 @@ actually needed.
   DoD, priority, blocker). Do not reload or rewrite an unchanged task merely
   to report progress.
 - Immediately before a direct `task_create`, call `plan_get` again so another
-  agent's recent write is visible. Direct create accepts an
-  `idempotency_key`; the bridge scopes explicit keys to the current discussion,
-  or derives one from `source_message_id`. A retry with the same key and
+  agent's recent write is visible. Direct create links the task atomically to
+  the MCP runtime's current discussion by default. Pass an explicit
+  `discussion_id` to target another existing discussion, including one just
+  returned by `disc_create`. This explicit form does not require the runtime to
+  be bound and remains available when `disc_find_by_session` reports
+  `rejoin_required`; an unknown target fails without leaving an orphan task.
+  Direct create accepts an `idempotency_key`; the bridge scopes explicit
+  keys to the effective target discussion, or derives one from
+  `source_message_id`. A retry with the same key and
   identical content returns the existing task without a second `created` event.
   Reusing the key for different content is a conflict. Titles are ordinary
   content, never identity: distinct keys may create tasks with the same title.

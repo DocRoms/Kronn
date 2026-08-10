@@ -17,7 +17,7 @@ function install(loaders: Record<UILocale, () => Promise<{ default: TranslationD
 
 afterEach(async () => {
   while (restorers.length > 0) restorers.pop()?.();
-  await Promise.all([loadLocale('fr'), loadLocale('en'), loadLocale('es')]);
+  await Promise.all([loadLocale('fr'), loadLocale('en'), loadLocale('es'), loadLocale('zh')]);
 });
 
 describe('lazy locale loading', () => {
@@ -30,6 +30,7 @@ describe('lazy locale loading', () => {
       fr: async () => ({ default: {} }),
       en: enLoader,
       es: async () => ({ default: {} }),
+      zh: async () => ({ default: {} }),
     });
 
     const first = loadLocale('en');
@@ -51,6 +52,7 @@ describe('lazy locale loading', () => {
       fr: async () => ({ default: {} }),
       en: enLoader,
       es: async () => ({ default: {} }),
+      zh: async () => ({ default: {} }),
     });
 
     await expect(loadLocale('en')).rejects.toThrow('chunk unavailable');

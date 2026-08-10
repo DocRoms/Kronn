@@ -650,6 +650,7 @@ mod tests {
         timeout_secs: Option<u32>,
     ) -> WorkflowStep {
         WorkflowStep {
+            id: None,
             name: name.into(),
             step_type: StepType::Exec,
             description: None,

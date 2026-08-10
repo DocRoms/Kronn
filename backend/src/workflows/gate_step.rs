@@ -98,6 +98,7 @@ mod tests {
 
     fn gate_step(name: &str, message: Option<&str>) -> WorkflowStep {
         WorkflowStep {
+            id: None,
             name: name.into(),
             step_type: StepType::Gate,
             description: None,

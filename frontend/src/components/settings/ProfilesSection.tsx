@@ -1,17 +1,19 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, type CSSProperties } from 'react';
 import { profiles as profilesApi } from '../../lib/api';
 import { userError } from '../../lib/userError';
 import type { AgentProfile } from '../../types/generated';
 import type { ToastFn } from '../../hooks/useToast';
 import { Plus, Trash2, Check, X } from 'lucide-react';
+import { CapabilityOriginBadge, type CapabilityOrigin } from './CapabilityOriginBadge';
 import '../../pages/SettingsPage.css';
 
 interface ProfilesSectionProps {
+  originFilter?: CapabilityOrigin | 'all';
   toast: ToastFn;
   t: (key: string, ...args: (string | number)[]) => string;
 }
 
-export function ProfilesSection({ toast, t }: ProfilesSectionProps) {
+export function ProfilesSection({ originFilter = 'all', toast, t }: ProfilesSectionProps) {
   const [availableProfiles, setAvailableProfiles] = useState<AgentProfile[]>([]);
   const [showCreateProfile, setShowCreateProfile] = useState(false);
   const [newProfileName, setNewProfileName] = useState('');
@@ -24,6 +26,11 @@ export function ProfilesSection({ toast, t }: ProfilesSectionProps) {
   const [expandedProfileDesc, setExpandedProfileDesc] = useState<string | null>(null);
   const [editingPersonaId, setEditingPersonaId] = useState<string | null>(null);
   const [editingPersonaValue, setEditingPersonaValue] = useState('');
+  const visibleProfiles = availableProfiles.filter(profile => (
+    originFilter === 'all'
+    || (originFilter === 'kronn' && profile.is_builtin)
+    || (originFilter === 'personal' && !profile.is_builtin)
+  ));
 
   useEffect(() => {
     const refetch = () => profilesApi.list()
@@ -41,8 +48,16 @@ export function ProfilesSection({ toast, t }: ProfilesSectionProps) {
       <div>
 
         <div className="flex-wrap mb-8" style={{ gap: 12, maxHeight: 400, overflowY: 'auto', overflowX: 'hidden' }}>
-          {availableProfiles.map(profile => (
-            <div key={profile.id} className="set-profile-card" style={{ borderLeft: `3px solid ${profile.color}` }}>
+          {visibleProfiles.length === 0 && (
+            <div className="set-capability-empty">{t('config.capabilityFilterEmpty')}</div>
+          )}
+          {visibleProfiles.map(profile => (
+            <div
+              key={profile.id}
+              className="set-profile-card"
+              data-origin={profile.is_builtin ? 'kronn' : 'personal'}
+              style={{ '--profile-color': profile.color } as CSSProperties}
+            >
               {/* Header: avatar + identity */}
               <div className="flex-row gap-6 mb-5" style={{ alignItems: 'flex-start' }}>
                 <div
@@ -92,6 +107,7 @@ export function ProfilesSection({ toast, t }: ProfilesSectionProps) {
                     )}
                   </div>
                 </div>
+                <CapabilityOriginBadge origin={profile.is_builtin ? 'kronn' : 'personal'} t={t} />
               </div>
               {/* Description: expandable persona_prompt */}
               {profile.persona_prompt && (
@@ -124,11 +140,6 @@ export function ProfilesSection({ toast, t }: ProfilesSectionProps) {
                 <span className="set-cat-badge" data-cat={profile.category}>
                   {t(`profiles.${profile.category.toLowerCase()}`)}
                 </span>
-                {profile.is_builtin ? (
-                  <span className="set-builtin-badge">{t('profiles.builtin')}</span>
-                ) : (
-                  <span className="set-custom-badge">{t('profiles.custom')}</span>
-                )}
                 {profile.default_engine && (
                   <span className="set-builtin-badge">{profile.default_engine}</span>
                 )}

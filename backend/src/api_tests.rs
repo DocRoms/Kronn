@@ -922,6 +922,34 @@ mod tests {
         assert_eq!(body["data"].as_str().unwrap(), "en");
     }
 
+    #[tokio::test]
+    #[serial]
+    async fn config_ui_language_accepts_chinese_and_rejects_unknown_locales() {
+        isolate_config_dir();
+        let state = test_state();
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/config/ui-language")
+            .header("Content-Type", "application/json")
+            .body(Body::from("\"zh\""))
+            .unwrap();
+        let (status, body) = send(state.clone(), false, req).await;
+        assert_eq!(status, StatusCode::OK, "set Chinese UI locale: {body}");
+        assert_eq!(state.config.read().await.ui_language, "zh");
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/config/ui-language")
+            .header("Content-Type", "application/json")
+            .body(Body::from("\"de\""))
+            .unwrap();
+        let (_, body) = send(state.clone(), false, req).await;
+        assert_eq!(body["success"], false);
+        assert!(body["error"].as_str().unwrap().contains("fr|en|es|zh"));
+        assert_eq!(state.config.read().await.ui_language, "zh");
+    }
+
     // ─── Q5: MCP API integration tests ────────────────────────────────────────
 
     #[tokio::test]
@@ -2403,6 +2431,11 @@ mod tests {
         let (status, body) = send(state.clone(), false, req).await;
         assert_eq!(status, StatusCode::OK, "create workflow: {body}");
         let wf_id = body["data"]["id"].as_str().unwrap().to_string();
+        let created_step_id = body["data"]["steps"][0]["id"]
+            .as_str()
+            .expect("created workflow step must have a durable id")
+            .to_string();
+        assert!(uuid::Uuid::parse_str(&created_step_id).is_ok());
 
         // GET by ID
         let req = Request::builder()
@@ -2414,6 +2447,11 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["data"]["name"].as_str().unwrap(), "Nightly Audit");
         assert_eq!(body["data"]["steps"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            body["data"]["steps"][0]["id"].as_str(),
+            Some(created_step_id.as_str()),
+            "the persisted step id must remain stable across reads"
+        );
     }
 
     /// 0.8.5 — `workflow_create_draft` MCP tool round-trip.
@@ -4223,5 +4261,154 @@ mod tests {
             crate::core::anti_halluc::SPEC_AGENTS_MD_V1,
             "route body must match the embedded constant byte-for-byte",
         );
+    }
+    // ─── HTTP-agent tool executor (TD-20260808) ──────────────────────────────
+    //
+    // The loop and the model's comprehension were proven separately; this
+    // covers the link between them — that the executor actually drives the
+    // real handlers and returns something a model can consume.
+
+    #[tokio::test]
+    async fn tool_executor_runs_real_handlers_and_projects_the_result() {
+        use crate::agents::tools::{ToolCall, ToolExecutor};
+        use crate::api::agent_tools::KronnToolExecutor;
+
+        let exec = KronnToolExecutor::new(test_state(), None);
+        let call = |name: &str, args: serde_json::Value| ToolCall {
+            id: "c1".into(),
+            name: name.into(),
+            arguments: args,
+        };
+
+        // Empty instance: the tools must still answer with a well-formed,
+        // empty result — a model that gets an error here would retry forever.
+        let out = exec.execute(&call("mcp_list", serde_json::json!({}))).await;
+        assert!(out.ok, "mcp_list failed: {:?}", out.content);
+        assert!(out.content["plugins"].is_array());
+        assert!(
+            out.content["next"].as_str().is_some(),
+            "the result must tell the model what to do next"
+        );
+
+        let out = exec.execute(&call("qa_list", serde_json::json!({}))).await;
+        assert!(out.ok, "qa_list failed: {:?}", out.content);
+        assert!(out.content["quick_apis"].is_array());
+    }
+
+    #[tokio::test]
+    async fn tool_executor_reports_bad_input_as_data_not_as_a_dead_turn() {
+        use crate::agents::tools::{ToolCall, ToolExecutor};
+        use crate::api::agent_tools::KronnToolExecutor;
+
+        let exec = KronnToolExecutor::new(test_state(), None);
+        let call = |name: &str, args: serde_json::Value| ToolCall {
+            id: "c1".into(),
+            name: name.into(),
+            arguments: args,
+        };
+
+        // Every one of these is a mistake a model actually makes. Each must
+        // come back as a readable error it can correct from, never a panic
+        // and never a silent empty success.
+        for (name, args, expect) in [
+            ("qa_run", serde_json::json!({}), "quick_api_id"),
+            ("api_endpoints", serde_json::json!({}), "api_plugin_slug"),
+            (
+                "api_call",
+                serde_json::json!({"endpoint_path": "/x"}),
+                "api_plugin_slug",
+            ),
+            ("nope", serde_json::json!({}), "unknown tool"),
+        ] {
+            let out = exec.execute(&call(name, args)).await;
+            assert!(!out.ok, "{name} should have failed");
+            let msg = out.content["error"].as_str().unwrap_or_default();
+            assert!(
+                msg.contains(expect),
+                "{name}: error should mention `{expect}`, got: {msg}"
+            );
+        }
+
+        // A slug that does not exist must say so rather than return an empty
+        // endpoint list, which a model would read as "this plugin has none".
+        let out = exec
+            .execute(&call(
+                "api_endpoints",
+                serde_json::json!({"api_plugin_slug": "ghost"}),
+            ))
+            .await;
+        assert!(!out.ok);
+        assert!(out.content["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("ghost"));
+    }
+    /// `api_call` needs a config id, and asking the MODEL to carry it proved
+    /// unreliable (a 4B paired `api-speedcurve` with Resend's id, 2026-08-09).
+    /// Kronn resolves it from the slug instead — so that mapping must be right.
+    #[tokio::test]
+    async fn tool_executor_resolves_the_config_id_belonging_to_the_slug() {
+        use crate::api::agent_tools::KronnToolExecutor;
+        use crate::models::{HostSyncMode, McpConfig};
+
+        let state = test_state();
+        // Two plugins wired, so picking "the first config" would be wrong.
+        for (server_id, name) in [("mcp-resend", "Resend"), ("api-speedcurve", "SpeedCurve")] {
+            let srv = crate::models::McpServer {
+                id: server_id.into(),
+                name: name.into(),
+                description: String::new(),
+                transport: crate::models::McpTransport::Stdio {
+                    command: "true".into(),
+                    args: vec![],
+                },
+                source: crate::models::McpSource::Manual,
+                api_spec: None,
+            };
+            state
+                .db
+                .with_conn(move |conn| crate::db::mcps::upsert_server(conn, &srv))
+                .await
+                .expect("seed server");
+        }
+        for (id, server_id, label) in [
+            ("cfg-resend", "mcp-resend", "resend"),
+            ("cfg-speedcurve", "api-speedcurve", "SpeedCurve"),
+        ] {
+            let cfg = McpConfig {
+                id: id.into(),
+                server_id: server_id.into(),
+                label: label.into(),
+                env_keys: vec![],
+                env_encrypted: String::new(),
+                args_override: None,
+                is_global: true,
+                include_general: true,
+                config_hash: format!("hash-{id}"),
+                project_ids: vec![],
+                host_sync: HostSyncMode::None,
+            };
+            state
+                .db
+                .with_conn(move |conn| crate::db::mcps::insert_config(conn, &cfg))
+                .await
+                .expect("seed config");
+        }
+
+        let exec = KronnToolExecutor::new(state, None);
+        assert_eq!(
+            exec.resolve_config_id_pub("api-speedcurve")
+                .await
+                .as_deref(),
+            Some("cfg-speedcurve"),
+            "resolved another plugin's config — this is the bug that broke api_call"
+        );
+        assert_eq!(
+            exec.resolve_config_id_pub("mcp-resend").await.as_deref(),
+            Some("cfg-resend")
+        );
+        // An unwired plugin has no config: that is a real answer, and api_call
+        // reports it rather than silently calling something else.
+        assert_eq!(exec.resolve_config_id_pub("api-ghost").await, None);
     }
 }

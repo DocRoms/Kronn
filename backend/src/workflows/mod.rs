@@ -455,6 +455,7 @@ mod tests {
 
     fn bare_step(name: &str, prompt: &str, fmt: StepOutputFormat) -> WorkflowStep {
         WorkflowStep {
+            id: None,
             name: name.into(),
             step_type: StepType::default(),
             description: None,

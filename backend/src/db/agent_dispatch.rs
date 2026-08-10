@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 
+use crate::models::ActiveAgentDispatch;
 use crate::models::AgentType;
 
 use super::parse_dt;
@@ -118,6 +119,34 @@ const JOB_COLUMNS: &str = "id, discussion_id, trigger_message_id, trigger_sort_o
     dedupe_key, agent_override_json, chain_prompt_ids_json, next_chain_index,
     batch_item, group_id, group_concurrency_limit, status, attempts, turn_attempts,
     available_at, claimed_at, completed_at, last_error, created_at, updated_at";
+
+pub fn list_active_for_discussion(
+    conn: &Connection,
+    discussion_id: &str,
+    default_agent: &AgentType,
+) -> Result<Vec<ActiveAgentDispatch>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, trigger_message_id, agent_override_json, status
+         FROM agent_dispatch_jobs
+         WHERE discussion_id = ?1 AND status IN ('Pending', 'Running')
+         ORDER BY trigger_sort_order ASC, created_at ASC",
+    )?;
+    let rows = stmt.query_map([discussion_id], |row| {
+        let override_json: Option<String> = row.get(2)?;
+        let agent_type = override_json
+            .as_deref()
+            .and_then(|value| serde_json::from_str(value).ok())
+            .unwrap_or_else(|| default_agent.clone());
+        Ok(ActiveAgentDispatch {
+            id: row.get(0)?,
+            trigger_message_id: row.get(1)?,
+            agent_type,
+            status: row.get(3)?,
+        })
+    })?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .context("list active agent dispatches")
+}
 
 pub fn get(conn: &Connection, id: &str) -> Result<Option<AgentDispatchJob>> {
     conn.query_row(
@@ -625,6 +654,37 @@ mod tests {
         assert_eq!(claimed.status, DispatchStatus::Running);
         assert_eq!(claimed.attempts, 1);
         assert!(claim(&connection, "j1").unwrap().is_none());
+    }
+
+    #[test]
+    fn active_dispatches_keep_their_turn_and_concrete_agent() {
+        let connection = connection();
+        enqueue_default(&connection, "j-default", "message:u1");
+        enqueue(
+            &connection,
+            NewAgentDispatchJob {
+                id: "j-ollama",
+                discussion_id: "d1",
+                trigger_message_id: "u1",
+                trigger_sort_order: 1,
+                dedupe_key: "message:u1:Ollama",
+                agent_override: Some(&AgentType::Ollama),
+                chain_prompt_ids: &[],
+                batch_item: None,
+                group_id: None,
+                group_concurrency_limit: None,
+            },
+        )
+        .unwrap();
+        claim(&connection, "j-default").unwrap();
+
+        let active = list_active_for_discussion(&connection, "d1", &AgentType::LiteLlm).unwrap();
+        assert_eq!(active.len(), 2);
+        assert_eq!(active[0].trigger_message_id, "u1");
+        assert_eq!(active[0].agent_type, AgentType::LiteLlm);
+        assert_eq!(active[0].status, "Running");
+        assert_eq!(active[1].agent_type, AgentType::Ollama);
+        assert_eq!(active[1].status, "Pending");
     }
 
     #[test]

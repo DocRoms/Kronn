@@ -8,6 +8,11 @@ import { isHiddenPath } from '../lib/constants';
 import type { AgentType, ApiAuthKind, ApiEndpoint, Project, McpConfigDisplay, McpDefinition, McpOverview, McpProbeResponse, HostSyncMode, CustomApiPayload, McpServer, PluginInterface } from '../types/generated';
 import { pluginKind, type PluginKind } from '../lib/pluginKind';
 import { linkify } from '../lib/linkify';
+import {
+  compactPluginCredentials,
+  pluginCredentialKeys,
+  pluginCredentialKind,
+} from '../lib/pluginCredentials';
 import { CustomApiAiHelper } from '../components/CustomApiAiHelper';
 import { RecoveryRestorePanel } from '../components/RecoveryRestorePanel';
 import { Dropdown } from '../components/Dropdown';
@@ -15,7 +20,7 @@ import { SecretField } from '../components/SecretField';
 import {
   Puzzle, Plus, Trash2, Eye, Check, RefreshCw, Square, CheckSquare, Minus,
   X, Key, Pencil, FileText, ExternalLink, Save, Search,
-  Plug, Globe, Info, Sparkles, Upload, Download, ChevronRight,
+  Plug, Globe, Info, Sparkles, Upload, Download, ChevronRight, Terminal,
 } from 'lucide-react';
 import { HostSyncChip } from '../components/HostSyncChip';
 import { HostSyncPreview } from '../components/HostSyncPreview';
@@ -69,7 +74,11 @@ const ENV_PLACEHOLDERS: Record<string, string> = {
   GITHUB_TOKEN: 'ghp_xxxxxxxxxxxx',
   // GitLab
   GITLAB_PERSONAL_ACCESS_TOKEN: 'glpat-xxxxxxxxxxxx',
+  GITLAB_TOKEN: 'glpat-xxxxxxxxxxxx',
+  GITLAB_HOST: 'https://gitlab.com',
   GITLAB_URL: 'https://gitlab.com',
+  // Fastly (optional CLI fallback)
+  FASTLY_API_TOKEN: '01H... (optional fallback)',
   // Slack
   SLACK_BOT_TOKEN: 'xoxb-xxxxxxxxxxxx',
   SLACK_TEAM_ID: 'T0XXXXXXX',
@@ -838,7 +847,10 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
       await mcpsApi.createConfig({
         server_id: addMcpSelected,
         label: addMcpLabel || mcpRegistry.find(m => m.id === addMcpSelected)?.name || 'New MCP',
-        env: addMcpEnv,
+        env: compactPluginCredentials(
+          mcpRegistry.find(m => m.id === addMcpSelected),
+          addMcpEnv,
+        ),
         args_override: null,
         is_global: addMcpGlobal,
         project_ids: [],
@@ -960,9 +972,12 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
       const server = cfg ? mcpOverview.servers.find(s => s.id === cfg.server_id) : null;
       const specKeys = server?.api_spec?.config_keys?.map(ck => ck.env_key) ?? [];
       const isCustom = cfg?.server_id.startsWith('custom-') ?? false;
+      const registryDefinition = cfg
+        ? mcpRegistry.find(definition => definition.id === cfg.server_id)
+        : undefined;
       const envToSend: Record<string, string> = isCustom && specKeys.length > 0
         ? Object.fromEntries(Object.entries(editingEnv).filter(([k]) => specKeys.includes(k)))
-        : editingEnv;
+        : compactPluginCredentials(registryDefinition, editingEnv);
       await mcpsApi.updateConfig(editingEnvId, { env: envToSend });
       setEditingEnvId(null);
       refetchMcps();
@@ -1917,7 +1932,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                                   setAddMcpSelected(m.id);
                                   setAddMcpLabel(alreadyAdded ? `${m.name} (${configs.filter(c => c.server_name === m.name).length + 1})` : m.name);
                                   const envInit: Record<string, string> = {};
-                                  m.env_keys.forEach(k => { envInit[k] = ''; });
+                                  pluginCredentialKeys(m).forEach(k => { envInit[k] = ''; });
                                   setAddMcpEnv(envInit);
                                 }}
                               >
@@ -1951,7 +1966,9 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                                     {m.official ? t('mcp.official') : t('mcp.community')} — {m.publisher}
                                   </span>
                                   {(m.env_keys.length > 0 || m.token_help) && (
-                                    <span><Key size={9} /> {t('mcp.setupRequired')}</span>
+                                    pluginCredentialKind(m) === 'cli'
+                                      ? <span className="mcp-credential-kind" data-kind="cli"><Terminal size={9} /> {t('mcp.credentials.cliBadge')}</span>
+                                      : <span className="mcp-credential-kind" data-kind="api"><Key size={9} /> {t('mcp.credentials.apiBadge')}</span>
                                   )}
                                 </div>
                               </div>
@@ -2041,11 +2058,17 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
               </div>
               {/* Env vars */}
               {(() => {
-                const envKeys = selectedDef?.env_keys ?? mcpOverview.configs.find(c => c.server_id === addMcpSelected)?.env_keys ?? [];
+                const envKeys = pluginCredentialKeys(
+                  selectedDef,
+                  mcpOverview.configs.find(c => c.server_id === addMcpSelected)?.env_keys ?? [],
+                );
+                const credentialKind = pluginCredentialKind(selectedDef);
                 return envKeys.length > 0 ? (
-                <div className="mb-5">
+                <div className="mb-5 mcp-credential-fields" data-kind={credentialKind}>
                   <div className="flex-row gap-4 mb-3">
-                    <label className="mcp-field-label mcp-field-label-inline">{t('mcp.envVars')}</label>
+                    <label className="mcp-field-label mcp-field-label-inline">
+                      {t(credentialKind === 'cli' ? 'mcp.credentials.cliTitle' : 'mcp.credentials.apiTitle')}
+                    </label>
                     {selectedDef?.token_url && (
                       <a
                         href={selectedDef.token_url}
@@ -2054,12 +2077,19 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                         className="mcp-token-link"
                       >
                         <ExternalLink size={10} />
-                        {selectedDef.token_help ?? t('mcp.getToken')}
+                        {t(credentialKind === 'cli' ? 'mcp.credentials.createFallback' : 'mcp.getToken')}
                       </a>
                     )}
                     {!selectedDef?.token_url && selectedDef?.token_help && (
                       <span className="mcp-token-hint">{selectedDef.token_help}</span>
                     )}
+                  </div>
+                  <div className="mcp-credential-explainer" data-kind={credentialKind} role="note">
+                    {credentialKind === 'cli' ? <Terminal size={14} /> : <Key size={14} />}
+                    <span>
+                      <strong>{t(credentialKind === 'cli' ? 'mcp.credentials.cliRecommended' : 'mcp.credentials.apiUsedByKronn')}</strong>
+                      <small>{t(credentialKind === 'cli' ? 'mcp.credentials.cliOptionalHint' : 'mcp.credentials.apiHint')}</small>
+                    </span>
                   </div>
                   {envKeys.map(k => {
                     const isVisible = addVisibleFields.has(k);
@@ -2075,11 +2105,14 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                     // Non-secret config keys are rendered as plain text
                     // (no masking) — they're not credentials and hiding
                     // them behind dots just makes the form unusable.
-                    const isPlainTextConfig = !!configKey;
+                    const isPlainTextConfig = !!configKey
+                      || (credentialKind === 'cli' && k.endsWith('_HOST'));
                     return (
                       <div key={k} className="mb-2">
                         <div className="flex-row gap-4">
-                          <span className="mcp-env-key-label">{configKey?.label ?? k}</span>
+                          <span className="mcp-env-key-label">
+                            {configKey?.label ?? k}
+                          </span>
                           <div className="mcp-env-input-wrap">
                             <input
                               className="input mcp-input-mono mcp-input-with-eye"
@@ -2597,19 +2630,31 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                         );
                       }
                       const specKeys: string[] = cfgServer?.api_spec?.config_keys?.map(ck => ck.env_key) ?? [];
-                      const displayEnvKeys = cfg.env_keys;
+                      const credentialKind = pluginCredentialKind(def);
+                      const displayEnvKeys = pluginCredentialKeys(def, cfg.env_keys);
                       const orphanEnvKeys: string[] = [];
                       const hasAnything = displayEnvKeys.length > 0 || def?.token_help;
                       // Suppress unused-var warnings for the registry path.
                       void specKeys; void orphanEnvKeys;
                       return hasAnything ? (
-                      <div className="mcp-detail-section">
-                        <h3 className="mcp-detail-section-title"><Key size={12} /> {displayEnvKeys.length > 0 ? t('mcp.envVars') : t('mcp.setup')} {displayEnvKeys.length > 0 && editingEnvId !== cfg.id && <button className="mcp-icon-btn" style={{ marginLeft: 4 }} onClick={() => handleStartEditSecrets(cfg.id)} title={t('mcp.editKeys')} aria-label={t('mcp.editKeys')}><Pencil size={11} style={{ color: 'var(--kr-text-dim)' }} /></button>}</h3>
+                      <div className="mcp-detail-section mcp-credential-fields" data-kind={credentialKind}>
+                        <h3 className="mcp-detail-section-title">
+                          {credentialKind === 'cli' ? <Terminal size={12} /> : <Key size={12} />}
+                          {t(credentialKind === 'cli' ? 'mcp.credentials.cliTitle' : 'mcp.credentials.apiTitle')}
+                          {displayEnvKeys.length > 0 && editingEnvId !== cfg.id && <button className="mcp-icon-btn" style={{ marginLeft: 4 }} onClick={() => handleStartEditSecrets(cfg.id)} title={t('mcp.editKeys')} aria-label={t('mcp.editKeys')}><Pencil size={11} style={{ color: 'var(--kr-text-dim)' }} /></button>}
+                        </h3>
+                        <div className="mcp-credential-explainer" data-kind={credentialKind} role="note">
+                          {credentialKind === 'cli' ? <Terminal size={14} /> : <Key size={14} />}
+                          <span>
+                            <strong>{t(credentialKind === 'cli' ? 'mcp.credentials.cliRecommended' : 'mcp.credentials.apiUsedByKronn')}</strong>
+                            <small>{t(credentialKind === 'cli' ? 'mcp.credentials.cliOptionalHint' : 'mcp.credentials.apiHint')}</small>
+                          </span>
+                        </div>
                         {def?.token_help && (() => {
                           const helpKey = `mcp.help.${def.id}`;
                           const translated = t(helpKey);
                           const helpText = translated !== helpKey ? translated : def.token_help;
-                          return <p className="mcp-detail-field-label" style={{ whiteSpace: 'pre-wrap' }}>{linkify(helpText)}</p>;
+                          return <p className="mcp-credential-help" style={{ whiteSpace: 'pre-wrap' }}>{linkify(helpText)}</p>;
                         })()}
                         {def?.token_url && <a href={def.token_url} target="_blank" rel="noopener noreferrer" className="mcp-secrets-token-link mb-4"><ExternalLink size={10} /> {t('mcp.getToken')}</a>}
                         {orphanEnvKeys.length > 0 && (
@@ -2617,15 +2662,20 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                             ⚠ {t('mcp.envOrphanHint', orphanEnvKeys.join(', '))}
                           </p>
                         )}
-                        {displayEnvKeys.map(k => (
-                          <div key={k} className="mcp-detail-field">
-                            <label className="mcp-detail-field-label">{k}</label>
-                            <div className="flex-row gap-3">
-                              <input className="input mcp-input-mono flex-1" value={editingEnvId === cfg.id ? (editingEnv[k] ?? '') : '••••••••'} onChange={e => setEditingEnv(prev => ({ ...prev, [k]: e.target.value }))} type={editingEnvId === cfg.id && visibleFields.has(k) ? 'text' : 'password'} placeholder={t('mcp.value')} readOnly={editingEnvId !== cfg.id} onClick={() => { if (editingEnvId !== cfg.id) handleStartEditSecrets(cfg.id); }} />
-                              <button className="mcp-icon-btn" onClick={async () => { if (editingEnvId !== cfg.id) { const ok = await handleStartEditSecrets(cfg.id); if (!ok) return; setVisibleFields(prev => new Set(prev).add(k)); } else { toggleFieldVisibility(k); } }} title={visibleFields.has(k) ? t('mcp.hide') : t('mcp.show')}><Eye size={12} style={{ color: visibleFields.has(k) ? 'var(--kr-accent-ink)' : 'var(--kr-text-ghost)' }} /></button>
+                        {displayEnvKeys.map(k => {
+                          const stored = cfg.env_keys.includes(k);
+                          return (
+                            <div key={k} className="mcp-detail-field">
+                              <label className="mcp-detail-field-label">
+                                {k}
+                              </label>
+                              <div className="flex-row gap-3">
+                                <input className="input mcp-input-mono flex-1" value={editingEnvId === cfg.id ? (editingEnv[k] ?? '') : stored ? '••••••••' : ''} onChange={e => setEditingEnv(prev => ({ ...prev, [k]: e.target.value }))} type={editingEnvId === cfg.id && visibleFields.has(k) ? 'text' : 'password'} placeholder={stored ? t('mcp.value') : t('mcp.credentials.notStored')} readOnly={editingEnvId !== cfg.id} onClick={() => { if (editingEnvId !== cfg.id) handleStartEditSecrets(cfg.id); }} />
+                                <button className="mcp-icon-btn" onClick={async () => { if (editingEnvId !== cfg.id) { const ok = await handleStartEditSecrets(cfg.id); if (!ok) return; setVisibleFields(prev => new Set(prev).add(k)); } else { toggleFieldVisibility(k); } }} title={visibleFields.has(k) ? t('mcp.hide') : t('mcp.show')}><Eye size={12} style={{ color: visibleFields.has(k) ? 'var(--kr-accent-ink)' : 'var(--kr-text-ghost)' }} /></button>
+                              </div>
                             </div>
-                          </div>
-                        ))}
+                          );
+                        })}
                         {editingEnvError && editingEnvId === cfg.id && (
                           <div className="mcp-env-warning" style={{ color: 'var(--kr-warning)', fontSize: '0.8rem', marginTop: 6 }}>{editingEnvError}</div>
                         )}

@@ -817,6 +817,7 @@ fn apply_accepted(
                 conn,
                 &CreatePlanningTaskRequest {
                     title: p.title.clone().unwrap_or_default(),
+                    discussion_id: None,
                     idempotency_key: None,
                     description: p.description.clone().unwrap_or_default(),
                     status: PlanningTaskStatus::Todo,

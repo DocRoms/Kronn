@@ -43,16 +43,13 @@ test('Vibe installed without auth shows the setup action', async ({ page }) => {
   await dashboard.goto();
   await dashboard.clickSettings();
 
-  const agents = page.locator('#settings-agents');
-  const toggle = agents.locator('.set-accordion-header');
-  if (await toggle.getAttribute('aria-expanded') !== 'true') {
-    await toggle.click();
-  }
-  await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+  const agents = page.locator('#settings-agent-config');
+  const vibe = agents.locator('.set-agent-row[data-agent-type="Vibe"]');
+  await expect(vibe).toBeVisible();
 
-  await expect(agents.getByRole('note')).toContainText(
+  await expect(vibe.getByRole('note')).toContainText(
     /Authentification requise|Authentication required|Autenticación necesaria/,
   );
-  await expect(agents.getByRole('button', { name: /vibe --setup/i })).toBeVisible();
-  await expect(agents.locator('.set-dot[data-state="auth-required"]')).toBeVisible();
+  await expect(vibe.getByRole('button', { name: /vibe --setup/i })).toBeVisible();
+  await expect(vibe.locator('.set-dot[data-state="auth-required"]')).toBeVisible();
 });

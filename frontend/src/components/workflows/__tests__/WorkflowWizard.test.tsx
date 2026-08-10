@@ -68,6 +68,7 @@ const mkProject = (over: Partial<Project> = {}): Project => ({
 });
 
 const mkStep = (over: Partial<WorkflowStep> = {}): WorkflowStep => ({
+  id: '11111111-1111-4111-8111-111111111111',
   name: 'main',
   step_type: { type: 'Agent' },
   description: null,
@@ -295,6 +296,22 @@ describe('WorkflowWizard — step list handlers', () => {
     toStepsPage([mkStep(), mkStep({ name: 'beta' })]);
     expect(screen.getByDisplayValue('main')).toBeInTheDocument();
     expect(screen.getByDisplayValue('beta')).toBeInTheDocument();
+  });
+
+  it('copies the canonical step name from its ID pill', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', {
+      value: { writeText },
+      configurable: true,
+    });
+    toStepsPage([mkStep(), mkStep({ name: 'beta' })]);
+
+    const idPill = screen.getByRole('button', { name: 'wf.copyStepId:main' });
+    expect(idPill).toHaveTextContent('#11111111');
+    fireEvent.click(idPill);
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('11111111-1111-4111-8111-111111111111'));
+    expect(idPill).toHaveAttribute('data-copied', 'true');
   });
 
   it('warns on Agent + Exec without required isolation and offers the safe setting', () => {

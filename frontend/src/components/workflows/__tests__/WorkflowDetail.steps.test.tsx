@@ -64,11 +64,11 @@ const mkWorkflow = (steps: WorkflowStep[]): Workflow => ({
 
 // 1 agent (tokens) + 4 deterministic (api / gate / exec / notify).
 const mixedSteps = [
-  mkStep({ name: 'analyze', step_type: { type: 'Agent' } }),
-  mkStep({ name: 'fetch_issue', step_type: { type: 'ApiCall' } }),
-  mkStep({ name: 'plan_gate', step_type: { type: 'Gate' } }),
-  mkStep({ name: 'run_tests', step_type: { type: 'Exec' } }),
-  mkStep({ name: 'notify_done', step_type: { type: 'Notify' } }),
+  mkStep({ id: '11111111-1111-4111-8111-111111111111', name: 'analyze', step_type: { type: 'Agent' } }),
+  mkStep({ id: '22222222-2222-4222-8222-222222222222', name: 'fetch_issue', step_type: { type: 'ApiCall' } }),
+  mkStep({ id: '33333333-3333-4333-8333-333333333333', name: 'plan_gate', step_type: { type: 'Gate' } }),
+  mkStep({ id: '44444444-4444-4444-8444-444444444444', name: 'run_tests', step_type: { type: 'Exec' } }),
+  mkStep({ id: '55555555-5555-4555-8555-555555555555', name: 'notify_done', step_type: { type: 'Notify' } }),
 ];
 
 type DetailProps = React.ComponentProps<typeof WorkflowDetail>;
@@ -126,6 +126,31 @@ describe('WorkflowDetail — collapsed steps pipeline', () => {
       'wiz.stepTypeExec',
       'wiz.stepTypeNotify',
     ]);
+  });
+
+  it('shows a copyable canonical ID on every step', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', {
+      value: { writeText },
+      configurable: true,
+    });
+    const { container } = renderDetail(mixedSteps);
+    const ids = container.querySelectorAll<HTMLButtonElement>('.wf-step-id-pill');
+    expect(ids).toHaveLength(mixedSteps.length);
+    expect(ids[1]).toHaveTextContent('#22222222');
+
+    fireEvent.click(ids[1]);
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('22222222-2222-4222-8222-222222222222'));
+    expect(ids[1]).toHaveAttribute('data-copied', 'true');
+  });
+
+  it('keeps the selected step ID visible in the expanded step card', () => {
+    const { container } = renderDetail(mixedSteps);
+    fireEvent.click(screen.getByTestId('wf-steps-toggle'));
+
+    const card = container.querySelector('.wf-step-card');
+    expect(card).toBeInTheDocument();
+    expect(card?.querySelector('.wf-step-id-pill')).toHaveTextContent('#11111111');
   });
 
   it('colors chips by the binary token class (agent vs deterministic), not per-type', () => {

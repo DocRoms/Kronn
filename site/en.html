@@ -343,7 +343,7 @@
     }
     .cli-grid {
       display: grid;
-      grid-template-columns: repeat(5, 1fr);
+      grid-template-columns: repeat(6, 1fr);
       gap: 12px;
       margin-bottom: 24px;
     }
@@ -1285,7 +1285,7 @@
       <a class="btn btn-pink" href="#level-1">▼ How to play</a>
       <a class="btn btn-electric" href="https://github.com/DocRoms/Kronn" target="_blank" rel="noopener">↓ Install</a>
     </div>
-    <div class="ea-disclaimer">v0.9.3 · <span class="ea-tag">early access</span> · API and step types may still change before v1.0</div>
+    <div class="ea-disclaimer">v0.9.4 · <span class="ea-tag">early access</span> · API and step types may still change before v1.0</div>
   </section>
 
   <!-- LEVEL 1 · THE BRIDGE -->
@@ -1293,7 +1293,7 @@
     <a class="level-tag" href="#level-1">LEVEL 1 · THE BRIDGE</a>
     <h2 class="section-title">One shared <span class="pk">brain</span>.<br>All your CLIs <span class="li">plugged into it</span>.</h2>
     <p class="section-intro">
-      Five AI CLIs that ignore each other. Three diverging MCP configs. Fourteen copy-pasted prompts. <strong>We've all accepted this as normal.</strong> Kronn gives you one shared brain — local, plugged into everything.
+      Six AI agents that ignore each other. Three diverging MCP configs. Fourteen copy-pasted prompts. <strong>We've all accepted this as normal.</strong> Kronn gives you one shared brain — local, plugged into everything.
     </p>
 
     <div class="schema" role="img"
@@ -1306,6 +1306,7 @@
         <div class="cli-cell">Gemini</div>
         <div class="cli-cell">Vibe</div>
         <div class="cli-cell">Ollama</div>
+        <div class="cli-cell">LiteLLM</div>
       </div>
 
       <!-- Boucle asymétrique : Kronn descend en COMMANDE (spawn process),
@@ -1634,10 +1635,10 @@
       <div class="inventory-col">
         <div class="inv-cat"><span class="num">04</span>Agents · plugins · local</div>
         <ul class="inv-list">
-          <li>7+ supported CLIs (Claude Code · Codex · Gemini · Ollama · Vibe…)</li>
+          <li>8 agents: Claude Code · Codex · Gemini · Ollama · LiteLLM · Vibe…</li>
           <li><code>kronn-internal</code> MCP: 77 tools for the agent to pilot Kronn</li>
           <li><strong>Eco mode</strong> via <a href="https://github.com/rtk-ai/rtk" target="_blank" rel="noopener">RTK</a>: one-click token-killer proxy on supported agents</li>
-          <li>Ollama 100% local + TTS Piper / STT Whisper (FR · EN · ES)</li>
+          <li>Ollama 100% local + LiteLLM proxy · UI in EN · FR · ES · 简体中文</li>
           <li><strong>MCP</strong> plugins: Atlassian · Linear · Notion · …</li>
           <li><strong>API</strong> plugins: Resend · Mailjet · webhooks</li>
           <li>Custom API plugin · declare your own endpoints</li>
@@ -1887,7 +1888,7 @@
       <div class="sec-panel warn">
         <div class="sec-title">What we don't have</div>
         <ul class="sec-list warn">
-          <li><strong>Not yet v1.0 stable.</strong> Current version v0.9.3, early access. The API, step types and schemas may evolve between versions.</li>
+          <li><strong>Not yet v1.0 stable.</strong> Current version v0.9.4, early access. The API, step types and schemas may evolve between versions.</li>
           <li>No SOC2 or GDPR certification at this time</li>
           <li>Single-user · no RBAC or team management</li>
           <li>If you use Anthropic / OpenAI / Google, your prompts go to them: their responsibility, not ours</li>
@@ -1903,7 +1904,7 @@
   <footer>
     <div class="game-over">· Continue? ·</div>
     <a href="https://github.com/DocRoms/Kronn" target="_blank" rel="noopener">github.com/DocRoms/Kronn</a>
-    <span class="credits">kronn v0.9.3 · agpl-3.0 · rust × typescript · made by <a href="https://www.docroms.com/" target="_blank" rel="noopener">d.r.</a></span>
+    <span class="credits">kronn v0.9.4 · agpl-3.0 · rust × typescript · made by <a href="https://www.docroms.com/" target="_blank" rel="noopener">d.r.</a></span>
   </footer>
 
 </div>

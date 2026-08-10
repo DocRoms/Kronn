@@ -12,10 +12,18 @@ import { BarChart3, ExternalLink, ChevronDown, ChevronUp, ChevronLeft, ChevronRi
 import { usage as usageApi } from '../../lib/api';
 import { useT } from '../../lib/I18nContext';
 import type { UsageReport } from '../../types/generated';
+import { ContextHelp } from '../ContextHelp';
 import { formatPeriod, rowsPerPage } from './usageFormat';
+import {
+  ALL_USAGE_FILTER,
+  CCUSAGE_GITHUB_URL,
+  analyzeUsageReport,
+  agentForUsageModel,
+  filterUsageReport,
+  usageAgents,
+  usageModels,
+} from './usageFilters';
 import '../../pages/SettingsPage.css';
-
-const CCUSAGE_GITHUB_URL = 'https://github.com/ryoppippi/ccusage';
 
 type Period = 'daily' | 'weekly' | 'monthly';
 
@@ -46,21 +54,24 @@ const AGENT_LABEL: Record<string, string> = {
   claude: 'Claude', codex: 'Codex', gemini: 'Gemini', other: 'Other',
 };
 
-function agentForModel(model: string): string {
-  const m = model.toLowerCase();
-  if (m.includes('claude') || m.includes('opus') || m.includes('sonnet') || m.includes('haiku')) return 'claude';
-  if (m.includes('gpt') || m.includes('codex') || /^o[134]/.test(m)) return 'codex';
-  if (m.includes('gemini')) return 'gemini';
-  return 'other';
-}
-
 interface AgentTotal { agent: string; cost: number; tokens: number; }
+
+function usageErrorKey(error: string): string {
+  const normalized = error.toLowerCase();
+  if (normalized.includes('not available') || normalized.includes('not found') || normalized.includes('enoent')) {
+    return 'usage.errorToolMissing';
+  }
+  if (normalized.includes('permission') || normalized.includes('access denied') || normalized.includes('read-only')) {
+    return 'usage.errorLogsUnreadable';
+  }
+  return 'usage.errorRead';
+}
 
 function rollupByAgent(report: UsageReport): AgentTotal[] {
   const acc = new Map<string, AgentTotal>();
   for (const row of report.rows) {
     for (const mb of row.model_breakdowns) {
-      const a = agentForModel(mb.model_name);
+      const a = agentForUsageModel(mb.model_name);
       const cur = acc.get(a) ?? { agent: a, cost: 0, tokens: 0 };
       cur.cost += mb.cost;
       cur.tokens += mb.total_tokens;
@@ -81,8 +92,10 @@ export function UsageSection(_props: UsageSectionProps) {
   const [report, setReport] = useState<UsageReport | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [showDetails, setShowDetails] = useState(false);
+  const [openPanel, setOpenPanel] = useState<'analysis' | 'details' | null>(null);
   const [page, setPage] = useState(0);
+  const [agentFilter, setAgentFilter] = useState(ALL_USAGE_FILTER);
+  const [modelFilter, setModelFilter] = useState(ALL_USAGE_FILTER);
 
   const refresh = useCallback(async (p: Period) => {
     setLoading(true);
@@ -116,7 +129,13 @@ export function UsageSection(_props: UsageSectionProps) {
     return () => { active = false; };
   }, [period]);
 
-  const byAgent = report ? rollupByAgent(report) : [];
+  const filteredReport = report
+    ? filterUsageReport(report, agentFilter, modelFilter)
+    : null;
+  const agentOptions = report ? usageAgents(report) : [];
+  const modelOptions = report ? usageModels(report, agentFilter) : [];
+  const byAgent = filteredReport ? rollupByAgent(filteredReport) : [];
+  const analysis = filteredReport ? analyzeUsageReport(filteredReport) : null;
   const totalAgentCost = byAgent.reduce((s, a) => s + a.cost, 0);
   const periods: Period[] = ['daily', 'weekly', 'monthly'];
 
@@ -130,6 +149,10 @@ export function UsageSection(_props: UsageSectionProps) {
         <div className="flex-1">
           <div className="flex-row gap-2" style={{ alignItems: 'center', flexWrap: 'wrap' }}>
             <span className="font-semibold text-base">{t('usage.title')}</span>
+            <ContextHelp title={t('usage.infoTitle')} align="end">
+              <p>{t('usage.infoLocal')}</p>
+              <p>{t('usage.infoScope')}</p>
+            </ContextHelp>
             <div className="flex-row gap-3" style={{ marginLeft: 'auto', alignItems: 'center' }}>
               <div className="set-usage-toggle-group" role="tablist" aria-label={t('usage.period')}>
                 {periods.map(p => (
@@ -141,6 +164,8 @@ export function UsageSection(_props: UsageSectionProps) {
                     data-active={period === p}
                     onClick={() => {
                       setPage(0);
+                      setAgentFilter(ALL_USAGE_FILTER);
+                      setModelFilter(ALL_USAGE_FILTER);
                       setLoading(true);
                       setError(null);
                       setPeriod(p);
@@ -164,27 +189,68 @@ export function UsageSection(_props: UsageSectionProps) {
             </div>
           </div>
           <p className="set-compression-explainer">{t('usage.intro')}</p>
+          {report && report.rows.length > 0 && (
+            <div className="set-usage-filters" aria-label={t('usage.filters')}>
+              <label className="set-usage-filter">
+                <span>{t('usage.filter.agent')}</span>
+                <select
+                  value={agentFilter}
+                  onChange={event => {
+                    setAgentFilter(event.target.value);
+                    setModelFilter(ALL_USAGE_FILTER);
+                    setPage(0);
+                  }}
+                  data-testid="usage-agent-filter"
+                >
+                  <option value={ALL_USAGE_FILTER}>{t('usage.filter.allAgents')}</option>
+                  {agentOptions.map(agent => (
+                    <option key={agent} value={agent}>{AGENT_LABEL[agent] ?? agent}</option>
+                  ))}
+                </select>
+              </label>
+              <label className="set-usage-filter">
+                <span>{t('usage.filter.model')}</span>
+                <select
+                  value={modelFilter}
+                  onChange={event => {
+                    setModelFilter(event.target.value);
+                    setPage(0);
+                  }}
+                  data-testid="usage-model-filter"
+                >
+                  <option value={ALL_USAGE_FILTER}>{t('usage.filter.allModels')}</option>
+                  {modelOptions.map(model => (
+                    <option key={model} value={model}>{model}</option>
+                  ))}
+                </select>
+              </label>
+            </div>
+          )}
         </div>
       </div>
 
       {/* ── Status line : total + tokens + agent chips + details toggle ── */}
       {error ? (
-        <div className="set-compression-warning" data-testid="usage-error">
-          {t('usage.unavailable')} — {error}
+        <div className="set-compression-warning" data-testid="usage-error" title={error}>
+          {t(usageErrorKey(error))}
         </div>
-      ) : report ? (
+      ) : report && report.rows.length === 0 ? (
+        <div className="set-compression-warning" data-testid="usage-empty">
+          {t('usage.empty')}
+        </div>
+      ) : filteredReport ? (
         <>
           <div className="set-compression-status">
             <span className="set-compression-dot" aria-hidden="true" />
             <span className="set-compression-status-text" data-testid="usage-total-cost">
-              {fmtCost(report.totals.total_cost)}
+              {fmtCost(filteredReport.totals.total_cost)}
             </span>
             <span className="set-compression-savings">
-              · {fmtTokens(report.totals.total_tokens)} {t('usage.tokensTotal')}
+              · {fmtTokens(filteredReport.totals.total_tokens)} {t('usage.tokensTotal')}
             </span>
-            {report.agents_detected.length > 0 && (
+            {filteredReport.agents_detected.length > 0 && (
               <span className="flex-row gap-2" style={{ marginLeft: 8, flexWrap: 'wrap' }}>
-                {report.agents_detected.map(a => (
+                {filteredReport.agents_detected.map(a => (
                   <span key={a} className="set-usage-legend" data-testid={`usage-agent-${a}`}>
                     <span className="set-usage-dot" style={{ background: AGENT_COLORS[a] ?? AGENT_COLORS.other }} />
                     <span className="text-sm">{AGENT_LABEL[a] ?? a}</span>
@@ -192,20 +258,120 @@ export function UsageSection(_props: UsageSectionProps) {
                 ))}
               </span>
             )}
-            <button
-              type="button"
-              className="set-compression-details-toggle"
-              onClick={() => setShowDetails(v => !v)}
-              aria-expanded={showDetails}
-              data-testid="usage-details-toggle"
-            >
-              {t('usage.detailsToggle')}
-              {showDetails ? <ChevronUp size={10} /> : <ChevronDown size={10} />}
-            </button>
+            <div className="set-usage-view-tabs" role="group" aria-label={t('usage.viewToggle')}>
+              <button
+                type="button"
+                className="set-compression-details-toggle"
+                data-active={openPanel === 'analysis'}
+                onClick={() => setOpenPanel(current => current === 'analysis' ? null : 'analysis')}
+                aria-expanded={openPanel === 'analysis'}
+                aria-controls="usage-analysis-panel"
+                data-testid="usage-analysis-toggle"
+              >
+                {t('usage.analysisToggle')}
+                {openPanel === 'analysis' ? <ChevronUp size={10} /> : <ChevronDown size={10} />}
+              </button>
+              <button
+                type="button"
+                className="set-compression-details-toggle"
+                data-active={openPanel === 'details'}
+                onClick={() => setOpenPanel(current => current === 'details' ? null : 'details')}
+                aria-expanded={openPanel === 'details'}
+                aria-controls="usage-details-panel"
+                data-testid="usage-details-toggle"
+              >
+                {t('usage.detailsToggle')}
+                {openPanel === 'details' ? <ChevronUp size={10} /> : <ChevronDown size={10} />}
+              </button>
+            </div>
           </div>
 
-          {showDetails && (
-            <div className="set-compression-details" style={{ display: 'block' }}>
+          {analysis && openPanel === 'analysis' && (
+            <section
+              id="usage-analysis-panel"
+              className="set-usage-analysis"
+              aria-labelledby="usage-analysis-title"
+              data-testid="usage-analysis"
+            >
+              <div id="usage-analysis-title" className="set-usage-subtitle">
+                {t('usage.analysis.title')}
+              </div>
+              <p className="set-usage-analysis-scope">{t('usage.analysis.scope')}</p>
+              <div className="set-usage-analysis-highlights">
+                {[
+                  {
+                    id: 'most-used',
+                    label: t('usage.analysis.mostUsed'),
+                    models: analysis.mostUsed,
+                  },
+                  {
+                    id: 'most-expensive',
+                    label: t('usage.analysis.mostExpensive'),
+                    models: analysis.mostExpensive,
+                  },
+                  {
+                    id: 'least-expensive',
+                    label: t('usage.analysis.leastExpensive'),
+                    models: analysis.leastExpensive,
+                  },
+                ].map(item => (
+                  <div
+                    key={item.id}
+                    className="set-usage-analysis-card"
+                    data-testid={`usage-analysis-${item.id}`}
+                  >
+                    <span className="set-usage-analysis-card-label">{item.label}</span>
+                    <ol>
+                      {item.models.map((model, index) => (
+                        <li key={model.modelName}>
+                          <span className="set-usage-analysis-rank" aria-hidden="true">
+                            {index + 1}
+                          </span>
+                          <strong title={model.modelName}>{model.modelName}</strong>
+                          <span className="set-usage-analysis-metrics">
+                            <span>{fmtTokens(model.totalTokens)} {t('usage.analysis.tokens')}</span>
+                            <span>{fmtCost(model.totalCost)}</span>
+                          </span>
+                        </li>
+                      ))}
+                    </ol>
+                  </div>
+                ))}
+              </div>
+              <div className="set-usage-efficiency">
+                <div className="set-usage-subtitle">{t('usage.analysis.efficiencyTop')}</div>
+                <p>{t('usage.analysis.efficiencyHelp')}</p>
+                <ol>
+                  {analysis.efficiencyTop.map((model, index) => (
+                    <li key={model.modelName}>
+                      <span className="set-usage-efficiency-rank" aria-hidden="true">
+                        {index + 1}
+                      </span>
+                      <strong title={model.modelName}>{model.modelName}</strong>
+                      <span>{fmtTokens(model.totalTokens)} {t('usage.analysis.tokens')}</span>
+                      <span>{fmtCost(model.totalCost)}</span>
+                      <span className="set-usage-efficiency-score">
+                        {model.tokensPerDollar === null
+                          ? t('usage.analysis.localFree')
+                          : t('usage.analysis.tokensPerDollar', fmtTokens(model.tokensPerDollar))}
+                      </span>
+                    </li>
+                  ))}
+                </ol>
+              </div>
+              <aside className="set-usage-saving-tips">
+                <strong>{t('usage.analysis.reduceTitle')}</strong>
+                <ul>
+                  <li>{t('usage.analysis.tipRtk')}</li>
+                  <li>{t('usage.analysis.tipApi')}</li>
+                  <li>{t('usage.analysis.tipLocal')}</li>
+                </ul>
+              </aside>
+            </section>
+          )}
+
+          {openPanel === 'details' && (
+            <div id="usage-details-panel" className="set-compression-details" style={{ display: 'block' }}>
               {/* Per-agent breakdown bar + legend */}
               {byAgent.length > 0 && totalAgentCost > 0 && (
                 <div className="mb-8">
@@ -233,11 +399,11 @@ export function UsageSection(_props: UsageSectionProps) {
               )}
 
               {/* Recent rows (most-recent first, paginated) */}
-              {report.rows.length === 0 ? (
+              {filteredReport.rows.length === 0 ? (
                 <p className="text-muted text-sm" data-testid="usage-empty">{t('usage.empty')}</p>
               ) : (() => {
-                const ordered = [...report.rows].reverse();
-                const perPage = rowsPerPage(report.period_kind);
+                const ordered = [...filteredReport.rows].reverse();
+                const perPage = rowsPerPage(filteredReport.period_kind);
                 const pageCount = Math.max(1, Math.ceil(ordered.length / perPage));
                 const safePage = Math.min(page, pageCount - 1);
                 const pageRows = ordered.slice(safePage * perPage, safePage * perPage + perPage);
@@ -257,7 +423,7 @@ export function UsageSection(_props: UsageSectionProps) {
                       <tbody>
                         {pageRows.map((r, i) => (
                           <tr key={`${r.period}-${i}`}>
-                            <td>{formatPeriod(report.period_kind, r.period, locale)}</td>
+                            <td>{formatPeriod(filteredReport.period_kind, r.period, locale)}</td>
                             <td style={{ textAlign: 'right' }}>{fmtTokens(r.input_tokens)}</td>
                             <td style={{ textAlign: 'right' }}>{fmtTokens(r.output_tokens)}</td>
                             <td style={{ textAlign: 'right' }} title={t('usage.cacheTooltip')}>

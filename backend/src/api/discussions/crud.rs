@@ -56,10 +56,23 @@ pub async fn list(
 pub async fn get(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Json<ApiResponse<Discussion>> {
+) -> Json<ApiResponse<crate::models::DiscussionDetail>> {
     match state
         .db
-        .with_conn(move |conn| crate::db::discussions::get_discussion(conn, &id))
+        .with_conn(move |conn| {
+            let Some(discussion) = crate::db::discussions::get_discussion(conn, &id)? else {
+                return Ok(None);
+            };
+            let active_agent_dispatches = crate::db::agent_dispatch::list_active_for_discussion(
+                conn,
+                &id,
+                &discussion.agent,
+            )?;
+            Ok(Some(crate::models::DiscussionDetail {
+                discussion,
+                active_agent_dispatches,
+            }))
+        })
         .await
     {
         Ok(Some(d)) => Json(ApiResponse::ok(d)),
@@ -79,6 +92,44 @@ pub async fn native_agent_mode(
         .await
     {
         Ok(Some(disabled)) => Json(ApiResponse::ok(DiscussionNativeAgentMode { disabled })),
+        Ok(None) => Json(ApiResponse::err("Discussion not found")),
+        Err(error) => Json(ApiResponse::err(format!("DB error: {error}"))),
+    }
+}
+
+/// GET /api/discussions/{id}/agent-handoffs
+pub async fn agent_handoff_mode(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<ApiResponse<DiscussionAgentHandoffMode>> {
+    let (global_enabled, global_paid_limit) = {
+        let config = state.config.read().await;
+        (
+            config.server.agent_handoffs_enabled,
+            (!config.server.agent_handoff_paid_unlimited)
+                .then_some(config.server.agent_handoff_paid_limit.min(5)),
+        )
+    };
+    match state
+        .db
+        .with_read_conn(move |conn| {
+            crate::db::discussions::get_disc_agent_handoff_policy(conn, &id)
+        })
+        .await
+    {
+        Ok(Some((disabled, unlimited_override))) => {
+            Json(ApiResponse::ok(DiscussionAgentHandoffMode {
+                global_enabled,
+                disabled,
+                unlimited_override,
+                effective_enabled: global_enabled && !disabled,
+                paid_limit: if unlimited_override {
+                    None
+                } else {
+                    global_paid_limit
+                },
+            }))
+        }
         Ok(None) => Json(ApiResponse::err("Discussion not found")),
         Err(error) => Json(ApiResponse::err(format!("DB error: {error}"))),
     }
@@ -347,6 +398,8 @@ pub async fn update(
     let new_agent = req.agent;
     let summary_strategy = req.summary_strategy;
     let no_agent = req.no_agent;
+    let agent_handoffs_disabled = req.agent_handoffs_disabled;
+    let agent_handoffs_unlimited = req.agent_handoffs_unlimited;
 
     // Reject conflicting directives on update
     if let Some(ref ids) = directive_ids {
@@ -414,6 +467,14 @@ pub async fn update(
             if let Some(disabled) = no_agent {
                 updated =
                     crate::db::discussions::set_disc_no_agent(conn, &id, disabled)? || updated;
+            }
+            if agent_handoffs_disabled.is_some() || agent_handoffs_unlimited.is_some() {
+                updated = crate::db::discussions::set_disc_agent_handoff_policy(
+                    conn,
+                    &id,
+                    agent_handoffs_disabled,
+                    agent_handoffs_unlimited,
+                )? || updated;
             }
             Ok(updated)
         })
@@ -654,6 +715,53 @@ mod tests {
         let state = state_with_disc("d-idle").await;
         let resp = delete(State(state), Path("d-idle".to_string())).await;
         assert!(resp.0.success);
+    }
+
+    #[tokio::test]
+    async fn get_discussion_exposes_each_active_dispatch_with_its_trigger_turn() {
+        let state = state_with_disc("d-overlap").await;
+        state
+            .db
+            .with_conn(|conn| {
+                let now = chrono::Utc::now().to_rfc3339();
+                conn.execute(
+                    "INSERT INTO messages (
+                         id, discussion_id, role, channel, content, timestamp,
+                         sort_order, received_at
+                     ) VALUES ('u-overlap', 'd-overlap', 'User', 'main', 'go', ?1, 0, ?1)",
+                    [&now],
+                )?;
+                crate::db::agent_dispatch::enqueue(
+                    conn,
+                    crate::db::agent_dispatch::NewAgentDispatchJob {
+                        id: "job-overlap",
+                        discussion_id: "d-overlap",
+                        trigger_message_id: "u-overlap",
+                        trigger_sort_order: 0,
+                        dedupe_key: "get-overlap",
+                        agent_override: Some(&crate::models::AgentType::Ollama),
+                        chain_prompt_ids: &[],
+                        batch_item: None,
+                        group_id: None,
+                        group_concurrency_limit: None,
+                    },
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let response = get(State(state), Path("d-overlap".to_string())).await;
+        let detail = response.0.data.expect("discussion detail");
+        assert_eq!(detail.active_agent_dispatches.len(), 1);
+        assert_eq!(
+            detail.active_agent_dispatches[0].trigger_message_id,
+            "u-overlap"
+        );
+        assert_eq!(
+            detail.active_agent_dispatches[0].agent_type,
+            crate::models::AgentType::Ollama
+        );
     }
 
     #[tokio::test]

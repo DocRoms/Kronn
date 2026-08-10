@@ -82,6 +82,25 @@ describe('ProfilesSection — mount', () => {
     expect(screen.getByText('Mia')).toBeTruthy();
   });
 
+  it('distinguishes Kronn profiles from personal profiles', async () => {
+    await mountProfiles();
+    const cards = [...document.querySelectorAll('.set-profile-card')];
+    expect(cards[0]).toHaveAttribute('data-origin', 'kronn');
+    expect(cards[0].textContent).toContain('config.originKronn');
+    expect(cards[1]).toHaveAttribute('data-origin', 'personal');
+    expect(cards[1].textContent).toContain('config.originPersonal');
+  });
+
+  it('applies the shared provenance filter', async () => {
+    await act(async () => {
+      render(<ProfilesSection originFilter="personal" toast={vi.fn() as never} t={t} />);
+    });
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+
+    expect(screen.queryByText('Architect')).not.toBeInTheDocument();
+    expect(screen.getByText('QA Lead')).toBeInTheDocument();
+  });
+
   it('survives a failed list fetch without crashing the card', async () => {
     profiles.list.mockRejectedValue(new Error('500'));
     await mountProfiles();

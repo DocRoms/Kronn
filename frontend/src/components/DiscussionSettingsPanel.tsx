@@ -1,10 +1,13 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import {
+  AlertTriangle,
   Check,
   ChevronRight,
   Cpu,
   FileText,
+  GitFork,
+  Info,
   Search,
   Server,
   Share2,
@@ -30,6 +33,7 @@ import type {
   Contact,
   Directive,
   Discussion,
+  DiscussionAgentHandoffMode,
   McpConfigDisplay,
   McpIncompatibility,
   Project,
@@ -73,6 +77,19 @@ export function DiscussionSettingsPanel({
   const { t } = useT();
   const [expandedSection, setExpandedSection] = useState<ConfigSection>(null);
   const [mcpSearch, setMcpSearch] = useState('');
+  const [handoffMode, setHandoffMode] = useState<DiscussionAgentHandoffMode | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    discussionsApi.agentHandoffMode(discussion.id)
+      .then(mode => {
+        if (active) setHandoffMode(mode);
+      })
+      .catch(() => {
+        if (active) setHandoffMode(null);
+      });
+    return () => { active = false; };
+  }, [discussion.id]);
 
   const discussionMcps = useMemo(() => {
     const projectId = discussion.project_id;
@@ -103,6 +120,95 @@ export function DiscussionSettingsPanel({
       toast(userError(cause), 'error');
     }
   };
+
+  const setAgentCollaborationMode = async (mode: 'default' | 'disabled' | 'unlimited') => {
+    const previous = handoffMode;
+    if (!previous) return;
+    setHandoffMode({
+      ...previous,
+      disabled: mode === 'disabled',
+      unlimited_override: mode === 'unlimited',
+      effective_enabled: previous.global_enabled && mode !== 'disabled',
+      paid_limit: mode === 'unlimited' ? null : previous.paid_limit,
+    });
+    try {
+      await discussionsApi.update(discussion.id, {
+        agent_handoffs_disabled: mode === 'disabled',
+        agent_handoffs_unlimited: mode === 'unlimited',
+      });
+      setHandoffMode(await discussionsApi.agentHandoffMode(discussion.id));
+      onDiscussionUpdated();
+    } catch (cause) {
+      setHandoffMode(previous);
+      toast(userError(cause), 'error');
+    }
+  };
+
+  const agentCollaborationControl = (
+    <div className="disc-settings-handoff" data-enabled={handoffMode?.effective_enabled === true}>
+      <div className="disc-settings-handoff-copy">
+        <GitFork size={13} aria-hidden="true" />
+        <span>
+          <strong>{t('disc.agentHandoffTitle')}</strong>
+          <small>
+            {handoffMode?.global_enabled
+              ? handoffMode.disabled
+                ? t('disc.agentHandoffDiscussionOff')
+                : handoffMode.paid_limit === null
+                  ? t('disc.agentHandoffHintUnlimited')
+                  : t('disc.agentHandoffHint', handoffMode.paid_limit)
+              : t('disc.agentHandoffGlobalOff')}
+          </small>
+        </span>
+      </div>
+      <div
+        className="disc-settings-handoff-modes"
+        role="radiogroup"
+        aria-label={t('disc.agentHandoffModeLabel')}
+      >
+        {(['default', 'disabled', 'unlimited'] as const).map(mode => {
+          const active = mode === 'disabled'
+            ? handoffMode?.disabled === true
+            : mode === 'unlimited'
+              ? handoffMode?.unlimited_override === true && handoffMode.disabled === false
+              : handoffMode?.disabled === false && handoffMode.unlimited_override === false;
+          return (
+            <button
+              key={mode}
+              type="button"
+              role="radio"
+              aria-checked={active}
+              data-active={active}
+              disabled={!handoffMode?.global_enabled}
+              onClick={() => void setAgentCollaborationMode(mode)}
+            >
+              {t(`disc.agentHandoffMode.${mode}`)}
+            </button>
+          );
+        })}
+      </div>
+      {handoffMode?.effective_enabled && (
+        <div className="disc-settings-handoff-chain-note" role="note">
+          <Info size={12} aria-hidden="true" />
+          <span>
+            {handoffMode.paid_limit === null
+              ? t('disc.agentHandoffChainUnlimited')
+              : t('disc.agentHandoffChainLimited', handoffMode.paid_limit)}
+          </span>
+        </div>
+      )}
+      <div className="disc-settings-handoff-cli-note" role="note">
+        <Info size={12} aria-hidden="true" />
+        <span>{t('disc.agentHandoffCliUnaffected')}</span>
+      </div>
+      {handoffMode?.effective_enabled && handoffMode.paid_limit === null && (
+        <div className="disc-settings-handoff-warning" role="alert">
+          <AlertTriangle size={12} aria-hidden="true" />
+          {t('disc.agentHandoffUnlimitedWarning')}
+        </div>
+      )}
+    </div>
+  );
 
   return (
     <aside className="disc-tool-panel disc-settings-panel" aria-label={t('disc.settingsPanel')}>
@@ -137,6 +243,7 @@ export function DiscussionSettingsPanel({
             <span title={t('directives.title')}><FileText size={11} /> {directiveCount}</span>
             <span title={t('disc.mcps')}><Server size={11} /> {discussionMcps.length}</span>
           </div>
+          {agentCollaborationControl}
         </section>
 
         {contacts.length > 0 && (
@@ -339,6 +446,7 @@ export function DiscussionSettingsPanel({
               </div>
             )}
           </div>
+
         </section>
 
         <section className="disc-settings-section">

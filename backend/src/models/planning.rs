@@ -320,6 +320,9 @@ pub struct CreatePlanningTaskLink {
 #[ts(export)]
 pub struct CreatePlanningTaskRequest {
     pub title: String,
+    /// Optional discussion to link atomically as an active plan item.
+    #[serde(default)]
+    pub discussion_id: Option<String>,
     /// Opaque caller-scoped retry key. The same key and content returns the
     /// existing task; reusing it for different content is a conflict.
     #[serde(default)]
