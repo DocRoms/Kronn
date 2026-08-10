@@ -6085,6 +6085,9 @@ class PlanningToolTests(unittest.TestCase):
         )
         task_list = next(tool for tool in self.mod.TOOLS if tool["name"] == "task_list")
         self.assertEqual(task_list["inputSchema"]["properties"]["limit"]["maximum"], 100)
+        task_create = next(tool for tool in self.mod.TOOLS if tool["name"] == "task_create")
+        self.assertIn("discussion_id", task_create["inputSchema"]["properties"])
+        self.assertIn("no bound discussion", task_create["description"])
 
     def test_planning_contract_parity_with_kronn_launched_prompt(self):
         # KT-29 (0.9.2-I) parity: the MCP `instructions` block and the
@@ -6135,7 +6138,7 @@ class PlanningToolTests(unittest.TestCase):
         resp = self.mod._handle(
             {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}
         )
-        self.assertEqual(resp["result"]["serverInfo"]["version"], "0.3.0")
+        self.assertEqual(resp["result"]["serverInfo"]["version"], "0.3.1")
 
     def test_plan_get_defaults_to_current_discussion(self):
         with mock.patch.object(self.mod, "_http", self.fake_http):
@@ -6197,6 +6200,7 @@ class PlanningToolTests(unittest.TestCase):
         method, path, body = self.fake_http.call_args.args
         self.assertEqual((method, path), ("POST", "/api/planning/tasks"))
         self.assertEqual(body["title"], "Plan it")
+        self.assertEqual(body["discussion_id"], "disc-plan")
         self.assertEqual(body["actor"], {
             "kind": "agent",
             "id": "Codex",
@@ -6206,6 +6210,30 @@ class PlanningToolTests(unittest.TestCase):
             b"disc-plan\0message\0MSG-12345678"
         ).hexdigest()
         self.assertEqual(body["idempotency_key"], expected_key)
+
+    def test_task_create_targets_an_explicit_discussion_and_scopes_retries_to_it(self):
+        self.mod._CURRENT_DISC_ID = None
+        with mock.patch.object(self.mod, "_http", self.fake_http):
+            self.mod.call_task_create({
+                "title": "Plan elsewhere",
+                "discussion_id": "disc-created-by-agent",
+                "idempotency_key": "logical-create-1",
+            })
+        method, path, body = self.fake_http.call_args.args
+        self.assertEqual((method, path), ("POST", "/api/planning/tasks"))
+        self.assertEqual(body["discussion_id"], "disc-created-by-agent")
+        expected_key = "mcp-task-create:" + hashlib.sha256(
+            b"disc-created-by-agent\0explicit\0logical-create-1"
+        ).hexdigest()
+        self.assertEqual(body["idempotency_key"], expected_key)
+
+    def test_task_create_without_a_target_still_requires_a_runtime_binding(self):
+        self.mod._CURRENT_DISC_ID = None
+        with mock.patch.object(self.mod, "_http", self.fake_http):
+            with self.assertRaises(RuntimeError) as missing_binding:
+                self.mod.call_task_create({"title": "No implicit target"})
+        self.assertIn("no disc bound", str(missing_binding.exception))
+        self.fake_http.assert_not_called()
 
     def test_task_create_scopes_explicit_idempotency_without_using_the_title(self):
         with mock.patch.object(self.mod, "_http", self.fake_http), \

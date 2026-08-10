@@ -5,6 +5,8 @@
 // ║  Regenerate: `make typegen`. CI fails if this file drifts from the models.  ║
 // ╚═══════════════════════════════════════════════════════════════════════════╝
 
+export type ActiveAgentDispatch = { id: string, trigger_message_id: string, agent_type: AgentType, status: string, };
+
 /**
  * Result of adding a contact, with optional diagnostic hint for unreachable peers.
  */
@@ -132,7 +134,15 @@ export type AgentConfig = { path: string | null, installed: boolean, version: st
  * Optional UI color used for this agent's canonical `@mention`.
  * `None` keeps the built-in frontend color.
  */
-mention_color?: string | null, };
+mention_color?: string | null,
+/**
+ * Where to reach an agent that is a server rather than a binary. Only
+ * LiteLLM uses it today: its proxy can live anywhere, so the endpoint is
+ * the user's to declare. The matching credential lives in `TokensConfig`
+ * under the `litellm` provider, never here — this struct is serialised
+ * to the frontend.
+ */
+base_url?: string | null, };
 
 /**
  * One decision row. Mirrors the `agent_decisions` table 1:1 — see
@@ -192,6 +202,9 @@ rtk_hook_configured: boolean,
  *   - `"vibe.sdk_fallback"` — Vibe SDK signature mismatch detected
  *     (sentinel file present); the runner falls back to direct API
  *     mode, losing the local-tools (bash/file I/O) capability.
+ *   - `"vibe.project_config_untrusted"` — Vibe's workspace-trust store
+ *     rejects a `.vibe` directory Kronn manages, so it loads none of
+ *     the MCP servers Kronn wrote there.
  *
  * `None` means "no degradation detected, agent is healthy".
  */
@@ -205,7 +218,7 @@ token_estimate: number, };
 
 export type AgentProjectUsage = { project_id: string, project_name: string, tokens_used: number, message_count: number, };
 
-export type AgentsConfig = { claude_code: AgentConfig, codex: AgentConfig, gemini_cli: AgentConfig, kiro: AgentConfig, vibe: AgentConfig, copilot_cli: AgentConfig, ollama: AgentConfig,
+export type AgentsConfig = { claude_code: AgentConfig, codex: AgentConfig, gemini_cli: AgentConfig, kiro: AgentConfig, vibe: AgentConfig, copilot_cli: AgentConfig, ollama: AgentConfig, lite_llm: AgentConfig,
 /**
  * Per-agent model tier overrides (Economy/Reasoning model names).
  */
@@ -221,7 +234,7 @@ model?: string | null,
  */
 tier?: ModelTier | null, reasoning_effort?: string | null, max_tokens?: number | null, };
 
-export type AgentType = "ClaudeCode" | "Codex" | "Vibe" | "GeminiCli" | "Kiro" | "CopilotCli" | "Ollama" | "Custom";
+export type AgentType = "ClaudeCode" | "Codex" | "Vibe" | "GeminiCli" | "Kiro" | "CopilotCli" | "Ollama" | "LiteLlm" | "Custom";
 
 export type AgentUsageSummary = { agent_type: string, total_tokens: number, message_count: number, by_project: Array<AgentProjectUsage>, };
 
@@ -237,7 +250,13 @@ export type AiFileNode = { path: string, name: string, is_dir: boolean, children
 
 export type AiSearchResult = { path: string, match_count: number, };
 
-export type ApiAuthKind = { "ApiKeyQuery": { param_name: string, env_key: string, } } | { "ApiKeyHeader": { header_name: string, env_key: string, } } | { "Bearer": { env_key: string, } } | { "Basic": { user_env: string, password_env: string, } } | { "BasicApiKey": { env_key: string, } } | { "CliToken": { command: string, args: Array<string>, inject: TokenInjection, } } | { "OAuth2ClientCredentials": { token_url: string, client_id_env: string, client_secret_env: string, scope: string, extra_headers?: Array<OAuth2ExtraHeader>, } } | { "TokenExchange": {
+export type ApiAuthKind = { "ApiKeyQuery": { param_name: string, env_key: string, } } | { "ApiKeyHeader": { header_name: string, env_key: string, } } | { "Bearer": { env_key: string, } } | { "Basic": { user_env: string, password_env: string, } } | { "BasicApiKey": { env_key: string, } } | { "CliToken": { command: string, args: Array<string>, inject: TokenInjection,
+/**
+ * Optional encrypted config key used only if the local CLI cannot
+ * resolve its own credential. Built-in registry entries alone may
+ * declare this fallback.
+ */
+fallback_env_key?: string, } } | { "OAuth2ClientCredentials": { token_url: string, client_id_env: string, client_secret_env: string, scope: string, extra_headers?: Array<OAuth2ExtraHeader>, } } | { "TokenExchange": {
 /**
  * Endpoint relative to the plugin's `base_url`. Examples:
  * `/sessions`, `/oauth/token`, `/v1/auth/exchange`.
@@ -346,7 +365,7 @@ export type AppConfig = { server: ServerConfig, tokens: TokensConfig, scan: Scan
  */
 language: string,
 /**
- * UI language (FR/EN/ES) for the React frontend. Persisted here so a
+ * UI language (FR/EN/ES/ZH) for the React frontend. Persisted here so a
  * Tauri WebView2 localStorage wipe doesn't reset the user's choice
  * every time the app updates or Windows rotates the WebView2 profile.
  * Frontend still writes to localStorage as a fast-path + fallback when
@@ -867,6 +886,10 @@ export type CreatePlanningTaskLink = { label: string, url: string, };
 
 export type CreatePlanningTaskRequest = { title: string,
 /**
+ * Optional discussion to link atomically as an active plan item.
+ */
+discussion_id?: string | null,
+/**
  * Opaque caller-scoped retry key. The same key and content returns the
  * existing task; reusing it for different content is a conflict.
  */
@@ -1222,6 +1245,99 @@ export type DiscUnlinkRequest = { disc_id: string,
 source_agent?: string | null, source_session_id?: string | null, };
 
 export type Discussion = { id: string, project_id: string | null, title: string, agent: AgentType, language: string, participants: Array<AgentType>, messages: Array<DiscussionMessage>, message_count: number,
+/**
+ * Subset of `message_count` excluding `MessageRole::System` rows. The
+ * streaming layer persists every tool call + every cached-summary
+ * breadcrumb as its own System message, so `message_count` is inflated
+ * from the user's point of view ("2 réponses + 50 outils" comptait 52).
+ * The unread badge tracks this count instead, so System breadcrumbs
+ * don't show up as "messages à lire".
+ */
+non_system_message_count: number, skill_ids?: Array<string>, profile_ids?: Array<string>, directive_ids?: Array<string>, archived: boolean,
+/**
+ * User-pinned / favorite discussion — appears in a dedicated "Favorites"
+ * section at the top of the sidebar regardless of project grouping.
+ */
+pinned: boolean, workspace_mode: string, workspace_path?: string | null, worktree_branch?: string | null,
+/**
+ * Model capability tier for this discussion.
+ */
+tier: ModelTier,
+/**
+ * 0.8.10 — explicit model override for this discussion (e.g. inherited
+ * from the Quick Prompt that launched it). Wins over `tier` at run time
+ * (threaded to the agent as `model_override`). `None` = resolve from tier.
+ */
+model?: string | null,
+/**
+ * Pin the first message (protocol prompt) — always include it in agent prompts, never summarize it.
+ * Used for validation, bootstrap, and briefing discussions.
+ */
+pin_first_message: boolean,
+/**
+ * Cached summary of older messages (eco-design: avoids re-sending full history).
+ */
+summary_cache?: string | null,
+/**
+ * Index of the last message included in summary_cache (0-based).
+ */
+summary_up_to_msg_idx?: number | null,
+/**
+ * How summaries are produced for this discussion. See `SummaryStrategy`
+ * for the semantics. Default `Auto` keeps the historical behaviour
+ * (per-agent thresholds with auto-fire after every reply).
+ */
+summary_strategy: SummaryStrategy,
+/**
+ * Cumulative count of `kronn-internal` tool calls made by the agent
+ * on this discussion. Bumped each time `disc_meta`, `disc_get_message`
+ * or `disc_summarize` is hit. Surfaced in the ChatHeader as a small
+ * "🔧 N" pill so the user can see when the agent is actively
+ * querying its history.
+ */
+introspection_call_count: number,
+/**
+ * Shared discussion UUID (None = local-only, Some = replicated with peers).
+ */
+shared_id?: string | null,
+/**
+ * Contact IDs this discussion is shared with.
+ */
+shared_with?: Array<string>,
+/**
+ * ID of the batch WorkflowRun that spawned this discussion, if any.
+ * Used for sidebar grouping under the project ("Cadrage to-Frame — 10 avr").
+ * Null for manual discussions created outside of a batch workflow.
+ */
+workflow_run_id?: string | null,
+/**
+ * The disc is owed an agent run that hasn't produced a durable trace yet
+ * (queued batch child, or a reply in flight). DB-backed so the sidebar's
+ * "en file" state survives navigation, reloads and missed WS frames.
+ */
+awaiting_agent: boolean,
+/**
+ * Test mode — branch the main repo was on before the user entered test
+ * mode. `Some` means the user is actively testing this discussion's
+ * branch in their main repo; `None` means normal worktree operation.
+ * Used by `test-mode/exit` to checkout back to the user's prior state.
+ */
+test_mode_restore_branch?: string | null,
+/**
+ * Test mode — if the main repo was dirty at enter time and the user opted
+ * in to auto-stash, this holds the stash message (e.g.
+ * `kronn:auto-<disc_id>`) so `exit` can pop the exact stash.
+ * `None` when the main repo was clean or the user declined the stash.
+ */
+test_mode_stash_ref?: string | null, created_at: string, updated_at: string, };
+
+export type DiscussionAgentHandoffMode = { global_enabled: boolean, disabled: boolean, unlimited_override: boolean, effective_enabled: boolean,
+/**
+ * `None` means no financial quota; structural loop guards still apply.
+ */
+paid_limit: number | null, };
+
+export type DiscussionDetail = { active_agent_dispatches: Array<ActiveAgentDispatch>, id: string, project_id: string | null, title: string, agent: AgentType, language: string, participants: Array<AgentType>, messages: Array<DiscussionMessage>, message_count: number,
 /**
  * Subset of `message_count` excluding `MessageRole::System` rows. The
  * streaming layer persists every tool call + every cached-summary
@@ -1949,6 +2065,66 @@ export type LintReport = { unsourced_count: number, flagged_spans: Array<Flagged
  */
 unverified_count: number, };
 
+export type LiteLlmHealthResponse = {
+/**
+ * "online", "offline", "not_installed", "unreachable"
+ */
+status: string, endpoint: string, models_count: number,
+/**
+ * User-facing explanation when status != "online".
+ */
+hint: string | null,
+/**
+ * Whether an endpoint has ever been saved. Distinguishes "never set up"
+ * from "set up but currently down", which are different cards.
+ */
+configured: boolean, };
+
+export type LiteLlmModel = {
+/**
+ * The id the proxy answers to — what goes in a step's `model_override`.
+ */
+id: string,
+/**
+ * The model actually serving this alias, e.g. `ollama_chat/qwen3:4b`.
+ * `None` when the proxy does not disclose it (`/model/info` is optional
+ * and may be admin-gated on a corporate deployment).
+ */
+backing_model: string | null,
+/**
+ * Provider parsed from `backing_model`'s prefix (`ollama`, `azure`, …).
+ * Deliberately NOT `owned_by`: LiteLLM hardcodes that to "openai" for
+ * API compatibility even when a local Ollama model answers, which reads
+ * as false provenance in the UI.
+ */
+provider: string | null, };
+
+export type LiteLlmModelFailure = { model: string, status_code: number, error_message: string, first_failed_at: string, last_failed_at: string, failure_count: number, };
+
+export type LiteLlmModelFailuresResponse = { failures: Array<LiteLlmModelFailure>, };
+
+export type LiteLlmModelRetryRequest = { model: string, };
+
+export type LiteLlmModelRetryResponse = { healthy: boolean, failure: LiteLlmModelFailure | null, };
+
+export type LiteLlmModelsResponse = { models: Array<LiteLlmModel>, };
+
+/**
+ * Connection attempt from the settings card. The key is write-only: it is
+ * stored in the encrypted token store and never read back to the frontend.
+ */
+export type LiteLlmTestRequest = { base_url: string,
+/**
+ * `None` leaves an already-stored key untouched; `Some("")` clears it.
+ */
+api_key?: string | null, };
+
+/**
+ * Outcome of a connection attempt. `saved` tells the card whether it may
+ * move on to model selection — a probe that failed persists nothing.
+ */
+export type LiteLlmTestResponse = { ok: boolean, saved: boolean, status: string, endpoint: string, models: Array<LiteLlmModel>, hint: string | null, };
+
 /**
  * A configured instance of an MCP server — with label, env secrets, etc.
  * Multiple projects can share the same config (deduplication by config_hash).
@@ -2171,7 +2347,7 @@ default?: string | null, reasoning?: string | null, };
 /**
  * Global model tier overrides per agent.
  */
-export type ModelTiersConfig = { claude_code: ModelTierConfig, codex: ModelTierConfig, gemini_cli: ModelTierConfig, kiro: ModelTierConfig, vibe: ModelTierConfig, copilot_cli: ModelTierConfig, ollama: ModelTierConfig, };
+export type ModelTiersConfig = { claude_code: ModelTierConfig, codex: ModelTierConfig, gemini_cli: ModelTierConfig, kiro: ModelTierConfig, vibe: ModelTierConfig, copilot_cli: ModelTierConfig, ollama: ModelTierConfig, lite_llm: ModelTierConfig, };
 
 /**
  * Config for the "Multi-agent review" option on an Agent step (see
@@ -3176,7 +3352,28 @@ default_model_tier: ModelTier,
  * Strict semantic — only consulted on NEW disc creation. Existing
  * discs keep their saved value (no retroactive change).
  */
-default_summary_strategy: SummaryStrategy, };
+default_summary_strategy: SummaryStrategy,
+/**
+ * Allow an agent's final prose to explicitly hand work to another
+ * attached agent through a canonical `@alias`. Opt-in because one
+ * generated reply can otherwise start additional paid runs.
+ */
+agent_handoffs_enabled: boolean,
+/**
+ * Maximum paid or cost-unknown handoffs spawned from one originating
+ * human turn. Ollama is local and uses a separate fixed safety ceiling.
+ */
+agent_handoff_paid_limit: number,
+/**
+ * Remove the paid/unknown per-turn quota while keeping the structural
+ * loop guards (attached agents only and bounded delegation depth).
+ */
+agent_handoff_paid_unlimited: boolean,
+/**
+ * Agents that cannot be started automatically from another agent's
+ * generated reply. Empty keeps the historical allow-all behaviour.
+ */
+agent_handoff_blocked_agents: Array<AgentType>, };
 
 export type ServerConfigPublic = { host: string, port: number, domain: string | null, max_concurrent_agents: number, agent_stall_timeout_min: number, auth_enabled: boolean, pseudo: string | null, avatar_email: string | null, bio: string | null, debug_mode: boolean,
 /**
@@ -3196,7 +3393,7 @@ default_model_tier: ModelTier,
  * `Off` by default in 0.8.6 onwards. UI surfaces an explanation of
  * when to re-enable (small-context agents without MCP access).
  */
-default_summary_strategy: SummaryStrategy, };
+default_summary_strategy: SummaryStrategy, agent_handoffs_enabled: boolean, agent_handoff_paid_limit: number, agent_handoff_paid_unlimited: boolean, agent_handoff_blocked_agents: Array<AgentType>, };
 
 export type SetAgentAccessRequest = { agent: AgentType, full_access: boolean, };
 
@@ -3646,7 +3843,17 @@ summary_strategy?: SummaryStrategy | null,
  * Disable or restore Kronn's native fallback for this discussion. Joined
  * peers remain participants and continue receiving turns.
  */
-no_agent?: boolean | null, };
+no_agent?: boolean | null,
+/**
+ * Disable generated agent-to-agent handoffs for this discussion even
+ * when the global opt-in is enabled.
+ */
+agent_handoffs_disabled?: boolean | null,
+/**
+ * Remove the financial quota for this discussion only. The global master
+ * switch, per-agent blocks and structural loop guards still apply.
+ */
+agent_handoffs_unlimited?: boolean | null, };
 
 export type UpdateMcpConfigRequest = { label?: string | null, env?: Record<string, string> | null, args_override?: Array<string> | null, is_global?: boolean | null, include_general?: boolean | null, host_sync?: HostSyncMode | null, preferred_interface?: PluginInterface | null, };
 
@@ -3701,7 +3908,7 @@ export type UsageEntry = { id: string, name: string, tokens_used: number, cost_u
  * Per-model cost within a row — lets the frontend roll up by agent
  * (model name prefix → Claude / Codex / Gemini …) for the breakdown chart.
  */
-export type UsageModelBreakdown = { model_name: string, cost: number, total_tokens: number, };
+export type UsageModelBreakdown = { model_name: string, cost: number, total_tokens: number, input_tokens: number, output_tokens: number, cache_creation_tokens: number, cache_read_tokens: number, };
 
 /**
  * A full usage report for one period kind.
@@ -4053,7 +4260,13 @@ export type WorkflowRunSummary = { id: string, status: RunStatus, started_at: st
 
 export type WorkflowSafety = { sandbox: boolean, max_files?: number | null, max_lines?: number | null, require_approval: boolean, };
 
-export type WorkflowStep = { name: string, step_type: StepType, description?: string | null, agent: AgentType, prompt_template: string, mode: StepMode, output_format: StepOutputFormat, mcp_config_ids?: Array<string>, agent_settings?: AgentSettings | null, on_result?: Array<StepConditionRule>,
+export type WorkflowStep = {
+/**
+ * Durable opaque identity of this step. `name` remains the editable
+ * workflow-local alias used by expressions and Goto rules; `id` is the
+ * stable identity exposed by the UI and APIs.
+ */
+id?: string | null, name: string, step_type: StepType, description?: string | null, agent: AgentType, prompt_template: string, mode: StepMode, output_format: StepOutputFormat, mcp_config_ids?: Array<string>, agent_settings?: AgentSettings | null, on_result?: Array<StepConditionRule>,
 /**
  * #8 — first-class handling of a step STALL/timeout. When the step exhausts
  * its attempts on a stall (no output for `stall_timeout_secs`), the runner

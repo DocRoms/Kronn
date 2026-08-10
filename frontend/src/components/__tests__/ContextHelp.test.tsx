@@ -13,6 +13,9 @@ describe('ContextHelp', () => {
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Understand this' }));
     expect(screen.getByRole('dialog')).toHaveTextContent('Contextual explanation');
+    expect(['normal', '400']).toContain(
+      getComputedStyle(screen.getByText('Contextual explanation').parentElement!).fontWeight,
+    );
 
     fireEvent.keyDown(document, { key: 'Escape' });
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();

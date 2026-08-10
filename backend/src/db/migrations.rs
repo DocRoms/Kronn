@@ -401,6 +401,26 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "106_awareness_offered_cursor",
         include_str!("sql/106_awareness_offered_cursor.sql"),
     ),
+    (
+        "107_workflow_step_ids",
+        include_str!("sql/107_workflow_step_ids.sql"),
+    ),
+    (
+        "108_lite_llm_model_failures",
+        include_str!("sql/108_lite_llm_model_failures.sql"),
+    ),
+    (
+        "109_agent_reply_turn_links",
+        include_str!("sql/109_agent_reply_turn_links.sql"),
+    ),
+    (
+        "110_agent_handoff_guard",
+        include_str!("sql/110_agent_handoff_guard.sql"),
+    ),
+    (
+        "111_agent_handoff_discussion_unlimited",
+        include_str!("sql/111_agent_handoff_discussion_unlimited.sql"),
+    ),
 ];
 
 /// Run all migrations, optionally backing up the database file first.
@@ -1017,6 +1037,97 @@ mod tests {
             )
             .unwrap();
         assert_eq!(detached, ("detached".into(), None));
+    }
+
+    #[test]
+    fn workflow_step_ids_migration_backfills_durable_distinct_uuids() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_through(&conn, "106_awareness_offered_cursor").unwrap();
+        let preserved = "11111111-2222-4333-8444-555555555555";
+        conn.execute(
+            "INSERT INTO workflows (
+                 id, name, trigger_json, steps_json, actions_json,
+                 created_at, updated_at, on_failure
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7)",
+            rusqlite::params![
+                "wf-step-ids",
+                "Legacy workflow",
+                "\"Manual\"",
+                format!(r#"[{{"name":"fetch"}},{{"id":"{preserved}","name":"reshape"}}]"#),
+                "[]",
+                "2026-08-09T00:00:00Z",
+                r#"[{"name":"notify_failure"}]"#,
+            ],
+        )
+        .unwrap();
+
+        run(&conn).unwrap();
+
+        let (steps_json, failure_json): (String, String) = conn
+            .query_row(
+                "SELECT steps_json, on_failure FROM workflows WHERE id = ?1",
+                ["wf-step-ids"],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let steps: serde_json::Value = serde_json::from_str(&steps_json).unwrap();
+        let failures: serde_json::Value = serde_json::from_str(&failure_json).unwrap();
+        let fetch_id = steps[0]["id"].as_str().unwrap();
+        let reshape_id = steps[1]["id"].as_str().unwrap();
+        let failure_id = failures[0]["id"].as_str().unwrap();
+
+        assert!(uuid::Uuid::parse_str(fetch_id).is_ok());
+        assert_eq!(reshape_id, preserved);
+        assert!(uuid::Uuid::parse_str(failure_id).is_ok());
+        assert_ne!(fetch_id, reshape_id);
+        assert_ne!(fetch_id, failure_id);
+        assert_eq!(steps[0]["name"], "fetch");
+        assert_eq!(steps[1]["name"], "reshape");
+    }
+
+    #[test]
+    fn agent_reply_turn_links_backfill_the_dispatch_trigger() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_through(&conn, "108_lite_llm_model_failures").unwrap();
+        conn.execute(
+            "INSERT INTO discussions (id, title, created_at, updated_at)
+             VALUES ('d-turns', 'Turns', '2026-08-10T00:00:00Z', '2026-08-10T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute_batch(
+            "INSERT INTO messages (
+                 id, discussion_id, role, content, timestamp, sort_order
+             ) VALUES
+                 ('u-1', 'd-turns', 'User', 'first', '2026-08-10T00:00:00Z', 0),
+                 ('u-2', 'd-turns', 'User', 'second', '2026-08-10T00:00:01Z', 1);
+             INSERT INTO agent_dispatch_jobs (
+                 id, discussion_id, trigger_message_id, trigger_sort_order,
+                 dedupe_key, status, available_at, created_at, updated_at
+             ) VALUES (
+                 'job-1', 'd-turns', 'u-1', 0, 'turn-link-job', 'Completed',
+                 '2026-08-10T00:00:00Z', '2026-08-10T00:00:00Z', '2026-08-10T00:00:02Z'
+             );
+             INSERT INTO messages (
+                 id, discussion_id, role, content, agent_type, timestamp,
+                 sort_order, agent_dispatch_job_id
+             ) VALUES (
+                 'a-late', 'd-turns', 'Agent', 'late reply', 'Ollama',
+                 '2026-08-10T00:00:02Z', 2, 'job-1'
+             );",
+        )
+        .unwrap();
+
+        run(&conn).unwrap();
+
+        let reply_to: Option<String> = conn
+            .query_row(
+                "SELECT reply_to_message_id FROM messages WHERE id = 'a-late'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(reply_to.as_deref(), Some("u-1"));
     }
 
     #[test]

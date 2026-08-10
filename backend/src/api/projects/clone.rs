@@ -98,7 +98,12 @@ async fn candidate_clone_urls(url: &str, state: &AppState) -> Vec<String> {
         crate::api::discover::find_all_provider_sources(state)
             .await
             .into_iter()
-            .map(|(source, token)| (source.provider, token))
+            .filter_map(|entry| match entry.auth {
+                crate::api::discover::RepoSourceAuth::Token { token, .. } => {
+                    Some((entry.source.provider, token))
+                }
+                crate::api::discover::RepoSourceAuth::GitLabCli { .. } => None,
+            })
             .collect()
     } else {
         Vec::new()

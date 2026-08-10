@@ -124,6 +124,19 @@ fn normalized_idempotency_key(request: &CreatePlanningTaskRequest) -> Result<Opt
     }
 }
 
+fn normalized_create_discussion_id(request: &CreatePlanningTaskRequest) -> Result<Option<&str>> {
+    match request.discussion_id.as_deref() {
+        Some(discussion_id) => {
+            let discussion_id = discussion_id.trim();
+            if discussion_id.is_empty() {
+                bail!("Discussion ID must not be empty");
+            }
+            Ok(Some(discussion_id))
+        }
+        None => Ok(None),
+    }
+}
+
 fn validate_dod(items: &[CreatePlanningDodItem]) -> Result<()> {
     if items.len() > 200 {
         bail!("A task cannot contain more than 200 Definition of Done items");
@@ -181,6 +194,7 @@ fn create_request_fingerprint(
     request: &CreatePlanningTaskRequest,
     parent_id: Option<&str>,
     tags: &[String],
+    discussion_id: Option<&str>,
 ) -> Result<String> {
     let mut project_ids = request.project_ids.clone();
     project_ids.sort();
@@ -210,7 +224,7 @@ fn create_request_fingerprint(
             })
         })
         .collect::<Vec<_>>();
-    let canonical = serde_json::to_vec(&serde_json::json!({
+    let mut canonical_value = serde_json::json!({
         "title": request.title.trim(),
         "description": request.description,
         "status": request.status,
@@ -220,7 +234,20 @@ fn create_request_fingerprint(
         "tags": normalized_tags,
         "definition_of_done": definition_of_done,
         "links": links,
-    }))?;
+    });
+    // Preserve the pre-discussion-target fingerprint byte-for-byte when the
+    // optional field is absent, so retries created by older clients remain
+    // valid after this additive API change.
+    if let Some(discussion_id) = discussion_id {
+        canonical_value
+            .as_object_mut()
+            .context("Planning task fingerprint must be an object")?
+            .insert(
+                "discussion_id".to_string(),
+                serde_json::Value::String(discussion_id.to_string()),
+            );
+    }
+    let canonical = serde_json::to_vec(&canonical_value)?;
     let digest: String = Sha256::digest(canonical)
         .iter()
         .map(|byte| format!("{byte:02x}"))
@@ -619,6 +646,17 @@ pub fn create_task(
     validate_dod(&request.definition_of_done)?;
     validate_links(&request.links)?;
     let idempotency_key = normalized_idempotency_key(request)?;
+    let discussion_id = normalized_create_discussion_id(request)?;
+    if let Some(discussion_id) = discussion_id {
+        let discussion_exists: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM discussions WHERE id = ?1)",
+            [discussion_id],
+            |row| row.get(0),
+        )?;
+        if !discussion_exists {
+            bail!("Discussion not found");
+        }
+    }
     let tags = normalize_tags(&request.tags)?;
     let parent_id = request
         .parent_id
@@ -629,7 +667,7 @@ pub fn create_task(
         ensure_parent_is_valid(conn, None, parent_id)?;
     }
     let idempotency_fingerprint = idempotency_key
-        .map(|_| create_request_fingerprint(request, parent_id.as_deref(), &tags))
+        .map(|_| create_request_fingerprint(request, parent_id.as_deref(), &tags, discussion_id))
         .transpose()?;
 
     // A direct create may race with the retry of the same MCP call. Acquiring
@@ -704,6 +742,33 @@ pub fn create_task(
             "priority": request.priority,
         }),
     )?;
+    if let Some(discussion_id) = discussion_id {
+        let position: i64 = transaction.query_row(
+            "SELECT COALESCE(MAX(position), -1) + 1
+             FROM planning_task_discussions
+             WHERE discussion_id = ?1 AND placement = 'active'",
+            [discussion_id],
+            |row| row.get(0),
+        )?;
+        transaction.execute(
+            "INSERT INTO planning_task_discussions
+             (task_id, discussion_id, placement, is_primary, position, created_at)
+             VALUES (?1, ?2, 'active', 0, ?3, ?4)",
+            params![id, discussion_id, position, now],
+        )?;
+        insert_event(
+            &transaction,
+            &id,
+            "discussion_linked",
+            &request.actor,
+            serde_json::json!({
+                "discussion_id": discussion_id,
+                "placement": PlanningPlacement::Active,
+                "is_primary": false,
+                "position": position,
+            }),
+        )?;
+    }
     transaction.commit()?;
     get_task(conn, &id)?.context("Created planning task disappeared")
 }
@@ -1674,6 +1739,7 @@ mod tests {
     fn request(title: &str) -> CreatePlanningTaskRequest {
         CreatePlanningTaskRequest {
             title: title.into(),
+            discussion_id: None,
             idempotency_key: None,
             description: String::new(),
             status: PlanningTaskStatus::Todo,
@@ -1729,6 +1795,68 @@ mod tests {
         .unwrap();
         assert_eq!(tagged.items.len(), 1);
         assert_eq!(tagged.items[0].id, first.summary.id);
+    }
+
+    #[test]
+    fn create_fingerprint_stays_compatible_when_discussion_target_is_absent() {
+        let create = request("Legacy retry");
+        let fingerprint = create_request_fingerprint(&create, None, &[], None).unwrap();
+        let legacy_canonical = serde_json::to_vec(&serde_json::json!({
+            "title": "Legacy retry",
+            "description": "",
+            "status": PlanningTaskStatus::Todo,
+            "priority": PlanningTaskPriority::Normal,
+            "parent_id": serde_json::Value::Null,
+            "project_ids": Vec::<String>::new(),
+            "tags": Vec::<String>::new(),
+            "definition_of_done": Vec::<serde_json::Value>::new(),
+            "links": Vec::<serde_json::Value>::new(),
+        }))
+        .unwrap();
+        let legacy_digest: String = Sha256::digest(legacy_canonical)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+
+        assert_eq!(fingerprint, format!("v1:{legacy_digest}"));
+        assert_ne!(
+            fingerprint,
+            create_request_fingerprint(&create, None, &[], Some("disc-target")).unwrap()
+        );
+    }
+
+    #[test]
+    fn create_task_can_atomically_link_an_existing_discussion() {
+        let connection = connection();
+        seed_disc(&connection, "disc-target");
+        let mut create = request("Plan in target");
+        create.discussion_id = Some(" disc-target ".into());
+
+        let task = create_task(&connection, &create).unwrap();
+
+        assert_eq!(task.summary.discussion_ids, vec!["disc-target"]);
+        let plan = get_discussion_plan(&connection, "disc-target").unwrap();
+        assert_eq!(plan.active.len(), 1);
+        assert_eq!(plan.active[0].task.id, task.summary.id);
+        assert!(task
+            .events
+            .iter()
+            .any(|event| event.action == "discussion_linked"));
+    }
+
+    #[test]
+    fn create_task_rejects_an_unknown_discussion_without_leaving_an_orphan() {
+        let connection = connection();
+        let mut create = request("Must not survive");
+        create.discussion_id = Some("missing-discussion".into());
+
+        let error = create_task(&connection, &create).unwrap_err();
+
+        assert!(error.to_string().contains("Discussion not found"));
+        let count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM planning_tasks", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
     }
 
     #[test]

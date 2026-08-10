@@ -342,6 +342,7 @@ pub async fn run_qa(
     // Re-uses the runtime executor so the execution path is identical to a
     // workflow run — same security policy, same retry logic, same envelope.
     let step = WorkflowStep {
+        id: None,
         name: format!("__qa_{}__", qa.id),
         step_type: StepType::ApiCall,
         description: None,
@@ -520,6 +521,7 @@ pub async fn batch_run_qa(
     // Per-field overrides on the step are all None → the executor will
     // pull every API field from the QA.
     let step = WorkflowStep {
+        id: None,
         name: format!("__qa_batch_{}__", qa.id),
         step_type: StepType::BatchApiCall,
         description: None,

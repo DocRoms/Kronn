@@ -467,6 +467,7 @@ fn portable_task_request(
 ) -> CreatePlanningTaskRequest {
     CreatePlanningTaskRequest {
         title: task.summary.title.clone(),
+        discussion_id: None,
         idempotency_key: None,
         description: task.description.clone(),
         status: task.summary.status,
@@ -855,10 +856,11 @@ fn tour_demo_envelope(ui_language: &str) -> DiscussionExportEnvelope {
         .with_timezone(&Utc);
     let user_message_id = TOUR_DEMO_REQUEST_SOURCE_ID.to_string();
     let preview_message_id = TOUR_DEMO_PREVIEW_SOURCE_ID.to_string();
-    let (language, prompt, tour_label, preview_title, preview_description) = match ui_language {
+    let (language, prompt, preview_intro, tour_label, preview_title, preview_description) = match ui_language {
         "en" => (
             "en",
             "Create a short HTML page presenting Kronn in the document viewer.",
+            "A deterministic document prepared for the Kronn guided tour.",
             "Kronn · Guided tour",
             "Live document preview",
             "This HTML is rendered directly in the discussion and can be exported without asking an agent to regenerate it.",
@@ -866,20 +868,30 @@ fn tour_demo_envelope(ui_language: &str) -> DiscussionExportEnvelope {
         "es" => (
             "es",
             "Crea una breve página HTML sobre Kronn en el visor de documentos.",
+            "Un documento determinista preparado para la visita guiada de Kronn.",
             "Kronn · Visita guiada",
             "Vista previa del documento",
             "Este HTML se muestra directamente en la conversación y puede exportarse sin pedir a un agente que lo genere de nuevo.",
         ),
+        "zh" => (
+            "zh",
+            "在文档查看器中创建一个介绍 Kronn 的简短 HTML 页面。",
+            "为 Kronn 引导教程准备的确定性文档。",
+            "Kronn · 引导教程",
+            "实时文档预览",
+            "此 HTML 会直接显示在讨论中，无需让代理重新生成即可导出。",
+        ),
         _ => (
             "fr",
             "Crée une courte page HTML présentant Kronn dans le viewer de documents.",
+            "Un document déterministe préparé pour la visite guidée de Kronn.",
             "Kronn · Visite guidée",
             "Aperçu du document",
             "Ce HTML est affiché directement dans la discussion et peut être exporté sans demander à un agent de le générer à nouveau.",
         ),
     };
     let preview_content = format!(
-        r#"A deterministic document prepared for the Kronn guided tour.
+        r#"{preview_intro}
 
 ```kronn-doc-preview
 <!doctype html>
@@ -1409,6 +1421,7 @@ mod tests {
                     conn,
                     &CreatePlanningTaskRequest {
                         title: "Portable task".into(),
+                        discussion_id: None,
                         idempotency_key: None,
                         description: "Task body".into(),
                         status: crate::models::PlanningTaskStatus::InProgress,

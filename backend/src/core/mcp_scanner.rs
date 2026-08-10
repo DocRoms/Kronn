@@ -1697,7 +1697,29 @@ fn sync_vibe_project_config(
     }
     ensure_gitignore(project_path, ".vibe/");
     tracing::info!("Safely merged .vibe/config.toml for {}", project_path);
+    warn_if_vibe_trust_blocks(&vibe_dir);
     Ok(())
+}
+
+/// A written config is not a loaded config: Vibe silently drops the whole
+/// layer when its trust store rejects the `.vibe` directory, taking every
+/// Kronn-managed MCP server with it. Surface that here, at write time, rather
+/// than leaving the user with an agent that reports no MCP and a file that
+/// visibly contains them.
+fn warn_if_vibe_trust_blocks(vibe_dir: &Path) {
+    use crate::core::vibe_trust;
+
+    if !vibe_trust::project_config_trust(vibe_dir.parent().unwrap_or(vibe_dir)).blocks_config_load()
+    {
+        return;
+    }
+    tracing::warn!(
+        target: "kronn::host_sync",
+        "Vibe config written to {} but its workspace trust is REVOKED — Vibe \
+         will load zero MCP servers from it. {}",
+        vibe_dir.display(),
+        vibe_trust::remediation_hint(vibe_dir),
+    );
 }
 
 // ─── Codex global sync ───────────────────────────────────────────────────────

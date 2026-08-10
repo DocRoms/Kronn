@@ -5,6 +5,7 @@ import type { WorkflowRun, WorkflowStep, DecideRunRequest, ProducedBranch } from
 import { Trash2, ChevronRight, Square, Loader2, Plug, Send, Layers, Shield, Hand, Check, X, RotateCcw, Terminal, GitBranch, Copy, FlaskConical, AlertTriangle, CornerDownRight } from 'lucide-react';
 import { AGENT_LABELS, AGENT_COLORS } from '../../lib/constants';
 import { parseForeachEnvelope, isZeroTokenItem } from '../../lib/foreach-envelope';
+import { CopyIdPill } from '../CopyIdPill';
 import {
   runStatusTimeline,
   tryParseTriageManifest,
@@ -833,6 +834,13 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, on
                 }}>
                   {ws_step.name}
                 </span>
+                {ws_step.id && (
+                  <CopyIdPill
+                    id={ws_step.id}
+                    title={t('wf.copyStepId', ws_step.name)}
+                    className="wf-step-id-pill"
+                  />
+                )}
                 {ws_step.step_type && (
                   <span className="wf-step-type-badge" data-type={
                     ws_step.step_type.type === 'ApiCall' ? 'api'

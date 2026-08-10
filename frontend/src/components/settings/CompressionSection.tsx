@@ -1,9 +1,10 @@
 import { useState, useEffect, useMemo } from 'react';
-import { Leaf, ExternalLink, Loader2, Info, X, Square, ChevronDown, ChevronUp, HelpCircle, ArrowUpCircle, Copy } from 'lucide-react';
+import { Leaf, ExternalLink, Loader2, Info, X, Square, ChevronDown, ChevronUp, ArrowUpCircle, Copy } from 'lucide-react';
 import { rtk as rtkApi } from '../../lib/api';
 import type { AgentDetection } from '../../types/generated';
 import type { ToastFn } from '../../hooks/useToast';
 import { RTK_APPLICABLE } from '../../lib/constants';
+import { ContextHelp } from '../ContextHelp';
 
 interface CompressionSectionProps {
   agents: AgentDetection[];
@@ -32,7 +33,6 @@ export function CompressionSection({ agents, onActivated, toast, t }: Compressio
   const [activating, setActivating] = useState(false);
   const [showInstallModal, setShowInstallModal] = useState(false);
   const [showDetails, setShowDetails] = useState(false);
-  const [showSobriety, setShowSobriety] = useState(false);
   const [savings, setSavings] = useState<{
     total: number;
     ratio: number;
@@ -221,16 +221,9 @@ export function CompressionSection({ agents, onActivated, toast, t }: Compressio
           <div className="flex-1">
             <div className="flex-row gap-2" style={{ alignItems: 'center' }}>
               <span className="font-semibold text-base">{t('config.rtk.title')}</span>
-              <button
-                type="button"
-                className="set-compression-info-btn"
-                onClick={() => setShowSobriety(v => !v)}
-                aria-expanded={showSobriety}
-                aria-label={t('config.rtk.sobrietyTitle')}
-                title={t('config.rtk.sobrietyTitle')}
-              >
-                <HelpCircle size={12} />
-              </button>
+              <ContextHelp title={t('config.rtk.sobrietyTitle')}>
+                <p>{t('config.rtk.sobrietyBody')}</p>
+              </ContextHelp>
               {/* Freshness pill — only shown when the backend confirms
                *  installed < latest_known under lenient semver. Click
                *  opens a small modal with a copyable upgrade command
@@ -249,16 +242,6 @@ export function CompressionSection({ agents, onActivated, toast, t }: Compressio
               )}
             </div>
             <p className="set-compression-explainer">{t('config.rtk.explainer')}</p>
-            {showSobriety && (
-              <div className="set-compression-sobriety">
-                <div className="set-compression-sobriety-title">
-                  {t('config.rtk.sobrietyTitle')}
-                </div>
-                <p className="set-compression-sobriety-body">
-                  {t('config.rtk.sobrietyBody')}
-                </p>
-              </div>
-            )}
           </div>
         </div>
 

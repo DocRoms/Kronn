@@ -37,6 +37,15 @@ const t = (key: string, ...args: (string | number)[]) =>
   args.length > 0 ? `${key}:${args.join(',')}` : key;
 
 const EMPTY_AGENTS: AgentDetection[] = [];
+const HANDOFF_AGENTS = [{
+  agent_type: 'Codex',
+  name: 'Codex',
+  origin: 'openai',
+  installed: false,
+  runtime_available: false,
+  enabled: true,
+  auth_ready: true,
+} as AgentDetection];
 const toastFn = vi.fn();
 
 beforeEach(() => {
@@ -68,6 +77,12 @@ describe('AgentsSection — default model tier dropdown (0.8.6 phase 4)', () => 
       expect(screen.getByTestId('default-tier-btn-default')).toBeTruthy();
       expect(screen.getByTestId('default-tier-btn-reasoning')).toBeTruthy();
     });
+    expect(screen.getByText('config.defaultTier.economyHint')).toBeTruthy();
+    expect(screen.getByText('config.defaultTier.defaultHint')).toBeTruthy();
+    expect(screen.getByText('config.defaultTier.reasoningHint')).toBeTruthy();
+    expect(screen.getByTestId('default-tier-btn-economy')).toHaveTextContent('⚡');
+    expect(screen.getByTestId('default-tier-btn-default')).toHaveTextContent('🎯');
+    expect(screen.getByTestId('default-tier-btn-reasoning')).toHaveTextContent('🧠');
   });
 
   it('marks the saved tier as active on mount', async () => {
@@ -216,10 +231,185 @@ describe('AgentsSection — default model tier dropdown (0.8.6 phase 4)', () => 
   });
 });
 
+describe('AgentsSection — bounded agent handoffs', () => {
+  it('is opt-in and persists both the global toggle and paid budget', async () => {
+    getServerConfigMock.mockResolvedValue({
+      default_model_tier: 'default',
+      default_summary_strategy: 'Off',
+      agent_handoffs_enabled: false,
+      agent_handoff_paid_limit: 1,
+      agent_handoff_paid_unlimited: false,
+      agent_handoff_blocked_agents: [],
+      host: 'localhost', port: 3140,
+    });
+    setServerConfigMock.mockResolvedValue(undefined);
+    const { container } = render(
+      <AgentsSection
+        agents={EMPTY_AGENTS}
+        agentAccess={null}
+        configLanguage="fr"
+        refetchAgents={vi.fn()}
+        refetchAgentAccess={vi.fn()}
+        toast={toastFn}
+        t={t}
+      />,
+    );
+
+    const section = await screen.findByTestId('agent-handoff-section');
+    const toggle = section.querySelector<HTMLButtonElement>('.set-agent-handoff-toggle');
+    const select = section.querySelector<HTMLSelectElement>('select');
+    expect(toggle).not.toBeNull();
+    expect(select).not.toBeNull();
+    expect(toggle).toHaveAttribute('aria-pressed', 'false');
+    expect(select?.disabled).toBe(true);
+
+    fireEvent.click(toggle!);
+    await waitFor(() => {
+      expect(setServerConfigMock).toHaveBeenCalledWith({ agent_handoffs_enabled: true });
+      expect(select?.disabled).toBe(false);
+    });
+    fireEvent.change(select!, { target: { value: '3' } });
+    await waitFor(() => {
+      expect(setServerConfigMock).toHaveBeenCalledWith({
+        agent_handoff_paid_limit: 3,
+        agent_handoff_paid_unlimited: false,
+      });
+    });
+    expect(container.querySelector('[data-testid="agent-handoff-section"]')).toBe(section);
+  });
+
+  it('restores the previous toggle when saving fails', async () => {
+    getServerConfigMock.mockResolvedValue({
+      default_model_tier: 'default',
+      default_summary_strategy: 'Off',
+      agent_handoffs_enabled: true,
+      agent_handoff_paid_limit: 1,
+      agent_handoff_paid_unlimited: false,
+      agent_handoff_blocked_agents: [],
+      host: 'localhost', port: 3140,
+    });
+    setServerConfigMock.mockRejectedValue(new Error('save failed'));
+    render(
+      <AgentsSection
+        agents={EMPTY_AGENTS}
+        agentAccess={null}
+        configLanguage="fr"
+        refetchAgents={vi.fn()}
+        refetchAgentAccess={vi.fn()}
+        toast={toastFn}
+        t={t}
+      />,
+    );
+
+    const section = await screen.findByTestId('agent-handoff-section');
+    const toggle = section.querySelector<HTMLButtonElement>('.set-agent-handoff-toggle')!;
+    await waitFor(() => expect(toggle).toHaveAttribute('aria-pressed', 'true'));
+    fireEvent.click(toggle);
+    await waitFor(() => {
+      expect(toastFn).toHaveBeenCalledWith('config.saveError', 'error');
+      expect(toggle).toHaveAttribute('aria-pressed', 'true');
+    });
+  });
+
+  it('makes the disabled state explicit from the global card down to each agent', async () => {
+    getServerConfigMock.mockResolvedValue({
+      default_model_tier: 'default',
+      default_summary_strategy: 'Off',
+      agent_handoffs_enabled: false,
+      agent_handoff_paid_limit: 1,
+      agent_handoff_paid_unlimited: false,
+      agent_handoff_blocked_agents: [],
+      host: 'localhost', port: 3140,
+    });
+    render(
+      <AgentsSection
+        agents={HANDOFF_AGENTS}
+        agentAccess={null}
+        configLanguage="fr"
+        refetchAgents={vi.fn()}
+        refetchAgentAccess={vi.fn()}
+        toast={toastFn}
+        t={t}
+      />,
+    );
+
+    expect(await screen.findByText('config.agentHandoffDisabledTitle')).toBeInTheDocument();
+    const target = screen.getByTestId('agent-handoff-section')
+      .querySelector<HTMLButtonElement>('.set-agent-handoff-target')!;
+    expect(target).toBeDisabled();
+    expect(target).toHaveTextContent('config.agentHandoffTargetInactive');
+    expect(screen.getByText('config.agentHandoffCliTitle')).toBeInTheDocument();
+    expect(screen.getByText('config.agentHandoffCliHint')).toBeInTheDocument();
+  });
+
+  it('supports an explicit unlimited warning and per-agent blocking', async () => {
+    getServerConfigMock.mockResolvedValue({
+      default_model_tier: 'default',
+      default_summary_strategy: 'Off',
+      agent_handoffs_enabled: true,
+      agent_handoff_paid_limit: 1,
+      agent_handoff_paid_unlimited: false,
+      agent_handoff_blocked_agents: [],
+      host: 'localhost', port: 3140,
+    });
+    setServerConfigMock.mockResolvedValue(undefined);
+    render(
+      <AgentsSection
+        agents={HANDOFF_AGENTS}
+        agentAccess={null}
+        configLanguage="fr"
+        refetchAgents={vi.fn()}
+        refetchAgentAccess={vi.fn()}
+        toast={toastFn}
+        t={t}
+      />,
+    );
+
+    const section = await screen.findByTestId('agent-handoff-section');
+    const select = section.querySelector<HTMLSelectElement>('select')!;
+    fireEvent.change(select, { target: { value: 'unlimited' } });
+    await waitFor(() => {
+      expect(setServerConfigMock).toHaveBeenCalledWith({ agent_handoff_paid_unlimited: true });
+      expect(screen.getByRole('alert')).toHaveTextContent('config.agentHandoffUnlimitedWarning');
+    });
+
+    fireEvent.click(section.querySelector<HTMLButtonElement>('.set-agent-handoff-target')!);
+    await waitFor(() => {
+      expect(setServerConfigMock).toHaveBeenCalledWith({
+        agent_handoff_blocked_agents: ['Codex'],
+      });
+    });
+  });
+});
+
 // 0.8.6 phase 4 — Default summary strategy dropdown (gap from #1.15).
 // Same surface contract as the tier picker : Off by default, 3
 // options, optimistic update, revert on error.
 describe('AgentsSection — default summary strategy (0.8.6 phase 4)', () => {
+  it('explains when kronn-internal makes automatic summaries unnecessary', async () => {
+    getServerConfigMock.mockResolvedValue({
+      default_model_tier: 'default',
+      default_summary_strategy: 'Off',
+      host: 'localhost', port: 3140,
+    });
+    render(
+      <AgentsSection
+        agents={EMPTY_AGENTS}
+        agentAccess={null}
+        configLanguage="fr"
+        refetchAgents={vi.fn()}
+        refetchAgentAccess={vi.fn()}
+        toast={toastFn}
+        t={t}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'config.defaultSummaryInfoTitle' }));
+
+    expect(screen.getByText('config.defaultSummaryInfoHistory')).toBeTruthy();
+    expect(screen.getByText('config.defaultSummaryInfoMcp')).toBeTruthy();
+  });
+
   it('renders 3 strategy options with Off marked active by default', async () => {
     getServerConfigMock.mockResolvedValue({
       default_model_tier: 'default',
@@ -246,6 +436,35 @@ describe('AgentsSection — default summary strategy (0.8.6 phase 4)', () => {
       expect(screen.getByTestId('default-summary-btn-off').getAttribute('data-active')).toBe('true');
       expect(screen.getByTestId('default-summary-btn-auto').getAttribute('data-active')).toBe('false');
     });
+    expect(screen.getByText('config.defaultSummary.offHint')).toBeTruthy();
+    expect(screen.getByText('config.defaultSummary.autoHint')).toBeTruthy();
+    expect(screen.getByText('config.defaultSummary.ondemandHint')).toBeTruthy();
+    expect(screen.getByText('config.comingSoon')).toBeTruthy();
+    expect(screen.getByTestId('default-summary-btn-ondemand')).toBeDisabled();
+  });
+
+  it('does not save the planned OnDemand strategy', async () => {
+    getServerConfigMock.mockResolvedValue({
+      default_model_tier: 'default',
+      default_summary_strategy: 'Off',
+      host: 'localhost', port: 3140,
+    });
+    render(
+      <AgentsSection
+        agents={EMPTY_AGENTS}
+        agentAccess={null}
+        configLanguage="fr"
+        refetchAgents={vi.fn()}
+        refetchAgentAccess={vi.fn()}
+        toast={toastFn}
+        t={t}
+      />,
+    );
+    const onDemand = await screen.findByTestId('default-summary-btn-ondemand');
+
+    fireEvent.click(onDemand);
+
+    expect(setServerConfigMock).not.toHaveBeenCalledWith({ default_summary_strategy: 'OnDemand' });
   });
 
   it('PATCHes /config/server with default_summary_strategy on click', async () => {

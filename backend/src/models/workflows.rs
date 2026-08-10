@@ -262,6 +262,11 @@ pub enum OnInvalid {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct WorkflowStep {
+    /// Durable opaque identity of this step. `name` remains the editable
+    /// workflow-local alias used by expressions and Goto rules; `id` is the
+    /// stable identity exposed by the UI and APIs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     pub name: String,
     #[serde(default)]
     pub step_type: StepType,

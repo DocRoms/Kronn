@@ -6,6 +6,7 @@ import { ApiCallStepCard, type ApiPluginOption } from './ApiCallStepCard';
 import { STARTER_TEMPLATES, cloneTemplateSteps } from '../../lib/workflow-templates/chartbeat-top5';
 import { buildV07Presets, type ChildWorkflowPreset } from '../../lib/workflow-templates/v07-presets';
 import { WorkflowQuickStartPicker } from './WorkflowQuickStartPicker';
+import { CopyIdPill } from '../CopyIdPill';
 import { buildQuickStartCatalogue, type UnifiedQuickStart } from '../../lib/workflow-quick-start';
 import { parseRepoUrl, buildOldestIssueRequest, inferTrackerSlugFromRepoUrl } from '../../lib/constants';
 import { AGENT_COLORS, AGENT_LABELS, ALL_AGENT_TYPES, isAgentRestricted } from '../../lib/constants';
@@ -1486,6 +1487,13 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                     placeholder={t('wiz.stepName')}
                     aria-label={t('wiz.stepName')}
                   />
+                  {step.id && (
+                    <CopyIdPill
+                      id={step.id}
+                      title={t('wf.copyStepId', step.name)}
+                      className="wf-step-id-pill"
+                    />
+                  )}
                   {(!step.step_type || step.step_type.type === 'Agent') && (
                     <>
                       <select

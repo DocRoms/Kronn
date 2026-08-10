@@ -1553,6 +1553,7 @@ mod tests {
         fmt: crate::models::StepOutputFormat,
     ) -> crate::models::WorkflowStep {
         crate::models::WorkflowStep {
+            id: None,
             name: name.into(),
             step_type: crate::models::StepType::default(),
             description: None,

@@ -308,6 +308,91 @@
   flex-wrap: wrap;
 }
 
+.mcp-credential-kind {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-weight: 650;
+}
+
+.mcp-credential-kind[data-kind="cli"] {
+  color: var(--kr-warning);
+}
+
+.mcp-credential-kind[data-kind="api"] {
+  color: var(--kr-cyan);
+}
+
+.mcp-credential-fields[data-kind="cli"] {
+  padding: var(--kr-sp-4);
+  border: 1px solid rgba(var(--kr-warning-rgb), 0.38);
+  border-radius: var(--kr-r-lg);
+  background:
+    linear-gradient(135deg, rgba(var(--kr-warning-rgb), 0.1), transparent 58%),
+    var(--kr-bg-subtle);
+  box-shadow: inset 3px 0 0 rgba(var(--kr-warning-rgb), 0.6);
+}
+
+.mcp-credential-fields[data-kind="cli"] .mcp-detail-section-title,
+.mcp-credential-fields[data-kind="cli"] > .flex-row > .mcp-field-label {
+  color: var(--kr-warning);
+}
+
+.mcp-credential-fields[data-kind="cli"] .input {
+  border-color: rgba(var(--kr-warning-rgb), 0.32);
+  background: rgba(var(--kr-warning-rgb), 0.04);
+}
+
+.mcp-credential-fields[data-kind="cli"] .input:focus {
+  border-color: rgba(var(--kr-warning-rgb), 0.72);
+  box-shadow: 0 0 0 2px rgba(var(--kr-warning-rgb), 0.12);
+}
+
+.mcp-credential-explainer {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: var(--kr-sp-3);
+  padding: var(--kr-sp-3) var(--kr-sp-4);
+  border: 1px solid var(--kr-border-ghost);
+  border-radius: var(--kr-r-md);
+  background: var(--kr-bg-subtle);
+  color: var(--kr-text-secondary);
+}
+
+.mcp-credential-explainer[data-kind="cli"] {
+  border-color: rgba(var(--kr-warning-rgb), 0.28);
+  background: rgba(var(--kr-warning-rgb), 0.07);
+}
+
+.mcp-credential-explainer svg {
+  margin-top: 2px;
+  color: var(--kr-text-muted);
+}
+
+.mcp-credential-explainer strong,
+.mcp-credential-explainer small {
+  display: block;
+}
+
+.mcp-credential-explainer strong {
+  color: var(--kr-text-primary);
+  font-size: var(--kr-fs-xs);
+}
+
+.mcp-credential-explainer small {
+  margin-top: 3px;
+  color: var(--kr-text-muted);
+  font-size: var(--kr-fs-2xs);
+  line-height: 1.45;
+}
+
+.mcp-credential-help {
+  margin: 0;
+  color: var(--kr-text-tertiary);
+  font-size: var(--kr-fs-xs);
+  line-height: 1.55;
+}
+
 /* Inline description rendered under an API plugin's config key field.
    Sourced from `api_spec.config_keys.description` — gives the user a
    one-line explanation of what the field is for without cluttering

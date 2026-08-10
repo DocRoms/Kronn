@@ -48,6 +48,7 @@ pub mod tailscale;
 pub mod usage;
 pub mod user_context;
 pub mod versions;
+pub mod vibe_trust;
 pub mod worktree;
 pub mod ws_client;
 

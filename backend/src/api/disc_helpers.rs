@@ -9,6 +9,71 @@
 
 use crate::models::{AgentType, TokensConfig};
 
+const AGENT_ALIASES: [(&str, AgentType); 8] = [
+    ("@claude", AgentType::ClaudeCode),
+    ("@codex", AgentType::Codex),
+    ("@vibe", AgentType::Vibe),
+    ("@gemini", AgentType::GeminiCli),
+    ("@kiro", AgentType::Kiro),
+    ("@copilot", AgentType::CopilotCli),
+    ("@ollama", AgentType::Ollama),
+    ("@litellm", AgentType::LiteLlm),
+];
+
+pub fn agent_alias(agent: &AgentType) -> Option<&'static str> {
+    AGENT_ALIASES
+        .iter()
+        .find_map(|(alias, candidate)| (candidate == agent).then_some(*alias))
+}
+
+pub fn agent_handoff_target_is_allowed(agent: &AgentType, blocked_agents: &[AgentType]) -> bool {
+    !blocked_agents.contains(agent)
+}
+
+pub fn agent_handoff_budget_instruction(
+    language: &str,
+    paid_remaining: Option<u32>,
+    ollama_available: bool,
+) -> String {
+    let local_note = match (language, ollama_available) {
+        (_, false) => "",
+        ("fr", true) => " Ollama est local et ne consomme pas ce quota.",
+        ("es", true) => " Ollama es local y no consume esta cuota.",
+        ("zh", true) => " Ollama 为本地智能体，不占用此额度。",
+        (_, true) => " Ollama runs locally and does not use this allowance.",
+    };
+    match (language, paid_remaining) {
+        ("fr", None) => "Aucune limite financière ne s'applique à cette discussion.".into(),
+        ("fr", Some(0)) => format!(
+            "Aucun lancement d'agent payant ne reste pour la chaîne issue de ce message.{local_note}"
+        ),
+        ("fr", Some(remaining)) => format!(
+            "Il reste {remaining} lancement(s) d'agent payant pour toute la chaîne issue de ce message.{local_note}"
+        ),
+        ("es", None) => "Esta conversación no tiene límite financiero.".into(),
+        ("es", Some(0)) => format!(
+            "No queda ningún inicio de agente de pago para la cadena de este mensaje.{local_note}"
+        ),
+        ("es", Some(remaining)) => format!(
+            "Quedan {remaining} inicios de agentes de pago para toda la cadena de este mensaje.{local_note}"
+        ),
+        ("zh", None) => "此讨论不设费用额度上限。".into(),
+        ("zh", Some(0)) => {
+            format!("此消息产生的调用链已没有付费智能体启动名额。{local_note}")
+        }
+        ("zh", Some(remaining)) => {
+            format!("此消息产生的整个调用链还可启动 {remaining} 个付费智能体。{local_note}")
+        }
+        (_, None) => "No financial limit applies to this discussion.".into(),
+        (_, Some(0)) => format!(
+            "No paid-agent starts remain for the chain created by this message.{local_note}"
+        ),
+        (_, Some(remaining)) => format!(
+            "{remaining} paid-agent start(s) remain for the entire chain created by this message.{local_note}"
+        ),
+    }
+}
+
 /// Per-agent prompt budget in characters.
 /// Leaves room for the agent's response within its context window.
 /// Conservative estimates — better to truncate safely than crash.
@@ -21,6 +86,7 @@ pub fn agent_prompt_budget(agent_type: &AgentType) -> usize {
         AgentType::CopilotCli => 200_000, // ~50K tokens, GPT-4o 128K window
         AgentType::Vibe => 60_000,        // ~15K tokens, Mistral 128K window (API mode)
         AgentType::Ollama => 100_000,     // ~25K tokens, depends on model (llama3 128K window)
+        AgentType::LiteLlm => 100_000,    // unknown upstream — same conservative floor as Ollama
         AgentType::Custom => 60_000,      // reasonable default
     }
 }
@@ -38,6 +104,8 @@ pub fn auth_mode_for(agent_type: &AgentType, tokens: &TokensConfig) -> String {
         AgentType::Kiro => "aws",
         AgentType::CopilotCli => "github",
         AgentType::Ollama => "ollama",
+        // Auth belongs to the proxy, not to Kronn: it holds the upstream keys.
+        AgentType::LiteLlm => "",
         AgentType::Custom => "",
     };
     let has_key = tokens.active_key_for(provider).is_some();
@@ -59,8 +127,40 @@ pub fn agent_display_name(agent_type: &AgentType) -> String {
         AgentType::Kiro => "Kiro".into(),
         AgentType::CopilotCli => "GitHub Copilot".into(),
         AgentType::Ollama => "Ollama".into(),
+        AgentType::LiteLlm => "LiteLLM".into(),
         AgentType::Custom => "Custom".into(),
     }
+}
+
+/// Canonical agent aliases used as explicit delegation signals in generated
+/// prose. Mentions in Markdown code are ignored so examples cannot launch
+/// work, and word boundaries reject email-like text.
+pub fn agent_mentions_in_prose(content: &str) -> Vec<AgentType> {
+    let prose = crate::core::anti_halluc::strip_inline_code(
+        &crate::core::anti_halluc::strip_fenced_code(content),
+    );
+    let lower = prose.to_lowercase();
+    let mut found = Vec::new();
+    for (alias, agent) in AGENT_ALIASES {
+        for (index, _) in lower.match_indices(alias) {
+            let before = lower[..index].chars().next_back();
+            let after = lower[index + alias.len()..].chars().next();
+            let valid_before = before.is_none_or(|ch| ch.is_whitespace() || "([{\"'".contains(ch));
+            let valid_after =
+                after.is_none_or(|ch| ch.is_whitespace() || ")]}>,.!?;:\"'".contains(ch));
+            if valid_before && valid_after {
+                found.push((index, agent.clone()));
+            }
+        }
+    }
+    found.sort_by_key(|(index, _)| *index);
+    let mut agents = Vec::new();
+    for (_, agent) in found {
+        if !agents.contains(&agent) {
+            agents.push(agent);
+        }
+    }
+    agents
 }
 
 /// Truncate text at the last sentence boundary before `max_len`, falling
@@ -243,6 +343,46 @@ mod tests {
         assert_eq!(agent_display_name(&AgentType::ClaudeCode), "Claude Code");
         assert_eq!(agent_display_name(&AgentType::GeminiCli), "Gemini CLI");
         assert_eq!(agent_display_name(&AgentType::CopilotCli), "GitHub Copilot");
+    }
+
+    #[test]
+    fn generated_agent_mentions_preserve_order_and_deduplicate() {
+        assert_eq!(
+            agent_mentions_in_prose("@Ollama, commence. Puis @Codex répond. @ollama confirme."),
+            vec![AgentType::Ollama, AgentType::Codex]
+        );
+    }
+
+    #[test]
+    fn generated_agent_mentions_ignore_code_and_email_like_text() {
+        let text = "mail me@codex.dev\n`@Ollama, example`\n```text\n@Gemini, example\n```\n(@Claude), à toi.";
+        assert_eq!(agent_mentions_in_prose(text), vec![AgentType::ClaudeCode]);
+    }
+
+    #[test]
+    fn blocked_agent_cannot_be_started_automatically() {
+        let blocked = vec![AgentType::ClaudeCode, AgentType::LiteLlm];
+        assert!(!agent_handoff_target_is_allowed(
+            &AgentType::LiteLlm,
+            &blocked
+        ));
+        assert!(agent_handoff_target_is_allowed(
+            &AgentType::Ollama,
+            &blocked
+        ));
+    }
+
+    #[test]
+    fn budget_instruction_exposes_remaining_allowance_without_promising_blocked_ollama() {
+        let with_local = agent_handoff_budget_instruction("fr", Some(1), true);
+        assert!(with_local.contains("1 lancement"));
+        assert!(with_local.contains("Ollama est local"));
+
+        let without_local = agent_handoff_budget_instruction("fr", Some(0), false);
+        assert!(without_local.contains("Aucun lancement"));
+        assert!(!without_local.contains("Ollama"));
+
+        assert!(agent_handoff_budget_instruction("en", None, false).contains("No financial limit"));
     }
 
     #[test]

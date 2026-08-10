@@ -1,9 +1,25 @@
 //! Remote repository discovery — GitHub/GitLab integration.
 
-use axum::{extract::State, Json};
-
 use crate::models::*;
 use crate::AppState;
+use axum::{extract::State, Json};
+
+#[derive(Clone, Debug)]
+pub(crate) enum RepoSourceAuth {
+    Token {
+        token: String,
+        api_url: Option<String>,
+    },
+    GitLabCli {
+        host: Option<String>,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct AuthenticatedRepoSource {
+    pub source: RepoSource,
+    pub auth: RepoSourceAuth,
+}
 
 /// POST /api/projects/discover-repos
 /// Discovers remote repositories from GitHub/GitLab that aren't yet tracked.
@@ -36,21 +52,24 @@ pub async fn discover_repos(
 
     // Get all available sources
     let all_sources = find_all_provider_sources(&state).await;
-    let available_sources: Vec<RepoSource> = all_sources.iter().map(|(s, _)| s.clone()).collect();
+    let available_sources: Vec<RepoSource> = all_sources
+        .iter()
+        .map(|entry| entry.source.clone())
+        .collect();
 
     if all_sources.is_empty() {
         return Json(ApiResponse::err(
-            "No GitHub or GitLab token found. Configure the GitHub or GitLab MCP with a Personal Access Token, or set GITHUB_TOKEN / GITLAB_TOKEN environment variable."
+            "No GitHub or GitLab connection found. Configure a provider plugin, authenticate its local CLI, or provide an API token."
         ));
     }
 
     // Filter sources if specific IDs requested
-    let sources_to_use: Vec<&(RepoSource, String)> = if req.source_ids.is_empty() {
+    let sources_to_use: Vec<&AuthenticatedRepoSource> = if req.source_ids.is_empty() {
         all_sources.iter().collect()
     } else {
         all_sources
             .iter()
-            .filter(|(s, _)| req.source_ids.contains(&s.id))
+            .filter(|entry| req.source_ids.contains(&entry.source.id))
             .collect()
     };
 
@@ -63,27 +82,27 @@ pub async fn discover_repos(
             .collect::<Vec<_>>(),
         sources_to_use
             .iter()
-            .map(|(s, _)| format!("{}({})", s.label, s.id))
+            .map(|entry| format!("{}({})", entry.source.label, entry.source.id))
             .collect::<Vec<_>>(),
     );
 
     // Deduplicate repos by full_name (in case multiple tokens see the same repo)
     let mut seen_full_names = std::collections::HashSet::new();
 
-    for (source, token_data) in &sources_to_use {
+    for entry in &sources_to_use {
+        let source = &entry.source;
         match source.provider.as_str() {
             "github" => {
-                let token_preview = if token_data.len() > 8 {
-                    &token_data[..8]
-                } else {
-                    token_data
+                let RepoSourceAuth::Token { token, .. } = &entry.auth else {
+                    continue;
                 };
+                let token_preview = if token.len() > 8 { &token[..8] } else { token };
                 tracing::info!(
                     "discover_repos: querying GitHub source '{}' with token {}...",
                     source.label,
                     token_preview
                 );
-                match fetch_github_repos(token_data).await {
+                match fetch_github_repos(token).await {
                     Ok(repos) => {
                         tracing::info!(
                             "discover_repos: source '{}' returned {} repos",
@@ -121,9 +140,26 @@ pub async fn discover_repos(
                 }
             }
             "gitlab" => {
-                let parts: Vec<&str> = token_data.splitn(2, '|').collect();
-                let (token, api_url) = (parts[0], parts.get(1).unwrap_or(&"https://gitlab.com"));
-                match fetch_gitlab_repos(token, api_url).await {
+                let result = match &entry.auth {
+                    RepoSourceAuth::Token { token, api_url } => {
+                        let api_url = api_url.as_deref().unwrap_or("https://gitlab.com");
+                        match fetch_gitlab_repos(token, api_url).await {
+                            Ok(repos) => Ok(repos),
+                            Err(api_error) => match fetch_gitlab_repos_via_cli(api_url).await {
+                                Ok(repos) => Ok(repos),
+                                Err(cli_error) => Err(format!(
+                                    "{}; local glab fallback also failed: {}",
+                                    api_error, cli_error
+                                )),
+                            },
+                        }
+                    }
+                    RepoSourceAuth::GitLabCli { host } => {
+                        fetch_gitlab_repos_via_cli(host.as_deref().unwrap_or("https://gitlab.com"))
+                            .await
+                    }
+                };
+                match result {
                     Ok(repos) => {
                         used_sources.push(source.label.clone());
                         for r in repos {
@@ -174,119 +210,160 @@ pub async fn discover_repos(
     }))
 }
 
-/// Find all available token sources from MCP configs and env vars.
-pub(crate) async fn find_all_provider_sources(state: &AppState) -> Vec<(RepoSource, String)> {
-    let mut sources: Vec<(RepoSource, String)> = vec![];
+/// Find all repository authentication sources from plugin configs and env vars.
+/// GitLab can use either a saved PAT or the local `glab auth login` session.
+pub(crate) async fn find_all_provider_sources(state: &AppState) -> Vec<AuthenticatedRepoSource> {
+    let mut sources: Vec<AuthenticatedRepoSource> = vec![];
 
     // Read encryption secret
     let config = state.config.read().await;
     let secret = config.encryption_secret.clone();
     drop(config);
 
-    // Scan MCP configs for GitHub/GitLab tokens
-    if let Some(secret) = &secret {
-        let secret_clone = secret.clone();
-        let configs = state
-            .db
-            .with_conn(crate::db::mcps::list_configs)
-            .await
-            .unwrap_or_default();
+    // Scan plugin configs. A tokenless GitLab config remains a valid source:
+    // discovery can use the local `glab auth login` session.
+    let configs = state
+        .db
+        .with_conn(crate::db::mcps::list_configs)
+        .await
+        .unwrap_or_default();
 
-        for cfg in configs {
-            if cfg.env_encrypted.is_empty() {
-                continue;
+    for cfg in configs {
+        let env = match (&secret, cfg.env_encrypted.is_empty()) {
+            (_, true) | (None, false) => std::collections::HashMap::new(),
+            (Some(secret), false) => {
+                match crate::db::mcps::decrypt_env(&cfg.env_encrypted, secret) {
+                    Ok(env) => env,
+                    Err(_) => continue,
+                }
             }
-            let env = match crate::db::mcps::decrypt_env(&cfg.env_encrypted, &secret_clone) {
-                Ok(e) => e,
-                Err(_) => continue,
+        };
+
+        // GitHub MCP
+        if cfg.server_id == "mcp-github" {
+            if let Some(token) = env
+                .get("GITHUB_PERSONAL_ACCESS_TOKEN")
+                .filter(|v| !v.is_empty())
+            {
+                let token_end = if token.len() > 4 {
+                    &token[token.len() - 4..]
+                } else {
+                    token
+                };
+                tracing::info!(
+                    "discover: found GitHub MCP config '{}' (id={}) with token ...{}",
+                    cfg.label,
+                    cfg.id,
+                    token_end
+                );
+                sources.push(AuthenticatedRepoSource {
+                    source: RepoSource {
+                        id: cfg.id.clone(),
+                        label: cfg.label.clone(),
+                        provider: "github".into(),
+                    },
+                    auth: RepoSourceAuth::Token {
+                        token: token.clone(),
+                        api_url: None,
+                    },
+                });
+            }
+        }
+
+        // GitLab MCP — current names first, then backwards-compatible aliases.
+        if cfg.server_id == "mcp-gitlab" {
+            let (configured_token, configured_host) = gitlab_credentials(&env);
+            let token = configured_token.or_else(gitlab_token_from_process_env);
+            let host = configured_host.or_else(gitlab_host_from_process_env);
+            let auth = match token {
+                Some(token) => RepoSourceAuth::Token {
+                    token,
+                    api_url: host,
+                },
+                None => RepoSourceAuth::GitLabCli { host },
             };
-
-            // GitHub MCP
-            if cfg.server_id == "mcp-github" {
-                if let Some(token) = env
-                    .get("GITHUB_PERSONAL_ACCESS_TOKEN")
-                    .filter(|v| !v.is_empty())
-                {
-                    let token_end = if token.len() > 4 {
-                        &token[token.len() - 4..]
-                    } else {
-                        token
-                    };
-                    tracing::info!(
-                        "discover: found GitHub MCP config '{}' (id={}) with token ...{}",
-                        cfg.label,
-                        cfg.id,
-                        token_end
-                    );
-                    sources.push((
-                        RepoSource {
-                            id: cfg.id.clone(),
-                            label: cfg.label.clone(),
-                            provider: "github".into(),
-                        },
-                        token.clone(),
-                    ));
-                }
-            }
-
-            // GitLab MCP
-            if cfg.server_id == "mcp-gitlab" {
-                if let Some(token) = env
-                    .get("GITLAB_PERSONAL_ACCESS_TOKEN")
-                    .filter(|v| !v.is_empty())
-                {
-                    let api_url = env
-                        .get("GITLAB_API_URL")
-                        .filter(|v| !v.is_empty())
-                        .cloned()
-                        .unwrap_or_else(|| "https://gitlab.com".into());
-                    // Encode the API URL in the token string with a separator
-                    sources.push((
-                        RepoSource {
-                            id: cfg.id.clone(),
-                            label: cfg.label.clone(),
-                            provider: "gitlab".into(),
-                        },
-                        format!("{}|{}", token, api_url),
-                    ));
-                }
-            }
+            sources.push(AuthenticatedRepoSource {
+                source: RepoSource {
+                    id: cfg.id.clone(),
+                    label: cfg.label.clone(),
+                    provider: "gitlab".into(),
+                },
+                auth,
+            });
         }
     }
 
     // Environment variable fallbacks
     if let Ok(token) = std::env::var("GITHUB_TOKEN").or_else(|_| std::env::var("GH_TOKEN")) {
         // Only add env source if there's no MCP config for GitHub already
-        let has_gh = sources.iter().any(|(s, _)| s.provider == "github");
+        let has_gh = sources
+            .iter()
+            .any(|entry| entry.source.provider == "github");
         if !has_gh {
-            sources.push((
-                RepoSource {
+            sources.push(AuthenticatedRepoSource {
+                source: RepoSource {
                     id: "env:github".into(),
                     label: "GitHub (env)".into(),
                     provider: "github".into(),
                 },
-                token,
-            ));
+                auth: RepoSourceAuth::Token {
+                    token,
+                    api_url: None,
+                },
+            });
         }
     }
 
-    if let Ok(token) = std::env::var("GITLAB_TOKEN") {
-        let has_gl = sources.iter().any(|(s, _)| s.provider == "gitlab");
+    if let Some(token) = gitlab_token_from_process_env() {
+        let has_gl = sources
+            .iter()
+            .any(|entry| entry.source.provider == "gitlab");
         if !has_gl {
-            let api_url =
-                std::env::var("GITLAB_API_URL").unwrap_or_else(|_| "https://gitlab.com".into());
-            sources.push((
-                RepoSource {
+            let api_url = gitlab_host_from_process_env();
+            sources.push(AuthenticatedRepoSource {
+                source: RepoSource {
                     id: "env:gitlab".into(),
                     label: "GitLab (env)".into(),
                     provider: "gitlab".into(),
                 },
-                format!("{}|{}", token, api_url),
-            ));
+                auth: RepoSourceAuth::Token { token, api_url },
+            });
         }
     }
 
     sources
+}
+
+fn gitlab_credentials(
+    env: &std::collections::HashMap<String, String>,
+) -> (Option<String>, Option<String>) {
+    let first_non_blank = |keys: &[&str]| {
+        keys.iter()
+            .find_map(|key| {
+                env.get(*key)
+                    .map(String::as_str)
+                    .filter(|value| !value.trim().is_empty())
+            })
+            .map(str::to_owned)
+    };
+    (
+        first_non_blank(&["GITLAB_TOKEN", "GITLAB_PERSONAL_ACCESS_TOKEN"]),
+        first_non_blank(&["GITLAB_HOST", "GL_HOST", "GITLAB_API_URL"]),
+    )
+}
+
+fn gitlab_token_from_process_env() -> Option<String> {
+    ["GITLAB_TOKEN", "GITLAB_PERSONAL_ACCESS_TOKEN"]
+        .iter()
+        .find_map(|key| std::env::var(key).ok())
+        .filter(|value| !value.trim().is_empty())
+}
+
+fn gitlab_host_from_process_env() -> Option<String> {
+    ["GITLAB_HOST", "GL_HOST", "GITLAB_API_URL"]
+        .iter()
+        .find_map(|key| std::env::var(key).ok())
+        .filter(|value| !value.trim().is_empty())
 }
 
 /// Normalize a repo URL for comparison (strip .git suffix, lowercase, strip protocol prefix)
@@ -439,7 +516,7 @@ fn parse_github_repo(r: &serde_json::Value) -> RemoteRepo {
 /// Fetch all repos for the authenticated GitLab user, including group repos.
 async fn fetch_gitlab_repos(token: &str, api_url: &str) -> Result<Vec<RemoteRepo>, String> {
     let client = discovery_client();
-    let base = api_url.trim_end_matches('/');
+    let base = normalize_gitlab_base_url(api_url)?;
     let mut all_repos = vec![];
     let mut seen = std::collections::HashSet::new();
 
@@ -483,6 +560,79 @@ async fn fetch_gitlab_repos(token: &str, api_url: &str) -> Result<Vec<RemoteRepo
     }
 
     Ok(all_repos)
+}
+
+fn normalize_gitlab_base_url(value: &str) -> Result<String, String> {
+    let value = value.trim();
+    let candidate = if value.contains("://") {
+        value.to_string()
+    } else {
+        format!("https://{}", value)
+    };
+    let mut url = reqwest::Url::parse(&candidate)
+        .map_err(|error| format!("Invalid GitLab host '{}': {}", value, error))?;
+    let path = url.path().trim_end_matches('/');
+    let root_path = path.strip_suffix("/api/v4").unwrap_or(path).to_string();
+    url.set_path(&root_path);
+    url.set_query(None);
+    url.set_fragment(None);
+    Ok(url.as_str().trim_end_matches('/').to_string())
+}
+
+fn gitlab_cli_hostname(value: &str) -> Result<String, String> {
+    let base = normalize_gitlab_base_url(value)?;
+    let url = reqwest::Url::parse(&base)
+        .map_err(|error| format!("Invalid GitLab host '{}': {}", value, error))?;
+    let host = url
+        .host_str()
+        .ok_or_else(|| format!("Invalid GitLab host '{}'", value))?;
+    Ok(match url.port() {
+        Some(port) => format!("{}:{}", host, port),
+        None => host.to_string(),
+    })
+}
+
+/// Use the user's local `glab auth login` session without extracting or
+/// persisting its token. This is also the recovery path when a saved PAT is
+/// stale. Environment token overrides are deliberately removed because glab
+/// gives them precedence over its stored credentials.
+async fn fetch_gitlab_repos_via_cli(host: &str) -> Result<Vec<RemoteRepo>, String> {
+    let hostname = gitlab_cli_hostname(host)?;
+    let mut command = crate::core::cmd::async_cmd("glab");
+    command
+        .args([
+            "api",
+            "projects?membership=true&per_page=100&order_by=last_activity_at&sort=desc",
+            "--paginate",
+            "--output",
+            "json",
+            "--hostname",
+            &hostname,
+        ])
+        .env_remove("GITLAB_TOKEN")
+        .env_remove("GITLAB_ACCESS_TOKEN")
+        .env_remove("OAUTH_TOKEN")
+        .env_remove("GITLAB_HOST")
+        .env_remove("GL_HOST")
+        .kill_on_drop(true);
+
+    let output = tokio::time::timeout(std::time::Duration::from_secs(20), command.output())
+        .await
+        .map_err(|_| "glab API request timed out after 20 seconds".to_string())?
+        .map_err(|error| format!("Unable to run glab: {}", error))?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let detail: String = detail.chars().take(500).collect();
+        return Err(if detail.is_empty() {
+            format!("glab exited with {}", output.status)
+        } else {
+            detail
+        });
+    }
+
+    let projects: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("Unable to parse glab response: {}", error))?;
+    Ok(projects.iter().map(parse_gitlab_repo).collect())
 }
 
 /// Paginate a GitLab projects endpoint and collect results.
@@ -609,6 +759,79 @@ mod tests {
         let out = normalize_repo_url("https://bitbucket.example.com/Foo/Bar.git");
         assert!(out.contains("bitbucket.example.com"));
         assert!(!out.ends_with(".git"));
+    }
+
+    #[test]
+    fn gitlab_credentials_prefers_current_cli_variable_names() {
+        let env = std::collections::HashMap::from([
+            ("GITLAB_TOKEN".to_string(), "current-token".to_string()),
+            (
+                "GITLAB_PERSONAL_ACCESS_TOKEN".to_string(),
+                "legacy-token".to_string(),
+            ),
+            (
+                "GITLAB_HOST".to_string(),
+                "https://gitlab.example.com".to_string(),
+            ),
+            (
+                "GITLAB_API_URL".to_string(),
+                "https://legacy.example.com/api/v4".to_string(),
+            ),
+        ]);
+
+        assert_eq!(
+            gitlab_credentials(&env),
+            (
+                Some("current-token".to_string()),
+                Some("https://gitlab.example.com".to_string()),
+            )
+        );
+    }
+
+    #[test]
+    fn gitlab_credentials_keeps_legacy_plugin_configs_working() {
+        let env = std::collections::HashMap::from([
+            (
+                "GITLAB_PERSONAL_ACCESS_TOKEN".to_string(),
+                "legacy-token".to_string(),
+            ),
+            (
+                "GITLAB_API_URL".to_string(),
+                "https://gitlab.example.com/api/v4".to_string(),
+            ),
+        ]);
+
+        assert_eq!(
+            gitlab_credentials(&env),
+            (
+                Some("legacy-token".to_string()),
+                Some("https://gitlab.example.com/api/v4".to_string()),
+            )
+        );
+    }
+
+    #[test]
+    fn normalize_gitlab_base_url_accepts_host_and_existing_api_suffix() {
+        assert_eq!(
+            normalize_gitlab_base_url("gitlab.example.com").unwrap(),
+            "https://gitlab.example.com"
+        );
+        assert_eq!(
+            normalize_gitlab_base_url("https://gitlab.example.com/api/v4/").unwrap(),
+            "https://gitlab.example.com"
+        );
+        assert_eq!(
+            normalize_gitlab_base_url("https://example.com/gitlab/api/v4").unwrap(),
+            "https://example.com/gitlab"
+        );
+    }
+
+    #[test]
+    fn gitlab_cli_hostname_strips_scheme_path_and_keeps_port() {
+        assert_eq!(
+            gitlab_cli_hostname("https://gitlab.example.com:8443/api/v4").unwrap(),
+            "gitlab.example.com:8443"
+        );
     }
 
     #[test]

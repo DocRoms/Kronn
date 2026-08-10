@@ -218,11 +218,10 @@ const defaultProps = {
 describe('SettingsPage', () => {
   it('persists the discussion-note composer toggle', async () => {
     await wrap(<SettingsPage {...defaultProps} />);
-    const heading = screen.getByText('Notes de discussion hors contexte');
-    const toggle = heading.closest('.mb-8')?.querySelector<HTMLElement>('[role="switch"]');
+    const toggle = screen.getByRole('switch', { name: 'Notes de discussion hors contexte' });
     expect(toggle).toHaveAttribute('aria-checked', 'true');
 
-    fireEvent.click(toggle!);
+    fireEvent.click(toggle);
 
     await waitFor(() => expect(configApi.setServerConfig).toHaveBeenCalledWith({
       discussion_notes_enabled: false,
@@ -246,6 +245,8 @@ describe('SettingsPage', () => {
     expect(body).toContain('Directives');
     // Profiles section
     expect(body).toContain('Profils agent');
+    expect(body).toContain('chaque step Agent');
+    expect(body).toContain('chaque carte agent');
   });
 
   it('renders a persistent section index and marks the selected destination', async () => {
@@ -259,14 +260,119 @@ describe('SettingsPage', () => {
     expect(document.body.textContent).toContain('1 racine scannée');
 
     const buttons = [...nav.querySelectorAll<HTMLButtonElement>('.set-nav-btn')];
-    const appearance = buttons.find(button => button.textContent?.includes('Apparence'));
+    const preferences = buttons.find(button => button.textContent?.includes('Interface & langues'));
     const database = buttons.find(button => button.textContent?.includes('Base de données'));
     expect(buttons.filter(button => button.getAttribute('aria-current') === 'location')).toHaveLength(1);
     expect(database).toBeTruthy();
 
     fireEvent.click(database!);
     expect(database!.getAttribute('aria-current')).toBe('location');
-    expect(appearance?.hasAttribute('aria-current')).toBe(false);
+    expect(preferences?.hasAttribute('aria-current')).toBe(false);
+  });
+
+  it('keeps agent capabilities directly after agents and the two beta sections', async () => {
+    await wrap(<SettingsPage {...defaultProps} agents={[sampleAgent]} />);
+
+    const content = document.querySelector('.set-content');
+    const sectionIds = [...(content?.children ?? [])]
+      .map(child => child.id)
+      .filter(Boolean);
+    expect(sectionIds.slice(0, 5)).toEqual([
+      'settings-identity',
+      'settings-agent-config',
+      'settings-sourcing',
+      'settings-continual-learning',
+      'settings-capabilities',
+    ]);
+  });
+
+  it('combines appearance and both language settings in one preference card', async () => {
+    await wrap(<SettingsPage {...defaultProps} agents={[sampleAgent]} />);
+
+    const preferences = document.querySelector('#settings-appearance');
+    expect(preferences).toBeTruthy();
+    expect(preferences?.textContent).toContain('Interface & langues');
+    expect(preferences?.textContent).toContain('Apparence');
+    expect(preferences?.textContent).toContain("Langue de l'interface");
+    expect(preferences?.textContent).toContain('Langue de sortie');
+    expect(preferences?.querySelector('#settings-languages')).toBeTruthy();
+    expect(document.querySelector('.set-content > #settings-languages')).toBeNull();
+  });
+
+  it('explains the output-language scope for launched agents and external CLIs', async () => {
+    await wrap(<SettingsPage {...defaultProps} agents={[sampleAgent]} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Comment cette langue est-elle appliquée ?' }));
+    expect(screen.getByText(/chaque exécution d’un agent lancé par l’application/)).toBeInTheDocument();
+    expect(screen.getByText(/agent CLI externe déjà rattaché/)).toBeInTheDocument();
+  });
+
+  it('groups the legacy lower settings into workspace and system areas', async () => {
+    await wrap(<SettingsPage {...defaultProps} agents={[sampleAgent]} />);
+
+    const groups = [...document.querySelectorAll('.set-content-group-intro h2')].map(node => node.textContent);
+    expect(groups).toEqual(['Expérience & projets', 'Système & données']);
+    expect(document.querySelector('#settings-user-context + .set-content-group-intro')).toBeTruthy();
+  });
+
+  it('separates agent skills from MCP connections in the capabilities card', async () => {
+    await wrap(<SettingsPage {...defaultProps} agents={[sampleAgent]} />);
+
+    const capabilities = document.querySelector('#settings-capabilities');
+    expect(capabilities).toBeTruthy();
+    expect(capabilities?.textContent).toContain('Capacités des agents');
+
+    const groups = [...(capabilities?.children ?? [])]
+      .filter(child => child.classList.contains('set-capabilities-group'));
+    expect(groups).toHaveLength(2);
+    expect(groups[0]).toHaveAttribute('data-kind', 'agent');
+    expect(groups[0].textContent).toContain('Compétences et comportements');
+    expect([...groups[0].querySelectorAll('.set-accordion-section')].map(section => section.id)).toEqual([
+      'settings-skills',
+      'settings-profiles',
+      'settings-directives',
+    ]);
+    expect(groups[1]).toHaveAttribute('data-kind', 'mcp');
+    expect(groups[1].textContent).toContain('Connexions MCP');
+    expect(groups[1].querySelector('#settings-host-mcps')).toBeTruthy();
+  });
+
+  it('explains capability types, origins and current global scope', async () => {
+    await wrap(<SettingsPage {...defaultProps} agents={[sampleAgent]} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Comprendre les capacités' }));
+
+    expect(screen.getByText(/Skill : procédure/)).toBeInTheDocument();
+    expect(screen.getByText(/Profil agent : rôle/)).toBeInTheDocument();
+    expect(screen.getByText(/Directive : règle/)).toBeInTheDocument();
+    expect(screen.getByText(/actuellement globales/)).toBeInTheDocument();
+  });
+
+  it('filters the unified capability area by origin and type', async () => {
+    await wrap(<SettingsPage {...defaultProps} agents={[sampleAgent]} />);
+    document.querySelectorAll('.set-accordion-header').forEach(button => fireEvent.click(button));
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+
+    const originGroup = screen.getByRole('group', { name: 'Provenance' });
+    const personalButton = [...originGroup.querySelectorAll('button')]
+      .find(button => button.textContent === 'Personnel');
+    fireEvent.click(personalButton!);
+
+    expect(document.body.textContent).not.toContain('Systems programming');
+    expect(document.body.textContent).toContain('Security auditing');
+    expect(document.body.textContent).not.toContain('Short answers');
+
+    const typeGroup = screen.getByRole('group', { name: 'Type' });
+    const directivesButton = [...typeGroup.querySelectorAll('button')]
+      .find(button => button.textContent === 'Directives');
+    fireEvent.click(directivesButton!);
+    expect(document.querySelector('#settings-skills')).toBeNull();
+    expect(document.querySelector('#settings-profiles')).toBeNull();
+    expect(document.querySelector('#settings-directives')).toBeTruthy();
+
+    const allOriginsButton = [...originGroup.querySelectorAll('button')]
+      .find(button => button.textContent === 'Tous');
+    fireEvent.click(allOriginsButton!);
+    expect(document.body.textContent).toContain('Short answers');
   });
 
   it('shows the current version under the settings menu with stable release links', async () => {
@@ -312,6 +418,15 @@ describe('SettingsPage', () => {
     expect(body).toContain('Systems programming');
     expect(body).toContain('Security');
     expect(body).toContain('Security auditing');
+
+    const rustCard = [...document.querySelectorAll('.set-item-card')]
+      .find(card => card.textContent?.includes('Systems programming'));
+    const securityCard = [...document.querySelectorAll('.set-item-card')]
+      .find(card => card.textContent?.includes('Security auditing'));
+    expect(rustCard).toHaveAttribute('data-origin', 'kronn');
+    expect(rustCard?.textContent).toContain('Kronn');
+    expect(securityCard).toHaveAttribute('data-origin', 'personal');
+    expect(securityCard?.textContent).toContain('Personnel');
   });
 
   it('custom skill card exposes Edit + Delete; builtin only Delete', async () => {
@@ -348,6 +463,9 @@ describe('SettingsPage', () => {
 
     expect(body).toContain('Terse');
     expect(body).toContain('Short answers');
+    const directiveCard = [...document.querySelectorAll('.set-item-card')]
+      .find(card => card.textContent?.includes('Short answers'));
+    expect(directiveCard).toHaveAttribute('data-origin', 'kronn');
   });
 
   it('DB info shows all counters when > 0', async () => {
@@ -423,11 +541,18 @@ describe('SettingsPage', () => {
     expect(body).not.toContain('Default profile per project');
   });
 
-  it('renders Usage nav button in settings navigation', async () => {
+  it('keeps Usage inside Agents instead of exposing a separate nav section', async () => {
     await wrap(<SettingsPage {...defaultProps} agents={[sampleAgent]} />);
     const navButtons = document.querySelectorAll('.set-nav-btn');
     const labels = Array.from(navButtons).map(b => b.textContent);
-    expect(labels).toContain('Usage');
+    expect(labels).not.toContain('Usage');
+    expect(document.querySelector('#settings-agent-config [data-testid="usage-section"]')).toBeTruthy();
+    const defaults = document.querySelector('[data-testid="agent-defaults"]');
+    const economyGrid = document.querySelector('.set-agent-economy-grid');
+    expect(economyGrid?.querySelector('[data-testid="usage-section"]')).toBeTruthy();
+    expect(defaults?.nextElementSibling).toBe(economyGrid);
+    expect(economyGrid?.nextElementSibling).toHaveClass('set-agent-list-head');
+    expect(document.querySelector('.set-agents-section')?.lastElementChild).toHaveClass('set-best-practices');
   });
 
   it('shows add key form when clicking Ajouter une cle', async () => {
@@ -455,8 +580,10 @@ describe('SettingsPage', () => {
     expect(document.querySelector('[data-testid="usage-period-daily"]')).toBeTruthy();
     expect(document.querySelector('[data-testid="usage-period-weekly"]')).toBeTruthy();
     expect(document.querySelector('[data-testid="usage-period-monthly"]')).toBeTruthy();
-    // Details toggle reveals the deep table
-    expect(document.querySelector('[data-testid="usage-details-toggle"]')).toBeTruthy();
+    // No compatible logs: show the explicit empty state instead of an empty
+    // details drawer.
+    expect(document.querySelector('[data-testid="usage-empty"]')).toBeTruthy();
+    expect(document.querySelector('[data-testid="usage-details-toggle"]')).toBeNull();
   });
 
   it('renders bio textarea in Identity section', async () => {

@@ -18,6 +18,7 @@ import { StepBranchMap } from './StepBranchMap';
 import { RunDetail, RunStatusTrail } from './RunDetail';
 import { liveStepWaitingKey, runStatusTimeline } from '../../lib/workflowUiUtils';
 import { AgentSwitchPicker } from '../AgentSwitchPicker';
+import { CopyIdPill } from '../CopyIdPill';
 import '../../pages/WorkflowsPage.css';
 
 const checkAgentRestricted = isAgentRestricted;
@@ -594,6 +595,13 @@ function StepCard({ step, index, agentAccess, projectId, t, quickPromptsById, wo
       <div className="flex-row gap-4">
         <span className="wf-step-number">{index + 1}</span>
         <span className="font-semibold text-md">{step.name}</span>
+        {step.id && (
+          <CopyIdPill
+            id={step.id}
+            title={t('wf.copyStepId', step.name)}
+            className="wf-step-id-pill"
+          />
+        )}
         {/* Per step_type tag — the previous version always rendered the
             agent label, which made an ApiCall step look like an Agent
             step ("main · Claude Code"). Now: distinct badge for Batch,
@@ -1284,12 +1292,21 @@ function SubWorkflowOverview({
                     </span>
                   </span>
                 </button>
-                {isAgentStep && (
-                  <span className="wf-pipe-chip-meta">
+                <span className="wf-pipe-chip-meta">
+                  {step.id && (
+                    <CopyIdPill
+                      id={step.id}
+                      title={t('wf.copyStepId', step.name)}
+                      className="wf-step-id-pill"
+                    />
+                  )}
+                  {isAgentStep && (
+                    <>
                     <StepAgentSwitcher step={step} stepIndex={index} t={t} compact />
                     <TierBadge step={step} t={t} chip />
-                  </span>
-                )}
+                    </>
+                  )}
+                </span>
               </div>
             );
           })}
@@ -1772,8 +1789,16 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, onChangeSt
                             </span>
                           </span>
                         </button>
-                        {isAgentStep && (
-                          <span className="wf-pipe-chip-meta">
+                        <span className="wf-pipe-chip-meta">
+                          {step.id && (
+                            <CopyIdPill
+                              id={step.id}
+                              title={t('wf.copyStepId', step.name)}
+                              className="wf-step-id-pill"
+                            />
+                          )}
+                          {isAgentStep && (
+                            <>
                             <StepAgentSwitcher
                               step={step}
                               stepIndex={i}
@@ -1783,8 +1808,9 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, onChangeSt
                               compact
                             />
                             <TierBadge step={step} t={t} chip />
-                          </span>
-                        )}
+                            </>
+                          )}
+                        </span>
                       </div>
                     </Fragment>
                   );

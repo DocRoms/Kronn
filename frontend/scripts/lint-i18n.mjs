@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 /**
- * i18n key lint — verifies translation parity across FR / EN / ES.
+ * i18n key lint — verifies translation parity across every shipped UI locale.
  *
  * Catches three classes of bugs:
  *
  *   1. Key in `t('foo')` but missing from `fr` → runtime fallback to the
  *      key itself, broken UX (sees "qp.compareAgents.button" instead of
  *      "Comparer sur 7 agents installés").
- *   2. Key in `fr` but missing from `en` / `es` → English/Spanish users
+ *   2. Key in `fr` but missing from another locale → users of that locale
  *      see the key string instead of a translation.
  *   3. Key declared in a locale but unused anywhere in the source → dead
  *      weight, gets imported into the bundle. Reported as a warning, not
@@ -26,6 +26,7 @@ import { fileURLToPath } from 'node:url';
 const ROOT = join(fileURLToPath(import.meta.url), '..', '..');
 const SRC = join(ROOT, 'src');
 const I18N_DIR = join(SRC, 'lib', 'i18n', 'locales');
+const LOCALES = ['fr', 'en', 'es', 'zh'];
 
 // ── 1. Parse locale dictionaries ──────────────────────────────────────────
 // Each locale is a `const fr: TranslationDict = { ... };` block. We walk
@@ -49,33 +50,26 @@ function extractLocaleBlock(name) {
 }
 
 function keysIn(block) {
-  // `'key.name':` at line start (with leading whitespace tolerated).
-  // Doesn't catch dynamic keys (none expected at the dictionary top
-  // level — keys are always literal strings).
+  // `'key.name':` or `"key.name":` at line start (with leading whitespace tolerated).
+  // Translation keys are namespaced (and therefore contain a dot). Requiring
+  // that dot avoids mistaking JSON examples embedded in multiline prompts for
+  // dictionary entries.
   const keys = new Set();
-  const re = /^[\t ]+'([^']+)':/gm;
+  const re = /^[\t ]+(['"])([^'"\n]*\.[^'"\n]*)\1:/gm;
   let m;
-  while ((m = re.exec(block))) keys.add(m[1]);
+  while ((m = re.exec(block))) keys.add(m[2]);
   return keys;
 }
 
-const localeBlocks = {
-  fr: extractLocaleBlock('fr'),
-  en: extractLocaleBlock('en'),
-  es: extractLocaleBlock('es'),
-};
-const localeKeys = {
-  fr: keysIn(localeBlocks.fr),
-  en: keysIn(localeBlocks.en),
-  es: keysIn(localeBlocks.es),
-};
+const localeBlocks = Object.fromEntries(LOCALES.map(locale => [locale, extractLocaleBlock(locale)]));
+const localeKeys = Object.fromEntries(LOCALES.map(locale => [locale, keysIn(localeBlocks[locale])]));
 
 // ── 2. Parity check ──────────────────────────────────────────────────────
 // FR is the reference (most complete historically). Every key in FR must
-// also exist in EN and ES.
+// also exist in every other shipped locale.
 const errors = [];
 const ref = localeKeys.fr;
-for (const lang of ['en', 'es']) {
+for (const lang of LOCALES.filter(locale => locale !== 'fr')) {
   const set = localeKeys[lang];
   for (const k of ref) {
     if (!set.has(k)) errors.push(`[parity] '${k}' present in fr but missing from ${lang}`);
@@ -148,7 +142,7 @@ for (const k of ref) {
 
 // ── 4. Report ────────────────────────────────────────────────────────────
 const totalKeys = ref.size;
-console.log(`i18n lint — fr=${localeKeys.fr.size}, en=${localeKeys.en.size}, es=${localeKeys.es.size}`);
+console.log(`i18n lint — ${LOCALES.map(locale => `${locale}=${localeKeys[locale].size}`).join(', ')}`);
 console.log(`Source: ${usedKeys.size} static t('…') usages across ${SRC} (+${dynamicCount} files with dynamic keys)`);
 
 for (const e of errors) console.error(e);
@@ -164,4 +158,4 @@ if (errors.length) {
 if (warnings.length) {
   console.warn(`\n⚠ ${warnings.length} warning(s) — review for dead keys.`);
 }
-console.log(`\n✓ ${totalKeys} keys triple-localised.`);
+console.log(`\n✓ ${totalKeys} keys localised in ${LOCALES.length} languages.`);

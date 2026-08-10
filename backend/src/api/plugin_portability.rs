@@ -1045,6 +1045,7 @@ mod tests {
                 command: "vendor".into(),
                 args: vec!["token".into()],
                 inject: TokenInjection::BearerHeader,
+                fallback_env_key: Some("API_TOKEN".into()),
             },
         );
         let values = plugin_value_descriptors(&server, &test_config(&server.id));

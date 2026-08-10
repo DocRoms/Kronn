@@ -48,6 +48,7 @@ export const API_NAMESPACES = [
   'directives',
   'stats',
   'ollama',
+  'liteLlm',
   'debugApi',
   'themes',
   'docs',
@@ -95,6 +96,7 @@ interface DefaultMock {
   directives: Record<string, AnyFn>;
   stats: Record<string, AnyFn>;
   ollama: Record<string, AnyFn>;
+  liteLlm: Record<string, AnyFn>;
   debugApi: Record<string, AnyFn>;
   themes: Record<string, AnyFn>;
   docs: Record<string, AnyFn>;
@@ -151,7 +153,7 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       saveGlobalContext: resolve(undefined),
       getGlobalContextMode: resolve('always'),
       saveGlobalContextMode: resolve(undefined),
-      getServerConfig: resolve({ pseudo: null, avatar_email: null, host: 'localhost', port: 3140, default_model_tier: 'default', default_summary_strategy: 'Off' }),
+      getServerConfig: resolve({ pseudo: null, avatar_email: null, host: 'localhost', port: 3140, default_model_tier: 'default', default_summary_strategy: 'Off', agent_handoffs_enabled: false, agent_handoff_paid_limit: 1, agent_handoff_paid_unlimited: false, agent_handoff_blocked_agents: [] }),
       setServerConfig: resolve(undefined),
       getNetworkExposure: resolve({ exposed: false, restart_required: false, port: 3140, reachable_ips: [] }),
       setNetworkExposure: resolve({ exposed: false, restart_required: false, port: 3140, reachable_ips: [] }),
@@ -304,6 +306,7 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       delete: resolve(undefined),
       update: resolve(undefined),
       nativeAgentMode: resolve({ disabled: false }),
+      agentHandoffMode: resolve({ global_enabled: false, disabled: false, unlimited_override: false, effective_enabled: false, paid_limit: 1 }),
       workspaces: resolve([]),
       archive: resolve(undefined),
       unarchive: resolve(undefined),
@@ -449,6 +452,21 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
     ollama: {
       health: resolve({ status: 'not_installed', version: null, endpoint: 'http://localhost:11434', models_count: 0, hint: null }),
       models: resolve({ models: [] }),
+    },
+
+    liteLlm: {
+      health: resolve({
+        status: 'not_configured', endpoint: 'http://localhost:4000',
+        models_count: 0, hint: null, configured: false,
+      }),
+      models: resolve({ models: [] }),
+      modelFailures: resolve({ failures: [] }),
+      forgetModelFailure: resolve(false),
+      retryModel: resolve({ healthy: true, failure: null }),
+      test: resolve({
+        ok: false, saved: false, status: 'offline',
+        endpoint: 'http://localhost:4000', models: [], hint: null,
+      }),
     },
 
     debugApi: {

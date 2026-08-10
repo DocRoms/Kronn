@@ -30,6 +30,7 @@ import {
   splitMessageSeed,
   stripAgentHandoff,
 } from '../lib/messageContent';
+import { parseModelErrorEvent } from '../lib/modelErrorEvent';
 import {
   Cpu, AlertTriangle, Zap, Loader2, Pause, Play,
   Key, Settings, Send, Pencil, RotateCcw, Check, Copy, Clock, ShieldCheck,
@@ -40,7 +41,6 @@ import {
 // Hoisted regexes (avoid creating new RegExp objects per message per render)
 const RE_AUTH_ERROR = /api.?key|invalid.*key|key.*not.*config|authenticat|unauthori|login|sign.?in/i;
 const RE_PARTIAL_RESPONSE = /Réponse partielle.*interrompu|Timeout d'inactivité/i;
-
 interface MentionMdNode {
   type: string;
   value?: string;
@@ -253,7 +253,31 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
     prevUserTs, defaultAgent, summaryCache, language, sending, editingText, hasFullAccess,
     onCopy, onTts, onEditStart, onEditCancel, onEditSubmit, onEditTextChange, onRetry, onExpandSummary, onNavigate, discussionId, projectId, chainableQPs, onLaunchQp, attachments, pendingAttachment, isSearchMatch, isSearchCurrent, replyTarget, replies = [], onReply, onReplyNavigate, t } = props;
   const isUser = msg.role === 'User';
-  const visibleContent = isUser ? stripAgentHandoff(msg.content) : msg.content;
+  const modelError = useMemo(() => {
+    if (msg.role !== 'System') return null;
+    const structured = parseModelErrorEvent(msg.content);
+    if (structured) return structured;
+    // Upgrade already-persisted pre-0.9.4 LiteLLM failures in place. Those
+    // messages contain the raw HTTP body and provenance fields but predate the
+    // structured marker, so users should not need to reproduce the failure to
+    // gain the compact diagnostic + settings CTA.
+    if (msg.agent_type !== 'LiteLlm' || !msg.model) return null;
+    const status = /LiteLLM error (\d{3})\b/i.exec(msg.content)?.[1];
+    if (!status || !['400', '404', '422'].includes(status)) return null;
+    const tier = ['economy', 'default', 'reasoning'].includes(msg.model_tier ?? '')
+      ? msg.model_tier as 'economy' | 'default' | 'reasoning'
+      : 'default';
+    return {
+      kind: 'model_error' as const,
+      status: Number(status),
+      summary: t('disc.modelErrorSummary', 'LiteLLM', status, msg.model),
+      detail: msg.content,
+      tier,
+    };
+  }, [msg.role, msg.content, msg.agent_type, msg.model, msg.model_tier, t]);
+  const visibleContent = isUser
+    ? stripAgentHandoff(msg.content)
+    : modelError?.summary ?? msg.content;
   const agentType = msg.agent_type ?? defaultAgent;
   const isTourDemo = msg.role === 'Agent'
     && msg.source_msg_id === 'kronn-guided-tour-demo-preview';
@@ -572,7 +596,7 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
             {messageShortLabel(msg.id)}
           </button>
         </div>
-        {msg.reply_to_message_id && (
+        {msg.role !== 'System' && msg.reply_to_message_id && (
           <button
             type="button"
             className="disc-reply-header"
@@ -628,6 +652,14 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
           // the markdown render — we don't want a second copy of
           // `[kronn-internal: ...]` rendered as raw text below.
           null
+        ) : modelError ? (
+          <div className="disc-model-error-content" data-testid="disc-model-error-content">
+            <p>{modelError.summary}</p>
+            <details>
+              <summary>{t('disc.modelErrorDetails')}</summary>
+              <pre>{modelError.detail}</pre>
+            </details>
+          </div>
         ) : isMatrixLastUser && !decodeDone ? (
           // Matrix: render as plain scrambled text for ~700ms before
           // flipping to Markdown. Markdown parse is skipped during
@@ -687,7 +719,7 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
               : <><Play size={9} /> TTS</>}
           </button>
         )}
-        {RE_AUTH_ERROR.test(msg.content) && (
+        {!modelError && RE_AUTH_ERROR.test(msg.content) && (
           <div className="disc-auth-error-cta">
             <button className="disc-scan-btn" style={{ fontSize: 11, padding: '5px 12px' }} onClick={() => onNavigate('settings')}>
               <Key size={11} /> {t('disc.overrideKey')}
@@ -700,6 +732,29 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
             <button className="disc-scan-btn" style={{ fontSize: 11, padding: '5px 12px', borderColor: 'rgba(var(--kr-warning-amber-rgb), 0.3)', background: 'rgba(var(--kr-warning-amber-rgb), 0.08)', color: 'var(--kr-warning-amber)' }} onClick={() => onNavigate('settings', { scrollTo: 'settings-server' })}>
               <Settings size={11} /> {t('disc.editTimeout')}
             </button>
+          </div>
+        )}
+        {modelError && msg.agent_type && (
+          <div className="disc-auth-error-cta">
+            <button
+              className="disc-scan-btn"
+              style={{ fontSize: 11, padding: '5px 12px' }}
+              onClick={() => {
+                try {
+                  sessionStorage.setItem('kronn:model-config-target', JSON.stringify({
+                    agentType: msg.agent_type,
+                    tier: modelError.tier,
+                  }));
+                } catch { /* private mode / quota: section navigation still works */ }
+                onNavigate('settings', { scrollTo: 'settings-agent-config' });
+              }}
+            >
+              <Settings size={11} />
+              {t('disc.changeTierModel', t(`disc.tier.${modelError.tier}`))}
+            </button>
+            <span className="disc-auth-error-hint">
+              {t('disc.modelErrorHint', modelError.status)}
+            </span>
           </div>
         )}
         {/* 0.8.3 — End-of-validation CTA. When the agent emits
@@ -799,7 +854,7 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
             )}
           </div>
           <div className="disc-msg-footer-right">
-            {replies.map(reply => {
+            {replies.filter(reply => reply.role !== 'System').map(reply => {
               const agentMention = reply.agent_type
                 ? AGENT_MENTIONS.find(mention => mention.type === reply.agent_type)?.trigger
                 : null;

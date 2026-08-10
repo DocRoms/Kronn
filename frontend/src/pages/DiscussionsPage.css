@@ -5906,6 +5906,37 @@ button.disc-contact-open {
   align-self: center;
 }
 
+.disc-model-error-content > p {
+  margin: 0;
+}
+
+.disc-model-error-content details {
+  margin-top: var(--kr-sp-4);
+  color: var(--kr-text-faint);
+  font-size: var(--kr-fs-xs);
+}
+
+.disc-model-error-content summary {
+  width: fit-content;
+  cursor: pointer;
+  user-select: none;
+}
+
+.disc-model-error-content pre {
+  max-height: 220px;
+  margin: var(--kr-sp-3) 0 0;
+  padding: var(--kr-sp-4);
+  overflow: auto;
+  border: 1px solid rgba(var(--kr-error-rgb), 0.14);
+  border-radius: var(--kr-r-md);
+  background: rgba(var(--kr-error-rgb), 0.035);
+  color: var(--kr-text-secondary);
+  font-size: var(--kr-fs-2xs);
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 /* ── Summary cache expanded ───────────────────────────── */
 .disc-summary-expanded {
   margin-top: 6px;

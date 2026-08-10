@@ -404,7 +404,7 @@ pub async fn save_language(
 
 /// GET /api/config/ui-language
 ///
-/// UI locale of the React frontend (FR/EN/ES). Returned by the frontend at
+/// UI locale of the React frontend (FR/EN/ES/ZH). Returned by the frontend at
 /// mount to survive Tauri WebView2 localStorage wipes (app update, profile
 /// rotation on Windows) — localStorage remains the fast-path write so the
 /// UI doesn't flash on navigation.
@@ -419,10 +419,10 @@ pub async fn save_ui_language(
     Json(lang): Json<String>,
 ) -> Json<ApiResponse<()>> {
     // Validate — refuse random strings to avoid poisoning the config. We
-    // accept only the three locales the frontend actually ships.
-    if !matches!(lang.as_str(), "fr" | "en" | "es") {
+    // accept only the locales the frontend actually ships.
+    if !matches!(lang.as_str(), "fr" | "en" | "es" | "zh") {
         return Json(ApiResponse::err(format!(
-            "Invalid ui_language '{}'. Expected fr|en|es.",
+            "Invalid ui_language '{}'. Expected fr|en|es|zh.",
             lang
         )));
     }
@@ -725,6 +725,7 @@ pub async fn set_agent_mention_color(
         AgentType::Vibe => &mut config.agents.vibe,
         AgentType::CopilotCli => &mut config.agents.copilot_cli,
         AgentType::Ollama => &mut config.agents.ollama,
+        AgentType::LiteLlm => &mut config.agents.lite_llm,
         AgentType::Custom => {
             return Json(ApiResponse::err(
                 "Custom agents do not have a configurable mention color",
@@ -776,6 +777,10 @@ pub async fn get_server_config(
         discussion_notes_enabled: config.server.discussion_notes_enabled,
         default_model_tier: config.server.default_model_tier,
         default_summary_strategy: config.server.default_summary_strategy,
+        agent_handoffs_enabled: config.server.agent_handoffs_enabled,
+        agent_handoff_paid_limit: config.server.agent_handoff_paid_limit.min(5),
+        agent_handoff_paid_unlimited: config.server.agent_handoff_paid_unlimited,
+        agent_handoff_blocked_agents: config.server.agent_handoff_blocked_agents.clone(),
     }))
 }
 
@@ -836,6 +841,26 @@ pub async fn set_server_config(
     // 0.8.6 phase 4 — default summary strategy. Same PATCH semantic.
     if let Some(strategy) = req.default_summary_strategy {
         config.server.default_summary_strategy = strategy;
+    }
+    if let Some(enabled) = req.agent_handoffs_enabled {
+        config.server.agent_handoffs_enabled = enabled;
+    }
+    if let Some(limit) = req.agent_handoff_paid_limit {
+        config.server.agent_handoff_paid_limit = limit.min(5);
+    }
+    if let Some(unlimited) = req.agent_handoff_paid_unlimited {
+        config.server.agent_handoff_paid_unlimited = unlimited;
+    }
+    if let Some(blocked_agents) = req.agent_handoff_blocked_agents {
+        config.server.agent_handoff_blocked_agents =
+            blocked_agents
+                .into_iter()
+                .fold(Vec::new(), |mut unique, agent| {
+                    if !unique.contains(&agent) {
+                        unique.push(agent);
+                    }
+                    unique
+                });
     }
     match config::save(&config).await {
         Ok(_) => Json(ApiResponse::ok(())),

@@ -46,13 +46,14 @@ async function mount(
   onSend: ReturnType<typeof vi.fn>,
   sending = false,
   agents: AgentDetection[] = [],
+  discussion: Discussion = disc,
 ) {
   const t = (k: string, ...a: unknown[]) => (a.length ? `${k}(${a.join('|')})` : k);
   let view!: ReturnType<typeof render>;
   await act(async () => {
     view = render(
       <ChatInput
-        discussion={disc} agents={agents} sending={sending} disabled={false}
+        discussion={discussion} agents={agents} sending={sending} disabled={false}
         ttsEnabled={false} ttsState="idle" worktreeError={null}
         availableSkills={[]} availableDirectives={[]}
         onSend={onSend as never} onStop={vi.fn()} onOrchestrate={vi.fn()}
@@ -226,6 +227,33 @@ describe('ChatInput — send-race guard (P0-10)', () => {
       [
         { kind: 'agent', agent_type: 'Codex', cli_session_id: null },
         { kind: 'discussion_agent', agent_type: 'ClaudeCode', cli_session_id: null },
+      ],
+      false,
+      undefined,
+    );
+  });
+
+  it('routes a general turn to every native model attached to the discussion', async () => {
+    const onSend = vi.fn();
+    const groupDiscussion = {
+      ...disc,
+      agent: 'LiteLlm',
+      participants: ['LiteLlm', 'Ollama'],
+    } as Discussion;
+    const agents = [
+      { agent_type: 'LiteLlm', installed: true, runtime_available: true, enabled: true },
+      { agent_type: 'Ollama', installed: true, runtime_available: true, enabled: true },
+    ] as AgentDetection[];
+    await mount(onSend, false, agents, groupDiscussion);
+    typeText('Vous devriez connaître vos points forts et faibles.');
+
+    fireEvent.click(sendButton());
+
+    expect(onSend).toHaveBeenCalledWith(
+      'Vous devriez connaître vos points forts et faibles.',
+      [
+        { kind: 'discussion_agent', agent_type: 'LiteLlm', cli_session_id: null },
+        { kind: 'agent', agent_type: 'Ollama', cli_session_id: null },
       ],
       false,
       undefined,

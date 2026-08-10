@@ -9,6 +9,7 @@ pub mod discussion_workspaces;
 pub mod discussions;
 pub mod id_resolver;
 pub mod learnings;
+pub mod lite_llm_model_failures;
 pub mod mcps;
 pub mod migrations;
 pub mod planning;

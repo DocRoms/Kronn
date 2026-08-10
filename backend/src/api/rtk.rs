@@ -77,11 +77,13 @@ fn rtk_args_for(agent_type: &AgentType) -> Option<Vec<&'static str>> {
         // editor's settings.json), not the @github/copilot standalone
         // CLI that Kronn detects as `CopilotCli`. Treating it as
         // unsupported avoids miswiring the wrong host.
-        // Kiro (AWS), Vibe, Ollama, Custom: not in RTK's upstream list.
+        // Kiro (AWS), Vibe, Ollama, LiteLLM, Custom: not in RTK's upstream
+        // list (the HTTP agents have no shell to hook at all).
         AgentType::CopilotCli
         | AgentType::Kiro
         | AgentType::Vibe
         | AgentType::Ollama
+        | AgentType::LiteLlm
         | AgentType::Custom => None,
     }
 }
@@ -107,6 +109,7 @@ fn rtk_uninstall_args_for(agent_type: &AgentType) -> Option<Vec<&'static str>> {
         | AgentType::Kiro
         | AgentType::Vibe
         | AgentType::Ollama
+        | AgentType::LiteLlm
         | AgentType::Custom => None,
     }
 }

@@ -102,7 +102,7 @@ fn agent_config_relpath(agent_type: &AgentType) -> Option<&'static Path> {
         // Not in RTK's supported list.
         AgentType::Kiro | AgentType::CopilotCli => None,
         // API-only or hookless.
-        AgentType::Vibe | AgentType::Ollama | AgentType::Custom => None,
+        AgentType::Vibe | AgentType::Ollama | AgentType::LiteLlm | AgentType::Custom => None,
     }
 }
 

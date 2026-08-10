@@ -3,7 +3,7 @@ import { SUGGESTED_MODELS } from '../ollamaModels';
 import { dictionaries } from '../../../lib/i18n/testing';
 
 // Guards Kronn's hardcoded Ollama first-pull suggestions: real tags, a hardware
-// range that includes no-GPU machines, and full FR/EN/ES coverage.
+// range that includes no-GPU machines, and full UI-locale coverage.
 describe('OllamaCard suggested models', () => {
   it('drops the bogus gemma4 entry (was "gemma4:26b" — never existed in the registry)', () => {
     for (const m of SUGGESTED_MODELS) {
@@ -30,8 +30,8 @@ describe('OllamaCard suggested models', () => {
     }
   });
 
-  it('every model descKey + tier label resolves in all locales (fr/en/es)', () => {
-    const locales = ['fr', 'en', 'es'] as const;
+  it('every model descKey + tier label resolves in all UI locales', () => {
+    const locales = ['fr', 'en', 'es', 'zh'] as const;
     for (const loc of locales) {
       const dict = dictionaries[loc] as Record<string, string>;
       for (const m of SUGGESTED_MODELS) {

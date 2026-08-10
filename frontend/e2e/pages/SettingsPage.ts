@@ -45,14 +45,15 @@ export class SettingsPage {
 
   // ─── Card locators (scoped to their accordion) ─────────────────────
   /** Skill card by its exact name. Match goes through the card's heading
-   *  span (`.font-semibold`) which holds only the skill name. Without this
+   *  title (`.set-capability-card-title`) which holds the skill icon + name.
+   *  Without this
    *  exact-match strategy a substring like "test-driven-development" also
    *  matches `testing` and `systematic-debugging` cards. */
   skillCard(name: string): Locator {
     return this.page
       .locator('#settings-skills .set-item-card')
       .filter({
-        has: this.page.locator('.font-semibold').getByText(name, { exact: true }),
+        has: this.page.locator('.set-capability-card-title').getByText(name, { exact: true }),
       });
   }
 

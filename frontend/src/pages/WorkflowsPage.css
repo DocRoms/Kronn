@@ -3120,6 +3120,20 @@
   padding: 0 11px 4px 19px;
 }
 
+.wf-step-id-pill {
+  min-width: 0;
+  max-width: 100%;
+  padding: 1px 6px;
+  font-size: 9px;
+}
+
+.wf-step-id-pill span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .wf-pipe-chip:hover {
   filter: brightness(1.15);
   transform: translateY(-1px);

@@ -110,9 +110,11 @@ pub enum ApiAuthKind {
     /// "empty password" in Settings → APIs.
     BasicApiKey { env_key: String },
     /// Resolve a token from a trusted local CLI command at request time, then
-    /// inject it into the API call without persisting the token in Kronn or in
-    /// generated MCP configuration files. Registry definitions are the only
-    /// source of this command contract; custom plugins cannot create one.
+    /// inject the command output into the API call without persisting that
+    /// output in Kronn or in generated MCP configuration files. A registry
+    /// entry may separately declare an encrypted fallback key. Registry
+    /// definitions are the only source of this command contract; custom
+    /// plugins cannot create one.
     ///
     /// Fastly uses this with `fastly auth token`, allowing the same local CLI
     /// identity to power both the CLI-backed MCP server and deterministic
@@ -121,6 +123,12 @@ pub enum ApiAuthKind {
         command: String,
         args: Vec<String>,
         inject: TokenInjection,
+        /// Optional encrypted config key used only if the local CLI cannot
+        /// resolve its own credential. Built-in registry entries alone may
+        /// declare this fallback.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        fallback_env_key: Option<String>,
     },
     /// OAuth2 client-credentials grant — Kronn exchanges `client_id` +
     /// `client_secret` against `token_url` to get a short-lived

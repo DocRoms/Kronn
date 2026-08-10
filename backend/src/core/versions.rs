@@ -55,6 +55,8 @@ pub fn latest_known_agent_version(agent_type: &AgentType) -> Option<&'static str
         // Kiro (preview, AWS distributes via cli.kiro.dev — no stable version
         // promise yet; we don't surface a freshness pill).
         AgentType::Kiro => None,
+        // litellm on PyPI
+        AgentType::LiteLlm => Some("1.95.0"),
         AgentType::Custom => None,
     }
 }
@@ -160,6 +162,7 @@ mod tests {
             AgentType::GeminiCli,
             AgentType::CopilotCli,
             AgentType::Ollama,
+            AgentType::LiteLlm,
         ] {
             assert!(
                 latest_known_agent_version(&agent).is_some(),

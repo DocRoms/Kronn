@@ -41,7 +41,11 @@ import {
   CircleHelp, Eye, EyeOff, StickyNote,
 } from 'lucide-react';
 import { useIsMobile } from '../hooks/useMediaQuery';
-import { composerMentions, targetsFromComposerText } from '../lib/messageTargets';
+import {
+  composerMentions,
+  nativeDiscussionTargets,
+  targetsFromComposerText,
+} from '../lib/messageTargets';
 
 interface AgentMentionQuery {
   query: string;
@@ -641,9 +645,17 @@ export function ChatInput({
     sendInFlightRef.current = true;
     const msg = inputVal.trim();
     const channel: MessageChannel = sendAsNote ? 'note' : 'main';
-    const { targets, targetAll } = channel === 'main'
+    const parsedTargets = channel === 'main'
       ? targetsFromComposerText(msg, AGENT_MENTIONS)
       : { targets: [], targetAll: false };
+    const attachedNativeTargets = nativeDiscussionTargets(discussion);
+    const targets = channel === 'main'
+      && parsedTargets.targets.length === 0
+      && !parsedTargets.targetAll
+      && attachedNativeTargets.length > 1
+      ? attachedNativeTargets
+      : parsedTargets.targets;
+    const targetAll = parsedTargets.targetAll;
 
     // ── Auto-trigger skills based on message keywords ──
     // Every skill can declare regex triggers in its frontmatter

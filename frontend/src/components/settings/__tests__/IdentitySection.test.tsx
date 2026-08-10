@@ -81,8 +81,8 @@ describe('IdentitySection — mount load', () => {
       pseudo: 'JohnDoe42', avatar_email: 'john@example.com', bio: 'Tester',
     });
     await mountIdentity();
-    expect((screen.getByPlaceholderText('Ex: JohnDoe42') as HTMLInputElement).value).toBe('JohnDoe42');
-    expect((screen.getByPlaceholderText('email@example.com') as HTMLInputElement).value).toBe('john@example.com');
+    expect((screen.getByPlaceholderText('settings.pseudoPlaceholder') as HTMLInputElement).value).toBe('JohnDoe42');
+    expect((screen.getByPlaceholderText('settings.avatarEmailPlaceholder') as HTMLInputElement).value).toBe('john@example.com');
     // bio uses the i18n placeholder key (identity translator → verbatim).
     expect((screen.getByPlaceholderText('settings.bioPlaceholder') as HTMLTextAreaElement).value).toBe('Tester');
   });
@@ -106,14 +106,46 @@ describe('IdentitySection — mount load', () => {
     contacts.networkInfo.mockRejectedValue(new Error('500'));
     await mountIdentity();
     // Card mounted ; pseudo input is empty.
-    expect((screen.getByPlaceholderText('Ex: JohnDoe42') as HTMLInputElement).value).toBe('');
+    expect((screen.getByPlaceholderText('settings.pseudoPlaceholder') as HTMLInputElement).value).toBe('');
+  });
+
+  it('separates profile, personal instructions and network sharing', async () => {
+    await mountIdentity();
+    expect(screen.getByText('settings.identityProfileTitle')).toBeInTheDocument();
+    expect(screen.getByText('settings.identityContextTitle')).toBeInTheDocument();
+    expect(screen.getByText('settings.identityNetworkTitle')).toBeInTheDocument();
+    expect(document.querySelectorAll('.set-identity-panel')).toHaveLength(3);
+  });
+
+  it('keeps the connection guide collapsed until requested', async () => {
+    await mountIdentity();
+    expect(screen.queryByText('contacts.guideStep1')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /contacts\.guideTitle/ }));
+    expect(screen.getByText('contacts.guideStep1')).toBeInTheDocument();
+  });
+
+  it('distinguishes discussion-launched agents from full CLI usage', async () => {
+    await mountIdentity();
+    fireEvent.click(screen.getByRole('button', { name: 'settings.bioInfoTitle' }));
+
+    expect(screen.getByText('settings.bioInfoInjection')).toBeInTheDocument();
+    expect(screen.getByText('settings.bioInfoCli')).toBeInTheDocument();
+  });
+
+  it('explains the exact scope of global context injection', async () => {
+    await mountIdentity();
+    fireEvent.click(screen.getByRole('button', { name: 'settings.globalContextInfoTitle' }));
+
+    expect(screen.getByText('settings.globalContextInfoInjection')).toBeInTheDocument();
+    expect(screen.getByText('settings.globalContextInfoCli')).toBeInTheDocument();
   });
 });
 
 describe('IdentitySection — save-on-change', () => {
   it('typing in pseudo fires setServerConfig with a partial payload', async () => {
     await mountIdentity();
-    const input = screen.getByPlaceholderText('Ex: JohnDoe42') as HTMLInputElement;
+    const input = screen.getByPlaceholderText('settings.pseudoPlaceholder') as HTMLInputElement;
     fireEvent.change(input, { target: { value: 'Romuald' } });
     expect(config.setServerConfig).toHaveBeenCalledWith({ pseudo: 'Romuald' });
     expect(input.value).toBe('Romuald');
@@ -121,7 +153,7 @@ describe('IdentitySection — save-on-change', () => {
 
   it('typing in avatar email fires setServerConfig with avatar_email only', async () => {
     await mountIdentity();
-    const input = screen.getByPlaceholderText('email@example.com') as HTMLInputElement;
+    const input = screen.getByPlaceholderText('settings.avatarEmailPlaceholder') as HTMLInputElement;
     fireEvent.change(input, { target: { value: 'me@example.com' } });
     expect(config.setServerConfig).toHaveBeenCalledWith({ avatar_email: 'me@example.com' });
   });
@@ -131,6 +163,21 @@ describe('IdentitySection — save-on-change', () => {
     const ta = screen.getByPlaceholderText('settings.bioPlaceholder') as HTMLTextAreaElement;
     fireEvent.change(ta, { target: { value: 'Eng @ Euronews' } });
     expect(config.setServerConfig).toHaveBeenCalledWith({ bio: 'Eng @ Euronews' });
+  });
+
+  it('surfaces an identity save failure without discarding the typed value', async () => {
+    const toast = vi.fn();
+    config.setServerConfig.mockRejectedValueOnce(new Error('offline'));
+    await mountIdentity(toast);
+    const input = screen.getByPlaceholderText('settings.pseudoPlaceholder') as HTMLInputElement;
+
+    fireEvent.change(input, { target: { value: 'Romuald' } });
+
+    expect(input.value).toBe('Romuald');
+    await waitFor(() => expect(toast).toHaveBeenCalledWith(
+      expect.stringContaining('offline'),
+      'error',
+    ));
   });
 });
 
@@ -171,6 +218,7 @@ describe('IdentitySection — global context lifecycle', () => {
     // Now mark dirty by typing.
     fireEvent.change(ta, { target: { value: '## Updated' } });
     expect(config.saveGlobalContext).not.toHaveBeenCalled(); // still deferred to blur
+    expect(screen.getByRole('status')).toHaveTextContent('settings.globalContextPending');
 
     fireEvent.blur(ta);
     await waitFor(() => expect(config.saveGlobalContext).toHaveBeenCalledWith('## Updated'));
@@ -195,8 +243,8 @@ describe('IdentitySection — network exposure toggle', () => {
     config.setNetworkExposure.mockResolvedValue({ exposed: true, restart_required: true, port: 3140, reachable_ips: [] });
     await mountIdentity();
 
-    const toggle = screen.getByTestId('expose-network-toggle') as HTMLInputElement;
-    expect(toggle.checked).toBe(false);
+    const toggle = screen.getByTestId('expose-network-toggle');
+    expect(toggle).toHaveAttribute('aria-checked', 'false');
 
     await act(async () => { fireEvent.click(toggle); });
     await waitFor(() => expect(config.setNetworkExposure).toHaveBeenCalledWith(true));
@@ -204,7 +252,7 @@ describe('IdentitySection — network exposure toggle', () => {
     // Exposing surfaces the security note + the restart-required notice.
     expect(screen.getByText('settings.exposeSecurityNote')).toBeInTheDocument();
     expect(screen.getByText('settings.exposeRestartRequired')).toBeInTheDocument();
-    expect(toggle.checked).toBe(true);
+    expect(toggle).toHaveAttribute('aria-checked', 'true');
   });
 
   it('shows the CLI restart hint (not a Tauri button) in web mode', async () => {

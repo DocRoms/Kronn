@@ -29,7 +29,10 @@ use super::{
     AGENT_GLOBAL_TIMEOUT, DEFAULT_STALL_TIMEOUT_MIN, MAX_AGENT_RESPONSE_BYTES,
     NON_STREAMING_STALL_TIMEOUT,
 };
-use crate::api::disc_helpers::{auth_mode_for, estimate_extra_context_len};
+use crate::api::disc_helpers::{
+    agent_alias, agent_handoff_budget_instruction, agent_handoff_target_is_allowed,
+    agent_mentions_in_prose, auth_mode_for, estimate_extra_context_len,
+};
 use crate::api::disc_prompts::build_agent_prompt;
 
 // ── Decoder-loop detector (shared by make_agent_stream + run_agent_streaming) ──
@@ -235,7 +238,9 @@ pub(crate) enum AgentExecutionOutcome {
 }
 
 fn agent_start_failure_outcome(error: &str) -> AgentExecutionOutcome {
-    if error.starts_with("Project path not found:") {
+    let non_retryable_http_status = agent_http_status(error)
+        .is_some_and(|status| (400..500).contains(&status) && !matches!(status, 408 | 425 | 429));
+    if error.starts_with("Project path not found:") || non_retryable_http_status {
         AgentExecutionOutcome::PreflightFailed
     } else {
         AgentExecutionOutcome::RuntimeUnavailable {
@@ -244,11 +249,121 @@ fn agent_start_failure_outcome(error: &str) -> AgentExecutionOutcome {
     }
 }
 
+fn agent_http_status(error: &str) -> Option<u16> {
+    error
+        .split_once(" error ")
+        .and_then(|(_, suffix)| suffix.split_whitespace().next())
+        .and_then(|status| status.parse::<u16>().ok())
+}
+
+/// A model-routing failure is useful to operators in full, but dumping a
+/// nested LiteLLM/Vertex JSON body into the transcript makes the discussion
+/// unreadable. Keep the raw diagnostic in a machine-readable System event so
+/// the UI can collapse it, while exposing the HTTP code, attempted model and
+/// reasoning tier for a one-click settings shortcut.
+fn model_start_error_content(
+    agent_type: &AgentType,
+    model: Option<&str>,
+    tier: crate::models::ModelTier,
+    language: &str,
+    error: &str,
+) -> Option<String> {
+    let status = agent_http_status(error)?;
+    if !matches!(status, 400 | 404 | 422) {
+        return None;
+    }
+    let model = model?;
+    let backend = format!("{agent_type:?}");
+    let summary = match language {
+        "fr" => format!(
+            "{backend} a répondu HTTP {status} : le modèle « {model} » est introuvable, indisponible dans cette région ou non autorisé."
+        ),
+        "es" => format!(
+            "{backend} respondió HTTP {status}: el modelo «{model}» no existe, no está disponible en esta región o no está autorizado."
+        ),
+        "zh" => format!(
+            "{backend} 返回 HTTP {status}：模型“{model}”不存在、在此区域不可用或未获授权。"
+        ),
+        _ => format!(
+            "{backend} returned HTTP {status}: model “{model}” was not found, is unavailable in this region, or is not authorized."
+        ),
+    };
+    let tier = match tier {
+        crate::models::ModelTier::Economy => "economy",
+        crate::models::ModelTier::Default => "default",
+        crate::models::ModelTier::Reasoning => "reasoning",
+    };
+    let payload = serde_json::json!({
+        "kind": "model_error",
+        "status": status,
+        "summary": summary,
+        "detail": error,
+        "tier": tier,
+    });
+    Some(format!("[kronn:model-error]\n{payload}"))
+}
+
 fn finish_tracked_preflight(
     completion_tx: &mut Option<tokio::sync::oneshot::Sender<AgentExecutionOutcome>>,
 ) {
     if let Some(sender) = completion_tx.take() {
         let _ = sender.send(AgentExecutionOutcome::PreflightFailed);
+    }
+}
+
+fn clear_awaiting_after_terminal(
+    conn: &rusqlite::Connection,
+    discussion_id: &str,
+    tracked_dispatch: bool,
+) -> anyhow::Result<()> {
+    if tracked_dispatch
+        || crate::db::agent_dispatch::has_active_for_discussion(conn, discussion_id)?
+    {
+        // A plural turn may still have Pending jobs after this model replies.
+        // The dispatch settlement transaction computes the authoritative value
+        // once the current job becomes terminal; clearing here creates a false
+        // idle window in which the remaining model placeholder disappears.
+        return Ok(());
+    }
+    crate::db::discussions::set_awaiting_agent(conn, discussion_id, false)
+}
+
+#[cfg(test)]
+mod awaiting_terminal_tests {
+    use super::clear_awaiting_after_terminal;
+
+    #[test]
+    fn tracked_reply_does_not_clear_a_plural_turn_before_dispatch_settlement() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO discussions (id, title, created_at, updated_at, awaiting_agent)
+             VALUES ('d-plural', 'Plural', ?1, ?1, 1)",
+            [&now],
+        )
+        .unwrap();
+
+        clear_awaiting_after_terminal(&conn, "d-plural", true).unwrap();
+        let still_awaiting: bool = conn
+            .query_row(
+                "SELECT awaiting_agent FROM discussions WHERE id = 'd-plural'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(still_awaiting);
+
+        clear_awaiting_after_terminal(&conn, "d-plural", false).unwrap();
+        let cleared: bool = conn
+            .query_row(
+                "SELECT awaiting_agent FROM discussions WHERE id = 'd-plural'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!cleared);
     }
 }
 
@@ -314,6 +429,27 @@ async fn make_agent_stream_inner(
     mut initial_event: Option<Event>,
     mut completion_tx: Option<tokio::sync::oneshot::Sender<AgentExecutionOutcome>>,
 ) -> Sse<SseStream> {
+    let tracked_dispatch = dispatch_job_id.is_some();
+    let dispatch_trigger_message_id = if let Some(job_id) = dispatch_job_id.as_ref() {
+        let job_id = job_id.clone();
+        state
+            .db
+            .with_conn(move |conn| crate::db::agent_dispatch::get(conn, &job_id))
+            .await
+            .ok()
+            .flatten()
+            .map(|job| job.trigger_message_id)
+    } else {
+        let did = discussion_id.clone();
+        state
+            .db
+            .with_read_conn(move |conn| {
+                crate::db::discussions::latest_main_user_message_id(conn, &did)
+            })
+            .await
+            .ok()
+            .flatten()
+    };
     // 0.8.5 — capture the agent-run start wallclock. The delta between
     // this and the moment we commit the Agent message gives us the
     // real reply duration in milliseconds (excludes user typing time).
@@ -358,6 +494,13 @@ async fn make_agent_stream_inner(
         }
     };
     let agent_type = agent_override.unwrap_or_else(|| disc.agent.clone());
+    let mut attached_handoff_agents = vec![disc.agent.clone()];
+    for participant in &disc.participants {
+        if !attached_handoff_agents.contains(participant) {
+            attached_handoff_agents.push(participant.clone());
+        }
+    }
+    attached_handoff_agents.retain(|agent| agent != &agent_type && agent_alias(agent).is_some());
     let auth_status = {
         let config = state.config.read().await;
         crate::agents::agent_auth_status(&agent_type, &config)
@@ -371,7 +514,7 @@ async fn make_agent_stream_inner(
             .db
             .with_conn(move |conn| {
                 let inserted = crate::db::discussions::insert_message(conn, &did, &persisted_error);
-                let cleared = crate::db::discussions::set_awaiting_agent(conn, &did, false);
+                let cleared = clear_awaiting_after_terminal(conn, &did, tracked_dispatch);
                 inserted.and(cleared)
             })
             .await
@@ -476,7 +619,7 @@ async fn make_agent_stream_inner(
                         source_msg_id: None,
                         duration_ms: None,
                         target_agent: None,
-                        reply_to_message_id: None,
+                        reply_to_message_id: dispatch_trigger_message_id.clone(),
                     };
                     let did = discussion_id.clone();
                     if let Err(db_err) = state
@@ -486,7 +629,7 @@ async fn make_agent_stream_inner(
                             let inserted =
                                 crate::db::discussions::insert_message(conn, &did, &persisted_err);
                             let cleared =
-                                crate::db::discussions::set_awaiting_agent(conn, &did, false);
+                                clear_awaiting_after_terminal(conn, &did, tracked_dispatch);
                             inserted.and(cleared)
                         })
                         .await
@@ -555,7 +698,7 @@ async fn make_agent_stream_inner(
                         source_msg_id: None,
                         duration_ms: None,
                         target_agent: None,
-                        reply_to_message_id: None,
+                        reply_to_message_id: dispatch_trigger_message_id.clone(),
                     };
                     let did = discussion_id.clone();
                     if let Err(db_error) = state
@@ -564,7 +707,7 @@ async fn make_agent_stream_inner(
                             let inserted =
                                 crate::db::discussions::insert_message(conn, &did, &persisted_err);
                             let cleared =
-                                crate::db::discussions::set_awaiting_agent(conn, &did, false);
+                                clear_awaiting_after_terminal(conn, &did, tracked_dispatch);
                             inserted.and(cleared)
                         })
                         .await
@@ -608,7 +751,7 @@ async fn make_agent_stream_inner(
                     source_msg_id: None,
                     duration_ms: None,
                     target_agent: None,
-                    reply_to_message_id: None,
+                    reply_to_message_id: dispatch_trigger_message_id.clone(),
                 };
                 let did = discussion_id.clone();
                 if let Err(db_error) = state
@@ -616,7 +759,7 @@ async fn make_agent_stream_inner(
                     .with_conn(move |conn| {
                         let inserted =
                             crate::db::discussions::insert_message(conn, &did, &persisted_err);
-                        let cleared = crate::db::discussions::set_awaiting_agent(conn, &did, false);
+                        let cleared = clear_awaiting_after_terminal(conn, &did, tracked_dispatch);
                         inserted.and(cleared)
                     })
                     .await
@@ -810,7 +953,29 @@ async fn make_agent_stream_inner(
     };
 
     // Inject user bio (first exchange only) + global context (always).
-    let (tokens, full_access, model_tiers_config, user_bio, global_context) = {
+    let (handoffs_disabled, handoffs_unlimited) = {
+        let did = discussion_id.clone();
+        state
+            .db
+            .with_read_conn(move |conn| {
+                crate::db::discussions::get_disc_agent_handoff_policy(conn, &did)
+            })
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or((false, false))
+    };
+    let (
+        tokens,
+        full_access,
+        model_tiers_config,
+        lite_llm_base_url,
+        user_bio,
+        global_context,
+        handoffs_enabled,
+        handoff_paid_limit,
+        handoff_blocked_agents,
+    ) = {
         let config = state.config.read().await;
         let fa = config.agents.full_access_for(&agent_type);
         let bio = if disc.messages.len() <= 2 {
@@ -835,8 +1000,13 @@ async fn make_agent_stream_inner(
             config.tokens.clone(),
             fa,
             config.agents.model_tiers.clone(),
+            config.agents.lite_llm.base_url.clone(),
             bio,
             gc,
+            config.server.agent_handoffs_enabled,
+            (!config.server.agent_handoff_paid_unlimited && !handoffs_unlimited)
+                .then_some(config.server.agent_handoff_paid_limit.min(5)),
+            config.server.agent_handoff_blocked_agents.clone(),
         )
     };
 
@@ -904,6 +1074,70 @@ async fn make_agent_stream_inner(
             ),
         };
         format!("{context_files_prompt}{notice}")
+    };
+    let handoff_paid_remaining = if handoffs_enabled && !handoffs_disabled {
+        match handoff_paid_limit {
+            Some(limit) => {
+                let did = discussion_id.clone();
+                let parent_id = dispatch_trigger_message_id.clone();
+                let spent = state
+                    .db
+                    .with_read_conn(move |conn| {
+                        crate::db::discussions::agent_handoff_paid_count_for_reply(
+                            conn,
+                            &did,
+                            parent_id.as_deref(),
+                        )
+                    })
+                    .await
+                    .unwrap_or(0);
+                Some(limit.saturating_sub(spent))
+            }
+            None => None,
+        }
+    } else {
+        Some(0)
+    };
+    let ollama_handoff_available = attached_handoff_agents.iter().any(|agent| {
+        *agent == AgentType::Ollama
+            && agent_handoff_target_is_allowed(agent, &handoff_blocked_agents)
+    });
+    let attached_aliases = attached_handoff_agents
+        .iter()
+        .filter(|agent| agent_handoff_target_is_allowed(agent, &handoff_blocked_agents))
+        .filter_map(agent_alias)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let context_files_prompt = if handoffs_enabled
+        && !handoffs_disabled
+        && !attached_aliases.is_empty()
+    {
+        let budget = agent_handoff_budget_instruction(
+            &disc.language,
+            handoff_paid_remaining,
+            ollama_handoff_available,
+        );
+        let notice = match disc.language.as_str() {
+            "fr" => format!(
+                "--- Agents autorisés à travailler ensemble ---\n\
+                 Pour demander l'aide d'un autre agent, adresse-lui une demande directe dans ta réponse finale avec l'un de ces alias : {attached_aliases}. {budget} Ne cite pas un alias comme simple exemple : sa mention peut lancer l'agent.\n\n"
+            ),
+            "es" => format!(
+                "--- Agentes autorizados a trabajar juntos ---\n\
+                 Para pedir ayuda a otro agente, dirígele una petición directa en tu respuesta final con uno de estos alias: {attached_aliases}. {budget} No cites un alias como simple ejemplo: mencionarlo puede iniciar el agente.\n\n"
+            ),
+            "zh" => format!(
+                "--- 允许智能体协同工作 ---\n\
+                 如需向另一个智能体求助，请在最终回复中使用以下别名直接提出请求：{attached_aliases}。{budget} 不要仅把别名当作示例；提及别名可能会启动该智能体。\n\n"
+            ),
+            _ => format!(
+                "--- Agents allowed to work together ---\n\
+                 To ask another agent for help, address it with a direct request in your final reply using one of these aliases: {attached_aliases}. {budget} Do not cite an alias as a mere example: mentioning it may start the agent.\n\n"
+            ),
+        };
+        format!("{context_files_prompt}{notice}")
+    } else {
+        context_files_prompt
     };
 
     // Estimate extra_context size so build_agent_prompt can respect the agent's budget.
@@ -1010,11 +1244,21 @@ async fn make_agent_stream_inner(
             mcp_context_override: global_mcp_context.as_deref(),
             tier: disc_tier,
             model_tiers: Some(&model_tiers_config),
+            lite_llm_base_url: lite_llm_base_url.as_deref(),
             model_override: disc_model.as_deref(),
             context_files_prompt: &context_files_prompt,
             // Forward to the agent process env so the kronn-internal MCP
             // bridge knows which discussion to introspect when called.
             discussion_id: Some(&discussion_id),
+            // Only HTTP agents consume this: CLI agents already reach the same
+            // primitives through the stdio bridge, and handing them a second
+            // channel would duplicate the surface for no gain.
+            tools: crate::agents::runner::is_http_chat_agent(&agent_type).then(|| {
+                crate::api::agent_tools::KronnToolExecutor::arc(
+                    state.clone(),
+                    Some(discussion_id.clone()),
+                )
+            }),
             ..runner::AgentStartConfig::new(&agent_type, &project_path, &prompt, &tokens)
         })
         .await
@@ -1497,6 +1741,19 @@ async fn make_agent_stream_inner(
                     }
                 }
 
+                // HTTP agents have no stdout tool events to parse: their loop
+                // records each call in the run's stderr capture, already in the
+                // `[kronn-internal: …]` shape. Lift them into the same list the
+                // CLI path fills so both render identically in the transcript.
+                if runner::is_http_chat_agent(&agent_type) {
+                    kronn_tool_calls.extend(
+                        stderr_lines
+                            .iter()
+                            .filter(|l| l.starts_with("[kronn-internal:"))
+                            .cloned(),
+                    );
+                }
+
                 let tokens_used = if stream_json_tokens > 0 {
                     stream_json_tokens
                 } else {
@@ -1587,6 +1844,17 @@ async fn make_agent_stream_inner(
                 // partial output still carries it. Stored per-message so the UI
                 // can show "Ollama · qwen3:32b" even when the model changes
                 // mid-thread. `None` for provider-default runs with no flag.
+                let candidate_handoffs = if child_run_was_success {
+                    agent_mentions_in_prose(&full_response)
+                        .into_iter()
+                        .filter(|candidate| attached_handoff_agents.contains(candidate))
+                        .filter(|candidate| {
+                            agent_handoff_target_is_allowed(candidate, &handoff_blocked_agents)
+                        })
+                        .collect::<Vec<_>>()
+                } else {
+                    Vec::new()
+                };
                 let agent_msg = DiscussionMessage {
                     id: Uuid::new_v4().to_string(),
                     role: MessageRole::Agent,
@@ -1610,32 +1878,42 @@ async fn make_agent_stream_inner(
                     duration_ms: Some(run_started_at.elapsed().as_millis() as u64),
                     lint_report,
                     target_agent: None,
-                    reply_to_message_id: None,
+                    reply_to_message_id: dispatch_trigger_message_id.clone(),
                 };
 
                 let did = disc_id.clone();
                 let msg = agent_msg.clone();
-                if let Err(e) = state
+                let source_agent = agent_type.clone();
+                let dispatch_id = dispatch_job_id.clone();
+                match state
                     .db
                     .with_conn(move |conn| {
-                        let transaction = conn.unchecked_transaction()?;
-                        crate::db::discussions::insert_message(&transaction, &did, &msg)?;
-                        transaction.execute(
-                            "UPDATE messages
-                             SET agent_run_succeeded = ?2, agent_dispatch_job_id = ?3
-                             WHERE id = ?1",
-                            rusqlite::params![
-                                msg.id,
-                                child_run_was_success as i64,
-                                dispatch_job_id
-                            ],
-                        )?;
-                        transaction.commit()?;
-                        Ok(())
+                        crate::db::discussions::insert_native_agent_message_with_handoffs(
+                            conn,
+                            &did,
+                            &msg,
+                            child_run_was_success,
+                            dispatch_id.as_deref(),
+                            &source_agent,
+                            &candidate_handoffs,
+                            handoffs_enabled,
+                            handoff_paid_limit,
+                        )
                     })
                     .await
                 {
-                    tracing::error!("Failed to save agent message: {e}");
+                    Ok(outcome) => {
+                        if !outcome.dispatched_agents.is_empty() {
+                            tracing::info!(
+                                discussion_id = %disc_id,
+                                source_agent = ?agent_type,
+                                targets = ?outcome.dispatched_agents,
+                                "scheduled bounded agent handoff"
+                            );
+                            state.agent_dispatch_notify.notify_one();
+                        }
+                    }
+                    Err(e) => tracing::error!("Failed to save agent message: {e}"),
                 }
                 // F1 — federate the native-runner reply to peers of a shared
                 // disc. Previously ONLY MCP `disc_append` + UI `send_message`
@@ -1677,7 +1955,7 @@ async fn make_agent_stream_inner(
                         source_msg_id: None,
                         duration_ms: None,
                         target_agent: None,
-                        reply_to_message_id: None,
+                        reply_to_message_id: dispatch_trigger_message_id.clone(),
                     };
                     let did_ref = disc_id.clone();
                     let m = refusal.clone();
@@ -1732,7 +2010,7 @@ async fn make_agent_stream_inner(
                             source_msg_id: None,
                             duration_ms: None,
                             target_agent: None,
-                            reply_to_message_id: None,
+                            reply_to_message_id: dispatch_trigger_message_id.clone(),
                         };
                         let did_sys = disc_id.clone();
                         let m = sys_msg.clone();
@@ -1783,7 +2061,7 @@ async fn make_agent_stream_inner(
                             source_msg_id: None,
                             duration_ms: None,
                             target_agent: None,
-                            reply_to_message_id: None,
+                            reply_to_message_id: dispatch_trigger_message_id.clone(),
                         };
                         let did_sys = disc_id.clone();
                         let m = sys_msg.clone();
@@ -1833,7 +2111,7 @@ async fn make_agent_stream_inner(
                             source_msg_id: None,
                             duration_ms: None,
                             target_agent: None,
-                            reply_to_message_id: None,
+                            reply_to_message_id: dispatch_trigger_message_id.clone(),
                         };
                         let did_sys = disc_id.clone();
                         let m = sys_msg.clone();
@@ -1875,7 +2153,7 @@ async fn make_agent_stream_inner(
                             conn, &did_clear, None, None,
                         );
                         let awaiting =
-                            crate::db::discussions::set_awaiting_agent(conn, &did_clear, false);
+                            clear_awaiting_after_terminal(conn, &did_clear, tracked_dispatch);
                         partial.and(awaiting)
                     })
                     .await;
@@ -2031,25 +2309,65 @@ async fn make_agent_stream_inner(
                 // KT-37 — a genuine spawn failure (NOT owed/retried: that path
                 // returned above) carries the agent + attempted model so the UI
                 // can label the failed turn's provenance. Role stays System.
+                let tier_label = match disc_tier {
+                    crate::models::ModelTier::Economy => "economy",
+                    crate::models::ModelTier::Default => "default",
+                    crate::models::ModelTier::Reasoning => "reasoning",
+                };
+                if agent_type == AgentType::LiteLlm {
+                    if let (Some(status), Some(model)) =
+                        (agent_http_status(&e), attempted_model.as_deref())
+                    {
+                        if matches!(status, 400 | 404 | 422) {
+                            let endpoint = crate::api::lite_llm::resolve_base_url_pub(
+                                lite_llm_base_url.as_deref(),
+                            );
+                            let model = model.to_string();
+                            let raw_error = e.clone();
+                            if let Err(db_error) = state
+                                .db
+                                .with_conn(move |conn| {
+                                    crate::db::lite_llm_model_failures::record(
+                                        conn, &endpoint, &model, status, &raw_error,
+                                    )?;
+                                    Ok(())
+                                })
+                                .await
+                            {
+                                tracing::warn!(
+                                    "Failed to remember LiteLLM model failure: {db_error}"
+                                );
+                            }
+                        }
+                    }
+                }
+                let content = model_start_error_content(
+                    &agent_type,
+                    attempted_model.as_deref(),
+                    disc_tier,
+                    &disc.language,
+                    &e,
+                )
+                .unwrap_or_else(|| format!("Erreur: {e}"));
                 let err_msg = DiscussionMessage {
                     model: attempted_model.clone(),
                     lint_report: None,
                     id: Uuid::new_v4().to_string(),
                     role: MessageRole::System,
                     channel: MessageChannel::Main,
-                    content: format!("Erreur: {}", e),
+                    content,
                     agent_type: Some(agent_type.clone()),
                     timestamp: Utc::now(),
                     tokens_used: 0,
                     auth_mode: None,
-                    model_tier: None,
+                    model_tier: Some(tier_label.to_string()),
                     cost_usd: None,
                     author_pseudo: None,
                     author_avatar_email: None,
                     source_msg_id: None,
                     duration_ms: None,
                     target_agent: None,
-                    reply_to_message_id: None,
+                    reply_to_message_id: dispatch_trigger_message_id.clone(),
                 };
 
                 let did = disc_id.clone();
@@ -2063,7 +2381,7 @@ async fn make_agent_stream_inner(
                         // ops run even if the insert fails — a `?` would leave the
                         // marker stale exactly when the run never started.
                         let inserted = crate::db::discussions::insert_message(conn, &did, &err_msg);
-                        let cleared = crate::db::discussions::set_awaiting_agent(conn, &did, false);
+                        let cleared = clear_awaiting_after_terminal(conn, &did, tracked_dispatch);
                         inserted.and(cleared)
                     })
                     .await
@@ -2542,8 +2860,8 @@ mod pretty_kronn_args_tests {
 mod agent_lifecycle_tests {
     use super::{
         agent_start_failure_outcome, auth_required_system_message, cap_agent_response,
-        child_run_counts_as_success, effective_stall_timeout, AgentExecutionOutcome,
-        AGENT_GLOBAL_TIMEOUT, NON_STREAMING_STALL_TIMEOUT,
+        child_run_counts_as_success, effective_stall_timeout, model_start_error_content,
+        AgentExecutionOutcome, AGENT_GLOBAL_TIMEOUT, NON_STREAMING_STALL_TIMEOUT,
     };
     use crate::models::{AgentType, MessageRole};
     use std::time::Duration;
@@ -2693,6 +3011,65 @@ mod agent_lifecycle_tests {
         assert_eq!(
             agent_start_failure_outcome("Project path not found: /missing"),
             AgentExecutionOutcome::PreflightFailed
+        );
+        assert_eq!(
+            agent_start_failure_outcome("LiteLLM error 404 Not Found: model unavailable"),
+            AgentExecutionOutcome::PreflightFailed
+        );
+        assert_eq!(
+            agent_start_failure_outcome("LiteLLM error 401 Unauthorized: invalid key"),
+            AgentExecutionOutcome::PreflightFailed
+        );
+        for error in [
+            "LiteLLM error 429 Too Many Requests: retry later",
+            "LiteLLM error 503 Service Unavailable: retry later",
+        ] {
+            assert_eq!(
+                agent_start_failure_outcome(error),
+                AgentExecutionOutcome::RuntimeUnavailable {
+                    reason: error.into()
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn model_http_error_is_a_structured_actionable_system_event() {
+        let raw = r#"LiteLLM error 404 Not Found: {"error":{"message":"Vertex details"}}"#;
+        let content = model_start_error_content(
+            &AgentType::LiteLlm,
+            Some("vertex_ai/mistral-large-2411"),
+            crate::models::ModelTier::Default,
+            "fr",
+            raw,
+        )
+        .expect("404 model errors should be structured");
+
+        let json = content
+            .strip_prefix("[kronn:model-error]\n")
+            .expect("system event marker");
+        let payload: serde_json::Value = serde_json::from_str(json).expect("valid payload");
+        assert_eq!(payload["status"], 404);
+        assert_eq!(payload["tier"], "default");
+        assert!(payload["summary"].as_str().unwrap().contains("HTTP 404"));
+        assert!(payload["summary"]
+            .as_str()
+            .unwrap()
+            .contains("vertex_ai/mistral-large-2411"));
+        assert_eq!(payload["detail"], raw);
+    }
+
+    #[test]
+    fn transient_http_error_stays_unstructured_for_retry() {
+        assert_eq!(
+            model_start_error_content(
+                &AgentType::LiteLlm,
+                Some("model-a"),
+                crate::models::ModelTier::Default,
+                "en",
+                "LiteLLM error 429 Too Many Requests: retry later",
+            ),
+            None,
         );
     }
 }

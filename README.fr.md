@@ -23,11 +23,11 @@
   <img src="docs/screenshots/kronn-projects.png" alt="Dashboard Kronn, sidebar avec onglets Projets / Discussions / Plugins / Automatisation / Config, trois projets demo listés (acme-blog, demo-monorepo, sample-rust-cli) avec leur statut AI-context et compteurs d'audit" />
 </p>
 
-**Pilote Claude Code, Codex, Gemini, Ollama (100 % local) et 3 autres CLI d'agents IA depuis un seul dashboard self-hosted, avec des MCP partagés, des secrets chiffrés et des workflows répétables.**
+**Pilote Claude Code, Codex, Gemini, Ollama (100 % local), LiteLLM et 3 autres agents IA depuis un seul dashboard self-hosted, avec des MCP partagés, des secrets chiffrés et des workflows répétables.**
 
 **Prompts plus petits, code déterministe quand c'est possible : moins d'hallucinations, facture tokens divisée, écoconception par conception.**
 
-> **Statut : 0.9.3 (version actuelle).** Fonctionnel mais pré-1.0. Les versions mineures peuvent introduire des breaking changes ; les patch versions sont safe.
+> **Statut : 0.9.4 (version actuelle).** Fonctionnel mais pré-1.0. Les versions mineures peuvent introduire des breaking changes ; les patch versions sont safe.
 > **Licence : AGPL-3.0.** Utiliser Kronn localement pour développer *ton propre* produit ne déclenche pas le copyleft ; il ne s'applique que si tu redistribues une version modifiée à d'autres. Voir [Notes sur la licence](#notes-sur-la-licence-agpl-3-0).
 
 ## Sommaire
@@ -52,7 +52,9 @@ Si tu as déjà :
 - **Regardé un mega-prompt de 500 lignes halluciner à moitié 12 tâches différentes**. Kronn te laisse décomposer : du code déterministe quand c'est mécanique (API, exec, webhook, zéro token), des petits prompts IA focused uniquement là où le raisonnement est indispensable, chacun validé via compare-agents avant d'être shippé.
 - **Voulu de l'IA sur ton code mais PAS ton code chez Anthropic**. Branche [Ollama](https://ollama.com), lance Llama / Gemma / Qwen localement. **0 € de tokens, 0 fuite de données**, même UI.
 
-Kronn est un **control plane self-hosted pour agents IA de code** : Claude Code, Codex, Vibe, Gemini CLI, Kiro, GitHub Copilot CLI, et Ollama. Backend en Rust, frontend en React, secrets dans un vault chiffré sur ta machine.
+Kronn est un **control plane self-hosted pour agents IA de code** : Claude Code, Codex, Vibe, Gemini CLI, Kiro, GitHub Copilot CLI, Ollama et LiteLLM. Backend en Rust, frontend en React, secrets dans un vault chiffré sur ta machine.
+
+L’interface est disponible en français, anglais, espagnol et chinois simplifié. Sa langue reste indépendante de la langue de sortie attribuée aux nouvelles discussions avec les agents.
 
 > **Tu te contentes d'un seul CLI aujourd'hui ?** Kronn devient utile dès que tu ajoutes un deuxième agent ou que tu veux rejouer un prompt sur N fichiers. C'est la couche au-dessus de ton assistant unique.
 
@@ -81,7 +83,7 @@ C'est ce qui rend Kronn différent de Cursor (un prompt, un agent) et de LangGra
 
 ## Démarrage rapide
 
-**Prérequis :** au moins un agent installé localement (Claude Code, Codex, Vibe, Kiro, Gemini CLI, GitHub Copilot CLI) ou [Ollama](https://ollama.com) pour des modèles 100 % locaux. Kronn pilote le runtime que tu utilises déjà ; il n'embarque pas son propre LLM. Le wizard d'installation auto-détecte ce qui est sur ton `$PATH`, avec un fallback `npx` pour les agents distribués via npm.
+**Prérequis :** au moins un agent CLI local, [Ollama](https://ollama.com) pour des modèles 100 % locaux, ou un proxy LiteLLM existant. Kronn pilote le runtime que tu utilises déjà ; il n'embarque pas son propre LLM. Le wizard d'installation auto-détecte ce qui est sur ton `$PATH`, avec un fallback `npx` pour les agents distribués via npm.
 
 ### Application Desktop : recommandée pour un usage solo
 
@@ -93,7 +95,7 @@ Télécharge l'installeur pour ton OS depuis [Releases](https://github.com/DocRo
 Requiert Docker + Docker Compose. Sur Windows, WSL2 (Docker Engine dans WSL fonctionne, Docker Desktop optionnel).
 
 ```bash
-git clone --branch 0.9.3 --depth 1 https://github.com/DocRoms/Kronn.git   # dernière release stable
+git clone --branch 0.9.4 --depth 1 https://github.com/DocRoms/Kronn.git   # dernière release stable
 cd Kronn
 ./kronn start
 # → http://localhost:3140
@@ -155,6 +157,8 @@ directement sa fiche complète dans Planification.
 ### 4. 100 % local avec Ollama
 
 Lance Llama 3, Gemma, Qwen, Codestral sur ta machine via Ollama, traité comme un agent à part entière. Mêmes Discussions / Quick Prompts / Workflows, Kronn route juste les appels vers `http://localhost:11434/v1/` au lieu du cloud. Choisis ton modèle par défaut depuis Settings. **0 € de tokens, 0 ligne de code qui quitte ton laptop.**
+
+Tu routes déjà tes modèles avec LiteLLM ? Déclare l’endpoint et sa clé éventuelle, teste la connexion, puis associe les modèles annoncés par ton proxy aux niveaux Économie / Par défaut / Raisonnement de Kronn. Ollama et LiteLLM peuvent tous les deux appeler les outils natifs de Kronn depuis une discussion.
 
 
 ### 5. Ne brûle des tokens QUE là où ils méritent leur coût
@@ -287,7 +291,7 @@ Trois couches indépendantes injectées dans le system prompt :
 | **n8n** | Automatisation générique, pas de contexte agent, pas de MCP | Quand l'IA est un step parmi d'autres, pas l'orchestrateur |
 | **Temporal** | Exécution durable à très grande échelle (niveau Uber/Stripe) avec replay + signals ; overkill pour orchestrer des CLI agents sur un laptop, pas de primitives IA | Quand tu veux le pattern workflow sans l'empreinte opérationnelle de Temporal |
 | **LangGraph** | Python in-process, pas de CLI agents, pas de plumbing MCP, pas de compare | Quand tu veux orchestrer les CLI réels (Claude, Codex…) avec leurs propres caches/sessions |
-| **LiteLLM** | Couche routeur API LLM, mais pas de workflow ni de CLI agents | Complémentaire : tu peux mettre LiteLLM derrière un step `Agent` Kronn |
+| **LiteLLM** | Routeur d’API LLM, sans workflow ni control plane pour agents CLI | Kronn utilise ton proxy LiteLLM comme agent de discussion/workflow et lui ajoute projets, outils et orchestration |
 
 ---
 

@@ -110,6 +110,7 @@ mod tests {
     /// reproduit donc le pattern utilisé par notify_step::tests::make_step.
     fn blank_step(name: &str, step_type: StepType) -> WorkflowStep {
         WorkflowStep {
+            id: None,
             name: name.to_string(),
             step_type,
             description: None,

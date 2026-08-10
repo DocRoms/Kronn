@@ -4,6 +4,32 @@ mod tests {
     use crate::models::AgentType;
     use serial_test::serial;
 
+    /// Drive the production `forward_chat_line` with Ollama's codec, in the
+    /// shape the Ollama tests below were written against. Ollama reports token
+    /// counts on the very chunk that ends the stream, so a per-call tally is
+    /// equivalent to the stream-scoped one the transport threads through.
+    async fn forward_ollama_line(
+        line: &str,
+        tx: &tokio::sync::mpsc::Sender<String>,
+        stderr: &std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        got_done: &mut bool,
+        got_error: &mut bool,
+        num_ctx: u64,
+    ) -> bool {
+        forward_chat_line(
+            &crate::agents::chat_codec::OllamaCodec,
+            line,
+            tx,
+            stderr,
+            got_done,
+            got_error,
+            num_ctx,
+            &mut TokenTally::default(),
+            &mut crate::agents::tools::ToolCallAccumulator::default(),
+        )
+        .await
+    }
+
     // ─── parse_claude_stream_line ─────────────────────────────────────────────
 
     #[test]
@@ -184,6 +210,429 @@ mod tests {
         assert_eq!(
             stderr.lock().unwrap().as_slice(),
             &["ollama_tokens:12:3".to_string()]
+        );
+    }
+
+    /// End-to-end against a REAL local model, to catch what mocks cannot:
+    /// that a live model actually emits a call our decoder accepts, and that
+    /// it uses the injected result instead of re-asking.
+    ///
+    /// Ignored by default — needs a LiteLLM proxy on :4000 fronting Ollama.
+    /// Run with: `cargo test --lib live_tool_loop -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore = "requires a live LiteLLM proxy on :4000"]
+    async fn live_tool_loop_against_a_real_model() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut process = start_ollama_http(
+            &AgentType::LiteLlm,
+            "Which MCP servers are available? Use the tool, then answer with just their names.",
+            "You are an agent inside Kronn. Use the provided tools for data you do not have.",
+            "local-fast",
+            None,
+            Some("http://127.0.0.1:4000"),
+            None,
+            Some(std::sync::Arc::new(FakeTools { seen: seen.clone() })),
+        )
+        .await
+        .expect("proxy must be reachable");
+
+        let mut out = String::new();
+        while let Some(chunk) = process.next_line().await {
+            out.push_str(&chunk);
+        }
+        eprintln!(
+            "--- model answer ---\n{out}\n--- calls: {:?}",
+            seen.lock().unwrap()
+        );
+
+        assert!(
+            !seen.lock().unwrap().is_empty(),
+            "the model never called the tool: {out:?}"
+        );
+        // The fake returns github + context7; a model that ignored the result
+        // would have no way to name them.
+        let lower = out.to_lowercase();
+        assert!(
+            lower.contains("github") || lower.contains("context7"),
+            "answer does not use the tool result: {out:?}"
+        );
+    }
+
+    // ─── The prose that once defeated the whole feature ──────────────────────
+
+    /// With tools on the wire, the prompt must not tell the model it has none.
+    /// This exact contradiction shipped once: `tools_declared=5` while the
+    /// context said "You have NO executable tools", and the model refused to
+    /// call anything. Neither the codec tests nor the loop tests could see it.
+    #[test]
+    fn tools_notice_matches_whether_tools_were_actually_declared() {
+        let with = http_agent_tools_notice(true);
+        let without = http_agent_tools_notice(false);
+
+        assert!(
+            !with.contains("NO executable tools"),
+            "declaring tools then denying them makes the model refuse to call: {with}"
+        );
+        assert!(
+            with.contains("CALL the matching tool"),
+            "the model must be told to use what it was given: {with}"
+        );
+        assert!(
+            without.contains("NO executable tools"),
+            "without an executor the model must not invent calls: {without}"
+        );
+
+        // File access is absent in both cases — that part was never the bug,
+        // and dropping it let the model claim it had read docs/ (2026-07-01).
+        for notice in [with, without] {
+            assert!(
+                notice.contains("NO file access")
+                    || notice.contains("NO executable tools and NO file access"),
+                "file access must stay denied: {notice}"
+            );
+        }
+    }
+
+    #[test]
+    fn http_agent_identity_prevents_a_local_model_from_copying_claude() {
+        let ollama = http_agent_identity_context(&AgentType::Ollama, "qwen3:32b");
+        assert!(ollama.contains("qwen3:32b"));
+        assert!(ollama.contains("served by Ollama"));
+        assert!(ollama.contains("not Claude"));
+        assert!(ollama.contains("@ollama"));
+        assert!(ollama.contains("LiteLlm"));
+        assert!(ollama.contains("Never copy another participant's self-identification"));
+
+        let lite_llm = http_agent_identity_context(&AgentType::LiteLlm, "claude-sonnet-4-6");
+        assert!(lite_llm.contains("claude-sonnet-4-6"));
+        assert!(lite_llm.contains("LiteLLM proxy"));
+        assert!(lite_llm.contains("@litellm"));
+    }
+
+    // ─── Tool loop ───────────────────────────────────────────────────────────
+
+    /// Records what it was asked to run and replies with a canned payload, so
+    /// the loop can be exercised without an AppState or a real Kronn API.
+    struct FakeTools {
+        seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::agents::tools::ToolExecutor for FakeTools {
+        fn catalogue(&self) -> Vec<serde_json::Value> {
+            vec![serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": "mcp_list",
+                    "description": "List MCP servers.",
+                    "parameters": { "type": "object", "properties": {}, "required": [] },
+                },
+            })]
+        }
+
+        async fn execute(
+            &self,
+            call: &crate::agents::tools::ToolCall,
+        ) -> crate::agents::tools::ToolOutcome {
+            self.seen.lock().unwrap().push(call.name.clone());
+            crate::agents::tools::ToolOutcome {
+                call: call.clone(),
+                content: serde_json::json!({ "servers": ["github", "context7"] }),
+                ok: true,
+            }
+        }
+    }
+
+    fn sse(frames: &[&str]) -> String {
+        frames
+            .iter()
+            .map(|f| format!("data: {f}\n\n"))
+            .collect::<String>()
+            + "data: [DONE]\n\n"
+    }
+
+    #[tokio::test]
+    async fn configured_litellm_endpoint_is_used_by_agent_start_config() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(sse(&[
+                r#"{"choices":[{"index":0,"delta":{"content":"bonjour"}}]}"#,
+                r#"{"choices":[],"usage":{"prompt_tokens":2,"completion_tokens":1}}"#,
+            ])))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let tokens = crate::models::TokensConfig {
+            anthropic: None,
+            openai: None,
+            google: None,
+            keys: Vec::new(),
+            disabled_overrides: Vec::new(),
+        };
+        let mut tiers = crate::models::ModelTiersConfig::default();
+        tiers.lite_llm.default = Some("corp-default".into());
+        let endpoint = server.uri();
+        let mut process = start_agent_with_config(AgentStartConfig {
+            tier: crate::models::ModelTier::Default,
+            model_tiers: Some(&tiers),
+            lite_llm_base_url: Some(&endpoint),
+            ..AgentStartConfig::new(&AgentType::LiteLlm, "", "hello", &tokens)
+        })
+        .await
+        .expect("configured corporate proxy should be reachable");
+
+        let mut output = String::new();
+        while let Some(chunk) = process.next_line().await {
+            output.push_str(&chunk);
+        }
+        assert_eq!(output, "bonjour");
+        assert!(process.child.wait().await.expect("lifeline").success());
+        let requests = server.received_requests().await.expect("request capture");
+        let body: serde_json::Value = serde_json::from_slice(&requests[0].body).expect("JSON body");
+        assert_eq!(body["model"], "corp-default");
+        assert_eq!(body["stream"], true);
+    }
+
+    /// The whole point of the feature: a model that asks for a tool gets the
+    /// result and answers from it, without the caller doing anything.
+    #[tokio::test]
+    async fn tool_loop_executes_then_feeds_the_result_back_for_a_second_turn() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // Turn 1 — the model asks for `mcp_list` and says nothing else.
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(sse(&[
+                r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"mcp_list","arguments":"{}"}}]}}]}"#,
+            ])))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        // Turn 2 — having the result, it answers.
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(sse(&[
+                r#"{"choices":[{"index":0,"delta":{"content":"2 servers"}}]}"#,
+                r#"{"choices":[],"usage":{"prompt_tokens":11,"completion_tokens":4}}"#,
+            ])))
+            .mount(&server)
+            .await;
+
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut process = start_ollama_http(
+            &AgentType::LiteLlm,
+            "which MCP servers are there?",
+            "",
+            "test-model",
+            None,
+            Some(&server.uri()),
+            None,
+            Some(std::sync::Arc::new(FakeTools { seen: seen.clone() })),
+        )
+        .await
+        .expect("start");
+
+        let mut out = String::new();
+        while let Some(chunk) = process.next_line().await {
+            out.push_str(&chunk);
+        }
+
+        assert_eq!(
+            seen.lock().unwrap().as_slice(),
+            &["mcp_list".to_string()],
+            "the tool must be executed exactly once"
+        );
+        assert!(
+            out.contains("2 servers"),
+            "final answer not streamed: {out:?}"
+        );
+        assert!(
+            !out.contains("call_1"),
+            "tool plumbing must not leak into the reply: {out:?}"
+        );
+    }
+
+    /// The Ollama wire, which the LiteLLM test above does NOT cover. This is
+    /// the exact gap that let a real bug through: Ollama 400s on
+    /// JSON-string `arguments` and needs a real object, so the loop executed
+    /// the tool and then died feeding the result back.
+    #[tokio::test]
+    #[serial]
+    async fn tool_loop_round_trips_on_the_ollama_wire() {
+        use wiremock::matchers::{body_string_contains, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // Context probe the Ollama path makes before chatting.
+        Mock::given(method("POST"))
+            .and(path("/api/show"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+            .mount(&server)
+            .await;
+        // Turn 1 — NDJSON, tool call on the message, counts on the terminal chunk.
+        Mock::given(method("POST"))
+            .and(path("/api/chat"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                "{\"message\":{\"content\":\"\",\"tool_calls\":[{\"function\":{\"name\":\"mcp_list\",\"arguments\":{}}}]},\"done\":false}\n\
+                 {\"done\":true,\"prompt_eval_count\":5,\"eval_count\":2}\n",
+            ))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        // Turn 2 — must arrive with the tool result AND an OBJECT `arguments`.
+        // `body_string_contains` is the assertion: a JSON-string encoding
+        // would render `"arguments":"{}"` and never match.
+        Mock::given(method("POST"))
+            .and(path("/api/chat"))
+            .and(body_string_contains(r#""arguments":{}"#))
+            .and(body_string_contains(r#""role":"tool""#))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                "{\"message\":{\"content\":\"2 servers\"},\"done\":false}\n\
+                 {\"done\":true,\"prompt_eval_count\":9,\"eval_count\":3}\n",
+            ))
+            .mount(&server)
+            .await;
+
+        let prev = std::env::var("OLLAMA_HOST").ok();
+        std::env::set_var("OLLAMA_HOST", server.uri());
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let started = start_ollama_http(
+            &AgentType::Ollama,
+            "which servers?",
+            "",
+            "test-model",
+            None,
+            None,
+            None,
+            Some(std::sync::Arc::new(FakeTools { seen: seen.clone() })),
+        )
+        .await;
+        match prev {
+            Some(v) => std::env::set_var("OLLAMA_HOST", v),
+            None => std::env::remove_var("OLLAMA_HOST"),
+        }
+
+        let mut process = started.expect("start");
+        let mut out = String::new();
+        while let Some(chunk) = process.next_line().await {
+            out.push_str(&chunk);
+        }
+        let status = process.child.wait().await.expect("lifeline");
+
+        assert_eq!(seen.lock().unwrap().as_slice(), &["mcp_list".to_string()]);
+        assert!(
+            out.contains("2 servers"),
+            "second turn not streamed: {out:?}"
+        );
+        assert!(status.success(), "the run should end clean");
+        // Counts must be the SUM across turns, not just the last exchange.
+        let captured = process.stderr_capture.lock().unwrap().join(" ");
+        assert!(
+            captured.contains("ollama_tokens:9:3"),
+            "final tally missing: {captured}"
+        );
+    }
+
+    /// A model stuck in a tool loop must fail loudly instead of billing
+    /// tokens forever.
+    #[tokio::test]
+    async fn tool_loop_stops_at_the_iteration_cap() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // Always asks for another tool — never converges.
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(sse(&[
+                r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"c","function":{"name":"mcp_list","arguments":"{}"}}]}}]}"#,
+            ])))
+            .mount(&server)
+            .await;
+
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut process = start_ollama_http(
+            &AgentType::LiteLlm,
+            "loop forever",
+            "",
+            "test-model",
+            None,
+            Some(&server.uri()),
+            None,
+            Some(std::sync::Arc::new(FakeTools { seen: seen.clone() })),
+        )
+        .await
+        .expect("start");
+
+        while process.next_line().await.is_some() {}
+        let status = process.child.wait().await.expect("lifeline");
+
+        let runs = seen.lock().unwrap().len();
+        assert_eq!(
+            runs,
+            crate::agents::tools::MAX_TOOL_ITERATIONS,
+            "capped at MAX_TOOL_ITERATIONS round-trips"
+        );
+        assert!(!status.success(), "a non-converging run must fail the step");
+        let captured = process.stderr_capture.lock().unwrap().join(" ");
+        assert!(
+            captured.contains("giving up"),
+            "no reason surfaced: {captured}"
+        );
+    }
+
+    #[tokio::test]
+    async fn forward_chat_line_carries_openai_usage_across_to_the_done_sentinel() {
+        // OpenAI splits what Ollama puts on one chunk: the text deltas, then a
+        // usage-only frame, then `[DONE]`. The stream-scoped tally is what
+        // keeps the token counts from being lost between the last two.
+        use crate::agents::chat_codec::OpenAiCodec;
+        use std::sync::{Arc, Mutex};
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(8);
+        let stderr = Arc::new(Mutex::new(Vec::<String>::new()));
+        let (mut done, mut err) = (false, false);
+        let mut tally = TokenTally::default();
+
+        for line in [
+            r#"data: {"choices":[{"delta":{"content":"39"}}]}"#,
+            r#"data: {"choices":[{"delta":{"content":"1"}}]}"#,
+            r#"data: {"choices":[],"usage":{"prompt_tokens":12,"completion_tokens":3}}"#,
+            "data: [DONE]",
+        ] {
+            assert!(
+                forward_chat_line(
+                    &OpenAiCodec,
+                    line,
+                    &tx,
+                    &stderr,
+                    &mut done,
+                    &mut err,
+                    0,
+                    &mut tally,
+                    &mut crate::agents::tools::ToolCallAccumulator::default(),
+                )
+                .await
+            );
+        }
+
+        assert!(done && !err, "[DONE] ends the stream cleanly");
+        drop(tx);
+        let mut got = String::new();
+        while let Some(s) = rx.recv().await {
+            got.push_str(&s);
+        }
+        assert_eq!(got, "391");
+        assert_eq!(
+            stderr.lock().unwrap().as_slice(),
+            &["ollama_tokens:12:3".to_string()],
+            "usage from the earlier frame survives to the sentinel"
         );
     }
 

@@ -539,8 +539,8 @@ describe('McpPage', () => {
     // Click card to expand detail panel
     fireEvent.click(screen.getByText('GitLab'));
 
-    // Env vars section title should be visible
-    expect(container.textContent).toContain("Variables d'environnement");
+    // Direct API credentials are explicitly distinguished from local CLI auth.
+    expect(container.textContent).toContain("Identifiants utilisés par l’API");
     // Edit pencil button should exist (title = "Modifier les clés")
     const editBtn = container.querySelector('button[title="Modifier les clés"]');
     expect(editBtn).toBeTruthy();
@@ -739,6 +739,76 @@ describe('McpPage', () => {
     fireEvent.click(screen.getByText('Ajouter'));
     expect(document.body.textContent).toContain('Officiel');
     expect(document.body.textContent).toContain('Fastly');
+  });
+
+  it('distinguishes CLI authentication from credentials used directly by an API', () => {
+    const fastlyDefinition: McpDefinition = {
+      id: 'mcp-fastly',
+      name: 'Fastly',
+      description: 'CDN server',
+      transport: { Stdio: { command: 'fastly-mcp', args: [] } },
+      env_keys: [],
+      tags: ['cli', 'api', 'cdn'],
+      token_url: 'https://manage.fastly.com/account/personal/tokens',
+      token_help: 'Fastly CLI authentication',
+      publisher: 'Fastly',
+      official: true,
+      api_spec: {
+        base_url: 'https://api.fastly.com',
+        auth: {
+          CliToken: {
+            command: 'fastly',
+            args: ['auth', 'token'],
+            inject: { CustomHeader: { name: 'Fastly-Key' } },
+            fallback_env_key: 'FASTLY_API_TOKEN',
+          },
+        },
+        endpoints: [],
+        config_keys: [],
+      },
+    };
+    const apiDefinition: McpDefinition = {
+      id: 'api-direct',
+      name: 'Direct API',
+      description: 'Direct API plugin',
+      transport: 'ApiOnly',
+      env_keys: ['DIRECT_API_TOKEN'],
+      tags: ['api'],
+      token_url: null,
+      token_help: 'API token',
+      publisher: 'Vendor',
+      official: true,
+      api_spec: null,
+    };
+    const overview: McpOverview = {
+      servers: [makeServer('mcp-fastly', 'Fastly'), makeServer('api-direct', 'Direct API')],
+      configs: [
+        makeConfig('fastly-config', 'mcp-fastly', 'Fastly'),
+        makeConfig('api-config', 'api-direct', 'Direct API', { env_keys: ['DIRECT_API_TOKEN'] }),
+      ],
+      customized_contexts: [],
+      incompatibilities: [],
+      incomplete_configs: [],
+    };
+    const { container } = wrap(
+      <McpPage
+        projects={[]}
+        mcpOverview={overview}
+        mcpRegistry={[fastlyDefinition, apiDefinition]}
+        refetchMcps={noop}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Fastly — Voir les détails' }));
+    const cliBackup = container.querySelector('.mcp-credential-fields[data-kind="cli"]');
+    expect(cliBackup).toHaveTextContent('Sauvegarde facultative');
+    expect(cliBackup).toHaveTextContent('Kronn exécute d’abord la commande du CLI local');
+    expect(cliBackup).toContainElement(screen.getByPlaceholderText('Non enregistré — session CLI locale utilisée'));
+    expect(screen.getByPlaceholderText('Non enregistré — session CLI locale utilisée')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Direct API — Voir les détails' }));
+    expect(container.querySelector('[data-testid="mcp-plugin-panel"]')).toHaveTextContent('Identifiants utilisés par l’API');
+    expect(container.querySelector('[data-testid="mcp-plugin-panel"]')).toHaveTextContent('Utilisé directement par Kronn');
   });
 
   it('shows community badge for third-party MCP in registry', () => {

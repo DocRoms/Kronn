@@ -978,6 +978,18 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         // ── Ollama (local LLM) ──
         .route("/api/ollama/health", get(api::ollama::health))
         .route("/api/ollama/models", get(api::ollama::models))
+        // ── LiteLLM (OpenAI-compatible proxy) ──
+        .route("/api/lite-llm/health", get(api::lite_llm::health))
+        .route("/api/lite-llm/models", get(api::lite_llm::models))
+        .route("/api/lite-llm/test", post(api::lite_llm::test))
+        .route(
+            "/api/lite-llm/model-failures",
+            get(api::lite_llm::model_failures).delete(api::lite_llm::forget_model_failure),
+        )
+        .route(
+            "/api/lite-llm/model-failures/retry",
+            post(api::lite_llm::retry_model),
+        )
         // ── Debug (log ringbuffer — backs Settings > Debug viewer) ──
         .route("/api/debug/logs", get(api::debug::get_logs))
         .route("/api/debug/logs/clear", post(api::debug::clear_logs))
@@ -1308,6 +1320,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route(
             "/api/discussions/{id}/native-agent",
             get(api::discussions::native_agent_mode),
+        )
+        .route(
+            "/api/discussions/{id}/agent-handoffs",
+            get(api::discussions::agent_handoff_mode),
         )
         .route(
             "/api/discussions/{id}/export",

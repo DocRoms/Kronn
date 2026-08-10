@@ -1198,6 +1198,7 @@ async fn execute_run_with_notify_policy(
                             &agent_extra_context,
                             Some(progress_tx),
                             Some(&agents_config.model_tiers),
+                            agents_config.lite_llm.base_url.as_deref(),
                         )
                         .await;
                         // execute_step took ownership of progress_tx and dropped
@@ -2130,6 +2131,7 @@ async fn execute_run_with_notify_policy(
                         &agent_extra_context,
                         None,
                         Some(&agents_config.model_tiers),
+                        agents_config.lite_llm.base_url.as_deref(),
                     )
                     .await
                 }
@@ -3013,6 +3015,7 @@ mod tests {
 
     fn fake_step(name: &str) -> crate::models::WorkflowStep {
         crate::models::WorkflowStep {
+            id: None,
             name: name.into(),
             step_type: crate::models::StepType::Agent,
             description: None,
@@ -3344,6 +3347,7 @@ mod tests {
 
     fn mk_step_for_snapshot(kind: StepType) -> WorkflowStep {
         WorkflowStep {
+            id: None,
             name: "s".into(),
             step_type: kind,
             description: None,

@@ -775,6 +775,8 @@ cmd_doctor() {
     #      required by Kronn-managed MCP servers when invoked from
     #      the host CLI.
     #   3. Docker presence + version — Kronn won't run without it.
+    #   4. Vibe workspace trust — a revoked `.vibe` makes Vibe ignore the
+    #      MCP config Kronn writes, with no error on either side.
     banner
     local total_issues=0
 
@@ -870,6 +872,41 @@ cmd_doctor() {
         total_issues=$((total_issues + 1))
     fi
 
+    # ─── 4. Vibe workspace trust ─────────────────────────────────────
+    # Vibe drops its whole project config layer when the `.vibe` directory
+    # is untrusted, so a Kronn-written config silently yields zero MCPs.
+    step "Vibe workspace trust"
+    local vibe_trust_file="${VIBE_HOME:-$HOME/.vibe}/trusted_folders.toml"
+    if [[ ! -f "$vibe_trust_file" ]]; then
+        info "No Vibe trust store yet ($vibe_trust_file) — nothing to check"
+    else
+        local blocked=0
+        # Only `.vibe` dirs holding a Kronn-managed config matter here.
+        while IFS= read -r dir; do
+            [[ -z "$dir" ]] && continue
+            [[ "$(basename "$dir")" == ".vibe" ]] || continue
+            [[ -f "$dir/config.toml" ]] || continue
+            head -1 "$dir/config.toml" 2>/dev/null | grep -q "managed by Kronn" || continue
+            if [[ $blocked -eq 0 ]]; then
+                warn "Kronn-managed Vibe configs that Vibe will IGNORE (workspace trust revoked):"
+            fi
+            printf "      %s/config.toml\n" "$dir"
+            blocked=$((blocked + 1))
+        done < <(awk '/^untrusted *= *\[/{f=1;next} f&&/\]/{f=0} f{gsub(/[",]/,"");gsub(/^[ \t]+|[ \t]+$/,"");print}' "$vibe_trust_file" 2>/dev/null)
+
+        if [[ $blocked -eq 0 ]]; then
+            success "No Kronn-managed Vibe config is blocked by workspace trust"
+        else
+            echo
+            info "Vibe reads the nearest trust decision, so an untrusted '.vibe'"
+            info "overrides a trusted repository root. Fix (either one):"
+            printf "    ${DIM}cd <project> && vibe${RESET}   ${DIM}# then accept the workspace-trust prompt${RESET}\n"
+            printf "    ${DIM}edit %s${RESET}  ${DIM}# remove the path from 'untrusted'${RESET}\n" "$vibe_trust_file"
+            info "Kronn does not edit this file — trust is your security decision."
+            total_issues=$((total_issues + blocked))
+        fi
+    fi
+
     # ─── Summary ─────────────────────────────────────────────────────
     echo
     if [[ $total_issues -eq 0 ]]; then
@@ -891,7 +928,7 @@ cmd_help() {
     printf "  ${CYAN}restart${RESET}        Restart services\n"
     printf "  ${CYAN}logs${RESET}           Show logs\n"
     printf "  ${CYAN}status${RESET}         Overview (auto-delegates to API when backend is up)\n"
-    printf "  ${CYAN}doctor${RESET}         Diagnose host-environment issues (uid-0 caches, missing CLIs, Docker)\n"
+    printf "  ${CYAN}doctor${RESET}         Diagnose host-environment issues (uid-0 caches, missing CLIs, Docker, Vibe trust)\n"
     printf "  ${CYAN}agents${RESET}         List detected agents\n"
     printf "  ${CYAN}projects${RESET}       List projects (requires backend)\n"
     printf "  ${CYAN}init [path]${RESET}    Configure a repository\n"

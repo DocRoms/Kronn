@@ -70,4 +70,22 @@ describe('i18n key parity', () => {
     }
     expect(mismatches, `Dangling placeholders in translations:\n${mismatches.join('\n')}`).toEqual([]);
   });
+
+  it('uses the current Fastly authentication commands in every locale', () => {
+    for (const { code } of UI_LOCALES) {
+      const help = dictionaries[code]['mcp.help.mcp-fastly'];
+      expect(help).toContain('fastly auth login');
+      expect(help).toContain('fastly auth list');
+      expect(help).not.toContain('fastly profile');
+    }
+  });
+
+  it('presents GitLab CLI login and encrypted fallback as complementary options', () => {
+    for (const { code } of UI_LOCALES) {
+      const help = dictionaries[code]['mcp.help.mcp-gitlab'];
+      expect(help).toContain('glab auth login');
+      expect(help).toContain('glab auth status');
+      expect(help).toContain('GITLAB_TOKEN');
+    }
+  });
 });

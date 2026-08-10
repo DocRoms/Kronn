@@ -48,9 +48,9 @@ beforeEach(() => {
 
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
 
-async function mountCard() {
+async function mountCard(modelCostSuffix?: (model: string) => string) {
   let result: ReturnType<typeof render>;
-  await act(async () => { result = render(<OllamaCard t={t} />); });
+  await act(async () => { result = render(<OllamaCard t={t} modelCostSuffix={modelCostSuffix} />); });
   await act(async () => { await new Promise(r => setTimeout(r, 0)); });
   return result!;
 }
@@ -134,6 +134,22 @@ describe('OllamaCard — canirun.ai hint always visible', () => {
 });
 
 describe('OllamaCard — per-tier model picker', () => {
+  it('adds an observed cost suffix supplied by the usage report', async () => {
+    ollama.health.mockResolvedValue({
+      status: 'online', version: '0.3.12', endpoint: 'http://localhost:11434',
+      models_count: 1, hint: null,
+    });
+    ollama.models.mockResolvedValue({
+      models: [{ name: 'llama3.2', size: 2_500_000_000, digest: 'sha:abc', modified_at: '2026-01-01' }],
+    });
+
+    await mountCard(model => model === 'llama3.2' ? ' · ≈ $0.00/M observed' : '');
+
+    expect(screen.getAllByRole('option', {
+      name: /llama3\.2.*≈ \$0\.00\/M observed/,
+    })).toHaveLength(3);
+  });
+
   it('choosing a model in the default AND economy selects fires setModelTiers per tier', async () => {
     ollama.health.mockResolvedValue({
       status: 'online', version: '0.3.12', endpoint: 'http://localhost:11434',

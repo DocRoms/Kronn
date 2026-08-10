@@ -31,7 +31,7 @@ import {
 import './aiHelper.css';
 
 function toUILocale(lang: string | undefined): UILocale {
-  if (lang === 'fr' || lang === 'en' || lang === 'es') return lang;
+  if (lang === 'fr' || lang === 'en' || lang === 'es' || lang === 'zh') return lang;
   return 'en';
 }
 

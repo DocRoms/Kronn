@@ -248,6 +248,7 @@ mod tests {
 
     fn make_step(config: NotifyConfig) -> WorkflowStep {
         WorkflowStep {
+            id: None,
             name: "notify".into(),
             step_type: StepType::Notify,
             description: None,

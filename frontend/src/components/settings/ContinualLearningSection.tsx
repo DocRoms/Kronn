@@ -4,7 +4,7 @@
 // default because the feature writes into injected truth files — opt-in.
 
 import { useEffect, useState } from 'react';
-import { BookOpen } from 'lucide-react';
+import { AlertTriangle, BookOpen, Lightbulb } from 'lucide-react';
 import { config as configApi } from '../../lib/api';
 import type { ToastFn } from '../../hooks/useToast';
 import '../../pages/SettingsPage.css';
@@ -49,7 +49,7 @@ export function ContinualLearningSection({ toast, t }: ContinualLearningSectionP
   };
 
   return (
-    <div id="settings-continual-learning" className="set-card">
+    <div id="settings-continual-learning" className="set-card set-beta-feature-card" data-feature="learning">
       <div className="set-section">
         <div className="flex-row gap-4 set-section-header-lg">
           <BookOpen size={14} className="text-accent" />
@@ -59,24 +59,43 @@ export function ContinualLearningSection({ toast, t }: ContinualLearningSectionP
           </span>
         </div>
         <p className="set-hint">{t('settings.clDesc')}</p>
-        <div className="flex-row gap-4 mb-3" style={{ alignItems: 'center' }}>
-          <span className="label" style={{ marginBottom: 0 }}>
-            {t('settings.clToggleLabel')}
-          </span>
-          <label
-            className="flex-row gap-2"
-            style={{ cursor: 'pointer', marginLeft: 'auto', alignItems: 'center' }}
+        <div className="set-beta-feature-stack">
+          <section className="set-beta-feature-panel" data-kind="control" data-enabled={enabled}>
+            <div className="set-beta-feature-panel-head">
+              <div className="set-beta-feature-panel-icon"><Lightbulb size={16} /></div>
+              <div className="flex-1">
+                <h3>{t('settings.clToggleLabel')}</h3>
+                <p>{t('settings.clHint')}</p>
+              </div>
+              <button
+                type="button"
+                className="set-beta-feature-switch"
+                role="switch"
+                aria-checked={enabled}
+                aria-label={t('settings.clToggleLabel')}
+                disabled={!loaded}
+                onClick={() => onToggle(!enabled)}
+              >
+                <span className="set-beta-feature-switch-track" aria-hidden="true">
+                  <span />
+                </span>
+                <strong>{enabled ? t('common.on') : t('common.off')}</strong>
+              </button>
+            </div>
+          </section>
+
+          <aside
+            className="set-cl-risk-warning"
+            aria-label={t('settings.clRiskTitle')}
+            data-testid="continual-learning-risk-warning"
           >
-            <input
-              type="checkbox"
-              checked={enabled}
-              disabled={!loaded}
-              onChange={(e) => onToggle(e.target.checked)}
-            />
-            <span className="text-sm">{enabled ? t('common.on') : t('common.off')}</span>
-          </label>
+            <div className="set-cl-risk-warning-title">
+              <AlertTriangle size={16} aria-hidden="true" />
+              <strong>{t('settings.clRiskTitle')}</strong>
+            </div>
+            <p>{t('settings.clRiskBody')}</p>
+          </aside>
         </div>
-        <p className="set-hint">{t('settings.clHint')}</p>
       </div>
     </div>
   );

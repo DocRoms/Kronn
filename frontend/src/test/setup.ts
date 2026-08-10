@@ -56,7 +56,7 @@ for (const name of ['localStorage', 'sessionStorage'] as const) {
 }
 
 // Unit tests exercise the synchronous `t()` API directly and intentionally
-// validate all three dictionaries. Production preloads only the active locale
+// validate every shipped dictionary. Production preloads only the active locale
 // in main.tsx; the test harness loads all chunks once before specs start.
 const { loadLocale } = await import('../lib/i18n');
-await Promise.all([loadLocale('fr'), loadLocale('en'), loadLocale('es')]);
+await Promise.all([loadLocale('fr'), loadLocale('en'), loadLocale('es'), loadLocale('zh')]);

@@ -106,7 +106,7 @@ impl AgentProcess {
     /// with newlines shreds the message into one word per line (the
     /// 2026-07-01 Ollama formatting bug).
     pub fn raw_token_stream(&self) -> bool {
-        self.agent_type == AgentType::Ollama
+        is_http_chat_agent(&self.agent_type)
     }
 
     /// Get next output line. For Kiro, strips ANSI codes and filters noise.
@@ -428,6 +428,14 @@ pub struct AgentStartConfig<'a> {
     pub tier: ModelTier,
     /// Per-agent model tier config (from global settings). Used to resolve tier to model name.
     pub model_tiers: Option<&'a ModelTiersConfig>,
+    /// Executes Kronn primitives when the model asks for them. `None` = the
+    /// agent gets no tools, which is the honest default for callers that have
+    /// no `AppState` to execute against.
+    pub tools: Option<std::sync::Arc<dyn crate::agents::tools::ToolExecutor>>,
+    /// Endpoint of the LiteLLM proxy, as saved from the settings card.
+    /// `None` falls back to `LITELLM_BASE_URL` then the default port; the
+    /// matching key is read from `tokens` under the `litellm` provider.
+    pub lite_llm_base_url: Option<&'a str>,
     /// Pre-built context files prompt (uploaded file contents for this discussion).
     pub context_files_prompt: &'a str,
     /// Discussion id this run targets, when known. Forwarded to the
@@ -489,11 +497,62 @@ impl<'a> AgentStartConfig<'a> {
             mcp_context_override: None,
             tier: ModelTier::Default,
             model_tiers: None,
+            tools: None,
+            lite_llm_base_url: None,
             context_files_prompt: "",
             discussion_id: None,
             ollama_format: None,
             model_override: None,
         }
+    }
+}
+
+/// What an HTTP agent is told about its own capabilities.
+///
+/// Two different truths, and stating the wrong one silently defeats the tool
+/// loop: with tools declared on the request, a prose "you have no tools" makes
+/// the model refuse to call them (observed 2026-08-09 — `tools_declared=5` on
+/// the wire, yet it answered "je ne peux pas exécuter d'outils ici"). File
+/// access is absent either way.
+pub(crate) fn http_agent_tools_notice(has_tools: bool) -> &'static str {
+    if has_tools {
+        "=== TOOLS ===\n\nYou have NO file access in this mode: you cannot read, \
+         write or modify ANY file (including docs/), and must never claim to have \
+         done so. You DO have executable tools, declared with this request — when \
+         the answer depends on data you were not given, CALL the matching tool \
+         instead of guessing or saying you cannot."
+    } else {
+        "=== TOOLS ===\n\nYou have NO executable tools and NO file access in this \
+         mode. You cannot read, write or modify ANY file (including docs/). Answer \
+         strictly from the context provided above; never claim to run a tool, call \
+         an API, or read a file."
+    }
+}
+
+/// Agents executed over the HTTP chat path instead of a CLI subprocess.
+/// They share every consequence of that: no filesystem, no tool-execution
+/// loop, and token-level (not line-level) streaming.
+pub(crate) fn is_http_chat_agent(agent_type: &AgentType) -> bool {
+    matches!(agent_type, AgentType::Ollama | AgentType::LiteLlm)
+}
+
+pub(crate) fn http_agent_identity_context(agent_type: &AgentType, model: &str) -> String {
+    match agent_type {
+        AgentType::Ollama => format!(
+            "=== RUNTIME IDENTITY ===\nYou are the local model `{model}` served by Ollama. \
+             You are not Claude, ChatGPT, or another agent mentioned in the conversation history. \
+             Messages labelled `Ollama` and the `@ollama` alias address you; labels such as \
+             `LiteLlm`, `ClaudeCode`, or their aliases address other participants. Never copy \
+             another participant's self-identification. When asked who you are, identify yourself \
+             as `{model}` running locally through Ollama."
+        ),
+        AgentType::LiteLlm => format!(
+            "=== RUNTIME IDENTITY ===\nYou are the model route `{model}` served through the \
+             LiteLLM proxy. Messages labelled `LiteLlm` and the `@litellm` alias address you. \
+             LiteLLM is the transport, not your model name. Never copy another participant's \
+             self-identification from the conversation history."
+        ),
+        _ => String::new(),
     }
 }
 
@@ -514,6 +573,7 @@ pub(crate) fn resolve_model_flag(
             AgentType::Vibe => &cfg.vibe,
             AgentType::CopilotCli => &cfg.copilot_cli,
             AgentType::Ollama => &cfg.ollama,
+            AgentType::LiteLlm => &cfg.lite_llm,
             AgentType::Custom => return None,
         };
         let override_val = match tier {
@@ -540,7 +600,7 @@ pub(crate) fn resolve_model_flag(
         // discussions run at the reasoning tier would silently get
         // "qwen3:30b-a3b" instead. (Cloud agents keep distinct per-tier
         // built-ins below, since haiku/sonnet/opus are genuinely different.)
-        if *agent_type == AgentType::Ollama {
+        if is_http_chat_agent(agent_type) {
             if let Some(ref d) = agent_cfg.default {
                 if !d.is_empty() {
                     return Some(d.clone());
@@ -585,6 +645,9 @@ pub(crate) fn resolve_model_flag(
         (AgentType::Ollama, ModelTier::Default) => Some("qwen3:8b".into()),
         (AgentType::Ollama, ModelTier::Economy) => Some("qwen3:8b".into()),
         (AgentType::Ollama, ModelTier::Reasoning) => Some("qwen3:30b-a3b".into()),
+        // LiteLLM deliberately has no built-in: the model names come from the
+        // operator's `config.yaml`, so any guess here would 404. The user sets
+        // one in the LiteLLM card and it covers every tier (see above).
         // Kiro, Vibe: no --model flag support
         _ => None,
     }
@@ -644,7 +707,11 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
     // cost. Steps that NEED full rules inline them in the prompt template.
     let compact = matches!(
         config.agent_type,
-        AgentType::Codex | AgentType::Kiro | AgentType::Vibe | AgentType::Ollama
+        AgentType::Codex
+            | AgentType::Kiro
+            | AgentType::Vibe
+            | AgentType::Ollama
+            | AgentType::LiteLlm
     );
 
     // Ensure this run's skills/profiles exist as native files in the
@@ -792,15 +859,15 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
             config.context_files_prompt
         ));
     }
-    // Ollama runs over bare HTTP chat: no filesystem, no tool-execution loop.
-    // Two consequences the other agents don't have:
+    // HTTP agents have no filesystem. Two consequences the CLI agents don't:
     //  1. CLI agents read `docs/AGENTS.md` themselves from the project CWD —
-    //     an HTTP model can't, so inject the doc inline (capped) or Ollama
+    //     an HTTP model can't, so inject the doc inline (capped) or it
     //     answers with zero project grounding.
-    //  2. Describing MCP tools would only teach the model to HALLUCINATE
-    //     calling them (observed 2026-07-01: it presented `fastly_execute` as
-    //     its own capability). Tell it the truth instead.
-    if *config.agent_type == AgentType::Ollama {
+    //  2. Never describe tools in prose here. Doing so taught the model to
+    //     HALLUCINATE calls (2026-07-01: it presented `fastly_execute` as its
+    //     own capability). Tools are DECLARED instead, on the request's
+    //     `tools` field — see `agents::tools`.
+    if is_http_chat_agent(config.agent_type) {
         if project_has_agents_md {
             if let Ok(mut doc) = std::fs::read_to_string(
                 std::path::Path::new(config.project_path).join("docs/AGENTS.md"),
@@ -829,13 +896,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                 ));
             }
         }
-        parts.push(
-            "=== TOOLS ===\n\nYou have NO executable tools and NO file access in this mode. \
-             You cannot read, write or modify ANY file (including docs/). Answer strictly \
-             from the context provided above; never claim to run a tool, call an API, or \
-             read a file."
-                .to_string(),
-        );
+        parts.push(http_agent_tools_notice(config.tools.is_some()).to_string());
     } else if !mcp_context.is_empty() {
         parts.push(format!("=== AVAILABLE TOOLS ===\n\n{}", mcp_context));
     }
@@ -848,7 +909,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
     // The memory prelude tells agents to WRITE learnings back into docs/ —
     // meaningless for Ollama (no file access) and actively harmful: it made the
     // model claim "I can modify docs/ files" (observed 2026-07-01).
-    if *config.agent_type != AgentType::Ollama {
+    if !is_http_chat_agent(config.agent_type) {
         parts.push(format!(
             "=== PROJECT MEMORY (write back what you learn) ===\n\n{}",
             memory_prelude
@@ -880,18 +941,35 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
     // This gives us: (1) separate system/user message roles — the model
     // doesn't confuse MCP context with the user's question, (2) token
     // counts in the response, (3) works without the ollama binary (Docker).
-    if *config.agent_type == AgentType::Ollama {
+    if is_http_chat_agent(config.agent_type) {
         let model_flag = effective_model_flag(
             config.model_override,
             config.agent_type,
             config.tier,
             config.model_tiers,
         );
+        // LiteLLM has no safe built-in default: model ids come from the
+        // operator's `config.yaml`, so guessing one yields an opaque 404.
+        let model = match (config.agent_type, model_flag.as_deref()) {
+            (_, Some(m)) if !m.is_empty() => m,
+            (AgentType::LiteLlm, _) => {
+                return Err(
+                    "No LiteLLM model configured. Pick one in Settings → Agents → \
+                            LiteLLM, or set a model override on the step."
+                        .into(),
+                )
+            }
+            _ => "qwen3:8b",
+        };
         return start_ollama_http(
+            config.agent_type,
             config.prompt,
             &extra_context,
-            model_flag.as_deref().unwrap_or("qwen3:8b"),
+            model,
             config.ollama_format,
+            config.lite_llm_base_url,
+            config.tokens.active_key_for("litellm"),
+            config.tools.clone(),
         )
         .await;
     }
@@ -1530,67 +1608,83 @@ pub(crate) fn build_ollama_chat_body(
     body
 }
 
-/// Handle one Ollama `/api/chat` response object (a streamed NDJSON line, or
-/// the single object of a non-streaming `format` response): forward its text
-/// delta to the channel and, on the terminal `done` chunk, stash token counts
-/// for `parse_token_usage`. Shared by the streaming loop and the tail flush so
-/// both response shapes go through identical handling. The stderr lock is only
-/// held across synchronous work — never across the `tx.send().await`.
-/// Returns `false` once the consumer has dropped the receiver (user cancelled /
-/// stream aborted) so the caller can stop draining Ollama into the void.
-pub(crate) async fn forward_ollama_line(
+/// Token counts seen so far. OpenAI emits them in a usage frame that arrives
+/// *before* the `[DONE]` sentinel, so they must survive across lines.
+#[derive(Default)]
+pub(crate) struct TokenTally {
+    prompt: u64,
+    eval: u64,
+}
+
+/// Apply one decoded stream line: forward the text delta, record errors, and
+/// on the terminal chunk stash token counts for `parse_token_usage`. The
+/// stderr lock is only held across synchronous work — never across
+/// `tx.send().await`.
+///
+/// Returns `false` once the consumer has dropped the receiver (user cancelled
+/// / stream aborted) so the caller can stop draining the response into the
+/// void.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn forward_chat_line(
+    codec: &dyn crate::agents::chat_codec::ChatCodec,
     line: &str,
     tx: &tokio::sync::mpsc::Sender<String>,
     stderr: &Arc<Mutex<Vec<String>>>,
     got_done: &mut bool,
     got_error: &mut bool,
-    // Requested num_ctx — lets the terminal chunk detect ACTUAL truncation
-    // (prompt_eval_count at the window) instead of relying on the pre-flight
-    // chars/3 estimate, which is blind to token-dense content. 0 = unknown.
     num_ctx: u64,
+    tally: &mut TokenTally,
+    // Tool-call fragments seen so far this turn. Merged here rather than in
+    // the codec because one call can span several frames.
+    pending_tools: &mut crate::agents::tools::ToolCallAccumulator,
 ) -> bool {
-    if line.trim().is_empty() {
+    let Some(chunk) = codec.parse_line(line) else {
         return true;
+    };
+    if !chunk.tool_calls.is_empty() {
+        pending_tools.push(chunk.tool_calls);
     }
-    if let Ok(json) = serde_json::from_str::<serde_json::Value>(line) {
-        // In-band error object ({"error":"model runner has unexpectedly
-        // stopped"}, sent on a 200 stream when the model crashes mid-
-        // generation). Swallowing it made the step SUCCEED with empty or
-        // truncated output — surface it so the step fails with the reason.
-        if let Some(err) = json["error"].as_str() {
-            tracing::warn!("Ollama in-band error: {err}");
-            if let Ok(mut stderr) = stderr.lock() {
-                stderr.push(format!("Ollama error: {err}"));
-            }
-            *got_error = true;
+    // In-band error on a 200 stream (model crashed mid-generation).
+    // Swallowing it made the step SUCCEED with empty or truncated output —
+    // surface it so the step fails with the reason.
+    if let Some(err) = &chunk.error {
+        tracing::warn!("Ollama in-band error: {err}");
+        if let Ok(mut stderr) = stderr.lock() {
+            stderr.push(format!("Ollama error: {err}"));
         }
-        if let Some(text) = json["message"]["content"].as_str() {
-            if !text.is_empty() && tx.send(text.to_string()).await.is_err() {
-                return false;
-            }
+        *got_error = true;
+    }
+    if let Some(text) = chunk.delta {
+        if tx.send(text).await.is_err() {
+            return false;
         }
-        if json["done"].as_bool() == Some(true) {
-            *got_done = true;
-            let prompt_tokens = json["prompt_eval_count"].as_u64().unwrap_or(0);
-            let eval_tokens = json["eval_count"].as_u64().unwrap_or(0);
+    }
+    if chunk.prompt_tokens > 0 {
+        tally.prompt = chunk.prompt_tokens;
+    }
+    if chunk.eval_tokens > 0 {
+        tally.eval = chunk.eval_tokens;
+    }
+    if chunk.done {
+        *got_done = true;
+        if let Ok(mut stderr) = stderr.lock() {
+            stderr.push(format!("ollama_tokens:{}:{}", tally.prompt, tally.eval));
+        }
+        // A prompt that FILLED the window was almost certainly cut by
+        // Ollama (it silently drops the overflow) — exact signal, unlike
+        // the pre-flight estimate.
+        if num_ctx > 0 && tally.prompt >= num_ctx.saturating_sub(64) {
+            tracing::warn!(
+                target: "kronn::ollama",
+                prompt_tokens = tally.prompt, num_ctx,
+                "prompt filled the context window — input was silently TRUNCATED by Ollama; \
+                 reduce the step's input or raise KRONN_OLLAMA_NUM_CTX_CAP"
+            );
             if let Ok(mut stderr) = stderr.lock() {
-                stderr.push(format!("ollama_tokens:{}:{}", prompt_tokens, eval_tokens));
-            }
-            // A prompt that FILLED the window was almost certainly cut by
-            // Ollama (it silently drops the overflow) — exact signal, unlike
-            // the pre-flight estimate.
-            if num_ctx > 0 && prompt_tokens >= num_ctx.saturating_sub(64) {
-                tracing::warn!(
-                    target: "kronn::ollama",
-                    prompt_tokens, num_ctx,
-                    "prompt filled the context window — input was silently TRUNCATED by Ollama; \
-                     reduce the step's input or raise KRONN_OLLAMA_NUM_CTX_CAP"
-                );
-                if let Ok(mut stderr) = stderr.lock() {
-                    stderr.push(format!(
-                        "Ollama truncation: prompt_eval_count {prompt_tokens} filled num_ctx {num_ctx}"
-                    ));
-                }
+                stderr.push(format!(
+                    "Ollama truncation: prompt_eval_count {} filled num_ctx {num_ctx}",
+                    tally.prompt
+                ));
             }
         }
     }
@@ -1606,51 +1700,89 @@ pub(crate) async fn forward_ollama_line(
 /// `format` = an optional JSON Schema (a `TypedSchema` step's schema, already
 /// wrapped in the canonical envelope shape by the caller). When set, decoding
 /// is grammar-constrained and the request is non-streaming (one JSON object).
+#[allow(clippy::too_many_arguments)]
 async fn start_ollama_http(
+    agent_type: &AgentType,
     user_prompt: &str,
     system_context: &str,
     model: &str,
     format: Option<&serde_json::Value>,
+    lite_llm_base_url: Option<&str>,
+    lite_llm_api_key: Option<&str>,
+    executor: Option<std::sync::Arc<dyn crate::agents::tools::ToolExecutor>>,
 ) -> Result<AgentProcess, String> {
-    let base = crate::api::ollama::ollama_base_url_pub();
-    let url = format!("{}/api/chat", base);
-
-    // 0.8.11 — ctx cap auto-derived from THE MODEL (its trained context via
-    // /api/show, cached), clamped to a RAM-safe ceiling. Zero configuration:
-    // a user who pulled qwen3:32b gets its real window instead of a silent 8K
-    // truncation. Env override still wins for experts.
-    let model_limit = ollama_model_ctx_limit(&base, model).await;
-    let ctx_cap = resolve_ctx_cap(std::env::var("KRONN_OLLAMA_NUM_CTX_CAP").ok(), model_limit);
-    let est = ((system_context.len() + user_prompt.len()) as u64 / 3) + 2048;
-    if est > ctx_cap {
-        tracing::warn!(
+    use crate::agents::chat_codec::{ChatCodec, OllamaCodec, OpenAiCodec};
+    let identity_context = http_agent_identity_context(agent_type, model);
+    let system_context = if system_context.trim().is_empty() {
+        identity_context
+    } else {
+        format!("{identity_context}\n\n{system_context}")
+    };
+    // Endpoint, request body and line decoding are the only per-backend parts;
+    // everything below this block is shared transport.
+    let codec: Box<dyn ChatCodec> = if *agent_type == AgentType::LiteLlm {
+        Box::new(OpenAiCodec)
+    } else {
+        Box::new(OllamaCodec)
+    };
+    let (base, body, ctx_cap) = if *agent_type == AgentType::LiteLlm {
+        let base = crate::api::lite_llm::resolve_base_url_pub(lite_llm_base_url);
+        // No `num_ctx` equivalent: the window belongs to whatever upstream the
+        // proxy fronts, so there is nothing here to cap or to warn about.
+        let body = crate::agents::chat_codec::build_openai_chat_body(
+            model,
+            &system_context,
+            user_prompt,
+            format,
+            format.is_none(),
+        );
+        tracing::info!(
+            target: "kronn::lite_llm",
+            model = %model,
+            constrained_format = format.is_some(),
+            stream = body["stream"].as_bool().unwrap_or(true),
+            "litellm run starting"
+        );
+        (base, body, 0)
+    } else {
+        let base = crate::api::ollama::ollama_base_url_pub();
+        // 0.8.11 — ctx cap auto-derived from THE MODEL (its trained context via
+        // /api/show, cached), clamped to a RAM-safe ceiling. Zero configuration:
+        // a user who pulled qwen3:32b gets its real window instead of a silent 8K
+        // truncation. Env override still wins for experts.
+        let model_limit = ollama_model_ctx_limit(&base, model).await;
+        let ctx_cap = resolve_ctx_cap(std::env::var("KRONN_OLLAMA_NUM_CTX_CAP").ok(), model_limit);
+        let est = ((system_context.len() + user_prompt.len()) as u64 / 3) + 2048;
+        if est > ctx_cap {
+            tracing::warn!(
+                target: "kronn::ollama",
+                model = %model,
+                estimated_tokens = est,
+                ctx_cap = ctx_cap,
+                model_limit = ?model_limit,
+                "Prompt likely exceeds the context window — Ollama will TRUNCATE it. \
+                 Reduce the step's input, or raise KRONN_OLLAMA_NUM_CTX_CAP if your machine has headroom."
+            );
+        }
+        let body = build_ollama_chat_body(model, &system_context, user_prompt, format, ctx_cap);
+        // Observability: the effective num_ctx is the #1 confound for local perf —
+        // an oversized window balloons the KV cache and spills onto the CPU (0.2
+        // vs 12.5 tok/s). Surface it (+ the derived reasoning-cut / schema flags)
+        // at INFO on a dedicated target so `kronn logs | grep ollama` shows what
+        // each run actually requested. tok/s is recovered downstream from the
+        // `ollama_tokens:` line (eval_count / eval_duration).
+        tracing::info!(
             target: "kronn::ollama",
             model = %model,
-            estimated_tokens = est,
-            ctx_cap = ctx_cap,
-            model_limit = ?model_limit,
-            "Prompt likely exceeds the context window — Ollama will TRUNCATE it. \
-             Reduce the step's input, or raise KRONN_OLLAMA_NUM_CTX_CAP if your machine has headroom."
+            num_ctx = body["options"]["num_ctx"].as_u64().unwrap_or(0),
+            no_think = ollama_disables_thinking(model),
+            constrained_format = format.is_some(),
+            stream = body["stream"].as_bool().unwrap_or(true),
+            "ollama run starting"
         );
-    }
-
-    let body = build_ollama_chat_body(model, system_context, user_prompt, format, ctx_cap);
-
-    // Observability: the effective num_ctx is the #1 confound for local perf —
-    // an oversized window balloons the KV cache and spills onto the CPU (0.2
-    // vs 12.5 tok/s). Surface it (+ the derived reasoning-cut / schema flags)
-    // at INFO on a dedicated target so `kronn logs | grep ollama` shows what
-    // each run actually requested. tok/s is recovered downstream from the
-    // `ollama_tokens:` line (eval_count / eval_duration).
-    tracing::info!(
-        target: "kronn::ollama",
-        model = %model,
-        num_ctx = body["options"]["num_ctx"].as_u64().unwrap_or(0),
-        no_think = ollama_disables_thinking(model),
-        constrained_format = format.is_some(),
-        stream = body["stream"].as_bool().unwrap_or(true),
-        "ollama run starting"
-    );
+        (base, body, ctx_cap)
+    };
+    let url = codec.endpoint(&base);
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(600)) // 10 min max for slow models
@@ -1662,17 +1794,49 @@ async fn start_ollama_http(
         .build()
         .map_err(|e| format!("HTTP client error: {}", e))?;
 
-    let response = client
-        .post(&url)
-        .json(&body)
+    let backend = if *agent_type == AgentType::LiteLlm {
+        "LiteLLM"
+    } else {
+        "Ollama"
+    };
+    // Ollama takes no credential; a LiteLLM proxy usually sits behind a
+    // master key. Blank means "no auth configured", not "send an empty key".
+    // Captured before the stream task, which cannot borrow `agent_type`.
+    let is_openai_wire = *agent_type == AgentType::LiteLlm;
+    let auth_key: Option<String> = lite_llm_api_key
+        .filter(|k| !k.trim().is_empty() && *agent_type == AgentType::LiteLlm)
+        .map(str::to_string);
+
+    // Declaring tools is what turns a text generator into something that can
+    // act. Only advertise them when there is an executor to honour the calls.
+    let mut body = body;
+    let mut tools_declared = 0usize;
+    if let Some(exec) = executor.as_ref() {
+        let catalogue = exec.catalogue();
+        tools_declared = catalogue.len();
+        if !catalogue.is_empty() {
+            body["tools"] = serde_json::Value::Array(catalogue);
+        }
+    }
+    tracing::info!(
+        target: "kronn::agent::tools",
+        backend, model = %model, tools_declared,
+        "HTTP agent starting"
+    );
+
+    let mut request = client.post(&url).json(&body);
+    if let Some(key) = auth_key.as_deref() {
+        request = request.bearer_auth(key);
+    }
+    let response = request
         .send()
         .await
-        .map_err(|e| format!("Ollama unreachable at {}: {}", base, e))?;
+        .map_err(|e| format!("{} unreachable at {}: {}", backend, base, e))?;
 
     if !response.status().is_success() {
         let status = response.status();
         let err_body = response.text().await.unwrap_or_default();
-        return Err(format!("Ollama error {}: {}", status, err_body));
+        return Err(format!("{} error {}: {}", backend, status, err_body));
     }
 
     // Stream the response — each line is a JSON object with a `message.content` field.
@@ -1717,80 +1881,174 @@ async fn start_ollama_http(
                 let _ = stdin.write_all(if ok { b"0\n" } else { b"1\n" }).await;
             }
         }
+        use crate::agents::tools::{
+            assistant_tool_call_message, tool_result_message, trace_line, ToolCallAccumulator,
+            MAX_TOOL_ITERATIONS,
+        };
         use futures::StreamExt;
-        let mut stream = response.bytes_stream();
-        let mut buffer = String::new();
-        let mut got_done = false;
+        // Token counts accumulate across every turn: a run that called three
+        // tools cost the sum, not just the last exchange.
+        let mut tally = TokenTally::default();
         let mut got_error = false;
+        let mut response = response;
+        let mut turn: usize = 0;
 
-        while let Some(chunk) = stream.next().await {
-            let bytes = match chunk {
-                Ok(b) => b,
-                Err(e) => {
-                    tracing::warn!("Ollama stream error: {}", e);
+        let ok = loop {
+            let mut stream = response.bytes_stream();
+            let mut buffer = String::new();
+            let mut got_done = false;
+            let mut pending_tools = ToolCallAccumulator::default();
+
+            while let Some(chunk) = stream.next().await {
+                let bytes = match chunk {
+                    Ok(b) => b,
+                    Err(e) => {
+                        tracing::warn!("{} stream error: {}", backend, e);
+                        if let Ok(mut se) = stderr_clone.lock() {
+                            se.push(format!(
+                                "{backend} stream error (connection lost mid-generation): {e}"
+                            ));
+                        }
+                        got_error = true;
+                        break;
+                    }
+                };
+
+                buffer.push_str(&String::from_utf8_lossy(&bytes));
+
+                // Process complete JSON lines (newline-delimited stream chunks).
+                while let Some(newline_pos) = buffer.find('\n') {
+                    let line = buffer[..newline_pos].to_string();
+                    buffer = buffer[newline_pos + 1..].to_string();
+                    // Consumer gone (cancel) → stop reading the HTTP body.
+                    if !forward_chat_line(
+                        codec.as_ref(),
+                        &line,
+                        &tx,
+                        &stderr_clone,
+                        &mut got_done,
+                        &mut got_error,
+                        ctx_cap,
+                        &mut tally,
+                        &mut pending_tools,
+                    )
+                    .await
+                    {
+                        finish(&mut lifeline, false).await;
+                        return;
+                    }
+                }
+            }
+
+            // Non-streaming responses (format-constrained / TypedSchema steps
+            // set stream:false) arrive as a single JSON object with no trailing
+            // newline, so the line loop above never fires — flush the remainder.
+            let _ = forward_chat_line(
+                codec.as_ref(),
+                buffer.trim(),
+                &tx,
+                &stderr_clone,
+                &mut got_done,
+                &mut got_error,
+                ctx_cap,
+                &mut tally,
+                &mut pending_tools,
+            )
+            .await;
+
+            let calls = pending_tools.finish();
+            let Some(exec) = executor.clone().filter(|_| !calls.is_empty() && !got_error) else {
+                // No tool round-trip to do: this turn is the answer.
+                //
+                // A stream that ends without the terminal `done` chunk was
+                // truncated (server closed, proxy cut it, model unloaded) —
+                // that must not pass as a successful step.
+                if !got_done && !got_error {
                     if let Ok(mut se) = stderr_clone.lock() {
                         se.push(format!(
-                            "Ollama stream error (connection lost mid-generation): {e}"
+                            "{backend} stream ended without a terminal 'done' chunk — output is likely truncated"
                         ));
                     }
                     got_error = true;
-                    break;
                 }
+                break got_done && !got_error;
             };
 
-            buffer.push_str(&String::from_utf8_lossy(&bytes));
+            turn += 1;
+            if turn > MAX_TOOL_ITERATIONS {
+                // Refusing to converge is a failure, not a silent truncation:
+                // surface it so the step fails with a reason.
+                let msg = format!(
+                    "{backend} kept requesting tools after {MAX_TOOL_ITERATIONS} rounds — giving up"
+                );
+                tracing::warn!(target: "kronn::agent::tools", "{}", msg);
+                if let Ok(mut se) = stderr_clone.lock() {
+                    se.push(msg);
+                }
+                break false;
+            }
 
-            // Process complete JSON lines (newline-delimited stream chunks).
-            while let Some(newline_pos) = buffer.find('\n') {
-                let line = buffer[..newline_pos].to_string();
-                buffer = buffer[newline_pos + 1..].to_string();
-                // Consumer gone (cancel) → stop reading the HTTP body.
-                if !forward_ollama_line(
-                    &line,
-                    &tx,
-                    &stderr_clone,
-                    &mut got_done,
-                    &mut got_error,
-                    ctx_cap,
-                )
-                .await
-                {
-                    finish(&mut lifeline, false).await;
-                    return;
+            // Execute, then feed the results back as the next turn's history.
+            let mut results = Vec::with_capacity(calls.len());
+            for call in &calls {
+                let outcome = exec.execute(call).await;
+                tracing::info!(
+                    target: "kronn::agent::tools",
+                    tool = %call.name, ok = outcome.ok, turn,
+                    "HTTP agent tool call"
+                );
+                if let Ok(mut se) = stderr_clone.lock() {
+                    se.push(trace_line(&outcome));
+                }
+                results.push(outcome);
+            }
+
+            if let Some(messages) = body["messages"].as_array_mut() {
+                // OpenAI wants JSON-encoded arguments; Ollama wants a real object.
+                messages.push(assistant_tool_call_message(&calls, is_openai_wire));
+                for outcome in &results {
+                    messages.push(tool_result_message(outcome));
                 }
             }
-        }
 
-        // Non-streaming responses (format-constrained / TypedSchema steps set
-        // stream:false) arrive as a single JSON object with no trailing
-        // newline, so the line loop above never fires — flush the remainder.
-        let _ = forward_ollama_line(
-            buffer.trim(),
-            &tx,
-            &stderr_clone,
-            &mut got_done,
-            &mut got_error,
-            ctx_cap,
-        )
-        .await;
-
-        // A stream that ends without the terminal `done` chunk was truncated
-        // (server closed the connection, proxy cut it, model unloaded) — that
-        // must not pass as a successful step.
-        if !got_done && !got_error {
-            if let Ok(mut se) = stderr_clone.lock() {
-                se.push("Ollama stream ended without a terminal 'done' chunk — output is likely truncated".into());
+            let mut next = client.post(&url).json(&body);
+            if let Some(key) = auth_key.as_deref() {
+                next = next.bearer_auth(key);
             }
-            got_error = true;
-        }
-        finish(&mut lifeline, got_done && !got_error).await;
+            response = match next.send().await {
+                Ok(r) if r.status().is_success() => r,
+                Ok(r) => {
+                    let status = r.status();
+                    let body = r.text().await.unwrap_or_default();
+                    let msg = format!(
+                        "{backend} error {status} on tool round-trip {turn}: {}",
+                        body.trim()
+                    );
+                    tracing::warn!(target: "kronn::agent::tools", "{}", msg);
+                    if let Ok(mut se) = stderr_clone.lock() {
+                        se.push(msg);
+                    }
+                    break false;
+                }
+                Err(e) => {
+                    let msg = format!("{backend} unreachable on tool round-trip {turn}: {e}");
+                    tracing::warn!(target: "kronn::agent::tools", "{}", msg);
+                    if let Ok(mut se) = stderr_clone.lock() {
+                        se.push(msg);
+                    }
+                    break false;
+                }
+            };
+        };
+
+        finish(&mut lifeline, ok).await;
     });
 
     Ok(AgentProcess {
         child: dummy_child,
         output_mode: OutputMode::Text,
         work_dir: std::env::temp_dir(),
-        agent_type: AgentType::Ollama,
+        agent_type: agent_type.clone(),
         rx,
         stderr_capture,
         stderr_task: None,
@@ -2024,6 +2282,18 @@ fn agent_command(
                 OutputMode::Text,
             )
         }
+        // Unreachable in practice: `start_agent_with_config` returns via the
+        // HTTP path before building a command line. Kept explicit (rather than
+        // folded into a catch-all) so a future CLI-mode LiteLLM has to make a
+        // deliberate decision here instead of silently inheriting `echo`.
+        AgentType::LiteLlm => (
+            "echo",
+            None,
+            vec!["LiteLLM runs over HTTP, not as a CLI process".into()],
+            "NONE",
+            StderrMode::Merge,
+            OutputMode::Text,
+        ),
         AgentType::Custom => (
             "echo",
             None,
@@ -2651,9 +2921,10 @@ pub fn parse_token_usage(
             }
             (response.to_string(), 0)
         }
-        AgentType::Ollama => {
-            // Ollama HTTP streaming puts "ollama_tokens:prompt:eval" in stderr_capture
-            // (written by start_ollama_http when the final `done: true` chunk arrives).
+        AgentType::Ollama | AgentType::LiteLlm => {
+            // Both HTTP backends put "ollama_tokens:prompt:eval" in stderr_capture
+            // (written by `forward_chat_line` on the terminal chunk); the marker
+            // keeps its original name because it is an internal wire detail.
             for line in stderr_lines {
                 if let Some(rest) = line.strip_prefix("ollama_tokens:") {
                     let parts: Vec<&str> = rest.split(':').collect();

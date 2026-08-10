@@ -129,6 +129,117 @@
   margin-bottom: 0;
 }
 
+.disc-settings-handoff {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 9px;
+  border: 1px solid var(--kr-border-ghost);
+  border-radius: var(--kr-r-md);
+  background: var(--kr-bg-surface);
+  margin-top: 10px;
+}
+
+.disc-settings-handoff[data-enabled="true"] {
+  border-color: var(--kr-accent-border);
+  background: var(--kr-accent-bg);
+}
+
+.disc-settings-handoff-copy {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 7px;
+  color: var(--kr-text-secondary);
+}
+
+.disc-settings-handoff-copy strong,
+.disc-settings-handoff-copy small {
+  display: block;
+}
+
+.disc-settings-handoff-copy strong {
+  color: var(--kr-text-primary);
+  font-size: var(--kr-fs-xs);
+}
+
+.disc-settings-handoff-copy small {
+  margin-top: 3px;
+  color: var(--kr-text-muted);
+  font-size: var(--kr-fs-2xs);
+  line-height: 1.4;
+}
+
+.disc-settings-handoff-modes {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 4px;
+}
+
+.disc-settings-handoff-modes button {
+  min-width: 0;
+  padding: 6px 5px;
+  border: 1px solid var(--kr-border-medium);
+  border-radius: var(--kr-r-sm);
+  background: var(--kr-bg-raised);
+  color: var(--kr-text-secondary);
+  font: inherit;
+  font-size: var(--kr-fs-2xs);
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.disc-settings-handoff-modes button[data-active="true"] {
+  border-color: var(--kr-accent-border);
+  background: var(--kr-accent-bg);
+  color: var(--kr-accent);
+}
+
+.disc-settings-handoff-modes button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.disc-settings-handoff-warning {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: flex-start;
+  gap: 5px;
+  padding-top: 7px;
+  border-top: 1px solid rgba(var(--kr-warning-rgb), 0.25);
+  color: var(--kr-warning);
+  font-size: var(--kr-fs-2xs);
+  line-height: 1.4;
+}
+
+.disc-settings-handoff-chain-note,
+.disc-settings-handoff-cli-note {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: flex-start;
+  gap: 5px;
+  color: var(--kr-text-muted);
+  font-size: var(--kr-fs-2xs);
+  line-height: 1.4;
+}
+
+.disc-settings-handoff-chain-note {
+  padding-top: 7px;
+  border-top: 1px solid var(--kr-border-ghost);
+}
+
+.disc-settings-handoff-cli-note {
+  color: var(--kr-text-tertiary);
+}
+
+.disc-settings-handoff-chain-note svg,
+.disc-settings-handoff-cli-note svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+
 .disc-settings-options,
 .disc-settings-chips {
   display: flex;

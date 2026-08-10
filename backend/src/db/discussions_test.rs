@@ -2461,4 +2461,340 @@ mod tests {
             .unwrap();
         assert_eq!(marked, 1);
     }
+
+    fn handoff_discussion(id: &str) -> Discussion {
+        let mut discussion = make_discussion(id);
+        discussion.participants = vec![
+            AgentType::ClaudeCode,
+            AgentType::Ollama,
+            AgentType::Codex,
+            AgentType::LiteLlm,
+        ];
+        discussion
+    }
+
+    fn agent_reply(id: &str, agent: AgentType, parent: &str) -> DiscussionMessage {
+        let mut message = make_message(id, MessageRole::Agent, Some(agent));
+        message.reply_to_message_id = Some(parent.into());
+        message
+    }
+
+    #[test]
+    fn native_agent_handoff_admits_local_and_one_paid_target_atomically() {
+        let conn = test_conn();
+        insert_discussion(&conn, &handoff_discussion("d-agent-handoff")).unwrap();
+        insert_message(
+            &conn,
+            "d-agent-handoff",
+            &make_message("u-agent-handoff", MessageRole::User, None),
+        )
+        .unwrap();
+        let response = agent_reply("a-agent-handoff", AgentType::ClaudeCode, "u-agent-handoff");
+
+        let outcome = insert_native_agent_message_with_handoffs(
+            &conn,
+            "d-agent-handoff",
+            &response,
+            true,
+            Some("source-job"),
+            &AgentType::ClaudeCode,
+            &[AgentType::Ollama, AgentType::Codex, AgentType::LiteLlm],
+            true,
+            Some(1),
+        )
+        .unwrap();
+
+        assert_eq!(
+            outcome.dispatched_agents,
+            vec![AgentType::Ollama, AgentType::Codex]
+        );
+        assert_eq!(
+            list_message_targets(&conn, "a-agent-handoff").unwrap(),
+            vec![
+                MessageTarget::agent(AgentType::Ollama),
+                MessageTarget::agent(AgentType::Codex),
+            ]
+        );
+        let jobs: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM agent_dispatch_jobs
+                 WHERE trigger_message_id = 'a-agent-handoff'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(jobs, 2);
+        let provenance: (i64, Option<String>) = conn
+            .query_row(
+                "SELECT agent_run_succeeded, agent_dispatch_job_id
+                 FROM messages WHERE id = 'a-agent-handoff'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(provenance, (1, Some("source-job".into())));
+    }
+
+    #[test]
+    fn native_agent_handoff_respects_global_discussion_and_attachment_guards() {
+        for (id, globally_enabled, discussion_disabled, no_agent, run_succeeded) in [
+            ("global-off", false, false, false, true),
+            ("discussion-off", true, true, false, true),
+            ("native-agent-off", true, false, true, true),
+            ("failed-run", true, false, false, false),
+        ] {
+            let conn = test_conn();
+            insert_discussion(&conn, &handoff_discussion(id)).unwrap();
+            insert_message(
+                &conn,
+                id,
+                &make_message(&format!("u-{id}"), MessageRole::User, None),
+            )
+            .unwrap();
+            if discussion_disabled {
+                set_disc_agent_handoffs_disabled(&conn, id, true).unwrap();
+            }
+            if no_agent {
+                set_disc_no_agent(&conn, id, true).unwrap();
+            }
+            let response = agent_reply(
+                &format!("a-{id}"),
+                AgentType::ClaudeCode,
+                &format!("u-{id}"),
+            );
+            let outcome = insert_native_agent_message_with_handoffs(
+                &conn,
+                id,
+                &response,
+                run_succeeded,
+                None,
+                &AgentType::ClaudeCode,
+                &[AgentType::Codex],
+                globally_enabled,
+                Some(1),
+            )
+            .unwrap();
+            assert!(outcome.dispatched_agents.is_empty());
+        }
+
+        let conn = test_conn();
+        let mut discussion = handoff_discussion("unattached");
+        discussion
+            .participants
+            .retain(|agent| *agent != AgentType::Codex);
+        insert_discussion(&conn, &discussion).unwrap();
+        insert_message(
+            &conn,
+            "unattached",
+            &make_message("u-unattached", MessageRole::User, None),
+        )
+        .unwrap();
+        let response = agent_reply("a-unattached", AgentType::ClaudeCode, "u-unattached");
+        let outcome = insert_native_agent_message_with_handoffs(
+            &conn,
+            "unattached",
+            &response,
+            true,
+            None,
+            &AgentType::ClaudeCode,
+            &[AgentType::Codex],
+            true,
+            Some(1),
+        )
+        .unwrap();
+        assert!(outcome.dispatched_agents.is_empty());
+    }
+
+    #[test]
+    fn native_agent_handoff_budget_is_shared_by_the_root_user_turn() {
+        let conn = test_conn();
+        insert_discussion(&conn, &handoff_discussion("d-budget")).unwrap();
+        insert_message(
+            &conn,
+            "d-budget",
+            &make_message("u-budget", MessageRole::User, None),
+        )
+        .unwrap();
+        let first = agent_reply("a-budget-1", AgentType::ClaudeCode, "u-budget");
+        let first_outcome = insert_native_agent_message_with_handoffs(
+            &conn,
+            "d-budget",
+            &first,
+            true,
+            None,
+            &AgentType::ClaudeCode,
+            &[AgentType::Codex],
+            true,
+            Some(1),
+        )
+        .unwrap();
+        assert_eq!(first_outcome.dispatched_agents, vec![AgentType::Codex]);
+        assert_eq!(
+            agent_handoff_paid_count_for_reply(&conn, "d-budget", Some("a-budget-1")).unwrap(),
+            1
+        );
+
+        let second = agent_reply("a-budget-2", AgentType::Ollama, "u-budget");
+        let second_outcome = insert_native_agent_message_with_handoffs(
+            &conn,
+            "d-budget",
+            &second,
+            true,
+            None,
+            &AgentType::Ollama,
+            &[AgentType::LiteLlm],
+            true,
+            Some(1),
+        )
+        .unwrap();
+        assert!(second_outcome.dispatched_agents.is_empty());
+    }
+
+    #[test]
+    fn unlimited_paid_budget_admits_every_attached_paid_target() {
+        let conn = test_conn();
+        insert_discussion(&conn, &handoff_discussion("d-unlimited-budget")).unwrap();
+        insert_message(
+            &conn,
+            "d-unlimited-budget",
+            &make_message("u-unlimited-budget", MessageRole::User, None),
+        )
+        .unwrap();
+        let response = agent_reply(
+            "a-unlimited-budget",
+            AgentType::ClaudeCode,
+            "u-unlimited-budget",
+        );
+
+        let outcome = insert_native_agent_message_with_handoffs(
+            &conn,
+            "d-unlimited-budget",
+            &response,
+            true,
+            None,
+            &AgentType::ClaudeCode,
+            &[AgentType::Codex, AgentType::LiteLlm],
+            true,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            outcome.dispatched_agents,
+            vec![AgentType::Codex, AgentType::LiteLlm]
+        );
+    }
+
+    #[test]
+    fn zero_paid_budget_still_allows_the_bounded_local_target() {
+        let conn = test_conn();
+        insert_discussion(&conn, &handoff_discussion("d-local-only")).unwrap();
+        insert_message(
+            &conn,
+            "d-local-only",
+            &make_message("u-local-only", MessageRole::User, None),
+        )
+        .unwrap();
+        let response = agent_reply("a-local-only", AgentType::ClaudeCode, "u-local-only");
+        let outcome = insert_native_agent_message_with_handoffs(
+            &conn,
+            "d-local-only",
+            &response,
+            true,
+            None,
+            &AgentType::ClaudeCode,
+            &[AgentType::Codex, AgentType::Ollama],
+            true,
+            Some(0),
+        )
+        .unwrap();
+
+        assert_eq!(outcome.dispatched_agents, vec![AgentType::Ollama]);
+    }
+
+    #[test]
+    fn native_agent_handoff_stops_after_two_generated_hops() {
+        let conn = test_conn();
+        insert_discussion(&conn, &handoff_discussion("d-depth")).unwrap();
+        insert_message(
+            &conn,
+            "d-depth",
+            &make_message("u-depth", MessageRole::User, None),
+        )
+        .unwrap();
+        let first = agent_reply("a-depth-1", AgentType::ClaudeCode, "u-depth");
+        insert_native_agent_message_with_handoffs(
+            &conn,
+            "d-depth",
+            &first,
+            true,
+            None,
+            &AgentType::ClaudeCode,
+            &[AgentType::Ollama],
+            true,
+            Some(2),
+        )
+        .unwrap();
+        let second = agent_reply("a-depth-2", AgentType::Ollama, "a-depth-1");
+        let second_outcome = insert_native_agent_message_with_handoffs(
+            &conn,
+            "d-depth",
+            &second,
+            true,
+            None,
+            &AgentType::Ollama,
+            &[AgentType::Codex],
+            true,
+            Some(2),
+        )
+        .unwrap();
+        assert_eq!(second_outcome.dispatched_agents, vec![AgentType::Codex]);
+        let third = agent_reply("a-depth-3", AgentType::Codex, "a-depth-2");
+        let third_outcome = insert_native_agent_message_with_handoffs(
+            &conn,
+            "d-depth",
+            &third,
+            true,
+            None,
+            &AgentType::Codex,
+            &[AgentType::LiteLlm],
+            true,
+            Some(2),
+        )
+        .unwrap();
+        assert!(third_outcome.dispatched_agents.is_empty());
+    }
+
+    #[test]
+    fn latest_main_user_message_ignores_notes_and_agent_replies() {
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("d-latest-user")).unwrap();
+        insert_message(
+            &conn,
+            "d-latest-user",
+            &make_message("u-main-1", MessageRole::User, None),
+        )
+        .unwrap();
+        let mut note = make_message("u-note", MessageRole::User, None);
+        note.channel = crate::models::MessageChannel::Note;
+        insert_message(&conn, "d-latest-user", &note).unwrap();
+        insert_message(
+            &conn,
+            "d-latest-user",
+            &make_message("a-latest", MessageRole::Agent, Some(AgentType::Codex)),
+        )
+        .unwrap();
+        insert_message(
+            &conn,
+            "d-latest-user",
+            &make_message("u-main-2", MessageRole::User, None),
+        )
+        .unwrap();
+
+        assert_eq!(
+            latest_main_user_message_id(&conn, "d-latest-user").unwrap(),
+            Some("u-main-2".into())
+        );
+        assert_eq!(latest_main_user_message_id(&conn, "missing").unwrap(), None);
+    }
 }
