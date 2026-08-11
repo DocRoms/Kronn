@@ -24,7 +24,7 @@ import { I18nProvider } from '../../lib/I18nContext';
 const { discoverRepos } = vi.hoisted(() => ({ discoverRepos: vi.fn() }));
 
 vi.mock('../../hooks/useWebSocket', () => ({
-  useWebSocket: vi.fn(() => ({ connected: false })),
+  useWebSocket: vi.fn(() => ({ connected: false, connectionState: 'connecting' })),
 }));
 
 vi.mock('../../lib/api', () => ({

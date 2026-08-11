@@ -3,6 +3,12 @@ import { getAuthToken } from '../lib/api';
 import type { WsMessage } from '../types/generated';
 
 export type WsEventHandler = (msg: WsMessage) => void;
+export type WsConnectionState = 'connecting' | 'connected' | 'reconnecting';
+
+const INITIAL_RECONNECT_DELAY_MS = 1_000;
+const MAX_RECONNECT_DELAY_MS = 60_000;
+const HEARTBEAT_INTERVAL_MS = 30_000;
+const HEARTBEAT_TIMEOUT_MS = 10_000;
 
 /**
  * React hook that maintains a WebSocket connection to the local backend.
@@ -19,11 +25,15 @@ export type WsEventHandler = (msg: WsMessage) => void;
 export function useWebSocket(
   onMessage: WsEventHandler,
   onConnect?: () => void,
-): { connected: boolean } {
+): { connected: boolean; connectionState: WsConnectionState } {
   const [connected, setConnected] = useState(false);
+  const [connectionState, setConnectionState] = useState<WsConnectionState>('connecting');
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeout = useRef<ReturnType<typeof setTimeout>>(undefined);
-  const backoff = useRef(1000);
+  const heartbeatTimeout = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const pendingHeartbeat = useRef<number | null>(null);
+  const backoff = useRef(INITIAL_RECONNECT_DELAY_MS);
+  const mounted = useRef(false);
   const onMessageRef = useRef(onMessage);
   const onConnectRef = useRef(onConnect);
 
@@ -36,6 +46,9 @@ export function useWebSocket(
   }, [onConnect]);
 
   const connect = useCallback(function openSocket() {
+    if (!mounted.current) return;
+    clearTimeout(reconnectTimeout.current);
+
     // Build WS URL from current page location
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const host = window.location.host;
@@ -46,8 +59,13 @@ export function useWebSocket(
     wsRef.current = ws;
 
     ws.onopen = () => {
+      if (!mounted.current || wsRef.current !== ws) {
+        ws.close();
+        return;
+      }
       setConnected(true);
-      backoff.current = 1000;
+      setConnectionState('connected');
+      backoff.current = INITIAL_RECONNECT_DELAY_MS;
       // Send Presence as the very first frame so the backend's recv-task
       // verifies the connection (cf. ws.rs handshake). Local connections
       // pass an empty invite_code — accepted on the loopback path. Without
@@ -75,8 +93,13 @@ export function useWebSocket(
     };
 
     ws.onmessage = (event) => {
+      if (!mounted.current || wsRef.current !== ws) return;
       try {
         const msg = JSON.parse(event.data) as WsMessage;
+        if (msg.type === 'pong' && msg.timestamp === pendingHeartbeat.current) {
+          pendingHeartbeat.current = null;
+          clearTimeout(heartbeatTimeout.current);
+        }
         onMessageRef.current(msg);
       } catch {
         // Ignore non-JSON messages
@@ -84,38 +107,73 @@ export function useWebSocket(
     };
 
     ws.onclose = () => {
+      if (wsRef.current !== ws) return;
       setConnected(false);
       wsRef.current = null;
+      pendingHeartbeat.current = null;
+      clearTimeout(heartbeatTimeout.current);
+      if (!mounted.current) return;
+      setConnectionState('reconnecting');
       // Reconnect with exponential backoff
+      const delay = backoff.current;
+      backoff.current = Math.min(delay * 2, MAX_RECONNECT_DELAY_MS);
       reconnectTimeout.current = setTimeout(() => {
-        backoff.current = Math.min(backoff.current * 2, 60000);
         openSocket();
-      }, backoff.current);
+      }, delay);
     };
 
     ws.onerror = () => {
       // onclose will fire after onerror, triggering reconnect
-      ws.close();
+      if (wsRef.current === ws) ws.close();
     };
   }, []);
 
   useEffect(() => {
+    mounted.current = true;
     connect();
 
     // Heartbeat: send ping every 30s
     const pingInterval = setInterval(() => {
-      if (wsRef.current?.readyState === WebSocket.OPEN) {
-        wsRef.current.send(JSON.stringify({ type: 'ping', timestamp: Date.now() }));
+      const ws = wsRef.current;
+      if (ws?.readyState === WebSocket.OPEN) {
+        const timestamp = Date.now();
+        pendingHeartbeat.current = timestamp;
+        try {
+          ws.send(JSON.stringify({ type: 'ping', timestamp }));
+        } catch {
+          ws.close();
+          return;
+        }
+        clearTimeout(heartbeatTimeout.current);
+        heartbeatTimeout.current = setTimeout(() => {
+          if (
+            mounted.current
+            && wsRef.current === ws
+            && pendingHeartbeat.current === timestamp
+          ) {
+            ws.close();
+          }
+        }, HEARTBEAT_TIMEOUT_MS);
       }
-    }, 30000);
+    }, HEARTBEAT_INTERVAL_MS);
 
     return () => {
+      mounted.current = false;
       clearInterval(pingInterval);
       clearTimeout(reconnectTimeout.current);
-      wsRef.current?.close();
+      clearTimeout(heartbeatTimeout.current);
+      pendingHeartbeat.current = null;
+      const ws = wsRef.current;
       wsRef.current = null;
+      if (ws) {
+        ws.onopen = null;
+        ws.onclose = null;
+        ws.onmessage = null;
+        ws.onerror = null;
+        ws.close();
+      }
     };
   }, [connect]);
 
-  return { connected };
+  return { connected, connectionState };
 }

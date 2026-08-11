@@ -53,15 +53,6 @@ jobs:
         continue-on-error: true
         run: pnpm audit --audit-level=moderate
 
-      - name: Flag security findings
-        if: >-
-          steps.audit-backend.outcome == 'failure' ||
-          steps.audit-desktop.outcome == 'failure' ||
-          steps.audit-frontend.outcome == 'failure'
-        run: |
-          echo "::error title=Dependency security review::One or more security audits reported alerts or could not complete. Review the Security steps before releasing."
-          exit 1
-
       # These commands only resolve/report available versions. `--dry-run` is
       # mandatory for Cargo; no install/update command is ever executed.
       - name: Updates — review backend Rust version drift
@@ -84,3 +75,33 @@ jobs:
           echo "Dependency review completed."
           echo "Security findings are reported separately from ordinary version drift."
           echo "No dependency was updated automatically."
+
+      - name: Enforce security gate
+        env:
+          BACKEND_AUDIT_OUTCOME: ${{ steps.audit-backend.outcome }}
+          DESKTOP_AUDIT_OUTCOME: ${{ steps.audit-desktop.outcome }}
+          FRONTEND_AUDIT_OUTCOME: ${{ steps.audit-frontend.outcome }}
+        run: |
+          failed=0
+
+          if [ "$BACKEND_AUDIT_OUTCOME" = "failure" ]; then
+            echo "::error title=Backend dependency audit failed::cargo audit reported a vulnerability or could not complete in backend/."
+            failed=1
+          fi
+
+          if [ "$DESKTOP_AUDIT_OUTCOME" = "failure" ]; then
+            echo "::error title=Desktop dependency audit failed::cargo audit reported a vulnerability or could not complete in desktop/src-tauri/."
+            failed=1
+          fi
+
+          if [ "$FRONTEND_AUDIT_OUTCOME" = "failure" ]; then
+            echo "::error title=Frontend dependency audit failed::pnpm audit reported a moderate-or-higher vulnerability or could not complete in frontend/."
+            failed=1
+          fi
+
+          if [ "$failed" -ne 0 ]; then
+            echo "Review the named Security step or steps before releasing."
+            exit 1
+          fi
+
+          echo "All dependency security audits passed."

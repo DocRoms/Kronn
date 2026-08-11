@@ -5,7 +5,7 @@ WORKDIR /app
 
 # corepack enables pnpm natively — no global npm install needed.
 # The pnpm version comes from `packageManager` in package.json
-# (currently pnpm@11.0.9) — corepack auto-fetches it on first invocation,
+# (currently pnpm@11.21.0) — corepack auto-fetches it on first invocation,
 # so this stays in sync with what local devs + CI use without hand-pinning
 # a version here.
 RUN corepack enable

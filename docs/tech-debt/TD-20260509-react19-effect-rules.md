@@ -18,23 +18,20 @@ Ad-hoc TS-strict warnings ride alongside:
 - `@typescript-eslint/no-non-null-assertion`
 - `@typescript-eslint/no-explicit-any`
 
-## Current count (2026-08-02 — third contextual pass)
+## Current count (2026-08-11 — fourth contextual pass)
 
-The maintenance pass remeasured **164 warnings, 0 errors** before editing (two
-additional `set-state-in-effect` hits and one additional Fast Refresh hit since
-the 2026-07-30 snapshot). After three contextual batches,
-`pnpm exec eslint src/ -f json` reports **92 warnings, 0 errors**:
+The first maintenance pass remeasured **164 warnings, 0 errors**. After four
+contextual batches, `pnpm exec eslint src/ -f json` reports **72 warnings,
+0 errors**:
 
 | Rule | Count | Category |
 |---|---|---|
 | `react-hooks/set-state-in-effect` | 43 | Heavy refactor each (often state derived from props) |
-| `react-hooks/immutability` | 21 | Mutation in render / effect |
-| `react-hooks/exhaustive-deps` | 13 | Mostly stable refs / useCallback opportunities |
-| `react-hooks/refs` | 5 | Refs for non-DOM values |
+| `react-hooks/immutability` | 19 | Mutation in render / effect |
 | `react-hooks/purity` | 4 | Pure-render rule violations |
 | `no-restricted-syntax` | 3 | Project-specific restricted patterns |
 | `react-hooks/preserve-manual-memoization` | 2 | Memo broken by inner ref change |
-| `no-console` | 1 | Debug output |
+| `react-hooks/refs` | 1 | Ref observed during render |
 
 The first batch brought ten targeted component files to zero warnings without
 disabling a rule: `SourceCodeViewer`, `AiDocViewer`, `AgentQuestionForm`,
@@ -57,6 +54,15 @@ categories. Message parsing, discussion unread labels, workflow UI helpers and
 API-assistant transforms now live in pure modules, while the toast item is a
 component-only boundary. Tests import the same production helpers directly,
 so extracting them does not create parallel test-only implementations.
+
+The fourth batch removes all twelve `exhaustive-deps` warnings rather than
+silencing them. Discussion message/language/workspace values are explicit
+dependencies, the WebSocket callback now depends on stable callbacks declared
+before it, empty-list fallbacks are referentially stable, and latest-handler
+refs update in the layout phase. It also removes obsolete render-time ref
+access from the mention picker and API-call filters. Oxlint is consequently a
+zero-warning gate; ESLint's 72-warning residual is pinned in CI as the new
+ratchet.
 
 ## Patterns applied for the cleared cases
 
@@ -86,8 +92,12 @@ so extracting them does not create parallel test-only implementations.
 
 Each warning needs per-file analysis:
 - `set-state-in-effect`: usually means "state is derived from props" — should become `useMemo`. Easy 1-2-line fixes once you understand the data flow, but you have to read each effect.
-- `exhaustive-deps`: half are "ref doesn't need to be a dep", half are "yes, this dep is missing — but adding it loops the effect" (need `useCallback` or split).
 - `immutability` / `refs` / `purity`: often deliberate React-18 patterns we'll need to refactor when React 20 actually ships.
+
+The Vitest suite also emits historical `act(...)` and aborted-mock-fetch noise.
+Those messages do not affect its result, but they obscure real failures and
+must be removed contextually from the owning test suites rather than suppressed
+globally.
 
 No automated fix for these — `eslint --fix` doesn't help.
 
@@ -106,14 +116,11 @@ Each warning needs contextual analysis:
   - Use `useEffectEvent` (not yet stable in React 19) or accept and
     document the pattern (when external side-effect is unavoidable
     e.g. `stopTts()` on disc switch).
-- **`exhaustive-deps`** (13 hits) — half are stable callbacks that
-  could move into `useCallback` (mechanical fix), half are
-  derived-state-with-loop traps (need split effects).
-- **`refs`** (5 hits) — refs storing non-DOM values. Sometimes
+- **`refs`** (1 hit) — a ref is observed during render. Sometimes
   safe to migrate to `useState` + `useEffect` pair, sometimes not
   (the ref's stability is load-bearing for race guards — see
   `feedback_race_guards.md`).
-- **`immutability`** (21 hits) — mutation in render. Almost always
+- **`immutability`** (19 hits) — mutation in render. Almost always
   fixable by hoisting the value into a `useMemo`.
 
 Recompute per-file hotspots from the JSON lint output before each pass; the
@@ -123,8 +130,8 @@ Recompute per-file hotspots from the JSON lint output before each pass; the
 
 ## Tests to not break
 
-- `pnpm test` (2619 passing on the 2026-07-24 snapshot)
-- `pnpm test:e2e` (smoke + tour + 36 specs)
+- `pnpm test`
+- `pnpm test:e2e`
 - No regression on auto-scroll, guided tour, or SSE streaming — that's where most of the delicate `useEffect`s live.
 
 ## Pointers

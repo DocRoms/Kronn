@@ -35,6 +35,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     name: Build ${{ matrix.label }}
     env:
+      # Makes Tauri's DMG bundler use its headless path instead of asking
+      # Finder/AppleScript to arrange the image on CI runners.
+      CI: 'true'
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
     steps:
@@ -86,9 +89,12 @@ jobs:
       - name: Cache cargo
         uses: actions/cache@v4
         with:
+          # Keep the legacy desktop-specific directory for branches or local
+          # configs that have not moved to the shared root target yet.
           path: |
             ~/.cargo/registry
             ~/.cargo/git
+            target
             desktop/src-tauri/target
           key: ${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ matrix.target }}-cargo-
@@ -107,7 +113,7 @@ jobs:
 
       - name: Enable corepack (provides pnpm pinned by package.json)
         # See `ci-test.yml`. Corepack reads `packageManager` from
-        # `frontend/package.json` (pnpm@11.0.9) — single source of truth
+        # `frontend/package.json` (pnpm@11.21.0) — single source of truth
         # for the pnpm version across local dev, CI, and Docker builds.
         run: corepack enable
 
@@ -125,7 +131,11 @@ jobs:
       # Clean old bundle artifacts from cargo cache to avoid uploading stale installers
       - name: Clean old bundles
         shell: bash
-        run: rm -rf desktop/src-tauri/target/${{ matrix.target }}/release/bundle
+        run: |
+          rm -rf "target/${{ matrix.target }}/release/bundle"
+          rm -rf "target/release/bundle"
+          rm -rf "desktop/src-tauri/target/${{ matrix.target }}/release/bundle"
+          rm -rf "desktop/src-tauri/target/release/bundle"
 
       - name: Build Tauri app
         working-directory: desktop/src-tauri

@@ -333,7 +333,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   const detailSeqRef = useRef(0);
   const detailScrollRef = useRef<HTMLDivElement>(null);
 
-  const workflows = workflowList ?? [];
+  const workflows = useMemo(() => workflowList ?? [], [workflowList]);
   // Persist collapse state across reloads — same convention as the
   // discussions sidebar (`kronn:discCollapsedGroups`). Without this the
   // user re-collapses every project group on every nav back to this

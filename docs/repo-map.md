@@ -151,19 +151,22 @@ Kronn/
 │       ├── main.tsx            # React DOM entry
 │       ├── App.tsx             # Router (setup wizard vs dashboard) + ErrorBoundary + React.lazy code splitting
 │       ├── pages/
-│       │   ├── Dashboard.tsx   # Main UI shell (~674L) — nav bar, page routing, shared state. Project list extracted to components/ProjectList + ProjectCard
-│       │   ├── SettingsPage.tsx # Settings (~1870 lines) — language, voice (TTS/STT model selection), agents config, tokens, usage stats, DB management
-│       │   ├── DiscussionsPage.tsx # Discussions orchestrator (~1218L) — state, streaming, callbacks. Split into components below.
+│       │   ├── Dashboard.tsx   # Main UI shell (~1525L) — nav bar, page routing, shared state. Project list extracted to components/ProjectList + ProjectCard
+│       │   ├── SettingsPage.tsx # Settings (~1917L) — Identity/Agents-first information architecture, capabilities, interface, experience/projects, system/data
+│       │   ├── DiscussionsPage.tsx # Discussions orchestrator (~4286L) — state, durable send receipts, streaming, reconnect resync, callbacks. Split into components below.
 │       │   ├── McpPage.tsx     # MCP management (registry, configs, inline secret editing with per-field visibility, context files, project toggles)
-│       │   ├── WorkflowsPage.tsx # Workflow management (~1780L, list, wizard, detail, runs, access warnings)
+│       │   ├── WorkflowsPage.tsx # Workflow management (~2925L, list, wizard integration, detail, runs, access warnings)
 │       │   ├── SetupWizard.tsx # First-run setup flow
 │       │   └── *.css           # Per-page CSS files (tokens + utilities in src/styles/)
 │       ├── components/
-│       │   ├── ChatHeader.tsx    # Discussion chat header (502L) — title editing, agent badges, MCP/settings popovers, git toggle
-│       │   ├── ChatInput.tsx     # Chat input composer (695L) — textarea, @mentions, voice STT, debate popover, send/stop
-│       │   ├── DiscussionSidebar.tsx # Sidebar (346L) — discussion list, contacts, search, archives
-│       │   ├── NewDiscussionForm.tsx  # New discussion form (710L) — brief-first responsive layout + launch/workspace/agent configuration
-│       │   ├── MessageBubble.tsx # Message bubble (329L) — user/agent/system, markdown, TTS, edit, copy, retry. MarkdownContent intercepts `kronn-doc-preview` (→ DocPreview) and `kronn-doc-data` (→ DocDataExport) fences; malformed JSON falls back to <pre>.
+│       │   ├── ChatHeader.tsx    # Discussion chat header (~609L) — title editing, model/reasoning picker, agent badges, MCP/settings popovers, git toggle
+│       │   ├── ChatInput.tsx     # Shared-behaviour chat composer (~2027L) — Markdown editor/preview/help, @mentions with per-target tier, emoji completion, voice STT, queue, send/stop
+│       │   ├── DiscussionSidebar.tsx # Sidebar (~1740L) — discussion list, contacts, search, archives, batch/run grouping
+│       │   ├── NewDiscussionForm.tsx  # New discussion form (~1104L) — same Markdown/mention/tier behaviour as chat + launch/workspace configuration
+│       │   ├── MessageBubble.tsx # Message bubble (~1493L) — user/agent/system, model provenance, markdown, TTS, edit, copy, retry. MarkdownContent intercepts `kronn-doc-preview` (→ DocPreview) and `kronn-doc-data` (→ DocDataExport) fences; malformed JSON falls back to <pre>.
+│       │   ├── AgentSwitchPicker.tsx # Shared compact agent × reasoning-tier picker used by discussion, Quick Prompt and workflow surfaces
+│       │   ├── MarkdownComposerTools.tsx # Shared edit/preview tabs, Markdown help, insertable examples and emoji guidance
+│       │   ├── workflows/WorkflowWizard.tsx # Full workflow editor (~4170L): progressive modes, direct stage/step navigation, reusable prompt editor, save/cancel from each stage
 │       │   ├── PluginPortabilityModal.tsx # Safe-by-default plugin bundle export/import; explicit encrypted-value danger zone
 │       │   ├── DocPreview.tsx    # HTML doc preview + export (0.5.1) — sandboxed iframe (empty `sandbox=""`) renders the agent-authored HTML, two buttons export PDF / DOCX via /api/docs/{pdf,docx}. Per-format state (idle/loading/ready/error).
 │       │   ├── DocDataExport.tsx # Structured-data export (0.5.1) — JSON payload card for CSV / XLSX / PPTX (no iframe). Header shows format + summary (row/sheet/slide count), single "Export" button per card.
@@ -199,13 +202,13 @@ Kronn/
 │       ├── hooks/
 │       │   ├── useApi.ts       # Generic fetch hook with loading/error/refetch + race condition protection
 │       │   ├── useToast.ts     # Toast notifications (success/error/info, auto-dismiss 4s, max 3 visible)
-│       │   ├── useWebSocket.ts # WebSocket subscription with auto-reconnect
+│       │   ├── useWebSocket.ts # WebSocket subscription with pong deadline, bounded reconnect, stale-socket protection and on-connect resync callback
 │       │   ├── useMediaQuery.ts # Responsive breakpoint helper
 │       │   ├── useQpChain.ts   # QP Chain Phase 1 — queue a Quick Prompt mid-stream, auto-fire on sending true→false edge (0.4.2)
 │       │   └── useRafBatchedStream.ts # Generic rAF-batched chunk streaming — collapses SSE deltas into one setState/frame (0.4.2)
 │       ├── lib/
 │       │   ├── api.ts          # API client (typed wrappers + SSE streaming helpers)
-│       │   ├── i18n.ts         # Lightweight i18n system (fr/en/es). Translation dictionaries + locale persistence (localStorage)
+│       │   ├── i18n.ts         # Lazy i18n system (fr/en/es/zh). Translation dictionaries + locale persistence (localStorage + backend ui_language)
 │       │   ├── I18nContext.tsx  # React context provider for UI locale (useT() hook)
 │       │   ├── constants.ts    # Shared constants: AGENT_COLORS, AGENT_LABELS, ALL_AGENT_TYPES, agentColor()
 │       │   ├── tts-engine.ts   # TTS playback engine: pause/resume/stop, sentence pipelining, SpeechSynthesis fallback
@@ -272,13 +275,13 @@ Kronn/
 ## Notes
 - `README.md` is not guaranteed to be up-to-date; prefer actual config files as source of truth.
 - `frontend/src/types/generated.ts` is auto-generated — never edit manually.
-- Dashboard.tsx (~1017L) is the main UI shell. Sub-pages: SettingsPage (~1106L), DiscussionsPage (~1736L after 2026-04-17 hook split into useQpChain + useRafBatchedStream), McpPage (~791L), WorkflowsPage (~810L). Projects: ProjectList (~234L) + ProjectCard (~707L).
+- UI file sizes evolve quickly; the tree above is the reviewed 2026-08-11 snapshot. Prefer `wc -l` over copying these figures into new design decisions.
 - Hot files still above the TD watermark: `backend/src/models/mod.rs` (~2225L), `backend/src/api/audit.rs` (~1966L), `backend/src/api/projects.rs` (~1819L). `backend/src/api/discussions.rs` was 3400L; now 2880L after 2026-04-17 extraction of 9 pure helpers (`disc_helpers.rs`) and 3 prompt builders (`disc_prompts.rs`).
-- DiscussionsPage split (2026-03-28): ChatHeader, ChatInput (~1063L — mentions + STT + debate + QP chain picker), DiscussionSidebar, NewDiscussionForm, MessageBubble, SwipeableDiscItem, AgentQuestionForm. ChatInput is the biggest outlier.
+- DiscussionsPage split (2026-03-28): ChatHeader, ChatInput, DiscussionSidebar, NewDiscussionForm, MessageBubble, SwipeableDiscItem and AgentQuestionForm. Since 0.9.4, `MarkdownComposerTools` and `AgentSwitchPicker` keep editor and agent × tier behaviour consistent across new-discussion, chat, Quick Prompt and workflow surfaces.
 - CSS system: `src/styles/` (tokens, utilities, components) + per-page CSS. ~319 inline styles remain (dynamic only).
 - TTS/STT logic extracted into `lib/tts-*.ts` and `lib/stt-*.ts` modules (7 files, ~400 lines total). Web Workers for WASM inference run off the main thread.
 - Shared constants (AGENT_COLORS, AGENT_LABELS) extracted to `lib/constants.ts` — imported by Dashboard and WorkflowsPage.
-- Frontend tests in `__tests__/` directories alongside source (51 suites, 629 tests as of 2026-04-17). See `docs/testing-quality.md`.
-- Shell tests in `tests/bats/` (8 suites, 186 tests via bats-core). See `docs/testing-quality.md`.
+- Frontend tests live in `__tests__/` directories alongside source. See `docs/testing-quality.md`; do not hard-code a suite count here because CI changes it continuously.
+- Shell tests live in `tests/bats/`. See `docs/testing-quality.md`.
 - CI pipeline: `.github/workflows/ci-test.yml` triggered on push to main + all PRs (backend clippy/test + frontend tsc/test + shell bats + security scan). Desktop build: `.github/workflows/desktop-build.yml`.
 - `templates/` directory contains the project documentation template files (docs/ skeleton, CLAUDE.md, .cursorrules, etc.) mounted at `/app/templates:ro` in Docker.

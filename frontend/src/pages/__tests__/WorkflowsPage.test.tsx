@@ -29,7 +29,7 @@ const mockWorkflowsApi = vi.hoisted(() => ({
 // WorkflowRunUpdated events. Stub it to a no-op so the test runtime
 // doesn't try to open a real WebSocket inside jsdom.
 vi.mock('../../hooks/useWebSocket', () => ({
-  useWebSocket: () => ({ connected: false }),
+  useWebSocket: () => ({ connected: false, connectionState: 'connecting' }),
 }));
 
 // Mock API — WorkflowsPage calls workflowsApi.list() and skillsApi.list() on mount

@@ -60,6 +60,13 @@ Three Docker services behind nginx gateway:
 - **macOS Docker agent bootstrap (0.3.5)**: on macOS hosts, host-mounted binaries are Darwin (macOS) executables that cannot run in the Linux container. `entrypoint.sh` detects `KRONN_HOST_OS=macOS` and installs Linux versions of Claude Code (npm), Codex (npm), and Kiro (curl) inside the container. `find_binary()` skips host-mounted Darwin binaries for `claude`, `codex`, `copilot`, `kiro-cli` when `host_is_macos()`. `~/.npm/bin` is mounted at `/host-bin/npm` via `KRONN_NPM_BIN` env var (auto-detected by Makefile `npm bin -g`).
 
 - **Ollama local LLM (0.4.0)**: unlike other agents (CLI spawn), Ollama uses HTTP API streaming (`POST OLLAMA_HOST/api/chat`). System context (MCP, skills, profiles, directives) is sent as `role: system`, user prompt as `role: user` — the model doesn't confuse context with question. The system context also states the concrete runtime model and maps `Ollama` / `@ollama` to self, so a weaker local model cannot copy a Claude identity from another participant's history. LiteLLM receives the equivalent route/alias identity guard. [src: file: backend/src/agents/runner.rs:539-557] Token tracking from `prompt_eval_count` + `eval_count` in the `done: true` response chunk. Cost: always $0. Docker: `OLLAMA_HOST` env var resolves to `host.docker.internal:11434` (macOS/Windows) or requires `OLLAMA_HOST=0.0.0.0 ollama serve` on WSL/Linux. Health endpoint returns contextual hints per environment. Setup wizard in Settings with 4 states (install → launch → pull models → model picker). `api/ollama.rs` for health+models, execution in `runner.rs:start_ollama_http()`.
+- **LiteLLM private reasoning (0.9.5)**: OpenAI-compatible streams pass
+  through a stateful leading-block filter. Initial `<think>` and `<thinking>`
+  content is withheld even when tags are split across chunks or never closed;
+  once visible answer content starts, identically named literal tags are
+  preserved. The same final sanitizer runs on persisted discussion output.
+  [src: file: backend/src/agents/runner.rs:1629-1780]
+  [src: file: backend/src/api/discussions/streaming.rs:1988-1994]
 
 ### Discussions
 - `Discussion.project_id` is `Option<String>` (Rust) / `string | null` (TS).
@@ -143,7 +150,12 @@ Three Docker services behind nginx gateway:
 - **Multi-user (Phase 1 — contacts + Phase 2 — WebSocket sync)**: `contacts` table (migration 022) with CRUD API (`/api/contacts`). Invite code format `kronn:pseudo@host:port`. Sidebar section shows contacts with online/offline status via real-time WebSocket. Settings > Identity displays the invite code.
   - **WebSocket server**: `GET /api/ws` — accepts connections from local frontend and remote Kronn peers. Auth via `?token=` query param. Messages dispatched through `AppState.ws_broadcast` (tokio broadcast channel).
   - **WebSocket client manager**: background task (`core/ws_client.rs`) maintains outbound WS connections to all contacts. Reconnects with exponential backoff (1s → 60s). Emits presence online/offline events.
-  - **Frontend hook**: `useWebSocket.ts` — single WS connection to own backend, auto-reconnect, 30s heartbeat ping. Replaces HTTP polling for contact presence.
+  - **Frontend hook**: `useWebSocket.ts` — single WS connection to own backend,
+    30s heartbeat ping with a 10s acknowledgement deadline, stale-socket guards
+    and bounded reconnect (1s → 60s). Every connection calls back into the
+    discussion page to reload rooms and active content and to probe contact
+    presence; the UI exposes `connecting` / `connected` / `reconnecting` rather
+    than silently appearing live on a dead socket.
   - **Protocol**: JSON tagged union `WsMessage` — variants: `presence`, `ping`, `pong`. Phase 3 (discussion sharing + pause IA) planned.
 - **Cross-platform**: `core/env.rs` provides `is_docker()` and `host_os_label()`. Docker-specific logic (chown, safe.directory, /host-home) is conditional. Agent uninstall commands use `#[cfg(unix)]`/`#[cfg(windows)]`. Tauri desktop app embeds the backend with `get_backend_url` command.
 
@@ -186,7 +198,11 @@ value-free audit event. See
 - `Database` struct wraps `Mutex<Connection>` with `with_conn()` async accessor.
 - Data persisted in `kronn.db` with WAL mode and foreign keys enabled.
 - Migrations run via `backend/src/db/migrations.rs` (versioned SQL files, executed before Mutex wrap to avoid blocking_lock panic).
-- Frontend: `useApi` hook for data fetching. Dashboard.tsx (~750 lines) is the main shell with accordion sections per project, bootstrap modal, and smart section defaults based on audit status; sub-pages (SettingsPage.tsx, DiscussionsPage.tsx, McpPage.tsx, WorkflowsPage.tsx) receive data as props. UI state managed locally with `useState`.
+- Frontend: `useApi` hook for data fetching. `Dashboard.tsx` is the main shell;
+  sub-pages (`SettingsPage.tsx`, `DiscussionsPage.tsx`, `McpPage.tsx`,
+  `WorkflowsPage.tsx`) receive data as props. UI state is managed locally with
+  `useState`; file sizes are intentionally tracked in `docs/repo-map.md`, not
+  duplicated here.
 - `useMemo` for computed values (agent mentions filtering, unread counts). Conditional polling (only active tab).
 - `ErrorBoundary` class component wraps lazy-loaded routes. `React.lazy` + `Suspense` for code splitting (SetupWizard, Dashboard).
 - `AbortController` cleanup on component unmount for SSE streams.
@@ -203,18 +219,25 @@ value-free audit event. See
 - Lightweight custom translation system (no external lib).
 - 3 UI locales: `fr`, `en`, `es`. Locale detection and lazy loading live in
   `frontend/src/lib/i18n.ts`; dictionaries live in
-  `frontend/src/lib/i18n/locales/{fr,en,es}.ts`.
+  `frontend/src/lib/i18n/locales/{fr,en,es,zh}.ts`.
 - UI language stored in `localStorage` (`kronn:ui-locale`), separate from agent output language (backend config).
 - `I18nContext.tsx` provides `useT()` hook returning `t(key, ...args)` for components.
 - Translation keys use dot notation: `nav.projects`, `projects.search`, `config.tokens.title`, etc.
 - String interpolation with `{0}`, `{1}` positional placeholders.
 - Default locale: `fr`.
 
-### Multi-agent orchestration
-- Discussion can involve multiple agents debating in configurable rounds (1–3, default 2 in UI).
-- Primary agent (discussion owner) speaks last each round and produces final synthesis.
-- Anti-repetition prompts keep rounds concise.
-- Language configurable globally (fr/en/zh/br), injected into all agent prompts.
+### Multi-agent routing and orchestration
+
+- Several explicit agent aliases on a normal user turn are an independent
+  fan-out: every target answers the same source turn and no debate or synthesis
+  is inferred.
+- Debate remains an explicit orchestration mode. Its configured rounds let
+  agents react to one another and the primary agent produces the synthesis.
+- Runtime collaboration is controlled separately. An agent can delegate only
+  when the discussion policy permits it and the response carries Kronn's hidden
+  handoff marker; ordinary generated `@alias` prose is inert.
+- The complete routing and deduplication contract lives in
+  [`discussion-agent-routing.md`](discussion-agent-routing.md).
 
 ### 3-axis agent configuration (Profiles / Skills / Directives)
 
@@ -292,6 +315,11 @@ Unified automation system: `Trigger → Steps`. Superset of OpenAI Symphony's WO
 
 **Key design decisions:**
 - Workflows are created step-by-step via the dashboard UI (wizard), not just WORKFLOW.md files.
+- The editor keeps its stage/step outline and save/cancel actions visible while
+  only the active pane scrolls. Existing workflows can jump directly between
+  stages, and the Steps stage exposes direct navigation to every step.
+- Agent prompts reuse the shared Markdown edit/preview/help component and the
+  shared agent × reasoning-tier picker used by discussions and Quick Prompts.
 - WORKFLOW.md files can be imported/detected from repos (Symphony format → single-step Kronn workflow).
 - Import auto-detects missing MCPs and suggests installation from registry.
 - Storage format in DB is JSON (not YAML).

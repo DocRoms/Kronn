@@ -142,7 +142,7 @@ vi.mock('../../lib/api', () => ({
 
 // Mock useWebSocket hook (WS not available in jsdom)
 vi.mock('../../hooks/useWebSocket', () => ({
-  useWebSocket: vi.fn(() => ({ connected: false })),
+  useWebSocket: vi.fn(() => ({ connected: false, connectionState: 'connecting' })),
 }));
 
 import {
@@ -572,7 +572,7 @@ describe('DiscussionsPage', () => {
     let capturedOnConnect: (() => void) | undefined;
     vi.mocked(useWebSocket).mockImplementation((_onMessage, onConnect) => {
       capturedOnConnect = onConnect as (() => void) | undefined;
-      return { connected: true };
+      return { connected: true, connectionState: 'connected' };
     });
 
     await wrap(
@@ -618,7 +618,41 @@ describe('DiscussionsPage', () => {
     expect(refetch).toHaveBeenCalled();
     expect(vi.mocked(discussionsApi.get)).toHaveBeenCalledWith('d1');
 
-    vi.mocked(useWebSocket).mockImplementation(() => ({ connected: false }));
+    vi.mocked(useWebSocket).mockImplementation(() => ({ connected: false, connectionState: 'connecting' }));
+  });
+
+  it('explains that real-time data will resync while the socket reconnects', async () => {
+    const { useWebSocket } = await import('../../hooks/useWebSocket');
+    const discussion = makeListDiscussion('d1', 0);
+    vi.mocked(discussionsApi.get).mockResolvedValue(discussion);
+    vi.mocked(useWebSocket).mockImplementation(() => ({
+      connected: false,
+      connectionState: 'reconnecting',
+    }));
+
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[discussion]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        initialActiveDiscussionId="d1"
+        {...liftedProps()}
+      />
+    );
+
+    expect(screen.getByRole('status')).toHaveTextContent(/reconnexion en cours/i);
+    expect(screen.getByRole('status')).toHaveTextContent(/brouillons sont conservés/i);
+
+    vi.mocked(useWebSocket).mockImplementation(() => ({
+      connected: false,
+      connectionState: 'connecting',
+    }));
   });
 
   it('does NOT abort SSE controllers on unmount', async () => {
@@ -671,7 +705,7 @@ describe('DiscussionsPage', () => {
         firedRecovered = true;
         setTimeout(() => onMessage({ type: 'partial_response_recovered', discussion_ids: ['d1'] }), 10);
       }
-      return { connected: true };
+      return { connected: true, connectionState: 'connected' };
     });
 
     await wrap(
@@ -691,7 +725,7 @@ describe('DiscussionsPage', () => {
     await act(async () => { await new Promise(r => setTimeout(r, 100)); });
 
     expect(lifted.abortControllers.current.d1).toBeUndefined();
-    vi.mocked(useWebSocket).mockImplementation(() => ({ connected: false }));
+    vi.mocked(useWebSocket).mockImplementation(() => ({ connected: false, connectionState: 'connecting' }));
   });
 
   it('marks a child queued on batch_run_child_queued WITHOUT refetching the list', async () => {
@@ -711,7 +745,7 @@ describe('DiscussionsPage', () => {
         firedQueued = true;
         setTimeout(() => onMessage({ type: 'batch_run_child_queued', run_id: 'r1', discussion_id: 'd1' }), 10);
       }
-      return { connected: true };
+      return { connected: true, connectionState: 'connected' };
     });
 
     await wrap(
@@ -736,7 +770,7 @@ describe('DiscussionsPage', () => {
     expect(updater({})).toEqual({ d1: true });
     // …and NOT a single list refetch from this frame.
     expect(refetch).not.toHaveBeenCalled();
-    vi.mocked(useWebSocket).mockImplementation(() => ({ connected: false }));
+    vi.mocked(useWebSocket).mockImplementation(() => ({ connected: false, connectionState: 'connecting' }));
   });
 
   it('clears sending AND queued state on agent_runs_interrupted', async () => {
@@ -754,7 +788,7 @@ describe('DiscussionsPage', () => {
         firedInterrupted = true;
         setTimeout(() => onMessage({ type: 'agent_runs_interrupted', discussion_ids: ['d1'] }), 10);
       }
-      return { connected: true };
+      return { connected: true, connectionState: 'connected' };
     });
 
     await wrap(
@@ -781,7 +815,7 @@ describe('DiscussionsPage', () => {
     expect(lifted.abortControllers.current.d1).toBeUndefined();
     // The component runs the real fr i18n — assert on the translated copy.
     expect(toastFn).toHaveBeenCalledWith(expect.stringContaining("en attente d'agent interrompue"), 'info');
-    vi.mocked(useWebSocket).mockImplementation(() => ({ connected: false }));
+    vi.mocked(useWebSocket).mockImplementation(() => ({ connected: false, connectionState: 'connecting' }));
   });
 
   it('refetches discussion when sending finishes (activeSending changes)', async () => {
@@ -1839,7 +1873,7 @@ describe('DiscussionsPage', () => {
       fireRecovered = () => onMessage(
         { type: 'partial_response_recovered', discussion_ids: ['d1'] } as any,
       );
-      return { connected: true };
+      return { connected: true, connectionState: 'connected' };
     });
 
     await renderForPartialPending();
@@ -1869,7 +1903,7 @@ describe('DiscussionsPage', () => {
       fireRecovered = () => onMessage(
         { type: 'partial_response_recovered', discussion_ids: ['d1'] } as any,
       );
-      return { connected: true };
+      return { connected: true, connectionState: 'connected' };
     });
 
     const textarea = await renderForPartialPending();
@@ -2745,7 +2779,7 @@ describe('DiscussionsPage', () => {
           online: true,
         });
       }, 10);
-      return { connected: true };
+      return { connected: true, connectionState: 'connected' };
     });
 
     const { contacts: contactsApi } = await import('../../lib/api');
@@ -2776,7 +2810,7 @@ describe('DiscussionsPage', () => {
     expect(body).toContain('1/1');
 
     // Restore default mock
-    vi.mocked(useWebSocket).mockImplementation(() => ({ connected: false }));
+    vi.mocked(useWebSocket).mockImplementation(() => ({ connected: false, connectionState: 'connecting' }));
   });
 
   it('flips sendingMap[disc] ON when a batch_run_child_started WS event arrives', async () => {
@@ -2788,7 +2822,7 @@ describe('DiscussionsPage', () => {
       setTimeout(() => {
         onMessage({ type: 'batch_run_child_started', run_id: 'run-1', discussion_id: 'd1' });
       }, 10);
-      return { connected: true };
+      return { connected: true, connectionState: 'connected' };
     });
 
     const setSendingMap = vi.fn();
@@ -2815,7 +2849,7 @@ describe('DiscussionsPage', () => {
     );
     expect(turnedOnD1).toBe(true);
 
-    vi.mocked(useWebSocket).mockImplementation(() => ({ connected: false }));
+    vi.mocked(useWebSocket).mockImplementation(() => ({ connected: false, connectionState: 'connecting' }));
   });
 
   it('shows contacts section with add button even when no contacts exist', async () => {

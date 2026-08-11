@@ -1485,6 +1485,7 @@ const fr: TranslationDict = {
   'contacts.chatStarted': 'Discussion ouverte avec {0}',
   'contacts.chatStartError': "Impossible d'ouvrir la discussion",
   'contacts.wsConnected': 'Connecté en temps réel',
+  'disc.realtimeReconnecting': 'Connexion temps réel interrompue — reconnexion en cours. Vos brouillons sont conservés et la discussion sera resynchronisée automatiquement.',
   'contacts.wsDisconnected': 'Déconnecté',
   'contacts.added': 'Contact ajouté',
   'contacts.addError': "Impossible d'ajouter ce contact",

@@ -1475,6 +1475,7 @@ const en: TranslationDict = {
   'contacts.chatStarted': 'Chat opened with {0}',
   'contacts.chatStartError': 'Could not open the chat',
   'contacts.wsConnected': 'Connected in real-time',
+  'disc.realtimeReconnecting': 'Real-time connection interrupted — reconnecting. Your drafts are preserved and the discussion will resync automatically.',
   'contacts.wsDisconnected': 'Disconnected',
   'contacts.added': 'Contact added',
   'contacts.addError': 'Failed to add contact',

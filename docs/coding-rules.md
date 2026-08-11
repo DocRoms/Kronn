@@ -12,7 +12,7 @@
 
 ## Rust (backend)
 
-- **Framework**: axum 0.7 with tokio async runtime.
+- **Framework**: axum 0.8 with tokio async runtime.
 - **Error handling**: `anyhow::Result` for internal, `ApiResponse` wrapper for HTTP.
 - **Serialization**: serde with `#[serde(rename_all = "snake_case")]` on enums.
 - **Route registration**: chain methods on same path — `.route("/path", get(h).post(h2))`, never two `.route()` calls with same path (axum panics).
@@ -29,24 +29,24 @@
 
 - **Node**: >= 23.6.0 (native TS support). Version managed via `fnm` or `.node-version`.
 - **Target**: ES2020, strict mode.
-- **Bundler**: Vite 5 with code splitting (React.lazy + Suspense, vendor chunks).
+- **Bundler**: Vite 8 with code splitting (React.lazy + Suspense, vendor chunks).
 - **Icons**: Lucide React (`lucide-react`).
 - **Types**: import from `../types/generated` — never define API types manually. Use `type` imports (`import type { ... }`).
 - **API calls**: use functions from `../lib/api.ts` — never raw `fetch` in components.
 - **Shared constants**: agent colors, labels, types → `lib/constants.ts`. Do not duplicate in pages.
 - **Styling**: CSS tokens (`--kr-*`), utility classes (`.flex-row`, `.gap-*`, `.text-*`), and component classes (`.btn`, `.card`, `.input`, `.badge`) in `src/styles/`. Per-page CSS in `src/pages/*.css`. Inline `style={{}}` only for dynamic values. Import page CSS at the top: `import './PageName.css'`.
 - **State**: local `useState` / `useEffect` / `useMemo` / `useCallback`. No global state library.
-- **i18n**: use `useT()` hook from `I18nContext.tsx`. All user-visible strings must use `t('key.name')`. Translation keys in `lib/i18n.ts`. 3 UI locales: `fr`, `en`, `es`. Output languages (for agents) are separate and include `zh`, `br`.
+- **i18n**: use `useT()` from `I18nContext.tsx`. All user-visible strings must use `t('key.name')`. Locale files are separated under `lib/i18n/locales/`; `fr`, `en`, `es` and `zh` must keep exact key parity. The agent output language is an independent setting.
 - **Error boundaries**: wrap lazy-loaded routes with `ErrorBoundary` (see App.tsx).
-- **SSE handling**: use `_streamSSE` helper in api.ts with `AbortController` for cancellation. Cleanup AbortControllers on component unmount.
-- **Linter**: ESLint 10 (`npm run lint`) — strict config with typescript-eslint. 0 errors required.
-- **Tests**: Vitest 4 (`npm test`, 520 tests, 41 suites). Use @testing-library/react for component tests. Wrap state-triggering calls in `act()`. For api mocking, prefer the shared `src/test/apiMock.ts` factory over inline `vi.mock` factories — see `docs/testing-quality.md`.
-- **Coverage**: `npm run test:coverage` — @vitest/coverage-v8 with text + lcov reporters.
-- **Build**: `npm run build` (tsc + vite build)
+- **SSE handling**: use `_streamSSE` from `api.ts` with `AbortController` cancellation. Keep controller cleanup with the lifecycle owner; discussion streams intentionally survive page-tab switches and are cleaned on completion or explicit Stop.
+- **Linter**: ESLint 10 (`pnpm lint`) is authoritative; Oxlint (`pnpm lint:fast`) is the zero-warning fast gate. ESLint requires zero errors and CI pins its warning count as a ratchet: cleanup lowers the budget, new warnings fail.
+- **Tests**: Vitest 4 (`pnpm test`). Use Testing Library for component tests and wrap state-triggering calls in `act()`. Prefer `src/test/apiMock.ts` over inline API mock factories — see `docs/testing-quality.md`.
+- **Coverage**: `pnpm test:coverage` — @vitest/coverage-v8 with enforced thresholds.
+- **Build**: `pnpm build` (native TypeScript check + Vite build)
 
 ## Shell scripts (lib/*.sh)
 
 - **Compat**: Bash 3.2+ (macOS + Linux + WSL). No associative arrays, no `readarray`.
 - **Portability**: detect GNU/BSD variants for `sed -i`, `cp -rn`, `timeout`.
 - **Lint**: use `shellcheck` (not enforced yet, but recommended).
-- **Tests**: bats-core (8 suites, 186 tests). Run with `make test-shell` or `bash tests/bats/run.sh`. Use `_load_lib()` helper from `test_helper.bash` to source scripts. All pure functions are tested; interactive functions (menus, agent install) are not testable in bats.
+- **Tests**: bats-core via `make test-shell` or `bash tests/bats/run.sh`. Use `_load_lib()` from `test_helper.bash` to source scripts. All pure functions are tested; interactive functions (menus, agent install) require a higher-level test.

@@ -5,7 +5,7 @@ import { I18nProvider } from '../../lib/I18nContext';
 // Dashboard now opens its own WS (audit_finished toast) — never a real
 // socket in tests.
 vi.mock('../../hooks/useWebSocket', () => ({
-  useWebSocket: vi.fn(() => ({ connected: false })),
+  useWebSocket: vi.fn(() => ({ connected: false, connectionState: 'connecting' })),
 }));
 
 // Mock ALL API modules used by Dashboard and its children

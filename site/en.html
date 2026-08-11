@@ -229,6 +229,24 @@
       border: 1px solid var(--magenta);
       border-radius: 0;
     }
+    .release-note {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      max-width: 760px;
+      margin: 16px auto 0;
+      padding: 10px 14px;
+      border: 1px solid rgba(200, 160, 255, 0.22);
+      background: rgba(200, 160, 255, 0.05);
+      font-family: var(--terminal);
+      font-size: 12px;
+      line-height: 1.5;
+      color: var(--text-dim);
+    }
+    .release-note strong { color: var(--lila); font-weight: 600; }
+    .release-note a { color: var(--electric); text-underline-offset: 3px; }
     .btn {
       font-family: var(--pixel);
       font-size: 10px;
@@ -1285,7 +1303,12 @@
       <a class="btn btn-pink" href="#level-1">▼ How to play</a>
       <a class="btn btn-electric" href="https://github.com/DocRoms/Kronn" target="_blank" rel="noopener">↓ Install</a>
     </div>
-    <div class="ea-disclaimer">v0.9.4 · <span class="ea-tag">early access</span> · API and step types may still change before v1.0</div>
+    <div class="ea-disclaimer">v0.9.5 · <span class="ea-tag">early access</span> · API and step types may still change before v1.0</div>
+    <div class="release-note" aria-label="What's new in Kronn 0.9.5">
+      <strong>0.9.5</strong>
+      <span>Predictable multi-agent starts · private LiteLLM reasoning · restart-safe conversations</span>
+      <a href="https://github.com/DocRoms/Kronn/blob/main/CHANGELOG.md" target="_blank" rel="noopener">Release notes →</a>
+    </div>
   </section>
 
   <!-- LEVEL 1 · THE BRIDGE -->
@@ -1888,7 +1911,7 @@
       <div class="sec-panel warn">
         <div class="sec-title">What we don't have</div>
         <ul class="sec-list warn">
-          <li><strong>Not yet v1.0 stable.</strong> Current version v0.9.4, early access. The API, step types and schemas may evolve between versions.</li>
+          <li><strong>Not yet v1.0 stable.</strong> Current version v0.9.5, early access. The API, step types and schemas may evolve between versions.</li>
           <li>No SOC2 or GDPR certification at this time</li>
           <li>Single-user · no RBAC or team management</li>
           <li>If you use Anthropic / OpenAI / Google, your prompts go to them: their responsibility, not ours</li>
@@ -1904,7 +1927,7 @@
   <footer>
     <div class="game-over">· Continue? ·</div>
     <a href="https://github.com/DocRoms/Kronn" target="_blank" rel="noopener">github.com/DocRoms/Kronn</a>
-    <span class="credits">kronn v0.9.4 · agpl-3.0 · rust × typescript · made by <a href="https://www.docroms.com/" target="_blank" rel="noopener">d.r.</a></span>
+    <span class="credits">kronn v0.9.5 · agpl-3.0 · rust × typescript · made by <a href="https://www.docroms.com/" target="_blank" rel="noopener">d.r.</a></span>
   </footer>
 
 </div>

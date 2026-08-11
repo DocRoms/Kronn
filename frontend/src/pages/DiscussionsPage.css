@@ -2939,6 +2939,25 @@ button.disc-contact-open {
   overflow: hidden;
 }
 
+.disc-realtime-status {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 7px 12px;
+  border-bottom: 1px solid rgba(var(--kr-warning-rgb), 0.28);
+  background: rgba(var(--kr-warning-rgb), 0.09);
+  color: var(--kr-warning);
+  font-size: var(--kr-fs-xs);
+  font-family: var(--kr-font-mono);
+  text-align: center;
+}
+
+.disc-realtime-status-spinner {
+  flex: 0 0 auto;
+  animation: spin 1s linear infinite;
+}
+
 .disc-messages-git-row {
   display: flex;
   flex: 1;

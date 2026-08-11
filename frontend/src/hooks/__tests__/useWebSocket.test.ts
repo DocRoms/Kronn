@@ -69,6 +69,7 @@ describe('useWebSocket', () => {
     const { result } = renderHook(() => useWebSocket(handler));
 
     expect(result.current.connected).toBe(false);
+    expect(result.current.connectionState).toBe('connecting');
     expect(MockWebSocket.instances).toHaveLength(1);
 
     // Simulate open
@@ -77,6 +78,7 @@ describe('useWebSocket', () => {
     });
 
     expect(result.current.connected).toBe(true);
+    expect(result.current.connectionState).toBe('connected');
   });
 
   it('calls onConnect on the first connect AND on every reconnect (re-sync hook)', () => {
@@ -175,6 +177,7 @@ describe('useWebSocket', () => {
     // Simulate disconnect
     act(() => ws.close());
     expect(result.current.connected).toBe(false);
+    expect(result.current.connectionState).toBe('reconnecting');
 
     // After 1s backoff, should try to reconnect
     act(() => { vi.advanceTimersByTime(1100); });
@@ -192,6 +195,8 @@ describe('useWebSocket', () => {
 
     // WebSocket should be closed
     expect(ws.readyState).toBe(3); // CLOSED
+    act(() => { vi.advanceTimersByTime(120_000); });
+    expect(MockWebSocket.instances).toHaveLength(1);
   });
 
   it('includes auth token in URL when available', () => {
@@ -240,6 +245,53 @@ describe('useWebSocket', () => {
     const parsed = JSON.parse(ws.sent[1]);
     expect(parsed.type).toBe('ping');
     expect(typeof parsed.timestamp).toBe('number');
+  });
+
+  it('closes a half-open socket when its heartbeat is not acknowledged', () => {
+    renderHook(() => useWebSocket(vi.fn()));
+    const ws = MockWebSocket.instances[0];
+    act(() => ws.simulateOpen());
+
+    act(() => { vi.advanceTimersByTime(30_000); });
+    expect(ws.readyState).toBe(MockWebSocket.OPEN);
+
+    act(() => { vi.advanceTimersByTime(10_000); });
+    expect(ws.readyState).toBe(3);
+    act(() => { vi.advanceTimersByTime(1_000); });
+    expect(MockWebSocket.instances).toHaveLength(2);
+  });
+
+  it('keeps the socket open when the matching heartbeat receives a pong', () => {
+    renderHook(() => useWebSocket(vi.fn()));
+    const ws = MockWebSocket.instances[0];
+    act(() => ws.simulateOpen());
+    act(() => { vi.advanceTimersByTime(30_000); });
+    const ping = JSON.parse(ws.sent.at(-1) ?? '{}') as { timestamp?: number };
+
+    act(() => ws.simulateMessage(JSON.stringify({
+      type: 'pong',
+      timestamp: ping.timestamp,
+    })));
+    act(() => { vi.advanceTimersByTime(10_000); });
+
+    expect(ws.readyState).toBe(MockWebSocket.OPEN);
+    expect(MockWebSocket.instances).toHaveLength(1);
+  });
+
+  it('ignores a stale close callback after a replacement socket exists', () => {
+    renderHook(() => useWebSocket(vi.fn()));
+    const stale = MockWebSocket.instances[0];
+    act(() => stale.simulateOpen());
+    act(() => stale.close());
+    act(() => { vi.advanceTimersByTime(1_000); });
+    const current = MockWebSocket.instances[1];
+    act(() => current.simulateOpen());
+
+    act(() => stale.close());
+    act(() => { vi.advanceTimersByTime(1_100); });
+
+    expect(MockWebSocket.instances).toHaveLength(1 + 1);
+    expect(current.readyState).toBe(MockWebSocket.OPEN);
   });
 
   it('backoff doubles after each disconnect', () => {

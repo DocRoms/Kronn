@@ -1451,6 +1451,7 @@ const zh: TranslationDict = {
   "contacts.chatStarted": "与 {0} 的聊天已打开",
   "contacts.chatStartError": "无法打开聊天",
   "contacts.wsConnected": "实时连接",
+  "disc.realtimeReconnecting": "实时连接已中断，正在重新连接。草稿会保留，讨论将在连接恢复后自动同步。",
   "contacts.wsDisconnected": "断开连接",
   "contacts.added": "联系人已添加",
   "contacts.addError": "添加联系人失败",

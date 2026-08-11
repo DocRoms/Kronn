@@ -1,140 +1,126 @@
-# Testing & quality (AI rules)
+# Testing and quality
 
-## Rules
+Kronn treats tests as release evidence, not as an approximate health signal.
+Never publish hard-coded test counts in this document: the suite changes often
+and the runner's final summary is the source of truth.
 
-- **Quality gate is non-negotiable**: code must compile and build after any change.
-- **All tests must pass**: `npm run test` (frontend, **908 tests** as of 0.6.0), `cargo test` (backend, **1490 tests** as of 0.6.0), `make test-shell` (192 bats tests).
-- **0 ESLint errors**: `npm run lint` must report 0 errors (warnings are tolerated for existing patterns).
-- **0 clippy warnings**: `cargo clippy --all-targets -- -D warnings` must pass.
+## Mandatory contract
 
-## Build checks
+- Every behavior change includes a regression test that fails without the
+  change.
+- Tests assert user-visible behavior or a durable protocol invariant, not
+  component implementation details.
+- A flaky test is a defect. Fix its synchronization or isolation; do not add
+  sleeps, retries or a looser assertion to make it green.
+- Frontend API mocks must match the generated Rust DTOs. Rust models remain the
+  type source of truth; regenerate TypeScript with `make typegen`.
+- All commands in the release gate must pass before a tag is created.
 
-| Layer | Command | Notes |
-|-------|---------|-------|
-| Rust compile | `cargo check` | Fast type check |
-| Rust lint | `cargo clippy` | Must pass without warnings |
-| Rust format | `cargo fmt --check` | Formatting check |
-| TS compile | `cd frontend && npx tsc -b` | Type check |
-| Frontend lint | `cd frontend && npm run lint` | ESLint 10 strict |
-| Frontend tests | `cd frontend && npm test` | Vitest 4 (517 tests) |
-| Frontend coverage | `cd frontend && npm run test:coverage` | Vitest + @vitest/coverage-v8 |
-| Frontend build | `cd frontend && npm run build` | Production build (Vite, code-split) |
-| Shell tests | `make test-shell` | bats-core (186 tests) |
-| Full stack | `make start` | Docker Compose build + up |
+## Release gate
 
-## Frontend test infrastructure
+Run from the repository root unless a working directory is shown.
 
-- **Runner**: Vitest 4 with happy-dom environment
-- **Assertions**: @testing-library/react + @testing-library/jest-dom
-- **Coverage**: @vitest/coverage-v8, reporters: text + lcov
-- **Config**: `frontend/vite.config.ts` (test section)
-- **Setup file**: `frontend/src/test/setup.ts`
-- **Node requirement**: >= 23.6.0 (native TS support, latest tooling)
+| Layer | Command | Required result |
+|---|---|---|
+| Version surfaces | `make check-version` | Every manifest, README, site and the first changelog release agree |
+| Diff hygiene | `git diff --check` | No whitespace errors |
+| Rust formatting | `cd backend && cargo fmt --all -- --check` | Clean |
+| Rust lint | `cd backend && cargo clippy --all-targets -- -D warnings` | Zero warnings (third-party code-generation parser notices are not clippy diagnostics) |
+| Backend tests | `make test-backend` | Entire Rust suite passes |
+| Python helpers | `make test-python` | Entire helper suite passes |
+| Shell | `make test-shell` | Entire bats suite passes |
+| Frontend native TS | `cd frontend && pnpm typecheck:native` | Clean |
+| Frontend legacy TS | `cd frontend && pnpm typecheck:legacy` | Clean |
+| Frontend ESLint | `cd frontend && pnpm lint` | Zero errors; CI's pinned warning budget must not increase |
+| Frontend fast lint | `cd frontend && pnpm lint:fast` | Zero warnings |
+| i18n | `cd frontend && pnpm lint:i18n` | `fr`, `en`, `es` and `zh` have matching, valid keys |
+| Frontend unit/integration | `make test-frontend` | Entire Vitest suite passes |
+| Frontend production build | `cd frontend && pnpm build` | TypeScript and Vite build succeed |
+| Browser E2E | `make test-e2e` | Entire Playwright suite passes against the expected backend fixture |
 
-### Frontend testing patterns (0.3.5)
+CI also checks dependency audit, generated-type drift, desktop compilation and
+repository-specific Rust safety lints. `.github/workflows/ci-test.yml` is the
+authoritative job graph.
 
-- **Shared API mock**: `src/test/apiMock.ts` exposes `buildApiMock(overrides)`. Factory covers all 13 namespaces + 5 flat fns of `lib/api.ts`. Deep-merges overrides namespace-by-namespace so slim overrides don't wipe sibling methods. **Always use via `vi.hoisted` + `vi.mock`** — factory refs at the top level break because `vi.mock` is hoisted above imports.
-- **Completeness guard**: `src/test/apiMock.complete.test.ts` imports the real `lib/api.ts` and asserts every top-level export is covered. Adding a new namespace without updating the default mock fails this test.
-- **i18n parity**: `src/lib/__tests__/i18n-parity.test.ts` — imports the exported `dictionaries` object and asserts fr/en/es key set isomorphism + non-empty values + placeholder-subset invariant (en/es may have fewer `{N}` than fr, never extras).
-- **Module-level state trackers**: patterns like `activeStepTests` (Map + subscribe/notify) in `WorkflowDetail.tsx` survive React unmount. Tests using these must either render inside the parent or mock the tracker directly.
+## Test placement
 
-### Test files (41 suites, 520 tests)
+| Change | Primary coverage |
+|---|---|
+| Pure Rust function | Unit test in the same module or its sibling `*_test.rs` |
+| HTTP route / persistence contract | `backend/tests/` or the relevant DB test module |
+| React hook / component | Adjacent `__tests__/` suite with Testing Library |
+| Cross-page browser behavior | `frontend/e2e/specs/` using stable roles or `data-*` test hooks |
+| Shell helper | `tests/bats/` |
+| Python MCP/helper script | Its stdlib unittest suite under `backend/scripts/` |
+| Database migration | Migration registry test plus an upgrade/backfill assertion |
 
-| File | Tests | Covers |
-|------|-------|--------|
-| `src/lib/__tests__/i18n.test.ts` | 14 | Translations FR/EN/ES, interpolation, fallbacks, locale completeness |
-| `src/lib/__tests__/constants.test.ts` | 9 | AGENT_COLORS, AGENT_LABELS, ALL_AGENT_TYPES (6 agents incl. CopilotCli), agentColor() |
-| `src/lib/__tests__/api.test.ts` | 11 | GET/POST/DELETE requests, error handling (API error, 502 HTML, null error), API structure |
-| `src/lib/__tests__/types.test.ts` | 10 | Generated types structure, union exhaustiveness, discriminated unions |
-| `src/lib/__tests__/I18nContext.test.tsx` | 4 | I18nProvider, locale switching, persistence |
-| `src/lib/__tests__/regression.test.ts` | 12 | Non-regression for all audit fixes (GeminiCli, constants, i18n, trigger_context, output languages) |
-| `src/lib/__tests__/access-warnings.test.ts` | 41 | i18n keys for access warnings (all locales), checkAgentRestricted, hasFullAccess, isAgentDisabled |
-| `src/hooks/__tests__/useApi.test.ts` | 5 | Fetch on mount, errors, refetch, race condition protection |
-| `src/__tests__/App.test.tsx` | 4 | Loading screen, SetupWizard vs Dashboard routing, API down fallback |
-| `src/__tests__/ErrorBoundary.test.tsx` | 2 | Error catch + display, normal render |
-| `src/pages/__tests__/WorkflowsPage.test.tsx` | 3 | Render with undefined/restricted/full agentAccess |
-| `src/pages/__tests__/DiscussionsPage.test.tsx` | 26 | Render, prefill, sidebar (message_count, titles, archives, org groups, collapse, search filter), streaming (thinking loader, tab restore, SSE abort, refetch), TTS (toggle, persist, play, speech cancel), discussion creation, copy button, response time, overflow-wrap, agent switch (button, dropdown) |
-| `src/pages/__tests__/SettingsPage.test.tsx` | 13 | Render, agents config, scan sections, API key management, model tiers, Usage section nav + filter buttons |
-| `src/pages/__tests__/McpPage.test.tsx` | 3 | Render with minimal props, configs, agents |
-| `src/lib/__tests__/agent-question-parse.test.ts` | 15 | Structured agent question parser: {{var}}: question extraction, edge cases, multi-var |
-| `src/components/__tests__/AgentQuestionForm.test.tsx` | 5 | AgentQuestionForm render, field filling, submit, empty state, integration with parser |
+Use `frontend/src/test/apiMock.ts` for the shared frontend API mock. Its
+completeness guard fails when a new API export is missing. Use the extended
+Playwright fixture in `frontend/e2e/fixtures/kronn-fixture.ts` unless the test
+explicitly owns boot/setup behavior.
 
-### Coverage status
+## 0.9.4 interaction regression map
 
-| Module | Stmts | Notes |
-|--------|-------|-------|
-| hooks/useApi.ts | 100% | Fully tested |
-| lib/constants.ts | 100% | Fully tested |
-| lib/i18n.ts | 100% | Fully tested |
-| lib/I18nContext.tsx | 90% | Missing edge case |
-| lib/api.ts | ~10% | SSE streams hard to unit test |
-| pages/*.tsx | ~5% | Basic render tests for 4 pages (Workflows, Discussions, Settings, MCP) |
+- `AgentSwitchPicker` tests cover the shared agent × reasoning-tier selection.
+- `MarkdownComposerTools` tests cover edit/preview tabs, help disclosure,
+  Markdown insertion and emoji examples.
+- `NewDiscussionForm`, `ChatInput`, `QuickPromptForm` and `WorkflowWizard`
+  suites cover their integration with those shared controls.
+- Workflow wizard unit and browser suites cover step types, direct navigation,
+  save/cancel availability and advanced-mode progressive disclosure.
+- Multi-model discussion E2E covers one placeholder and one ordered reply slot
+  per durable target, including late local-model replies.
+- Backend runner and discussion tests cover exact provider/model attribution,
+  target-tier persistence, LiteLLM failure diagnostics and explicit MCP
+  discussion routing.
 
-### Shell test infrastructure
+## 0.9.5 reliability regression map
 
-- **Runner**: bats-core with bats-assert + bats-support (git submodules in `tests/bats/`)
-- **Test runner**: `make test-shell` or `bash tests/bats/run.sh`
-- **Helper**: `tests/bats/test_helper.bash` — `_load_lib()` function, pre-initialized color variables
+- `backend/src/agents/runner_test.rs` pins the leading-thinking filter across
+  split chunks, unclosed private reasoning and legitimate later literal tags.
+- Discussion routing tests pin independent new-discussion fan-out, explicit
+  handoff markers, duplicate suppression and collaboration policy.
+- `frontend/src/hooks/__tests__/useWebSocket.test.ts` pins first connect,
+  reconnect resync, pong deadlines, half-open close, backoff reset, stale socket
+  callbacks and unmount cleanup.
+- `frontend/src/components/__tests__/BackendStatus.test.tsx` pins fast outage
+  recovery plus `online` and tab-visibility probes without healthy-state noise.
+- `frontend/src/pages/__tests__/DiscussionsPage.test.tsx` pins the reconnecting
+  explanation, active-room resync, interrupted-run cleanup and pre-receipt send
+  rollback.
+- `frontend/e2e/specs/ws-reconnect.spec.ts` proves the global outage indicator
+  appears and clears in a real browser.
+- `frontend/e2e/specs/disc-send-receipt-resilience.spec.ts` proves a failed
+  pre-receipt send restores the exact draft and removes the optimistic message.
 
-### Shell test files (8 suites, 192 tests)
+The browser tests deliberately simulate network boundaries without launching a
+paid agent. Unit and integration suites own transport edge cases; Playwright
+owns the assembled UI contract. Restarting the CI runner's backend process from
+inside a browser spec is intentionally avoided because it couples the test to
+process ownership and creates a flaky global side effect.
 
-| File | Tests | Covers |
-|------|-------|--------|
-| `tests/bats/agents.bats` | 42 | `_parse_version`, `_agent_idx` (6 agents incl. kiro-cli + copilot), `_count_detected` (0-6), `_format_agent_line`, `_check_node_version`, Kiro + Copilot metadata |
-| `tests/bats/mcps.bats` | 19 | `secret_get` (TOML parsing), `init_secrets` (creation, perms, idempotence), `secrets_configured` |
-| `tests/bats/tron.bats` | 32 | `_tron_format_elapsed`, `_tron_pad`, `tron_init/cleanup`, `tron_progress`, `tron_set_step/log/agent`, `tron_signal_done`, progress file in target dir, `_tron_write_progress_file` |
-| `tests/bats/ui.bats` | 28 | `info/success/warn/fail/step/banner`, color variables, return codes, empty messages, special characters |
-| `tests/bats/repos.bats` | 24 | `scan_repos` (find/names/status/empty/nested/reset/default), `detect_ai_context` (12 cases), `ensure_gitignore` |
-| `tests/bats/analyze.bats` | 16 | `inject/has/remove_bootstrap_prompt`, roundtrip, `_ANALYSIS_STEPS` validation, marker constants |
-| `tests/bats/portability.bats` | 18 | `_safe_timeout`, `remove_bootstrap_prompt` (GNU/BSD sed), `ensure_gitignore`, `detect_ai_context`, `scan_repos`, rsync/cp fallback |
-| `tests/bats/bugfixes.bats` | 12 | Non-regression: cross-filesystem temp, sed delimiter, KRONN_DIR guard, envsubst leak, gitignore guard |
+## Useful focused commands
 
-### What's NOT tested
+```bash
+cd frontend
+pnpm vitest run src/hooks/__tests__/useWebSocket.test.ts
+pnpm vitest run src/components/__tests__/BackendStatus.test.tsx
+pnpm vitest run src/pages/__tests__/DiscussionsPage.test.tsx
+pnpm playwright test e2e/specs/ws-reconnect.spec.ts \
+  e2e/specs/disc-send-receipt-resilience.spec.ts
+```
 
-- **Page components**: Dashboard.tsx (~650 lines), SetupWizard.tsx — basic render tests exist for 4 sub-pages but deeper interaction/state tests still needed.
-- **SSE streaming logic** in api.ts — requires mocking ReadableStream, complex setup.
-- **Backend Rust**: **1187 tests** (1040 lib + 147 integration). Key test suites: `discussions_test.rs` (21 tests: CRUD, archive, title editing, message management, AgentType round-trip for all 6 agents, DB string stability), `runner_test.rs` (agent commands, model tiers, token parsing, stream parsing for all agents), `pricing.rs` (cost estimation for all 6 providers), `key_discovery.rs` (cross-platform HOME resolution), `mod.rs` (agent detection with .cmd/.exe extensions, WSL_DISTRO_NAME detection), `env.rs` (is_docker, host_os_label), `scanner.rs` (shellexpand ~/, UNC paths), `db/tests.rs` (partial_response set/recover/idempotency + `partial_response_started_at` preservation + `has_pending_partial`), `tests/api_tests.rs` HTTP integration: dismiss-partial + WS broadcast, partial_pending guard on send_message, boot recovery simulation, workflow_cancel_run cascade to child discs via parent_run_id + idempotent on finished run. Run with `cargo test`.
-- **Shell interactive functions**: menu systems, agent installation/uninstall, terminal animation (require terminal I/O, tested indirectly via non-interactive helpers).
+```bash
+cd backend
+cargo test leading_thinking_filter
+cargo test discussion
+```
 
-### Cross-agent regression tests (0.3.6)
+## Tooling
 
-Parameterized tests that iterate over ALL agent types automatically. When a new agent is added, these fail if any supporting piece is missing:
-
-| Test | Location | What it catches |
-|------|----------|----------------|
-| `cross_agent_every_type_in_known_agents` | agents/mod.rs | New AgentType variant missing from KNOWN_AGENTS |
-| `cross_agent_definitions_are_complete` | agents/mod.rs | Agent with empty binary/name/install_cmd |
-| `cross_agent_no_custom_in_known_agents` | agents/mod.rs | Custom variant accidentally in KNOWN_AGENTS |
-| `cross_agent_macos_skip_covers_npm_agents` | agents/mod.rs | npm agent missing from macOS Docker skip list |
-| `cross_agent_db_round_trip_all_types` | db/tests.rs | DB serialization broken for a specific agent |
-| `ALL_AGENT_TYPES matches generated` | constants.test.ts | Frontend missing a backend-defined agent |
-| `every agent has color + label` | constants.test.ts | New agent without UI color/label |
-| `at least 6 agent types` | constants.test.ts | Agent accidentally removed |
-
-## ESLint configuration
-
-- **Config file**: `frontend/eslint.config.js` (ESLint 10 flat config)
-- **Base**: typescript-eslint strict + react-hooks + react-refresh
-- **Strict rules**: eqeqeq, prefer-const, no-var, no-throw-literal, no-implicit-coercion, consistent-type-imports
-- **File-scoped overrides**: Dashboard.tsx (no-unused-expressions off — IIFE render blocks), api.ts (no-invalid-void-type off — `api<void>()`), generated.ts (no-explicit-any off), test files (lenient)
-
-## Fast smoke checks
-
-| Action | Command |
-|--------|---------|
-| Backend compiles | `cd backend && cargo check` |
-| Frontend compiles | `cd frontend && npx tsc -b` |
-| Frontend tests | `cd frontend && npm test` |
-| Frontend lint | `cd frontend && npm run lint` |
-| Shell tests | `make test-shell` |
-| Type generation | `make typegen` |
-
-## Troubleshooting (when command output is missing)
-
-### Rule (critical)
-- If output is missing, state it explicitly: **"I did not receive the command output"**.
-- Retry once.
-- If output is still missing, ask the user to **copy/paste the full command output** into the chat.
-
-### Why
-- Without the actual output, we cannot confirm PASS/FAIL or diagnose failures safely.
+- Node: package constraint `>=23.6.0`; CI uses Node 24.
+- Package manager: the `packageManager` field pins pnpm.
+- Frontend unit runner: Vitest with happy-dom and Testing Library.
+- Browser runner: Playwright Chromium by default; see
+  `frontend/playwright.config.ts` and `frontend/e2e/README.md`.
+- Coverage: `cd frontend && pnpm test:coverage`; backend coverage runs in CI.
