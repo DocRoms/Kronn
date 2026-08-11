@@ -13,6 +13,7 @@ import { useEffect, useState } from 'react';
 import { useT } from '../lib/I18nContext';
 import { userContext as api, type UserContextFile } from '../lib/api';
 import { ChevronRight, Trash2, Plus, Loader2, AlertTriangle, Check, FileText } from 'lucide-react';
+import { MarkdownEditor } from './MarkdownComposerTools';
 
 type RowState =
   | { kind: 'collapsed' }
@@ -201,14 +202,16 @@ export function UserContextEditor() {
                 )}
                 {(state.kind === 'editing' || state.kind === 'saving' || state.kind === 'error') && (
                   <div className="user-context-edit">
-                    <textarea
-                      className="user-context-textarea"
-                      value={state.current}
-                      onChange={(e) => onChange(f.name, e.target.value)}
-                      disabled={state.kind === 'saving'}
-                      rows={Math.max(6, Math.min(20, state.current.split('\n').length + 1))}
-                      aria-label={t('userContext.editingAria', f.name)}
-                    />
+                    <MarkdownEditor content={state.current}>
+                      <textarea
+                        className="user-context-textarea"
+                        value={state.current}
+                        onChange={(e) => onChange(f.name, e.target.value)}
+                        disabled={state.kind === 'saving'}
+                        rows={Math.max(6, Math.min(20, state.current.split('\n').length + 1))}
+                        aria-label={t('userContext.editingAria', f.name)}
+                      />
+                    </MarkdownEditor>
                     {state.kind === 'error' && (
                       <div className="user-context-error"><AlertTriangle size={11} /> {state.msg}</div>
                     )}

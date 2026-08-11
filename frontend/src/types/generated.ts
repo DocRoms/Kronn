@@ -850,7 +850,12 @@ message_id: string | null, created_at: string, };
 
 export type CreateDirectiveRequest = { name: string, description: string, icon: string, category: DirectiveCategory, content: string, conflicts?: Array<string>, };
 
-export type CreateDiscussionRequest = { project_id?: string | null, title: string, agent: AgentType, language?: string, initial_prompt: string, skill_ids?: Array<string>, profile_ids?: Array<string>, directive_ids?: Array<string>, workspace_mode?: string | null, base_branch?: string | null,
+export type CreateDiscussionRequest = { project_id?: string | null, title: string, agent: AgentType, language?: string, initial_prompt: string,
+/**
+ * Explicit recipients of the initial message, including per-agent tier
+ * overrides selected from the new-discussion composer.
+ */
+initial_targets?: Array<MessageTarget>, skill_ids?: Array<string>, profile_ids?: Array<string>, directive_ids?: Array<string>, workspace_mode?: string | null, base_branch?: string | null,
 /**
  * Model capability tier (economy / default / reasoning).
  */
@@ -1337,7 +1342,13 @@ export type DiscussionAgentHandoffMode = { global_enabled: boolean, disabled: bo
  */
 paid_limit: number | null, };
 
-export type DiscussionDetail = { active_agent_dispatches: Array<ActiveAgentDispatch>, id: string, project_id: string | null, title: string, agent: AgentType, language: string, participants: Array<AgentType>, messages: Array<DiscussionMessage>, message_count: number,
+export type DiscussionDetail = { active_agent_dispatches: Array<ActiveAgentDispatch>,
+/**
+ * Durable routing intent keyed by the user-message id. Keeping it next
+ * to the transcript lets the UI show what was requested even when the
+ * concrete model that eventually answered differs.
+ */
+message_targets: { [key in string]: Array<MessageTarget> }, id: string, project_id: string | null, title: string, agent: AgentType, language: string, participants: Array<AgentType>, messages: Array<DiscussionMessage>, message_count: number,
 /**
  * Subset of `message_count` excluding `MessageRole::System` rows. The
  * streaming layer persists every tool call + every cached-summary
@@ -2319,7 +2330,12 @@ author?: string | null,
  */
 since?: string | null, until?: string | null, limit?: number | null, offset?: number | null, };
 
-export type MessageTarget = { kind: MessageTargetKind, agent_type: AgentType, cli_session_id?: number | null, };
+export type MessageTarget = { kind: MessageTargetKind, agent_type: AgentType, cli_session_id?: number | null,
+/**
+ * Optional per-turn tier override. `None` preserves the historical
+ * discussion-wide routing; joined CLI sessions always ignore this field.
+ */
+tier?: ModelTier | null, };
 
 export type MessageTargetKind = "discussion_agent" | "agent" | "cli";
 

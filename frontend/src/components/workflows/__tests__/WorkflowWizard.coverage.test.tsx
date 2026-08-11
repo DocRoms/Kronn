@@ -269,6 +269,15 @@ describe('WorkflowWizard — preset deep-link', () => {
     // The preset seeds a multi-step pipeline → an "Add step" control on
     // the Steps page proves we landed there.
     await waitFor(() => expect(screen.getByText('wiz.addStep')).toBeInTheDocument());
+    const outline = document.querySelector('.wf-wizard-step-outline');
+    expect(outline).not.toBeNull();
+    expect(outline?.querySelectorAll('button').length).toBeGreaterThan(1);
+    const secondStep = outline?.querySelectorAll('button')[1] as HTMLButtonElement;
+    fireEvent.click(secondStep);
+    expect(document.querySelector('[data-wizard-step-index="1"]')).toHaveAttribute(
+      'data-outline-active',
+      'true',
+    );
   });
 
   it('transforms the ticket-to-pr fetch_issue step into an ApiCall when a tracker plugin is wired', async () => {
@@ -286,15 +295,11 @@ describe('WorkflowWizard — preset deep-link', () => {
       projects: [mkProject({ repo_url: 'https://github.com/octo/demo' })],
     });
     // The preset effect runs once plugins settle and jumps to advanced
-    // Steps (step 2). The transformed pipeline surfaces step-type buttons,
-    // and the first step is now an ApiCall (selected pill).
+    // Steps (step 2). The first compact step summary reports ApiCall.
     await waitFor(() =>
       expect(screen.getAllByText('wiz.stepTypeApiCall').length).toBeGreaterThan(0),
     );
-    // At least one ApiCall step pill is selected (the transformed fetch_issue).
-    const selectedApi = Array.from(document.querySelectorAll('[data-type="api"]'))
-      .some(el => el.getAttribute('data-selected') === 'true');
-    expect(selectedApi).toBe(true);
+    expect(document.querySelector('.wf-step-type-current[data-type="api"]')).not.toBeNull();
   });
 });
 

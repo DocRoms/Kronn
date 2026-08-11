@@ -41,6 +41,16 @@
   font-weight: 500;
 }
 
+.kr-agent-switch-current-tier {
+  display: inline-grid;
+  place-items: center;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  background: var(--kr-bg-subtle);
+  font-size: 9px;
+}
+
 .kr-agent-switch[data-compact='true'] .kr-agent-switch-btn {
   gap: 3px;
   padding: 0;
@@ -51,11 +61,12 @@
 
 .kr-agent-switch-popover {
   position: fixed;
-  z-index: var(--kr-z-modal);
+  z-index: calc(var(--kr-z-modal) + 20);
   display: flex;
   flex-direction: column;
   width: max-content;
   min-width: 170px;
+  max-width: calc(100vw - 16px);
   padding: 4px;
   border: 1px solid var(--kr-border);
   border-radius: var(--kr-r-md);
@@ -102,4 +113,88 @@
   height: 7px;
   border-radius: 50%;
   flex: 0 0 auto;
+}
+
+.kr-agent-switch-tier-row {
+  display: grid;
+  grid-template-columns: minmax(112px, 1fr) auto;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  min-height: 41px;
+  padding: 5px 6px 5px 8px;
+  border-radius: var(--kr-r-sm);
+}
+
+.kr-agent-switch-tier-row:hover {
+  background: var(--kr-bg-hover);
+}
+
+.kr-agent-switch-tier-agent {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  color: var(--kr-text-secondary);
+  font-size: var(--kr-fs-xs);
+  font-weight: 650;
+}
+
+.kr-agent-switch-tier-choices {
+  display: inline-flex;
+  gap: 3px;
+}
+
+.kr-agent-switch-tier-option {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  min-width: 48px;
+  height: 28px;
+  padding: 0 6px;
+  border: 1px solid var(--kr-border-ghost);
+  border-radius: var(--kr-r-sm);
+  background: var(--kr-bg-surface);
+  color: var(--kr-text-secondary);
+  font-family: inherit;
+  font-size: 9px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.kr-agent-switch-tier-option:hover:not(:disabled) {
+  border-color: var(--kr-accent-border);
+  background: var(--kr-accent-bg);
+}
+
+.kr-agent-switch-tier-option[data-current='true'] {
+  border-color: var(--kr-accent-border);
+  background: var(--kr-accent-bg);
+}
+
+.kr-agent-switch-tier-option:disabled {
+  cursor: default;
+}
+
+.kr-agent-switch-tier-option svg {
+  position: absolute;
+  right: 1px;
+  bottom: 1px;
+  color: var(--kr-accent);
+}
+
+@media (max-width: 419px) {
+  .kr-agent-switch-tier-row {
+    grid-template-columns: 1fr;
+  }
+
+  .kr-agent-switch-tier-choices {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+  }
+
+  .kr-agent-switch-tier-option {
+    width: 100%;
+  }
 }

@@ -77,6 +77,105 @@ const agents: AgentDetection[] = [
 ] as AgentDetection[];
 
 test.describe('Discussion chat — multi-model reply lifecycle', () => {
+  test('keeps the explicitly requested agent tier visible on the sent message', async ({ page }) => {
+    let sentBody: SendMessageRequest | null = null;
+
+    await page.exposeFunction('e2eCaptureTieredSend', (body: SendMessageRequest) => {
+      sentBody = body;
+    });
+    await page.addInitScript(({ discussionId }) => {
+      const originalFetch = window.fetch.bind(window);
+      window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === 'string'
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : input.url;
+        const method = init?.method ?? (input instanceof Request ? input.method : 'GET');
+        if (method === 'POST' && url.endsWith(`/api/discussions/${discussionId}/messages`)) {
+          const body = JSON.parse(String(init?.body ?? '{}')) as SendMessageRequest;
+          await (window as unknown as {
+            e2eCaptureTieredSend: (request: SendMessageRequest) => Promise<void>;
+          }).e2eCaptureTieredSend(body);
+          const encoder = new TextEncoder();
+          return new Response(new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(encoder.encode(
+                `event: accepted\ndata: ${JSON.stringify({
+                  message_id: body.client_message_id,
+                  sort_order: 1,
+                  duplicate: false,
+                })}\n\n`,
+              ));
+              controller.enqueue(encoder.encode('event: done\ndata: {}\n\n'));
+              controller.close();
+            },
+          }), {
+            status: 200,
+            headers: { 'Content-Type': 'text/event-stream' },
+          });
+        }
+        return originalFetch(input, init);
+      };
+    }, { discussionId: DISC_ID });
+
+    await page.route('**/api/agents', route => {
+      if (route.request().method() !== 'GET') return route.continue();
+      return route.fulfill({ status: 200, contentType: 'application/json', body: envelope(agents) });
+    });
+    await page.route('**/api/discussions', route => {
+      if (route.request().method() !== 'GET') return route.continue();
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: envelope([discussion([message('seed', 'User', 'Départ')], false)]),
+      });
+    });
+    await page.route(`**/api/discussions/${DISC_ID}/participants`, route => route.fulfill({
+      status: 200, contentType: 'application/json', body: envelope([]),
+    }));
+    await page.route(`**/api/discussions/${DISC_ID}/native-agent`, route => route.fulfill({
+      status: 200, contentType: 'application/json', body: envelope({ disabled: false }),
+    }));
+    await page.route(`**/api/discussions/${DISC_ID}`, route => {
+      if (route.request().method() !== 'GET') return route.continue();
+      const sent = sentBody as SendMessageRequest | null;
+      const messages = [message('seed', 'User', 'Départ')];
+      if (sent?.client_message_id) {
+        messages.push(message(sent.client_message_id, 'User', '@codex Analyse rapidement'));
+      }
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: envelope({
+          ...discussion(messages, false),
+          active_agent_dispatches: [],
+          message_targets: sent?.client_message_id
+            ? { [sent.client_message_id]: sent.targets }
+            : {},
+        }),
+      });
+    });
+
+    const dashboard = new DashboardPage(page);
+    await dashboard.goto();
+    await dashboard.openDiscussion(DISC_ID);
+
+    const composer = page.locator('.disc-composer-textarea');
+    await composer.fill('@cod');
+    const codexMention = page.locator('.disc-mention-item').filter({ hasText: '@codex' }).first();
+    await codexMention.locator('.disc-mention-tier-choice[data-tier="economy"]').click();
+    await composer.fill('@codex Analyse rapidement');
+    await page.locator('.disc-send-btn').click();
+
+    await expect.poll(() => sentBody).not.toBeNull();
+    expect(sentBody?.targets).toEqual([
+      { kind: 'agent', agent_type: 'Codex', cli_session_id: null, tier: 'economy' },
+    ]);
+    const receipt = page.getByTestId('message-routing-receipt').filter({ hasText: '@codex' });
+    await expect(receipt).toContainText('@codex · ⚡ Éco');
+  });
+
   test('a general turn targets both models and keeps Ollama visible after LiteLLM settles', async ({ page }) => {
     let sentAt = 0;
     let sentBody: SendMessageRequest | null = null;
@@ -178,8 +277,8 @@ test.describe('Discussion chat — multi-model reply lifecycle', () => {
     await expect(page.getByTestId('pending-agent-Ollama')).toBeVisible();
     await expect.poll(() => sentBody).not.toBeNull();
     expect(sentBody?.targets).toEqual([
-      { kind: 'discussion_agent', agent_type: 'LiteLlm', cli_session_id: null },
-      { kind: 'agent', agent_type: 'Ollama', cli_session_id: null },
+      { kind: 'discussion_agent', agent_type: 'LiteLlm', cli_session_id: null, tier: null },
+      { kind: 'agent', agent_type: 'Ollama', cli_session_id: null, tier: 'default' },
     ]);
 
     await expect(page.getByText(LITE_REPLY)).toBeVisible({ timeout: 5_000 });
@@ -300,9 +399,9 @@ test.describe('Discussion chat — multi-model reply lifecycle', () => {
     await page.locator('.disc-send-btn').click();
     await expect.poll(() => secondBody).not.toBeNull();
     expect(secondBody?.targets).toEqual([
-      { kind: 'discussion_agent', agent_type: 'LiteLlm', cli_session_id: null },
-      { kind: 'agent', agent_type: 'Ollama', cli_session_id: null },
-      { kind: 'agent', agent_type: 'Codex', cli_session_id: null },
+      { kind: 'discussion_agent', agent_type: 'LiteLlm', cli_session_id: null, tier: null },
+      { kind: 'agent', agent_type: 'Ollama', cli_session_id: null, tier: 'default' },
+      { kind: 'agent', agent_type: 'Codex', cli_session_id: null, tier: 'default' },
     ]);
 
     await expect(page.locator('[data-testid="pending-agent-Ollama"]')).toHaveCount(2);

@@ -336,6 +336,42 @@ describe('DiscussionsPage', () => {
     expect(screen.getAllByText('Private timeline note').length).toBeGreaterThan(0);
   });
 
+  it('passes persisted routing tiers from the discussion detail to each user message', async () => {
+    const fullDisc: Discussion = {
+      ...makeListDiscussion('d-routing', 1),
+      messages: [
+        { id: 'u-routing', role: 'User', channel: 'main', content: 'Passe en mode rapide', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
+      ],
+    };
+    vi.mocked(discussionsApi.get).mockResolvedValue({
+      ...fullDisc,
+      active_agent_dispatches: [],
+      message_targets: {
+        'u-routing': [{ kind: 'agent', agent_type: 'ClaudeCode', tier: 'economy' }],
+      },
+    });
+
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[fullDisc]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        initialActiveDiscussionId="d-routing"
+        {...liftedProps()}
+      />,
+    );
+
+    const receipt = await screen.findByTestId('message-routing-receipt');
+    expect(receipt).toHaveTextContent('Routage demandé');
+    expect(receipt).toHaveTextContent('@claude · ⚡ Éco');
+  });
+
   // ─── Streaming & tab-switch behavior tests ──────────────────────────────
 
   it('shows thinking loader when sendingMap has active entry', async () => {
@@ -2231,6 +2267,17 @@ describe('DiscussionsPage', () => {
       fireEvent.click(screen.getByText(/Démarrer la discussion/));
     });
     await waitFor(() => {
+      expect(vi.mocked(discussionsApi.create)).toHaveBeenCalledWith(
+        expect.objectContaining({
+          agent: 'Codex',
+          initial_targets: [
+            { kind: 'discussion_agent', agent_type: 'Codex', tier: 'default' },
+            { kind: 'agent', agent_type: 'ClaudeCode', tier: 'default' },
+          ],
+        }),
+      );
+    });
+    await waitFor(() => {
       expect(vi.mocked(discussionsApi.orchestrate)).toHaveBeenCalledWith(
         'prompt-agents-1',
         expect.objectContaining({
@@ -2516,7 +2563,7 @@ describe('DiscussionsPage', () => {
     // The button carries the configured agent under its canonical mention plus its
     // role, so the same identity reads the same way here, in the composer and in
     // the participant list.
-    const switchBtn = document.querySelector('[title="Changer d\'agent"]');
+    const switchBtn = screen.getByRole('button', { name: "Changer d'agent ou de mode IA" });
     expect(switchBtn).toBeTruthy();
     expect(switchBtn?.textContent).toContain('@claude');
     expect(switchBtn?.textContent).toContain('agent de discussion');
@@ -2567,7 +2614,7 @@ describe('DiscussionsPage', () => {
 
   // ─── Agent switch dropdown tests ─────────────────────────────────────
 
-  it('switches the discussion agent silently without launching a response', async () => {
+  it('switches the discussion agent and mode silently without launching a response', async () => {
     const fullDisc: Discussion = {
       ...makeListDiscussion('d-dropdown', 2),
       messages: [
@@ -2598,7 +2645,7 @@ describe('DiscussionsPage', () => {
     );
 
     // Click the agent switch button
-    const switchBtn = document.querySelector('[title="Changer d\'agent"]') as HTMLButtonElement;
+    const switchBtn = screen.getByRole('button', { name: "Changer d'agent ou de mode IA" });
     expect(switchBtn).toBeTruthy();
     await act(async () => { fireEvent.click(switchBtn); });
 
@@ -2611,12 +2658,12 @@ describe('DiscussionsPage', () => {
     vi.mocked(discussionsApi.update).mockClear();
     vi.mocked(discussionsApi.runAgent).mockClear();
     await act(async () => {
-      fireEvent.click(screen.getByRole('menuitem', { name: 'Codex' }));
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Codex · Standard' }));
     });
 
     await waitFor(() => {
       expect(vi.mocked(discussionsApi.update))
-        .toHaveBeenCalledWith('d-dropdown', { agent: 'Codex' });
+        .toHaveBeenCalledWith('d-dropdown', { agent: 'Codex', tier: 'default' });
     });
     expect(vi.mocked(discussionsApi.runAgent)).not.toHaveBeenCalled();
   });

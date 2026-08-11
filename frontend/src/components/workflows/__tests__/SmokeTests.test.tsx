@@ -123,10 +123,13 @@ describe('Workflow smoke tests', () => {
       fireEvent.click(btn);
     }
 
-    // Find the BatchQP type buttons (one per step). Click the one on step 2.
-    const batchBtns = Array.from(container.querySelectorAll('button[data-type="batch-qp"]')) as HTMLButtonElement[];
-    expect(batchBtns.length).toBe(2);
-    fireEvent.click(batchBtns[1]);
+    // Open step 2's compact type catalogue, then choose BatchQP.
+    const stepCards = container.querySelectorAll('.wf-step-edit-card');
+    const secondCard = stepCards[1] as HTMLElement;
+    fireEvent.click(secondCard.querySelector('.wf-step-type-current') as HTMLButtonElement);
+    const batchBtn = secondCard.querySelector('.wf-step-type-option[data-type="batch-qp"]') as HTMLButtonElement;
+    expect(batchBtn).toBeTruthy();
+    fireEvent.click(batchBtn);
 
     // After auto-prep, step 1's Structured button must read as selected.
     const structuredBtns = Array.from(container.querySelectorAll('.wf-step-type-btn'))
@@ -299,20 +302,23 @@ describe('Workflow smoke tests', () => {
         fireEvent.click(btn);
       }
 
-      // Click the ApiCall type button.
-      const apiBtn = container.querySelector('button[data-type="api"]') as HTMLButtonElement;
+      // Open the compact type catalogue and choose ApiCall.
+      const card = container.querySelector('.wf-step-edit-card') as HTMLElement;
+      fireEvent.click(card.querySelector('.wf-step-type-current') as HTMLButtonElement);
+      const apiBtn = card.querySelector('.wf-step-type-option[data-type="api"]') as HTMLButtonElement;
       expect(apiBtn).toBeTruthy();
       fireEvent.click(apiBtn);
 
       // Click back to Agent — pre-fix this re-rendered the Agent UI
       // with `prompt_template: undefined` and crashed on `.trim()`.
-      const agentBtn = container.querySelector('button[data-type="agent"]') as HTMLButtonElement;
+      fireEvent.click(card.querySelector('.wf-step-type-current') as HTMLButtonElement);
+      const agentBtn = card.querySelector('.wf-step-type-option[data-type="agent"]') as HTMLButtonElement;
       expect(agentBtn).toBeTruthy();
       fireEvent.click(agentBtn);
 
       // If we reach here without throwing, the fix is in place.
-      // Also assert the Agent buttons are now selected to confirm swap landed.
-      expect(agentBtn.getAttribute('data-selected')).toBe('true');
+      // Also assert the compact summary now reports Agent.
+      expect(card.querySelector('.wf-step-type-current')?.getAttribute('data-type')).toBe('agent');
     } finally {
       window.confirm = origConfirm;
     }

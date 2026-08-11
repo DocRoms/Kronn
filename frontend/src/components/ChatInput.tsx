@@ -12,14 +12,28 @@ import type {
   Directive,
   ContextFile,
   QuickPrompt,
+  ModelTier,
+  ModelTiersConfig,
 } from '../types/generated';
 import {
   AGENT_MENTIONS as ALL_AGENT_MENTIONS,
+  MODEL_TIER_ICONS,
   agentColor,
   isUsable,
+  modelForAgentTier,
 } from '../lib/constants';
 import { audioBufferToFloat32, transcribeAudio } from '../lib/stt-engine';
-import { loadDraft, saveDraft, clearDraft } from '../lib/chat-drafts';
+import {
+  loadDraft,
+  saveDraft,
+  clearDraft,
+  type DraftRoutingTiers,
+} from '../lib/chat-drafts';
+import {
+  loadDiscussionRoutingPreferences,
+  saveDiscussionRoutingPreferences,
+  type DiscussionRoutingPreferences,
+} from '../lib/discussionRoutingPreferences';
 import { quoteMultilinePaste } from '../lib/quoteMultilinePaste';
 import { formatRelativeTime } from '../lib/relativeTime';
 import { discussions as discussionsApi, autoTriggersApi, config as configApi } from '../lib/api';
@@ -38,35 +52,18 @@ import {
   StopCircle, RotateCcw, Loader2,
   Cpu, Mic, MicOff, Phone, PhoneOff,
   Volume2, VolumeX, Check, Zap, FileText, Paperclip, Image, Reply,
-  CircleHelp, Eye, EyeOff, StickyNote,
+  Eye, EyeOff, StickyNote, Terminal,
 } from 'lucide-react';
 import { useIsMobile } from '../hooks/useMediaQuery';
+import { MarkdownEditor } from './MarkdownComposerTools';
 import {
   composerMentions,
   nativeDiscussionTargets,
   targetsFromComposerText,
 } from '../lib/messageTargets';
+import { findAgentMentionQuery, type AgentMentionQuery } from '../lib/mention-autocomplete';
 
-interface AgentMentionQuery {
-  query: string;
-  start: number;
-  end: number;
-}
-
-function findAgentMentionQuery(
-  text: string,
-  cursorPos: number,
-): AgentMentionQuery | null {
-  const prefix = text.slice(0, Math.max(0, Math.min(cursorPos, text.length)));
-  const match = prefix.match(/(?:^|[\s([{])@([\w-]*)$/);
-  if (!match) return null;
-  const query = match[1].toLowerCase();
-  return {
-    query,
-    start: prefix.length - query.length - 1,
-    end: prefix.length,
-  };
-}
+const MENTION_TIER_CHOICES: ModelTier[] = ['economy', 'default', 'reasoning'];
 
 let sttWorker: Worker | null = null;
 function getSttWorker(): Worker {
@@ -122,6 +119,7 @@ export interface ChatInputProps {
   showDiscussionNotes?: boolean;
   onToggleDiscussionNotes?: () => void;
   onCancelReply?: () => void;
+  modelTiers?: ModelTiersConfig | null;
   toast: ToastFn;
   t: (key: string, ...args: (string | number)[]) => string;
 }
@@ -160,6 +158,7 @@ export function ChatInput({
   showDiscussionNotes = true,
   onToggleDiscussionNotes,
   onCancelReply,
+  modelTiers,
   toast,
   t,
 }: ChatInputProps) {
@@ -269,6 +268,23 @@ export function ChatInput({
   const [restoredDraftAt, setRestoredDraftAt] = useState<string | null>(null);
   const draftSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const currentDiscIdRef = useRef<string | null>(null);
+  const [mentionTierOverrides, setMentionTierOverrides] = useState<DraftRoutingTiers>({});
+  const mentionTierOverridesRef = useRef<DraftRoutingTiers>({});
+  const [preferredTiers, setPreferredTiers] = useState<DiscussionRoutingPreferences>({});
+  const preferredTiersRef = useRef<DiscussionRoutingPreferences>({});
+  const submittedRoutingTiersRef = useRef<Record<string, DraftRoutingTiers>>({});
+
+  const updateMentionTierOverrides = useCallback((next: DraftRoutingTiers) => {
+    mentionTierOverridesRef.current = next;
+    setMentionTierOverrides(next);
+  }, []);
+
+  const updatePreferredTiers = useCallback((next: DiscussionRoutingPreferences) => {
+    preferredTiersRef.current = next;
+    setPreferredTiers(next);
+    const discId = currentDiscIdRef.current;
+    if (discId) saveDiscussionRoutingPreferences(discId, next);
+  }, []);
 
   const scheduleDraftSave = useCallback((text: string) => {
     const discId = currentDiscIdRef.current;
@@ -277,7 +293,7 @@ export function ChatInput({
     // 250ms debounce — fast enough to survive a "type-and-tab-away" gesture
     // but sparse enough to never hammer localStorage on long messages.
     draftSaveTimerRef.current = setTimeout(() => {
-      saveDraft(discId, text);
+      saveDraft(discId, text, mentionTierOverridesRef.current);
     }, 250);
   }, []);
 
@@ -286,7 +302,7 @@ export function ChatInput({
       clearTimeout(draftSaveTimerRef.current);
       draftSaveTimerRef.current = null;
     }
-    saveDraft(discId, text);
+    saveDraft(discId, text, mentionTierOverridesRef.current);
   }, []);
 
   // On discussion switch: flush the previous discussion's draft (without
@@ -306,16 +322,25 @@ export function ChatInput({
     if (!nextDiscId) {
       // No discussion selected → clear textarea state.
       updateChatInput('');
+      updateMentionTierOverrides({});
+      preferredTiersRef.current = {};
+      setPreferredTiers({});
       setRestoredDraftAt(null);
       return;
     }
 
+    const rememberedTiers = loadDiscussionRoutingPreferences(nextDiscId);
+    preferredTiersRef.current = rememberedTiers;
+    setPreferredTiers(rememberedTiers);
+
     const saved = loadDraft(nextDiscId);
     if (saved) {
       updateChatInput(saved.text);
+      updateMentionTierOverrides(saved.routingTiers);
       setRestoredDraftAt(saved.savedAt);
     } else {
       updateChatInput('');
+      updateMentionTierOverrides({});
       setRestoredDraftAt(null);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -329,7 +354,7 @@ export function ChatInput({
       if (discId && draftSaveTimerRef.current) {
         clearTimeout(draftSaveTimerRef.current);
         draftSaveTimerRef.current = null;
-        saveDraft(discId, chatInputValueRef.current);
+        saveDraft(discId, chatInputValueRef.current, mentionTierOverridesRef.current);
       }
     };
   }, []);
@@ -354,11 +379,16 @@ export function ChatInput({
       }
 
       const current = chatInputValueRef.current;
+      const submittedTiers = submittedRoutingTiersRef.current[detail.discussionId] ?? {};
       if (detail.settlement === 'accepted') {
+        delete submittedRoutingTiersRef.current[detail.discussionId];
         if (current.trim()) {
           flushDraftNow(detail.discussionId, current);
         } else {
           clearDraft(detail.discussionId);
+          if (currentDiscIdRef.current === detail.discussionId) {
+            updateMentionTierOverrides({});
+          }
         }
         return;
       }
@@ -369,6 +399,8 @@ export function ChatInput({
           ? current
           : `${detail.message}\n\n${current}`;
       updateChatInput(restored);
+      const restoredTiers = { ...submittedTiers, ...mentionTierOverridesRef.current };
+      updateMentionTierOverrides(restoredTiers);
       flushDraftNow(detail.discussionId, restored);
       setRestoredDraftAt(new Date().toISOString());
       requestAnimationFrame(() => {
@@ -382,7 +414,7 @@ export function ChatInput({
 
     window.addEventListener(MESSAGE_SEND_SETTLED_EVENT, onSendSettled);
     return () => window.removeEventListener(MESSAGE_SEND_SETTLED_EVENT, onSendSettled);
-  }, [flushDraftNow, updateChatInput]);
+  }, [flushDraftNow, updateChatInput, updateMentionTierOverrides]);
 
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
   const [mentionIndex, setMentionIndex] = useState(0);
@@ -397,7 +429,11 @@ export function ChatInput({
     if (found) setMentionIndex(0);
   }, []);
 
-  const applyMentionSuggestion = useCallback((trigger: string) => {
+  const applyMentionSuggestion = useCallback((
+    trigger: string,
+    agentType?: AgentType,
+    tier?: ModelTier,
+  ) => {
     const range = mentionRangeRef.current;
     if (!range) return;
     const current = chatInputValueRef.current;
@@ -406,6 +442,19 @@ export function ChatInput({
     const next = `${current.slice(0, range.start)}${trigger}${spacer}${trailing}`;
     const cursor = range.start + trigger.length + spacer.length;
     updateChatInput(next);
+    if (agentType) {
+      const nextTiers = { ...mentionTierOverridesRef.current };
+      const effectiveTier = tier ?? preferredTiersRef.current[agentType];
+      if (effectiveTier) nextTiers[agentType] = effectiveTier;
+      else delete nextTiers[agentType];
+      updateMentionTierOverrides(nextTiers);
+      if (tier) {
+        updatePreferredTiers({
+          ...preferredTiersRef.current,
+          [agentType]: tier,
+        });
+      }
+    }
     scheduleDraftSave(next);
     setMentionQuery(null);
     mentionRangeRef.current = null;
@@ -413,7 +462,7 @@ export function ChatInput({
       chatInputRef.current?.focus();
       chatInputRef.current?.setSelectionRange(cursor, cursor);
     });
-  }, [scheduleDraftSave, updateChatInput]);
+  }, [scheduleDraftSave, updateChatInput, updateMentionTierOverrides, updatePreferredTiers]);
 
   // ─── Emoji shortcode autocomplete (:tada: → 🎉) ──────────────────────────
   // Clones the @mention plumbing below but matches `:word` anywhere in the
@@ -491,7 +540,6 @@ export function ChatInput({
   const sttCancelledRef = useRef(false);
 
   const [showDebatePopover, setShowDebatePopover] = useState(false);
-  const [showRoutingHelp, setShowRoutingHelp] = useState(false);
   const [showQPPicker, setShowQPPicker] = useState(false);
   const [debateAgents, setDebateAgents] = useState<AgentType[]>([]);
   const [debateRounds, setDebateRounds] = useState(2);
@@ -568,6 +616,59 @@ export function ChatInput({
       : [],
     [AGENT_MENTIONS, nativeAgentDisabled],
   );
+  const mentionRoutingMode = useCallback((mention: (typeof AGENT_MENTIONS)[number]) => {
+    const target = mention.target;
+    if (!target || !discussion) return null;
+    if (target.kind === 'cli') {
+      return {
+        icon: null,
+        title: t('disc.routingCliModelManaged'),
+      };
+    }
+    const selectedTier = mentionTierOverrides[target.agent_type]
+      ?? preferredTiers[target.agent_type];
+    const isPrincipal = target.kind === 'discussion_agent';
+    const tier = selectedTier
+      ?? (isPrincipal ? discussion.tier : target.tier ?? 'default');
+    const model = isPrincipal && !selectedTier && discussion.model?.trim()
+      ? discussion.model.trim()
+      : modelForAgentTier(
+        target.agent_type,
+        tier,
+        modelTiers,
+        t('disc.defaultAgentModel'),
+      );
+    return {
+      icon: MODEL_TIER_ICONS[tier],
+      title: t(
+        isPrincipal && !selectedTier ? 'disc.routingNativeTier' : 'disc.routingTargetTier',
+        t(`disc.tier.${tier}`),
+        model,
+      ),
+      tier,
+    };
+  }, [discussion, mentionTierOverrides, modelTiers, preferredTiers, t]);
+  const pruneMentionTierOverrides = useCallback((text: string) => {
+    const activeAgents = new Set(
+      targetsFromComposerText(text, AGENT_MENTIONS).targets
+        .filter(target => target.kind !== 'cli')
+        .map(target => target.agent_type),
+    );
+    const next = Object.fromEntries(
+      Object.entries(mentionTierOverridesRef.current)
+        .filter(([agent]) => activeAgents.has(agent as AgentType)),
+    ) as DraftRoutingTiers;
+    if (Object.keys(next).length !== Object.keys(mentionTierOverridesRef.current).length) {
+      updateMentionTierOverrides(next);
+    }
+  }, [AGENT_MENTIONS, updateMentionTierOverrides]);
+  const mentionTierChoiceTitle = useCallback((agent: AgentType, tier: ModelTier) => (
+    t(
+      'disc.routingInvokeTier',
+      t(`disc.tier.${tier}`),
+      modelForAgentTier(agent, tier, modelTiers, t('disc.defaultAgentModel')),
+    )
+  ), [modelTiers, t]);
   const routingHelp = useMemo(() => {
     if (!discussion) {
       return {
@@ -649,12 +750,18 @@ export function ChatInput({
       ? targetsFromComposerText(msg, AGENT_MENTIONS)
       : { targets: [], targetAll: false };
     const attachedNativeTargets = nativeDiscussionTargets(discussion);
-    const targets = channel === 'main'
+    const defaultTargets = channel === 'main'
       && parsedTargets.targets.length === 0
       && !parsedTargets.targetAll
       && attachedNativeTargets.length > 1
       ? attachedNativeTargets
       : parsedTargets.targets;
+    const targets = defaultTargets.map(target => {
+      if (target.kind === 'cli') return target;
+      const tier = mentionTierOverridesRef.current[target.agent_type]
+        ?? preferredTiersRef.current[target.agent_type];
+      return tier ? { ...target, tier } : target;
+    });
     const targetAll = parsedTargets.targetAll;
 
     // ── Auto-trigger skills based on message keywords ──
@@ -700,9 +807,14 @@ export function ChatInput({
     // as a durable draft until DiscussionsPage receives the backend's
     // `accepted` receipt. A failure before that receipt restores this exact
     // snapshot instead of losing the user's message.
+    submittedRoutingTiersRef.current = {
+      ...submittedRoutingTiersRef.current,
+      [discussion.id]: { ...mentionTierOverridesRef.current },
+    };
     flushDraftNow(discussion.id, msg);
     setRestoredDraftAt(null);
     updateChatInput('');
+    updateMentionTierOverrides({});
     setMentionQuery(null);
     try {
       if (channel === 'note') {
@@ -974,6 +1086,84 @@ export function ChatInput({
     </div>
   );
 
+  const composerHelpContent = (
+    <div className="disc-routing-help-content">
+      <div className="disc-composer-help-section-heading">@ {t('disc.routingHelpTitle')}</div>
+      <p>{t(routingHelp.discussionAgent?.usable
+        ? 'disc.routingHelpDefault'
+        : 'disc.routingHelpDefaultDisabled')}</p>
+      <div className="disc-routing-help-group">
+        <strong>{t('disc.routingActiveAgents')}</strong>
+        <ul>
+          {routingHelp.discussionAgent?.usable && (
+            <li>
+              <code>
+                {routingHelp.discussionAgent.trigger}
+                <span> · {t('disc.targetDiscussionAgent')}</span>
+              </code>
+              {' — '}{t('disc.routingHelpDiscussionAgent')}
+            </li>
+          )}
+          {routingHelp.cliSessions.map(mention => (
+            <li key={`cli:${mention.target?.cli_session_id}`}>
+              <code>
+                {mention.trigger}
+                <span> · {mention.label}</span>
+              </code>
+              {' — '}{t('disc.routingHelpCli')}
+            </li>
+          ))}
+          {routingHelp.activePunctualAgents.map(mention => (
+            <li key={`agent:${mention.target?.agent_type}`}>
+              <code>
+                {mention.displayTrigger}
+                <span> · {t('disc.targetPunctualAgent')}</span>
+              </code>
+              {' — '}{t('disc.routingHelpPunctual')}
+            </li>
+          ))}
+        </ul>
+      </div>
+      {routingHelp.availablePunctualAgents.length > 0 && (
+        <div className="disc-routing-help-group">
+          <strong>{t('disc.routingAvailableAgents')}</strong>
+          <ul>
+            {routingHelp.availablePunctualAgents.map(mention => (
+              <li key={`available:${mention.target?.agent_type}`}>
+                <code>
+                  {mention.displayTrigger}
+                  <span> · {t('disc.targetPunctualAgent')}</span>
+                </code>
+                {' — '}{t('disc.routingHelpPunctual')}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {routingHelp.discussionAgent && !routingHelp.discussionAgent.usable && (
+        <div className="disc-routing-help-group">
+          <strong>{t('disc.routingDisabledAgent')}</strong>
+          <ul>
+            <li>
+              <code>
+                {routingHelp.discussionAgent.trigger}
+                <span> · {t('disc.targetDiscussionAgent')}</span>
+              </code>
+              {' — '}{t('disc.routingHelpDiscussionAgentDisabled')}
+            </li>
+          </ul>
+        </div>
+      )}
+      <ul>
+        <li>
+          <code>@all</code>
+          {' — '}{t('disc.routingHelpAll', routingHelp.allParticipants)}
+        </li>
+      </ul>
+      <p className="text-muted">{t('disc.routingHelpTokenSaver')}</p>
+    </div>
+  );
+
   // ─── Render ──────────────────────────────────────────────────────────────
   return (
     <div className="disc-composer-wrap" data-disabled={disabled}>
@@ -1093,28 +1283,70 @@ export function ChatInput({
                         : 'disc.routingAvailableAgents')}
                     </div>
                   )}
-                  <button
+                  <div
                     className="disc-mention-item"
                     data-highlighted={i === mentionIndex}
-                    onMouseDown={e => {
-                      e.preventDefault();
-                      // Event-time read only; no ref value influences render.
-                      // eslint-disable-next-line react-hooks/refs
-                      applyMentionSuggestion(m.trigger);
-                    }}
                     onMouseEnter={() => setMentionIndex(i)}
                   >
-                    {m.type
-                      ? <Cpu size={12} style={{ color: agentColor(m.type) }} />
-                      : <Users size={12} className="text-accent" />}
-                    <span
-                      className="font-semibold"
-                      style={m.type ? { color: agentColor(m.type) } : undefined}
+                    <button
+                      type="button"
+                      className="disc-mention-main"
+                      onMouseDown={e => {
+                        e.preventDefault();
+                        applyMentionSuggestion(m.trigger, m.type);
+                      }}
                     >
-                      {m.displayTrigger}
-                    </span>
-                    <span className="text-muted">{m.label}</span>
-                  </button>
+                      {m.type
+                        ? <Cpu size={12} style={{ color: agentColor(m.type) }} />
+                        : <Users size={12} className="text-accent" />}
+                      <span
+                        className="font-semibold"
+                        style={m.type ? { color: agentColor(m.type) } : undefined}
+                      >
+                        {m.displayTrigger}
+                      </span>
+                      <span className="text-muted">{m.label}</span>
+                      {m.target?.kind === 'cli' && (
+                        <span
+                          className="disc-mention-routing-mode"
+                          title={t('disc.routingCliModelManaged')}
+                          aria-label={t('disc.routingCliModelManaged')}
+                        >
+                          <Terminal size={12} aria-hidden="true" />
+                        </span>
+                      )}
+                    </button>
+                    {m.type && m.target && m.target.kind !== 'cli' && (() => {
+                      const agentType = m.type;
+                      if (!agentType) return null;
+                      const mode = mentionRoutingMode(m);
+                      return (
+                        <span
+                          className="disc-mention-tier-choices"
+                          aria-label={mode?.title}
+                        >
+                          {MENTION_TIER_CHOICES.map(tier => (
+                            <button
+                              key={tier}
+                              type="button"
+                              className="disc-mention-tier-choice"
+                              data-tier={tier}
+                              data-current={mode?.tier === tier}
+                              aria-label={`${m.displayTrigger} · ${mentionTierChoiceTitle(agentType, tier)}`}
+                              title={mentionTierChoiceTitle(agentType, tier)}
+                              onMouseDown={event => {
+                                event.preventDefault();
+                                event.stopPropagation();
+                                applyMentionSuggestion(m.trigger, agentType, tier);
+                              }}
+                            >
+                              <span aria-hidden="true">{MODEL_TIER_ICONS[tier]}</span>
+                            </button>
+                          ))}
+                        </span>
+                      );
+                    })()}
+                  </div>
                 </Fragment>
               ))}
               {disabledFiltered.length > 0 && (
@@ -1136,6 +1368,18 @@ export function ChatInput({
                         {mention.displayTrigger}
                       </span>
                       <span className="text-muted">{t('disc.nativeAgentDisabled')}</span>
+                      {(() => {
+                        const mode = mentionRoutingMode(mention);
+                        return mode ? (
+                          <span
+                            className="disc-mention-routing-mode"
+                            title={mode.title}
+                            aria-label={mode.title}
+                          >
+                            <span aria-hidden="true">{mode.icon}</span>
+                          </span>
+                        ) : null;
+                      })()}
                     </div>
                   ))}
                 </>
@@ -1284,8 +1528,59 @@ export function ChatInput({
           </div>
         )}
 
-        {/* Textarea */}
+        {Object.entries(mentionTierOverrides).length > 0 && (
+          <div
+            className="disc-composer-routing-chips"
+            aria-label={t('disc.routingOverrides')}
+          >
+            {Object.entries(mentionTierOverrides).map(([agent, tier]) => {
+              const agentType = agent as AgentType;
+              const trigger = ALL_AGENT_MENTIONS.find(
+                mention => mention.type === agentType,
+              )?.trigger ?? agent;
+              const title = mentionTierChoiceTitle(agentType, tier);
+              return (
+                <span
+                  key={agent}
+                  className="disc-composer-routing-chip"
+                  title={title}
+                >
+                  <span style={{ color: agentColor(agentType) }}>{trigger}</span>
+                  <span>{MODEL_TIER_ICONS[tier]} {t(`disc.tier.${tier}`)}</span>
+                  <button
+                    type="button"
+                    aria-label={t('disc.routingResetTier', trigger)}
+                    title={t('disc.routingResetTier', trigger)}
+                    onClick={() => {
+                      const nextOverrides = { ...mentionTierOverridesRef.current };
+                      delete nextOverrides[agentType];
+                      updateMentionTierOverrides(nextOverrides);
+                      const nextPreferences = { ...preferredTiersRef.current };
+                      delete nextPreferences[agentType];
+                      updatePreferredTiers(nextPreferences);
+                      scheduleDraftSave(chatInputValueRef.current);
+                    }}
+                  >
+                    <X size={10} aria-hidden="true" />
+                  </button>
+                </span>
+              );
+            })}
+          </div>
+        )}
+
+        {/* Shared Edit / Preview surface. The textarea stays mounted while
+            preview is active so drafts, caret state and queued sends survive
+            tab switches unchanged. */}
+        <MarkdownEditor
+          key={discussion?.id ?? 'none'}
+          sourceId={`disc-message-composer-${discussion?.id ?? 'none'}`}
+          embedded
+          helpTitle={t('disc.composerHelpTitle')}
+          helpContent={composerHelpContent}
+        >
         <textarea
+          id={`disc-message-composer-${discussion?.id ?? 'none'}`}
           ref={chatInputRef}
           className="disc-composer-textarea"
           rows={1}
@@ -1302,6 +1597,7 @@ export function ChatInput({
             requestAnimationFrame(() => { ta.style.height = 'auto'; ta.style.height = Math.min(ta.scrollHeight, 160) + 'px'; });
             // Persist draft so tab/page navigation doesn't wipe the in-flight
             // textarea content. Debounced inside scheduleDraftSave.
+            pruneMentionTierOverrides(val);
             scheduleDraftSave(val);
             // Hide the "restored draft" hint as soon as the user edits.
             if (restoredDraftAt) setRestoredDraftAt(null);
@@ -1370,7 +1666,8 @@ export function ChatInput({
               if (e.key === 'ArrowUp') { e.preventDefault(); setMentionIndex(i => Math.max(i - 1, 0)); return; }
               if ((e.key === 'Tab' || e.key === 'Enter') && filtered.length > 0) {
                 e.preventDefault();
-                applyMentionSuggestion(filtered[mentionIndex].mention.trigger);
+                const selectedMention = filtered[mentionIndex].mention;
+                applyMentionSuggestion(selectedMention.trigger, selectedMention.type);
                 return;
               }
               if (e.key === 'Escape') { setMentionQuery(null); return; }
@@ -1389,6 +1686,7 @@ export function ChatInput({
           // hard-disabled composer (no usable agent) blocks input.
           disabled={disabled && !sendAsNote}
         />
+        </MarkdownEditor>
 
         {/* Bottom toolbar inside composer */}
         <div className="disc-composer-toolbar" data-mobile={isMobile}>
@@ -1630,102 +1928,6 @@ export function ChatInput({
               )}
             </div>
 
-            <div className="relative">
-              <button
-                type="button"
-                className="disc-tool-btn"
-                data-active={showRoutingHelp}
-                data-color="accent"
-                onClick={() => setShowRoutingHelp(current => !current)}
-                title={t('disc.routingHelpTitle')}
-                aria-label={t('disc.routingHelpTitle')}
-                aria-expanded={showRoutingHelp}
-              >
-                <CircleHelp size={15} />
-              </button>
-              {showRoutingHelp && (
-                <div className="disc-routing-help" role="dialog" aria-label={t('disc.routingHelpTitle')}>
-                  <div className="disc-debate-title">
-                    <CircleHelp size={12} /> {t('disc.routingHelpTitle')}
-                  </div>
-                  <p>{t(routingHelp.discussionAgent?.usable
-                    ? 'disc.routingHelpDefault'
-                    : 'disc.routingHelpDefaultDisabled')}</p>
-                  <div className="disc-routing-help-group">
-                    <strong>{t('disc.routingActiveAgents')}</strong>
-                    <ul>
-                    {routingHelp.discussionAgent?.usable && (
-                      <li>
-                        <code>
-                          {routingHelp.discussionAgent.trigger}
-                          <span> · {t('disc.targetDiscussionAgent')}</span>
-                        </code>
-                        {' — '}
-                        {t(routingHelp.discussionAgent.usable
-                          ? 'disc.routingHelpDiscussionAgent'
-                          : 'disc.routingHelpDiscussionAgentDisabled')}
-                      </li>
-                    )}
-                    {routingHelp.cliSessions.map(mention => (
-                      <li key={`cli:${mention.target?.cli_session_id}`}>
-                        <code>
-                          {mention.trigger}
-                          <span> · {mention.label}</span>
-                        </code>
-                        {' — '}{t('disc.routingHelpCli')}
-                      </li>
-                    ))}
-                    {routingHelp.activePunctualAgents.map(mention => (
-                      <li key={`agent:${mention.target?.agent_type}`}>
-                        <code>
-                          {mention.displayTrigger}
-                          <span> · {t('disc.targetPunctualAgent')}</span>
-                        </code>
-                        {' — '}{t('disc.routingHelpPunctual')}
-                      </li>
-                    ))}
-                    </ul>
-                  </div>
-                  {routingHelp.availablePunctualAgents.length > 0 && (
-                    <div className="disc-routing-help-group">
-                      <strong>{t('disc.routingAvailableAgents')}</strong>
-                      <ul>
-                        {routingHelp.availablePunctualAgents.map(mention => (
-                          <li key={`available:${mention.target?.agent_type}`}>
-                            <code>
-                              {mention.displayTrigger}
-                              <span> · {t('disc.targetPunctualAgent')}</span>
-                            </code>
-                            {' — '}{t('disc.routingHelpPunctual')}
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
-                  {routingHelp.discussionAgent && !routingHelp.discussionAgent.usable && (
-                    <div className="disc-routing-help-group">
-                      <strong>{t('disc.routingDisabledAgent')}</strong>
-                      <ul>
-                        <li>
-                          <code>
-                            {routingHelp.discussionAgent.trigger}
-                            <span> · {t('disc.targetDiscussionAgent')}</span>
-                          </code>
-                          {' — '}{t('disc.routingHelpDiscussionAgentDisabled')}
-                        </li>
-                      </ul>
-                    </div>
-                  )}
-                  <ul>
-                    <li>
-                      <code>@all</code>
-                      {' — '}{t('disc.routingHelpAll', routingHelp.allParticipants)}
-                    </li>
-                  </ul>
-                  <p className="text-muted">{t('disc.routingHelpTokenSaver')}</p>
-                </div>
-              )}
-            </div>
           </div>
 
           {/* Spacer */}

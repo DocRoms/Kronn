@@ -2014,14 +2014,19 @@ pub fn replace_message_targets(
         };
         conn.execute(
             "INSERT INTO message_targets (
-                 message_id, target_kind, agent_type, cli_session_id, position
-             ) VALUES (?1, ?2, ?3, ?4, ?5)",
+                 message_id, target_kind, agent_type, cli_session_id, position, model_tier
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 message_id,
                 target_kind,
                 format_agent_type(&target.agent_type),
                 target.cli_session_id,
-                position as i64
+                position as i64,
+                target.tier.as_ref().map(|tier| match tier {
+                    crate::models::ModelTier::Economy => "economy",
+                    crate::models::ModelTier::Default => "default",
+                    crate::models::ModelTier::Reasoning => "reasoning",
+                }),
             ],
         )?;
     }
@@ -2039,7 +2044,7 @@ pub fn replace_message_targets(
 
 pub fn list_message_targets(conn: &Connection, message_id: &str) -> Result<Vec<MessageTarget>> {
     let mut statement = conn.prepare(
-        "SELECT target_kind, agent_type, cli_session_id
+        "SELECT target_kind, agent_type, cli_session_id, model_tier
          FROM message_targets
          WHERE message_id = ?1
          ORDER BY position ASC",
@@ -2055,11 +2060,61 @@ pub fn list_message_targets(conn: &Connection, message_id: &str) -> Result<Vec<M
                 kind,
                 agent_type: parse_agent_type(&row.get::<_, String>(1)?),
                 cli_session_id: row.get(2)?,
+                tier: match row.get::<_, Option<String>>(3)?.as_deref() {
+                    Some("economy") => Some(crate::models::ModelTier::Economy),
+                    Some("default") => Some(crate::models::ModelTier::Default),
+                    Some("reasoning") => Some(crate::models::ModelTier::Reasoning),
+                    _ => None,
+                },
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(anyhow::Error::from)?;
     Ok(targets)
+}
+
+/// Return the durable routing intent for every addressed message in one
+/// discussion. A single joined query keeps discussion loading O(1) queries as
+/// transcripts grow.
+pub fn list_discussion_message_targets(
+    conn: &Connection,
+    discussion_id: &str,
+) -> Result<std::collections::HashMap<String, Vec<MessageTarget>>> {
+    let mut statement = conn.prepare(
+        "SELECT mt.message_id, mt.target_kind, mt.agent_type, mt.cli_session_id, mt.model_tier
+         FROM message_targets mt
+         INNER JOIN messages m ON m.id = mt.message_id
+         WHERE m.discussion_id = ?1
+         ORDER BY m.sort_order ASC, mt.position ASC",
+    )?;
+    let rows = statement.query_map([discussion_id], |row| {
+        let kind = match row.get::<_, String>(1)?.as_str() {
+            "discussion_agent" => MessageTargetKind::DiscussionAgent,
+            "cli" => MessageTargetKind::Cli,
+            _ => MessageTargetKind::Agent,
+        };
+        let target = MessageTarget {
+            kind,
+            agent_type: parse_agent_type(&row.get::<_, String>(2)?),
+            cli_session_id: row.get(3)?,
+            tier: match row.get::<_, Option<String>>(4)?.as_deref() {
+                Some("economy") => Some(crate::models::ModelTier::Economy),
+                Some("default") => Some(crate::models::ModelTier::Default),
+                Some("reasoning") => Some(crate::models::ModelTier::Reasoning),
+                _ => None,
+            },
+        };
+        Ok((row.get::<_, String>(0)?, target))
+    })?;
+    let mut targets_by_message = std::collections::HashMap::new();
+    for row in rows {
+        let (message_id, target) = row?;
+        targets_by_message
+            .entry(message_id)
+            .or_insert_with(Vec::new)
+            .push(target);
+    }
+    Ok(targets_by_message)
 }
 
 /// Record which exact joined CLI session authored a live MCP message.

@@ -4,8 +4,8 @@
  * In 0.6.0 only Agent / ApiCall / Gate / Exec had a "selected" color
  * variant on their step type button. Sprint 1.5 added selected styling
  * for BatchQuickPrompt / BatchApiCall / Notify / JsonData. This spec
- * locks the convention: every step type button gets a `data-selected`
- * attribute that flips to "true" when the user picks it.
+ * locks the convention: every option in the expandable type catalogue gets
+ * a `data-selected` attribute that flips to "true" when the user picks it.
  *
  * Locked here so a future refactor that drops the attribute (say, switch
  * to React state-only styling) catches our regression net.
@@ -27,17 +27,19 @@ test.describe('Workflow wizard — step type buttons', () => {
     await workflows.openNewWorkflowWizard();
     await wizard.gotoStepsPage('e2e-step-types');
 
-    // The Steps page renders one default step. Its step type bar carries
-    // 8 buttons (one per StepType variant). All MUST have data-selected.
-    const stepTypeBar = page.locator('.wf-step-type-btn').first();
-    await expect(stepTypeBar).toBeVisible({ timeout: 5_000 });
+    // The redesigned Steps page keeps the type catalogue collapsed until the
+    // current-type card is clicked. Open it before checking every option.
+    const currentType = page.locator('.wf-step-type-current').first();
+    await expect(currentType).toBeVisible({ timeout: 5_000 });
+    await currentType.click();
+    await expect(page.locator('.wf-step-type-catalog').first()).toBeVisible();
 
     const expectedTypes = [
       'agent', 'api', 'batch-qp', 'notify',
-      'gate', 'exec', 'batch-api', 'json-data',
+      'gate', 'exec', 'batch-api', 'json-data', 'sub-workflow',
     ];
     for (const dataType of expectedTypes) {
-      const btn = page.locator(`.wf-step-type-btn[data-type="${dataType}"]`).first();
+      const btn = page.locator(`.wf-step-type-option[data-type="${dataType}"]`).first();
       await expect(btn, `step type "${dataType}" should be present`).toBeVisible();
       // data-selected must exist (true OR false — we just check it's set,
       // styling regression would be losing the attribute entirely).
@@ -57,8 +59,16 @@ test.describe('Workflow wizard — step type buttons', () => {
     await workflows.openNewWorkflowWizard();
     await wizard.gotoStepsPage('e2e-jsondata');
 
-    const jsonDataBtn = page.locator('.wf-step-type-btn[data-type="json-data"]').first();
+    const currentType = page.locator('.wf-step-type-current').first();
+    await currentType.click();
+    const jsonDataBtn = page.locator('.wf-step-type-option[data-type="json-data"]').first();
     await jsonDataBtn.click();
-    await expect(jsonDataBtn).toHaveAttribute('data-selected', 'true');
+    await expect(currentType).toHaveAttribute('data-type', 'json-data');
+
+    // Selection closes the catalogue. Reopen it and verify the styling state
+    // is still exposed on the JsonData option.
+    await currentType.click();
+    await expect(page.locator('.wf-step-type-option[data-type="json-data"]').first())
+      .toHaveAttribute('data-selected', 'true');
   });
 });

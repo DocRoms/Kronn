@@ -158,8 +158,14 @@ principal use a structured target; autonomous rooms use no-agent mode.
 
 ## Persistence and interruption
 
-- `message_targets` records every intended addressee kind, agent type and
-  optional exact CLI session in order.
+- `message_targets` records every intended addressee kind, agent type,
+  optional exact CLI session and optional per-turn reasoning tier in order.
+  New-discussion `@alias` routing is persisted on the initial user message
+  before orchestration starts, so every participant resolves its own tier;
+  targets without an override inherit the discussion tier.
+  [src: file: backend/src/api/discussions/crud.rs:286-304]
+  [src: file: backend/src/api/discussions/orchestration.rs:147-165]
+  [src: file: backend/src/api/discussions/orchestration.rs:471-475]
 - `message_cli_authors` records the exact local CLI author for verified live MCP
   appends, enabling deterministic `reply_to` routing across same-provider peers.
 - `messages.target_agent` remains the first-target compatibility projection.

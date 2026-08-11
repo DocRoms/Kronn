@@ -7,7 +7,7 @@ import { userError } from '../lib/userError';
 import { useApi } from '../hooks/useApi';
 import type {
   Project, WorkflowSummary, Workflow, WorkflowRun,
-  AgentType, AgentsConfig, StepResult, QuickPrompt, CreateQuickPromptRequest,
+  AgentType, AgentsConfig, ModelTier, StepResult, QuickPrompt, CreateQuickPromptRequest,
   QuickApi, CreateQuickApiRequest,
   JsonValue,
 } from '../types/generated';
@@ -432,23 +432,22 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     }
   };
 
-  const changeStepAgent = async (stepIndex: number, agent: AgentType) => {
+  const changeStepAgent = async (stepIndex: number, agent: AgentType, tier: ModelTier) => {
     const workflow = detailWorkflow;
     const step = workflow?.steps[stepIndex];
     if (!workflow || !step || (step.step_type && step.step_type.type !== 'Agent')) return;
-    if (step.agent === agent) return;
+    const currentTier = step.agent_settings?.tier ?? 'default';
+    if (step.agent === agent && currentTier === tier) return;
 
-    // Preserve portable settings, but clear an explicit provider-specific
-    // model (e.g. Claude's "opus" cannot be passed to Codex). The abstract
-    // tier and reasoning effort still carry over to the new agent.
+    // Selecting an abstract tier explicitly clears any concrete model. A
+    // concrete model wins over the tier at runtime, so preserving it here
+    // would make the newly selected mode look active without taking effect.
     const steps = workflow.steps.map((current, index) =>
       index === stepIndex
         ? {
             ...current,
             agent,
-            agent_settings: current.agent_settings
-              ? { ...current.agent_settings, model: null }
-              : current.agent_settings,
+            agent_settings: { ...current.agent_settings, model: null, tier },
           }
         : current
     );
@@ -800,8 +799,8 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     refetchQP();
   };
 
-  const changeQuickPromptAgent = async (qp: QuickPrompt, agent: AgentType) => {
-    if (qp.agent === agent) return;
+  const changeQuickPromptAgent = async (qp: QuickPrompt, agent: AgentType, tier: ModelTier) => {
+    if (qp.agent === agent && qp.tier === tier) return;
     try {
       await quickPromptsApi.update(qp.id, {
         name: qp.name,
@@ -813,13 +812,13 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
         skill_ids: qp.skill_ids,
         profile_ids: qp.profile_ids,
         directive_ids: qp.directive_ids,
-        tier: qp.tier,
-        // A concrete model name belongs to the previous provider. Keep the
-        // portable tier/effort settings, but let the new agent resolve its
-        // own model instead of receiving e.g. a Claude model on Codex.
+        tier,
+        // The explicit matrix choice must win over an expert model override.
+        // Clearing it also prevents carrying a provider-specific model to a
+        // different agent (for example Claude's "opus" to Codex).
         agent_settings: qp.agent_settings
-          ? { ...qp.agent_settings, model: null }
-          : null,
+          ? { ...qp.agent_settings, model: null, tier }
+          : { model: null, tier },
         description: qp.description,
       });
       refetchQP();
@@ -1837,8 +1836,16 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                           <AgentSwitchPicker
                             currentAgent={qp.agent}
                             availableAgents={installedAgentTypes ?? []}
-                            onChange={agent => changeQuickPromptAgent(qp, agent)}
-                            title={t('disc.switchAgent')}
+                            currentTier={qp.tier ?? 'default'}
+                            onSelectionChange={(agent, tier) => changeQuickPromptAgent(qp, agent, tier)}
+                            tierLabels={{
+                              economy: t('disc.tier.economy'),
+                              default: t('disc.tier.default'),
+                              reasoning: t('disc.tier.reasoning'),
+                            }}
+                            modelTiers={agentAccess?.model_tiers}
+                            defaultModelLabel={t('config.defaultModel')}
+                            title={t('disc.switchAgentAndTier')}
                             ariaLabel={t('qp.agentSwitchLabel', qp.name, AGENT_LABELS[qp.agent] ?? qp.agent)}
                             staticClassName="qp-card-agent-static"
                           />

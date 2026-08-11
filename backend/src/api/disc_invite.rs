@@ -1147,11 +1147,13 @@ pub async fn wait_for_peer(
                                     SELECT GROUP_CONCAT(
                                         ordered.target_kind || '|' ||
                                         ordered.agent_type || '|' ||
-                                        COALESCE(ordered.cli_session_id, ''),
+                                        COALESCE(ordered.cli_session_id, '') || '|' ||
+                                        COALESCE(ordered.model_tier, ''),
                                         ','
                                     )
                                     FROM (
-                                        SELECT mt.target_kind, mt.agent_type, mt.cli_session_id
+                                        SELECT mt.target_kind, mt.agent_type, mt.cli_session_id,
+                                               mt.model_tier
                                         FROM message_targets mt
                                         WHERE mt.message_id = messages.id
                                         ORDER BY mt.position ASC
@@ -1185,11 +1187,13 @@ pub async fn wait_for_peer(
                                     SELECT GROUP_CONCAT(
                                         ordered.target_kind || '|' ||
                                         ordered.agent_type || '|' ||
-                                        COALESCE(ordered.cli_session_id, ''),
+                                        COALESCE(ordered.cli_session_id, '') || '|' ||
+                                        COALESCE(ordered.model_tier, ''),
                                         ','
                                     )
                                     FROM (
-                                        SELECT mt.target_kind, mt.agent_type, mt.cli_session_id
+                                        SELECT mt.target_kind, mt.agent_type, mt.cli_session_id,
+                                               mt.model_tier
                                         FROM message_targets mt
                                         WHERE mt.message_id = message_revision_events.target_message_id
                                         ORDER BY mt.position ASC
@@ -1220,7 +1224,7 @@ pub async fn wait_for_peer(
                                 serialized
                                     .split(',')
                                     .filter_map(|target| {
-                                        let mut fields = target.splitn(3, '|');
+                                        let mut fields = target.splitn(4, '|');
                                         let kind = match fields.next()? {
                                             "discussion_agent" => MessageTargetKind::DiscussionAgent,
                                             "cli" => MessageTargetKind::Cli,
@@ -1231,10 +1235,17 @@ pub async fn wait_for_peer(
                                         );
                                         let cli_session_id =
                                             fields.next().and_then(|value| value.parse().ok());
+                                        let tier = match fields.next() {
+                                            Some("economy") => Some(crate::models::ModelTier::Economy),
+                                            Some("default") => Some(crate::models::ModelTier::Default),
+                                            Some("reasoning") => Some(crate::models::ModelTier::Reasoning),
+                                            _ => None,
+                                        };
                                         Some(MessageTarget {
                                             kind,
                                             agent_type,
                                             cli_session_id,
+                                            tier,
                                         })
                                     })
                                     .collect::<Vec<_>>()
@@ -1534,11 +1545,13 @@ fn load_awareness_batch(
                         SELECT GROUP_CONCAT(
                             ordered.target_kind || '|' ||
                             ordered.agent_type || '|' ||
-                            COALESCE(ordered.cli_session_id, ''),
+                            COALESCE(ordered.cli_session_id, '') || '|' ||
+                            COALESCE(ordered.model_tier, ''),
                             ','
                         )
                         FROM (
-                            SELECT mt.target_kind, mt.agent_type, mt.cli_session_id
+                            SELECT mt.target_kind, mt.agent_type, mt.cli_session_id,
+                                   mt.model_tier
                             FROM message_targets mt
                             WHERE mt.message_id = messages.id
                             ORDER BY mt.position ASC
@@ -1565,11 +1578,13 @@ fn load_awareness_batch(
                         SELECT GROUP_CONCAT(
                             ordered.target_kind || '|' ||
                             ordered.agent_type || '|' ||
-                            COALESCE(ordered.cli_session_id, ''),
+                            COALESCE(ordered.cli_session_id, '') || '|' ||
+                            COALESCE(ordered.model_tier, ''),
                             ','
                         )
                         FROM (
-                            SELECT mt.target_kind, mt.agent_type, mt.cli_session_id
+                            SELECT mt.target_kind, mt.agent_type, mt.cli_session_id,
+                                   mt.model_tier
                             FROM message_targets mt
                             WHERE mt.message_id = message_revision_events.target_message_id
                             ORDER BY mt.position ASC
@@ -1598,7 +1613,7 @@ fn load_awareness_batch(
                     serialized
                         .split(',')
                         .filter_map(|target| {
-                            let mut fields = target.splitn(3, '|');
+                            let mut fields = target.splitn(4, '|');
                             let kind = match fields.next()? {
                                 "discussion_agent" => MessageTargetKind::DiscussionAgent,
                                 "cli" => MessageTargetKind::Cli,
@@ -1607,10 +1622,17 @@ fn load_awareness_batch(
                             let agent_type =
                                 crate::db::discussions::parse_agent_type(fields.next()?);
                             let cli_session_id = fields.next().and_then(|value| value.parse().ok());
+                            let tier = match fields.next() {
+                                Some("economy") => Some(crate::models::ModelTier::Economy),
+                                Some("default") => Some(crate::models::ModelTier::Default),
+                                Some("reasoning") => Some(crate::models::ModelTier::Reasoning),
+                                _ => None,
+                            };
                             Some(MessageTarget {
                                 kind,
                                 agent_type,
                                 cli_session_id,
+                                tier,
                             })
                         })
                         .collect::<Vec<_>>()

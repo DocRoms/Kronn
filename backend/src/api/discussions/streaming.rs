@@ -227,7 +227,7 @@ pub(crate) async fn make_agent_stream(
     discussion_id: String,
     agent_override: Option<AgentType>,
 ) -> Sse<SseStream> {
-    make_agent_stream_inner(state, discussion_id, agent_override, None, None, None).await
+    make_agent_stream_inner(state, discussion_id, agent_override, None, None, None, None).await
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -371,6 +371,7 @@ pub(crate) async fn make_agent_stream_tracked(
     state: AppState,
     discussion_id: String,
     agent_override: Option<AgentType>,
+    tier_override: Option<crate::models::ModelTier>,
     dispatch_job_id: String,
 ) -> (
     Sse<SseStream>,
@@ -381,6 +382,7 @@ pub(crate) async fn make_agent_stream_tracked(
         state,
         discussion_id,
         agent_override,
+        tier_override,
         Some(dispatch_job_id),
         None,
         Some(completion_tx),
@@ -393,6 +395,7 @@ pub(crate) async fn make_agent_stream_tracked_with_initial_event(
     state: AppState,
     discussion_id: String,
     agent_override: Option<AgentType>,
+    tier_override: Option<crate::models::ModelTier>,
     dispatch_job_id: String,
     initial_event: Event,
 ) -> (
@@ -404,6 +407,7 @@ pub(crate) async fn make_agent_stream_tracked_with_initial_event(
         state,
         discussion_id,
         agent_override,
+        tier_override,
         Some(dispatch_job_id),
         Some(initial_event),
         Some(completion_tx),
@@ -425,6 +429,7 @@ async fn make_agent_stream_inner(
     state: AppState,
     discussion_id: String,
     agent_override: Option<AgentType>,
+    tier_override: Option<crate::models::ModelTier>,
     dispatch_job_id: Option<String>,
     mut initial_event: Option<Event>,
     mut completion_tx: Option<tokio::sync::oneshot::Sender<AgentExecutionOutcome>>,
@@ -531,10 +536,14 @@ async fn make_agent_stream_inner(
         finish_tracked_preflight(&mut completion_tx);
         return Sse::new(prepend_initial_event(stream, initial_event.take()));
     }
-    let disc_tier = disc.tier;
+    let disc_tier = tier_override.unwrap_or(disc.tier);
     // 0.8.10 — explicit per-discussion model (e.g. inherited from a launching
     // Quick Prompt) wins over the tier; None → resolve from tier as before.
-    let disc_model = disc.model.clone();
+    let disc_model = if tier_override.is_some() {
+        None
+    } else {
+        disc.model.clone()
+    };
     let skill_ids = disc.skill_ids.clone();
     let directive_ids = disc.directive_ids.clone();
     let profile_ids = disc.profile_ids.clone();

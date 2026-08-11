@@ -376,12 +376,27 @@ pub(crate) async fn stream_claimed_dispatch_job(
     }
 
     let power_lease = crate::core::power_guard::acquire();
+    let target_tier = {
+        let trigger_message_id = job.trigger_message_id.clone();
+        let agent_override = job.agent_override.clone();
+        state
+            .db
+            .with_read_conn(move |conn| {
+                let targets =
+                    crate::db::discussions::list_message_targets(conn, &trigger_message_id)?;
+                Ok(dispatch_target_tier(&targets, agent_override.as_ref()))
+            })
+            .await
+            .ok()
+            .flatten()
+    };
     let (stream, completion) = match initial_event {
         Some(event) => {
             make_agent_stream_tracked_with_initial_event(
                 state.clone(),
                 job.discussion_id.clone(),
                 job.agent_override.clone(),
+                target_tier,
                 job.id.clone(),
                 event,
             )
@@ -392,6 +407,7 @@ pub(crate) async fn stream_claimed_dispatch_job(
                 state.clone(),
                 job.discussion_id.clone(),
                 job.agent_override.clone(),
+                target_tier,
                 job.id.clone(),
             )
             .await
@@ -461,6 +477,22 @@ pub(crate) async fn stream_claimed_dispatch_job(
     });
     handoff_guard.disarm();
     Some(stream)
+}
+
+fn dispatch_target_tier(
+    targets: &[crate::models::MessageTarget],
+    agent_override: Option<&crate::models::AgentType>,
+) -> Option<crate::models::ModelTier> {
+    targets
+        .iter()
+        .find(|target| match agent_override {
+            Some(agent) => {
+                target.kind == crate::models::MessageTargetKind::Agent
+                    && &target.agent_type == agent
+            }
+            None => target.kind == crate::models::MessageTargetKind::DiscussionAgent,
+        })
+        .and_then(|target| target.tier)
 }
 
 async fn finish_dispatch_turn(
@@ -740,9 +772,36 @@ pub(crate) fn render_chain_qp_prompt(
 
 #[cfg(test)]
 mod chain_render_tests {
-    use super::{persist_dispatch_settlement, render_chain_qp_prompt, DispatchHandoffGuard};
+    use super::{
+        dispatch_target_tier, persist_dispatch_settlement, render_chain_qp_prompt,
+        DispatchHandoffGuard,
+    };
     use std::sync::Arc;
     use tokio::sync::RwLock;
+
+    #[test]
+    fn dispatch_uses_the_tier_of_its_exact_native_target() {
+        use crate::models::{AgentType, MessageTarget, ModelTier};
+
+        let targets = vec![
+            MessageTarget::discussion_agent(AgentType::LiteLlm).with_tier(ModelTier::Reasoning),
+            MessageTarget::agent(AgentType::Codex).with_tier(ModelTier::Economy),
+            MessageTarget::cli(AgentType::Codex, 42),
+        ];
+
+        assert_eq!(
+            dispatch_target_tier(&targets, None),
+            Some(ModelTier::Reasoning)
+        );
+        assert_eq!(
+            dispatch_target_tier(&targets, Some(&AgentType::Codex)),
+            Some(ModelTier::Economy)
+        );
+        assert_eq!(
+            dispatch_target_tier(&targets, Some(&AgentType::Ollama)),
+            None
+        );
+    }
 
     #[test]
     fn previous_qp_output_is_substituted() {

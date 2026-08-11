@@ -189,7 +189,7 @@ export function ProfileTooltip({
             transform: pos.top < 0 ? 'translateY(0)' : 'translateY(-100%)',
             maxWidth: 340,
             pointerEvents: 'none',
-            zIndex: 'var(--kr-z-modal)' as unknown as number,
+            zIndex: 'calc(var(--kr-z-modal) + 20)' as unknown as number,
             background: 'var(--kr-bg-elevated)',
             border: `1px solid ${profile.color}55`,
             borderRadius: 'var(--kr-r-lg)',

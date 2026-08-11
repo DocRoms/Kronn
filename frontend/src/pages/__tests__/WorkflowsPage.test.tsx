@@ -875,7 +875,7 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
     expect(detailPane.scrollTop).toBe(0);
   });
 
-  it("change l'agent d'un step sans altérer son palier de raisonnement", async () => {
+  it("change l'agent et le mode IA d'un step en une seule sélection", async () => {
     const agentSettings = {
       model: 'claude-opus',
       tier: 'reasoning',
@@ -922,8 +922,8 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
     await act(async () => { fireEvent.click(screen.getByText('PR Review LAB')); });
     await waitFor(() => expect(screen.getByText('Éditer')).toBeInTheDocument());
 
-    fireEvent.click(screen.getByLabelText(/Changer l'agent du step « prnum »/i));
-    await act(async () => { fireEvent.click(screen.getByRole('menuitem', { name: 'Codex' })); });
+    fireEvent.click(screen.getByLabelText(/Changer l'agent ou le mode IA du step « prnum »/i));
+    await act(async () => { fireEvent.click(screen.getByRole('menuitem', { name: 'Codex · Avancé' })); });
 
     await waitFor(() => expect(mockWorkflowsApi.update).toHaveBeenCalledTimes(1));
     const [, request] = mockWorkflowsApi.update.mock.calls[0];
@@ -932,12 +932,13 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
       agent_settings: {
         ...agentSettings,
         model: null,
+        tier: 'reasoning',
       },
     });
     expect(request.steps[1].agent).toBe('ClaudeCode');
   });
 
-  it('wizard : chaque step Agent expose le sélecteur de palier (⚡/🎯/🧠) et le changement est appliqué', async () => {
+  it('wizard : chaque step Agent expose le sélecteur agent × mode IA et applique le changement', async () => {
     mockWorkflowsApi.list.mockResolvedValue([labSummary()]);
     mockWorkflowsApi.get.mockResolvedValue(labWorkflow());
     mockWorkflowsApi.listRuns.mockResolvedValue([]);
@@ -957,11 +958,11 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
     }
     await waitFor(() => expect(screen.getByDisplayValue('prnum')).toBeInTheDocument());
 
-    const tierSelect = screen.getAllByTitle(/Palier de modèle/)[0] as HTMLSelectElement;
-    expect(tierSelect.value).toBe('default');
-    expect(Array.from(tierSelect.options).map(o => o.value)).toEqual(['economy', 'default', 'reasoning']);
-    fireEvent.change(tierSelect, { target: { value: 'reasoning' } });
-    expect(tierSelect.value).toBe('reasoning');
+    const agentTierPicker = screen.getAllByRole('button', { name: 'Agent et mode IA' })[0];
+    expect(agentTierPicker).toHaveTextContent('🎯');
+    fireEvent.click(agentTierPicker);
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Claude Code · Avancé' }));
+    expect(agentTierPicker).toHaveTextContent('🧠');
   });
 
   it('uses the workflow card hierarchy for Quick Prompts', async () => {
@@ -1049,6 +1050,58 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
     expect(container.querySelector('[data-qp-id="qp-codex"]')).toBeInTheDocument();
     expect(container.querySelector('[data-qp-id="qp-claude"]')).not.toBeInTheDocument();
     expect(screen.getByLabelText('Trier les Quick Prompts')).toHaveValue('name');
+  });
+
+  it('changes a Quick Prompt agent and AI mode together from its card', async () => {
+    const qp: QuickPrompt = {
+      id: 'qp-agent-tier',
+      name: 'Review release',
+      icon: '🔎',
+      description: '',
+      prompt_template: 'Review',
+      variables: [],
+      agent: 'ClaudeCode',
+      project_id: null,
+      skill_ids: [],
+      profile_ids: [],
+      directive_ids: [],
+      tier: 'default',
+      agent_settings: { model: 'opus', tier: 'default', reasoning_effort: null, max_tokens: null },
+      created_at: '2026-01-01T00:00:00Z',
+      updated_at: '2026-01-01T00:00:00Z',
+    };
+    vi.mocked(quickPromptsApi.list).mockResolvedValueOnce([qp]);
+    vi.mocked(quickPromptsApi.update).mockReset().mockResolvedValue(qp);
+
+    await wrap(
+      <WorkflowsPage
+        projects={[]}
+        installedAgentTypes={['ClaudeCode', 'Codex']}
+        agentAccess={fullConfig}
+      />,
+    );
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Quick Prompts \(1\)/ }));
+    });
+
+    const trigger = screen.getByRole('button', {
+      name: /Changer l'agent ou le mode IA du QP « Review release »/,
+    });
+    expect(trigger).toHaveTextContent('🎯');
+    expect(trigger).toHaveAttribute('title', expect.stringContaining('sonnet'));
+    fireEvent.click(trigger);
+    await act(async () => {
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Codex · Avancé' }));
+    });
+
+    await waitFor(() => expect(quickPromptsApi.update).toHaveBeenCalledWith(
+      'qp-agent-tier',
+      expect.objectContaining({
+        agent: 'Codex',
+        tier: 'reasoning',
+        agent_settings: expect.objectContaining({ model: null, tier: 'reasoning' }),
+      }),
+    ));
   });
 
   it('offers AI-assisted creation and JSON import from the Quick APIs tab', async () => {
