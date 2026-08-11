@@ -132,9 +132,10 @@ pub fn agent_display_name(agent_type: &AgentType) -> String {
     }
 }
 
-/// Canonical agent aliases used as explicit delegation signals in generated
-/// prose. Mentions in Markdown code are ignored so examples cannot launch
-/// work, and word boundaries reject email-like text.
+/// Canonical agent aliases found in generated prose. This is useful for
+/// display/introspection only: automatic delegation requires the explicit
+/// marker parsed by [`extract_agent_handoff_markers`]. Mentions in Markdown
+/// code are ignored and word boundaries reject email-like text.
 pub fn agent_mentions_in_prose(content: &str) -> Vec<AgentType> {
     let prose = crate::core::anti_halluc::strip_inline_code(
         &crate::core::anti_halluc::strip_fenced_code(content),
@@ -161,6 +162,48 @@ pub fn agent_mentions_in_prose(content: &str) -> Vec<AgentType> {
         }
     }
     agents
+}
+
+/// Extract explicit handoff markers and remove them before persistence.
+///
+/// Natural `@alias` mentions are deliberately inert: models cite peers in
+/// examples and explanations all the time. A native agent starts only when the
+/// response contains `<!-- kronn:handoff @alias -->`, which the collaboration
+/// prompt documents and Markdown renderers keep invisible while streaming.
+pub fn extract_agent_handoff_markers(content: &str) -> (String, Vec<AgentType>) {
+    let mut cleaned = String::with_capacity(content.len());
+    let mut agents = Vec::new();
+    let mut cursor = 0;
+
+    while let Some(relative_start) = content[cursor..].find("<!--") {
+        let start = cursor + relative_start;
+        let Some(relative_end) = content[start + 4..].find("-->") else {
+            break;
+        };
+        let end = start + 4 + relative_end + 3;
+        let body = content[start + 4..end - 3].trim().to_ascii_lowercase();
+        let marked_agent =
+            body.strip_prefix("kronn:handoff")
+                .map(str::trim)
+                .and_then(|marked_alias| {
+                    AGENT_ALIASES.iter().find_map(|(alias, agent)| {
+                        (*alias == marked_alias).then_some(agent.clone())
+                    })
+                });
+
+        if let Some(agent) = marked_agent {
+            cleaned.push_str(&content[cursor..start]);
+            if !agents.contains(&agent) {
+                agents.push(agent);
+            }
+        } else {
+            cleaned.push_str(&content[cursor..end]);
+        }
+        cursor = end;
+    }
+    cleaned.push_str(&content[cursor..]);
+
+    (cleaned, agents)
 }
 
 /// Truncate text at the last sentence boundary before `max_len`, falling
@@ -357,6 +400,27 @@ mod tests {
     fn generated_agent_mentions_ignore_code_and_email_like_text() {
         let text = "mail me@codex.dev\n`@Ollama, example`\n```text\n@Gemini, example\n```\n(@Claude), à toi.";
         assert_eq!(agent_mentions_in_prose(text), vec![AgentType::ClaudeCode]);
+    }
+
+    #[test]
+    fn handoff_markers_are_explicit_deduplicated_and_removed() {
+        let (cleaned, agents) = extract_agent_handoff_markers(
+            "@Codex, vérifie.\n<!-- kronn:handoff @codex -->\n\
+             <!-- KRONN:HANDOFF @OLLAMA -->\n<!-- kronn:handoff @codex -->",
+        );
+
+        assert_eq!(agents, vec![AgentType::Codex, AgentType::Ollama]);
+        assert_eq!(cleaned.trim(), "@Codex, vérifie.");
+    }
+
+    #[test]
+    fn natural_aliases_and_unrelated_comments_do_not_create_handoffs() {
+        let response = "Je peux compléter les réponses d'@claude ou d'@codex.\n\
+                        <!-- ordinary documentation comment -->";
+        let (cleaned, agents) = extract_agent_handoff_markers(response);
+
+        assert!(agents.is_empty());
+        assert_eq!(cleaned, response);
     }
 
     #[test]

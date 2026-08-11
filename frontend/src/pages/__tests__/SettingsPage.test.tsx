@@ -216,6 +216,12 @@ const defaultProps = {
 };
 
 describe('SettingsPage', () => {
+  it('exposes a stable deep-link target for agent collaboration settings', async () => {
+    await wrap(<SettingsPage {...defaultProps} agents={[sampleAgent]} />);
+
+    expect(document.getElementById('settings-agent-handoffs')).toBeTruthy();
+  });
+
   it('persists the discussion-note composer toggle', async () => {
     await wrap(<SettingsPage {...defaultProps} />);
     const toggle = screen.getByRole('switch', { name: 'Notes de discussion hors contexte' });

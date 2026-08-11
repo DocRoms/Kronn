@@ -1205,6 +1205,52 @@ fn agent_handoff_counts_for_root(
     Ok((local_count, paid_count))
 }
 
+/// Native agents already scheduled on the root turn.
+///
+/// This includes the user's typed targets and agents admitted by earlier
+/// handoffs. A later reply may mention one of these aliases conversationally,
+/// but that agent already owns a dispatch for the same root user message and
+/// must not be launched a second time.
+pub fn native_agents_scheduled_for_root_turn(
+    conn: &Connection,
+    discussion_id: &str,
+    reply_to_message_id: Option<&str>,
+) -> Result<Vec<AgentType>> {
+    let Some((root_user_id, _)) = agent_handoff_root(conn, discussion_id, reply_to_message_id)?
+    else {
+        return Ok(Vec::new());
+    };
+    let mut agents = Vec::new();
+    for target in list_message_targets(conn, &root_user_id)? {
+        if matches!(
+            target.kind,
+            MessageTargetKind::DiscussionAgent | MessageTargetKind::Agent
+        ) && !agents.contains(&target.agent_type)
+        {
+            agents.push(target.agent_type);
+        }
+    }
+    let prefix = format!("agent-handoff:{root_user_id}:%");
+    let mut statement = conn.prepare(
+        "SELECT agent_override_json
+         FROM agent_dispatch_jobs
+         WHERE discussion_id = ?1 AND dedupe_key LIKE ?2",
+    )?;
+    let handoff_agents = statement
+        .query_map(params![discussion_id, prefix], |row| {
+            row.get::<_, Option<String>>(0)
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for agent_json in handoff_agents.into_iter().flatten() {
+        if let Ok(agent) = serde_json::from_str::<AgentType>(&agent_json) {
+            if !agents.contains(&agent) {
+                agents.push(agent);
+            }
+        }
+    }
+    Ok(agents)
+}
+
 pub fn agent_handoff_paid_count_for_reply(
     conn: &Connection,
     discussion_id: &str,
@@ -1265,8 +1311,16 @@ pub fn insert_native_agent_message_with_handoffs(
     if let Some((root_user_id, _depth)) = root {
         let (mut local_count, mut paid_count) =
             agent_handoff_counts_for_root(&transaction, discussion_id, &root_user_id)?;
+        let already_scheduled = native_agents_scheduled_for_root_turn(
+            &transaction,
+            discussion_id,
+            msg.reply_to_message_id.as_deref(),
+        )?;
         for agent in candidate_agents {
-            if agent == source_agent || !attached_agents.contains(agent) || allowed.contains(agent)
+            if agent == source_agent
+                || already_scheduled.contains(agent)
+                || !attached_agents.contains(agent)
+                || allowed.contains(agent)
             {
                 continue;
             }

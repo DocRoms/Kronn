@@ -112,6 +112,31 @@ New and migrated sessions start both cursors at the room's current tip.
 [src: file: backend/src/db/discussions.rs:1700-1920]
 [src: file: backend/src/api/federation.rs:20-110]
 
+New-discussion aliases follow the same independent fan-out contract. Creation
+persists the initial typed targets and keeps every native target visible as a
+room participant; the subsequent `/run` call materializes one durable dispatch
+per native identity. It does **not** call the orchestration endpoint, add debate
+framing, or append a synthesis. Because those jobs drain sequentially inside
+one discussion, each later runner receives a bounded prompt containing the
+shared trigger plus any direct sibling replies already completed for that same
+turn. This lets it complement or answer a concrete peer request without an
+extra dispatch. Later human turns and unrelated handoff branches remain hidden.
+Agent-to-agent handoffs remain governed separately by the opt-in collaboration
+setting below.
+Within the same root user turn, an agent already named in the user's target list
+or admitted by an earlier handoff is considered scheduled: sibling replies are
+told not to wait for or relaunch it, and the persistence boundary rejects any
+redundant handoff. Natural `@alias` references in generated prose are inert. A
+new native dispatch requires the explicit hidden
+`<!-- kronn:handoff @alias -->` marker described in the collaboration prompt;
+Kronn removes that marker before persistence. An agent not scheduled yet can
+still be delegated a concrete follow-up under the normal collaboration limits.
+[src: file: backend/src/api/discussions/crud.rs:242-315]
+[src: file: backend/src/api/discussions/messaging.rs:54-117]
+[src: file: backend/src/api/discussions/messaging.rs:829-905]
+[src: file: backend/src/api/discussions/streaming.rs:497-573]
+[src: file: backend/src/db/discussions.rs:1213-1335]
+
 ## Joined agent turn (MCP)
 
 A live MCP `disc_append` carries the same ordered `targets` model as the human
@@ -161,11 +186,10 @@ principal use a structured target; autonomous rooms use no-agent mode.
 - `message_targets` records every intended addressee kind, agent type,
   optional exact CLI session and optional per-turn reasoning tier in order.
   New-discussion `@alias` routing is persisted on the initial user message
-  before orchestration starts, so every participant resolves its own tier;
+  before its independent dispatches start, so every responder resolves its own tier;
   targets without an override inherit the discussion tier.
-  [src: file: backend/src/api/discussions/crud.rs:286-304]
-  [src: file: backend/src/api/discussions/orchestration.rs:147-165]
-  [src: file: backend/src/api/discussions/orchestration.rs:471-475]
+  [src: file: backend/src/api/discussions/crud.rs:297-315]
+  [src: file: backend/src/api/discussions/runtime.rs:379-415]
 - `message_cli_authors` records the exact local CLI author for verified live MCP
   appends, enabling deterministic `reply_to` routing across same-provider peers.
 - `messages.target_agent` remains the first-target compatibility projection.

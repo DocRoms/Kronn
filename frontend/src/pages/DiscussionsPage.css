@@ -5120,6 +5120,51 @@ button.disc-contact-open {
   text-decoration: line-through;
 }
 
+.disc-prompt-multi-agent-mode {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--kr-sp-3);
+  padding: 8px;
+  border: 1px solid var(--kr-border-light);
+  border-radius: var(--kr-r-sm);
+  background: var(--kr-bg-surface);
+  color: var(--kr-text-secondary);
+  font-size: var(--kr-fs-xs);
+  line-height: 1.4;
+}
+
+.disc-prompt-multi-agent-mode > svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+  color: var(--kr-accent);
+}
+
+.disc-prompt-multi-agent-mode strong {
+  color: var(--kr-text-primary);
+}
+
+.disc-prompt-multi-agent-mode small {
+  display: block;
+  margin-top: 3px;
+  color: var(--kr-text-muted);
+  font-size: var(--kr-fs-2xs);
+}
+
+.disc-prompt-multi-agent-mode[data-collaboration="enabled"] small {
+  color: var(--kr-success);
+}
+
+.disc-prompt-multi-agent-mode button {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
 .disc-form-error {
   color: var(--kr-error-soft);
   font-size: var(--kr-fs-xs);

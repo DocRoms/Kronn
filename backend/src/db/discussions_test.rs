@@ -2726,6 +2726,64 @@ mod tests {
     }
 
     #[test]
+    fn native_agent_handoff_does_not_relaunch_a_root_turn_target() {
+        let conn = test_conn();
+        insert_discussion(&conn, &handoff_discussion("d-root-targets")).unwrap();
+        insert_message(
+            &conn,
+            "d-root-targets",
+            &make_message("u-root-targets", MessageRole::User, None),
+        )
+        .unwrap();
+        replace_message_targets(
+            &conn,
+            "u-root-targets",
+            &[
+                MessageTarget::discussion_agent(AgentType::ClaudeCode),
+                MessageTarget::agent(AgentType::Codex),
+            ],
+        )
+        .unwrap();
+        let response = agent_reply("a-root-targets", AgentType::ClaudeCode, "u-root-targets");
+
+        let outcome = insert_native_agent_message_with_handoffs(
+            &conn,
+            "d-root-targets",
+            &response,
+            true,
+            None,
+            &AgentType::ClaudeCode,
+            &[AgentType::Codex, AgentType::LiteLlm],
+            true,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(outcome.dispatched_agents, vec![AgentType::LiteLlm]);
+        assert_eq!(
+            native_agents_scheduled_for_root_turn(&conn, "d-root-targets", Some("a-root-targets"),)
+                .unwrap(),
+            vec![AgentType::ClaudeCode, AgentType::Codex, AgentType::LiteLlm,],
+        );
+
+        let sibling_response =
+            agent_reply("a-root-targets-sibling", AgentType::Codex, "u-root-targets");
+        let duplicate_handoff = insert_native_agent_message_with_handoffs(
+            &conn,
+            "d-root-targets",
+            &sibling_response,
+            true,
+            None,
+            &AgentType::Codex,
+            &[AgentType::LiteLlm],
+            true,
+            None,
+        )
+        .unwrap();
+        assert!(duplicate_handoff.dispatched_agents.is_empty());
+    }
+
+    #[test]
     fn unlimited_paid_budget_admits_every_attached_paid_target() {
         let conn = test_conn();
         insert_discussion(&conn, &handoff_discussion("d-unlimited-budget")).unwrap();

@@ -1616,6 +1616,121 @@ pub(crate) struct TokenTally {
     eval: u64,
 }
 
+#[derive(Debug, Default, PartialEq, Eq)]
+enum LeadingThinkingState {
+    #[default]
+    Probing,
+    Suppressing,
+    Passthrough,
+}
+
+/// Suppress a reasoning block only when it prefixes an HTTP model response.
+///
+/// Some OpenAI-compatible proxies return DeepSeek-style `<think>...</think>`
+/// scratchpads in `content` instead of a dedicated reasoning field. Deltas can
+/// split either tag at any byte boundary, so a per-chunk regex cannot prevent
+/// the leak. Once real answer text starts, the filter becomes a passthrough so
+/// legitimate code samples mentioning these tags remain visible.
+#[derive(Debug, Default)]
+pub(crate) struct LeadingThinkingFilter {
+    state: LeadingThinkingState,
+    pending: String,
+}
+
+impl LeadingThinkingFilter {
+    const OPEN_TAGS: [&'static str; 2] = ["<think>", "<thinking>"];
+    const CLOSE_TAGS: [&'static str; 2] = ["</think>", "</thinking>"];
+
+    pub(crate) fn push(&mut self, input: &str) -> String {
+        if self.state == LeadingThinkingState::Passthrough {
+            return input.to_string();
+        }
+
+        self.pending.push_str(input);
+        let mut visible = String::new();
+
+        loop {
+            match self.state {
+                LeadingThinkingState::Passthrough => {
+                    visible.push_str(&std::mem::take(&mut self.pending));
+                    break;
+                }
+                LeadingThinkingState::Probing => {
+                    let Some(first_content) = self
+                        .pending
+                        .char_indices()
+                        .find_map(|(index, ch)| (!ch.is_whitespace()).then_some(index))
+                    else {
+                        break;
+                    };
+                    let candidate = self.pending[first_content..].to_ascii_lowercase();
+                    if let Some(tag) = Self::OPEN_TAGS
+                        .iter()
+                        .find(|tag| candidate.starts_with(**tag))
+                    {
+                        self.pending.drain(..first_content + tag.len());
+                        self.state = LeadingThinkingState::Suppressing;
+                        continue;
+                    }
+                    if Self::OPEN_TAGS
+                        .iter()
+                        .any(|tag| tag.starts_with(&candidate))
+                    {
+                        break;
+                    }
+                    self.state = LeadingThinkingState::Passthrough;
+                }
+                LeadingThinkingState::Suppressing => {
+                    let lower = self.pending.to_ascii_lowercase();
+                    let closing = Self::CLOSE_TAGS
+                        .iter()
+                        .filter_map(|tag| lower.find(tag).map(|index| (index, tag.len())))
+                        .min_by_key(|(index, _)| *index);
+                    if let Some((index, tag_len)) = closing {
+                        self.pending.drain(..index + tag_len);
+                        self.state = LeadingThinkingState::Probing;
+                        continue;
+                    }
+
+                    let keep = Self::longest_possible_tag_suffix(&lower, &Self::CLOSE_TAGS);
+                    self.pending.drain(..self.pending.len() - keep);
+                    break;
+                }
+            }
+        }
+
+        visible
+    }
+
+    pub(crate) fn finish(&mut self) -> String {
+        match self.state {
+            LeadingThinkingState::Suppressing => {
+                self.pending.clear();
+                String::new()
+            }
+            LeadingThinkingState::Probing | LeadingThinkingState::Passthrough => {
+                std::mem::take(&mut self.pending)
+            }
+        }
+    }
+
+    fn longest_possible_tag_suffix(input: &str, tags: &[&str]) -> usize {
+        tags.iter()
+            .flat_map(|tag| (1..tag.len()).map(move |length| &tag[..length]))
+            .filter(|prefix| input.ends_with(prefix))
+            .map(str::len)
+            .max()
+            .unwrap_or(0)
+    }
+}
+
+pub(crate) fn strip_leading_thinking_blocks(input: &str) -> String {
+    let mut filter = LeadingThinkingFilter::default();
+    let mut visible = filter.push(input);
+    visible.push_str(&filter.finish());
+    visible
+}
+
 /// Apply one decoded stream line: forward the text delta, record errors, and
 /// on the terminal chunk stash token counts for `parse_token_usage`. The
 /// stderr lock is only held across synchronous work — never across
@@ -1634,6 +1749,7 @@ pub(crate) async fn forward_chat_line(
     got_error: &mut bool,
     num_ctx: u64,
     tally: &mut TokenTally,
+    thinking_filter: &mut LeadingThinkingFilter,
     // Tool-call fragments seen so far this turn. Merged here rather than in
     // the codec because one call can span several frames.
     pending_tools: &mut crate::agents::tools::ToolCallAccumulator,
@@ -1655,7 +1771,8 @@ pub(crate) async fn forward_chat_line(
         *got_error = true;
     }
     if let Some(text) = chunk.delta {
-        if tx.send(text).await.is_err() {
+        let visible = thinking_filter.push(&text);
+        if !visible.is_empty() && tx.send(visible).await.is_err() {
             return false;
         }
     }
@@ -1898,6 +2015,7 @@ async fn start_ollama_http(
             let mut buffer = String::new();
             let mut got_done = false;
             let mut pending_tools = ToolCallAccumulator::default();
+            let mut thinking_filter = LeadingThinkingFilter::default();
 
             while let Some(chunk) = stream.next().await {
                 let bytes = match chunk {
@@ -1930,6 +2048,7 @@ async fn start_ollama_http(
                         &mut got_error,
                         ctx_cap,
                         &mut tally,
+                        &mut thinking_filter,
                         &mut pending_tools,
                     )
                     .await
@@ -1952,9 +2071,16 @@ async fn start_ollama_http(
                 &mut got_error,
                 ctx_cap,
                 &mut tally,
+                &mut thinking_filter,
                 &mut pending_tools,
             )
             .await;
+
+            let trailing = thinking_filter.finish();
+            if !trailing.is_empty() && tx.send(trailing).await.is_err() {
+                finish(&mut lifeline, false).await;
+                return;
+            }
 
             let calls = pending_tools.finish();
             let Some(exec) = executor.clone().filter(|_| !calls.is_empty() && !got_error) else {

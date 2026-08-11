@@ -466,7 +466,11 @@ export function AgentsSection({
               </div>
             </div>
 
-            <div className="set-agent-default-card set-agent-handoff-card" data-testid="agent-handoff-section">
+            <div
+              id="settings-agent-handoffs"
+              className="set-agent-default-card set-agent-handoff-card"
+              data-testid="agent-handoff-section"
+            >
               <div className="set-agent-default-title">
                 <GitFork size={15} aria-hidden="true" />
                 <span>{t('config.agentHandoffTitle')}</span>
