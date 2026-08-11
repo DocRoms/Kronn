@@ -25,6 +25,7 @@ mod tests {
             got_error,
             num_ctx,
             &mut TokenTally::default(),
+            &mut LeadingThinkingFilter::default(),
             &mut crate::agents::tools::ToolCallAccumulator::default(),
         )
         .await
@@ -111,6 +112,38 @@ mod tests {
         assert_eq!(strip_thinking_leaks("<thinking>y</thinking>"), "y");
         // Still no false positives on the plain word.
         assert_eq!(strip_thinking_leaks("I think so."), "I think so.");
+    }
+
+    #[test]
+    fn leading_thinking_filter_hides_split_deepseek_reasoning() {
+        let mut filter = LeadingThinkingFilter::default();
+        let chunks = [
+            "  <th",
+            "ink>Je dois retrouver le prompt",
+            " et analyser les agents.</thi",
+            "nk>\n\nVoici la réponse.",
+        ];
+        let mut visible = chunks
+            .into_iter()
+            .map(|chunk| filter.push(chunk))
+            .collect::<String>();
+        visible.push_str(&filter.finish());
+
+        assert_eq!(visible, "\n\nVoici la réponse.");
+    }
+
+    #[test]
+    fn leading_thinking_filter_preserves_tags_after_answer_starts() {
+        let response = "Pour documenter le format, utilisez `<think>exemple</think>`.";
+        assert_eq!(strip_leading_thinking_blocks(response), response);
+    }
+
+    #[test]
+    fn leading_thinking_filter_drops_unclosed_private_reasoning() {
+        assert_eq!(
+            strip_leading_thinking_blocks("<THINKING>brouillon interne sans fermeture"),
+            ""
+        );
     }
 
     // ─── Ollama /api/chat request body (asserts on the REQUEST, never on the
@@ -599,6 +632,7 @@ mod tests {
         let stderr = Arc::new(Mutex::new(Vec::<String>::new()));
         let (mut done, mut err) = (false, false);
         let mut tally = TokenTally::default();
+        let mut thinking_filter = LeadingThinkingFilter::default();
 
         for line in [
             r#"data: {"choices":[{"delta":{"content":"39"}}]}"#,
@@ -616,6 +650,7 @@ mod tests {
                     &mut err,
                     0,
                     &mut tally,
+                    &mut thinking_filter,
                     &mut crate::agents::tools::ToolCallAccumulator::default(),
                 )
                 .await
@@ -634,6 +669,52 @@ mod tests {
             &["ollama_tokens:12:3".to_string()],
             "usage from the earlier frame survives to the sentinel"
         );
+    }
+
+    #[tokio::test]
+    async fn forward_chat_line_never_emits_litellm_reasoning_content() {
+        use crate::agents::chat_codec::OpenAiCodec;
+        use std::sync::{Arc, Mutex};
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(8);
+        let stderr = Arc::new(Mutex::new(Vec::<String>::new()));
+        let (mut done, mut err) = (false, false);
+        let mut tally = TokenTally::default();
+        let mut thinking_filter = LeadingThinkingFilter::default();
+        let mut pending_tools = crate::agents::tools::ToolCallAccumulator::default();
+
+        for content in ["<thi", "nk>private scratchpad", "</think>Final answer"] {
+            let line = format!(
+                r#"data: {{"choices":[{{"delta":{{"content":{}}}}}]}}"#,
+                serde_json::to_string(content).unwrap()
+            );
+            assert!(
+                forward_chat_line(
+                    &OpenAiCodec,
+                    &line,
+                    &tx,
+                    &stderr,
+                    &mut done,
+                    &mut err,
+                    0,
+                    &mut tally,
+                    &mut thinking_filter,
+                    &mut pending_tools,
+                )
+                .await
+            );
+        }
+        let trailing = thinking_filter.finish();
+        if !trailing.is_empty() {
+            tx.send(trailing).await.unwrap();
+        }
+        drop(tx);
+
+        let mut visible = String::new();
+        while let Some(chunk) = rx.recv().await {
+            visible.push_str(&chunk);
+        }
+        assert_eq!(visible, "Final answer");
     }
 
     #[tokio::test]

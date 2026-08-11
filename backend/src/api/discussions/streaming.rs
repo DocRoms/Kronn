@@ -30,8 +30,8 @@ use super::{
     NON_STREAMING_STALL_TIMEOUT,
 };
 use crate::api::disc_helpers::{
-    agent_alias, agent_handoff_budget_instruction, agent_handoff_target_is_allowed,
-    agent_mentions_in_prose, auth_mode_for, estimate_extra_context_len,
+    agent_alias, agent_handoff_budget_instruction, agent_handoff_target_is_allowed, auth_mode_for,
+    estimate_extra_context_len, extract_agent_handoff_markers,
 };
 use crate::api::disc_prompts::build_agent_prompt;
 
@@ -367,6 +367,97 @@ mod awaiting_terminal_tests {
     }
 }
 
+#[cfg(test)]
+mod dispatch_prompt_snapshot_tests {
+    use super::{discussion_at_dispatch_trigger, independent_sibling_notice};
+    use crate::models::Discussion;
+
+    fn discussion_with_turns() -> Discussion {
+        serde_json::from_value(serde_json::json!({
+            "id": "d-plural",
+            "project_id": null,
+            "title": "Independent answers",
+            "agent": "Codex",
+            "language": "fr",
+            "participants": ["Codex", "ClaudeCode"],
+            "messages": [
+                {
+                    "id": "u1",
+                    "role": "User",
+                    "content": "Répondez séparément",
+                    "agent_type": null,
+                    "timestamp": "2026-08-11T08:00:00Z"
+                },
+                {
+                    "id": "a-codex",
+                    "role": "Agent",
+                    "content": "Première réponse",
+                    "agent_type": "Codex",
+                    "timestamp": "2026-08-11T08:00:01Z",
+                    "reply_to_message_id": "u1"
+                },
+                {
+                    "id": "u2",
+                    "role": "User",
+                    "content": "Question suivante",
+                    "agent_type": null,
+                    "timestamp": "2026-08-11T08:00:02Z"
+                }
+            ],
+            "message_count": 3,
+            "non_system_message_count": 3,
+            "summary_cache": "Résumé calculé après la première réponse",
+            "summary_up_to_msg_idx": 1,
+            "created_at": "2026-08-11T08:00:00Z",
+            "updated_at": "2026-08-11T08:00:02Z"
+        }))
+        .expect("valid discussion fixture")
+    }
+
+    #[test]
+    fn plural_responder_sees_completed_siblings_but_not_later_user_turns() {
+        let snapshot = discussion_at_dispatch_trigger(&discussion_with_turns(), Some("u1"));
+
+        assert_eq!(snapshot.messages.len(), 2);
+        assert_eq!(snapshot.messages[0].id, "u1");
+        assert_eq!(snapshot.messages[1].id, "a-codex");
+        assert!(!snapshot.messages.iter().any(|message| message.id == "u2"));
+        assert_eq!(snapshot.message_count, 2);
+        assert_eq!(snapshot.non_system_message_count, 2);
+        assert_eq!(snapshot.summary_cache, None);
+        assert_eq!(snapshot.summary_up_to_msg_idx, None);
+    }
+
+    #[test]
+    fn missing_trigger_keeps_the_full_conversation() {
+        let disc = discussion_with_turns();
+        let snapshot = discussion_at_dispatch_trigger(&disc, Some("missing"));
+
+        assert_eq!(snapshot.messages.len(), 3);
+        assert_eq!(snapshot.summary_cache, disc.summary_cache);
+    }
+
+    #[test]
+    fn agent_handoff_trigger_still_excludes_later_turns() {
+        let snapshot = discussion_at_dispatch_trigger(&discussion_with_turns(), Some("a-codex"));
+
+        assert_eq!(snapshot.messages.len(), 2);
+        assert_eq!(snapshot.messages[0].id, "u1");
+        assert_eq!(snapshot.messages[1].id, "a-codex");
+        assert!(!snapshot.messages.iter().any(|message| message.id == "u2"));
+    }
+
+    #[test]
+    fn sibling_notice_encourages_complement_without_relaunch() {
+        let notice = independent_sibling_notice("fr", "@codex, @ollama");
+
+        assert!(notice.contains("complète-les utilement"));
+        assert!(notice.contains("ne le relance pas"));
+        assert!(notice.contains("@codex, @ollama"));
+        assert!(independent_sibling_notice("fr", "").is_empty());
+    }
+}
+
 pub(crate) async fn make_agent_stream_tracked(
     state: AppState,
     discussion_id: String,
@@ -422,6 +513,97 @@ fn prepend_initial_event(stream: SseStream, initial_event: Option<Event>) -> Sse
             Box::pin(futures::stream::once(async move { Ok::<_, Infallible>(event) }).chain(stream))
         }
         None => stream,
+    }
+}
+
+/// Freeze the conversational view at the message that owns this dispatch.
+///
+/// Plural targets are executed one at a time inside a discussion so their
+/// file operations cannot race. A responder sees completed direct siblings so
+/// it can complement them, but never later User turns or unrelated handoff
+/// branches. The durable transcript itself remains untouched.
+fn discussion_at_dispatch_trigger(
+    disc: &Discussion,
+    trigger_message_id: Option<&str>,
+) -> Discussion {
+    let Some(trigger_message_id) = trigger_message_id else {
+        return disc.clone();
+    };
+    let Some(trigger_index) = disc
+        .messages
+        .iter()
+        .position(|message| message.id == trigger_message_id)
+    else {
+        return disc.clone();
+    };
+    if trigger_index + 1 >= disc.messages.len() {
+        return disc.clone();
+    }
+
+    let mut snapshot = disc.clone();
+    let trigger = &disc.messages[trigger_index];
+    snapshot.messages = if matches!(trigger.role, MessageRole::User) {
+        // A later responder can complement an earlier sibling or answer its
+        // concrete question without creating another dispatch. Later User
+        // turns and unrelated/handoff branches remain invisible.
+        disc.messages[..=trigger_index]
+            .iter()
+            .chain(disc.messages[trigger_index + 1..].iter().filter(|message| {
+                matches!(message.role, MessageRole::Agent)
+                    && matches!(message.channel, MessageChannel::Main)
+                    && message.reply_to_message_id.as_deref() == Some(trigger_message_id)
+            }))
+            .cloned()
+            .collect()
+    } else {
+        disc.messages[..=trigger_index].to_vec()
+    };
+    snapshot.message_count = snapshot.messages.len() as u32;
+    snapshot.non_system_message_count = snapshot
+        .messages
+        .iter()
+        .filter(|message| !matches!(message.role, MessageRole::System))
+        .count() as u32;
+    // A summary may have been refreshed after this dispatch was accepted.
+    // Keeping it could leak sibling/later turns even though the raw messages
+    // were truncated, so the bounded prompt uses raw pre-trigger history.
+    snapshot.summary_cache = None;
+    snapshot.summary_up_to_msg_idx = None;
+    snapshot
+}
+
+fn independent_sibling_notice(language: &str, aliases: &str) -> String {
+    if aliases.is_empty() {
+        return String::new();
+    }
+    match language {
+        "fr" => format!(
+            "--- Réponses multi-agents complémentaires ---\n\
+             Les agents suivants ont chacun un tour déjà programmé pour ce même message : {aliases}. \
+             Les réponses déjà terminées sont visibles dans le contexte. Réponds directement à \
+             l'utilisateur et complète-les utilement sans lancer de débat automatique. Tu peux \
+             répondre brièvement à une demande concrète d'un autre agent, mais ne le relance pas.\n\n"
+        ),
+        "es" => format!(
+            "--- Respuestas multiagente complementarias ---\n\
+             Cada uno de estos agentes ya tiene un turno programado para el mismo mensaje: {aliases}. \
+             Las respuestas ya terminadas aparecen en el contexto. Responde directamente al usuario \
+             y complétalas de forma útil sin iniciar un debate automático. Puedes responder brevemente \
+             a una petición concreta de otro agente, pero no vuelvas a iniciarlo.\n\n"
+        ),
+        "zh" => format!(
+            "--- 多智能体互补回复 ---\n\
+             以下智能体都已为同一条消息安排了一次回复：{aliases}。已完成的回复会显示在上下文中。\
+             请直接回复用户并提供有价值的补充，不要自动展开辩论。你可以简短回应另一个智能体的\
+             具体请求，但不要再次启动它。\n\n"
+        ),
+        _ => format!(
+            "--- Complementary multi-agent replies ---\n\
+             Each of these agents already has one turn scheduled for the same message: {aliases}. \
+             Completed replies are visible in the context. Reply directly to the user and add useful \
+             complementary points without starting an automatic debate. You may briefly answer a \
+             concrete request from another agent, but do not launch it again.\n\n"
+        ),
     }
 }
 
@@ -1107,6 +1289,33 @@ async fn make_agent_stream_inner(
     } else {
         Some(0)
     };
+    let root_turn_scheduled_agents = {
+        let did = discussion_id.clone();
+        let parent_id = dispatch_trigger_message_id.clone();
+        state
+            .db
+            .with_read_conn(move |conn| {
+                crate::db::discussions::native_agents_scheduled_for_root_turn(
+                    conn,
+                    &did,
+                    parent_id.as_deref(),
+                )
+            })
+            .await
+            .unwrap_or_default()
+    };
+    let sibling_aliases = root_turn_scheduled_agents
+        .iter()
+        .filter(|agent| **agent != agent_type)
+        .filter_map(agent_alias)
+        .collect::<Vec<_>>()
+        .join(", ");
+    // These agents already own a dispatch for the same root User turn. Do not
+    // advertise them as handoff targets to this runner, and explain why so the
+    // generated answer does not wait for a redundant acknowledgement.
+    attached_handoff_agents.retain(|agent| !root_turn_scheduled_agents.contains(agent));
+    let sibling_notice = independent_sibling_notice(&disc.language, &sibling_aliases);
+    let context_files_prompt = format!("{context_files_prompt}{sibling_notice}");
     let ollama_handoff_available = attached_handoff_agents.iter().any(|agent| {
         *agent == AgentType::Ollama
             && agent_handoff_target_is_allowed(agent, &handoff_blocked_agents)
@@ -1129,19 +1338,19 @@ async fn make_agent_stream_inner(
         let notice = match disc.language.as_str() {
             "fr" => format!(
                 "--- Agents autorisés à travailler ensemble ---\n\
-                 Pour demander l'aide d'un autre agent, adresse-lui une demande directe dans ta réponse finale avec l'un de ces alias : {attached_aliases}. {budget} Ne cite pas un alias comme simple exemple : sa mention peut lancer l'agent.\n\n"
+                 Pour demander l'aide d'un autre agent, adresse-lui une demande directe dans ta réponse finale avec l'un de ces alias : {attached_aliases}, puis ajoute `<!-- kronn:handoff @alias -->` en remplaçant `@alias` par sa vraie valeur. {budget} Seul ce marqueur lance l'agent ; une mention normale reste informative. Le marqueur sera retiré avant l'enregistrement du message.\n\n"
             ),
             "es" => format!(
                 "--- Agentes autorizados a trabajar juntos ---\n\
-                 Para pedir ayuda a otro agente, dirígele una petición directa en tu respuesta final con uno de estos alias: {attached_aliases}. {budget} No cites un alias como simple ejemplo: mencionarlo puede iniciar el agente.\n\n"
+                 Para pedir ayuda a otro agente, dirígele una petición directa en tu respuesta final con uno de estos alias: {attached_aliases}, y añade `<!-- kronn:handoff @alias -->` sustituyendo `@alias` por su valor real. {budget} Solo este marcador inicia al agente; una mención normal es informativa. El marcador se elimina antes de guardar el mensaje.\n\n"
             ),
             "zh" => format!(
                 "--- 允许智能体协同工作 ---\n\
-                 如需向另一个智能体求助，请在最终回复中使用以下别名直接提出请求：{attached_aliases}。{budget} 不要仅把别名当作示例；提及别名可能会启动该智能体。\n\n"
+                 如需向另一个智能体求助，请在最终回复中使用以下别名直接提出请求：{attached_aliases}，并添加 `<!-- kronn:handoff @alias -->`，将 `@alias` 替换为真实别名。{budget} 只有此标记会启动智能体；普通提及仅用于说明。保存消息前会移除此标记。\n\n"
             ),
             _ => format!(
                 "--- Agents allowed to work together ---\n\
-                 To ask another agent for help, address it with a direct request in your final reply using one of these aliases: {attached_aliases}. {budget} Do not cite an alias as a mere example: mentioning it may start the agent.\n\n"
+                 To ask another agent for help, address it with a direct request in your final reply using one of these aliases: {attached_aliases}, then add `<!-- kronn:handoff @alias -->` with the real alias substituted. {budget} Only this marker launches the agent; a normal mention is informational. The marker is removed before the message is stored.\n\n"
             ),
         };
         format!("{context_files_prompt}{notice}")
@@ -1159,7 +1368,8 @@ async fn make_agent_stream_inner(
         global_mcp_context.as_deref(),
         &agent_type,
     ) + context_files_prompt.len();
-    let prompt = build_agent_prompt(&disc, &agent_type, extra_context_len);
+    let prompt_disc = discussion_at_dispatch_trigger(&disc, dispatch_trigger_message_id.as_deref());
+    let prompt = build_agent_prompt(&prompt_disc, &agent_type, extra_context_len);
 
     let auth_mode_str = auth_mode_for(&agent_type, &tokens);
 
@@ -1778,7 +1988,16 @@ async fn make_agent_stream_inner(
                 // error/kill stderr capture above, which bypasses the streaming
                 // cap), so a multi-MB message can't reach the DB or crash the UI
                 // renderer on open. See `cap_agent_response`.
+                full_response = runner::strip_leading_thinking_blocks(&full_response);
                 full_response = cap_agent_response(full_response, MAX_AGENT_RESPONSE_BYTES);
+
+                // Ordinary @alias references in an answer are informational.
+                // Only the hidden marker requested by the collaboration prompt
+                // authorizes a new native dispatch, and it never reaches the
+                // persisted transcript.
+                let (cleaned_response, marked_handoffs) =
+                    extract_agent_handoff_markers(&full_response);
+                full_response = cleaned_response;
 
                 // Save agent response to DB — always runs even if client is gone
                 let tier_label = match disc_tier {
@@ -1854,7 +2073,7 @@ async fn make_agent_stream_inner(
                 // can show "Ollama · qwen3:32b" even when the model changes
                 // mid-thread. `None` for provider-default runs with no flag.
                 let candidate_handoffs = if child_run_was_success {
-                    agent_mentions_in_prose(&full_response)
+                    marked_handoffs
                         .into_iter()
                         .filter(|candidate| attached_handoff_agents.contains(candidate))
                         .filter(|candidate| {

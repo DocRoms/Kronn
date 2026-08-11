@@ -1468,6 +1468,9 @@
 
 .set-agent-handoff-card {
   grid-column: 1 / -1;
+  /* Deep links land below the fixed application header instead of hiding the
+     card title underneath it. Mirrors the offset used by top-level cards. */
+  scroll-margin-top: 84px;
 }
 
 .set-agent-handoff-toggle {
@@ -4993,6 +4996,10 @@
   }
 
   .set-card {
+    scroll-margin-top: 112px;
+  }
+
+  .set-agent-handoff-card {
     scroll-margin-top: 112px;
   }
 }

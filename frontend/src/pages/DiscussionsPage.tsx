@@ -277,6 +277,14 @@ import { speakText, stopTts, pauseTts, resumeTts, isTtsPaused } from '../lib/tts
 const EMPTY_ATTACHMENTS: ContextFile[] = [];
 const EMPTY_MESSAGES: DiscussionMessage[] = [];
 
+function registerAbortController(
+  registry: React.MutableRefObject<Record<string, AbortController>>,
+  discussionId: string,
+  controller: AbortController,
+) {
+  registry.current[discussionId] = controller;
+}
+
 let ttsWorker: Worker | null = null;
 function getTtsWorker(): Worker {
   if (!ttsWorker) {
@@ -1585,7 +1593,7 @@ export function DiscussionsPage({
 
     // Trigger agent run after a short delay to let discussion load in sidebar
     const controller = new AbortController();
-    abortControllers.current[discId] = controller;
+    registerAbortController(abortControllers, discId, controller);
     setTimeout(async () => {
       pendingAutoRun.current = null;
       if (controller.signal.aborted) return;
@@ -1726,26 +1734,14 @@ export function DiscussionsPage({
       return;
     }
 
-    // Prompt-driven multi-agent launch reuses the existing orchestration
-    // contract: one shared discussion, every mentioned agent contributes to
-    // the first round, and Kronn persists the participant list + synthesis.
-    // A single mention stays on the cheaper legacy run path because the form
-    // already made that agent the discussion's primary.
-    if (config.targetAgents.length > 1) {
-      await handleOrchestrate(
-        config.targetAgents,
-        1,
-        config.skillIds,
-        config.directiveIds,
-        discId,
-      );
-      return;
-    }
-
     const controller = new AbortController();
-    abortControllers.current[discId] = controller;
+    registerAbortController(abortControllers, discId, controller);
     setSendingMap(prev => ({ ...prev, [discId]: true }));
     setStreamingMap(prev => ({ ...prev, [discId]: '' }));
+    const firstTarget = config.targetAgents[0];
+    if (firstTarget) {
+      setStreamingTargetMap(prev => ({ ...prev, [discId]: firstTarget }));
+    }
     resetAgentLogs();
     await discussionsApi.runAgent(
       discId,
@@ -1753,7 +1749,15 @@ export function DiscussionsPage({
       () => cleanupStream(discId),
       (error) => { console.error('Agent error:', error); const e = userError(error); if (e.includes('checked out') || e.includes('worktree')) { setWorktreeError(e); } else { toast(e, 'error'); } cleanupStream(discId); },
       controller.signal,
-        onAgentLog,
+      onAgentLog,
+      undefined,
+      () => {
+        // `/run` materializes one durable dispatch per initial target before
+        // opening the SSE response. Refresh immediately so every independent
+        // responder gets its own placeholder, including the queued ones.
+        reloadDiscussion(discId);
+        refetchDiscussions();
+      },
     );
   };
 
@@ -2888,7 +2892,10 @@ export function DiscussionsPage({
             onSubmit={handleCreateDiscussion}
             onClose={() => setShowNewDiscussion(false)}
             onPrefillConsumed={onPrefillConsumed}
-            onNavigate={(page) => { setShowNewDiscussion(false); onNavigate(page); }}
+            onNavigate={(page, opts) => {
+              setShowNewDiscussion(false);
+              onNavigate(page, opts);
+            }}
             t={t}
           />
         )}

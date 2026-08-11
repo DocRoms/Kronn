@@ -187,6 +187,12 @@ describe('NewDiscussionForm — creation flow layout', () => {
     expect(screen.getByTestId('new-disc-agent-picker')).toHaveTextContent('disc.agentFromPrompt');
     expect(screen.getByTestId('prompt-agent-summary')).toHaveTextContent('@codex');
     expect(screen.getByTestId('prompt-agent-summary')).toHaveTextContent('@claude');
+    await waitFor(() => {
+      const mode = screen.getByTestId('prompt-multi-agent-mode');
+      expect(mode).toHaveAttribute('data-collaboration', 'disabled');
+      expect(mode).toHaveTextContent('disc.multiAgentIndependentTitle');
+      expect(mode).toHaveTextContent('disc.multiAgentCollaborationDisabled');
+    });
 
     const create = document.querySelector('.disc-create-btn') as HTMLButtonElement;
     expect(create.disabled).toBe(false);
@@ -199,6 +205,63 @@ describe('NewDiscussionForm — creation flow layout', () => {
       targetTiers: { Codex: 'default', ClaudeCode: 'default' },
       launchAgentNow: true,
     }));
+  });
+
+  it('shows when agent-to-agent collaboration remains available after independent replies', async () => {
+    const apiMod = await import('../../lib/api');
+    (apiMod.config.getServerConfig as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      default_model_tier: 'default',
+      agent_handoffs_enabled: true,
+    });
+    render(
+      <NewDiscussionForm
+        projects={[]}
+        agents={[AGENT, CODEX_AGENT]}
+        configLanguage="fr"
+        agentAccess={null}
+        onSubmit={vi.fn()}
+        onClose={vi.fn()}
+        onNavigate={vi.fn()}
+        t={(key: string) => key}
+      />,
+    );
+
+    fireEvent.change(screen.getByRole('textbox', { name: 'disc.prompt' }), {
+      target: { value: '@codex @claude répondez à cette question.' },
+    });
+
+    await waitFor(() => {
+      const mode = screen.getByTestId('prompt-multi-agent-mode');
+      expect(mode).toHaveAttribute('data-collaboration', 'enabled');
+      expect(mode).toHaveTextContent('disc.multiAgentCollaborationEnabled');
+    });
+  });
+
+  it('opens settings directly on the agent collaboration control', async () => {
+    const onClose = vi.fn();
+    const onNavigate = vi.fn();
+    render(
+      <NewDiscussionForm
+        projects={[]}
+        agents={[AGENT, CODEX_AGENT]}
+        configLanguage="fr"
+        agentAccess={null}
+        onSubmit={vi.fn()}
+        onClose={onClose}
+        onNavigate={onNavigate}
+        t={(key: string) => key}
+      />,
+    );
+
+    fireEvent.change(screen.getByRole('textbox', { name: 'disc.prompt' }), {
+      target: { value: '@codex @claude répondez à cette question.' },
+    });
+    fireEvent.click(await screen.findByText('disc.multiAgentCollaborationSettings'));
+
+    expect(onClose).toHaveBeenCalledOnce();
+    expect(onNavigate).toHaveBeenCalledWith('settings', {
+      scrollTo: 'settings-agent-handoffs',
+    });
   });
 
   it('selects and submits the reasoning level beside each prompt alias', async () => {

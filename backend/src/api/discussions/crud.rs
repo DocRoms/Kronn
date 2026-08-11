@@ -239,6 +239,17 @@ pub async fn create(
     let workspace_mode = req.workspace_mode.unwrap_or_else(|| "Direct".into());
     let base_branch = req.base_branch;
 
+    let mut initial_participants = vec![req.agent.clone()];
+    for target in &req.initial_targets {
+        if matches!(
+            target.kind,
+            MessageTargetKind::DiscussionAgent | MessageTargetKind::Agent
+        ) && !initial_participants.contains(&target.agent_type)
+        {
+            initial_participants.push(target.agent_type.clone());
+        }
+    }
+
     let discussion = Discussion {
         awaiting_agent: false,
         id: Uuid::new_v4().to_string(),
@@ -246,7 +257,7 @@ pub async fn create(
         title: req.title,
         agent: req.agent.clone(),
         language,
-        participants: vec![req.agent.clone()],
+        participants: initial_participants,
         messages: vec![initial_message.clone()],
         message_count: 1,
         non_system_message_count: 1,
@@ -750,6 +761,11 @@ mod tests {
 
         let response = create(State(state.clone()), Json(request)).await;
         let discussion = response.0.data.expect("discussion created");
+        assert_eq!(
+            discussion.participants,
+            vec![AgentType::Codex, AgentType::Ollama],
+            "every initial native target must remain visible in the room",
+        );
         let message_id = discussion.messages[0].id.clone();
         let targets = state
             .db

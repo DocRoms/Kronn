@@ -2191,7 +2191,7 @@ describe('DiscussionsPage', () => {
     }, { timeout: 1000 });
   });
 
-  it('launches every agent mentioned in a new-discussion prompt through one orchestration round', async () => {
+  it('launches every agent mentioned in a new-discussion prompt as independent replies', async () => {
     const createdDisc: Discussion = {
       ...makeListDiscussion('prompt-agents-1', 1),
       agent: 'Codex',
@@ -2262,6 +2262,10 @@ describe('DiscussionsPage', () => {
       });
     });
     expect(screen.getByText('Agents définis par le prompt')).toBeTruthy();
+    await waitFor(() => {
+      expect(screen.getByText('Réponses multi-agents.')).toBeTruthy();
+      expect(screen.getByText(/Collaboration entre agents désactivée/)).toBeTruthy();
+    });
 
     await act(async () => {
       fireEvent.click(screen.getByText(/Démarrer la discussion/));
@@ -2278,17 +2282,18 @@ describe('DiscussionsPage', () => {
       );
     });
     await waitFor(() => {
-      expect(vi.mocked(discussionsApi.orchestrate)).toHaveBeenCalledWith(
+      expect(vi.mocked(discussionsApi.runAgent)).toHaveBeenCalledWith(
         'prompt-agents-1',
-        expect.objectContaining({
-          agents: ['Codex', 'ClaudeCode'],
-          max_rounds: 1,
-        }),
-        expect.any(Object),
+        expect.any(Function),
+        expect.any(Function),
+        expect.any(Function),
         expect.any(AbortSignal),
+        expect.any(Function),
+        undefined,
+        expect.any(Function),
       );
     });
-    expect(vi.mocked(discussionsApi.runAgent)).not.toHaveBeenCalled();
+    expect(vi.mocked(discussionsApi.orchestrate)).not.toHaveBeenCalled();
   });
 
   it('shows copy button on agent messages', async () => {

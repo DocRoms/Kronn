@@ -57,7 +57,7 @@ export interface NewDiscussionFormProps {
   onSubmit: (config: NewDiscConfig) => void;
   onClose: () => void;
   onPrefillConsumed?: () => void;
-  onNavigate: (page: string) => void;
+  onNavigate: (page: string, opts?: { scrollTo?: string }) => void;
   t: (key: string, ...args: (string | number)[]) => string;
 }
 
@@ -96,6 +96,7 @@ export function NewDiscussionForm({
   // Strict semantic — only applied at form-open time, never retroactively.
   const [newDiscTier, setNewDiscTier] = useState<'economy' | 'default' | 'reasoning'>('default');
   const [promptAgentTiers, setPromptAgentTiers] = useState<Partial<Record<AgentType, ModelTier>>>({});
+  const [agentHandoffsEnabled, setAgentHandoffsEnabled] = useState<boolean | null>(null);
   // 0.8.6 phase 2 — disc-first refactor. When `false`, the disc is
   // created without launching a CLI ; the user invites agents later
   // via the `[+ Inviter]` header button. Default `true` keeps the
@@ -189,6 +190,7 @@ export function NewDiscussionForm({
         if (cfg?.default_model_tier) {
           setNewDiscTier(cfg.default_model_tier);
         }
+        setAgentHandoffsEnabled(cfg?.agent_handoffs_enabled ?? false);
       })
       .catch(() => { /* keep 'default' fallback */ });
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -817,6 +819,36 @@ export function NewDiscussionForm({
                     .join(', '),
                 )}
               </span>
+            )}
+            {promptLaunchAgents.length > 1 && unavailablePromptAgents.length === 0 && (
+              <div
+                className="disc-prompt-multi-agent-mode"
+                data-collaboration={agentHandoffsEnabled === true ? 'enabled' : 'disabled'}
+                data-testid="prompt-multi-agent-mode"
+              >
+                <MessageSquare size={14} aria-hidden="true" />
+                <span>
+                  <strong>{t('disc.multiAgentIndependentTitle')}</strong>
+                  {' '}{t('disc.multiAgentIndependentHint', promptLaunchAgents.length)}
+                  {agentHandoffsEnabled !== null && (
+                    <small>
+                      {agentHandoffsEnabled
+                        ? t('disc.multiAgentCollaborationEnabled')
+                        : t('disc.multiAgentCollaborationDisabled')}
+                      {' '}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          onClose();
+                          onNavigate('settings', { scrollTo: 'settings-agent-handoffs' });
+                        }}
+                      >
+                        {t('disc.multiAgentCollaborationSettings')}
+                      </button>
+                    </small>
+                  )}
+                </span>
+              </div>
             )}
           </div>
         )}

@@ -17,6 +17,7 @@ use axum::{
     Json,
 };
 use chrono::Utc;
+use rusqlite::{Connection, OptionalExtension};
 use uuid::Uuid;
 
 use crate::models::*;
@@ -48,6 +49,71 @@ fn same_target_identity(left: &MessageTarget, right: &MessageTarget) -> bool {
     left.kind == right.kind
         && left.agent_type == right.agent_type
         && left.cli_session_id == right.cli_session_id
+}
+
+/// Native responders represented by a message's typed targets.
+///
+/// `None` means the discussion's principal agent; `Some(agent)` is a
+/// punctual native agent. Joined CLI identities are deliberately excluded:
+/// `/run` may start local processes, but it must never impersonate a joined
+/// CLI session. An entirely untargeted message keeps the legacy principal
+/// fallback.
+fn native_dispatch_agents_for_targets(targets: &[MessageTarget]) -> Vec<Option<AgentType>> {
+    if targets.is_empty() {
+        return vec![None];
+    }
+
+    let mut agents = Vec::new();
+    for target in targets {
+        let candidate = match target.kind {
+            MessageTargetKind::DiscussionAgent => Some(None),
+            MessageTargetKind::Agent => Some(Some(target.agent_type.clone())),
+            MessageTargetKind::Cli => None,
+        };
+        if let Some(candidate) = candidate {
+            if !agents.contains(&candidate) {
+                agents.push(candidate);
+            }
+        }
+    }
+    agents
+}
+
+fn enqueue_dispatches_for_trigger(
+    conn: &Connection,
+    discussion_id: &str,
+    trigger_message_id: &str,
+    trigger_sort_order: i64,
+    run_key: &str,
+) -> anyhow::Result<Vec<crate::db::agent_dispatch::AgentDispatchJob>> {
+    let targets = crate::db::discussions::list_message_targets(conn, trigger_message_id)?;
+    let dispatch_agents = native_dispatch_agents_for_targets(&targets);
+    let mut jobs = Vec::with_capacity(dispatch_agents.len());
+    for (position, agent_override) in dispatch_agents.iter().enumerate() {
+        let job_id = Uuid::new_v4().to_string();
+        let target_key = agent_override
+            .as_ref()
+            .map(|agent| format!("{agent:?}"))
+            .unwrap_or_else(|| "discussion-agent".to_string());
+        let dedupe_key = format!("force:{run_key}:{position}:{target_key}");
+        let job = crate::db::agent_dispatch::enqueue(
+            conn,
+            crate::db::agent_dispatch::NewAgentDispatchJob {
+                id: &job_id,
+                discussion_id,
+                trigger_message_id,
+                trigger_sort_order,
+                dedupe_key: &dedupe_key,
+                agent_override: agent_override.as_ref(),
+                chain_prompt_ids: &[],
+                batch_item: None,
+                group_id: None,
+                group_concurrency_limit: None,
+            },
+        )?;
+        jobs.push(job);
+    }
+    Ok(jobs)
 }
 
 pub(crate) fn normalized_targets(
@@ -766,8 +832,6 @@ pub async fn run_agent(
     Path(id): Path<String>,
     request: Option<Json<RunAgentRequest>>,
 ) -> Sse<SseStream> {
-    let job_id = Uuid::new_v4().to_string();
-    let enqueue_id = job_id.clone();
     let enqueue_discussion_id = id.clone();
     let requested_key = request
         .and_then(|Json(request)| request.idempotency_key)
@@ -780,53 +844,54 @@ pub async fn run_agent(
             serde_json::json!({ "error": "Invalid idempotency_key" }).to_string(),
         )]);
     }
-    let dedupe_key = format!(
-        "force:{}",
-        requested_key.as_deref().unwrap_or(job_id.as_str())
-    );
-    let job = state
+    let run_key = requested_key.unwrap_or_else(|| Uuid::new_v4().to_string());
+    let jobs = state
         .db
         .with_conn(move |conn| {
             if let Some(active) =
                 crate::db::agent_dispatch::find_active_for_discussion(conn, &enqueue_discussion_id)?
             {
-                return Ok(Some(active));
+                return Ok((true, vec![active]));
             }
-            let has_user_message: bool = conn.query_row(
-                "SELECT EXISTS(
-                    SELECT 1 FROM messages
-                    WHERE discussion_id = ?1 AND role = 'User' AND channel = 'main'
-                )",
-                [&enqueue_discussion_id],
-                |row| row.get(0),
-            )?;
-            if !has_user_message {
-                return Ok(None);
-            }
+            let trigger = conn
+                .query_row(
+                    "SELECT id, sort_order FROM messages
+                     WHERE discussion_id = ?1 AND role = 'User' AND channel = 'main'
+                     ORDER BY sort_order DESC LIMIT 1",
+                    [&enqueue_discussion_id],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+                )
+                .optional()?;
+            let Some((trigger_message_id, trigger_sort_order)) = trigger else {
+                return Ok((false, Vec::new()));
+            };
             let transaction = conn.unchecked_transaction()?;
-            let job = crate::db::agent_dispatch::enqueue_for_latest_user(
+            let jobs = enqueue_dispatches_for_trigger(
                 &transaction,
-                crate::db::agent_dispatch::NewLatestUserDispatch {
-                    id: &enqueue_id,
-                    discussion_id: &enqueue_discussion_id,
-                    dedupe_key: &dedupe_key,
-                    agent_override: None,
-                    chain_prompt_ids: &[],
-                    batch_item: None,
-                    group_id: None,
-                    group_concurrency_limit: None,
-                },
+                &enqueue_discussion_id,
+                &trigger_message_id,
+                trigger_sort_order,
+                &run_key,
             )?;
-            crate::db::discussions::set_awaiting_agent(&transaction, &enqueue_discussion_id, true)?;
+            if !jobs.is_empty() {
+                crate::db::discussions::set_awaiting_agent(
+                    &transaction,
+                    &enqueue_discussion_id,
+                    true,
+                )?;
+            }
             transaction.commit()?;
-            Ok(Some(job))
+            Ok((true, jobs))
         })
         .await;
-    let job = match job {
-        Ok(Some(job)) => job,
+    let job = match jobs {
+        Ok((_, jobs)) if !jobs.is_empty() => jobs.into_iter().next().expect("non-empty jobs"),
         // Legacy/empty discussions have no User message to anchor a durable
         // obligation. Preserve the force-run behaviour for those rare cases.
-        Ok(None) => return make_agent_stream(state, id, None).await,
+        Ok((false, _)) => return make_agent_stream(state, id, None).await,
+        // The latest message explicitly targets joined CLI identities only.
+        // Its local `/run` launch is intentionally a no-op.
+        Ok((true, _)) => return sse_events(Vec::new()),
         Err(error) => {
             tracing::error!("Force-run durable enqueue failed for {id}: {error}");
             return sse_events(vec![Event::default().event("error").data(
@@ -959,6 +1024,74 @@ mod tests {
     use axum::response::IntoResponse;
     use std::sync::Arc;
     use tokio::sync::RwLock;
+
+    #[test]
+    fn plural_message_targets_create_independent_native_dispatches() {
+        let targets = vec![
+            MessageTarget::discussion_agent(AgentType::Codex).with_tier(ModelTier::Economy),
+            MessageTarget::agent(AgentType::ClaudeCode).with_tier(ModelTier::Reasoning),
+        ];
+
+        assert_eq!(
+            native_dispatch_agents_for_targets(&targets),
+            vec![None, Some(AgentType::ClaudeCode)]
+        );
+    }
+
+    #[test]
+    fn native_dispatch_targets_ignore_joined_cli_and_deduplicate_agents() {
+        let targets = vec![
+            MessageTarget::cli(AgentType::Codex, 42),
+            MessageTarget::agent(AgentType::Ollama),
+            MessageTarget::agent(AgentType::Ollama),
+        ];
+
+        assert_eq!(
+            native_dispatch_agents_for_targets(&targets),
+            vec![Some(AgentType::Ollama)]
+        );
+        assert_eq!(native_dispatch_agents_for_targets(&[]), vec![None]);
+    }
+
+    #[test]
+    fn initial_run_enqueues_one_durable_job_per_native_target() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO discussions (id, title, agent, participants_json, created_at, updated_at)
+             VALUES ('d-initial-plural', 'Plural', 'Codex', '[\"Codex\",\"ClaudeCode\"]', ?1, ?1)",
+            [&now],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO messages (
+                 id, discussion_id, role, channel, content, timestamp,
+                 sort_order, received_at
+             ) VALUES ('u-initial', 'd-initial-plural', 'User', 'main', 'go', ?1, 0, ?1)",
+            [&now],
+        )
+        .unwrap();
+        crate::db::discussions::replace_message_targets(
+            &conn,
+            "u-initial",
+            &[
+                MessageTarget::discussion_agent(AgentType::Codex),
+                MessageTarget::agent(AgentType::ClaudeCode),
+            ],
+        )
+        .unwrap();
+
+        let jobs =
+            enqueue_dispatches_for_trigger(&conn, "d-initial-plural", "u-initial", 0, "test-run")
+                .unwrap();
+
+        assert_eq!(jobs.len(), 2);
+        assert_eq!(jobs[0].agent_override, None);
+        assert_eq!(jobs[1].agent_override, Some(AgentType::ClaudeCode));
+        assert!(jobs.iter().all(|job| job.trigger_message_id == "u-initial"));
+    }
 
     /// State with one project + one disc, mirroring the disc_invite test
     /// harness. `send_message` is a free function over extractors, so we

@@ -1653,6 +1653,7 @@ export const discussions = {
     signal?: AbortSignal,
     onLog?: (text: string) => void,
     idempotencyKey?: string,
+    onStart?: () => void,
   ) => discussions._streamSSE(
     `${_apiBase}/api/discussions/${id}/run`,
     idempotencyKey ? { idempotency_key: idempotencyKey } : null,
@@ -1660,7 +1661,7 @@ export const discussions = {
     onDone,
     onError,
     signal,
-    undefined,
+    onStart,
     onLog,
   ),
 
