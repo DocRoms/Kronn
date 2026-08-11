@@ -24,7 +24,7 @@ import { parseAgentQuestions } from '../lib/agent-question-parse';
 import { userError } from '../lib/userError';
 import { getDeployedVersion, setDeployedVersion } from '../lib/qp-improver-banner';
 import { sanitizeQpImproverPayload } from '../lib/qp-improver-sanitize';
-import type { Project, AgentDetection, Discussion, DiscussionMessage, MessageChannel, AgentType, AgentsConfig, Skill, AgentProfile, Directive, McpConfigDisplay, McpIncompatibility, Contact, WsMessage, ContextFile, BatchRunSummary, DiscussionPlan, ProposalListResponse, MessageSearchHit, MessageTarget, ParticipantView } from '../types/generated';
+import type { Project, AgentDetection, Discussion, DiscussionDetail, DiscussionMessage, MessageChannel, AgentType, AgentsConfig, Skill, AgentProfile, Directive, McpConfigDisplay, McpIncompatibility, Contact, WsMessage, ContextFile, BatchRunSummary, DiscussionPlan, ProposalListResponse, MessageSearchHit, MessageTarget, ParticipantView } from '../types/generated';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { useQpChain } from '../hooks/useQpChain';
 import { useMessageQueue } from '../hooks/useMessageQueue';
@@ -53,6 +53,9 @@ import {
   pendingAgentReplies,
   targetsFromComposerText,
 } from '../lib/messageTargets';
+
+type LoadedDiscussion = Discussion
+  & Partial<Pick<DiscussionDetail, 'active_agent_dispatches' | 'message_targets'>>;
 
 function newClientMessageId(): string {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
@@ -645,7 +648,7 @@ export function DiscussionsPage({
   );
 
   // Cache of fully-loaded discussions (with messages)
-  const [loadedDiscussions, setLoadedDiscussions] = useState<Record<string, Discussion>>({});
+  const [loadedDiscussions, setLoadedDiscussions] = useState<Record<string, LoadedDiscussion>>({});
 
   // Fetch full discussion (with messages) when active discussion changes
   // or when sending finishes (to pick up the agent's response).
@@ -675,7 +678,7 @@ export function DiscussionsPage({
   useEffect(() => { setWorktreeError(null); }, [activeDiscussionId]);
 
   // ─── Derived data ────────────────────────────────────────────────────────
-  const activeDiscussion = (activeDiscussionId && loadedDiscussions[activeDiscussionId])
+  const activeDiscussion: LoadedDiscussion | null = (activeDiscussionId && loadedDiscussions[activeDiscussionId])
     ? loadedDiscussions[activeDiscussionId]
     : allDiscussions.find(d => d.id === activeDiscussionId) ?? null;
   const replyTarget = useMemo(
@@ -1656,6 +1659,11 @@ export function DiscussionsPage({
         agent: config.agent,
         language: configLanguage ?? 'fr',
         initial_prompt: config.prompt,
+        initial_targets: config.targetAgents.map(agent => ({
+          kind: agent === config.agent ? 'discussion_agent' : 'agent',
+          agent_type: agent,
+          tier: config.targetTiers[agent] ?? config.tier,
+        })),
         skill_ids: config.skillIds.length > 0 ? config.skillIds : undefined,
         profile_ids: config.profileIds.length > 0 ? config.profileIds : undefined,
         ...(config.directiveIds.length > 0 ? { directive_ids: config.directiveIds } : {}),
@@ -1905,6 +1913,10 @@ export function DiscussionsPage({
             target_agent: targets[0]?.agent_type ?? null,
             reply_to_message_id: replyTargetId ?? null,
           }],
+          message_targets: {
+            ...(disc.message_targets ?? {}),
+            [clientMessageId]: targets,
+          },
           message_count: disc.message_count + 1,
           non_system_message_count: disc.non_system_message_count + 1,
         },
@@ -1950,11 +1962,13 @@ export function DiscussionsPage({
       setLoadedDiscussions(prev => {
         const disc = prev[discId];
         if (!disc) return prev;
+        const { [clientMessageId]: _removedTarget, ...remainingTargets } = disc.message_targets ?? {};
         return {
           ...prev,
           [discId]: {
             ...disc,
             messages: disc.messages.filter(m => m.id !== clientMessageId),
+            message_targets: remainingTargets,
             message_count: Math.max(0, disc.message_count - 1),
             non_system_message_count: Math.max(0, disc.non_system_message_count - 1),
           },
@@ -2959,6 +2973,7 @@ export function DiscussionsPage({
               discussion={activeDiscussion}
               projects={projects}
               agents={agents}
+              modelTiers={agentAccess?.model_tiers}
               showGitPanel={showGitPanel}
               showPlanPanel={showPlanPanel}
               showSettingsPanel={showSettingsPanel}
@@ -3352,6 +3367,7 @@ export function DiscussionsPage({
                       {separator}
                       <MessageBubble
                         msg={msg}
+                        targets={activeDiscussion.message_targets?.[msg.id] ?? []}
                         idx={idx}
                         attachments={attachmentsByMessageId[msg.id] ?? EMPTY_ATTACHMENTS}
                         pendingAttachment={pendingFileMsgIds.has(msg.id)}
@@ -4165,6 +4181,7 @@ export function DiscussionsPage({
                 clearReplyDraft(activeDiscussion.id);
                 setReplyToMessageId(null);
               }}
+              modelTiers={agentAccess?.model_tiers}
               toast={toast}
               t={t}
             />

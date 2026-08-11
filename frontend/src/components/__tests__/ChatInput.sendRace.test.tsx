@@ -16,7 +16,11 @@
 import { beforeEach, describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent, act, waitFor } from '@testing-library/react';
 import { ChatInput } from '../ChatInput';
-import type { AgentDetection, Discussion } from '../../types/generated';
+import type {
+  AgentDetection,
+  Discussion,
+  ModelTiersConfig,
+} from '../../types/generated';
 import {
   autoTriggersApi,
   discussions as discussionsApi,
@@ -47,6 +51,7 @@ async function mount(
   sending = false,
   agents: AgentDetection[] = [],
   discussion: Discussion = disc,
+  modelTiers?: ModelTiersConfig,
 ) {
   const t = (k: string, ...a: unknown[]) => (a.length ? `${k}(${a.join('|')})` : k);
   let view!: ReturnType<typeof render>;
@@ -60,6 +65,7 @@ async function mount(
         onTtsToggle={vi.fn()} onWorktreeErrorDismiss={vi.fn()}
         onWorktreeRetry={vi.fn()} isAgentRestricted={() => false}
         contextFiles={[]} uploadingFiles={false}
+        modelTiers={modelTiers}
         toast={vi.fn() as never} t={t}
       />,
     );
@@ -82,6 +88,7 @@ function sendButton(): HTMLButtonElement {
 
 describe('ChatInput — send-race guard (P0-10)', () => {
   beforeEach(() => {
+    localStorage.clear();
     vi.spyOn(autoTriggersApi, 'listDisabled').mockResolvedValue([]);
     vi.spyOn(discussionsApi, 'participants').mockResolvedValue([]);
     vi.spyOn(discussionsApi, 'nativeAgentMode').mockResolvedValue({ disabled: false });
@@ -186,9 +193,9 @@ describe('ChatInput — send-race guard (P0-10)', () => {
     expect(cliIndex).toBeGreaterThanOrEqual(0);
     expect(punctualIndex).toBeGreaterThan(cliIndex);
     fireEvent.keyDown(screen.getByRole('textbox'), { key: 'Escape' });
-    fireEvent.click(screen.getByLabelText('disc.routingHelpTitle'));
+    fireEvent.click(screen.getByLabelText('disc.composerHelpTitle'));
 
-    const help = screen.getByRole('dialog', { name: 'disc.routingHelpTitle' });
+    const help = screen.getByRole('dialog', { name: 'disc.composerHelpTitle' });
     expect(help).toHaveTextContent('disc.routingActiveAgents');
     expect(help).toHaveTextContent('disc.routingAvailableAgents');
     expect(help).toHaveTextContent('disc.routingDisabledAgent');
@@ -199,6 +206,162 @@ describe('ChatInput — send-race guard (P0-10)', () => {
     expect(help).toHaveTextContent(
       'disc.routingHelpAll(@codex-cli · disc.targetCli)',
     );
+    expect(help).toHaveTextContent('markdown.helpTitle');
+    expect(help).toHaveTextContent('markdown.emojiHint');
+    expect(screen.queryByRole('button', { name: 'markdown.help' })).toBeNull();
+  });
+
+  it('shows the discussion tier on its principal and Standard on punctual aliases', async () => {
+    const reasoningDiscussion = {
+      ...disc,
+      tier: 'reasoning',
+      model: null,
+      participants: ['ClaudeCode', 'Codex'],
+    } as Discussion;
+    const modelTiers = {
+      claude_code: { reasoning: 'claude-company-opus' },
+      codex: { default: 'gpt-company-standard', reasoning: 'gpt-company-review' },
+      gemini_cli: {},
+      kiro: {},
+      vibe: {},
+      copilot_cli: {},
+      ollama: {},
+      lite_llm: {},
+    } as ModelTiersConfig;
+    await mount(vi.fn(), false, [
+      {
+        agent_type: 'ClaudeCode', installed: true, runtime_available: false, enabled: true,
+      },
+      {
+        agent_type: 'Codex', installed: true, runtime_available: false, enabled: true,
+      },
+    ] as AgentDetection[], reasoningDiscussion, modelTiers);
+
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: '@' } });
+
+    expect(screen.getByLabelText(
+      'disc.routingNativeTier(disc.tier.reasoning|claude-company-opus)',
+    )).toBeInTheDocument();
+    expect(screen.getByLabelText(
+      'disc.routingTargetTier(disc.tier.default|gpt-company-standard)',
+    )).toBeInTheDocument();
+  });
+
+  it('routes a punctual @alias with the tier chosen in one click', async () => {
+    const onSend = vi.fn();
+    const modelTiers = {
+      claude_code: {},
+      codex: { reasoning: 'gpt-company-review' },
+      gemini_cli: {},
+      kiro: {},
+      vibe: {},
+      copilot_cli: {},
+      ollama: {},
+      lite_llm: {},
+    } as ModelTiersConfig;
+    await mount(onSend, false, [{
+      agent_type: 'Codex', installed: true, runtime_available: false, enabled: true,
+    }] as AgentDetection[], disc, modelTiers);
+
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: '@co' } });
+    fireEvent.mouseDown(screen.getByRole('button', {
+      name: '@codex · disc.routingInvokeTier(disc.tier.reasoning|gpt-company-review)',
+    }));
+    fireEvent.click(sendButton());
+
+    expect(onSend).toHaveBeenCalledWith(
+      '@codex',
+      [{
+        kind: 'agent', agent_type: 'Codex', cli_session_id: null, tier: 'reasoning',
+      }],
+      false,
+      undefined,
+    );
+    expect(screen.queryByLabelText('disc.routingOverrides')).not.toBeInTheDocument();
+  });
+
+  it('remembers the last explicit tier for that agent in this discussion', async () => {
+    const onSend = vi.fn();
+    await mount(onSend, false, [{
+      agent_type: 'Codex', installed: true, runtime_available: false, enabled: true,
+    }] as AgentDetection[]);
+
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: '@co' } });
+    fireEvent.mouseDown(screen.getByRole('button', {
+      name: /@codex · disc\.routingInvokeTier\(disc\.tier\.reasoning/,
+    }));
+
+    const routing = screen.getByLabelText('disc.routingOverrides');
+    expect(routing).toHaveTextContent('@codex');
+    expect(routing).toHaveTextContent('🧠 disc.tier.reasoning');
+    fireEvent.click(sendButton());
+    await act(async () => { await Promise.resolve(); });
+
+    typeText('@codex encore un avis');
+    fireEvent.click(sendButton());
+
+    expect(onSend).toHaveBeenLastCalledWith(
+      '@codex encore un avis',
+      [{
+        kind: 'agent', agent_type: 'Codex', cli_session_id: null, tier: 'reasoning',
+      }],
+      false,
+      undefined,
+    );
+  });
+
+  it('routes two aliases at two independent reasoning tiers in one message', async () => {
+    const onSend = vi.fn();
+    await mount(onSend, false, [
+      { agent_type: 'Codex', installed: true, runtime_available: false, enabled: true },
+      { agent_type: 'Ollama', installed: true, runtime_available: true, enabled: true },
+    ] as AgentDetection[]);
+
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: '@co' } });
+    fireEvent.mouseDown(screen.getByRole('button', {
+      name: /@codex · disc\.routingInvokeTier\(disc\.tier\.reasoning/,
+    }));
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: '@codex @ol' } });
+    fireEvent.mouseDown(screen.getByRole('button', {
+      name: /@ollama · disc\.routingInvokeTier\(disc\.tier\.economy/,
+    }));
+
+    expect(screen.getByLabelText('disc.routingOverrides')).toHaveTextContent('@codex');
+    expect(screen.getByLabelText('disc.routingOverrides')).toHaveTextContent('@ollama');
+    fireEvent.click(sendButton());
+
+    expect(onSend).toHaveBeenCalledWith(
+      '@codex @ollama',
+      [
+        { kind: 'agent', agent_type: 'Codex', cli_session_id: null, tier: 'reasoning' },
+        { kind: 'agent', agent_type: 'Ollama', cli_session_id: null, tier: 'economy' },
+      ],
+      false,
+      undefined,
+    );
+  });
+
+  it('marks joined CLI aliases as CLI-managed instead of assigning a Kronn tier', async () => {
+    vi.spyOn(discussionsApi, 'participants').mockResolvedValue([{
+      id: 42,
+      disc_id: disc.id,
+      agent_type: 'Codex',
+      session_id: 'codex-cli-session',
+      role: 'peer',
+      status: 'active',
+      joined_at: '2026-07-29T00:00:00Z',
+      left_at: null,
+    }] as never);
+    await mount(vi.fn(), false, [{
+      agent_type: 'Codex', installed: true, runtime_available: false, enabled: true,
+    }] as AgentDetection[]);
+
+    await waitFor(() => {
+      fireEvent.change(screen.getByRole('textbox'), { target: { value: '@codex-c' } });
+      expect(screen.getByText('@codex-cli')).toBeInTheDocument();
+    });
+    expect(screen.getByLabelText('disc.routingCliModelManaged'))
+      .toBeInTheDocument();
   });
 
   it('routes every installed mention once in the order written by the human', async () => {
@@ -225,8 +388,10 @@ describe('ChatInput — send-race guard (P0-10)', () => {
     expect(onSend).toHaveBeenCalledWith(
       '@codex tu peux confronter @claude si tu veux',
       [
-        { kind: 'agent', agent_type: 'Codex', cli_session_id: null },
-        { kind: 'discussion_agent', agent_type: 'ClaudeCode', cli_session_id: null },
+        { kind: 'agent', agent_type: 'Codex', cli_session_id: null, tier: 'default' },
+        {
+          kind: 'discussion_agent', agent_type: 'ClaudeCode', cli_session_id: null, tier: null,
+        },
       ],
       false,
       undefined,
@@ -252,8 +417,10 @@ describe('ChatInput — send-race guard (P0-10)', () => {
     expect(onSend).toHaveBeenCalledWith(
       'Vous devriez connaître vos points forts et faibles.',
       [
-        { kind: 'discussion_agent', agent_type: 'LiteLlm', cli_session_id: null },
-        { kind: 'agent', agent_type: 'Ollama', cli_session_id: null },
+        {
+          kind: 'discussion_agent', agent_type: 'LiteLlm', cli_session_id: null, tier: null,
+        },
+        { kind: 'agent', agent_type: 'Ollama', cli_session_id: null, tier: 'default' },
       ],
       false,
       undefined,

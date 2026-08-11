@@ -31,6 +31,22 @@ use crate::api::disc_prompts::{
     build_orchestration_prompt, build_synthesis_prompt, OrchestrationContext,
 };
 
+fn target_tier(agent: &AgentType, targets: &[MessageTarget], fallback: ModelTier) -> ModelTier {
+    targets
+        .iter()
+        .find(|target| target.kind != MessageTargetKind::Cli && target.agent_type == *agent)
+        .and_then(|target| target.tier)
+        .unwrap_or(fallback)
+}
+
+fn tier_label(tier: ModelTier) -> &'static str {
+    match tier {
+        ModelTier::Economy => "economy",
+        ModelTier::Default => "default",
+        ModelTier::Reasoning => "reasoning",
+    }
+}
+
 pub async fn orchestrate(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -131,6 +147,21 @@ pub async fn orchestrate(
     let disc_language = disc.language.clone();
     let disc_tier = disc.tier;
     let primary_agent_type = disc.agent.clone();
+    let initial_message_id = disc
+        .messages
+        .iter()
+        .rev()
+        .find(|message| matches!(message.role, MessageRole::User))
+        .map(|message| message.id.clone());
+    let initial_targets = match initial_message_id {
+        Some(message_id) => state
+            .db
+            .with_conn(move |conn| crate::db::discussions::list_message_targets(conn, &message_id))
+            .await
+            .unwrap_or_default(),
+        None => Vec::new(),
+    };
+    let primary_tier = target_tier(&primary_agent_type, &initial_targets, disc_tier);
     // Use skills from the orchestration request if provided, otherwise fall back to discussion skills
     let orch_skill_ids = if req_skill_ids.is_empty() {
         disc.skill_ids.clone()
@@ -381,7 +412,7 @@ pub async fn orchestrate(
                 work_dir: orch_workspace_path.as_deref(),
                 full_access: fa,
                 mcp_context_override: global_mcp_context.as_deref(),
-                tier: disc_tier,
+                tier: primary_tier,
                 model_tiers: Some(&model_tiers_config),
                 lite_llm_base_url: lite_llm_base_url.as_deref(),
                 // Internal summarisation pass — keep disc_id off to avoid
@@ -440,6 +471,7 @@ pub async fn orchestrate(
 
             for agent_type in &agents {
                 let agent_name = agent_display_name(agent_type);
+                let agent_tier = target_tier(agent_type, &initial_targets, disc_tier);
 
                 emit!(AgentStreamEvent::AgentStart {
                     data: serde_json::json!({ "agent": agent_name, "agent_type": agent_type, "round": round })
@@ -466,7 +498,7 @@ pub async fn orchestrate(
                     directive_ids: &orch_directive_ids,
                     profile_ids: &orch_profile_ids,
                     mcp_context_override: global_mcp_context.as_deref(),
-                    tier: disc_tier,
+                    tier: agent_tier,
                     model_tiers: Some(&model_tiers_config),
                     lite_llm_base_url: lite_llm_base_url.as_deref(),
                     context_files_prompt: &companion_context,
@@ -525,7 +557,7 @@ pub async fn orchestrate(
                             let round_model = runner::effective_model_flag(
                                 None,
                                 agent_type,
-                                disc_tier,
+                                agent_tier,
                                 Some(&model_tiers_config),
                             );
                             let msg = DiscussionMessage {
@@ -539,7 +571,7 @@ pub async fn orchestrate(
                                 timestamp: Utc::now(),
                                 tokens_used: result.tokens_used,
                                 auth_mode: Some(auth_mode_for(agent_type, &tokens)),
-                                model_tier: None,
+                                model_tier: Some(tier_label(agent_tier).to_string()),
                                 cost_usd: None,
                                 author_pseudo: None,
                                 author_avatar_email: None,
@@ -616,7 +648,7 @@ pub async fn orchestrate(
                 directive_ids: &orch_directive_ids,
                 profile_ids: &orch_profile_ids,
                 mcp_context_override: global_mcp_context.as_deref(),
-                tier: disc_tier,
+                tier: primary_tier,
                 model_tiers: Some(&model_tiers_config),
                 lite_llm_base_url: lite_llm_base_url.as_deref(),
                 context_files_prompt: &companion_context,
@@ -647,7 +679,7 @@ pub async fn orchestrate(
                         let synthesis_model = runner::effective_model_flag(
                             None,
                             &primary_agent_type,
-                            disc_tier,
+                            primary_tier,
                             Some(&model_tiers_config),
                         );
                         let msg = DiscussionMessage {
@@ -661,7 +693,7 @@ pub async fn orchestrate(
                             timestamp: Utc::now(),
                             tokens_used: result.tokens_used,
                             auth_mode: Some(auth_mode_for(&primary_agent_type, &tokens)),
-                            model_tier: None,
+                            model_tier: Some(tier_label(primary_tier).to_string()),
                             cost_usd: None,
                             author_pseudo: None,
                             author_avatar_email: None,
@@ -1387,7 +1419,8 @@ mod orchestrate_validation_tests {
     // pure function so we can unit-test the discriminant-based comparison
     // without spinning up `detect_all` (which hits the filesystem and
     // depends on the host having `claude` / `codex` binaries).
-    use crate::models::AgentType;
+    use super::target_tier;
+    use crate::models::{AgentType, MessageTarget, ModelTier};
 
     fn missing_agents(requested: &[AgentType], usable: &[AgentType]) -> Vec<AgentType> {
         requested
@@ -1432,6 +1465,27 @@ mod orchestrate_validation_tests {
         let req = vec![AgentType::ClaudeCode, AgentType::Codex, AgentType::Vibe];
         let missing = missing_agents(&req, &[]);
         assert_eq!(missing.len(), 3);
+    }
+
+    #[test]
+    fn orchestration_uses_each_initial_target_tier_with_discussion_fallback() {
+        let targets = vec![
+            MessageTarget::agent(AgentType::Codex).with_tier(ModelTier::Reasoning),
+            MessageTarget::agent(AgentType::Ollama).with_tier(ModelTier::Economy),
+        ];
+
+        assert_eq!(
+            target_tier(&AgentType::Codex, &targets, ModelTier::Default),
+            ModelTier::Reasoning,
+        );
+        assert_eq!(
+            target_tier(&AgentType::Ollama, &targets, ModelTier::Default),
+            ModelTier::Economy,
+        );
+        assert_eq!(
+            target_tier(&AgentType::ClaudeCode, &targets, ModelTier::Default),
+            ModelTier::Default,
+        );
     }
 }
 

@@ -257,18 +257,18 @@ describe('AgentsSection — bounded agent handoffs', () => {
 
     const section = await screen.findByTestId('agent-handoff-section');
     const toggle = section.querySelector<HTMLButtonElement>('.set-agent-handoff-toggle');
-    const select = section.querySelector<HTMLSelectElement>('select');
     expect(toggle).not.toBeNull();
-    expect(select).not.toBeNull();
     expect(toggle).toHaveAttribute('aria-pressed', 'false');
-    expect(select?.disabled).toBe(true);
+    expect(screen.queryByTestId('agent-handoff-details')).toBeNull();
+    expect(section.querySelector('select')).toBeNull();
 
     fireEvent.click(toggle!);
     await waitFor(() => {
       expect(setServerConfigMock).toHaveBeenCalledWith({ agent_handoffs_enabled: true });
-      expect(select?.disabled).toBe(false);
+      expect(screen.getByTestId('agent-handoff-details')).toBeInTheDocument();
     });
-    fireEvent.change(select!, { target: { value: '3' } });
+    const select = section.querySelector<HTMLSelectElement>('select')!;
+    fireEvent.change(select, { target: { value: '3' } });
     await waitFor(() => {
       expect(setServerConfigMock).toHaveBeenCalledWith({
         agent_handoff_paid_limit: 3,
@@ -311,7 +311,7 @@ describe('AgentsSection — bounded agent handoffs', () => {
     });
   });
 
-  it('makes the disabled state explicit from the global card down to each agent', async () => {
+  it('keeps every advanced control collapsed while collaboration is disabled', async () => {
     getServerConfigMock.mockResolvedValue({
       default_model_tier: 'default',
       default_summary_strategy: 'Off',
@@ -333,13 +333,12 @@ describe('AgentsSection — bounded agent handoffs', () => {
       />,
     );
 
-    expect(await screen.findByText('config.agentHandoffDisabledTitle')).toBeInTheDocument();
-    const target = screen.getByTestId('agent-handoff-section')
-      .querySelector<HTMLButtonElement>('.set-agent-handoff-target')!;
-    expect(target).toBeDisabled();
-    expect(target).toHaveTextContent('config.agentHandoffTargetInactive');
-    expect(screen.getByText('config.agentHandoffCliTitle')).toBeInTheDocument();
-    expect(screen.getByText('config.agentHandoffCliHint')).toBeInTheDocument();
+    const section = await screen.findByTestId('agent-handoff-section');
+    expect(section).toHaveTextContent('config.agentHandoffTitle');
+    expect(section).toHaveTextContent('config.agentHandoffOff');
+    expect(screen.queryByTestId('agent-handoff-details')).toBeNull();
+    expect(section.querySelector('.set-agent-handoff-target')).toBeNull();
+    expect(screen.queryByText('config.agentHandoffCliTitle')).toBeNull();
   });
 
   it('supports an explicit unlimited warning and per-agent blocking', async () => {

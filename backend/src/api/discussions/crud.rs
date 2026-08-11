@@ -68,9 +68,12 @@ pub async fn get(
                 &id,
                 &discussion.agent,
             )?;
+            let message_targets =
+                crate::db::discussions::list_discussion_message_targets(conn, &id)?;
             Ok(Some(crate::models::DiscussionDetail {
                 discussion,
                 active_agent_dispatches,
+                message_targets,
             }))
         })
         .await
@@ -280,6 +283,7 @@ pub async fn create(
     // source of truth avoids races against concurrent QP updates).
     let originating_qp_id = req.originating_qp_id.clone();
     let want_no_agent = req.no_agent;
+    let initial_targets = req.initial_targets;
     match state
         .db
         .with_conn(move |conn| {
@@ -295,6 +299,9 @@ pub async fn create(
             }
             crate::db::discussions::insert_discussion(conn, &disc)?;
             crate::db::discussions::insert_message(conn, &disc.id, &msg)?;
+            if !initial_targets.is_empty() {
+                crate::db::discussions::replace_message_targets(conn, &msg.id, &initial_targets)?;
+            }
             if let Some(ref qp_id) = originating_qp_id {
                 if let Ok(Some(v)) = crate::db::quick_prompts::current_version_index(conn, qp_id) {
                     crate::db::discussions::set_originating_qp(conn, &disc.id, qp_id, v)?;
@@ -718,6 +725,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_persists_initial_message_targets_and_their_tiers() {
+        let state = state_with_disc("existing").await;
+        let request: CreateDiscussionRequest = serde_json::from_value(serde_json::json!({
+            "project_id": null,
+            "title": "Tiered launch",
+            "agent": "Codex",
+            "language": "fr",
+            "initial_prompt": "@codex et @ollama",
+            "initial_targets": [
+                {
+                    "kind": "discussion_agent",
+                    "agent_type": "Codex",
+                    "tier": "reasoning"
+                },
+                {
+                    "kind": "agent",
+                    "agent_type": "Ollama",
+                    "tier": "economy"
+                }
+            ]
+        }))
+        .expect("valid create payload");
+
+        let response = create(State(state.clone()), Json(request)).await;
+        let discussion = response.0.data.expect("discussion created");
+        let message_id = discussion.messages[0].id.clone();
+        let targets = state
+            .db
+            .with_conn(move |conn| crate::db::discussions::list_message_targets(conn, &message_id))
+            .await
+            .expect("targets loaded");
+
+        assert_eq!(targets.len(), 2);
+        assert_eq!(targets[0].agent_type, AgentType::Codex);
+        assert_eq!(targets[0].tier, Some(ModelTier::Reasoning));
+        assert_eq!(targets[1].agent_type, AgentType::Ollama);
+        assert_eq!(targets[1].tier, Some(ModelTier::Economy));
+    }
+
+    #[tokio::test]
     async fn get_discussion_exposes_each_active_dispatch_with_its_trigger_turn() {
         let state = state_with_disc("d-overlap").await;
         state
@@ -730,6 +777,14 @@ mod tests {
                          sort_order, received_at
                      ) VALUES ('u-overlap', 'd-overlap', 'User', 'main', 'go', ?1, 0, ?1)",
                     [&now],
+                )?;
+                crate::db::discussions::replace_message_targets(
+                    conn,
+                    "u-overlap",
+                    &[
+                        crate::models::MessageTarget::agent(crate::models::AgentType::Ollama)
+                            .with_tier(crate::models::ModelTier::Economy),
+                    ],
                 )?;
                 crate::db::agent_dispatch::enqueue(
                     conn,
@@ -761,6 +816,13 @@ mod tests {
         assert_eq!(
             detail.active_agent_dispatches[0].agent_type,
             crate::models::AgentType::Ollama
+        );
+        assert_eq!(
+            detail.message_targets.get("u-overlap"),
+            Some(&vec![crate::models::MessageTarget::agent(
+                crate::models::AgentType::Ollama
+            )
+            .with_tier(crate::models::ModelTier::Economy)]),
         );
     }
 

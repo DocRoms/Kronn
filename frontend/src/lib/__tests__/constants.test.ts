@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { AGENT_COLORS, AGENT_LABELS, AGENT_MENTIONS, ALL_AGENT_TYPES, agentColor, agentMentionColors, mentionedAgents, getProjectGroup, isHiddenPath, isUsable, isValidationDisc, isBriefingDisc, isBootstrapDisc, agentSupportsIntrospection, isTrackerMcp, TRACKER_MCP_NEEDLES, parseRepoUrl, buildOldestIssueRequest, inferTrackerSlugFromRepoUrl, RTK_APPLICABLE, isRtkActive } from '../constants';
+import { AGENT_COLORS, AGENT_LABELS, AGENT_MENTIONS, ALL_AGENT_TYPES, MODEL_TIER_ICONS, agentColor, agentMentionColors, mentionedAgents, getProjectGroup, isHiddenPath, isUsable, isValidationDisc, isBriefingDisc, isBootstrapDisc, agentSupportsIntrospection, isTrackerMcp, TRACKER_MCP_NEEDLES, parseRepoUrl, buildOldestIssueRequest, inferTrackerSlugFromRepoUrl, RTK_APPLICABLE, isRtkActive, modelForAgentTier } from '../constants';
 
 describe('constants', () => {
   describe('agent registry completeness', () => {
@@ -40,6 +40,36 @@ describe('constants', () => {
     it('has display-name aliases for Claude and Gemini', () => {
       expect(AGENT_COLORS['Claude Code']).toBe(AGENT_COLORS['ClaudeCode']);
       expect(AGENT_COLORS['Gemini CLI']).toBe(AGENT_COLORS['GeminiCli']);
+    });
+  });
+
+  describe('model tier display', () => {
+    it('uses configured models before built-in and provider defaults', () => {
+      const modelTiers = {
+        claude_code: {},
+        codex: { reasoning: 'gpt-company-review' },
+        gemini_cli: {},
+        kiro: {},
+        vibe: {},
+        copilot_cli: {},
+        ollama: {},
+        lite_llm: {},
+      };
+
+      expect(modelForAgentTier('Codex', 'reasoning', modelTiers, 'Provider default'))
+        .toBe('gpt-company-review');
+      expect(modelForAgentTier('ClaudeCode', 'economy', null, 'Provider default'))
+        .toBe('haiku');
+      expect(modelForAgentTier('LiteLlm', 'default', null, 'Provider default'))
+        .toBe('Provider default');
+    });
+
+    it('keeps one established icon per reasoning tier', () => {
+      expect(MODEL_TIER_ICONS).toEqual({
+        economy: '⚡',
+        default: '🎯',
+        reasoning: '🧠',
+      });
     });
   });
 

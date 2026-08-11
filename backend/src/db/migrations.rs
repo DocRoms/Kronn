@@ -421,6 +421,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "111_agent_handoff_discussion_unlimited",
         include_str!("sql/111_agent_handoff_discussion_unlimited.sql"),
     ),
+    (
+        "112_message_target_tiers",
+        include_str!("sql/112_message_target_tiers.sql"),
+    ),
 ];
 
 /// Run all migrations, optionally backing up the database file first.
@@ -953,6 +957,38 @@ mod tests {
             ("agent".into(), "Codex".into(), None, 0),
             "099 must preserve 098 rows while assigning their legacy punctual-agent identity"
         );
+    }
+
+    #[test]
+    fn message_target_tiers_upgrade_existing_typed_rows_as_inherited() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_through(&conn, "111_agent_handoff_discussion_unlimited").unwrap();
+        conn.execute_batch(
+            "PRAGMA foreign_keys = OFF;
+             INSERT INTO message_targets (
+                 message_id, target_kind, agent_type, cli_session_id, position
+             ) VALUES ('legacy-target', 'agent', 'Codex', NULL, 0);",
+        )
+        .unwrap();
+
+        run(&conn).unwrap();
+
+        let inherited: Option<String> = conn
+            .query_row(
+                "SELECT model_tier FROM message_targets
+                 WHERE message_id = 'legacy-target'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(inherited, None);
+        assert!(conn
+            .execute(
+                "UPDATE message_targets SET model_tier = 'ultra'
+                 WHERE message_id = 'legacy-target'",
+                [],
+            )
+            .is_err());
     }
 
     #[test]

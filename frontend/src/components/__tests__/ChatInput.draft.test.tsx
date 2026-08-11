@@ -184,7 +184,7 @@ describe('ChatInput draft persistence', () => {
     fireEvent.keyDown(textarea, { key: 'Enter', shiftKey: false });
     expect(onSend).toHaveBeenCalledWith(
       'peux-tu @codex',
-      [{ kind: 'agent', agent_type: 'Codex', cli_session_id: null }],
+      [{ kind: 'agent', agent_type: 'Codex', cli_session_id: null, tier: 'default' }],
       false,
       undefined,
     );
@@ -232,7 +232,7 @@ describe('ChatInput draft persistence', () => {
     fireEvent.keyDown(textarea, { key: 'Enter', shiftKey: false });
     expect(onSend).toHaveBeenCalledWith(
       '@ollama',
-      [{ kind: 'agent', agent_type: 'Ollama', cli_session_id: null }],
+      [{ kind: 'agent', agent_type: 'Ollama', cli_session_id: null, tier: 'default' }],
       false,
       undefined,
     );

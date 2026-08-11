@@ -44,6 +44,12 @@ fn accepted_event(message_id: &str, sort_order: i64, duplicate: bool) -> Event {
     )
 }
 
+fn same_target_identity(left: &MessageTarget, right: &MessageTarget) -> bool {
+    left.kind == right.kind
+        && left.agent_type == right.agent_type
+        && left.cli_session_id == right.cli_session_id
+}
+
 pub(crate) fn normalized_targets(
     targets: Vec<MessageTarget>,
     target_agents: Vec<AgentType>,
@@ -64,7 +70,10 @@ pub(crate) fn normalized_targets(
     };
     let mut deduped = Vec::with_capacity(targets.len());
     for target in targets.drain(..) {
-        if !deduped.contains(&target) {
+        if !deduped
+            .iter()
+            .any(|existing| same_target_identity(existing, &target))
+        {
             deduped.push(target);
         }
     }
@@ -95,7 +104,8 @@ pub(crate) async fn canonical_targets(
         let mut all = if no_agent {
             Vec::new()
         } else {
-            vec![MessageTarget::discussion_agent(discussion.agent.clone())]
+            vec![MessageTarget::discussion_agent(discussion.agent.clone())
+                .with_tier(discussion.tier)]
         };
         all.extend(
             discussion
@@ -103,7 +113,7 @@ pub(crate) async fn canonical_targets(
                 .iter()
                 .filter(|agent| **agent != discussion.agent)
                 .cloned()
-                .map(MessageTarget::agent),
+                .map(|agent| MessageTarget::agent(agent).with_tier(ModelTier::Default)),
         );
         all.extend(sessions.iter().map(|session| {
             MessageTarget::cli(
@@ -121,9 +131,15 @@ pub(crate) async fn canonical_targets(
     for target in candidates {
         let canonical = match target.kind {
             MessageTargetKind::DiscussionAgent => {
-                MessageTarget::discussion_agent(discussion.agent.clone())
+                let mut canonical = MessageTarget::discussion_agent(discussion.agent.clone());
+                canonical.tier = target.tier;
+                canonical
             }
-            MessageTargetKind::Agent => MessageTarget::agent(target.agent_type),
+            MessageTargetKind::Agent => {
+                let mut canonical = MessageTarget::agent(target.agent_type);
+                canonical.tier = target.tier;
+                canonical
+            }
             MessageTargetKind::Cli => {
                 let Some(session_id) = target.cli_session_id else {
                     return Err("CLI target requires cli_session_id".to_string());
@@ -142,7 +158,10 @@ pub(crate) async fn canonical_targets(
                 MessageTarget::cli(session_agent, session_id)
             }
         };
-        if !targets.contains(&canonical) {
+        if !targets
+            .iter()
+            .any(|existing| same_target_identity(existing, &canonical))
+        {
             targets.push(canonical);
         }
     }
@@ -1003,6 +1022,50 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn canonical_targets_keep_explicit_tiers_and_default_target_all_punctual_agents() {
+        let disc = "d-tiered-targets";
+        let state = make_state_with_disc(disc).await;
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::discussions::update_discussion_agent(conn, disc, &AgentType::LiteLlm)?;
+                crate::db::discussions::update_discussion_tier(conn, disc, &ModelTier::Reasoning)?;
+                crate::db::discussions::update_discussion_participants(
+                    conn,
+                    disc,
+                    &[AgentType::LiteLlm, AgentType::Codex],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let explicit = canonical_targets(
+            &state,
+            disc,
+            vec![MessageTarget::agent(AgentType::Codex).with_tier(ModelTier::Economy)],
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            explicit,
+            vec![MessageTarget::agent(AgentType::Codex).with_tier(ModelTier::Economy)]
+        );
+
+        let all = canonical_targets(&state, disc, Vec::new(), true)
+            .await
+            .unwrap();
+        assert_eq!(
+            all,
+            vec![
+                MessageTarget::discussion_agent(AgentType::LiteLlm).with_tier(ModelTier::Reasoning),
+                MessageTarget::agent(AgentType::Codex).with_tier(ModelTier::Default),
+            ]
+        );
+    }
+
     async fn response_body_to_string(response: Response) -> String {
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
@@ -1366,6 +1429,7 @@ mod tests {
             super::super::streaming::make_agent_stream_tracked_with_initial_event(
                 state,
                 "missing-disc".into(),
+                None,
                 None,
                 "test-dispatch".into(),
                 accepted_event("3d966785-b7b4-446b-8303-ac28f02a5427", 9, false),

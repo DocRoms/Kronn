@@ -2345,8 +2345,8 @@ mod tests {
         message.content = "@codex confronte @claude".into();
         message.target_agent = Some(AgentType::Codex);
         let targets = [
-            MessageTarget::agent(AgentType::Codex),
-            MessageTarget::agent(AgentType::ClaudeCode),
+            MessageTarget::agent(AgentType::Codex).with_tier(ModelTier::Economy),
+            MessageTarget::agent(AgentType::ClaudeCode).with_tier(ModelTier::Reasoning),
         ];
         let dispatches = [
             UserDispatchSpec {
@@ -2425,6 +2425,81 @@ mod tests {
             )
             .unwrap();
         assert_eq!(job_count, 2);
+    }
+
+    #[test]
+    fn discussion_targets_preserve_message_scope_order_and_tiers() {
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("d-routing-receipts")).unwrap();
+        insert_discussion(&conn, &make_discussion("d-routing-other")).unwrap();
+
+        insert_message(
+            &conn,
+            "d-routing-receipts",
+            &make_message("u-routing-one", MessageRole::User, None),
+        )
+        .unwrap();
+        replace_message_targets(
+            &conn,
+            "u-routing-one",
+            &[
+                MessageTarget::agent(AgentType::Codex).with_tier(ModelTier::Economy),
+                MessageTarget::agent(AgentType::ClaudeCode).with_tier(ModelTier::Reasoning),
+            ],
+        )
+        .unwrap();
+
+        insert_message(
+            &conn,
+            "d-routing-receipts",
+            &make_message("u-routing-two", MessageRole::User, None),
+        )
+        .unwrap();
+        let cli_session_id = crate::db::discussion_sessions::create_session(
+            &conn,
+            "d-routing-receipts",
+            "ClaudeCode",
+            Some("routing-cli"),
+            "peer",
+        )
+        .unwrap();
+        replace_message_targets(
+            &conn,
+            "u-routing-two",
+            &[MessageTarget::cli(AgentType::ClaudeCode, cli_session_id)],
+        )
+        .unwrap();
+
+        insert_message(
+            &conn,
+            "d-routing-other",
+            &make_message("u-routing-other", MessageRole::User, None),
+        )
+        .unwrap();
+        replace_message_targets(
+            &conn,
+            "u-routing-other",
+            &[MessageTarget::agent(AgentType::Ollama).with_tier(ModelTier::Default)],
+        )
+        .unwrap();
+
+        let receipts = list_discussion_message_targets(&conn, "d-routing-receipts").unwrap();
+        assert_eq!(receipts.len(), 2);
+        assert_eq!(
+            receipts.get("u-routing-one"),
+            Some(&vec![
+                MessageTarget::agent(AgentType::Codex).with_tier(ModelTier::Economy),
+                MessageTarget::agent(AgentType::ClaudeCode).with_tier(ModelTier::Reasoning),
+            ]),
+        );
+        assert_eq!(
+            receipts.get("u-routing-two"),
+            Some(&vec![MessageTarget::cli(
+                AgentType::ClaudeCode,
+                cli_session_id,
+            )]),
+        );
+        assert!(!receipts.contains_key("u-routing-other"));
     }
 
     #[test]

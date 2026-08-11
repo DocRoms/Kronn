@@ -26,6 +26,33 @@ describe('chat-drafts', () => {
     expect(got).not.toBeNull();
     expect(got!.text).toBe('hello world');
     expect(got!.savedAt).toBe('2026-04-15T09:00:00.000Z');
+    expect(got!.routingTiers).toEqual({});
+  });
+
+  it('persists validated per-alias routing tiers', () => {
+    saveDraft('d1', '@codex review', { Codex: 'reasoning', Ollama: 'economy' });
+
+    expect(loadDraft('d1')?.routingTiers).toEqual({
+      Codex: 'reasoning',
+      Ollama: 'economy',
+    });
+  });
+
+  it('loads legacy text-only drafts without routing metadata', () => {
+    localStorage.setItem(
+      CHAT_DRAFT_CONFIG.KEY_PREFIX + 'legacy',
+      JSON.stringify({
+        v: 1,
+        text: '@codex legacy',
+        savedAt: new Date().toISOString(),
+      }),
+    );
+
+    expect(loadDraft('legacy')).toEqual({
+      text: '@codex legacy',
+      savedAt: '2026-04-15T09:00:00.000Z',
+      routingTiers: {},
+    });
   });
 
   it('isolates drafts per discussion id', () => {

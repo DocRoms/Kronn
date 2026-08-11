@@ -7,6 +7,7 @@ import type {
   Discussion,
   AgentType,
   DiscussionWorkspace,
+  ModelTiersConfig,
 } from '../types/generated';
 import { AGENT_MENTIONS, isUsable, isValidationDisc, isBriefingDisc, isBootstrapDisc } from '../lib/constants';
 import type { ToastFn } from '../hooks/useToast';
@@ -35,6 +36,7 @@ export interface ChatHeaderProps {
   discussion: Discussion;
   projects: Project[];
   agents: AgentDetection[];
+  modelTiers?: ModelTiersConfig | null;
   showGitPanel: boolean;
   showPlanPanel?: boolean;
   showSettingsPanel?: boolean;
@@ -69,6 +71,7 @@ export function ChatHeader({
   discussion,
   projects,
   agents,
+  modelTiers = null,
   showGitPanel,
   showPlanPanel = false,
   showSettingsPanel = false,
@@ -372,16 +375,24 @@ export function ChatHeader({
                   currentAgent={discussion.agent}
                   availableAgents={installedAgentsList.map(agent => agent.agent_type)}
                   disabled={sending || nativeAgentDisabled === null || nativeAgentModeSaving}
-                  title={t('disc.switchAgent')}
-                  ariaLabel={t('disc.switchAgent')}
+                  title={t('disc.switchAgentAndTier')}
+                  ariaLabel={t('disc.switchAgentAndTier')}
                   suffix={t('disc.targetDiscussionAgent')}
+                  currentTier={discussion.tier ?? 'default'}
+                  tierLabels={{
+                    economy: t('disc.tier.economy'),
+                    default: t('disc.tier.default'),
+                    reasoning: t('disc.tier.reasoning'),
+                  }}
+                  modelTiers={modelTiers}
+                  defaultModelLabel={t('config.defaultModel')}
                   displayName={
                     AGENT_MENTIONS.find(mention => mention.type === discussion.agent)?.trigger
                     ?? discussion.agent
                   }
-                  onChange={async agent => {
+                  onSelectionChange={async (agent, tier) => {
                     try {
-                      await discussionsApi.update(discussion.id, { agent });
+                      await discussionsApi.update(discussion.id, { agent, tier });
                       onAgentSwitch(agent);
                     } catch (err) {
                       toast(String(err), 'error');

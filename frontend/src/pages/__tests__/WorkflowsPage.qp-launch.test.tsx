@@ -132,7 +132,7 @@ afterEach(() => {
 });
 
 describe('WorkflowsPage — QP launch double-click race', () => {
-  it('switches a QP agent inline while preserving its tier and clearing the old provider model', async () => {
+  it('switches a QP agent and mode inline while clearing the old provider model', async () => {
     const qp: QuickPrompt = {
       ...sampleQpNoVar,
       agent_settings: {
@@ -164,7 +164,7 @@ describe('WorkflowsPage — QP launch double-click race', () => {
 
     fireEvent.click(trigger!);
     await act(async () => {
-      fireEvent.click(screen.getByRole('menuitem', { name: 'Codex' }));
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Codex · Avancé' }));
     });
 
     await waitFor(() => expect(mockQuickPromptsApi.update).toHaveBeenCalledTimes(1));
@@ -174,7 +174,7 @@ describe('WorkflowsPage — QP launch double-click race', () => {
         name: qp.name,
         prompt_template: qp.prompt_template,
         agent: 'Codex',
-        tier: 'default',
+        tier: 'reasoning',
         agent_settings: {
           model: null,
           tier: 'reasoning',

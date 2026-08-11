@@ -1,18 +1,25 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
 import '../pages/DiscussionsPage.css';
 import { ProfileTooltip } from './ProfileTooltip';
-import { Dropdown } from './Dropdown';
+import { AgentSwitchPicker } from './AgentSwitchPicker';
+import { MarkdownEditor } from './MarkdownComposerTools';
 import { skills as skillsApi, profiles as profilesApi, directives as directivesApi, config as configApi } from '../lib/api';
-import type { Project, AgentDetection, AgentType, AgentsConfig, Skill, AgentProfile, Directive } from '../types/generated';
-import { AGENT_LABELS, AGENT_MENTIONS, mentionedAgents, isAgentRestricted as isAgentRestrictedUtil, isUsable, isHiddenPath, RTK_APPLICABLE, isRtkActive } from '../lib/constants';
+import type { Project, AgentDetection, AgentType, AgentsConfig, Skill, AgentProfile, Directive, ModelTier } from '../types/generated';
+import { AGENT_LABELS, AGENT_MENTIONS, MODEL_TIER_ICONS, agentColor, mentionedAgents, modelForAgentTier, isAgentRestricted as isAgentRestrictedUtil, isUsable, isHiddenPath, RTK_APPLICABLE, isRtkActive } from '../lib/constants';
+import { findAgentMentionQuery, type AgentMentionQuery } from '../lib/mention-autocomplete';
+import {
+  applyEmojiReplacement,
+  findEmojiQuery,
+  searchEmojis,
+  type EmojiQuery,
+  type EmojiSuggestion,
+} from '../lib/emoji-autocomplete';
 import {
   Folder, ChevronRight, GitBranch,
   MessageSquare, X, AlertTriangle,
-  Settings, Check, Zap, UserCircle, FileText, Paperclip, Image, Smile,
+  Settings, Check, Zap, UserCircle, FileText, Paperclip, Image,
+  Cpu,
 } from 'lucide-react';
-
-const PROMPT_AGENT_MODE = '__prompt_agents__';
-const COMMON_EMOJIS = ['😀', '👍', '🎉', '❤️', '🚀', '👀', '✅', '🤔', '🔥', '🙏', '😂', '😅'];
 
 // ─── Public types ────────────────────────────────────────────────────────────
 
@@ -32,6 +39,8 @@ export interface NewDiscConfig {
   /** Agents explicitly mentioned in the initial prompt. Empty means the
    * legacy single-agent picker owns the launch. */
   targetAgents: AgentType[];
+  /** Per-agent reasoning levels selected beside each prompt alias. */
+  targetTiers: Partial<Record<AgentType, ModelTier>>;
   /** 0.8.6 phase 2 — when `false`, the parent should create the disc
    *  WITHOUT auto-launching an agent (CLI run skipped). The user is
    *  expected to invite agents later via the `[+ Inviter]` header
@@ -86,6 +95,7 @@ export function NewDiscussionForm({
   // with the user's `ServerConfig.default_model_tier` on mount (0.8.6 phase 4).
   // Strict semantic — only applied at form-open time, never retroactively.
   const [newDiscTier, setNewDiscTier] = useState<'economy' | 'default' | 'reasoning'>('default');
+  const [promptAgentTiers, setPromptAgentTiers] = useState<Partial<Record<AgentType, ModelTier>>>({});
   // 0.8.6 phase 2 — disc-first refactor. When `false`, the disc is
   // created without launching a CLI ; the user invites agents later
   // via the `[+ Inviter]` header button. Default `true` keeps the
@@ -96,11 +106,16 @@ export function NewDiscussionForm({
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
   const newDiscFileInputRef = useRef<HTMLInputElement>(null);
   const newDiscPromptRef = useRef<HTMLTextAreaElement>(null);
-  const [showEmojiPicker, setShowEmojiPicker] = useState(false);
+  const [mentionMatch, setMentionMatch] = useState<AgentMentionQuery | null>(null);
+  const mentionQuery = mentionMatch?.query ?? null;
+  const [mentionIndex, setMentionIndex] = useState(0);
+  const [emojiMatch, setEmojiMatch] = useState<EmojiQuery | null>(null);
+  const [emojiSuggestions, setEmojiSuggestions] = useState<EmojiSuggestion[]>([]);
+  const [emojiIndex, setEmojiIndex] = useState(0);
   const previousPromptAgentsRef = useRef('');
 
   // ─── Derived ─────────────────────────────────────────────────────────────
-  const installedAgentsList = agents.filter(isUsable);
+  const installedAgentsList = useMemo(() => agents.filter(isUsable), [agents]);
   const promptMentionedAgents = useMemo(
     () => mentionedAgents(newDiscPrompt),
     [newDiscPrompt],
@@ -143,11 +158,11 @@ export function NewDiscussionForm({
     if (installedAgentsList.length > 0 && !installedAgentsList.some(a => a.agent_type === newDiscAgent)) {
       setNewDiscAgent(installedAgentsList[0].agent_type);
     }
-  }, [installedAgentsList.length, newDiscAgent]);
+  }, [installedAgentsList, newDiscAgent]);
 
-  // A newly-detected canonical mention switches the picker to prompt-driven
-  // launch. The user may still override it manually afterwards; adding or
-  // removing mentions re-evaluates the automatic choice.
+  // Canonical mentions own routing while they remain in the prompt. Keeping
+  // the single-agent picker locked prevents an accidental click from hiding
+  // recipients that are still visibly addressed in the brief.
   const promptAgentKey = promptMentionedAgents.join(',');
   useEffect(() => {
     const previous = previousPromptAgentsRef.current;
@@ -214,15 +229,61 @@ export function NewDiscussionForm({
   const [creating, setCreating] = useState(false);
   const creatingRef = useRef(false);
 
-  const insertEmoji = (emoji: string) => {
-    if (newDiscPrefilled) return;
-    const textarea = newDiscPromptRef.current;
-    const start = textarea?.selectionStart ?? newDiscPrompt.length;
-    const end = textarea?.selectionEnd ?? start;
-    const next = `${newDiscPrompt.slice(0, start)}${emoji}${newDiscPrompt.slice(end)}`;
-    const cursor = start + emoji.length;
+  const refreshPromptAutocomplete = (text: string, cursor: number) => {
+    const mention = findAgentMentionQuery(text, cursor);
+    setMentionMatch(mention);
+    if (mention) setMentionIndex(0);
+
+    const emoji = findEmojiQuery(text, cursor);
+    const suggestions = emoji ? searchEmojis(emoji.query) : [];
+    setEmojiMatch(suggestions.length > 0 ? emoji : null);
+    setEmojiSuggestions(suggestions);
+    if (suggestions.length > 0) setEmojiIndex(0);
+  };
+
+  const prunePromptAgentTiers = (text: string) => {
+    const activeAgents = new Set(mentionedAgents(text));
+    setPromptAgentTiers(previous => Object.fromEntries(
+      Object.entries(previous).filter(([agent]) => activeAgents.has(agent as AgentType)),
+    ) as Partial<Record<AgentType, ModelTier>>);
+  };
+
+  const applyMentionSuggestion = (
+    trigger: string,
+    textarea: HTMLTextAreaElement | null,
+    agentType?: AgentType,
+    tier?: ModelTier,
+  ) => {
+    const range = mentionMatch;
+    if (!range) return;
+    const trailing = newDiscPrompt.slice(range.end);
+    const spacer = trailing.length === 0 || !/^\s/.test(trailing) ? ' ' : '';
+    const next = `${newDiscPrompt.slice(0, range.start)}${trigger}${spacer}${trailing}`;
+    const cursor = range.start + trigger.length + spacer.length;
     setNewDiscPrompt(next);
-    setShowEmojiPicker(false);
+    if (agentType) {
+      setPromptAgentTiers(previous => ({
+        ...previous,
+        [agentType]: tier ?? previous[agentType] ?? newDiscTier,
+      }));
+    }
+    setMentionMatch(null);
+    requestAnimationFrame(() => {
+      textarea?.focus();
+      textarea?.setSelectionRange(cursor, cursor);
+    });
+  };
+
+  const applyEmojiSuggestion = (suggestion: EmojiSuggestion) => {
+    if (!emojiMatch) return;
+    const { text, cursor } = applyEmojiReplacement(
+      newDiscPrompt,
+      emojiMatch,
+      suggestion.emoji,
+    );
+    setNewDiscPrompt(text);
+    setEmojiMatch(null);
+    setEmojiSuggestions([]);
     requestAnimationFrame(() => {
       newDiscPromptRef.current?.focus();
       newDiscPromptRef.current?.setSelectionRange(cursor, cursor);
@@ -251,6 +312,15 @@ export function NewDiscussionForm({
       const fallbackTitle = launchAgentNow
         ? newDiscPrompt.trim().slice(0, 60)
         : (newDiscPrompt.trim().slice(0, 60) || t('disc.discFirstDefaultTitle'));
+      const primaryAgent = (
+        agentLaunchMode === 'prompt'
+          ? promptLaunchAgents[0]
+          : newDiscAgent
+      || installedAgentsList[0]?.agent_type
+      || 'ClaudeCode') as AgentType;
+      const targetTiers = Object.fromEntries(
+        promptLaunchAgents.map(agent => [agent, promptAgentTiers[agent] ?? newDiscTier]),
+      ) as Partial<Record<AgentType, ModelTier>>;
       await Promise.resolve(onSubmit({
         title: newDiscTitle.trim() || fallbackTitle,
         // Even when `launchAgentNow=false`, the backend `CreateDiscussionRequest`
@@ -259,23 +329,21 @@ export function NewDiscussionForm({
         // placeholder ; the parent skips `runAgent` so no CLI runs.
         // The new `discussion_sessions` table is the source of truth for
         // actual participants from 0.8.6 onward.
-        agent: (
-          agentLaunchMode === 'prompt'
-            ? promptLaunchAgents[0]
-            : newDiscAgent
-        || installedAgentsList[0]?.agent_type
-        || 'ClaudeCode') as AgentType,
+        agent: primaryAgent,
         projectId: newDiscProjectId || null,
         prompt: newDiscPrompt.trim(),
         skillIds: newDiscSkillIds,
         profileIds: newDiscProfileIds,
         directiveIds: newDiscDirectiveIds,
         workspaceMode: newDiscWorkspaceMode,
-        tier: newDiscTier,
+        tier: agentLaunchMode === 'prompt'
+          ? targetTiers[primaryAgent] ?? newDiscTier
+          : newDiscTier,
         branchName: newDiscBranchName,
         baseBranch: newDiscBaseBranch,
         pendingFiles: pendingFiles.length > 0 ? pendingFiles : undefined,
         targetAgents: agentLaunchMode === 'prompt' ? promptLaunchAgents : [],
+        targetTiers: agentLaunchMode === 'prompt' ? targetTiers : {},
         launchAgentNow,
       }));
     } catch (e) {
@@ -342,47 +410,164 @@ export function NewDiscussionForm({
 
             <label className="disc-form-label">{t('disc.prompt')}</label>
             <div className="disc-new-prompt-wrap">
-              <textarea
-                ref={newDiscPromptRef}
-                className="disc-textarea-styled"
-                data-locked={newDiscPrefilled}
-                placeholder={t('disc.promptPlaceholder')}
-                value={newDiscPrompt}
-                aria-label={t('disc.prompt')}
-                onChange={e => !newDiscPrefilled && setNewDiscPrompt(e.target.value)}
-                readOnly={newDiscPrefilled}
-                rows={7}
-                autoFocus={!newDiscPrefilled}
-              />
-              {!newDiscPrefilled && (
-                <div className="disc-new-emoji-control">
-                  <button
-                    type="button"
-                    className="disc-new-emoji-toggle"
-                    aria-label={t('disc.addEmoji')}
-                    aria-expanded={showEmojiPicker}
-                    onClick={() => setShowEmojiPicker(open => !open)}
-                  >
-                    <Smile size={14} />
-                  </button>
-                  {showEmojiPicker && (
-                    <div className="disc-new-emoji-picker" role="listbox" aria-label={t('disc.addEmoji')}>
-                      {COMMON_EMOJIS.map(emoji => (
-                        <button
-                          key={emoji}
-                          type="button"
+              {mentionQuery !== null && (() => {
+                const matching = AGENT_MENTIONS.filter(mention => (
+                  mention.trigger.slice(1).startsWith(mentionQuery)
+                ));
+                const available = matching.filter(mention => installedAgentTypes.has(mention.type));
+                const unavailable = matching.filter(mention => !installedAgentTypes.has(mention.type));
+                if (matching.length === 0) return null;
+                return (
+                  <div className="disc-mention-popover disc-new-autocomplete" role="listbox" aria-label={t('disc.mentionAgents')}>
+                    {available.length > 0 && (
+                      <div className="disc-mention-group">{t('disc.routingAvailableAgents')}</div>
+                    )}
+                    {available.map((mention, index) => {
+                      const currentTier = promptAgentTiers[mention.type] ?? newDiscTier;
+                      return (
+                        <div
+                          key={mention.trigger}
                           role="option"
-                          aria-selected="false"
-                          aria-label={`${t('disc.insertEmoji')} ${emoji}`}
-                          onClick={() => insertEmoji(emoji)}
+                          aria-selected={index === mentionIndex}
+                          className="disc-mention-item"
+                          data-highlighted={index === mentionIndex}
+                          onMouseEnter={() => setMentionIndex(index)}
+                          onMouseDown={event => {
+                            event.preventDefault();
+                            applyMentionSuggestion(mention.trigger, newDiscPromptRef.current, mention.type);
+                          }}
                         >
-                          {emoji}
-                        </button>
-                      ))}
-                    </div>
-                  )}
+                          <div className="disc-mention-main">
+                            <Cpu size={13} style={{ color: agentColor(mention.type) }} />
+                            <span className="font-semibold" style={{ color: agentColor(mention.type) }}>{mention.trigger}</span>
+                            <span className="text-muted">{mention.label}</span>
+                          </div>
+                          <span className="disc-mention-tier-choices" aria-label={t('disc.modelTier')}>
+                            {(['economy', 'default', 'reasoning'] as const).map(tier => {
+                              const model = modelForAgentTier(
+                                mention.type,
+                                tier,
+                                agentAccess?.model_tiers,
+                                t('disc.defaultAgentModel'),
+                              );
+                              const title = t('disc.routingInvokeTier', t(`disc.tier.${tier}`), model);
+                              return (
+                                <button
+                                  key={tier}
+                                  type="button"
+                                  className="disc-mention-tier-choice"
+                                  data-tier={tier}
+                                  data-current={currentTier === tier}
+                                  aria-label={`${mention.trigger} · ${title}`}
+                                  title={title}
+                                  onMouseDown={event => {
+                                    event.preventDefault();
+                                    event.stopPropagation();
+                                    applyMentionSuggestion(mention.trigger, newDiscPromptRef.current, mention.type, tier);
+                                  }}
+                                >
+                                  <span aria-hidden="true">{MODEL_TIER_ICONS[tier]}</span>
+                                </button>
+                              );
+                            })}
+                          </span>
+                        </div>
+                      );
+                    })}
+                    {unavailable.length > 0 && (
+                      <div className="disc-mention-group">{t('disc.routingDisabledAgent')}</div>
+                    )}
+                    {unavailable.map(mention => (
+                      <div key={mention.trigger} className="disc-mention-item disc-mention-item-disabled" aria-disabled="true">
+                        <Cpu size={13} style={{ color: agentColor(mention.type) }} />
+                        <span className="font-semibold">{mention.trigger}</span>
+                        <span className="text-muted">{t('disc.promptAgentUnavailable')}</span>
+                      </div>
+                    ))}
+                  </div>
+                );
+              })()}
+
+              {emojiMatch && emojiSuggestions.length > 0 && (
+                <div className="disc-mention-popover disc-emoji-popover disc-new-autocomplete" role="listbox" aria-label={t('disc.emojiShortcodes')}>
+                  {emojiSuggestions.map((suggestion, index) => (
+                    <button
+                      key={suggestion.shortcode}
+                      type="button"
+                      role="option"
+                      aria-selected={index === emojiIndex}
+                      className="disc-mention-item disc-emoji-item"
+                      data-highlighted={index === emojiIndex}
+                      onMouseEnter={() => setEmojiIndex(index)}
+                      onMouseDown={event => {
+                        event.preventDefault();
+                        applyEmojiSuggestion(suggestion);
+                      }}
+                    >
+                      <span className="disc-emoji-glyph" aria-hidden="true">{suggestion.emoji}</span>
+                      <span className="font-semibold text-accent">:{suggestion.shortcode}:</span>
+                    </button>
+                  ))}
                 </div>
               )}
+
+              <MarkdownEditor
+                content={newDiscPrompt}
+                embedded
+                helpTitle={t('disc.composerHelpTitle')}
+                helpContent={(
+                  <>
+                    <div className="md-composer-help-topic">
+                      <strong>{t('disc.composerMentions')}</strong>
+                      <p>{t('disc.mentionAgentsHelp')}</p>
+                    </div>
+                  </>
+                )}
+              >
+                <textarea
+                  id="disc-new-prompt"
+                  ref={newDiscPromptRef}
+                  className="disc-textarea-styled"
+                  data-locked={newDiscPrefilled}
+                  placeholder={t('disc.promptPlaceholder')}
+                  value={newDiscPrompt}
+                  aria-label={t('disc.prompt')}
+                  onChange={e => {
+                    if (newDiscPrefilled) return;
+                    setNewDiscPrompt(e.target.value);
+                    prunePromptAgentTiers(e.target.value);
+                    refreshPromptAutocomplete(e.target.value, e.target.selectionStart ?? e.target.value.length);
+                  }}
+                  onClick={e => refreshPromptAutocomplete(e.currentTarget.value, e.currentTarget.selectionStart ?? e.currentTarget.value.length)}
+                  onKeyUp={e => {
+                    if ((mentionQuery !== null || emojiMatch) && ['ArrowUp', 'ArrowDown'].includes(e.key)) return;
+                    if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'].includes(e.key)) {
+                      refreshPromptAutocomplete(e.currentTarget.value, e.currentTarget.selectionStart ?? e.currentTarget.value.length);
+                    }
+                  }}
+                  onKeyDown={e => {
+                    if (emojiMatch && emojiSuggestions.length > 0) {
+                      if (e.key === 'ArrowDown') { e.preventDefault(); setEmojiIndex(index => Math.min(index + 1, emojiSuggestions.length - 1)); return; }
+                      if (e.key === 'ArrowUp') { e.preventDefault(); setEmojiIndex(index => Math.max(index - 1, 0)); return; }
+                      if (e.key === 'Tab' || e.key === 'Enter') { e.preventDefault(); applyEmojiSuggestion(emojiSuggestions[emojiIndex]); return; }
+                      if (e.key === 'Escape') { e.preventDefault(); setEmojiMatch(null); setEmojiSuggestions([]); return; }
+                    }
+                    if (mentionQuery !== null) {
+                      const matching = AGENT_MENTIONS.filter(mention => (
+                        installedAgentTypes.has(mention.type)
+                        && mention.trigger.slice(1).startsWith(mentionQuery)
+                      ));
+                      if (e.key === 'ArrowDown') { e.preventDefault(); setMentionIndex(index => Math.min(index + 1, matching.length - 1)); return; }
+                      if (e.key === 'ArrowUp') { e.preventDefault(); setMentionIndex(index => Math.max(index - 1, 0)); return; }
+                      if ((e.key === 'Tab' || e.key === 'Enter') && matching.length > 0) { e.preventDefault(); applyMentionSuggestion(matching[mentionIndex].trigger, e.currentTarget, matching[mentionIndex].type); return; }
+                      if (e.key === 'Escape') { e.preventDefault(); setMentionMatch(null); return; }
+                    }
+                  }}
+                  readOnly={newDiscPrefilled}
+                  rows={7}
+                  autoFocus={!newDiscPrefilled}
+                />
+              </MarkdownEditor>
             </div>
 
             <label className="disc-form-label" style={{ marginTop: 12 }}>{t('disc.title')}</label>
@@ -532,40 +717,51 @@ export function NewDiscussionForm({
               </span>
             </label>
             {launchAgentNow ? (
-              // 0.8.6 (#62) — Dropdown migration : native <select>
-              // ignored page CSS for <option> rows on Firefox/Safari.
-              <Dropdown<string>
-                value={agentLaunchMode === 'prompt' ? PROMPT_AGENT_MODE : newDiscAgent}
-                options={
-                  installedAgentsList.length === 0
-                    ? [
-                      {
-                        value: PROMPT_AGENT_MODE,
-                        label: t('disc.agentFromPrompt'),
-                        description: t('disc.agentFromPromptHint'),
-                      },
-                      { value: '', label: t('disc.noAgent'), disabled: true },
-                    ]
-                    : [
-                      {
-                        value: PROMPT_AGENT_MODE,
-                        label: t('disc.agentFromPrompt'),
-                        description: t('disc.agentFromPromptHint'),
-                      },
-                      ...installedAgentsList.map(a => ({ value: a.agent_type, label: a.name })),
-                    ]
-                }
-                onChange={value => {
-                  if (value === PROMPT_AGENT_MODE) {
-                    setAgentLaunchMode('prompt');
-                    return;
-                  }
-                  setAgentLaunchMode('selected');
-                  setNewDiscAgent(value as AgentType);
-                }}
-                ariaLabel={t('disc.agent')}
-                testId="new-disc-agent-picker"
-              />
+              <div
+                className="disc-new-agent-model-picker"
+                data-mode={agentLaunchMode}
+                data-testid="new-disc-agent-picker"
+              >
+                {agentLaunchMode === 'prompt' ? (
+                  <div className="disc-new-prompt-routing">
+                    <button
+                      type="button"
+                      className="disc-new-prompt-routing-main"
+                      title={t('disc.agentFromPromptHint')}
+                      disabled
+                      aria-disabled="true"
+                    >
+                      <span aria-hidden="true">@</span>
+                      <span>
+                        <strong>{t('disc.agentFromPrompt')}</strong>
+                        <small>{t('disc.agentFromPromptHint')}</small>
+                      </span>
+                    </button>
+                  </div>
+                ) : newDiscAgent ? (
+                  <AgentSwitchPicker
+                    currentAgent={newDiscAgent}
+                    currentTier={newDiscTier}
+                    availableAgents={installedAgentsList.map(agent => agent.agent_type)}
+                    modelTiers={agentAccess?.model_tiers}
+                    defaultModelLabel={t('disc.defaultAgentModel')}
+                    tierLabels={{
+                      economy: t('disc.tier.economy'),
+                      default: t('disc.tier.default'),
+                      reasoning: t('disc.tier.reasoning'),
+                    }}
+                    title={t('disc.agentAndMode')}
+                    ariaLabel={t('disc.agentAndMode')}
+                    onSelectionChange={async (agent, tier) => {
+                      setAgentLaunchMode('selected');
+                      setNewDiscAgent(agent);
+                      setNewDiscTier(tier);
+                    }}
+                  />
+                ) : (
+                  <span className="disc-form-hint">{t('disc.noAgent')}</span>
+                )}
+              </div>
             ) : (
               <div className="disc-form-hint" style={{ fontSize: '0.85em', opacity: 0.7, padding: '6px 0' }}>
                 {t('disc.discFirstHint')}
@@ -585,14 +781,29 @@ export function NewDiscussionForm({
               ) : promptMentionedAgents.map(agent => {
                 const available = installedAgentTypes.has(agent);
                 const mention = AGENT_MENTIONS.find(candidate => candidate.type === agent);
+                const selectedTier = promptAgentTiers[agent] ?? newDiscTier;
+                const selectedModel = modelForAgentTier(
+                  agent,
+                  selectedTier,
+                  agentAccess?.model_tiers,
+                  t('disc.defaultAgentModel'),
+                );
                 return (
                   <span
                     key={agent}
                     className="disc-prompt-agent-chip"
                     data-available={available}
-                    title={available ? undefined : t('disc.promptAgentUnavailable')}
+                    title={available
+                      ? t('disc.routingInvokeTier', t(`disc.tier.${selectedTier}`), selectedModel)
+                      : t('disc.promptAgentUnavailable')}
                   >
-                    {mention?.trigger ?? `@${AGENT_LABELS[agent] ?? agent}`}
+                    <span>{mention?.trigger ?? `@${AGENT_LABELS[agent] ?? agent}`}</span>
+                    {available && (
+                      <span className="disc-prompt-agent-tier">
+                        <span aria-hidden="true">{MODEL_TIER_ICONS[selectedTier]}</span>
+                        {t(`disc.tier.${selectedTier}`)}
+                      </span>
+                    )}
                   </span>
                 );
               })}
@@ -721,27 +932,15 @@ export function NewDiscussionForm({
               <ChevronRight size={11} className="disc-chevron" data-expanded={showAdvancedOptions} />
               <Settings size={10} />
               {t('disc.advancedOptions')}
-              {(newDiscSkillIds.length > 0 || newDiscProfileIds.length > 0 || newDiscDirectiveIds.length > 0 || newDiscTier !== 'default') && (
+              {(newDiscSkillIds.length > 0 || newDiscProfileIds.length > 0 || newDiscDirectiveIds.length > 0) && (
                 <span className="disc-advanced-count">
-                  ({newDiscSkillIds.length + newDiscProfileIds.length + newDiscDirectiveIds.length}{newDiscTier !== 'default' ? ` · ${newDiscTier === 'economy' ? '⚡' : '🧠'}` : ''})
+                  ({newDiscSkillIds.length + newDiscProfileIds.length + newDiscDirectiveIds.length})
                 </span>
               )}
             </button>
 
             {showAdvancedOptions && (
               <div className="disc-advanced-panel">
-
-                {/* Model tier selector */}
-                <div className="disc-advanced-section">
-                  <div className="disc-advanced-section-label">{t('disc.modelTier')}</div>
-                  <div style={{ display: 'flex', gap: 4 }}>
-                    {(['economy', 'default', 'reasoning'] as const).map(tier => (
-                      <button key={tier} type="button" className="disc-tier-btn" data-active={newDiscTier === tier} data-tier={tier} onClick={() => setNewDiscTier(tier)}>
-                        {tier === 'economy' ? '⚡' : tier === 'reasoning' ? '🧠' : '⚙️'} {t(`disc.tier.${tier}`)}
-                      </button>
-                    ))}
-                  </div>
-                </div>
 
                 {/* Skills accordion */}
                 {availableSkills.length > 0 && (

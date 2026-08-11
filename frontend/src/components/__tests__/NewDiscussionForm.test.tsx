@@ -96,6 +96,51 @@ describe('NewDiscussionForm — creation flow layout', () => {
     expect(brief.compareDocumentPosition(configuration) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
+  it('previews the Markdown currently entered in the starting brief', () => {
+    mount([PROJECT_WITH_REPO]);
+
+    fireEvent.change(screen.getByRole('textbox', { name: 'disc.prompt' }), {
+      target: { value: '# Objectif\n\n> Vérifier le parcours.' },
+    });
+    fireEvent.click(screen.getByRole('tab', { name: 'markdown.preview' }));
+
+    expect(screen.getByRole('heading', { name: 'Objectif' })).toBeInTheDocument();
+    expect(screen.getByText('Vérifier le parcours.').closest('blockquote')).not.toBeNull();
+  });
+
+  it('chooses the starting agent and reasoning mode in one picker', async () => {
+    const onSubmit = vi.fn();
+    render(
+      <NewDiscussionForm
+        projects={[]}
+        agents={[AGENT, CODEX_AGENT]}
+        configLanguage="fr"
+        agentAccess={null}
+        onSubmit={onSubmit}
+        onClose={vi.fn()}
+        onNavigate={vi.fn()}
+        t={(key: string) => key}
+      />,
+    );
+
+    const picker = await screen.findByTestId('new-disc-agent-picker');
+    fireEvent.click(screen.getByRole('button', { name: 'disc.agentAndMode' }));
+    fireEvent.click(await screen.findByRole('menuitem', {
+      name: 'Codex · disc.tier.reasoning',
+    }));
+    expect(picker).toHaveTextContent('Codex');
+    expect(picker.querySelector('[data-tier="reasoning"]')).not.toBeNull();
+
+    fireEvent.change(screen.getByRole('textbox', { name: 'disc.prompt' }), {
+      target: { value: 'Analyse ce changement.' },
+    });
+    fireEvent.click(document.querySelector('.disc-create-btn') as HTMLButtonElement);
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledWith(
+      expect.objectContaining({ agent: 'Codex', tier: 'reasoning' }),
+    ));
+  });
+
   it('keeps the prepare-without-agent path explicit and hides the agent picker', async () => {
     mount([]);
 
@@ -136,6 +181,10 @@ describe('NewDiscussionForm — creation flow layout', () => {
     expect(screen.getByTestId('new-disc-agent-picker')).toHaveTextContent(
       'disc.agentFromPrompt',
     );
+    const promptRouting = screen.getByRole('button', { name: /disc\.agentFromPrompt/ });
+    expect(promptRouting).toBeDisabled();
+    fireEvent.click(promptRouting);
+    expect(screen.getByTestId('new-disc-agent-picker')).toHaveTextContent('disc.agentFromPrompt');
     expect(screen.getByTestId('prompt-agent-summary')).toHaveTextContent('@codex');
     expect(screen.getByTestId('prompt-agent-summary')).toHaveTextContent('@claude');
 
@@ -147,8 +196,44 @@ describe('NewDiscussionForm — creation flow layout', () => {
     expect(onSubmit.mock.calls[0][0]).toEqual(expect.objectContaining({
       agent: 'Codex',
       targetAgents: ['Codex', 'ClaudeCode'],
+      targetTiers: { Codex: 'default', ClaudeCode: 'default' },
       launchAgentNow: true,
     }));
+  });
+
+  it('selects and submits the reasoning level beside each prompt alias', async () => {
+    const onSubmit = vi.fn();
+    render(
+      <NewDiscussionForm
+        projects={[]}
+        agents={[AGENT, CODEX_AGENT]}
+        configLanguage="fr"
+        agentAccess={null}
+        onSubmit={onSubmit}
+        onClose={vi.fn()}
+        onNavigate={vi.fn()}
+        t={(key: string) => key}
+      />,
+    );
+
+    const prompt = screen.getByRole('textbox', { name: 'disc.prompt' });
+    fireEvent.change(prompt, { target: { value: 'Avis de @co' } });
+    const codexOption = await screen.findByRole('option', { name: /@codex Codex/ });
+    fireEvent.mouseDown(codexOption.querySelector('[data-tier="reasoning"]') as HTMLButtonElement);
+
+    expect(prompt).toHaveValue('Avis de @codex ');
+    const summary = screen.getByTestId('prompt-agent-summary');
+    expect(summary).toHaveTextContent('@codex');
+    expect(summary).toHaveTextContent('disc.tier.reasoning');
+    expect(document.querySelector('.disc-new-prompt-tier-choices')).toBeNull();
+
+    fireEvent.click(document.querySelector('.disc-create-btn') as HTMLButtonElement);
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
+      agent: 'Codex',
+      tier: 'reasoning',
+      targetAgents: ['Codex'],
+      targetTiers: { Codex: 'reasoning' },
+    })));
   });
 
   it('blocks prompt-driven launch when a mentioned agent is unavailable', async () => {
@@ -175,17 +260,50 @@ describe('NewDiscussionForm — creation flow layout', () => {
     expect((document.querySelector('.disc-create-btn') as HTMLButtonElement).disabled).toBe(true);
   });
 
-  it('inserts an emoji at the prompt caret from the compact picker', async () => {
+  it('groups agent, Markdown, and emoji guidance in the shared composer help', () => {
+    mount([]);
+
+    fireEvent.click(screen.getByRole('button', { name: 'disc.composerHelpTitle' }));
+    const help = screen.getByRole('dialog', { name: 'disc.composerHelpTitle' });
+    expect(help).toHaveTextContent('disc.mentionAgentsHelp');
+    expect(help).toHaveTextContent('markdown.emojiHint');
+    expect(help).toHaveTextContent('markdown.helpTitle');
+    expect(screen.queryByRole('button', { name: 'disc.addEmoji' })).toBeNull();
+  });
+
+  it('autocompletes an installed @alias from the initial-message composer', async () => {
+    render(
+      <NewDiscussionForm
+        projects={[]}
+        agents={[AGENT, CODEX_AGENT]}
+        configLanguage="fr"
+        agentAccess={null}
+        onSubmit={vi.fn()}
+        onClose={vi.fn()}
+        onNavigate={vi.fn()}
+        t={(key: string) => key}
+      />,
+    );
+
+    const prompt = screen.getByRole('textbox', { name: 'disc.prompt' }) as HTMLTextAreaElement;
+    fireEvent.change(prompt, { target: { value: 'Avis de @co' } });
+    const option = await screen.findByRole('option', { name: /@codex Codex/ });
+    fireEvent.mouseDown(option);
+
+    expect(prompt.value).toBe('Avis de @codex ');
+    expect(screen.getByTestId('prompt-agent-summary')).toHaveTextContent('@codex');
+  });
+
+  it('uses the same :emoji: autocomplete and exposes Markdown support', async () => {
     mount([]);
     const prompt = screen.getByRole('textbox', { name: 'disc.prompt' }) as HTMLTextAreaElement;
-    fireEvent.change(prompt, { target: { value: 'Bravo ' } });
-    prompt.setSelectionRange(6, 6);
+    fireEvent.change(prompt, { target: { value: 'Bravo :ta' } });
 
-    fireEvent.click(screen.getByRole('button', { name: 'disc.addEmoji' }));
-    fireEvent.click(screen.getByRole('option', { name: 'disc.insertEmoji 🎉' }));
+    const tada = await screen.findByText(':tada:');
+    fireEvent.mouseDown(tada.closest('button') as HTMLButtonElement);
 
-    expect(prompt.value).toBe('Bravo 🎉');
-    expect(screen.queryByRole('listbox', { name: 'disc.addEmoji' })).toBeNull();
+    expect(prompt.value).toBe('Bravo 🎉 ');
+    expect(screen.getByRole('button', { name: 'disc.composerHelpTitle' })).toBeInTheDocument();
   });
 });
 
@@ -736,12 +854,10 @@ describe('NewDiscussionForm — default model tier (0.8.6 phase 4)', () => {
     await act(async () => { fireEvent.click(advancedToggle); });
 
     await waitFor(() => {
-      const reasoningBtn = document.querySelector('[data-tier="reasoning"]') as HTMLElement;
-      expect(reasoningBtn).toBeTruthy();
-      expect(reasoningBtn.getAttribute('data-active')).toBe('true');
+      const currentTier = document.querySelector('.kr-agent-switch-current-tier') as HTMLElement;
+      expect(currentTier).toBeTruthy();
+      expect(currentTier.getAttribute('data-tier')).toBe('reasoning');
     });
-    const defaultBtn = document.querySelector('[data-tier="default"]') as HTMLElement;
-    expect(defaultBtn.getAttribute('data-active')).toBe('false');
   });
 
   it('falls back to "default" tier when ServerConfig fetch fails (network error)', async () => {
@@ -779,8 +895,8 @@ describe('NewDiscussionForm — default model tier (0.8.6 phase 4)', () => {
     await act(async () => { fireEvent.click(advancedToggle); });
 
     await waitFor(() => {
-      const defaultBtn = document.querySelector('[data-tier="default"]') as HTMLElement;
-      expect(defaultBtn.getAttribute('data-active')).toBe('true');
+      const currentTier = document.querySelector('.kr-agent-switch-current-tier') as HTMLElement;
+      expect(currentTier.getAttribute('data-tier')).toBe('default');
     });
   });
 });

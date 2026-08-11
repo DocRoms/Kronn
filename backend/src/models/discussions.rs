@@ -5,6 +5,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use ts_rs::TS;
 
 use super::{AgentType, ModelTier};
@@ -24,6 +25,11 @@ pub struct DiscussionDetail {
     #[serde(flatten)]
     pub discussion: Discussion,
     pub active_agent_dispatches: Vec<ActiveAgentDispatch>,
+    /// Durable routing intent keyed by the user-message id. Keeping it next
+    /// to the transcript lets the UI show what was requested even when the
+    /// concrete model that eventually answered differs.
+    #[serde(default)]
+    pub message_targets: HashMap<String, Vec<MessageTarget>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -305,6 +311,10 @@ pub struct CreateDiscussionRequest {
     #[serde(default = "super::setup::default_language")]
     pub language: String,
     pub initial_prompt: String,
+    /// Explicit recipients of the initial message, including per-agent tier
+    /// overrides selected from the new-discussion composer.
+    #[serde(default)]
+    pub initial_targets: Vec<MessageTarget>,
     #[serde(default)]
     pub skill_ids: Vec<String>,
     #[serde(default)]
@@ -400,6 +410,10 @@ pub struct MessageTarget {
     pub agent_type: AgentType,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cli_session_id: Option<i64>,
+    /// Optional per-turn tier override. `None` preserves the historical
+    /// discussion-wide routing; joined CLI sessions always ignore this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<ModelTier>,
 }
 
 impl MessageTarget {
@@ -408,6 +422,7 @@ impl MessageTarget {
             kind: MessageTargetKind::DiscussionAgent,
             agent_type,
             cli_session_id: None,
+            tier: None,
         }
     }
 
@@ -416,6 +431,7 @@ impl MessageTarget {
             kind: MessageTargetKind::Agent,
             agent_type,
             cli_session_id: None,
+            tier: None,
         }
     }
 
@@ -424,7 +440,13 @@ impl MessageTarget {
             kind: MessageTargetKind::Cli,
             agent_type,
             cli_session_id: Some(cli_session_id),
+            tier: None,
         }
+    }
+
+    pub fn with_tier(mut self, tier: ModelTier) -> Self {
+        self.tier = Some(tier);
+        self
     }
 }
 

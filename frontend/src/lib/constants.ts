@@ -1,6 +1,11 @@
 // ─── Shared constants across pages ──────────────────────────────────────────
 
-import type { AgentType, AgentsConfig } from '../types/generated';
+import type {
+  AgentType,
+  AgentsConfig,
+  ModelTier,
+  ModelTiersConfig,
+} from '../types/generated';
 
 export const AGENT_COLORS: Record<string, string> = {
   ClaudeCode: '#D4714E',
@@ -28,6 +33,44 @@ export const AGENT_LABELS: Record<string, string> = {
 };
 
 export const ALL_AGENT_TYPES: AgentType[] = ['ClaudeCode', 'Codex', 'Vibe', 'GeminiCli', 'Kiro', 'CopilotCli', 'Ollama', 'LiteLlm'];
+
+export const MODEL_TIER_ICONS: Record<ModelTier, string> = {
+  economy: '⚡',
+  default: '🎯',
+  reasoning: '🧠',
+};
+
+const MODEL_TIER_CONFIG_KEY: Partial<Record<AgentType, keyof ModelTiersConfig>> = {
+  ClaudeCode: 'claude_code',
+  Codex: 'codex',
+  GeminiCli: 'gemini_cli',
+  Kiro: 'kiro',
+  Vibe: 'vibe',
+  CopilotCli: 'copilot_cli',
+  Ollama: 'ollama',
+  LiteLlm: 'lite_llm',
+};
+
+/** Resolve the concrete model name Kronn will request for an agent/tier pair.
+ * Some providers intentionally choose their own account-compatible default;
+ * callers supply the human-facing fallback used for those unknown names. */
+export function modelForAgentTier(
+  agent: AgentType,
+  tier: ModelTier,
+  modelTiers: ModelTiersConfig | null | undefined,
+  defaultModelLabel: string,
+): string {
+  const configKey = MODEL_TIER_CONFIG_KEY[agent];
+  const configured = configKey ? modelTiers?.[configKey]?.[tier] : null;
+  if (configured) return configured;
+
+  const builtin = ({
+    ClaudeCode: { economy: 'haiku', default: 'sonnet', reasoning: 'opus' },
+    Codex: { economy: 'gpt-5.6-luna', reasoning: 'gpt-5.6-sol' },
+    GeminiCli: { economy: 'gemini-2.5-flash', reasoning: 'gemini-3.1-pro-preview' },
+  } as Partial<Record<AgentType, Partial<Record<ModelTier, string>>>>)[agent]?.[tier];
+  return builtin ?? defaultModelLabel;
+}
 
 export const AGENT_MENTIONS: ReadonlyArray<{
   trigger: string;

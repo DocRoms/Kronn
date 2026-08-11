@@ -310,6 +310,60 @@ describe('MessageBubble — author pseudo / avatar (User)', () => {
   });
 });
 
+describe('MessageBubble — durable routing receipt', () => {
+  it('keeps every requested native agent and reasoning icon on the user message', () => {
+    renderBubble(
+      makeMessage({ role: 'User', content: 'Comparez vos réponses' }),
+      {
+        targets: [
+          { kind: 'agent', agent_type: 'ClaudeCode', tier: 'economy' },
+          { kind: 'agent', agent_type: 'Codex', tier: 'reasoning' },
+        ],
+      },
+    );
+
+    const receipt = screen.getByTestId('message-routing-receipt');
+    expect(receipt).toHaveTextContent('disc.routingRequested');
+    expect(receipt).toHaveTextContent('@claude · ⚡ disc.tier.economy');
+    expect(receipt).toHaveTextContent('@codex · 🧠 disc.tier.reasoning');
+  });
+
+  it('does not invent a reasoning icon for a legacy target without a tier', () => {
+    renderBubble(
+      makeMessage({ role: 'User', content: 'Ancien message' }),
+      { targets: [{ kind: 'discussion_agent', agent_type: 'ClaudeCode' }] },
+    );
+
+    const receipt = screen.getByTestId('message-routing-receipt');
+    expect(receipt).toHaveTextContent('@claude');
+    expect(receipt).not.toHaveTextContent('⚡');
+    expect(receipt).not.toHaveTextContent('🎯');
+    expect(receipt).not.toHaveTextContent('🧠');
+  });
+
+  it('identifies an exact CLI route without assigning it a Kronn tier', () => {
+    renderBubble(
+      makeMessage({ role: 'User', content: 'CLI uniquement' }),
+      {
+        targets: [{
+          kind: 'cli',
+          agent_type: 'ClaudeCode',
+          cli_session_id: 42,
+        }],
+      },
+    );
+
+    const receipt = screen.getByTestId('message-routing-receipt');
+    expect(receipt).toHaveTextContent('@claude-cli · disc.targetCli');
+    expect(receipt).not.toHaveTextContent('🎯');
+  });
+
+  it('stays hidden when no durable routing data exists', () => {
+    renderBubble(makeMessage({ role: 'User', content: 'Sans métadonnées' }));
+    expect(screen.queryByTestId('message-routing-receipt')).not.toBeInTheDocument();
+  });
+});
+
 describe('MessageBubble — agent mentions', () => {
   it('renders a mention written by an Agent with the same chip as a User mention', () => {
     const { container } = renderBubble(
@@ -699,7 +753,7 @@ describe('MessageBubble — edit mode', () => {
     const ta = container.querySelector('textarea.disc-edit-textarea') as HTMLTextAreaElement;
     expect(ta).not.toBeNull();
     expect(ta.value).toBe('edited text');
-    expect(ta).toHaveAttribute('rows', '10');
+    expect(ta).toHaveAttribute('rows', '1');
     expect(ta).toHaveAccessibleName('disc.editResend');
     expect(ta.closest('.disc-msg-bubble')).toHaveAttribute('data-editing', 'true');
   });
@@ -712,6 +766,19 @@ describe('MessageBubble — edit mode', () => {
     );
     fireEvent.change(container.querySelector('textarea')!, { target: { value: 'new' } });
     expect(onEditTextChange).toHaveBeenCalledWith('new');
+  });
+
+  it('grows with edited content and caps at the same height as the composer', async () => {
+    const { container } = renderBubble(
+      makeMessage({ role: 'User' }),
+      { isEditing: true, editingText: 'x' },
+    );
+    const textarea = container.querySelector('textarea.disc-edit-textarea') as HTMLTextAreaElement;
+    Object.defineProperty(textarea, 'scrollHeight', { configurable: true, value: 420 });
+
+    fireEvent.change(textarea, { target: { value: 'a much longer edited message' } });
+
+    await waitFor(() => expect(textarea.style.height).toBe('160px'));
   });
 
   it('fires onEditCancel from the cancel button', () => {

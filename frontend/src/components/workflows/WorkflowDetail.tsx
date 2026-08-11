@@ -4,7 +4,7 @@ import { workflows as workflowsApi, quickPrompts as quickPromptsApi } from '../.
 import type { BatchPreview } from '../../lib/api';
 import { AGENT_LABELS, isAgentRestricted } from '../../lib/constants';
 import { extractLikelyOutput } from '../../lib/extractLikelyOutput';
-import type { Workflow, WorkflowRun, StepResult, AgentsConfig, WorkflowStep, QuickPrompt, BatchRunSummary, AgentType } from '../../types/generated';
+import type { Workflow, WorkflowRun, StepResult, AgentsConfig, WorkflowStep, QuickPrompt, BatchRunSummary, AgentType, ModelTier } from '../../types/generated';
 import {
   Trash2, Play, Loader2, Check, X, ChevronLeft, ChevronRight, ChevronDown,
   Settings, RefreshCw, AlertTriangle, FlaskConical,
@@ -145,7 +145,7 @@ export interface WorkflowDetailProps {
   workflow: Workflow;
   runs: WorkflowRun[];
   availableAgentTypes?: AgentType[];
-  onChangeStepAgent?: (stepIndex: number, agent: AgentType) => Promise<void>;
+  onChangeStepAgent?: (stepIndex: number, agent: AgentType, tier: ModelTier) => Promise<void>;
   totalRuns?: number;
   hasMoreRuns?: boolean;
   loadingMoreRuns?: boolean;
@@ -329,7 +329,7 @@ function StepCard({ step, index, agentAccess, projectId, t, quickPromptsById, wo
   projectId?: string | null; t: (key: string, ...args: (string | number)[]) => string;
   quickPromptsById?: Map<string, QuickPrompt>;
   availableAgentTypes?: AgentType[];
-  onChangeAgent?: (stepIndex: number, agent: AgentType) => Promise<void>;
+  onChangeAgent?: (stepIndex: number, agent: AgentType, tier: ModelTier) => Promise<void>;
   onSelectStep?: (stepIndex: number) => void;
   /** Workflow id is needed to key the dry-run test state cache (see module
    *  comment on `stepTestCache`) so the panel survives navigation. */
@@ -687,10 +687,11 @@ function StepCard({ step, index, agentAccess, projectId, t, quickPromptsById, wo
             stepIndex={index}
             availableAgentTypes={availableAgentTypes}
             onChange={onChangeAgent}
+            modelTiers={agentAccess?.model_tiers}
             t={t}
           />
         )}
-        {isAgentLike && <TierBadge step={step} t={t} />}
+        {isAgentLike && !onChangeAgent && <TierBadge step={step} t={t} />}
         {isAgentLike && checkAgentRestricted(agentAccess ?? undefined, step.agent) && (
           <span className="flex-row gap-1 text-xs text-warning">
             <AlertTriangle size={10} />
@@ -1174,13 +1175,15 @@ function StepAgentSwitcher({
   stepIndex,
   availableAgentTypes = [],
   onChange,
+  modelTiers,
   t,
   compact = false,
 }: {
   step: WorkflowStep;
   stepIndex: number;
   availableAgentTypes?: AgentType[];
-  onChange?: (stepIndex: number, agent: AgentType) => Promise<void>;
+  onChange?: (stepIndex: number, agent: AgentType, tier: ModelTier) => Promise<void>;
+  modelTiers?: AgentsConfig['model_tiers'];
   t: (key: string, ...args: (string | number)[]) => string;
   compact?: boolean;
 }) {
@@ -1188,9 +1191,17 @@ function StepAgentSwitcher({
     <AgentSwitchPicker
       currentAgent={step.agent}
       availableAgents={availableAgentTypes}
-      onChange={onChange ? agent => onChange(stepIndex, agent) : undefined}
+      currentTier={step.agent_settings?.tier ?? 'default'}
+      onSelectionChange={onChange ? (agent, tier) => onChange(stepIndex, agent, tier) : undefined}
+      tierLabels={{
+        economy: t('disc.tier.economy'),
+        default: t('disc.tier.default'),
+        reasoning: t('disc.tier.reasoning'),
+      }}
+      modelTiers={modelTiers}
+      defaultModelLabel={t('config.defaultModel')}
       compact={compact}
-      title={t('disc.switchAgent')}
+      title={t('disc.switchAgentAndTier')}
       ariaLabel={t('wf.stepAgentSwitchLabel', step.name, AGENT_LABELS[step.agent] ?? step.agent)}
       staticClassName={compact ? 'wf-pipe-chip-agent' : 'wf-step-agent-static'}
     />
@@ -1804,10 +1815,11 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, onChangeSt
                               stepIndex={i}
                               availableAgentTypes={availableAgentTypes}
                               onChange={onChangeStepAgent}
+                              modelTiers={agentAccess?.model_tiers}
                               t={t}
                               compact
                             />
-                            <TierBadge step={step} t={t} chip />
+                            {!onChangeStepAgent && <TierBadge step={step} t={t} chip />}
                             </>
                           )}
                         </span>

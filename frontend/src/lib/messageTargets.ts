@@ -54,6 +54,7 @@ export function composerMentions(
         kind: isPrincipal ? 'discussion_agent' : 'agent',
         agent_type: mention.type,
         cli_session_id: null,
+        tier: isPrincipal ? null : 'default',
       },
     });
   }
@@ -153,6 +154,7 @@ export function nativeDiscussionTargets(
       kind: agent === discussion.agent ? 'discussion_agent' : 'agent',
       agent_type: agent,
       cli_session_id: null,
+      tier: agent === discussion.agent ? null : 'default',
     }));
 }
 

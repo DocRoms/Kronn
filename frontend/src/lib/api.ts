@@ -30,7 +30,7 @@ import type {
   ImportPluginBundleRequest,
   ImportPluginBundleReport,
   Discussion,
-  ActiveAgentDispatch,
+  DiscussionDetail,
   DiscussionNativeAgentMode,
   DiscussionAgentHandoffMode,
   DiscussionMeta,
@@ -1329,7 +1329,7 @@ export const discussions = {
    *  (incl. background/batch children). Polled so a run still working after you
    *  navigate away keeps showing as running, instead of looking dead. */
   getRunning: () => api<string[]>('GET', '/discussions/running'),
-  get: (id: string) => api<Discussion & { active_agent_dispatches?: ActiveAgentDispatch[] }>(
+  get: (id: string) => api<Discussion & Partial<Pick<DiscussionDetail, 'active_agent_dispatches' | 'message_targets'>>>(
     'GET',
     `/discussions/${id}`,
   ),

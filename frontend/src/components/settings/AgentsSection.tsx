@@ -470,12 +470,6 @@ export function AgentsSection({
               <div className="set-agent-default-title">
                 <GitFork size={15} aria-hidden="true" />
                 <span>{t('config.agentHandoffTitle')}</span>
-                <span className="set-agent-handoff-status" data-enabled={agentHandoffsEnabled === true}>
-                  {agentHandoffsEnabled ? t('config.agentHandoffOn') : t('config.agentHandoffOff')}
-                </span>
-              </div>
-              <p>{t('config.agentHandoffHint')}</p>
-              <div className="set-agent-handoff-controls">
                 <button
                   type="button"
                   className="set-agent-handoff-toggle"
@@ -484,100 +478,89 @@ export function AgentsSection({
                   disabled={agentHandoffsEnabled === null}
                   onClick={() => void saveAgentHandoffsEnabled(!agentHandoffsEnabled)}
                 >
+                  <span>{agentHandoffsEnabled ? t('config.agentHandoffOn') : t('config.agentHandoffOff')}</span>
                   <span className="set-toggle-track" data-on={agentHandoffsEnabled === true}>
                     <span className="set-toggle-thumb" data-on={agentHandoffsEnabled === true} />
                   </span>
-                  <span>
-                    <strong>{t('config.agentHandoffToggle')}</strong>
-                    <small>{t('config.agentHandoffToggleHint')}</small>
-                  </span>
                 </button>
-                <label className="set-agent-handoff-limit">
-                  <span>{t('config.agentHandoffPaidLimit')}</span>
-                  <select
-                    value={agentHandoffPaidUnlimited ? 'unlimited' : String(agentHandoffPaidLimit)}
-                    disabled={agentHandoffsEnabled !== true}
-                    onChange={event => void saveAgentHandoffPaidLimit(
-                      event.target.value === 'unlimited' ? 'unlimited' : Number(event.target.value),
-                    )}
-                  >
-                    {[0, 1, 2, 3, 4, 5].map(limit => (
-                      <option key={limit} value={limit}>
-                        {limit === 0
-                          ? t('config.agentHandoffPaidLimitZero')
-                          : limit === 1
-                            ? t('config.agentHandoffPaidLimitOne')
-                            : t('config.agentHandoffPaidLimitMany', limit)}
-                      </option>
-                    ))}
-                    <option value="unlimited">{t('config.agentHandoffPaidLimitUnlimited')}</option>
-                  </select>
-                  <small>{t('config.agentHandoffPaidLimitHint')}</small>
-                </label>
               </div>
-              {agentHandoffsEnabled === false && (
-                <div className="set-agent-handoff-off-note" role="status">
-                  <X size={15} aria-hidden="true" />
-                  <span>
-                    <strong>{t('config.agentHandoffDisabledTitle')}</strong>
-                    <small>{t('config.agentHandoffDisabledHint')}</small>
-                  </span>
+              {agentHandoffsEnabled === true && (
+                <div className="set-agent-handoff-expanded" data-testid="agent-handoff-details">
+                  <p>{t('config.agentHandoffHint')}</p>
+                  <label className="set-agent-handoff-limit">
+                    <span>{t('config.agentHandoffPaidLimit')}</span>
+                    <select
+                      value={agentHandoffPaidUnlimited ? 'unlimited' : String(agentHandoffPaidLimit)}
+                      onChange={event => void saveAgentHandoffPaidLimit(
+                        event.target.value === 'unlimited' ? 'unlimited' : Number(event.target.value),
+                      )}
+                    >
+                      {[0, 1, 2, 3, 4, 5].map(limit => (
+                        <option key={limit} value={limit}>
+                          {limit === 0
+                            ? t('config.agentHandoffPaidLimitZero')
+                            : limit === 1
+                              ? t('config.agentHandoffPaidLimitOne')
+                              : t('config.agentHandoffPaidLimitMany', limit)}
+                        </option>
+                      ))}
+                      <option value="unlimited">{t('config.agentHandoffPaidLimitUnlimited')}</option>
+                    </select>
+                    <small>{t('config.agentHandoffPaidLimitHint')}</small>
+                  </label>
+                  {agentHandoffPaidUnlimited && (
+                    <div className="set-agent-handoff-warning" role="alert">
+                      <AlertTriangle size={16} aria-hidden="true" />
+                      <span>
+                        <strong>{t('config.agentHandoffUnlimitedWarningTitle')}</strong>
+                        <small>{t('config.agentHandoffUnlimitedWarning')}</small>
+                      </span>
+                    </div>
+                  )}
+                  <div className="set-agent-handoff-targets">
+                    <div className="set-agent-handoff-targets-copy">
+                      <strong>{t('config.agentHandoffTargetsTitle')}</strong>
+                      <small>{t('config.agentHandoffTargetsHint')}</small>
+                    </div>
+                    <div className="set-agent-handoff-target-grid">
+                      {agents.map(agent => {
+                        const allowed = !agentHandoffBlockedAgents.includes(agent.agent_type);
+                        const local = agent.agent_type === 'Ollama';
+                        return (
+                          <button
+                            key={agent.agent_type}
+                            type="button"
+                            className="set-agent-handoff-target"
+                            data-allowed={allowed}
+                            aria-pressed={allowed}
+                            onClick={() => void saveAgentHandoffTarget(agent.agent_type, !allowed)}
+                          >
+                            <span className="set-agent-handoff-target-check" aria-hidden="true">
+                              {allowed ? <Check size={11} /> : <X size={11} />}
+                            </span>
+                            <span>
+                              <strong>{AGENT_LABELS[agent.agent_type] ?? agent.name}</strong>
+                              <small>{t(local ? 'config.agentHandoffTargetLocal' : 'config.agentHandoffTargetPaid')}</small>
+                            </span>
+                            <span className="set-agent-handoff-target-state">
+                              {t(allowed
+                                ? 'config.agentHandoffTargetAllowed'
+                                : 'config.agentHandoffTargetBlocked')}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                  <div className="set-agent-handoff-cli-note" role="note">
+                    <Info size={15} aria-hidden="true" />
+                    <span>
+                      <strong>{t('config.agentHandoffCliTitle')}</strong>
+                      <small>{t('config.agentHandoffCliHint')}</small>
+                    </span>
+                  </div>
                 </div>
               )}
-              {agentHandoffsEnabled && agentHandoffPaidUnlimited && (
-                <div className="set-agent-handoff-warning" role="alert">
-                  <AlertTriangle size={16} aria-hidden="true" />
-                  <span>
-                    <strong>{t('config.agentHandoffUnlimitedWarningTitle')}</strong>
-                    <small>{t('config.agentHandoffUnlimitedWarning')}</small>
-                  </span>
-                </div>
-              )}
-              <div className="set-agent-handoff-targets">
-                <div className="set-agent-handoff-targets-copy">
-                  <strong>{t('config.agentHandoffTargetsTitle')}</strong>
-                  <small>{t('config.agentHandoffTargetsHint')}</small>
-                </div>
-                <div className="set-agent-handoff-target-grid">
-                  {agents.map(agent => {
-                    const allowed = !agentHandoffBlockedAgents.includes(agent.agent_type);
-                    const local = agent.agent_type === 'Ollama';
-                    return (
-                      <button
-                        key={agent.agent_type}
-                        type="button"
-                        className="set-agent-handoff-target"
-                        data-allowed={allowed}
-                        aria-pressed={allowed}
-                        disabled={agentHandoffsEnabled !== true}
-                        onClick={() => void saveAgentHandoffTarget(agent.agent_type, !allowed)}
-                      >
-                        <span className="set-agent-handoff-target-check" aria-hidden="true">
-                          {allowed ? <Check size={11} /> : <X size={11} />}
-                        </span>
-                        <span>
-                          <strong>{AGENT_LABELS[agent.agent_type] ?? agent.name}</strong>
-                          <small>{t(local ? 'config.agentHandoffTargetLocal' : 'config.agentHandoffTargetPaid')}</small>
-                        </span>
-                        <span className="set-agent-handoff-target-state">
-                          {t(agentHandoffsEnabled !== true
-                            ? 'config.agentHandoffTargetInactive'
-                            : allowed
-                              ? 'config.agentHandoffTargetAllowed'
-                              : 'config.agentHandoffTargetBlocked')}
-                        </span>
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-              <div className="set-agent-handoff-cli-note" role="note">
-                <Info size={15} aria-hidden="true" />
-                <span>
-                  <strong>{t('config.agentHandoffCliTitle')}</strong>
-                  <small>{t('config.agentHandoffCliHint')}</small>
-                </span>
-              </div>
             </div>
           </div>
         </section>

@@ -22,10 +22,13 @@ import type { ComponentProps } from 'react';
 import { buildApiMock } from '../../../test/apiMock';
 import type { Project, Workflow, WorkflowStep } from '../../../types/generated';
 
-const { createMock, updateMock, qpListMock } = vi.hoisted(() => ({
+const { createMock, updateMock, qpListMock, skillListMock, profileListMock, directiveListMock } = vi.hoisted(() => ({
   createMock: vi.fn(),
   updateMock: vi.fn(),
   qpListMock: vi.fn(),
+  skillListMock: vi.fn(),
+  profileListMock: vi.fn(),
+  directiveListMock: vi.fn(),
 }));
 
 vi.mock('../../../lib/api', () => buildApiMock({
@@ -35,6 +38,15 @@ vi.mock('../../../lib/api', () => buildApiMock({
   },
   quickPrompts: {
     list: qpListMock as never,
+  },
+  skills: {
+    list: skillListMock as never,
+  },
+  profiles: {
+    list: profileListMock as never,
+  },
+  directives: {
+    list: directiveListMock as never,
   },
 }));
 
@@ -108,9 +120,15 @@ beforeEach(() => {
   createMock.mockReset();
   updateMock.mockReset();
   qpListMock.mockReset();
+  skillListMock.mockReset();
+  profileListMock.mockReset();
+  directiveListMock.mockReset();
   createMock.mockResolvedValue({});
   updateMock.mockResolvedValue({});
   qpListMock.mockResolvedValue([]);
+  skillListMock.mockResolvedValue([]);
+  profileListMock.mockResolvedValue([]);
+  directiveListMock.mockResolvedValue([]);
   vi.stubGlobal('confirm', vi.fn(() => true));
 });
 
@@ -150,6 +168,9 @@ describe('buildBlankStep', () => {
 describe('WorkflowWizard — mode + initial render', () => {
   it('renders the mode toggle and starts on the name step in simple mode by default', () => {
     renderWizard();
+    expect(screen.getByText('wiz.createTitle')).toBeInTheDocument();
+    expect(document.querySelector('.wf-wizard-body')).not.toBeNull();
+    expect(document.querySelector('.wf-wizard-content')).not.toBeNull();
     expect(screen.getByText('wiz.modeSimple')).toBeInTheDocument();
     expect(screen.getByText('wiz.modeAdvanced')).toBeInTheDocument();
     // Name input is on step 0.
@@ -174,6 +195,19 @@ describe('WorkflowWizard — mode + initial render', () => {
     });
     // Advanced progress bar carries the Trigger label that simple mode lacks.
     expect(screen.getByText('wiz.trigger')).toBeInTheDocument();
+  });
+
+  it('lets the user return to a completed step from the progress navigation', () => {
+    renderWizard();
+    fireEvent.change(screen.getByLabelText('wiz.name'), { target: { value: 'Weekly report' } });
+    fireEvent.click(screen.getByText('wiz.next'));
+
+    const firstStep = screen.getByRole('button', { name: /wiz.infos/ });
+    expect(firstStep).not.toBeDisabled();
+    fireEvent.click(firstStep);
+
+    expect(screen.getByLabelText('wiz.name')).toHaveValue('Weekly report');
+    expect(firstStep).toHaveAttribute('aria-current', 'step');
   });
 });
 
@@ -223,7 +257,7 @@ describe('WorkflowWizard — navigation', () => {
     fireEvent.change(screen.getByLabelText('wiz.name'), { target: { value: 'Named' } });
     fireEvent.click(screen.getByText('wiz.next'));
     // Simple step 1 exposes the agent picker.
-    expect(screen.getByLabelText('wiz.agentLabel')).toBeInTheDocument();
+    expect(screen.getByLabelText('wiz.agentAndTierLabel')).toBeInTheDocument();
   });
 
   it('Previous walks back to the name step', () => {
@@ -239,6 +273,34 @@ describe('WorkflowWizard — navigation', () => {
     renderWizard({ onCancel });
     fireEvent.click(screen.getByText('common.cancel'));
     expect(onCancel).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps Cancel available after leaving the first step', () => {
+    const onCancel = vi.fn();
+    renderWizard({ onCancel });
+    fireEvent.change(screen.getByLabelText('wiz.name'), { target: { value: 'Named' } });
+    fireEvent.click(screen.getByText('wiz.next'));
+
+    fireEvent.click(screen.getByText('common.cancel'));
+    expect(onCancel).toHaveBeenCalledTimes(1);
+    expect(screen.getByText('wiz.previous')).toBeInTheDocument();
+  });
+
+  it('keeps future steps locked while creating a workflow', () => {
+    renderWizard();
+    expect(screen.getByRole('button', { name: /wiz\.summary/ })).toBeDisabled();
+    expect(screen.queryByText('wiz.create')).toBeNull();
+  });
+
+  it('lets an existing workflow jump directly to any wizard step', () => {
+    renderWizard({ editWorkflow: mkWorkflow() });
+    const summaryStep = screen.getByRole('button', { name: /wiz\.summary/ });
+
+    expect(summaryStep).not.toBeDisabled();
+    fireEvent.click(summaryStep);
+
+    expect(summaryStep).toHaveAttribute('aria-current', 'step');
+    expect(screen.getByText('ExistingWorkflow')).toBeInTheDocument();
   });
 });
 
@@ -391,6 +453,22 @@ describe('WorkflowWizard — save handler', () => {
     await waitFor(() => expect(onDone).toHaveBeenCalledTimes(1));
   });
 
+  it('can save a valid existing workflow without visiting the summary', async () => {
+    const onDone = vi.fn();
+    renderWizard({ editWorkflow: mkWorkflow(), onDone });
+
+    const saveBtn = screen.getByText('wiz.save').closest('button') as HTMLButtonElement;
+    expect(screen.getByLabelText('wiz.name')).toBeInTheDocument();
+    expect(saveBtn).not.toBeDisabled();
+    fireEvent.click(saveBtn);
+
+    await waitFor(() => expect(updateMock).toHaveBeenCalledWith(
+      'wf-1',
+      expect.objectContaining({ name: 'ExistingWorkflow' }),
+    ));
+    await waitFor(() => expect(onDone).toHaveBeenCalledTimes(1));
+  });
+
   it('surfaces a save error banner when create rejects (and does not call onDone)', async () => {
     const onDone = vi.fn();
     createMock.mockRejectedValueOnce(new Error('backend boom'));
@@ -462,10 +540,52 @@ describe('WorkflowWizard — step-type swaps', () => {
     fireEvent.click(screen.getByText('wiz.next')); // → Steps
   };
 
+  const chooseStepType = (label: string, cardIndex = 0) => {
+    const cards = document.querySelectorAll('.wf-step-edit-card');
+    const card = cards[cardIndex] as HTMLElement;
+    fireEvent.click(card.querySelector('.wf-step-type-current') as HTMLButtonElement);
+    const option = Array.from(card.querySelectorAll<HTMLButtonElement>('.wf-step-type-option'))
+      .find(button => button.textContent?.includes(label));
+    if (!option) throw new Error(`missing step type option ${label} in card ${cardIndex}`);
+    fireEvent.click(option);
+  };
+
+  it('keeps the nine types collapsed and groups them by purpose when opened', () => {
+    toSteps();
+    expect(document.querySelector('.wf-step-type-catalog')).toBeNull();
+
+    const firstCard = document.querySelector('.wf-step-edit-card') as HTMLElement;
+    fireEvent.click(firstCard.querySelector('.wf-step-type-current') as HTMLButtonElement);
+
+    expect(screen.getByText('wiz.stepTypeGroupAi')).toBeInTheDocument();
+    expect(screen.getByText('wiz.stepTypeGroupData')).toBeInTheDocument();
+    expect(screen.getByText('wiz.stepTypeGroupControl')).toBeInTheDocument();
+    expect(firstCard.querySelectorAll('.wf-step-type-option')).toHaveLength(9);
+  });
+
+  it('keeps optional agent context compact and reveals each selector on demand', async () => {
+    skillListMock.mockResolvedValue([{ id: 'skill-rust', name: 'rust' }]);
+    profileListMock.mockResolvedValue([{ id: 'profile-kai', name: 'Kai', persona_name: 'Kai', avatar: '🏗️', role: 'Architect', color: '#8b5cf6' }]);
+    directiveListMock.mockResolvedValue([{ id: 'directive-code', name: 'Code Only', icon: '💻' }]);
+    toSteps();
+
+    await waitFor(() => expect(document.querySelectorAll('.wf-agent-context-config')).toHaveLength(2));
+    const firstCard = document.querySelector('.wf-step-edit-card') as HTMLElement;
+    const context = firstCard.querySelector('.wf-agent-context-config') as HTMLDetailsElement;
+    expect(context.open).toBe(false);
+    expect(context.querySelectorAll('.wf-agent-context-group')).toHaveLength(3);
+
+    fireEvent.click(context.querySelector('.wf-agent-context-summary') as HTMLElement);
+    const skillsGroup = context.querySelector('.wf-agent-context-group') as HTMLDetailsElement;
+    fireEvent.click(skillsGroup.querySelector('summary') as HTMLElement);
+    fireEvent.click(screen.getAllByRole('button', { name: 'rust' })[0]);
+
+    expect(context.textContent).toContain('wiz.agentContextSkillsCount:1');
+  });
+
   it('swapping to Notify reveals the webhook URL field and edits url/method/body', () => {
     toSteps();
-    // First Notify swap button (one per step; act on the first).
-    fireEvent.click(screen.getAllByText('wiz.stepTypeNotify')[0]);
+    chooseStepType('wiz.stepTypeNotify');
     expect(screen.getByText('wiz.notifyTitle')).toBeInTheDocument();
     expect(screen.getByText(/wiz\.notifyUrl/)).toBeInTheDocument();
     const url = screen.getByPlaceholderText(/hooks\.slack\.com/) as HTMLInputElement;
@@ -482,7 +602,7 @@ describe('WorkflowWizard — step-type swaps', () => {
 
   it('swapping to Gate reveals the gate message field and editing it works', () => {
     toSteps();
-    fireEvent.click(screen.getAllByText('wiz.stepTypeGate')[0]);
+    chooseStepType('wiz.stepTypeGate');
     expect(screen.getByText('wiz.gateMessage')).toBeInTheDocument();
     const msg = screen.getByPlaceholderText('wiz.gateMessagePlaceholder') as HTMLTextAreaElement;
     fireEvent.change(msg, { target: { value: 'Please review' } });
@@ -491,7 +611,7 @@ describe('WorkflowWizard — step-type swaps', () => {
 
   it('swapping to Exec surfaces the empty-allowlist warning + "configure now" CTA', () => {
     toSteps();
-    fireEvent.click(screen.getAllByText('wiz.stepTypeExec')[0]);
+    chooseStepType('wiz.stepTypeExec');
     // No allowlist configured yet → the warning + CTA render (not the
     // command picker). Clicking the CTA jumps to the Config tab.
     expect(screen.getByText('wiz.execTitle')).toBeInTheDocument();
@@ -503,7 +623,7 @@ describe('WorkflowWizard — step-type swaps', () => {
 
   it('swapping to JsonData reveals the payload editor and parses valid JSON', () => {
     toSteps();
-    fireEvent.click(screen.getAllByText('wiz.stepTypeJsonData')[0]);
+    chooseStepType('wiz.stepTypeJsonData');
     expect(screen.getByText('wiz.jsonDataTitle')).toBeInTheDocument();
     expect(screen.getByText(/wiz\.jsonDataPayload/)).toBeInTheDocument();
     const editor = screen.getByPlaceholderText('wiz.jsonDataPlaceholder') as HTMLTextAreaElement;
@@ -517,7 +637,7 @@ describe('WorkflowWizard — step-type swaps', () => {
 
   it('JsonData ignores invalid JSON (payload not stored, editor stays empty)', () => {
     toSteps();
-    fireEvent.click(screen.getAllByText('wiz.stepTypeJsonData')[0]);
+    chooseStepType('wiz.stepTypeJsonData');
     const editor = screen.getByPlaceholderText('wiz.jsonDataPlaceholder') as HTMLTextAreaElement;
     fireEvent.change(editor, { target: { value: '{ not json' } });
     // Invalid input is not committed to the (typed) payload, so the
@@ -527,7 +647,7 @@ describe('WorkflowWizard — step-type swaps', () => {
 
   it('swapping to ApiCall mounts the ApiCall step card (empty-plugin state)', () => {
     toSteps();
-    fireEvent.click(screen.getAllByText('wiz.stepTypeApiCall')[0]);
+    chooseStepType('wiz.stepTypeApiCall');
     // No plugins configured → the card renders its not-supported notice.
     expect(screen.getByText('wf.apicall.notSupported')).toBeInTheDocument();
   });
@@ -536,7 +656,7 @@ describe('WorkflowWizard — step-type swaps', () => {
     toSteps();
     // Act on the second step so selectBatchQpStepType patches the
     // predecessor (the first Agent step) to Structured + low-effort.
-    fireEvent.click(screen.getAllByText('wiz.stepTypeBatchQP')[1]);
+    chooseStepType('wiz.stepTypeBatchQP', 1);
     // No QPs configured in the default mock → the batch form surfaces the
     // "no quick prompts" notice (still proves the BatchQP branch rendered).
     expect(screen.getByText('wiz.batchQPTitle')).toBeInTheDocument();
@@ -549,7 +669,7 @@ describe('WorkflowWizard — step-type swaps', () => {
     fireEvent.click(screen.getByText('wiz.next')); // → Steps
     // Wait for QPs to load so the batch picker has options.
     await screen.findAllByDisplayValue('wiz.agentQpPickerInline');
-    fireEvent.click(screen.getAllByText('wiz.stepTypeBatchQP')[1]);
+    chooseStepType('wiz.stepTypeBatchQP', 1);
     // The batch QP picker (data-invalid select) is present + selectable.
     const picker = screen.getByText(/wiz\.batchQPPicker$/).parentElement
       ?.parentElement?.querySelector('select[data-invalid]') as HTMLSelectElement
@@ -566,7 +686,7 @@ describe('WorkflowWizard — step-type swaps', () => {
     // Reject it; the Agent prompt textarea must still be there.
     vi.stubGlobal('confirm', vi.fn(() => false));
     toSteps();
-    fireEvent.click(screen.getAllByText('wiz.stepTypeNotify')[0]);
+    chooseStepType('wiz.stepTypeNotify');
     // Notify form did NOT appear because the swap was cancelled.
     expect(screen.queryByText('wiz.notifyTitle')).not.toBeInTheDocument();
   });
@@ -619,8 +739,8 @@ describe('WorkflowWizard — step reorder + advanced toggle', () => {
   it('removing a step drops it from the list (>1 step)', () => {
     toSteps();
     expect(screen.getByDisplayValue('beta')).toBeInTheDocument();
-    // Two "Remove step" controls (one per step); remove the second.
-    fireEvent.click(screen.getAllByLabelText('Remove step')[1]);
+    // Two remove controls (one per step); remove the second.
+    fireEvent.click(screen.getAllByLabelText('wiz.removeStep')[1]);
     expect(screen.queryByDisplayValue('beta')).not.toBeInTheDocument();
     expect(screen.getByDisplayValue('main')).toBeInTheDocument();
   });
@@ -757,13 +877,15 @@ describe('WorkflowWizard — simple task page', () => {
     fireEvent.click(screen.getByText('wiz.next')); // → Task
   };
 
-  it('changing the agent picker updates the step agent', () => {
+  it('changing the agent picker updates the step agent and AI mode', () => {
     renderWizard({ installedAgentTypes: ['ClaudeCode', 'Codex'] });
     fireEvent.change(screen.getByLabelText('wiz.name'), { target: { value: 'TaskWF' } });
     fireEvent.click(screen.getByText('wiz.next'));
-    const agentSelect = screen.getByLabelText('wiz.agentLabel') as HTMLSelectElement;
-    fireEvent.change(agentSelect, { target: { value: 'Codex' } });
-    expect(agentSelect.value).toBe('Codex');
+    const agentPicker = screen.getByLabelText('wiz.agentAndTierLabel');
+    fireEvent.click(agentPicker);
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Codex · disc.tier.reasoning' }));
+    expect(agentPicker).toHaveTextContent('Codex');
+    expect(agentPicker).toHaveTextContent('🧠');
   });
 
   it('clicking a starter card fills the prompt and names the workflow', () => {

@@ -9,7 +9,7 @@
  * restored on remount.
  *
  * Storage shape (one entry per discussion):
- *   { v: 1, text: string, savedAt: ISO-8601 }
+ *   { v: 2, text: string, routingTiers: object, savedAt: ISO-8601 }
  * The `v` field lets future schema changes coexist with old browsers
  * that still have pre-migration drafts.
  *
@@ -19,19 +19,36 @@
  * `purgeExpiredDrafts` once the caller supplies the current live ids.
  */
 
+import type { AgentType, ModelTier } from '../types/generated';
+
 const DRAFT_KEY_PREFIX = 'kronn:draft:';
 const MAX_DRAFT_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
-const DRAFT_SCHEMA_VERSION = 1;
+const DRAFT_SCHEMA_VERSION = 2;
+
+export type DraftRoutingTiers = Partial<Record<AgentType, ModelTier>>;
 
 export interface DraftRecord {
   text: string;
   savedAt: string; // ISO-8601
+  routingTiers: DraftRoutingTiers;
 }
 
 interface StoredDraft {
   v: number;
   text: string;
   savedAt: string;
+  routingTiers?: DraftRoutingTiers;
+}
+
+const VALID_TIERS = new Set<ModelTier>(['economy', 'default', 'reasoning']);
+
+function validRoutingTiers(value: unknown): DraftRoutingTiers {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  return Object.fromEntries(
+    Object.entries(value).filter((entry): entry is [AgentType, ModelTier] => (
+      typeof entry[1] === 'string' && VALID_TIERS.has(entry[1] as ModelTier)
+    )),
+  );
 }
 
 function storageKey(discussionId: string): string {
@@ -45,7 +62,11 @@ function storageKey(discussionId: string): string {
  * Passing an empty string removes the entry — no point keeping a
  * zero-length draft around.
  */
-export function saveDraft(discussionId: string, text: string): void {
+export function saveDraft(
+  discussionId: string,
+  text: string,
+  routingTiers: DraftRoutingTiers = {},
+): void {
   if (!discussionId) return;
   try {
     if (!text) {
@@ -56,6 +77,7 @@ export function saveDraft(discussionId: string, text: string): void {
       v: DRAFT_SCHEMA_VERSION,
       text,
       savedAt: new Date().toISOString(),
+      routingTiers: validRoutingTiers(routingTiers),
     };
     localStorage.setItem(storageKey(discussionId), JSON.stringify(payload));
   } catch {
@@ -77,7 +99,7 @@ export function loadDraft(discussionId: string, now: Date = new Date()): DraftRe
     if (!raw) return null;
     const parsed = JSON.parse(raw) as Partial<StoredDraft> | null;
     if (!parsed || typeof parsed !== 'object') return null;
-    if (parsed.v !== DRAFT_SCHEMA_VERSION) return null;
+    if (parsed.v !== 1 && parsed.v !== DRAFT_SCHEMA_VERSION) return null;
     if (typeof parsed.text !== 'string' || !parsed.text) return null;
     if (typeof parsed.savedAt !== 'string') return null;
 
@@ -91,7 +113,11 @@ export function loadDraft(discussionId: string, now: Date = new Date()): DraftRe
       return null;
     }
 
-    return { text: parsed.text, savedAt: parsed.savedAt };
+    return {
+      text: parsed.text,
+      savedAt: parsed.savedAt,
+      routingTiers: parsed.v === 1 ? {} : validRoutingTiers(parsed.routingTiers),
+    };
   } catch {
     return null;
   }

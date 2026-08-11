@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import { useT } from '../../lib/I18nContext';
+import { MarkdownEditor } from '../MarkdownComposerTools';
 import { AGENT_LABELS } from '../../lib/constants';
 import { config as configApi, ollama as ollamaApi } from '../../lib/api';
 import type {
@@ -399,14 +400,18 @@ export function QuickPromptForm({
           <Plus size={12} /> {t('qp.addVariable')}
         </button>
       </div>
-      <textarea
-        ref={textareaRef}
-        className="wf-textarea mb-4"
-        rows={8}
-        value={template}
-        onChange={e => setTemplate(e.target.value)}
-        placeholder={t('qp.promptPlaceholder')}
-      />
+      <div className="wf-markdown-prompt-field mb-4">
+        <MarkdownEditor content={template}>
+          <textarea
+            ref={textareaRef}
+            className="wf-textarea"
+            rows={8}
+            value={template}
+            onChange={e => setTemplate(e.target.value)}
+            placeholder={t('qp.promptPlaceholder')}
+          />
+        </MarkdownEditor>
+      </div>
       <p className="qp-syntax-hint">{t('qp.syntaxHint')}</p>
 
       {(!name || !template) && (

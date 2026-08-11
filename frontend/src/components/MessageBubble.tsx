@@ -5,6 +5,7 @@ import {
   useRef,
   useMemo,
   useEffect,
+  useLayoutEffect,
   memo,
   type ReactNode,
 } from 'react';
@@ -21,9 +22,9 @@ import { MermaidDiagram } from './MermaidDiagram';
 import remarkGfm from 'remark-gfm';
 import remarkEmoji from 'remark-emoji';
 import '../pages/DiscussionsPage.css';
-import type { DiscussionMessage, AgentType, QuickPrompt, ContextFile } from '../types/generated';
+import type { DiscussionMessage, AgentType, QuickPrompt, ContextFile, MessageTarget } from '../types/generated';
 import { MessageAttachments } from './MessageAttachments';
-import { AGENT_LABELS, AGENT_MENTIONS, USER_MENTION_TRIGGER, agentColor } from '../lib/constants';
+import { AGENT_LABELS, AGENT_MENTIONS, MODEL_TIER_ICONS, USER_MENTION_TRIGGER, agentColor } from '../lib/constants';
 import { gravatarUrl } from '../lib/gravatar';
 import {
   splitInjectedContext,
@@ -41,6 +42,13 @@ import {
 // Hoisted regexes (avoid creating new RegExp objects per message per render)
 const RE_AUTH_ERROR = /api.?key|invalid.*key|key.*not.*config|authenticat|unauthori|login|sign.?in/i;
 const RE_PARTIAL_RESPONSE = /Réponse partielle.*interrompu|Timeout d'inactivité/i;
+const EDIT_TEXTAREA_MAX_HEIGHT = 160;
+
+function resizeEditTextarea(textarea: HTMLTextAreaElement) {
+  textarea.style.height = 'auto';
+  textarea.style.height = `${Math.min(textarea.scrollHeight, EDIT_TEXTAREA_MAX_HEIGHT)}px`;
+}
+
 interface MentionMdNode {
   type: string;
   value?: string;
@@ -187,6 +195,8 @@ const KronnSeedToggle = memo(({ seed }: { seed: string }) => {
 
 export interface MessageBubbleProps {
   msg: DiscussionMessage;
+  /** Durable addressees recorded when this user message was accepted. */
+  targets?: MessageTarget[];
   idx: number;
   isLastUser: boolean;
   isLastAgent: boolean;
@@ -251,7 +261,13 @@ export interface MessageBubbleProps {
 export const MessageBubble = memo(function MessageBubble(props: MessageBubbleProps) {
   const { msg, isLastUser, isLastAgent, isEditing, isCopied, isTtsActive, ttsState: tts, isExpandedSummary,
     prevUserTs, defaultAgent, summaryCache, language, sending, editingText, hasFullAccess,
-    onCopy, onTts, onEditStart, onEditCancel, onEditSubmit, onEditTextChange, onRetry, onExpandSummary, onNavigate, discussionId, projectId, chainableQPs, onLaunchQp, attachments, pendingAttachment, isSearchMatch, isSearchCurrent, replyTarget, replies = [], onReply, onReplyNavigate, t } = props;
+    onCopy, onTts, onEditStart, onEditCancel, onEditSubmit, onEditTextChange, onRetry, onExpandSummary, onNavigate, discussionId, projectId, chainableQPs, onLaunchQp, attachments, pendingAttachment, isSearchMatch, isSearchCurrent, replyTarget, replies = [], onReply, onReplyNavigate, targets = [], t } = props;
+  const editTextareaRef = useRef<HTMLTextAreaElement>(null);
+  useLayoutEffect(() => {
+    if (isEditing && editTextareaRef.current) {
+      resizeEditTextarea(editTextareaRef.current);
+    }
+  }, [editingText, isEditing]);
   const isUser = msg.role === 'User';
   const modelError = useMemo(() => {
     if (msg.role !== 'System') return null;
@@ -596,6 +612,44 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
             {messageShortLabel(msg.id)}
           </button>
         </div>
+        {isUser && targets.length > 0 && (
+          <div
+            className="disc-msg-routing-receipt"
+            aria-label={t('disc.routingRequested')}
+            data-testid="message-routing-receipt"
+          >
+            <span className="disc-msg-routing-label">{t('disc.routingRequested')}</span>
+            <span className="disc-msg-routing-targets">
+              {targets.map((target, index) => {
+                const trigger = AGENT_MENTIONS.find(mention => mention.type === target.agent_type)?.trigger
+                  ?? `@${AGENT_LABELS[target.agent_type] ?? target.agent_type}`;
+                const alias = target.kind === 'cli' ? `${trigger}-cli` : trigger;
+                const tierLabel = target.tier ? t(`disc.tier.${target.tier}`) : null;
+                return (
+                  <span
+                    key={`${target.kind}-${target.agent_type}-${target.cli_session_id ?? index}`}
+                    className="disc-msg-routing-target"
+                    data-kind={target.kind}
+                    title={target.kind === 'cli'
+                      ? `${alias} · ${t('disc.targetCli')}`
+                      : tierLabel
+                        ? `${alias} · ${tierLabel}`
+                        : alias}
+                  >
+                    <span>{alias}{' '}</span>
+                    {target.kind === 'cli' ? (
+                      <span className="disc-msg-routing-tier">· {t('disc.targetCli')}</span>
+                    ) : target.tier && tierLabel ? (
+                      <span className="disc-msg-routing-tier">
+                        · <span aria-hidden="true">{MODEL_TIER_ICONS[target.tier]}</span> {tierLabel}
+                      </span>
+                    ) : null}
+                  </span>
+                );
+              })}
+            </span>
+          </div>
+        )}
         {msg.role !== 'System' && msg.reply_to_message_id && (
           <button
             type="button"
@@ -624,8 +678,13 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
         {isEditing ? (
           <div className="disc-edit-layout">
             <textarea
+              ref={editTextareaRef}
               value={editingText}
-              onChange={e => onEditTextChange(e.target.value)}
+              onChange={e => {
+                onEditTextChange(e.target.value);
+                const textarea = e.currentTarget;
+                requestAnimationFrame(() => resizeEditTextarea(textarea));
+              }}
               onKeyDown={e => {
                 // IME guard: pressing Enter during an active composition
                 // confirms the candidate, never re-submits the edit.
@@ -636,7 +695,7 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
               }}
               className="disc-edit-textarea"
               aria-label={t('disc.editResend')}
-              rows={10}
+              rows={1}
               autoFocus
             />
             <div className="disc-edit-actions">

@@ -309,9 +309,9 @@ describe('WorkflowDetail — collapsed steps pipeline', () => {
     fireEvent.click(trigger);
     expect(trigger.closest('.kr-agent-switch')).toHaveAttribute('data-open', 'true');
     expect(screen.getByRole('menu').parentElement).toBe(document.body);
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Codex' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Codex · disc.tier.default' }));
 
-    await waitFor(() => expect(onChangeStepAgent).toHaveBeenCalledWith(0, 'Codex'));
+    await waitFor(() => expect(onChangeStepAgent).toHaveBeenCalledWith(0, 'Codex', 'default'));
     expect(screen.queryByTestId('wf-steps-detail')).toBeNull();
   });
 });

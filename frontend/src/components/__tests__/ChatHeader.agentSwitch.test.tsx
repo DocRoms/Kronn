@@ -9,7 +9,7 @@ vi.mock('../../lib/I18nContext', () => ({
 
 import { discussions as discussionsApi } from '../../lib/api';
 import { ChatHeader } from '../ChatHeader';
-import type { AgentDetection, AgentType, Discussion } from '../../types/generated';
+import type { AgentDetection, AgentType, Discussion, ModelTiersConfig } from '../../types/generated';
 import type { ToastFn } from '../../hooks/useToast';
 
 const noop = () => {};
@@ -64,6 +64,7 @@ function renderHeader(options: {
   onAgentSwitch?: (agent: AgentType) => void;
   onDiscussionUpdated?: () => void;
   toast?: ToastFn;
+  modelTiers?: ModelTiersConfig;
 } = {}) {
   const sending = options.sending ?? false;
   const onAgentSwitch = options.onAgentSwitch ?? vi.fn<(agent: AgentType) => void>();
@@ -78,6 +79,7 @@ function renderHeader(options: {
         makeAgent('Codex'),
         makeAgent('GeminiCli', false),
       ]}
+      modelTiers={options.modelTiers}
       showGitPanel={false}
       isMobile={false}
       sending={sending}
@@ -120,21 +122,23 @@ describe('ChatHeader — shared agent switcher', () => {
     expect(edit.closest('.disc-chat-header-presence')).toBeNull();
   });
 
-  it('uses the workflow picker and persists a usable agent directly', async () => {
+  it('persists an agent and AI mode together from the quick picker', async () => {
     const { onAgentSwitch } = renderHeader();
-    const trigger = screen.getByRole('button', { name: 'disc.switchAgent' });
+    const trigger = screen.getByRole('button', { name: 'disc.switchAgentAndTier' });
 
     expect(trigger).toHaveClass('kr-agent-switch-btn');
-    expect(trigger).toHaveTextContent('@claude · disc.targetDiscussionAgent');
+    expect(trigger).toHaveTextContent('@claude');
+    expect(trigger).toHaveTextContent('disc.targetDiscussionAgent');
+    expect(trigger).toHaveTextContent('🎯');
     await waitFor(() => expect(trigger).toBeEnabled());
     fireEvent.click(trigger);
     const menu = screen.getByRole('menu');
     expect(menu.parentElement).toBe(document.body);
-    expect(screen.getByRole('menuitem', { name: 'Claude Code' })).toBeDisabled();
-    expect(screen.getByRole('menuitem', { name: 'Codex' })).toBeEnabled();
-    expect(screen.queryByRole('menuitem', { name: 'Gemini CLI' })).toBeNull();
+    expect(screen.getByRole('menuitem', { name: 'Claude Code · disc.tier.default' })).toBeDisabled();
+    expect(screen.getByRole('menuitem', { name: 'Codex · disc.tier.reasoning' })).toBeEnabled();
+    expect(screen.queryByRole('group', { name: 'Gemini CLI' })).toBeNull();
 
-    const codexOption = screen.getByRole('menuitem', { name: 'Codex' });
+    const codexOption = screen.getByRole('menuitem', { name: 'Codex · disc.tier.reasoning' });
     fireEvent.mouseDown(codexOption);
     fireEvent.click(codexOption);
     fireEvent.click(codexOption);
@@ -143,7 +147,7 @@ describe('ChatHeader — shared agent switcher', () => {
       expect(discussionsApi.update).toHaveBeenCalledTimes(1);
       expect(discussionsApi.update).toHaveBeenCalledWith(
         'disc-agent-switch',
-        { agent: 'Codex' },
+        { agent: 'Codex', tier: 'reasoning' },
       );
       expect(onAgentSwitch).toHaveBeenCalledTimes(1);
       expect(onAgentSwitch).toHaveBeenCalledWith('Codex');
@@ -151,9 +155,54 @@ describe('ChatHeader — shared agent switcher', () => {
     expect(screen.queryByRole('menu')).toBeNull();
   });
 
+  it('changes only the AI mode without forcing an agent switch', async () => {
+    const { onAgentSwitch } = renderHeader();
+    const trigger = screen.getByRole('button', { name: 'disc.switchAgentAndTier' });
+    await waitFor(() => expect(trigger).toBeEnabled());
+    fireEvent.click(trigger);
+    fireEvent.click(screen.getByRole('menuitem', {
+      name: 'Claude Code · disc.tier.economy',
+    }));
+
+    await waitFor(() => {
+      expect(discussionsApi.update).toHaveBeenCalledWith(
+        'disc-agent-switch',
+        { agent: 'ClaudeCode', tier: 'economy' },
+      );
+      expect(onAgentSwitch).toHaveBeenCalledWith('ClaudeCode');
+    });
+  });
+
+  it('shows the resolved concrete model in hover titles', async () => {
+    const blank = { economy: null, default: null, reasoning: null };
+    renderHeader({
+      modelTiers: {
+        claude_code: { ...blank },
+        codex: { ...blank, reasoning: 'gpt-company-review' },
+        gemini_cli: { ...blank },
+        kiro: { ...blank },
+        vibe: { ...blank },
+        copilot_cli: { ...blank },
+        ollama: { ...blank },
+        lite_llm: { ...blank },
+      },
+    });
+    const trigger = screen.getByRole('button', { name: 'disc.switchAgentAndTier' });
+    await waitFor(() => expect(trigger).toBeEnabled());
+    expect(trigger).toHaveAttribute(
+      'title',
+      'disc.switchAgentAndTier · disc.tier.default · sonnet',
+    );
+
+    fireEvent.click(trigger);
+    expect(screen.getByRole('menuitem', {
+      name: 'Codex · disc.tier.reasoning',
+    })).toHaveAttribute('title', 'disc.tier.reasoning · gpt-company-review');
+  });
+
   it('is disabled while the discussion is sending', () => {
     renderHeader({ sending: true });
-    expect(screen.getByRole('button', { name: 'disc.switchAgent' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'disc.switchAgentAndTier' })).toBeDisabled();
   });
 
   it('shows declared joined-CLI worktrees in the discussion header', async () => {
@@ -186,10 +235,10 @@ describe('ChatHeader — shared agent switcher', () => {
     vi.mocked(discussionsApi.update).mockRejectedValue(new Error('offline'));
     const { toast, onAgentSwitch } = renderHeader();
 
-    const trigger = screen.getByRole('button', { name: 'disc.switchAgent' });
+    const trigger = screen.getByRole('button', { name: 'disc.switchAgentAndTier' });
     await waitFor(() => expect(trigger).toBeEnabled());
     fireEvent.click(trigger);
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Codex' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Codex · disc.tier.default' }));
 
     await waitFor(() => expect(toast).toHaveBeenCalledWith('Error: offline', 'error'));
     expect(onAgentSwitch).not.toHaveBeenCalled();
@@ -202,10 +251,12 @@ describe('ChatHeader — shared agent switcher', () => {
 
     const enable = await screen.findByRole('button', { name: 'disc.nativeAgentEnable' });
     expect(enable).toHaveTextContent('disc.nativeAgentDisabled');
-    expect(screen.queryByRole('button', { name: 'disc.switchAgent' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'disc.switchAgentAndTier' })).toBeNull();
 
-    fireEvent.click(enable);
-    fireEvent.click(enable);
+    await act(async () => {
+      fireEvent.click(enable);
+      fireEvent.click(enable);
+    });
 
     await waitFor(() => {
       expect(discussionsApi.update).toHaveBeenCalledTimes(1);
@@ -215,7 +266,7 @@ describe('ChatHeader — shared agent switcher', () => {
       );
       expect(onDiscussionUpdated).toHaveBeenCalledTimes(1);
     });
-    expect(screen.getByRole('button', { name: 'disc.switchAgent' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'disc.switchAgentAndTier' })).toBeInTheDocument();
   });
 
   it('keeps the native control disabled until a failed mode read can be retried', async () => {
@@ -228,7 +279,7 @@ describe('ChatHeader — shared agent switcher', () => {
     await act(async () => {
       await Promise.resolve();
     });
-    expect(screen.getByRole('button', { name: 'disc.switchAgent' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'disc.switchAgentAndTier' })).toBeDisabled();
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(5_000);
@@ -242,9 +293,12 @@ describe('ChatHeader — shared agent switcher', () => {
   it('disables the native fallback without changing the configured agent', async () => {
     const { onAgentSwitch } = renderHeader();
     const disable = await screen.findByRole('button', { name: 'disc.nativeAgentDisable' });
+    await waitFor(() => expect(disable).toBeEnabled());
 
-    fireEvent.click(disable);
-    fireEvent.click(disable);
+    await act(async () => {
+      fireEvent.click(disable);
+      fireEvent.click(disable);
+    });
 
     await waitFor(() => {
       expect(discussionsApi.update).toHaveBeenCalledTimes(1);

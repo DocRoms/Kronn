@@ -54,7 +54,9 @@ describe('typed composer targets', () => {
       expect.objectContaining({
         trigger: '@codex',
         label: 'agent ponctuel',
-        target: expect.objectContaining({ kind: 'agent', agent_type: 'Codex' }),
+        target: expect.objectContaining({
+          kind: 'agent', agent_type: 'Codex', tier: 'default',
+        }),
       }),
       expect.objectContaining({
         trigger: '@codex-cli',
@@ -93,8 +95,12 @@ describe('typed composer targets', () => {
       agent: 'LiteLlm',
       participants: ['LiteLlm', 'Ollama', 'LiteLlm'],
     })).toEqual([
-      { kind: 'discussion_agent', agent_type: 'LiteLlm', cli_session_id: null },
-      { kind: 'agent', agent_type: 'Ollama', cli_session_id: null },
+      {
+        kind: 'discussion_agent', agent_type: 'LiteLlm', cli_session_id: null, tier: null,
+      },
+      {
+        kind: 'agent', agent_type: 'Ollama', cli_session_id: null, tier: 'default',
+      },
     ]);
   });
 
