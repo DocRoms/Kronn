@@ -9,7 +9,7 @@
 // after the fact). If the volume justifies it, we can swap for SSE
 // later.
 
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useT } from '../lib/I18nContext';
 import { apiCallLogs, type ApiCallLogRow, type ApiCallLogsFilter } from '../lib/api';
 import { RefreshCw, X, Filter, Activity } from 'lucide-react';
@@ -30,17 +30,11 @@ export function ApiCallLogsPage() {
   const [pluginFilter, setPluginFilter] = useState<string>('');
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [drawerRow, setDrawerRow] = useState<ApiCallLogRow | null>(null);
-  // Keep the fetcher stable in the interval cb : closures capturing
-  // filter state would freeze the first values otherwise.
-  const filterRef = useRef({ sourceFilter, statusFilter, pluginFilter });
-  filterRef.current = { sourceFilter, statusFilter, pluginFilter };
-
   const refresh = useCallback(async () => {
-    const { sourceFilter: src, statusFilter: st, pluginFilter: pl } = filterRef.current;
     const filter: ApiCallLogsFilter = {
-      ...(src !== 'all' ? { source: src } : {}),
-      ...(st !== 'all' ? { status: st } : {}),
-      ...(pl.trim() !== '' ? { plugin_slug: pl.trim() } : {}),
+      ...(sourceFilter !== 'all' ? { source: sourceFilter } : {}),
+      ...(statusFilter !== 'all' ? { status: statusFilter } : {}),
+      ...(pluginFilter.trim() !== '' ? { plugin_slug: pluginFilter.trim() } : {}),
       limit: 100,
     };
     setError(null);
@@ -52,13 +46,12 @@ export function ApiCallLogsPage() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [pluginFilter, sourceFilter, statusFilter]);
 
   // Initial fetch + on filter change.
   useEffect(() => {
-    setLoading(true);
     refresh();
-  }, [refresh, sourceFilter, statusFilter, pluginFilter]);
+  }, [refresh]);
 
   // Auto-refresh loop.
   useEffect(() => {
@@ -89,7 +82,10 @@ export function ApiCallLogsPage() {
                 key={s}
                 type="button"
                 className={`api-call-logs-chip${sourceFilter === s ? ' api-call-logs-chip-active' : ''}`}
-                onClick={() => setSourceFilter(s)}
+                onClick={() => {
+                  setLoading(true);
+                  setSourceFilter(s);
+                }}
                 data-testid={`api-call-logs-source-${s}`}
               >
                 {t(`apiCallLogs.source.${s}`)}
@@ -105,7 +101,10 @@ export function ApiCallLogsPage() {
                 key={s}
                 type="button"
                 className={`api-call-logs-chip${statusFilter === s ? ' api-call-logs-chip-active' : ''}`}
-                onClick={() => setStatusFilter(s)}
+                onClick={() => {
+                  setLoading(true);
+                  setStatusFilter(s);
+                }}
                 data-testid={`api-call-logs-status-${s}`}
               >
                 {s === 'all' ? t('apiCallLogs.source.all') : s}
@@ -122,7 +121,10 @@ export function ApiCallLogsPage() {
             className="api-call-logs-input"
             placeholder={t('apiCallLogs.filterPluginPlaceholder')}
             value={pluginFilter}
-            onChange={e => setPluginFilter(e.target.value)}
+            onChange={e => {
+              setLoading(true);
+              setPluginFilter(e.target.value);
+            }}
             data-testid="api-call-logs-plugin-input"
           />
         </div>

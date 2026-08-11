@@ -1,4 +1,4 @@
-import { Fragment, useState, useRef, useEffect, useCallback, useMemo } from 'react';
+import { Fragment, useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo } from 'react';
 import '../pages/DiscussionsPage.css';
 import type {
   Discussion,
@@ -216,6 +216,7 @@ export function ChatInput({
   useEffect(() => {
     if (replyTarget) chatInputRef.current?.focus();
   }, [replyTarget]);
+  const discussionLanguage = discussion?.language;
 
   useEffect(() => {
     let current = true;
@@ -616,6 +617,22 @@ export function ChatInput({
       : [],
     [AGENT_MENTIONS, nativeAgentDisabled],
   );
+  const filteredMentionOptions = useMemo(
+    () => mentionQuery === null
+      ? []
+      : MENTION_OPTIONS.filter(
+        ({ mention }) => mention.trigger.slice(1).startsWith(mentionQuery),
+      ),
+    [mentionQuery, MENTION_OPTIONS],
+  );
+  const filteredDisabledMentionOptions = useMemo(
+    () => mentionQuery === null
+      ? []
+      : DISABLED_MENTION_OPTIONS.filter(
+        mention => mention.trigger.slice(1).startsWith(mentionQuery),
+      ),
+    [mentionQuery, DISABLED_MENTION_OPTIONS],
+  );
   const mentionRoutingMode = useCallback((mention: (typeof AGENT_MENTIONS)[number]) => {
     const target = mention.target;
     if (!target || !discussion) return null;
@@ -839,7 +856,9 @@ export function ChatInput({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [discussion, sending, onSend, updateChatInput, AGENT_MENTIONS, availableSkills, toast, t, disabledAutoSkills, replyTarget, sendAsNote]);
 
-  handleSendMessageRef.current = handleSendMessage;
+  useLayoutEffect(() => {
+    handleSendMessageRef.current = handleSendMessage;
+  }, [handleSendMessage]);
 
   // ─── Keyboard shortcuts during recording ─────────────────────────────────
   useEffect(() => {
@@ -913,7 +932,7 @@ export function ChatInput({
           }
           const float32 = audioBufferToFloat32(decoded);
 
-          const lang = discussion?.language || 'fr';
+          const lang = discussionLanguage || 'fr';
           // 0.8.6 fix — wire the worker's `status` messages so the UI
           // can show "Téléchargement du modèle…" on the first call
           // (Whisper-tiny is ~40MB from HF, takes 30s-2min). Pre-fix
@@ -966,7 +985,7 @@ export function ChatInput({
       console.error('Microphone access denied:', err);
       setSttState('idle');
     }
-  }, [sttState, discussion?.language, voiceMode, updateChatInput, toast, t]);
+  }, [sttState, discussionLanguage, voiceMode, updateChatInput, toast, t]);
 
   // ─── Voice mode effects ──────────────────────────────────────────────────
 
@@ -1264,19 +1283,13 @@ export function ChatInput({
         }}
       >
         {/* @mention autocomplete dropdown */}
-        {mentionQuery !== null && (() => {
-          const filtered = MENTION_OPTIONS.filter(
-            ({ mention }) => mention.trigger.slice(1).startsWith(mentionQuery ?? ''),
-          );
-          const disabledFiltered = DISABLED_MENTION_OPTIONS.filter(
-            mention => mention.trigger.slice(1).startsWith(mentionQuery ?? ''),
-          );
-          if (filtered.length === 0 && disabledFiltered.length === 0) return null;
-          return (
+        {mentionQuery !== null
+          && (filteredMentionOptions.length > 0 || filteredDisabledMentionOptions.length > 0)
+          && (
             <div className="disc-mention-popover">
-              {filtered.map(({ mention: m, group }, i) => (
+              {filteredMentionOptions.map(({ mention: m, group }, i) => (
                 <Fragment key={m.trigger}>
-                  {(i === 0 || filtered[i - 1].group !== group) && (
+                  {(i === 0 || filteredMentionOptions[i - 1].group !== group) && (
                     <div className="disc-mention-group">
                       {t(group === 'active'
                         ? 'disc.routingActiveAgents'
@@ -1316,14 +1329,10 @@ export function ChatInput({
                         </span>
                       )}
                     </button>
-                    {m.type && m.target && m.target.kind !== 'cli' && (() => {
-                      const agentType = m.type;
-                      if (!agentType) return null;
-                      const mode = mentionRoutingMode(m);
-                      return (
+                    {m.type && m.target && m.target.kind !== 'cli' && (
                         <span
                           className="disc-mention-tier-choices"
-                          aria-label={mode?.title}
+                          aria-label={mentionRoutingMode(m)?.title}
                         >
                           {MENTION_TIER_CHOICES.map(tier => (
                             <button
@@ -1331,30 +1340,29 @@ export function ChatInput({
                               type="button"
                               className="disc-mention-tier-choice"
                               data-tier={tier}
-                              data-current={mode?.tier === tier}
-                              aria-label={`${m.displayTrigger} · ${mentionTierChoiceTitle(agentType, tier)}`}
-                              title={mentionTierChoiceTitle(agentType, tier)}
+                              data-current={mentionRoutingMode(m)?.tier === tier}
+                              aria-label={`${m.displayTrigger} · ${mentionTierChoiceTitle(m.type as AgentType, tier)}`}
+                              title={mentionTierChoiceTitle(m.type as AgentType, tier)}
                               onMouseDown={event => {
                                 event.preventDefault();
                                 event.stopPropagation();
-                                applyMentionSuggestion(m.trigger, agentType, tier);
+                                applyMentionSuggestion(m.trigger, m.type, tier);
                               }}
                             >
                               <span aria-hidden="true">{MODEL_TIER_ICONS[tier]}</span>
                             </button>
                           ))}
                         </span>
-                      );
-                    })()}
+                    )}
                   </div>
                 </Fragment>
               ))}
-              {disabledFiltered.length > 0 && (
+              {filteredDisabledMentionOptions.length > 0 && (
                 <>
                   <div className="disc-mention-group">
                     {t('disc.routingDisabledAgent')}
                   </div>
-                  {disabledFiltered.map(mention => (
+                  {filteredDisabledMentionOptions.map(mention => (
                     <div
                       key={`disabled:${mention.trigger}`}
                       className="disc-mention-item disc-mention-item-disabled"
@@ -1368,25 +1376,21 @@ export function ChatInput({
                         {mention.displayTrigger}
                       </span>
                       <span className="text-muted">{t('disc.nativeAgentDisabled')}</span>
-                      {(() => {
-                        const mode = mentionRoutingMode(mention);
-                        return mode ? (
+                      {mentionRoutingMode(mention) && (
                           <span
                             className="disc-mention-routing-mode"
-                            title={mode.title}
-                            aria-label={mode.title}
+                            title={mentionRoutingMode(mention)?.title}
+                            aria-label={mentionRoutingMode(mention)?.title}
                           >
-                            <span aria-hidden="true">{mode.icon}</span>
+                            <span aria-hidden="true">{mentionRoutingMode(mention)?.icon}</span>
                           </span>
-                        ) : null;
-                      })()}
+                      )}
                     </div>
                   ))}
                 </>
               )}
             </div>
-          );
-        })()}
+          )}
 
         {/* Emoji shortcode autocomplete (:tada: → 🎉). Reuses the same CSS
             class as @mentions so both popovers look consistent; the extra

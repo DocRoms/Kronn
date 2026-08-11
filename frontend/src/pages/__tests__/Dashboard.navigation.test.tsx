@@ -4,7 +4,7 @@ import { I18nProvider } from '../../lib/I18nContext';
 import type { Discussion } from '../../types/generated';
 
 vi.mock('../../hooks/useWebSocket', () => ({
-  useWebSocket: vi.fn(() => ({ connected: false })),
+  useWebSocket: vi.fn(() => ({ connected: false, connectionState: 'connecting' })),
 }));
 
 vi.mock('../DiscussionsPage', () => ({

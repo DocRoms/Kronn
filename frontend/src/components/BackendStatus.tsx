@@ -9,7 +9,8 @@ import { useT } from '../lib/I18nContext';
  * stays hidden (no chrome noise). When it stops answering, a red
  * "backend offline" pill surfaces so the user knows the next API
  * call won't reach the server — without waiting for an action to
- * fail.
+ * fail. While offline, polling accelerates so a restarted backend is
+ * detected quickly.
  *
  * # Why not just rely on `<ApiErrorScreen />`
  *
@@ -25,7 +26,8 @@ import { useT } from '../lib/I18nContext';
  * don't always have a live WS — a pure HTTP health check is the
  * superset.
  */
-const POLL_INTERVAL_MS = 30_000;
+const HEALTHY_POLL_INTERVAL_MS = 30_000;
+const UNHEALTHY_POLL_INTERVAL_MS = 2_000;
 const POLL_JITTER_MS = 5_000; // randomise to avoid thundering herd on shared hosts
 
 export function BackendStatus() {
@@ -38,10 +40,15 @@ export function BackendStatus() {
   useEffect(() => {
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let checking = false;
 
     const check = async () => {
+      if (checking || cancelled) return;
+      checking = true;
+      let nextHealthy = false;
       try {
         await fetchHealth();
+        nextHealthy = true;
         if (!cancelled) setHealthy(true);
       } catch {
         // Any failure (network, 5xx, JSON parse) → mark unhealthy.
@@ -49,19 +56,35 @@ export function BackendStatus() {
         // try again — when it succeeds, the pill auto-hides.
         if (!cancelled) setHealthy(false);
       } finally {
+        checking = false;
         if (!cancelled) {
-          const jitter = Math.random() * POLL_JITTER_MS;
-          timer = setTimeout(check, POLL_INTERVAL_MS + jitter);
+          const delay = nextHealthy
+            ? HEALTHY_POLL_INTERVAL_MS + Math.random() * POLL_JITTER_MS
+            : UNHEALTHY_POLL_INTERVAL_MS;
+          timer = setTimeout(check, delay);
         }
       }
     };
 
+    const checkNow = () => {
+      if (timer) clearTimeout(timer);
+      void check();
+    };
+
+    const checkWhenVisible = () => {
+      if (document.visibilityState === 'visible') checkNow();
+    };
+
     // First check fires immediately so the pill surfaces a backend
     // crash that happened just before the user navigated.
-    check();
+    void check();
+    window.addEventListener('online', checkNow);
+    document.addEventListener('visibilitychange', checkWhenVisible);
     return () => {
       cancelled = true;
       if (timer) clearTimeout(timer);
+      window.removeEventListener('online', checkNow);
+      document.removeEventListener('visibilitychange', checkWhenVisible);
     };
   }, []);
 

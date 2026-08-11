@@ -10,9 +10,10 @@
  *      `kronn-backend-status` class.
  *   3. /api/health recovers → pill auto-hides on the next poll.
  *
- * Closes regression scope of TD-20260504-ws-reconnect-stale-ui (the
- * pill is the only persistent feedback loop the user has when the
- * gateway between their browser and the backend is dropping packets).
+ * Closes the health-surface part of
+ * TD-20260715-ws-dead-after-restart-silent-send. WebSocket heartbeat and
+ * resynchronisation are covered at hook/page level; this browser test pins the
+ * global signal that remains visible on pages without a live subscription.
  *
  * # Why route-mocked rather than real disconnect
  *
@@ -24,10 +25,8 @@
  *
  * # Cost
  *
- * Zero $. No agent runs. ~30s test wall time (one poll cycle to
- * fail + one to recover; we override `POLL_INTERVAL_MS` indirectly
- * by aborting requests immediately so the cycle is just the
- * setTimeout(30s) jitter).
+ * Zero $. No agent runs. Offline health checks retry after 2s; healthy checks
+ * stay sparse so the happy path remains cheap.
  */
 import { test, expect } from '@playwright/test';
 
@@ -88,9 +87,8 @@ test.describe('Backend status pill — surfaces health failures + auto-recovers'
     await expect(pill).toHaveAttribute('role', 'status');
     await expect(pill).toContainText(/Backend (unreachable|injoignable|inalcanzable)/);
 
-    // Now restore /api/health so the next poll succeeds. The
-    // BackendStatus component schedules a setTimeout(POLL_INTERVAL_MS
-    // + jitter) after each check — worst case 35s. We give it 60s.
+    // Restore /api/health. Offline polling is deliberately accelerated, so a
+    // restarted backend clears the warning in roughly two seconds.
     await page.unroute('**/api/health');
     await page.route('**/api/health', route => {
       void route.fulfill({
@@ -99,6 +97,6 @@ test.describe('Backend status pill — surfaces health failures + auto-recovers'
         body: JSON.stringify({ ok: true, in_docker: false, version: 'e2e' }),
       });
     });
-    await expect(pill, 'pill should detach once /api/health recovers').toHaveCount(0, { timeout: 60_000 });
+    await expect(pill, 'pill should detach once /api/health recovers').toHaveCount(0, { timeout: 15_000 });
   });
 });

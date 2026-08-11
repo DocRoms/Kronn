@@ -32,7 +32,7 @@ const mockQuickPromptsApi = vi.hoisted(() => ({
 // WorkflowRunUpdated events. Stub it so the test runtime doesn't try
 // to open a real WebSocket inside jsdom.
 vi.mock('../../hooks/useWebSocket', () => ({
-  useWebSocket: () => ({ connected: false }),
+  useWebSocket: () => ({ connected: false, connectionState: 'connecting' }),
 }));
 
 vi.mock('../../lib/api', () => ({

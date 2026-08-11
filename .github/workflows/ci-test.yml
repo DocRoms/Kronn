@@ -138,7 +138,7 @@ jobs:
 
       - name: Enable corepack (provides pnpm pinned by package.json)
         # Node 24 ships corepack — it reads `packageManager` from
-        # `frontend/package.json` (pnpm@11.0.9) and fetches that exact
+        # `frontend/package.json` (pnpm@11.21.0) and fetches that exact
         # version on first invocation. Avoids drift between `npm i -g
         # pnpm` (latest, moving) and the version local devs run.
         run: corepack enable
@@ -327,7 +327,7 @@ jobs:
 
       - name: Setup pnpm
         # The pnpm version is read from `frontend/package.json`'s
-        # `packageManager` field (currently pnpm@11.0.9). Passing
+        # `packageManager` field (currently pnpm@11.21.0). Passing
         # `version:` here on top of it makes `pnpm/action-setup@v4`
         # error with `Multiple versions of pnpm specified` — leave
         # this section as-is so the package.json stays the single
@@ -355,9 +355,9 @@ jobs:
         run: pnpm lint:fast
 
       - name: Lint — eslint (0 errors, warning budget)
-        run: pnpm lint --max-warnings 92
+        run: pnpm lint --max-warnings 72
 
-      - name: Lint — i18n key parity (fr/en/es)
+      - name: Lint — i18n key parity (fr/en/es/zh)
         run: pnpm lint:i18n
 
       - name: Run tests with coverage threshold floor
@@ -579,7 +579,7 @@ jobs:
 
       - name: Setup pnpm
         # The pnpm version is read from `frontend/package.json`'s
-        # `packageManager` field (currently pnpm@11.0.9). Passing
+        # `packageManager` field (currently pnpm@11.21.0). Passing
         # `version:` here on top of it makes `pnpm/action-setup@v4`
         # error with `Multiple versions of pnpm specified` — leave
         # this section as-is so the package.json stays the single

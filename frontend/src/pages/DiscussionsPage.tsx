@@ -1,4 +1,4 @@
-import { Fragment, useState, useRef, useEffect, useCallback, useMemo, useDeferredValue } from 'react';
+import { Fragment, useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo, useDeferredValue } from 'react';
 import './DiscussionsPage.css';
 import { MessageBubble, MarkdownContent } from '../components/MessageBubble';
 import { DiscussionNote } from '../components/DiscussionNote';
@@ -44,7 +44,7 @@ import {
   ChevronRight, Cpu, Loader2,
   MessageSquare, AlertTriangle,
   ShieldCheck, Check, Rocket, Play, Zap,
-  Menu, X, Clock, ExternalLink, Search, ChevronUp, ChevronDown,
+  Menu, X, Clock, ExternalLink, Search, ChevronUp, ChevronDown, WifiOff,
 } from 'lucide-react';
 import { useIsMobile } from '../hooks/useMediaQuery';
 import {
@@ -515,7 +515,9 @@ export function DiscussionsPage({
   // Mirrors `partialPending` for the WebSocket handler, which reads it from a
   // closure created before the refusal happened.
   const partialPendingRef = useRef<typeof partialPending>(null);
-  partialPendingRef.current = partialPending;
+  useLayoutEffect(() => {
+    partialPendingRef.current = partialPending;
+  }, [partialPending]);
   // Held in a ref because the WS handler is built earlier in this render than the
   // resend function it needs — same reason `useMessageQueue` keeps `onFire` in one.
   const resendPartialRef = useRef<
@@ -547,6 +549,11 @@ export function DiscussionsPage({
         // "batch groups have no parent pastille" without any signal.
         console.warn('Failed to load batch run summaries:', e);
       });
+  }, []);
+  const reloadDiscussion = useCallback((discId: string) => {
+    discussionsApi.get(discId).then(disc => {
+      if (disc) setLoadedDiscussions(prev => ({ ...prev, [disc.id]: disc }));
+    }).catch(() => {});
   }, []);
   const openBatchReview = useCallback(async (runId: string, label: string, discIds: string[]) => {
     setBatchReview({ runId, label, discIds });
@@ -908,6 +915,12 @@ export function DiscussionsPage({
     return !agentDet || !isUsable(agentDet);
   }, [activeDiscussion, agents]);
 
+  const activeDiscussionMessages = activeDiscussion?.messages;
+  const loadedActiveDiscussionId = activeDiscussion?.id;
+  const activeDiscussionLanguage = activeDiscussion?.language;
+  const activeDiscussionWorkspaceMode = activeDiscussion?.workspace_mode;
+  const activeDiscussionUnseenBasis = activeDiscussion ? unseenBasis(activeDiscussion) : 0;
+
   const sending = activeDiscussionId ? !!sendingMap[activeDiscussionId] : false;
   const pendingReplySlots = useMemo(() => {
     if (!activeDiscussion || (!sending && !activeDiscussion.awaiting_agent)) return [];
@@ -946,8 +959,8 @@ export function DiscussionsPage({
   // Auto-read new agent responses when TTS is enabled
   const prevMsgCountRef = useRef(-1);
   useEffect(() => {
-    if (!activeDiscussion) { prevMsgCountRef.current = -1; return; }
-    const msgs = activeDiscussion.messages;
+    if (!activeDiscussionMessages) { prevMsgCountRef.current = -1; return; }
+    const msgs = activeDiscussionMessages;
     // Skip the first render (initialize the ref) — only speak on subsequent updates
     if (prevMsgCountRef.current < 0) {
       prevMsgCountRef.current = msgs.length;
@@ -960,7 +973,7 @@ export function DiscussionsPage({
         const autoId = lastAgent.id;
         setTtsPlayingMsgId(autoId);
         setTtsState('loading');
-        speakText(getTtsWorker, lastAgent.content, activeDiscussion?.language || 'fr', () => setTtsState('playing'))
+        speakText(getTtsWorker, lastAgent.content, activeDiscussionLanguage || 'fr', () => setTtsState('playing'))
           .finally(() => {
             setTtsPlayingMsgId(cur => {
               if (cur === autoId && !isTtsPaused()) { setTtsState('idle'); return null; }
@@ -970,7 +983,7 @@ export function DiscussionsPage({
       }
     }
     prevMsgCountRef.current = msgs.length;
-  }, [activeDiscussion?.messages.length, ttsEnabled, sending]);
+  }, [activeDiscussionLanguage, activeDiscussionMessages, ttsEnabled, sending]);
 
   // ─── Agent access helpers (shared from constants.ts) ─────────────────────
   const isAgentRestricted = useCallback((agentType: AgentType): boolean =>
@@ -1149,11 +1162,18 @@ export function DiscussionsPage({
       }
       toast(t('disc.agentRunsInterruptedToast', msg.discussion_ids.length), 'info');
     }
-  // NOTE: reloadDiscussion is defined later in the component and referenced
-  // here only inside the callback body (closure). Do NOT add it to the dep
-  // array — it would be in the temporal dead zone at this point in render
-  // and throw a ReferenceError.
-  }, [contactsList, activeDiscussionId, refetchDiscussions, setSendingMap, setQueuedMap, toast, t]);
+  }, [
+    abortControllers,
+    activeDiscussionId,
+    contactsList,
+    refetchBatchSummaries,
+    refetchDiscussions,
+    reloadDiscussion,
+    setQueuedMap,
+    setSendingMap,
+    t,
+    toast,
+  ]);
 
   // Reliable presence SNAPSHOT. The `presence` WS events above are edge-triggered
   // (fired only when a peer connects/disconnects), so a frontend that subscribed
@@ -1176,7 +1196,7 @@ export function DiscussionsPage({
   // dep) — `reloadDiscussion` is declared further down; it's only *called* after
   // mount, so the temporal-dead-zone caveat that applies to dep arrays here
   // (see handleWsMessage above) doesn't apply to a deferred call.
-  const { connected: wsConnected } = useWebSocket(handleWsMessage, () => {
+  const { connected: wsConnected, connectionState: wsConnectionState } = useWebSocket(handleWsMessage, () => {
     refetchDiscussions();
     if (activeDiscussionId) reloadDiscussion(activeDiscussionId);
     refreshContactsPresence();
@@ -1233,7 +1253,7 @@ export function DiscussionsPage({
   }, [activeDiscussionId, onActiveDiscussionChange]);
 
   useEffect(() => {
-    if (activeDiscussionId && activeDiscussion) {
+    if (activeDiscussionId && activeDiscussionMessages) {
       // 0.8.3 (#277) — guard against the off-by-N+ bug where the
       // list endpoint returns `messages: []` (empty by design,
       // populated only by `discussions.get`). 0.8.7 — the badge
@@ -1242,11 +1262,11 @@ export function DiscussionsPage({
       // the same basis used by `unseenBasis` — and take the max with
       // a filtered messages count to defend against the empty-array
       // first-render race from #277.
-      const filtered = activeDiscussion.messages.filter(m => m.role !== 'System').length;
-      const total = Math.max(filtered, unseenBasis(activeDiscussion));
+      const filtered = activeDiscussionMessages.filter(m => m.role !== 'System').length;
+      const total = Math.max(filtered, activeDiscussionUnseenBasis);
       markDiscussionSeen(activeDiscussionId, total);
     }
-  }, [activeDiscussionId, activeDiscussion?.messages.length, activeDiscussion?.non_system_message_count, markDiscussionSeen]);
+  }, [activeDiscussionId, activeDiscussionMessages, activeDiscussionUnseenBasis, markDiscussionSeen]);
 
   // Timer for agent activity duration — uses lifted startMap to survive page switches
   useEffect(() => {
@@ -1271,7 +1291,7 @@ export function DiscussionsPage({
       setSendingElapsed(0);
     }
     return () => { if (sendingTimerRef.current) clearInterval(sendingTimerRef.current); };
-  }, [sending, activeDiscussionId, sendingStartMap]);
+  }, [sending, activeDiscussionId, sendingStartMap, setSendingStartMap]);
 
   // Auto-scroll on new messages, sending state, and streaming. Two rules:
   // 1. We only auto-scroll if the user is "stuck to bottom" — i.e. they
@@ -1346,13 +1366,13 @@ export function DiscussionsPage({
   }, []);
   useEffect(() => () => bottomSettleStopRef.current?.(), []);
   useEffect(() => {
-    if (globalSearchTargetRef.current?.discussionId === activeDiscussion?.id) return;
+    if (globalSearchTargetRef.current?.discussionId === loadedActiveDiscussionId) return;
     if (!stickToBottomRef.current) {
       setHasNewWhileScrolledUp(true);
       return;
     }
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [activeDiscussion?.messages.length, sending]);
+  }, [loadedActiveDiscussionId, activeDiscussion?.messages.length, sending]);
   useEffect(() => {
     if (!streamingText) return;
     if (!stickToBottomRef.current) {
@@ -1407,13 +1427,13 @@ export function DiscussionsPage({
   // after an agent reply lands), and when the agent run ends (sending: true
   // → false). Silent on failure — the badge just stays at its last value.
   useEffect(() => {
-    if (!activeDiscussion || activeDiscussion.workspace_mode !== 'Isolated') {
+    if (!loadedActiveDiscussionId || activeDiscussionWorkspaceMode !== 'Isolated') {
       setPendingFilesCount(0);
       return;
     }
     if (sending) return; // let the stream finish before polling
     let cancelled = false;
-    discussionsApi.gitStatus(activeDiscussion.id)
+    discussionsApi.gitStatus(loadedActiveDiscussionId)
       .then((res: { files?: unknown }) => {
         if (cancelled) return;
         const files = res?.files ?? [];
@@ -1421,7 +1441,7 @@ export function DiscussionsPage({
       })
       .catch(() => { /* keep last count on transient errors */ });
     return () => { cancelled = true; };
-  }, [activeDiscussion?.id, activeDiscussion?.messages.length, activeDiscussion?.workspace_mode, sending]);
+  }, [loadedActiveDiscussionId, activeDiscussion?.messages.length, activeDiscussionWorkspaceMode, sending]);
 
   // Handle prefill from parent (e.g. "validate audit" button on Projects page)
   useEffect(() => {
@@ -1431,12 +1451,6 @@ export function DiscussionsPage({
   }, [prefill]);
 
   // ─── Callbacks ───────────────────────────────────────────────────────────
-
-  const reloadDiscussion = useCallback((discId: string) => {
-    discussionsApi.get(discId).then(disc => {
-      if (disc) setLoadedDiscussions(prev => ({ ...prev, [disc.id]: disc }));
-    }).catch(() => {});
-  }, []);
 
   const cleanupStream = useCallback((discId: string) => {
     // Reported scroll-jump bug: when the SSE stream finishes, the
@@ -2151,7 +2165,9 @@ export function DiscussionsPage({
     }
   };
 
-  resendPartialRef.current = pending => { void resendPartialPending(pending); };
+  useLayoutEffect(() => {
+    resendPartialRef.current = pending => { void resendPartialPending(pending); };
+  });
 
   // Impatience path: abandon the stuck recovery now instead of waiting for it.
   // This discards the partial answer, so it stays behind an explicit click.
@@ -2219,18 +2235,17 @@ export function DiscussionsPage({
   // Split the discussion's files into "pending" (still in the composer, no
   // message_id) and "attached" (pinned to a message, grouped by message id).
   // The composer shows only pending; each message bubble shows its own (0.8.8).
-  const activeDiscFiles = contextFilesMap[activeDiscussionId ?? ''] ?? [];
   const pendingContextFiles = useMemo(
-    () => activeDiscFiles.filter(f => !f.message_id),
-    [activeDiscFiles],
+    () => (contextFilesMap[activeDiscussionId ?? ''] ?? []).filter(f => !f.message_id),
+    [activeDiscussionId, contextFilesMap],
   );
   const attachmentsByMessageId = useMemo(() => {
     const map: Record<string, ContextFile[]> = {};
-    for (const f of activeDiscFiles) {
+    for (const f of contextFilesMap[activeDiscussionId ?? ''] ?? []) {
       if (f.message_id) (map[f.message_id] ??= []).push(f);
     }
     return map;
-  }, [activeDiscFiles]);
+  }, [activeDiscussionId, contextFilesMap]);
 
   const handleRetry = async () => {
     if (!activeDiscussionId || sending) return;
@@ -3038,6 +3053,14 @@ export function DiscussionsPage({
             <div className="disc-messages-git-row">
             <div className="disc-messages-col" data-replying={!!replyTarget}>
 
+            {wsConnectionState === 'reconnecting' && (
+              <div className="disc-realtime-status" role="status" aria-live="polite">
+                <WifiOff size={14} aria-hidden="true" />
+                <span>{t('disc.realtimeReconnecting')}</span>
+                <Loader2 size={13} className="disc-realtime-status-spinner" aria-hidden="true" />
+              </div>
+            )}
+
             {/* 0.8.3 (#280) — Audit-running warning. When an audit
                 is in progress on the same project, Kronn has filtered
                 `.mcp.json` down to the audit allowlist (~5 servers)
@@ -3679,8 +3702,7 @@ export function DiscussionsPage({
                     </p>
                     <button className="disc-cta-btn" data-variant="accent" onClick={async () => {
                       try {
-                        const resp = await workflowsApi.createBundle(payload);
-                        console.info('Bundle created:', resp);
+                        await workflowsApi.createBundle(payload);
                         onNavigate('workflows');
                       } catch (e) {
                         console.warn('Failed to create bundle:', e);

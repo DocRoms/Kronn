@@ -6,8 +6,8 @@
  * UX contract.
  */
 
-import { describe, it, expect, vi } from 'vitest';
-import { render, waitFor, screen } from '@testing-library/react';
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
+import { act, render, waitFor, screen } from '@testing-library/react';
 import { I18nProvider } from '../../lib/I18nContext';
 
 const mocks = vi.hoisted(() => ({
@@ -27,6 +27,14 @@ vi.mock('../../lib/api', async () => {
 import { BackendStatus } from '../BackendStatus';
 
 describe('BackendStatus', () => {
+  beforeEach(() => {
+    mocks.fetchHealth.mockReset();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it('renders nothing while the backend answers /api/health', async () => {
     mocks.fetchHealth.mockResolvedValue({ ok: true, version: '0.7.1' });
     const { container } = render(
@@ -50,6 +58,7 @@ describe('BackendStatus', () => {
   });
 
   it('clears the pill once the backend recovers', async () => {
+    vi.useFakeTimers();
     // First call fails, then succeeds.
     mocks.fetchHealth
       .mockRejectedValueOnce(new Error('ECONNREFUSED'))
@@ -57,13 +66,20 @@ describe('BackendStatus', () => {
     const { container } = render(
       <I18nProvider><BackendStatus /></I18nProvider>
     );
-    // Wait for the unhealthy pill to surface.
-    await screen.findByRole('status');
-    // Then the next poll succeeds — but the test harness can't
-    // easily wait 30s. We assert the pill DOES appear on the first
-    // failure (the recovery path is covered by the structural design:
-    // the same `setHealthy` callback flips back to true and the
-    // component returns null).
+    // Flush the immediately-started health request without relying on
+    // Testing Library's timer-based polling (fake timers are active here).
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(screen.getByRole('status')).toBeVisible();
     expect(container.querySelector('.kronn-backend-status')).not.toBeNull();
+
+    // Offline retries are intentionally fast: a restarted backend should
+    // clear the warning without making the user wait for the healthy 30s poll.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_000);
+    });
+    expect(mocks.fetchHealth).toHaveBeenCalledTimes(2);
+    expect(container.querySelector('.kronn-backend-status')).toBeNull();
   });
 });

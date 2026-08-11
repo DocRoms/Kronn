@@ -383,7 +383,7 @@ export function Dashboard({ onReset }: DashboardProps) {
   const mcpRegistry = registry ?? [];
   const mcpOverview = mcpOverviewData ?? { servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [] };
   const agents = agentList ?? [];
-  const allDiscussions = discussionList ?? [];
+  const allDiscussions = useMemo(() => discussionList ?? [], [discussionList]);
   const allSkills = skillList ?? [];
 
   // ─── Unseen count (computed here so it works across all pages) ─────────
