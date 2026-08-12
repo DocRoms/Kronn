@@ -334,6 +334,9 @@ pub async fn send_message(
             )
         };
         let note = DiscussionMessage {
+            recovered_partial: false,
+            session_tokens_at_message: None,
+            author_cli_ordinal: None,
             model: None,
             lint_report: None,
             id: message_id.clone(),
@@ -461,6 +464,9 @@ pub async fn send_message(
 
     // Add user message to DB
     let user_msg = DiscussionMessage {
+        recovered_partial: false,
+        session_tokens_at_message: None,
+        author_cli_ordinal: None,
         model: None,
         lint_report: None,
         id: message_id.clone(),
@@ -569,9 +575,30 @@ pub async fn send_message(
             return sse_events(vec![accepted_event(&message_id, sort_order, true)]);
         }
         crate::db::discussions::InsertUserMessageOutcome::PartialPending => {
+            // KT-251 DoD 3 — name the answer that is blocking. Without this the
+            // user sees a banner about "a previous reply" they cannot identify,
+            // which is exactly what was reported: "je ne vois pas encore d'id […]
+            // ça t'aurait aidé au debug". The id exists from the first checkpoint
+            // (migration 109), so there is nothing to compute — only to pass on.
+            let blocking_id = {
+                // `id` rather than `disc_id`: the latter was moved into the
+                // insert closure above.
+                let did = id.clone();
+                state
+                    .db
+                    .with_read_conn(move |conn| {
+                        crate::db::discussions::pending_partial_message_id(conn, &did)
+                    })
+                    .await
+                    .ok()
+                    .flatten()
+            };
             return sse_events(vec![Event::default().event("error").data(
                 serde_json::json!({
                     "error": "partial_pending",
+                    // `null` when the checkpoint predates migration 109: unknown,
+                    // which must not read as "no answer in flight".
+                    "blocking_message_id": blocking_id,
                     "message": "Une réponse d'agent précédente est en cours de récupération. Patientez ou fermez la notification de récupération avant de renvoyer."
                 }).to_string(),
             )]);
@@ -1389,6 +1416,9 @@ mod tests {
                     conn,
                     disc,
                     &DiscussionMessage {
+                        recovered_partial: false,
+                        session_tokens_at_message: None,
+                        author_cli_ordinal: None,
                         id: message_id.into(),
                         role: MessageRole::User,
                         channel: MessageChannel::Main,
@@ -1702,6 +1732,9 @@ mod tests {
             .db
             .with_conn(move |conn| {
                 let first = DiscussionMessage {
+                    recovered_partial: false,
+                    session_tokens_at_message: None,
+                    author_cli_ordinal: None,
                     id: "d9158714-19d4-4dbf-9b7d-0839c93458b7".into(),
                     role: MessageRole::User,
                     channel: MessageChannel::Main,
@@ -2145,6 +2178,9 @@ mod tests {
                     conn,
                     disc,
                     &DiscussionMessage {
+                        recovered_partial: false,
+                        session_tokens_at_message: None,
+                        author_cli_ordinal: None,
                         id: "user-batch-relock".into(),
                         role: MessageRole::User,
                         channel: MessageChannel::Main,

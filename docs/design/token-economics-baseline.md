@@ -9,6 +9,12 @@ Collector: `backend/scripts/token_economics.py` ·
 Tests: `backend/scripts/test_token_economics.py` (`make test-python`) ·
 Baseline snapshots: `docs/research/token-economics-baseline-*.json`.
 
+Controlled release-gate replay: `backend/scripts/token_economics_ab.py` ·
+tests: `backend/scripts/test_token_economics_ab.py` ·
+result: `docs/research/token-economics-ab-2026-08-12.json`. The replay keeps
+prompt/answer bodies out of the artifact and records only native usage counters,
+duration and deterministic answer quality.
+
 ## 1. The KPI
 
 **Raw context traffic per completed task, at comparable quality.**

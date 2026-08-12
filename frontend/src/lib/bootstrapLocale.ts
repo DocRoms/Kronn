@@ -24,21 +24,25 @@ export async function loadInitialLocale(
   }
 }
 
-export function renderBootstrapFailure(root: HTMLElement, reload = () => window.location.reload()) {
+export function renderBootstrapFailure(
+  root: HTMLElement,
+  onRetry = () => window.location.reload(),
+  detailMessage = 'A language resource is unavailable. Check the connection, then retry.',
+) {
   root.replaceChildren();
   const panel = document.createElement('main');
   panel.setAttribute('role', 'alert');
   panel.className = 'bootstrap-error';
 
   const title = document.createElement('h1');
-  title.textContent = 'Kronn could not load the interface';
+  title.textContent = 'Kronn could not start';
   const detail = document.createElement('p');
-  detail.textContent = 'A language resource is unavailable. Check the connection, then retry.';
+  detail.textContent = detailMessage;
   const retry = document.createElement('button');
   retry.type = 'button';
   retry.className = 'btn btn-primary';
   retry.textContent = 'Retry';
-  retry.addEventListener('click', reload);
+  retry.addEventListener('click', onRetry);
 
   panel.append(title, detail, retry);
   root.append(panel);

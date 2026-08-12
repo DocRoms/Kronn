@@ -558,6 +558,9 @@ pub async fn disc_append(
         }
 
         let msg = DiscussionMessage {
+            recovered_partial: false,
+            session_tokens_at_message: None,
+            author_cli_ordinal: None,
             model: None,
             // Only a live single Agent append carries a report (loop runs once).
             lint_report: live_lint_report.take(),
@@ -798,11 +801,14 @@ pub async fn disc_link(
                 &source_agent,
                 &source_session_id,
             )?;
-            if existing.as_deref().is_some_and(|id| id != req.disc_id)
-                && !req.force_reassign
-            {
+            if existing.as_deref().is_some_and(|id| id != req.disc_id) && !req.force_reassign {
+                // Name the remedy the CALLER can actually reach. This surfaces
+                // through `disc_join`, which never forwards `force_reassign` —
+                // advertising that flag alone sent MCP callers down a dead end.
                 anyhow::bail!(
-                    "session already linked to discussion {} — pass force_reassign=true to transfer it",
+                    "session already linked to discussion {} — from MCP call \
+                     disc_transfer_session (human-confirmed); direct API callers \
+                     may pass force_reassign=true",
                     existing.expect("checked as Some")
                 );
             }
@@ -996,6 +1002,14 @@ pub struct DiscFindBySessionQuery {
 pub struct DiscFindBySessionResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disc_id: Option<String>,
+    /// KT-247 — the agent's own room alias (`@claude-cli`, `@claude-cli-2`…),
+    /// re-surfaced on the idempotent resume lookup so a CLI recovers its
+    /// identity after an MCP reload without a fresh join. `None` when no bound
+    /// session resolves or the provider is unknown.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub self_alias: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cli_ordinal: Option<i64>,
 }
 
 /// `GET /api/disc/find_by_session?source_agent=…&source_session_id=…`
@@ -1006,15 +1020,45 @@ pub async fn disc_find_by_session(
     let result = state
         .db
         .with_conn(move |conn| {
-            crate::db::disc_source::find_disc_by_source_session(
+            use rusqlite::OptionalExtension;
+            let disc_id = crate::db::disc_source::find_disc_by_source_session(
                 conn,
                 &q.source_agent,
                 &q.source_session_id,
-            )
+            )?;
+            // Resolve the bound session's stable identity within the located
+            // room. A miss (no active row for this durable key) leaves alias
+            // None rather than guessing — the lookup stays a pure read.
+            let (cli_ordinal, self_alias) = match &disc_id {
+                Some(id) => {
+                    let pk: Option<i64> = conn
+                        .query_row(
+                            "SELECT id FROM discussion_sessions
+                               WHERE disc_id = ?1 AND agent_type = ?2 AND session_id = ?3
+                                 AND status != 'left'
+                               ORDER BY id DESC LIMIT 1",
+                            rusqlite::params![id, &q.source_agent, &q.source_session_id],
+                            |r| r.get::<_, i64>(0),
+                        )
+                        .optional()?;
+                    match pk {
+                        Some(pk) => crate::db::discussion_sessions::cli_session_identity(conn, pk)?,
+                        None => (None, None),
+                    }
+                }
+                None => (None, None),
+            };
+            Ok::<_, anyhow::Error>((disc_id, cli_ordinal, self_alias))
         })
         .await;
     match result {
-        Ok(disc_id) => Json(ApiResponse::ok(DiscFindBySessionResponse { disc_id })),
+        Ok((disc_id, cli_ordinal, self_alias)) => {
+            Json(ApiResponse::ok(DiscFindBySessionResponse {
+                disc_id,
+                self_alias,
+                cli_ordinal,
+            }))
+        }
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
 }
@@ -1239,9 +1283,13 @@ pub async fn disc_load_other(
         })
         .collect();
     let total = non_system.len() as u32;
-    let from = q.from.unwrap_or(0).min(total);
-    let to = q.to.unwrap_or(total).min(total);
-    let (from, to) = if from > to { (to, from) } else { (from, to) };
+    // KT-193 DoD 4 — retrieval stays TARGETED. Omitting the range used to mean
+    // "everything": on the real database that is 1 427 messages and 1 320 210
+    // bytes of one discussion, which is precisely the re-read this release exists
+    // to stop. Defaulting to the most RECENT window instead — an unqualified
+    // request is nearly always "show me where this got to", and `total` comes
+    // back so a caller who wants more can ask for a specific range.
+    let (from, to) = load_other_window(q.from, q.to, total);
 
     // Group the disc's attachments by message id in one read, so each returned
     // message can carry the files pinned to it (0.8.8). list_context_files is
@@ -1294,6 +1342,41 @@ pub async fn disc_load_other(
         to_idx: to,
         messages: msgs,
     }))
+}
+
+/// Default window when a caller gives no range. Enough to see where a thread got
+/// to, far from the whole history.
+const LOAD_OTHER_DEFAULT_WINDOW: u32 = 40;
+
+/// KT-193 DoD 4 — resolve the requested slice of a discussion.
+///
+/// Omitting the range used to mean "everything": on the real database that is
+/// 1 427 messages and 1 320 210 bytes of one discussion, which is precisely the
+/// re-read this release exists to stop. An unqualified request now returns the
+/// most RECENT window — an unqualified ask is nearly always "show me where this
+/// got to" — and the response still carries `total`, so a caller who wants more
+/// asks for a specific range.
+///
+/// An EXPLICIT range is honoured as given: retrieval stays on demand, and a
+/// caller who names a span owns its size.
+pub(crate) fn load_other_window(from: Option<u32>, to: Option<u32>, total: u32) -> (u32, u32) {
+    let (from, to) = match (from, to) {
+        (Some(from), Some(to)) => (from.min(total), to.min(total)),
+        (Some(from), None) => {
+            let from = from.min(total);
+            (from, (from + LOAD_OTHER_DEFAULT_WINDOW).min(total))
+        }
+        (None, Some(to)) => {
+            let to = to.min(total);
+            (to.saturating_sub(LOAD_OTHER_DEFAULT_WINDOW), to)
+        }
+        (None, None) => (total.saturating_sub(LOAD_OTHER_DEFAULT_WINDOW), total),
+    };
+    if from > to {
+        (to, from)
+    } else {
+        (from, to)
+    }
 }
 
 #[cfg(test)]
@@ -2684,5 +2767,79 @@ mod tests {
             !is_live_peer_turn(true, Some("joined-session"), 2),
             "bulk transcript imports are not live turns"
         );
+    }
+}
+
+#[cfg(test)]
+mod load_other_window_tests {
+    //! KT-193 DoD 4 — retrieval must stay targeted.
+    //!
+    //! The defect: an unqualified request returned the WHOLE discussion. On the
+    //! real database that is 1 427 messages / 1 320 210 bytes — the re-read this
+    //! release exists to stop.
+
+    use super::*;
+
+    #[test]
+    fn no_range_returns_the_most_recent_window_not_everything() {
+        // THE fix. An unqualified ask is "show me where this got to".
+        let (from, to) = load_other_window(None, None, 1_427);
+        assert_eq!(to, 1_427);
+        assert_eq!(from, 1_427 - LOAD_OTHER_DEFAULT_WINDOW);
+        assert!(
+            to - from <= LOAD_OTHER_DEFAULT_WINDOW,
+            "an unqualified request still pulled {} messages",
+            to - from
+        );
+    }
+
+    #[test]
+    fn an_explicit_range_is_honoured_as_given() {
+        // Retrieval stays ON DEMAND: a caller who names a span owns its size,
+        // even a large one. Silently shrinking it would break a legitimate
+        // export.
+        let (from, to) = load_other_window(Some(0), Some(1_000), 1_427);
+        assert_eq!((from, to), (0, 1_000));
+    }
+
+    #[test]
+    fn a_start_without_an_end_reads_forward_by_one_window() {
+        let (from, to) = load_other_window(Some(100), None, 1_427);
+        assert_eq!((from, to), (100, 100 + LOAD_OTHER_DEFAULT_WINDOW));
+    }
+
+    #[test]
+    fn an_end_without_a_start_reads_backward_by_one_window() {
+        let (from, to) = load_other_window(None, Some(100), 1_427);
+        assert_eq!((from, to), (100 - LOAD_OTHER_DEFAULT_WINDOW, 100));
+    }
+
+    #[test]
+    fn a_short_discussion_is_returned_whole() {
+        // Below the window there is nothing to trim, and clamping to zero would
+        // return an empty slice for a five-message thread.
+        assert_eq!(load_other_window(None, None, 5), (0, 5));
+    }
+
+    #[test]
+    fn an_empty_discussion_yields_an_empty_slice() {
+        assert_eq!(load_other_window(None, None, 0), (0, 0));
+    }
+
+    #[test]
+    fn a_range_beyond_the_end_is_clamped_not_rejected() {
+        assert_eq!(load_other_window(Some(0), Some(9_999), 10), (0, 10));
+    }
+
+    #[test]
+    fn a_reversed_range_is_swapped_rather_than_returning_nothing() {
+        assert_eq!(load_other_window(Some(80), Some(20), 100), (20, 80));
+    }
+
+    #[test]
+    fn an_end_below_the_window_does_not_underflow() {
+        // `to - WINDOW` on a u32 would wrap to four billion and read the whole
+        // discussion — the opposite of the fix.
+        assert_eq!(load_other_window(None, Some(3), 100), (0, 3));
     }
 }

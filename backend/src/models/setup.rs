@@ -593,10 +593,8 @@ pub enum AgentType {
     Kiro,
     CopilotCli,
     /// Local LLM via Ollama (0.4.0). Runs over the HTTP `/api/chat` path,
-    /// not a CLI process. Zero tokens, zero cost, and **no tools**: MCP
-    /// servers are deliberately not described to it (doing so produced
-    /// hallucinated tool calls — see `start_agent_with_config`). Tracked in
-    /// TD-20260808-http-agents-no-tool-calling.
+    /// not a CLI process. It has no filesystem or arbitrary MCP access, but
+    /// Kronn exposes a small native tool catalogue executed server-side.
     Ollama,
     /// OpenAI-compatible proxy (LiteLLM). Same HTTP execution path as Ollama,
     /// different wire format (`OpenAiCodec`). "Installed" means the `litellm`

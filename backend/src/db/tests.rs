@@ -249,6 +249,9 @@ fn sample_discussion(id: &str, project_id: Option<&str>) -> Discussion {
 
 fn sample_message(id: &str, role: MessageRole) -> DiscussionMessage {
     DiscussionMessage {
+        recovered_partial: false,
+        session_tokens_at_message: None,
+        author_cli_ordinal: None,
         model: None,
         lint_report: None,
         id: id.into(),
@@ -3359,9 +3362,46 @@ fn partial_response_preserves_started_at_across_checkpoints() {
         "started_at must be preserved across updates"
     );
 
+    // KT-251 — the id is pinned on the FIRST checkpoint, exactly like the
+    // timestamp above, and the salvaged message reuses it. Before this an
+    // in-flight answer had no id at all until it was already dead.
+    let checkpoint_id: String = conn
+        .query_row(
+            "SELECT partial_response_message_id FROM discussions WHERE id = 'disc-ts'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        !checkpoint_id.is_empty(),
+        "no id assigned to the in-flight answer"
+    );
+
     // Recovery uses the started_at, not now()
     let ids = crate::db::discussions::recover_partial_responses(&conn).unwrap();
     assert_eq!(ids, vec!["disc-ts"]);
+    let recovered_id: String = conn
+        .query_row(
+            "SELECT id FROM messages WHERE discussion_id = 'disc-ts'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        recovered_id, checkpoint_id,
+        "the salvaged message must keep the id the answer had while streaming",
+    );
+    let cleared: Option<String> = conn
+        .query_row(
+            "SELECT partial_response_message_id FROM discussions WHERE id = 'disc-ts'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        cleared, None,
+        "the checkpoint id must be released, or the next run would inherit it",
+    );
     let msg_ts_str: String = conn
         .query_row(
             "SELECT timestamp FROM messages WHERE discussion_id = 'disc-ts'",
@@ -4574,6 +4614,9 @@ fn quick_prompt_metrics_aggregates_first_agent_reply_per_version() {
         crate::db::discussions::insert_discussion(&conn, &d).unwrap();
         // User msg + Agent msg (with tokens + duration).
         let user_msg = DiscussionMessage {
+            recovered_partial: false,
+            session_tokens_at_message: None,
+            author_cli_ordinal: None,
             model: None,
             lint_report: None,
             id: format!("{}-u", disc_id),
@@ -4594,6 +4637,9 @@ fn quick_prompt_metrics_aggregates_first_agent_reply_per_version() {
             reply_to_message_id: None,
         };
         let agent_msg = DiscussionMessage {
+            recovered_partial: false,
+            session_tokens_at_message: None,
+            author_cli_ordinal: None,
             model: None,
             lint_report: None,
             id: format!("{}-a", disc_id),
@@ -4862,6 +4908,9 @@ fn quick_prompt_metrics_ignores_non_first_agent_replies() {
     crate::db::discussions::insert_discussion(&conn, &d).unwrap();
     // Three Agent replies — only the first should be counted.
     let mk = |id: &str, role: MessageRole, toks: u64, dur: u64| DiscussionMessage {
+        recovered_partial: false,
+        session_tokens_at_message: None,
+        author_cli_ordinal: None,
         model: None,
         lint_report: None,
         id: id.into(),

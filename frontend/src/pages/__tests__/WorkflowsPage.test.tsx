@@ -130,7 +130,10 @@ const fullConfig: AgentsConfig = {
   model_tiers: defaultModelTiers,
 };
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  sessionStorage.removeItem('kronn:postQpImproved');
+});
 
 const wrap = async (ui: React.ReactElement) => {
   let result: ReturnType<typeof render>;
@@ -142,6 +145,15 @@ const wrap = async (ui: React.ReactElement) => {
 };
 
 describe('WorkflowsPage', () => {
+  it('opens the Quick Prompts tab from the one-shot deploy target without an effect redirect', async () => {
+    sessionStorage.setItem('kronn:postQpImproved', 'qp-deployed');
+
+    await wrap(<WorkflowsPage projects={[]} />);
+
+    expect(screen.getByRole('button', { name: /Quick Prompts/ })).toHaveAttribute('data-active', 'true');
+    expect(sessionStorage.getItem('kronn:postQpImproved')).toBeNull();
+  });
+
   it('renders with various agentAccess configs and shows create button', async () => {
     // Without agentAccess
     const { unmount: u1 } = await wrap(<WorkflowsPage projects={[]} />);
@@ -922,7 +934,12 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
     await act(async () => { fireEvent.click(screen.getByText('PR Review LAB')); });
     await waitFor(() => expect(screen.getByText('Éditer')).toBeInTheDocument());
 
-    fireEvent.click(screen.getByLabelText(/Changer l'agent ou le mode IA du step « prnum »/i));
+    // The selected Agent step deliberately exposes the same switcher in the
+    // compact pipeline and in its preview card. Exercise the preview control
+    // explicitly so this regression test keeps asserting the inline editor
+    // surface instead of depending on a globally unique accessible name.
+    const previewPanel = screen.getByRole('tabpanel', { name: 'Aperçu' });
+    fireEvent.click(within(previewPanel).getByLabelText(/Changer l'agent ou le mode IA du step « prnum »/i));
     await act(async () => { fireEvent.click(screen.getByRole('menuitem', { name: 'Codex · Avancé' })); });
 
     await waitFor(() => expect(mockWorkflowsApi.update).toHaveBeenCalledTimes(1));

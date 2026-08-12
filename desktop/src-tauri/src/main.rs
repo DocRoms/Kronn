@@ -1,7 +1,10 @@
 // Prevents additional console window on Windows in release
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::sync::Arc;
+use std::{
+    io::{Read, Write},
+    sync::Arc,
+};
 use tokio::sync::RwLock;
 
 use kronn::{
@@ -17,6 +20,8 @@ use kronn::{
 // This ensures the desktop app works regardless of install location.
 use include_dir::{include_dir, Dir};
 static FRONTEND_DIST: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../frontend/dist");
+const BACKEND_STARTUP_ATTEMPTS: usize = 600;
+const BACKEND_STARTUP_POLL: std::time::Duration = std::time::Duration::from_millis(100);
 
 // ── Wake lock ──────────────────────────────────────────────────────────────
 
@@ -164,6 +169,39 @@ async fn wake_lock_watcher(db: Arc<Database>) {
 fn find_free_port() -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("Failed to bind to free port");
     listener.local_addr().unwrap().port()
+}
+
+/// Confirm that the embedded loopback listener answers Kronn's health contract
+/// before the packaged webview navigates away from its loading screen.
+fn probe_kronn_backend(port: u16) -> Option<String> {
+    let address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let Ok(mut stream) =
+        std::net::TcpStream::connect_timeout(&address, std::time::Duration::from_millis(400))
+    else {
+        return None;
+    };
+    let timeout = Some(std::time::Duration::from_millis(800));
+    let _ = stream.set_read_timeout(timeout);
+    let _ = stream.set_write_timeout(timeout);
+    if stream
+        .write_all(b"GET /api/health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+        .is_err()
+    {
+        return None;
+    }
+    let mut response = String::new();
+    if stream.read_to_string(&mut response).is_err() {
+        return None;
+    }
+    if !response.starts_with("HTTP/1.1 200") {
+        return None;
+    }
+    let body = response.split("\r\n\r\n").nth(1)?;
+    let health: serde_json::Value = serde_json::from_str(body).ok()?;
+    health["ok"]
+        .as_bool()
+        .filter(|ok| *ok)
+        .and_then(|_| health["version"].as_str().map(str::to_owned))
 }
 
 /// Extract embedded frontend files to a temp directory for serving.
@@ -485,7 +523,11 @@ fn enrich_path() {
 // ── Backend ────────────────────────────────────────────────────────────────
 
 /// Start the Kronn backend server on a given port (runs in a tokio task)
-async fn start_backend(port: u16, dist_dir: std::path::PathBuf) -> anyhow::Result<()> {
+async fn start_backend(
+    port: u16,
+    dist_dir: std::path::PathBuf,
+    _data_dir_lock: std::fs::File,
+) -> anyhow::Result<()> {
     tracing::info!("Starting embedded Kronn backend on port {}", port);
 
     // Enrich PATH for desktop mode — GUI apps on macOS/Linux inherit a minimal PATH
@@ -514,14 +556,6 @@ async fn start_backend(port: u16, dist_dir: std::path::PathBuf) -> anyhow::Resul
     } else {
         DEFAULT_MAX_CONCURRENT_AGENTS
     };
-
-    // Exactly ONE backend per data dir (same guard as the headless main): refuse
-    // to start if another Kronn already holds the lock, so two processes can't
-    // race on config.toml / the key / the DB. Held for the process lifetime.
-    let _data_dir_lock = config::acquire_data_dir_lock().map_err(|e| {
-        tracing::error!("{e}");
-        e
-    })?;
 
     // Open database
     let database = Arc::new(Database::open().expect("Failed to open database"));
@@ -707,20 +741,35 @@ async fn start_backend(port: u16, dist_dir: std::path::PathBuf) -> anyhow::Resul
 
 struct BackendInfo {
     port: u16,
+    startup_error: std::sync::Mutex<Option<String>>,
 }
 
 #[tauri::command]
-fn get_backend_url(info: tauri::State<'_, BackendInfo>) -> String {
-    format!("http://127.0.0.1:{}", info.port)
-}
-
-#[tauri::command]
-fn open_url(url: String) -> Result<(), String> {
-    if url.starts_with("http://") || url.starts_with("https://") {
-        open::that(&url).map_err(|e| format!("Failed to open URL: {}", e))
-    } else {
-        Err("Only http/https URLs are allowed".into())
+async fn wait_for_backend(info: tauri::State<'_, BackendInfo>) -> Result<String, String> {
+    for _ in 0..BACKEND_STARTUP_ATTEMPTS {
+        if let Some(message) = info
+            .startup_error
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+        {
+            return Err(message);
+        }
+        if probe_kronn_backend(info.port).is_some() {
+            return Ok(format!("http://127.0.0.1:{}", info.port));
+        }
+        tokio::time::sleep(BACKEND_STARTUP_POLL).await;
     }
+
+    let message = format!(
+        "Kronn could not start its local service on http://127.0.0.1:{}. Check the application logs, then retry.",
+        info.port
+    );
+    *info
+        .startup_error
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(message.clone());
+    Err(message)
 }
 
 /// Relaunch the desktop app — used by the "Allow connections from other
@@ -742,6 +791,19 @@ fn main() {
         )
         .init();
 
+    // Acquire ownership before constructing the UI. Reusing another process's
+    // HTTP listener is unsafe even when versions match: that server can have a
+    // different origin policy, runtime state or binary than this desktop app.
+    let (mut data_dir_lock, startup_error) = match config::acquire_data_dir_lock() {
+        Ok(lock) => (Some(lock), None),
+        Err(error) => {
+            let message = format!(
+                "Kronn cannot start its local service because another Kronn instance is already using this data directory. Quit the other desktop, CLI, dev or Docker instance, then retry.\n\n{error}"
+            );
+            tracing::error!("{message}");
+            (None, Some(message))
+        }
+    };
     let port = find_free_port();
 
     // Extract frontend dist (embedded in binary for production, filesystem for dev)
@@ -751,12 +813,11 @@ fn main() {
     // This ensures SharedArrayBuffer is available for WASM threading (TTS/STT)
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
-        .manage(BackendInfo { port })
-        .invoke_handler(tauri::generate_handler![
-            get_backend_url,
-            open_url,
-            restart_app
-        ])
+        .manage(BackendInfo {
+            port,
+            startup_error: std::sync::Mutex::new(startup_error),
+        })
+        .invoke_handler(tauri::generate_handler![wait_for_backend, restart_app])
         .setup(move |app| {
             use tauri::Manager;
 
@@ -764,52 +825,56 @@ fn main() {
             // NSIS layouts. The backend is started only after this environment
             // override is ready, so its DocsSidecar always sees the bundled
             // executable on first boot.
-            let resource_dir = app.path().resource_dir()?;
-            let docs_sidecar = bundled_docs_sidecar_path(&resource_dir);
-            if docs_sidecar.is_file() {
-                std::env::set_var("KRONN_DOCS_SIDECAR", &docs_sidecar);
-                tracing::info!(
-                    "Bundled document sidecar configured at {}",
-                    docs_sidecar.display()
-                );
-            } else {
-                tracing::warn!(
-                    "Bundled document sidecar missing at {}",
-                    docs_sidecar.display()
-                );
-            }
-
-            // Start the backend after the resource path is configured.
-            let backend_port = port;
-            std::thread::spawn(move || {
-                let rt = tokio::runtime::Builder::new_multi_thread()
-                    .enable_all()
-                    .build()
-                    .expect("Failed to create Tokio runtime");
-                rt.block_on(async {
-                    if let Err(e) = start_backend(backend_port, dist_dir).await {
-                        tracing::error!("Backend failed: {}", e);
+            match app.path().resource_dir() {
+                Ok(resource_dir) => {
+                    let docs_sidecar = bundled_docs_sidecar_path(&resource_dir);
+                    if docs_sidecar.is_file() {
+                        std::env::set_var("KRONN_DOCS_SIDECAR", &docs_sidecar);
+                        tracing::info!(
+                            "Bundled document sidecar configured at {}",
+                            docs_sidecar.display()
+                        );
+                    } else {
+                        tracing::warn!(
+                            "Bundled document sidecar missing at {}",
+                            docs_sidecar.display()
+                        );
                     }
-                });
-            });
-
-            // First launch on Windows can be slow (Defender scan, DB creation,
-            // key discovery), so allow 15 seconds before navigating the webview.
-            for i in 0..150 {
-                if std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).is_ok() {
-                    tracing::info!("Backend ready after {}ms", i * 100);
-                    break;
                 }
-                std::thread::sleep(std::time::Duration::from_millis(100));
+                Err(error) => {
+                    // Document generation is optional. A damaged/missing
+                    // sidecar must not terminate or relaunch the whole desktop.
+                    tracing::warn!("Unable to resolve bundled resources: {error}");
+                }
             }
 
-            // Navigate main window to backend URL
-            if let Some(window) = app.get_webview_window("main") {
-                let url: tauri::Url = format!("http://127.0.0.1:{}", port)
-                    .parse()
-                    .expect("Invalid URL");
-                let _ = window.navigate(url);
+            // Start the backend only when this process owns the data directory.
+            if let Some(data_dir_lock) = data_dir_lock.take() {
+                let backend_port = port;
+                let app_handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_multi_thread()
+                        .enable_all()
+                        .build()
+                        .expect("Failed to create Tokio runtime");
+                    rt.block_on(async {
+                        if let Err(e) = start_backend(backend_port, dist_dir, data_dir_lock).await {
+                            tracing::error!("Backend failed: {}", e);
+                            let message =
+                                format!("Kronn's local service stopped during startup: {e}");
+                            *app_handle
+                                .state::<BackendInfo>()
+                                .startup_error
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                                Some(message.clone());
+                        }
+                    });
+                });
             }
+            // Keep setup non-blocking so the bundled loading state paints
+            // immediately. The frontend awaits `wait_for_backend`, then
+            // navigates to the verified same-origin loopback service.
 
             // ── System tray menu ──
             use tauri::menu::{MenuBuilder, MenuItemBuilder};
@@ -885,6 +950,65 @@ mod enrich_path_tests {
         } else {
             assert!(path.ends_with("kronn-docs"));
         }
+    }
+
+    #[test]
+    fn backend_probe_accepts_kronn_health_and_rejects_an_unrelated_listener() {
+        fn serve_once(body: &'static str) -> u16 {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0_u8; 512];
+                let _ = stream.read(&mut request);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+            });
+            port
+        }
+
+        assert_eq!(
+            probe_kronn_backend(serve_once(r#"{"ok":true,"version":"0.9.5"}"#)),
+            Some("0.9.5".into())
+        );
+        assert_eq!(probe_kronn_backend(serve_once(r#"{"ok":false}"#)), None);
+        assert_eq!(
+            probe_kronn_backend(serve_once(r#"{"ok":true,"version":"99.0.0"}"#)),
+            Some("99.0.0".into())
+        );
+    }
+
+    #[test]
+    fn packaged_backend_gets_a_realistic_first_boot_window() {
+        let timeout = BACKEND_STARTUP_POLL * BACKEND_STARTUP_ATTEMPTS as u32;
+        assert!(timeout >= std::time::Duration::from_secs(60));
+        assert!(timeout <= std::time::Duration::from_secs(90));
+    }
+
+    #[test]
+    fn tauri_capabilities_allow_only_the_required_commands_per_origin() {
+        let local: serde_json::Value =
+            serde_json::from_str(include_str!("../capabilities/main-local.json")).unwrap();
+        let remote: serde_json::Value =
+            serde_json::from_str(include_str!("../capabilities/backend-origin.json")).unwrap();
+
+        assert_eq!(local["windows"], serde_json::json!(["main"]));
+        assert!(local["permissions"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("allow-wait-for-backend")));
+        assert_eq!(
+            remote["remote"]["urls"],
+            serde_json::json!(["http://127.0.0.1:*"])
+        );
+        assert_eq!(
+            remote["permissions"],
+            serde_json::json!(["allow-restart-app"])
+        );
     }
 
     #[test]

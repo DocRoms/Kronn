@@ -1099,7 +1099,7 @@ html[data-density="large"] .dash-main {
 
 .dash-tab[data-active="true"] {
   background: rgba(var(--kr-accent-rgb), 0.15);
-  color: var(--kr-accent);
+  color: var(--kr-accent-ink);
 }
 
 .dash-tab + .dash-tab {
@@ -2465,17 +2465,19 @@ html[data-density="large"] .dash-main {
 
 .project-overview-git-chip[data-tone='success'] {
   border-color: color-mix(in srgb, var(--kr-success) 32%, var(--kr-border-light));
-  color: var(--kr-success);
+  /* Keep semantic hue while following the theme's readable foreground.
+     Raw status colors are too light on the overview's pale surfaces. */
+  color: color-mix(in srgb, var(--kr-success) 40%, var(--kr-text-primary));
 }
 
 .project-overview-git-chip[data-tone='warning'] {
   border-color: color-mix(in srgb, var(--kr-warning) 32%, var(--kr-border-light));
-  color: var(--kr-warning);
+  color: color-mix(in srgb, var(--kr-warning) 40%, var(--kr-text-primary));
 }
 
 .project-overview-git-chip[data-tone='info'] {
   border-color: color-mix(in srgb, var(--kr-info) 32%, var(--kr-border-light));
-  color: var(--kr-info);
+  color: color-mix(in srgb, var(--kr-info) 40%, var(--kr-text-primary));
 }
 
 .project-overview-git-chip[data-tone='loading'] > i {
@@ -2772,12 +2774,12 @@ html[data-density="large"] .dash-main {
 }
 
 .project-overview-dependency-major {
-  color: var(--kr-error-soft);
+  color: color-mix(in srgb, var(--kr-error-soft) 40%, var(--kr-text-primary));
   font-weight: 750;
 }
 
 .project-overview-dependency-row small .project-overview-dependency-package-major {
-  color: var(--kr-error-soft);
+  color: color-mix(in srgb, var(--kr-error-soft) 40%, var(--kr-text-primary));
   font-weight: 700;
 }
 
@@ -3276,4 +3278,50 @@ html[data-density="large"] .dash-main {
   .project-git-switcher small {
     grid-column: 1;
   }
+}
+
+/* ════════ KT-190 — couverture télémétrie ════════
+   Le badge « inconnue » n'est pas décoratif : il porte la seule information
+   qui empêche de lire un total comme complet. Il doit rester lisible, donc il
+   emprunte la couleur d'avertissement du thème plutôt qu'une valeur en dur —
+   un jaune fixe devient illisible sur un thème à teinte unique (cf. KT-252). */
+.telemetry-coverage {
+  margin-top: 1rem;
+  padding: 0.75rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-elevated, transparent);
+}
+
+.telemetry-coverage h3 {
+  margin: 0 0 0.5rem;
+  font-size: 0.9rem;
+}
+
+.telemetry-coverage__table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.telemetry-coverage__table th,
+.telemetry-coverage__table td {
+  text-align: left;
+  padding: 0.25rem 0.5rem 0.25rem 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.telemetry-coverage__unknown {
+  color: var(--warning-fg, var(--warning));
+  font-weight: 600;
+}
+
+.telemetry-coverage__note {
+  margin: 0.5rem 0 0;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+.telemetry-coverage--error .telemetry-coverage__note {
+  color: var(--warning-fg, var(--warning));
 }

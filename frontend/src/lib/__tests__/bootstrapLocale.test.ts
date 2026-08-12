@@ -27,10 +27,21 @@ describe('locale bootstrap fallback', () => {
     const reload = vi.fn();
     renderBootstrapFailure(root, reload);
 
-    expect(root.querySelector('[role="alert"]')?.textContent).toContain('could not load');
+    expect(root.querySelector('[role="alert"]')?.textContent).toContain('could not start');
     const button = root.querySelector('button');
     expect(button?.textContent).toBe('Retry');
     button?.click();
     expect(reload).toHaveBeenCalledTimes(1);
   });
+
+  it('renders native startup details as text without interpreting markup', () => {
+    const root = document.createElement('div');
+    renderBootstrapFailure(root, vi.fn(), 'Data lock held\n<script>unsafe()</script>');
+
+    expect(root.querySelector('p')?.textContent).toBe(
+      'Data lock held\n<script>unsafe()</script>',
+    );
+    expect(root.querySelector('script')).toBeNull();
+  });
+
 });

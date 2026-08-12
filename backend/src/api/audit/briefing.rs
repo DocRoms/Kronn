@@ -96,6 +96,9 @@ pub async fn start_briefing(
     let agent_type = req.agent;
 
     let initial_message = DiscussionMessage {
+        recovered_partial: false,
+        session_tokens_at_message: None,
+        author_cli_ordinal: None,
         model: None,
         lint_report: None,
         id: Uuid::new_v4().to_string(),

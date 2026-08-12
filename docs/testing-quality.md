@@ -52,6 +52,7 @@ authoritative job graph.
 | Cross-page browser behavior | `frontend/e2e/specs/` using stable roles or `data-*` test hooks |
 | Shell helper | `tests/bats/` |
 | Python MCP/helper script | Its stdlib unittest suite under `backend/scripts/` |
+| Desktop sidecar bootstrap | `backend/sidecars/docs/test_build_bundle.py` plus the platform build smoke test |
 | Database migration | Migration registry test plus an upgrade/backfill assertion |
 
 Use `frontend/src/test/apiMock.ts` for the shared frontend API mock. Its
@@ -92,6 +93,26 @@ explicitly owns boot/setup behavior.
   appears and clears in a real browser.
 - `frontend/e2e/specs/disc-send-receipt-resilience.spec.ts` proves a failed
   pre-receipt send restores the exact draft and removes the optimistic message.
+
+## 0.9.6 reliability regression map
+
+- `backend/src/api/disc_prompts.rs` tests pin first-turn Planning discovery,
+  explicit CLI discussion targeting, native HTTP-agent instructions and Vibe's
+  honest human-gated fallback.
+- `backend/src/api_tests.rs` proves an HTTP agent can read a plan and create an
+  idempotent task in the current discussion while Kronn owns discussion scope,
+  actor identity and source-message provenance.
+- `backend/sidecars/docs/test_build_bundle.py` pins Windows UCRT64 precedence
+  and the loader environment. Desktop CI builds the sidecar before Rust,
+  verifies each DMG checksum, mounts it and strictly verifies the contained
+  application signature.
+- `WorkflowDetail.steps.test.tsx` pins the workflow step inspector's default
+  Preview tab, shared focused editor, save/refresh path and draft cancellation.
+- `backend/src/db/agent_dispatch.rs` pins distinct queued, claimed,
+  agent-started and settled timestamps. `backend/src/workflows/batch_step.rs`
+  expires a real eight-child BatchQuickPrompt under an accelerated active-time
+  budget and proves that all eight dispatches settle as cancelled, none remains
+  active and no discussion retains `awaiting_agent`.
 
 The browser tests deliberately simulate network boundaries without launching a
 paid agent. Unit and integration suites own transport edge cases; Playwright

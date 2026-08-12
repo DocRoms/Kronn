@@ -2180,6 +2180,36 @@ button.disc-contact-open {
   color: var(--kr-success);
 }
 
+/* KT-254 — the two token figures in the header. Styled as two SEPARATE pills
+   rather than one, because the visual grouping is the claim: a per-reply cost and
+   a cumulative session total are not addends of the same total. */
+.disc-token-cost {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.disc-token-cost-part {
+  padding: 2px 7px;
+  border: 1px solid var(--kr-border-ghost);
+  border-radius: 999px;
+  background: var(--kr-bg-subtle);
+  color: var(--kr-text-secondary);
+  font-size: var(--kr-fs-xs);
+  white-space: nowrap;
+}
+
+/* An unreadable counter is dimmed, never hidden: the user must see that a CLI is
+   joined and that its cost is unaccounted for. */
+.disc-token-cost-part[data-part='cli-unknown'] {
+  border-style: dashed;
+  color: var(--kr-text-ghost);
+}
+
+.disc-token-cost-partial {
+  color: var(--kr-text-ghost);
+}
+
 .disc-chat-context-project {
   max-width: 190px;
   overflow: hidden;
@@ -6946,4 +6976,23 @@ button.disc-contact-open {
   .disc-note-excerpt {
     grid-column: 1 / -1;
   }
+}
+
+/* KT-251 — the fold on a salvaged fragment. Deliberately quiet: it is history,
+   not a call to action. The label carries the meaning, so no colour is needed —
+   and a theme token would be one more pairing to keep readable (cf. KT-252). */
+.disc-msg-fragment-toggle {
+  padding: 2px 6px;
+  font-size: var(--kr-fs-2xs);
+  color: var(--kr-text-dim);
+  font-style: italic;
+}
+
+/* KT-251 — the id of the answer blocking a send. Monospace and dim: it is a
+   debugging handle, not a message. */
+.disc-partial-pending-id {
+  font-family: var(--kr-font-mono, monospace);
+  font-size: var(--kr-fs-2xs);
+  color: var(--kr-text-dim);
+  user-select: all;
 }

@@ -3,6 +3,7 @@ import { AtSign, ChevronDown, Copy, FileText, Network, ShieldCheck, UserCircle }
 import { config as configApi, contacts as contactsApi, type NetworkExposure } from '../../lib/api';
 import { gravatarUrl } from '../../lib/gravatar';
 import { userError } from '../../lib/userError';
+import { invokeTauri, isTauriRuntime } from '../../lib/tauri';
 import type { NetworkInfo } from '../../types/generated';
 import type { ToastFn } from '../../hooks/useToast';
 import { ContextHelp } from '../ContextHelp';
@@ -30,7 +31,7 @@ export function IdentitySection({ toast, t }: IdentitySectionProps) {
   const [networkInfo, setNetworkInfo] = useState<NetworkInfo | null>(null);
   const [exposure, setExposure] = useState<NetworkExposure | null>(null);
   const [showConnectionGuide, setShowConnectionGuide] = useState(false);
-  const isTauri = typeof window !== 'undefined' && '__TAURI__' in window;
+  const isTauri = isTauriRuntime();
 
   useEffect(() => {
     configApi.getServerConfig().then(config => {
@@ -58,8 +59,7 @@ export function IdentitySection({ toast, t }: IdentitySectionProps) {
 
   const restartApp = async () => {
     try {
-      const mod = await new Function("return import('@tauri-apps/api/core')")();
-      await mod.invoke('restart_app');
+      await invokeTauri('restart_app');
     } catch { /* Web mode or restart unavailable. */ }
   };
 

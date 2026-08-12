@@ -373,69 +373,82 @@ pub fn build_agent_prompt(
         String::new()
     };
 
-    // Introspection-tools heads-up. Only printed when the agent can
-    // actually call them (the `kronn-internal` MCP server is wired in
-    // .mcp.json and `KRONN_DISCUSSION_ID` is forwarded in the env). The
-    // text is short on purpose and explicitly tells the
-    // agent NOT to call them speculatively. Without the "only when you
-    // see a context gap" framing, agents tend to call disc_summarize on
-    // every turn and we lose the savings the strategy switch buys us.
-    //
-    // Mirror of `frontend/src/lib/constants.ts::agentSupportsIntrospection` —
-    // keep them in sync.
-    //
-    //   - Vibe + Ollama (Kronn-launched): the runner bypasses MCP-stdio
-    //     for these two (Vibe hangs on stdin, Ollama has no MCP client
-    //     at all). The agent sees the tool LIST in the prompt but
-    //     cannot call them bidirectionally. Slash-marker fallback
-    //     planned for Vibe in TD-20260510-introspection-vibe.
-    //
-    // History — 0.8.6 (2026-05-20) : Codex flipped back to supporting
-    // after Codex 0.132 fixed the exec-mode sandbox that cancelled
-    // MCP tool calls in 0.121. Confirmed live by a `tools/call` smoke
-    // test through Codex itself. The TD-20260510-codex-mcp-sandbox-
-    // block is closed.
-    let agent_speaks_mcp = !matches!(agent_type, AgentType::Vibe | AgentType::Ollama,);
+    // CLI agents use kronn-internal; HTTP agents receive the compact native
+    // catalogue in `agent_tools.rs`. Vibe deliberately runs without MCP
+    // because its stdio integration hangs, so it can only emit a durable,
+    // human-gated proposal fence. Custom is not an executable runtime.
+    let agent_speaks_mcp = matches!(
+        agent_type,
+        AgentType::ClaudeCode
+            | AgentType::Codex
+            | AgentType::GeminiCli
+            | AgentType::Kiro
+            | AgentType::CopilotCli
+    );
+    let agent_has_native_planning = matches!(agent_type, AgentType::Ollama | AgentType::LiteLlm);
+
+    // Planning is useful durable context even on turn one. Keep the notice
+    // compact and inject no task body: agents pull `plan_get` only when the
+    // request concerns tracked work. The explicit id makes CLI writes robust
+    // to stale MCP session bindings and removes the need for a join token.
+    let planning_notice = match (disc.language.as_str(), agent_speaks_mcp, agent_has_native_planning)
+    {
+        ("fr", true, _) => format!(
+            "Planification Kronn — cette discussion est `{}` et peut avoir un plan partagé composé de tâches priorisées. `plan_get()` lit ce plan. Si la demande concerne un plan ou du travail à retenir, appelle `plan_get({{discussion_id: \"{}\"}})` avant les outils `task_*`, puis passe ce même `discussion_id` à `task_create`/`task_link_discussion`. Cet identifiant explicite fonctionne même si le MCP annonce `no disc bound` ou `rejoin_required` : ne demande pas de token d'invitation. Effectue directement une demande non ambiguë ; sinon émets un bloc `kronn-plan-action` soumis à validation humaine. Ne remplace jamais une mise à jour demandée par un simple résumé Markdown.\n\n",
+            disc.id, disc.id
+        ),
+        ("es", true, _) => format!(
+            "Planificación de Kronn — esta conversación es `{}`. Si la solicitud trata de un plan o trabajo que debe conservarse, llama a `plan_get({{discussion_id: \"{}\"}})` antes de las herramientas `task_*` y pasa el mismo `discussion_id` a `task_create`. El id explícito funciona incluso si MCP indica `no disc bound` o `rejoin_required`: no pidas un token de invitación. Aplica directamente una solicitud inequívoca; si es ambigua, emite un bloque `kronn-plan-action` sujeto a validación humana. No sustituyas una actualización solicitada por un simple resumen Markdown.\n\n",
+            disc.id, disc.id
+        ),
+        ("zh", true, _) => format!(
+            "Kronn 计划 — 当前讨论 ID 为 `{}`。当请求涉及需要保留的计划或任务时，先调用 `plan_get({{discussion_id: \"{}\"}})`，再调用 `task_*` 工具，并把同一 `discussion_id` 传给 `task_create`。即使 MCP 返回 `no disc bound` 或 `rejoin_required`，显式 ID 仍然有效；不要索要邀请令牌。明确的请求可直接执行；有歧义时输出需人工确认的 `kronn-plan-action` 代码块。不要只用 Markdown 计划代替用户要求的更新。\n\n",
+            disc.id, disc.id
+        ),
+        (_, true, _) => format!(
+            "Kronn Planning — this discussion is `{}`. When the request concerns a plan or work worth retaining, call `plan_get({{discussion_id: \"{}\"}})` before `task_*` tools and pass the same `discussion_id` to `task_create`. The explicit id works even when MCP reports `no disc bound` or `rejoin_required`; do not ask for an invitation token. Apply an unambiguous request directly; otherwise emit a human-gated `kronn-plan-action` fence. Never replace a requested update with a prose-only Markdown plan.\n\n",
+            disc.id, disc.id
+        ),
+        ("fr", _, true) => "Planification Kronn — les outils natifs `plan_get` et `task_*` sont déjà limités à cette discussion. Si la demande concerne un plan ou du travail à retenir, lis le plan avant toute modification. Effectue directement une demande non ambiguë ; sinon émets un bloc `kronn-plan-action` soumis à validation humaine. Ne remplace jamais une mise à jour demandée par un simple résumé Markdown.\n\n".into(),
+        ("es", _, true) => "Planificación de Kronn — las herramientas nativas `plan_get` y `task_*` ya están limitadas a esta conversación. Si la solicitud trata de un plan o trabajo que debe conservarse, lee el plan antes de modificarlo. Aplica directamente una solicitud inequívoca; si es ambigua, emite un bloque `kronn-plan-action` sujeto a validación humana. No sustituyas una actualización solicitada por un simple plan Markdown.\n\n".into(),
+        ("zh", _, true) => "Kronn 计划 — 原生 `plan_get` 和 `task_*` 工具已限定到当前讨论。当请求涉及需要保留的计划或任务时，请先读取计划再修改。明确的请求可直接执行；有歧义时输出需人工确认的 `kronn-plan-action` 代码块。不要只用 Markdown 计划代替用户要求的更新。\n\n".into(),
+        (_, _, true) => "Kronn Planning — native `plan_get` and `task_*` tools are already scoped to this discussion. When the request concerns a plan or work worth retaining, read the plan before changing it. Apply an unambiguous request directly; otherwise emit a human-gated `kronn-plan-action` fence. Never replace a requested update with a prose-only Markdown plan.\n\n".into(),
+        ("fr", _, _) => "Planification Kronn — ce runtime ne peut pas appeler directement les outils Planning. Si la demande concerne le plan ou les tâches, ne réponds pas uniquement en Markdown : émets un bloc `kronn-plan-action` qui sera soumis à validation humaine dans Kronn.\n\n".into(),
+        ("es", _, _) => "Planificación de Kronn — este runtime no puede llamar directamente a las herramientas de Planning. Si la solicitud trata del plan o las tareas, no respondas solo con Markdown: emite un bloque `kronn-plan-action` que se someterá a validación humana en Kronn.\n\n".into(),
+        ("zh", _, _) => "Kronn 计划 — 此运行时无法直接调用计划工具。如果请求涉及计划或任务，请不要只回复 Markdown；请输出 `kronn-plan-action` 代码块，由用户在 Kronn 中确认。\n\n".into(),
+        (_, _, _) => "Kronn Planning — this runtime cannot call Planning tools directly. If the request concerns the plan or tasks, do not reply with Markdown alone: emit a `kronn-plan-action` fence for human validation in Kronn.\n\n".into(),
+    };
+
+    // History heads-up stays delayed: unlike the Planning capability pointer,
+    // it is dead weight while the complete short thread is already in-window.
     let introspection_notice = match disc.language.as_str() {
         "fr" => "Outils d'historique disponibles via le MCP `kronn-internal` : \
             `disc_meta()` (compte de messages, agent, tier — gratuit), \
             `disc_get_message(idx | message_id, before?, after?)` (un message précis par index ou référence `MSG-…`, avec petit contexte optionnel — gratuit), \
             `disc_summarize(from?, to?)` (synthèse à la demande — coûte des tokens). \
             N'utilise CES OUTILS QUE si tu remarques un trou de contexte que tu ne peux pas déduire de la fenêtre courante. Pas en spéculation.\n\
-            Cette discussion peut avoir un plan partagé composé de tâches priorisées et modifiables dans Kronn. \
-            L'utilisateur peut y faire référence naturellement comme « le plan », « les tâches », « ce qu'il reste à faire », « la priorité », etc. \
-            `plan_get()` lit ce plan ; `task_list`/`task_get`/`task_changes` lisent les tâches ; `proposal_list`/`proposal_get` lisent les propositions durables ; `task_create`/`task_update`/`task_link_discussion` permettent de créer, modifier, prioriser ou relier le travail. \
-            Lis d'abord le plan concerné. Juste avant tout `task_create` direct, rappelle `plan_get` afin de voir l'écriture récente d'un pair. Applique directement une intention non ambiguë ; sinon propose l'action avec un bloc `kronn-plan-action` soumis à validation humaine (create, create_many, status, complete, unblock, open). \
-            Tu peux lire et proposer, mais seul un humain accepte, refuse ou décide une proposition durable. \
-            Ne remplace pas une demande de mise à jour du plan par un simple résumé Markdown. \
-            Quand un travail suivi démarre ou change réellement, maintiens son statut, sa DoD et sa priorité dans le plan. N'écris que lors d'un changement réel : ne recharge ou réécris jamais une tâche inchangée pour simplement signaler l'avancement. \
-            Si les outils Planning annoncés sont absents de ta surface MCP, utilise l'instantané `plan_snapshot` de `disc_join` en lecture seule, demande à @user de reconnecter le MCP Kronn et n'invente aucune mise à jour.\n\n",
+            L'utilisateur peut parler naturellement du plan comme « le plan », « les tâches », « ce qu'il reste » ou « la priorité ». \
+            `plan_get`/`task_list`/`task_get`/`task_changes` lisent le travail ; `proposal_list`/`proposal_get` lisent les propositions durables. \
+            Juste avant tout `task_create` direct, rappelle `plan_get` afin de voir l'écriture récente d'un pair. Pour une intention ambiguë, émets un bloc `kronn-plan-action` (create, create_many, status, complete, unblock, open) : seul un humain accepte, refuse ou décide une proposition durable. \
+            Quand un travail suivi démarre ou change réellement, maintiens son statut, sa DoD et sa priorité et ne recharge ou réécris jamais une tâche inchangée. Si les outils annoncés manquent, utilise l'instantané `plan_snapshot` de `disc_join` en lecture seule et n'invente aucune mise à jour.\n\n",
         "es" => "Herramientas de historial vía MCP `kronn-internal`: \
             `disc_meta()` (cuenta de mensajes, agente, tier — gratuito), \
             `disc_get_message(idx | message_id, before?, after?)` (un mensaje por índice o referencia `MSG-…`, con contexto pequeño opcional — gratuito), \
             `disc_summarize(from?, to?)` (resumen bajo demanda — cuesta tokens). \
             Úsalos SOLO cuando notes un hueco de contexto que no puedas deducir de la ventana actual.\n\
-            Esta conversación puede tener un plan compartido con tareas priorizadas y editables en Kronn. \
-            El usuario puede referirse a él naturalmente como « el plan », « las tareas », « lo que queda », « la prioridad », etc. \
-            `plan_get()` lee el plan; `task_list`/`task_get`/`task_changes` leen tareas; `proposal_list`/`proposal_get` leen las propuestas durables; `task_create`/`task_update`/`task_link_discussion` permiten crear, modificar, priorizar o vincular el trabajo. \
-            Lee primero el plan correspondiente. Justo antes de cualquier `task_create` directo, vuelve a llamar a `plan_get` para ver la escritura reciente de otro agente. Aplica directamente una intención inequívoca; si es ambigua, propone un bloque `kronn-plan-action` con validación humana (create, create_many, status, complete, unblock, open). \
-            Puedes leer y proponer, pero solo un humano acepta, rechaza o decide una propuesta durable. \
-            No sustituyas una actualización solicitada por un simple resumen Markdown. \
-            Cuando un trabajo seguido empieza o cambia realmente, mantén su estado, DoD y prioridad en el plan. Escribe solo ante un cambio real: nunca recargues o reescribas una tarea sin cambios solo para informar del progreso. \
-            Si las herramientas de Planning anunciadas faltan en tu superficie MCP, usa el `plan_snapshot` de `disc_join` en modo de solo lectura, pide a @user que reconecte el MCP de Kronn y no inventes ninguna actualización.\n\n",
+            El usuario puede hablar naturalmente de « el plan », « las tareas », « lo que queda » o « la prioridad ». \
+            `plan_get`/`task_list`/`task_get`/`task_changes` leen el trabajo; `proposal_list`/`proposal_get` leen propuestas durables. \
+            Justo antes de cualquier `task_create` directo, vuelve a llamar a `plan_get` para ver la escritura reciente de otro agente. Para una intención ambigua, emite un bloque `kronn-plan-action` (create, create_many, status, complete, unblock, open): solo un humano acepta, rechaza o decide una propuesta durable. \
+            Cuando un trabajo seguido empieza o cambia realmente, mantén su estado, DoD y prioridad y nunca recargues o reescribas una tarea sin cambios. Si faltan las herramientas anunciadas, usa el `plan_snapshot` de `disc_join` en modo de solo lectura y no inventes ninguna actualización.\n\n",
         _ => "History tools available via the `kronn-internal` MCP: \
             `disc_meta()` (message count, agent, tier — free), \
             `disc_get_message(idx | message_id, before?, after?)` (one message by index or `MSG-…` reference, with an optional small context window — free), \
             `disc_summarize(from?, to?)` (on-demand summary — costs tokens). \
             Use these ONLY when you notice a context gap you cannot infer from the current window. Never speculatively.\n\
-            This discussion may have a shared Kronn plan made of prioritized, editable tasks. \
-            The user may refer to it naturally as “the plan”, “the tasks”, “what remains”, “the priority”, and similar wording. \
-            `plan_get()` reads the plan; `task_list`/`task_get`/`task_changes` read tasks; `proposal_list`/`proposal_get` read durable proposals; `task_create`/`task_update`/`task_link_discussion` create, edit, prioritize or link work. \
-            Read the relevant plan first. Immediately before any direct `task_create`, call `plan_get` again so a peer's recent write is visible. Apply unambiguous intent directly; otherwise propose a human-gated `kronn-plan-action` fence (create, create_many, status, complete, unblock, open). \
-            You may read and propose, but only a human accepts, rejects or decides a durable proposal. \
-            Never replace a requested plan update with a prose-only Markdown summary. \
-            Whenever tracked work starts or materially changes, keep its status, DoD and priority honest in the plan. Write only on a real change: never reload or rewrite an unchanged task merely to report progress. \
-            If the announced Planning tools are missing from your MCP surface, use the read-only `plan_snapshot` from `disc_join`, ask @user to reconnect the Kronn MCP, and never fabricate an update.\n\n",
+            The user may refer to Planning naturally as “the plan”, “the tasks”, “what remains” or “the priority”. \
+            `plan_get`/`task_list`/`task_get`/`task_changes` read work; `proposal_list`/`proposal_get` read durable proposals. \
+            Immediately before any direct `task_create`, call `plan_get` again so a peer's recent write is visible. For ambiguous intent, emit a `kronn-plan-action` fence (create, create_many, status, complete, unblock, open): only a human accepts, rejects or decides a durable proposal. \
+            Whenever tracked work materially changes, keep its status, DoD and priority honest and never reload or rewrite an unchanged task. If announced tools are absent, use the read-only `plan_snapshot` from `disc_join` and never fabricate an update.\n\n",
     };
 
     // Slash-marker fallback for agents that don't speak MCP (Vibe,
@@ -493,8 +506,8 @@ pub fn build_agent_prompt(
         // Language instruction at end only — LLMs weight recent text more heavily,
         // and MCP context is injected via --append-system-prompt (separate from prompt).
         return format!(
-            "{}{}{}\n\n{}",
-            title_ctx, worktree_notice, content, lang_instr
+            "{}{}{}{}\n\n{}",
+            title_ctx, worktree_notice, planning_notice, content, lang_instr
         );
     }
 
@@ -539,7 +552,7 @@ pub fn build_agent_prompt(
     //     parser in `slash_markers.rs` resolves them into System
     //     messages on the next turn).
     //   - Codex is an MCP speaker again since 0.8.6 / Codex 0.132.
-    let agent_uses_slash_markers = matches!(agent_type, AgentType::Vibe | AgentType::Ollama,);
+    let agent_uses_slash_markers = matches!(agent_type, AgentType::Vibe | AgentType::Ollama);
     let intro_block: &str = if user_msgs.len() >= 3 {
         if agent_speaks_mcp {
             introspection_notice
@@ -552,8 +565,8 @@ pub fn build_agent_prompt(
         ""
     };
     let header = format!(
-        "{}{}{}{}{}",
-        title_ctx, worktree_notice, intro_block, interactive_hint, prev_conv_label
+        "{}{}{}{}{}{}",
+        title_ctx, worktree_notice, planning_notice, intro_block, interactive_hint, prev_conv_label
     );
     let overhead = header.len() + footer.len() + 100; // 100 = notice template space
 
@@ -768,6 +781,9 @@ mod tests {
 
     fn user_msg(content: &str) -> DiscussionMessage {
         DiscussionMessage {
+            recovered_partial: false,
+            session_tokens_at_message: None,
+            author_cli_ordinal: None,
             model: None,
             lint_report: None,
             id: uuid::Uuid::new_v4().to_string(),
@@ -791,6 +807,9 @@ mod tests {
 
     fn agent_msg(content: &str, agent_type: AgentType) -> DiscussionMessage {
         DiscussionMessage {
+            recovered_partial: false,
+            session_tokens_at_message: None,
+            author_cli_ordinal: None,
             model: None,
             lint_report: None,
             id: uuid::Uuid::new_v4().to_string(),
@@ -820,6 +839,47 @@ mod tests {
         assert!(prompt.contains("Hello Claude"));
         assert!(prompt.contains("MUST respond in English"));
         assert!(!prompt.contains("Previous conversation"));
+    }
+
+    #[test]
+    fn first_turn_exposes_planning_with_an_explicit_discussion_id() {
+        let disc = disc_with_messages(
+            vec![user_msg("Create the discussion plan with one task per day")],
+            "en",
+        );
+        let prompt = build_agent_prompt(&disc, &AgentType::Codex, 0);
+
+        assert!(prompt.contains("Kronn Planning"));
+        assert!(prompt.contains(&disc.id));
+        assert!(prompt.contains("no disc bound"));
+        assert!(prompt.contains("do not ask for an invitation token"));
+        assert!(prompt.contains("Never replace a requested update"));
+        assert!(
+            !prompt.contains("History tools available"),
+            "history discovery remains delayed; only the compact Planning capability is turn-one context"
+        );
+    }
+
+    #[test]
+    fn first_turn_http_agent_gets_native_planning_instructions() {
+        for agent in [AgentType::Ollama, AgentType::LiteLlm] {
+            let disc = disc_with_messages(vec![user_msg("Track this in the plan")], "en");
+            let prompt = build_agent_prompt(&disc, &agent, 0);
+
+            assert!(prompt.contains("native `plan_get` and `task_*` tools"));
+            assert!(prompt.contains("scoped to this discussion"));
+            assert!(!prompt.contains("no disc bound"));
+        }
+    }
+
+    #[test]
+    fn first_turn_vibe_gets_a_human_gated_planning_fallback() {
+        let disc = disc_with_messages(vec![user_msg("Track this in the plan")], "en");
+        let prompt = build_agent_prompt(&disc, &AgentType::Vibe, 0);
+
+        assert!(prompt.contains("cannot call Planning tools directly"));
+        assert!(prompt.contains("`kronn-plan-action`"));
+        assert!(prompt.contains("human validation"));
     }
 
     #[test]
@@ -1005,25 +1065,16 @@ mod tests {
         }
     }
 
-    /// KT-29 (0.9.2-I) limit: Vibe & Ollama are launched by Kronn WITHOUT a
-    /// bidirectional MCP client, so they cannot call the plan tools. They get
-    /// the slash-marker fallback, NOT the MCP plan contract — the
-    /// `kronn-plan-action` fence would be dead weight they can't act on. This
-    /// keeps the documented limitation honest as a live invariant.
+    /// Vibe still uses the one-turn-late history marker fallback. Ollama has
+    /// native Planning tools but keeps markers for history introspection.
     #[test]
-    fn planning_contract_limit_vibe_ollama_get_no_mcp_fence() {
-        let contract = planning_contract();
-        let fence = contract["fence"].as_str().unwrap();
+    fn history_marker_fallback_remains_available_to_vibe_and_ollama() {
         for agent in [AgentType::Vibe, AgentType::Ollama] {
             let disc = disc_with_messages(
                 vec![user_msg("one"), user_msg("two"), user_msg("three")],
                 "en",
             );
             let prompt = build_agent_prompt(&disc, &agent, 0);
-            assert!(
-                !prompt.contains(fence),
-                "{agent:?} has no bidirectional MCP — must NOT receive the `{fence}` contract"
-            );
             assert!(
                 prompt.contains("KRONN:DISC_META"),
                 "{agent:?} must receive the slash-marker fallback instead"

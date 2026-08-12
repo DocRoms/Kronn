@@ -31,6 +31,7 @@ already requiring it.
 
 import contextlib
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -71,6 +72,22 @@ TOOLS = [
             "done for this client."
         ),
         "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "tool_manual",
+        "description": (
+            "On-demand authoring guide for one Kronn tool. Call it when that "
+            "tool's description points here; omit `tool` to list manuals."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "tool": {
+                    "type": "string",
+                    "description": "Tool name.",
+                }
+            },
+        },
     },
     {
         "name": "bridge_info",
@@ -490,6 +507,22 @@ TOOLS = [
             "required": ["task_id", "blocker_task_id"],
         },
     },
+    {
+        "name": "task_remove_blocker",
+        "description": (
+            "Remove one dependency edge. KT references or UUIDs accepted. "
+            "Statuses and blocked_reason stay unchanged; safe to retry."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string"},
+                "blocker_task_id": {"type": "string"},
+                "source_message_id": {"type": "string"},
+            },
+            "required": ["task_id", "blocker_task_id"],
+        },
+    },
     # ─── 0.8.4 (#294) cross-agent memory tools ─────────────────────────
     # Each one is a 1:1 mirror of a backend route in
     # `backend/src/api/disc_source.rs`. They let an external CLI
@@ -552,42 +585,34 @@ TOOLS = [
             "deliberate — an agent that posts and stops polling shows as "
             "offline and reads to the human as having left. Pass "
             "`wait_for_reply: false` only to post twice in a row.\n"
-            "  ⚠ MENTIONS — use the identities Kronn exposes and NEVER invent "
-            "a pseudo. Native agents: `@claude`, `@codex`, `@vibe`, "
-            "`@gemini`, `@kiro`, `@copilot`, `@ollama`. Joined CLIs use the "
-            "matching `-cli` alias shown in the discussion (`@codex-cli`, "
-            "`@codex-cli-2`, etc.). `@codex` NEVER means `@codex-cli`. "
-            "The human of this "
-            "instance : `@user` — that exact trigger, not their first name, "
-            "not their pseudo, not `@romu`. A canonical mention renders as a "
-            "chip with the right identity and colour; an invented one renders "
-            "as dead text and the person it was meant for never sees they "
-            "were addressed.\n"
-            "  • BULK (for cross-agent-memory transcript import, "
-            "0.8.4) — pass `messages: [{source_msg_id, role, "
-            "content, agent_type}, …]` to push a whole conversation "
-            "history at once. Idempotent on (disc_id, source_msg_id) "
-            "— re-pushing the same transcript does NOT duplicate.\n\n"
+            "  ⚠ MENTIONS — NEVER invent a pseudo; use what Kronn exposes. "
+            "Native agents: `@claude`, `@codex`, `@vibe`, `@gemini`, `@kiro`, "
+            "`@copilot`, `@ollama`. Joined CLIs use the `-cli` alias shown in "
+            "the discussion (`@codex-cli`, `@codex-cli-2`); `@codex` NEVER "
+            "means `@codex-cli`. The human of this instance : `@user` — that "
+            "exact trigger, not their name, not `@romu`. An invented mention "
+            "renders as dead text and its target never learns they were "
+            "addressed.\n"
+            "  • BULK — import a whole transcript at once via `messages: [...]`, "
+            "idempotently. Rare; see `tool_manual({tool: \"disc_append\"})`.\n\n"
             "Returns `{appended, skipped_as_duplicates, diverged, "
             "last_sort_order}`. `last_sort_order` is only the WRITE receipt "
             "for the message just posted — NEVER use it as a read cursor: a "
             "peer message may have landed immediately before this write and "
             "would be skipped. The bridge keeps a distinct durable read "
-            "cursor and uses it automatically for the chained wait. "
-            "`diverged=true` means the Kronn UI was edited after a "
-            "previous import — warn the user before more updates."
+            "cursor and uses it automatically for the chained wait."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "content": {"type": "string", "description": "Simple mode : the text to post. Bridge wraps it into a messages[]."},
-                "role": {"type": "string", "description": "Simple mode : role override (default Agent). Use User if you're echoing the user's words."},
-                "channel": {"type": "string", "enum": ["main", "note"], "description": "Simple mode: main (default) or note. A note never wakes an agent."},
-                "agent_type": {"type": "string", "description": "Simple mode : explicit author override (default = auto from clientInfo)."},
-                "target_agent": {"type": "string", "description": "Simple mode : explicit one-shot responder override. Normally inferred from one unambiguous structured @agent mention outside code. AgentType value such as ClaudeCode, Codex or Ollama."},
+                "content": {"type": "string", "description": "Live message text."},
+                "role": {"type": "string", "description": "Default Agent; use User only when importing user text."},
+                "channel": {"type": "string", "enum": ["main", "note"], "description": "Default main; notes never wake agents."},
+                "agent_type": {"type": "string", "description": "Author override; normally inferred."},
+                "target_agent": {"type": "string", "description": "Legacy one-shot responder override."},
                 "targets": {
                     "type": "array",
-                    "description": "Simple mode: ordered exact responder identities. Prefer natural mentions; pass this only when a caller already knows the durable CLI session id.",
+                    "description": "Ordered exact responders; prefer natural mentions.",
                     "items": {
                         "type": "object",
                         "properties": {
@@ -598,11 +623,11 @@ TOOLS = [
                         "required": ["kind", "agent_type"],
                     },
                 },
-                "reply_to_message_id": {"type": "string", "description": "Simple mode : durable id of the message being answered. Obtain it from disc_get_message; the target must belong to this discussion."},
-                "wait_for_reply": {"type": "boolean", "description": "Simple mode, default TRUE : after posting, the same call keeps listening for the next peer message (result under `waited`). Leave it on — posting without listening is what makes an agent look like it left the room. Pass false only when you are about to post again immediately."},
-                "source_msg_id": {"type": "string", "description": "Simple mode : dedup key. Derived from the message itself by default, so a retried tool call is idempotent instead of posting twice. Pass an explicit value only to post the SAME text twice on purpose."},
-                "wait_timeout_secs": {"type": "integer", "description": "Blocking seconds for the chained wait (default 60, clamped server-side). Prefer a long window."},
-                "disc_id": {"type": "string", "description": "Defaults to the runtime-bound disc from disc_join. Override only when you need to post to a DIFFERENT disc."},
+                "reply_to_message_id": {"type": "string", "description": "Durable replied-message id from disc_get_message."},
+                "wait_for_reply": {"type": "boolean", "description": "Default true; false only before another immediate post."},
+                "source_msg_id": {"type": "string", "description": "Optional explicit dedup key."},
+                "wait_timeout_secs": {"type": "integer", "description": "Chained-wait seconds; default 60."},
+                "disc_id": {"type": "string", "description": "Defaults to the bound discussion."},
                 "messages": {
                     "type": "array",
                     "description": "Bulk mode : explicit array of messages (used for transcript import).",
@@ -1005,24 +1030,16 @@ TOOLS = [
             "— read it, do not answer it. "
             "`withheld_by_routing` counts newer peer turns deliberately "
             "omitted because they target another identity, so a moving cursor "
-            "cannot be mistaken for a lost message. Omit `since_sort_order` in normal use: the "
-            "bridge keeps a durable cursor and acknowledges a delivered batch "
-            "only when the CLI makes its next subsequent tool call, tracked by "
-            "a bridge-local sequence rather than the client JSON-RPC id. An "
-            "unacknowledged batch is replayed after reconnect. When manually overriding it, only reuse "
-            "`latest_sort_order` returned by a WAIT — never "
-            "`last_sort_order` returned by an append. Every delivered item carries "
-            "a durable `message_id`; acknowledge or reply using those exact ids "
-            "(use `reply_to_message_id` for one transcript message). Current messages carry typed "
-            "`targets` that distinguish the configured discussion agent, a "
-            "punctual native agent, and one exact joined CLI. A joined CLI "
-            "message also carries `reply_target` when Kronn knows its exact "
-            "author session, so a reply stays attached to that CLI even when "
-            "several peers use the same provider. A joined CLI "
-            "is WOKEN only by turns selecting its own CLI identity; other "
-            "room traffic arrives attached to its next wake as `awareness` "
-            "context, so nothing is lost and nothing wakes it needlessly. Legacy "
-            "`target_agents` / `target_agent` remain compatibility projections. IMPORTANT: "
+            "cannot be mistaken for a lost message. **Omit `since_sort_order`** — the "
+            "bridge keeps a durable cursor. When you do override it, only ever reuse "
+            "`latest_sort_order` returned by a WAIT, never `last_sort_order` returned "
+            "by an append: that one is a different counter and skips turns. Every "
+            "delivered item carries a durable `message_id`; acknowledge or reply using "
+            "those exact ids (`reply_to_message_id` for one transcript message). "
+            "`tool_manual({tool: \"disc_wait_for_peer\"})` explains the cursor and "
+            "acknowledgement mechanics, and how typed `targets`/`reply_target` decide "
+            "who a turn wakes — read it before debugging a message you think you lost. "
+            "IMPORTANT: "
             "`timed_out=true` now only happens at the safety cap or on an "
             "interruption and is NORMAL in an active collaboration — re-arm "
             "the wait when ready. A quiet return is NOT end-of-conversation; "
@@ -1051,11 +1068,11 @@ TOOLS = [
     {
         "name": "disc_load_other",
         "description": (
-            "Load a slice of messages from a Kronn disc OTHER than the "
-            "current one. Returns `{disc_id, title, total_messages, "
-            "from_idx, to_idx, messages}`. Defaults: from=0, to=total. "
-            "Useful when the user says 'go look at what we decided in "
-            "the auth thread last week'."
+            "Load a slice of messages from a disc OTHER than the current one. "
+            "Returns `{disc_id, title, total_messages, from_idx, to_idx, "
+            "messages}`. **No range = the LAST ~40 messages, not the whole "
+            "disc** (one real thread is 1 427). An explicit `from`/`to` is "
+            "honoured at any size."
         ),
         "inputSchema": {
             "type": "object",
@@ -1064,8 +1081,8 @@ TOOLS = [
                     "Discussion id. The user can copy it from the UI: the "
                     "#-prefixed pill in the chat header (click = full UUID)."
                 )},
-                "from": {"type": "integer", "description": "Inclusive start (0-based). Default 0."},
-                "to": {"type": "integer", "description": "Exclusive end. Default total length."},
+                "from": {"type": "integer", "description": "Inclusive start (0-based)."},
+                "to": {"type": "integer", "description": "Exclusive end."},
                 "include_notes": {"type": "boolean", "description": "Explicit audit opt-in. Default false."},
             },
             "required": ["disc_id"],
@@ -1330,25 +1347,21 @@ TOOLS = [
             "TAGGED OBJECT `{\"type\": \"Agent\"}` — NOT a bare string (serde "
             "`#[serde(tag=\"type\")]`). Same for `output_format` "
             "(`{\"type\":\"Structured\"}`) and the workflow `trigger` "
-            "(`{\"type\":\"Manual\"}`). (This tool is forgiving — it also accepts a "
-            "bare-string `step_type` and wraps it — but the canonical form, the "
-            "one `workflow_get` returns, is the tagged object.) `step_type.type` is "
+            "(`{\"type\":\"Manual\"}`). A bare string is also accepted and wrapped, "
+            "but the tagged object is canonical. `step_type.type` is "
             "a CLOSED set — one of: **Agent · ApiCall · BatchApiCall · "
             "BatchQuickPrompt · Exec · Gate · Notify · JsonData · SubWorkflow**. "
             "(Don't infer the available types from one workflow you happened to "
             "open — it may use only Agent steps. This list is the whole taxonomy.)\n"
-            "Common shapes (copy then adapt):\n"
-            "  • Agent: `{\"name\":\"Triage\",\"step_type\":{\"type\":\"Agent\"},\"agent\":\"ClaudeCode\",\"prompt_template\":\"Analyse {{previous_step.output}}\",\"output_format\":{\"type\":\"Structured\"}}`\n"
-            "  • ApiCall: `{\"name\":\"Fetch\",\"step_type\":{\"type\":\"ApiCall\"},\"api_plugin_slug\":\"mcp-atlassian\",\"api_config_id\":\"<id from mcp_list>\",\"api_endpoint_path\":\"/rest/api/2/search\",\"api_method\":\"GET\",\"api_query\":{\"jql\":\"...\"}}`\n"
-            "  • Exec: `{\"name\":\"Tests\",\"step_type\":{\"type\":\"Exec\"},\"exec_command\":\"make\",\"exec_args\":[\"test\"],\"exec_timeout_secs\":600}` (binary must be in the workflow `exec_allowlist`; for a LARGE input use `\"exec_stdin\":\"{{steps.fetch.data_json}}\"` — piped to stdin, no argv size limit — instead of a huge arg)\n"
-            "  • Gate: `{\"name\":\"Validate\",\"step_type\":{\"type\":\"Gate\"},\"gate_message\":\"Approve?\",\"gate_request_changes_target\":\"<step name to loop back to>\"}`\n"
-            "  • Notify: `{\"name\":\"Done\",\"step_type\":{\"type\":\"Notify\"},\"notify_config\":{...}}`\n"
-            "  • BatchQuickPrompt: `{\"name\":\"Fan out\",\"step_type\":{\"type\":\"BatchQuickPrompt\"},\"batch_quick_prompt_id\":\"<qp id>\",\"batch_items_from\":\"{{previous_step.data}}\",\"batch_wait_for_completion\":true}`\n"
-            "  • BatchApiCall: `{\"name\":\"Bulk\",\"step_type\":{\"type\":\"BatchApiCall\"},\"batch_items_from\":\"{{previous_step.data}}\",\"api_plugin_slug\":\"…\",\"api_config_id\":\"…\",\"api_endpoint_path\":\"…\",\"api_method\":\"POST\"}` (fans one ApiCall over a list without starting a model)\n"
-            "  • JsonData: `{\"name\":\"Seed\",\"step_type\":{\"type\":\"JsonData\"},\"json_data_payload\":\"[{...}]\"}` (deterministic data source that starts no model — feeds `{{steps.Seed.data}}`)\n"
-            "  • SubWorkflow: `{\"name\":\"Implement\",\"step_type\":{\"type\":\"SubWorkflow\"},\"sub_workflow_id\":\"<child id>\"}` — runs ANOTHER workflow as a step. Add `\"sub_workflow_foreach_file\":\".kronn/tasks.json\"` to run the child ONCE PER ITEM. **FOREACH RUNTIME CONTRACT (run-breaking): the engine exposes each item to the child as template vars `{{current_task.<field>}}` (e.g. path `/pulls/{{current_task.number}}/reviews`) AND as the file `.kronn/current_task.json`. Accessor is FIXED `current_task.*` — NOT `{{item.*}}`, NOT derived from the foreach file name.** Child must exist first. Call `workflow_step_schema` for the full contract.\n"
-            "Advanced (Agent step): `output_format` = `{\"type\":\"TypedSchema\",\"schema\":{…}}` (validates+repairs the agent's JSON) or `{\"type\":\"Structured\"}`; `multi_agent_review:true` = second agent debates the output.\n"
-            "Better than hand-authoring: `workflow_get`/`workflow_clone` a RICH workflow (e.g. AutoPilot) and adapt. Returns the created workflow JSON (id + all fields)."
+            "**Call `workflow_step_schema` BEFORE composing steps.** It returns the "
+            "required/optional fields, a copy-ready example per type, the output-piping "
+            "rules and every template-var namespace. Two traps it "
+            "documents that are worth naming up front because they fail at RUN time: a "
+            "SubWorkflow foreach item is reached as `{{current_task.<field>}}` (fixed "
+            "name, NOT `{{item.*}}`, NOT the foreach file's name), while a Batch fan-out "
+            "item is `{{batch.item.<field>}}` — different namespaces, easy to swap.\n"
+            "Better than hand-authoring: `workflow_get`/`workflow_clone` a RICH workflow "
+            "(e.g. AutoPilot) and adapt. Returns the created workflow JSON (id + all fields)."
         ),
         "inputSchema": {
             "type": "object",
@@ -1579,7 +1592,7 @@ TOOLS = [
         "description": (
             "Delete a Quick Prompt by id. Use to clean up an orphan draft "
             "(e.g. after replacing a QP rather than patching it via "
-            "`qp_update`)."
+            "`qp_update`). IRREVERSIBLE — runs already produced from it are kept."
         ),
         "inputSchema": {
             "type": "object",
@@ -1712,7 +1725,7 @@ TOOLS = [
     },
     {
         "name": "skill_delete",
-        "description": "Delete a custom skill by id (builtins are protected).",
+        "description": "Delete a custom skill by id (builtins are protected). IRREVERSIBLE. Past runs keep the prompts they used; only future runs lose it.",
         "inputSchema": {
             "type": "object",
             "properties": {"skill_id": {"type": "string"}},
@@ -1763,7 +1776,7 @@ TOOLS = [
     },
     {
         "name": "profile_delete",
-        "description": "Delete a custom profile by id (builtins are protected).",
+        "description": "Delete a custom profile by id (builtins are protected). IRREVERSIBLE. Past runs keep the prompts they used; only future runs lose it.",
         "inputSchema": {
             "type": "object",
             "properties": {"profile_id": {"type": "string"}},
@@ -1810,7 +1823,7 @@ TOOLS = [
     },
     {
         "name": "directive_delete",
-        "description": "Delete a custom directive by id (builtins are protected).",
+        "description": "Delete a custom directive by id (builtins are protected). IRREVERSIBLE. Past runs keep the prompts they used; only future runs lose it.",
         "inputSchema": {
             "type": "object",
             "properties": {"directive_id": {"type": "string"}},
@@ -1846,28 +1859,6 @@ TOOLS = [
             "domain config\", \"trigger a webhook\"). Saves token cost "
             "on every future invocation : `qa_run(id, vars)` instead "
             "of rebuilding the `api_call` payload from scratch.\n\n"
-            "**⚠ Recommended workflow — PROBE then PERSIST** :\n"
-            "  1. **Probe** : do ONE `api_call` to the target endpoint "
-            "WITHOUT `extract` (or with `extract: null`). Read the "
-            "response shape — many vendors (JIRA, Confluence, AWS, "
-            "GitHub) return verbose payloads with `changelog`, "
-            "`renderedFields`, ADF nodes, ARN-heavy refs that bloat "
-            "an agent's context (10-40k tokens for a single ticket).\n"
-            "  2. **Decide** : pick the JSONPath that keeps only what "
-            "downstream agents need (often `$.fields`, `$.data`, or "
-            "`$.items[*].{id,title,status}`). When in doubt, ask the "
-            "user what they care about.\n"
-            "  3. **Persist** : call `qa_create_draft` with the "
-            "optimised `api_extract` AND vendor-side filters in "
-            "`api_query` (e.g. `fields=summary,status` for JIRA, "
-            "`expand=` knobs for Confluence). Persist both for "
-            "max token economy — server-side filtering AND client-side "
-            "extraction stack.\n\n"
-            "Persisting a QA without `api_extract` is fine for "
-            "small-payload vendors (Resend, Mailjet, simple webhooks) "
-            "but ALWAYS measure first — the next `qa_update` call to "
-            "add `api_extract` post-hoc is just MCP friction the user "
-            "can avoid by getting it right at create time.\n\n"
             "**Discovery first** : call `mcp_list` to find the right "
             "`api_plugin_slug` + `api_config_id`. The QA's endpoint "
             "must match one of the plugin's allow-listed endpoints "
@@ -1877,21 +1868,12 @@ TOOLS = [
             "leaves can contain `{{var_name}}` placeholders that "
             "match `variables[].name`. At `qa_run` time the user "
             "(or `qa_run`'s `vars` arg) provides the values.\n\n"
-            "**Variables** : each entry is "
-            "`{name, label?, placeholder?, required?, description?}`. "
-            "Required defaults to true. `name` must be a "
-            "UPPER_SNAKE_CASE or lower_snake_case identifier matching "
-            "the `{{var_name}}` placeholders in the API config.\n\n"
-            "**Safety** : QAs have no `enabled` flag — every QA can "
-            "be launched on demand. No auto-fire risk. The user "
-            "reviews the QA in the Quick APIs page before invoking. "
-            "Same safety profile as `qp_create_draft`.\n\n"
-            "**Iteration** : if you realise after testing that the "
-            "QA needs tweaking (heavier payload than expected, missing "
-            "query param, wrong extract path), use `qa_update({qa_id, "
-            "...patch})` — it merges your patch on top of the existing "
-            "QA so you only specify what changed. No need to ask the "
-            "user to click through the Quick APIs page UI.\n\n"
+            "**Call `tool_manual({tool: \"qa_create_draft\"})` first.** It "
+            "carries the probe-then-persist method that decides `api_extract` "
+            "(the difference between a 40k-token payload and a useful one), the "
+            "`variables[]` entry shape, and how `qa_update` patches a QA "
+            "afterwards. Skipping it is how a QA gets persisted with the wrong "
+            "extract path — which only shows up at `qa_run` time.\n\n"
             "Returns the created QA JSON (id, all fields) so the "
             "agent can echo the id back to the user "
             "(`Quick API created as <id> — try it with qa_run({qa_id, vars})`)."
@@ -2012,31 +1994,19 @@ TOOLS = [
             "**Plugin selection** — pass EITHER:\n"
             "  (a) `api_plugin_slug` + `api_config_id` (from `mcp_list`)\n"
             "  (b) `quick_api_id` (from `qa_list`) — for saved Quick APIs\n\n"
-            "**Project scope** — auto-resolved server-side from 3 "
-            "sources (in priority): (1) explicit `project_id` arg if "
-            "passed, (2) the disc context if Kronn spawned you from a "
-            "disc (auto-injected), (3) the chosen `api_config_id`'s "
-            "first linked project. **Host-CLI sessions** (launched "
-            "outside Kronn) work natively via source #3 — no env var "
-            "or arg needed when you pick a config that's project-"
-            "scoped. Only pass `project_id` explicitly when the config "
-            "is global and you want to attribute the call to a "
-            "specific project.\n\n"
             "**Auth happens server-side**: never put credentials in the "
             "request body, headers, query, or path. Kronn injects them "
             "from the encrypted DB config. If a plugin's auth scheme "
             "doesn't seem to be applied, that's a plugin spec issue "
             "(report it), not something to work around with hand-typed "
             "Authorization headers.\n\n"
-            "**Non-secret config values via ${ENV.X}**: when a plugin "
-            "has a non-secret identifier (e.g. Didomi's `organization_id`, "
-            "an account_id, a workspace_slug) stored in its config, you "
-            "can reference it in your call using the `${ENV.KEY}` syntax "
-            "(use the env_key from `mcp_list.servers_with_api[].config_keys`). "
-            "Example: `query: { organization_id: '${ENV.ORGANIZATION_ID}' }`. "
-            "Kronn substitutes server-side — you never see the actual "
-            "value. Works in `endpoint_path`, `path_params`, `query`, "
-            "`headers`, and `body` (string leaves).\n\n"
+            "Project scope is resolved server-side; pass `project_id` only to "
+            "override it. A plugin's NON-secret config values (an account_id, a "
+            "workspace_slug) are referenced as `${ENV.KEY}` and substituted "
+            "server-side. `tool_manual({tool: \"api_call\"})` has the resolution "
+            "order and where `${ENV.KEY}` is accepted — read it before passing "
+            "`project_id` by hand or hardcoding an identifier the config already "
+            "holds.\n\n"
             "Returns `{success, data, status, summary, http_status, "
             "error?}`. `data` is what downstream agent reasoning should "
             "consume; `summary` is the one-liner suitable for echoing "
@@ -3995,6 +3965,54 @@ def call_task_changes(args):
     ))
 
 
+# KT-250 — a narrow write gets a narrow receipt.
+#
+# The planning API answers every write with the WHOLE task: description, full
+# DoD, and the event log — in which an earlier `updated` event still holds a
+# verbatim copy of the previous description. So the reply GROWS with the task's
+# history, and ticking the fifth checkbox costs more than the first. Measured on
+# KT-249: 11 512 B per call, 6 437 of them the event log, with the description
+# shipped twice (3 438 B as the field, 3 400 B again inside an event). Five
+# booleans cost about 57 KB.
+#
+# The UI keeps the full payload — it renders history. An agent ticking a box
+# already knows the task; it needs proof the write landed and nothing else.
+_TASK_ACK_FIELDS = (
+    "id", "reference", "title", "status", "priority",
+    "parent_reference", "blocker_count",
+)
+
+
+def _task_ack(task, dod_id=None):
+    """What an agent needs to trust a write, and no more.
+
+    `dod_id` names the checklist item this call touched: its own state comes
+    back so the agent can confirm the RIGHT item moved, which a bare count
+    cannot show.
+    """
+    if not isinstance(task, dict):
+        return task
+    ack = {key: task[key] for key in _TASK_ACK_FIELDS if key in task}
+    dod = task.get("definition_of_done")
+    if isinstance(dod, list) and dod:
+        done = sum(1 for item in dod if isinstance(item, dict) and item.get("completed"))
+        ack["dod_progress"] = f"{done}/{len(dod)}"
+        if dod_id is not None:
+            touched = next(
+                (item for item in dod if isinstance(item, dict) and item.get("id") == dod_id),
+                None,
+            )
+            if touched is not None:
+                ack["dod_item"] = {
+                    "id": touched.get("id"),
+                    "completed": touched.get("completed"),
+                    "sentence": touched.get("sentence"),
+                }
+    # Named explicitly: silence about a dropped field reads as "there was none".
+    ack["omitted"] = "description, full definition_of_done, events — call task_get for them"
+    return ack
+
+
 def call_task_create(args):
     title = (args.get("title") or "").strip()
     if not title:
@@ -4027,7 +4045,7 @@ def call_task_create(args):
         body["idempotency_key"] = (
             "mcp-task-create:" + hashlib.sha256(scoped).hexdigest()
         )
-    return _unwrap(_http("POST", "/api/planning/tasks", body))
+    return _task_ack(_unwrap(_http("POST", "/api/planning/tasks", body)))
 
 
 def call_task_update(args):
@@ -4043,7 +4061,7 @@ def call_task_update(args):
         if key in args:
             body[key] = args[key]
     encoded = urllib.parse.quote(task_id, safe="")
-    return _unwrap(_http("PATCH", f"/api/planning/tasks/{encoded}", body))
+    return _task_ack(_unwrap(_http("PATCH", f"/api/planning/tasks/{encoded}", body)))
 
 
 def call_task_link_discussion(args):
@@ -4059,9 +4077,9 @@ def call_task_link_discussion(args):
     if args.get("position") is not None:
         body["position"] = args["position"]
     encoded = urllib.parse.quote(task_id, safe="")
-    return _unwrap(_http(
+    return _task_ack(_unwrap(_http(
         "POST", f"/api/planning/tasks/{encoded}/discussions", body
-    ))
+    )))
 
 
 def call_task_update_dod(args):
@@ -4073,14 +4091,17 @@ def call_task_update_dod(args):
         raise RuntimeError("task_update_dod: completed must be a boolean")
     encoded_task = urllib.parse.quote(task_id, safe="")
     encoded_dod = urllib.parse.quote(dod_id, safe="")
-    return _unwrap(_http(
-        "PATCH",
-        f"/api/planning/tasks/{encoded_task}/dod/{encoded_dod}",
-        {
-            "completed": args["completed"],
-            "actor": _planning_actor(args),
-        },
-    ))
+    return _task_ack(
+        _unwrap(_http(
+            "PATCH",
+            f"/api/planning/tasks/{encoded_task}/dod/{encoded_dod}",
+            {
+                "completed": args["completed"],
+                "actor": _planning_actor(args),
+            },
+        )),
+        dod_id=dod_id,
+    )
 
 
 def call_task_add_blocker(args):
@@ -4091,14 +4112,30 @@ def call_task_add_blocker(args):
             "task_add_blocker: task_id and blocker_task_id are required"
         )
     encoded = urllib.parse.quote(task_id, safe="")
-    return _unwrap(_http(
+    return _task_ack(_unwrap(_http(
         "POST",
         f"/api/planning/tasks/{encoded}/blockers",
         {
             "blocker_task_id": blocker_task_id,
             "actor": _planning_actor(args),
         },
-    ))
+    )))
+
+
+def call_task_remove_blocker(args):
+    task_id = (args.get("task_id") or "").strip()
+    blocker_task_id = (args.get("blocker_task_id") or "").strip()
+    if not task_id or not blocker_task_id:
+        raise RuntimeError(
+            "task_remove_blocker: task_id and blocker_task_id are required"
+        )
+    encoded_task = urllib.parse.quote(task_id, safe="")
+    encoded_blocker = urllib.parse.quote(blocker_task_id, safe="")
+    return _task_ack(_unwrap(_http(
+        "DELETE",
+        f"/api/planning/tasks/{encoded_task}/blockers/{encoded_blocker}",
+        {"actor": _planning_actor(args)},
+    )))
 
 
 # ─── 0.8.4 (#294) cross-agent memory tools ─────────────────────────────
@@ -4222,7 +4259,30 @@ def _structured_message_targets(content, disc_id):
                 if participant.get("agent_type") == agent_type
             ]
             ordinal = int(match.group(3) or "1")
-            if ordinal < 1 or ordinal > len(matching):
+            # KT-247 — resolve through the backend's STABLE `cli_ordinal`, not the
+            # position in this list. Position shifts when a session leaves, so the
+            # alias the human reads in a message header and the session the MCP
+            # targets could drift apart: two truths for one name.
+            ranked = [p for p in matching if p.get("cli_ordinal")]
+            if ranked:
+                if len(ranked) != len(matching):
+                    # Mixing both schemes is the one case that silently mis-targets.
+                    raise RuntimeError(
+                        "disc_append: this room mixes sessions with and without a "
+                        "stable ordinal; refusing to guess which one "
+                        f"{match.group(0)} means — reconnect the Kronn MCP so every "
+                        "participant carries its ordinal"
+                    )
+                chosen = next(
+                    (p for p in ranked if int(p["cli_ordinal"]) == ordinal), None
+                )
+            elif ordinal <= len(matching):
+                # Server predates the ordinal: keep the historical positional
+                # behaviour rather than break every alias against an old backend.
+                chosen = matching[ordinal - 1]
+            else:
+                chosen = None
+            if chosen is None:
                 alias = match.group(0)
                 raise RuntimeError(
                     f"disc_append: {alias} does not identify a joined CLI in "
@@ -4231,7 +4291,7 @@ def _structured_message_targets(content, disc_id):
             target = {
                 "kind": "cli",
                 "agent_type": agent_type,
-                "cli_session_id": matching[ordinal - 1]["id"],
+                "cli_session_id": chosen["id"],
             }
         else:
             target = {
@@ -4313,7 +4373,11 @@ def _reject_short_alias_reply_to_cli_author(disc_id, reply_to_message_id, target
             same = [p for p in participants if p.get("agent_type") == author_type]
             for position, participant in enumerate(same, start=1):
                 if participant.get("id") == reply_target.get("cli_session_id"):
-                    suggestion = f"@{alias}-cli" + (f"-{position}" if position > 1 else "")
+                    # Prefer the backend ordinal; position is only a fallback for a
+                    # server predating it. Suggesting a positional alias against a
+                    # ranked room would hand the caller a wrong identity.
+                    rank = participant.get("cli_ordinal") or position
+                    suggestion = f"@{alias}-cli" + (f"-{rank}" if int(rank) > 1 else "")
                     break
     except Exception:  # noqa: BLE001 — no fabricated ordinal below
         pass
@@ -4496,7 +4560,11 @@ def call_disc_append(args):
     if isinstance(waited, dict) and isinstance(waited.get("latest_sort_order"), int):
         appended["pending_read_cursor"] = waited["latest_sort_order"]
     if isinstance(waited, dict) and waited.get("hint"):
-        appended["hint"] = waited["hint"]
+        # Lift it, don't copy it: the same ~400 B of unchanging protocol text was
+        # shipping twice per response (here and inside `waited`). Over a long
+        # multi-agent session that repetition costs more than the entire
+        # documentation bootstrap. One copy, at the level callers read.
+        appended["hint"] = waited.pop("hint")
     return appended
 
 
@@ -4714,9 +4782,13 @@ def call_disc_workspace_set(args):
 
 
 def call_disc_search(args):
-    q = args.get("q")
+    # Accept `query` as well: the rest of the surface spells the search term that
+    # way, so callers reach for it first and paid a round-trip on a hard refusal.
+    # The schema still advertises `q`; this only stops a naming detail from
+    # costing a retry.
+    q = args.get("q") or args.get("query")
     if not q:
-        raise RuntimeError("disc_search: missing required 'q'")
+        raise RuntimeError("disc_search: missing required 'q' (alias: 'query')")
     params = {"q": q}
     if args.get("limit") is not None:
         params["limit"] = args["limit"]
@@ -5294,6 +5366,135 @@ def _wait_sleep(delay, polls, started):
     return _wait_abort_reason() is not None
 
 
+# KT-190 — this bridge reports its OWN token cost.
+#
+# Kronn knows what the agents it spawns cost. A CLI that joined a room was never
+# spawned, so everything it posts is stored `tokens_used = 0` — measured on one
+# real session, 4 143 787 451 tokens recorded as zero. Only this machine holds
+# the vendor's transcript and only this process knows which session it is, so the
+# measuring has to happen here.
+#
+# Three rules, because telemetry must never become the thing that breaks the
+# room: it runs on a daemon thread so it cannot add a millisecond to a wait, it
+# adds nothing to the wait's response, and any failure is logged and dropped.
+# A session whose cost is unknown is a nuisance; a wait that hangs is an outage.
+_TELEMETRY_INTERVAL_SECS = 300
+_TELEMETRY_STATE = {"last_run": 0.0, "in_flight": False}
+
+
+def _telemetry_vendor():
+    """Which collector applies to this CLI, or None when there is none.
+
+    Codex and Copilot deliberately return None: their counters are not readable
+    yet, and reporting zero for them is the blind spot this exists to remove.
+    """
+    return {"ClaudeCode": "claude-code", "Vibe": "vibe"}.get(_agent_type_for_session())
+
+
+def _collect_and_report_telemetry(disc_id, session_id, vendor):
+    """Measure this session and POST it. Best effort, silent on failure."""
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "cli_token_collector",
+            os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "cli_token_collector.py"),
+        )
+        collector = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(collector)
+
+        if vendor == "claude-code":
+            session_key = _native_conversation_id(allow_probe=False)
+        else:
+            # Vibe exports nothing and keeps no file open, so its session is
+            # resolved from the recorded cwd — and refuses when ambiguous.
+            resolved = collector.resolve_vibe_session_id(os.getcwd())
+            if resolved["status"] != "resolved":
+                print(f"kronn-internal: vibe telemetry {resolved['status']}: "
+                      f"{resolved.get('reason')}", file=sys.stderr)
+                return
+            session_key = resolved["session_id"]
+        if not session_key:
+            return
+
+        # Resume where the last report stopped, so a 61 MB transcript is not
+        # re-parsed every time. The cursor is the SERVER's, echoed back by the
+        # previous POST — see the end of this function.
+        offset = _TELEMETRY_STATE.get(f"offset:{session_key}", 0)
+
+        # The timeline is what lets the backend stamp each message with the
+        # SESSION's running total at that instant — @user's UX call, and the only
+        # honest one: a CLI's spend cannot be cut into per-message costs, since
+        # between two room messages it also reads files and runs tests.
+        result = collector.collect_for_session(
+            vendor, session_key, since_offset=offset, with_timeline=True
+        )
+        if result.get("status") != "measured":
+            print(f"kronn-internal: telemetry not measured: {result.get('reason')}",
+                  file=sys.stderr)
+            return
+
+        counters = result.get("counters") or {}
+        body = {
+            "session_id": session_id,
+            "vendor": result["vendor"],
+            "provenance": result["provenance"],
+            # A counter this vendor does not publish is sent as null, never 0.
+            "input_tokens": counters.get("input"),
+            "cache_creation_tokens": counters.get("cache_creation"),
+            "cache_read_tokens": counters.get("cache_read"),
+            "output_tokens": counters.get("output"),
+            "measured_responses": result.get("measured_responses"),
+            "models_json": json.dumps(result.get("models") or {}, ensure_ascii=False),
+            "window_start": result.get("window_start"),
+            "window_end": result.get("window_end"),
+            "vendor_cost_usd": result.get("vendor_cost_usd"),
+            "read_offset": result.get("next_offset", 0),
+            # Absent for a snapshot vendor (Vibe): it reports session totals with
+            # no per-response instants, so there is nothing to place against a
+            # message. Sending an empty list is correct — the backend then stamps
+            # nothing rather than guessing.
+            "timeline": result.get("timeline") or [],
+        }
+        encoded = urllib.parse.quote(disc_id, safe="")
+        response = _http("POST", f"/api/discussions/{encoded}/telemetry", body)
+        stored_offset = ((response or {}).get("data") or {}).get("read_offset")
+        if isinstance(stored_offset, int):
+            # Trust the SERVER's cursor: it may be ahead of ours if another
+            # report landed, and resuming from a stale one would double-count.
+            _TELEMETRY_STATE[f"offset:{session_key}"] = stored_offset
+    except Exception as error:  # noqa: BLE001 — telemetry must never break a wait
+        print(f"kronn-internal: telemetry report failed: {error}", file=sys.stderr)
+    finally:
+        _TELEMETRY_STATE["in_flight"] = False
+        _TELEMETRY_STATE["last_run"] = time.monotonic()
+
+
+def _maybe_report_telemetry():
+    """Throttled, non-blocking trigger. Never raises into the caller."""
+    try:
+        vendor = _telemetry_vendor()
+        if not vendor:
+            return
+        if _TELEMETRY_STATE["in_flight"]:
+            return
+        elapsed = time.monotonic() - _TELEMETRY_STATE["last_run"]
+        if _TELEMETRY_STATE["last_run"] and elapsed < _TELEMETRY_INTERVAL_SECS:
+            return
+        disc_id = _disc_id()
+        session_id = _session_id_for_caller()
+        if not disc_id or not session_id:
+            return
+        _TELEMETRY_STATE["in_flight"] = True
+        threading.Thread(
+            target=_collect_and_report_telemetry,
+            args=(disc_id, session_id, vendor),
+            daemon=True,
+        ).start()
+    except Exception as error:  # noqa: BLE001
+        _TELEMETRY_STATE["in_flight"] = False
+        print(f"kronn-internal: telemetry trigger failed: {error}", file=sys.stderr)
+
+
 def call_disc_wait_for_peer(args):
     """KT-189 — wait OUTSIDE the LLM loop.
 
@@ -5303,6 +5504,10 @@ def call_disc_wait_for_peer(args):
     quiet inner polls do not return to the model. A host may still background
     the long-running tool call and surface its own notification.
     """
+    # KT-190 — measure this session's own cost. Fires a daemon thread at most
+    # every few minutes and returns immediately: the wait's latency and its
+    # response are untouched.
+    _maybe_report_telemetry()
     budget = _wait_total_budget(args)
     started = time.monotonic()
     deadline = started + budget if budget is not None else None
@@ -7347,6 +7552,128 @@ def call_kronn_intro(_args):
     }
 
 
+# KT-192 — reference material for the heaviest tools, moved OUT of the catalogue.
+# The catalogue is injected into every session before any work is exchanged; these
+# guides are read by the few callers that author one of these payloads. Splitting
+# them is the trade the measurements argued for: pay once, on demand, instead of
+# always. What stays in a tool's own description is what fails at RUN time if
+# guessed — traps, closed sets, binding rules — never the methodology.
+TOOL_MANUALS = {
+    "disc_append": (
+        "**BULK transcript import** (cross-agent memory, since 0.8.4) — pass "
+        "`messages: [{source_msg_id, role, content, agent_type}, …]` to push a "
+        "whole conversation history in one call instead of appending turn by "
+        "turn. Idempotent on `(disc_id, source_msg_id)`: re-pushing the same "
+        "transcript does not duplicate it, so a retry after a partial failure is "
+        "safe.\n\n"
+        "`diverged: true` in the response means the discussion was edited in the "
+        "Kronn UI after a previous import. Warn the user before pushing more: "
+        "further updates would be layered onto a transcript a human has already "
+        "changed by hand.\n\n"
+        "Everything else about this tool — mentions, targets, the fact that "
+        "posting also listens — is in its own description, because getting it "
+        "wrong means a peer never hears you."
+    ),
+    "disc_wait_for_peer": (
+        "**Cursor and acknowledgement.** The bridge keeps a durable read cursor, "
+        "so omitting `since_sort_order` is the normal case. A delivered batch is "
+        "acknowledged only when the CLI makes its NEXT tool call, tracked by a "
+        "bridge-local sequence rather than the client's JSON-RPC id (clients may "
+        "legally reuse or omit that id). An unacknowledged batch is replayed after "
+        "a reconnect rather than skipped: a duplicate in context is cheap, a lost "
+        "message is not.\n\n"
+        "When you do override the cursor, only reuse `latest_sort_order` returned "
+        "by a WAIT. `last_sort_order` from an append is a different counter, and "
+        "passing it skips every turn between the two.\n\n"
+        "**Who a turn wakes.** Messages carry typed `targets` distinguishing three "
+        "identities: the configured discussion agent, a punctual native invocation, "
+        "and one exact joined CLI. Provider equality is not identity — a joined "
+        "Codex must not answer a turn addressed to punctual Codex. A joined CLI "
+        "message also carries `reply_target` when Kronn knows its exact author "
+        "session, so a reply stays attached to that CLI even when several peers run "
+        "the same provider.\n\n"
+        "A joined CLI is WOKEN only by turns selecting its own identity. Everything "
+        "else in the room arrives attached to its next wake as `awareness` context, "
+        "so nothing is lost and nothing wakes it needlessly. `withheld_by_routing` "
+        "counts turns deliberately omitted because they target someone else — that "
+        "is why a jumping cursor is not evidence of a dropped message.\n\n"
+        "`target_agents` / `target_agent` remain compatibility projections of "
+        "`targets`; do not reason from them."
+    ),
+    "api_call": (
+        "**Project scope** — resolved server-side from three sources, in "
+        "priority order: (1) an explicit `project_id` argument, (2) the disc "
+        "context when Kronn spawned you from a disc (auto-injected), (3) the "
+        "chosen `api_config_id`'s first linked project. Host-CLI sessions "
+        "launched outside Kronn work natively through source 3 — no env var, no "
+        "argument — as long as the config you pick is project-scoped. Pass "
+        "`project_id` explicitly only when the config is global and you want the "
+        "call attributed to one project.\n\n"
+        "**Non-secret config values via `${ENV.KEY}`** — when a plugin config "
+        "holds an identifier that is not a secret (Didomi's `organization_id`, an "
+        "account_id, a workspace_slug), reference it instead of hardcoding it. "
+        "Take the key from `mcp_list.servers_with_api[].config_keys`, then write "
+        "e.g. `query: {organization_id: '${ENV.ORGANIZATION_ID}'}`. Kronn "
+        "substitutes it server-side, so you never see the value. Accepted in "
+        "`endpoint_path`, `path_params`, `query`, `headers` and `body` — string "
+        "leaves only.\n\n"
+        "This is NOT the mechanism for credentials. Secrets are injected by the "
+        "plugin's auth spec and never appear in a call you compose."
+    ),
+    "qa_create_draft": (
+        "**PROBE then PERSIST — the workflow that saves the most tokens.**\n"
+        "  1. **Probe**: one `api_call` to the endpoint with NO `extract` (or "
+        "`extract: null`). Read the real response shape. Many vendors (JIRA, "
+        "Confluence, AWS, GitHub) return `changelog`, `renderedFields`, ADF nodes "
+        "or ARN-heavy refs — 10-40k tokens for a single ticket.\n"
+        "  2. **Decide**: pick the JSONPath that keeps only what downstream "
+        "agents need (often `$.fields`, `$.data`, `$.items[*].{id,title,status}`). "
+        "When in doubt, ask the user what they care about.\n"
+        "  3. **Persist**: create the QA with that `api_extract` AND vendor-side "
+        "filters in `api_query` (`fields=summary,status` for JIRA, `expand=` knobs "
+        "for Confluence). Both stack: server-side filtering and client-side "
+        "extraction.\n\n"
+        "Persisting without `api_extract` is fine for small-payload vendors "
+        "(Resend, Mailjet, simple webhooks) — but measure first. Adding it later "
+        "with `qa_update` is friction the user never had to pay.\n\n"
+        "**Variables**: each entry is `{name, label?, placeholder?, required?, "
+        "description?}`; `required` defaults to true. `name` must be a snake_case "
+        "or UPPER_SNAKE_CASE identifier matching the `{{var_name}}` placeholders.\n\n"
+        "**Safety**: a QA has no `enabled` flag and cannot auto-fire — every QA is "
+        "launched on demand, and the user reviews it in the Quick APIs page first. "
+        "Same profile as `qp_create_draft`.\n\n"
+        "**Iteration**: `qa_update({qa_id, ...patch})` merges onto the existing QA, "
+        "so specify only what changed. Heavier payload than expected, missing query "
+        "param, wrong extract path — all fixable without sending the user through "
+        "the UI."
+    ),
+}
+
+
+def call_tool_manual(args):
+    """Return one tool's authoring guide, or the list of what exists."""
+    name = (args or {}).get("tool")
+    if not isinstance(name, str) or not name.strip():
+        return {
+            "available": sorted(TOOL_MANUALS),
+            "hint": "Pass `tool` to read one of these.",
+        }
+    name = name.strip()
+    manual = TOOL_MANUALS.get(name)
+    if manual is None:
+        # Naming the alternatives beats a bare "unknown": a caller that guessed
+        # the name is one hop from the right one.
+        return {
+            "error": f"No manual for {name!r}.",
+            "available": sorted(TOOL_MANUALS),
+            "hint": (
+                "Only tools whose description points at `tool_manual` have one. "
+                "For everything else the description IS the whole contract."
+            ),
+        }
+    return {"tool": name, "manual": manual}
+
+
 def call_bridge_info(_args):
     try:
         mtime_now = os.path.getmtime(__file__)
@@ -7537,6 +7864,7 @@ DISPATCH = {
     # 0.8.12 PR A — audit surface
     "audit_prepare": call_audit_prepare,
     "audit_install_template": call_audit_install_template,
+    "tool_manual": call_tool_manual,
     "bridge_info": call_bridge_info,
     "kronn_intro": call_kronn_intro,
     "resolve_id": call_resolve_id,
@@ -7558,6 +7886,7 @@ DISPATCH = {
     "task_update_dod": call_task_update_dod,
     "task_link_discussion": call_task_link_discussion,
     "task_add_blocker": call_task_add_blocker,
+    "task_remove_blocker": call_task_remove_blocker,
     # 0.8.4 (#294) cross-agent memory
     "disc_create": call_disc_create,
     "disc_append": call_disc_append,
@@ -7826,7 +8155,7 @@ def _handle(req):
                 # Tool-surface version, intentionally distinct from the Kronn
                 # app release. Bumping it tells clients that cache tools/list
                 # to refresh after the Planning contract was added.
-                "serverInfo": {"name": "kronn-internal", "version": "0.3.1"},
+                "serverInfo": {"name": "kronn-internal", "version": "0.3.2"},
                 # Top-level orientation the client surfaces to the model: WHAT
                 # Kronn is + a MAP of the tool surface by area + how to navigate
                 # it, so an agent doesn't have to reverse-engineer capabilities
@@ -7844,7 +8173,7 @@ def _handle(req):
                     "Your tools, by area:\n"
                     "• Opaque IDs: when the user pastes an ID without naming its type, call `resolve_id` FIRST; it returns compact routing context and the object-specific tool to use next.\n"
                     "• Discussions (multi-agent threads): `disc_meta`/`disc_get_message`/`disc_search`/`disc_load_other`/`disc_create`/`disc_append`/`disc_join`/`disc_invite_peer`…\n"
-                    "• Planning: a discussion may have a shared plan made of prioritized, editable tasks. The user may refer to it naturally as “the plan”, “the tasks”, “what remains”, “the priority”, and similar wording. Use `plan_get` (compact current objective/plan) · `task_list` (compact filtered backlog) · `task_get` (FULL task) · `task_changes` (deltas) · `proposal_list`/`proposal_get` (durable proposals, read-only) · narrow writes `task_create`/`task_update`/`task_update_dod`/`task_link_discussion`/`task_add_blocker`. Read the relevant plan first. Immediately before any direct `task_create`, call `plan_get` again so a peer's recent write is visible. Apply unambiguous intent directly; otherwise propose a human-gated `kronn-plan-action` fence (`create`, `create_many`, `status`, `complete`, `unblock`, `open`). You may read and propose, but only a human accepts, rejects or decides a durable proposal. Never replace a requested plan update with a prose-only summary. Whenever tracked work starts or materially changes, keep its status, DoD and priority honest in the plan. Write only on a real change: never reload or rewrite an unchanged task merely to report progress. If the announced Planning tools are missing from your MCP surface, use the read-only `plan_snapshot` from `disc_join`, ask @user to reconnect the Kronn MCP, and never fabricate an update.\n"
+                    "• Planning: a discussion may have a shared plan made of prioritized, editable tasks. The user may refer to it naturally as “the plan”, “the tasks”, “what remains”, “the priority”, and similar wording. Use `plan_get` (compact current objective/plan) · `task_list` (compact filtered backlog) · `task_get` (FULL task) · `task_changes` (deltas) · `proposal_list`/`proposal_get` (durable proposals, read-only) · narrow writes `task_create`/`task_update`/`task_update_dod`/`task_link_discussion`/`task_add_blocker`/`task_remove_blocker`. Read the relevant plan first. Immediately before any direct `task_create`, call `plan_get` again so a peer's recent write is visible. Apply unambiguous intent directly; otherwise propose a human-gated `kronn-plan-action` fence (`create`, `create_many`, `status`, `complete`, `unblock`, `open`). You may read and propose, but only a human accepts, rejects or decides a durable proposal. Never replace a requested plan update with a prose-only summary. Whenever tracked work starts or materially changes, keep its status, DoD and priority honest in the plan. Write only on a real change: never reload or rewrite an unchanged task merely to report progress. If the announced Planning tools are missing from your MCP surface, use the read-only `plan_snapshot` from `disc_join`, ask @user to reconnect the Kronn MCP, and never fabricate an update.\n"
                     "• Workflows (multi-step pipelines): `workflow_list` (compact) · `workflow_get` (FULL, every step) · `workflow_step_schema` (CANONICAL step schema as an untruncatable result — the closed 9 `step_type`s, per-type fields, runtime contracts; call before authoring) · `workflow_create_draft` · `workflow_clone`/`workflow_update`/`workflow_set_enabled` · `workflow_trigger`/`workflow_run_status` · run history `workflow_runs`/`workflow_run_get` · `workflow_active_runs`/`workflow_cancel_run`. Agent-step bindings (full CRUD): `skills_list`/`profiles_list`/`directives_list` enumerate valid ids; `skill_get`/`profile_get`/`directive_get` read FULL bodies; `skill_create`/`skill_update`/`skill_delete` (+ `profile_*`/`directive_*`) author & edit custom ones.\n"
                     "• Quick Prompts (reusable prompt templates): `qp_list` (no body) · `qp_get` (FULL incl `prompt_template` — read this to know what a QP does, or to run it yourself) · `qp_create_draft`/`qp_update`/`qp_delete` · `qp_run`/`qp_batch_run`.\n"
                     "• Quick APIs + API broker: `qa_list`/`qa_run`/`qa_create_draft`/`qa_update` · `mcp_list` → `api_call` (configured plugins, auth injected).\n"

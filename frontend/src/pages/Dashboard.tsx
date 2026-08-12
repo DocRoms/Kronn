@@ -36,6 +36,7 @@ const DiscussionsPage = lazy(() => import('./DiscussionsPage').then(m => ({ defa
 import { ActiveRunsPopover } from '../components/workflows/ActiveRunsPopover';
 import { ActiveAuditsPopover } from '../components/ActiveAuditsPopover';
 import { ProjectList } from '../components/ProjectList';
+import { TelemetryCoveragePanel } from '../components/TelemetryCoveragePanel';
 import {
   Folder, FolderOpen, Puzzle,
   Plus, Search, Zap, Settings,
@@ -1337,6 +1338,10 @@ export function Dashboard({ onReset }: DashboardProps) {
             expandedId={expandedId}
             onSetExpandedId={setExpandedId}
           />
+          {/* KT-190 — coverage, not a total. Kronn has no counter of its own
+              for a CLI it never spawned, so a token figure shown alone would
+              look complete while being mostly blind. */}
+          <TelemetryCoveragePanel />
         </ErrorBoundary>)}
 
         {/* ════════ PLANIFICATION ════════ */}

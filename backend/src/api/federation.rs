@@ -476,6 +476,9 @@ mod tests {
                 conn,
                 "d-sync-revision",
                 &DiscussionMessage {
+                    recovered_partial: false,
+                    session_tokens_at_message: None,
+                    author_cli_ordinal: None,
                     id: "user-sync-revision".into(),
                     role: MessageRole::User,
                     channel: crate::models::MessageChannel::Main,
@@ -500,6 +503,9 @@ mod tests {
                 conn,
                 "d-sync-revision",
                 &DiscussionMessage {
+                    recovered_partial: false,
+                    session_tokens_at_message: None,
+                    author_cli_ordinal: None,
                     id: "agent-sync-reply".into(),
                     role: MessageRole::Agent,
                     channel: crate::models::MessageChannel::Main,

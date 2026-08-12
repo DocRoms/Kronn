@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState, useCallback } from 'react';
-import { getAuthToken } from '../lib/api';
+import { getApiBase, getAuthToken } from '../lib/api';
 import type { WsMessage } from '../types/generated';
 
 export type WsEventHandler = (msg: WsMessage) => void;
@@ -49,9 +49,12 @@ export function useWebSocket(
     if (!mounted.current) return;
     clearTimeout(reconnectTimeout.current);
 
-    // Build WS URL from current page location
-    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const host = window.location.host;
+    // Tauri can keep serving its bundled frontend while reusing a compatible
+    // CLI backend. In that case API base and page origin intentionally differ.
+    const apiBase = getApiBase();
+    const endpoint = apiBase ? new URL(apiBase) : window.location;
+    const proto = endpoint.protocol === 'https:' ? 'wss:' : 'ws:';
+    const host = endpoint.host;
     const token = getAuthToken();
     const url = `${proto}//${host}/api/ws${token ? `?token=${encodeURIComponent(token)}` : ''}`;
 

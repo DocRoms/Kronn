@@ -152,9 +152,13 @@ human references use a format such as `KT-142`. `[src: user: 2026-07-24: global 
 ## Agent and MCP contract
 
 Task data is not injected into every agent prompt. Agents receive a compact
-change notification only when the discussion plan or a linked task changed,
-then pull the required details. This prevents unrelated agents from paying for
-unused planning context. `[src: user: 2026-07-24: context-cost decision]`
+Planning capability pointer from the first turn, but no task body. It includes
+the exact discussion id for MCP clients, so an explicit `plan_get` or
+`task_create` does not depend on the bridge's runtime binding. When linked
+Planning state changes, agents also receive a compact change notification and
+then pull only the required details. This prevents unrelated agents from paying
+for unused task content while ensuring “create the discussion plan” works on a
+new room. `[src: file: backend/src/api/disc_prompts.rs]`
 
 The intended read surface is:
 
@@ -171,6 +175,21 @@ instants, independent of `Z`/offset spelling and fractional precision. Agents mu
 taught this contract in the same prompt/instruction layer that currently
 advertises discussion-history tools. Today that layer explicitly describes
 `disc_meta`, `disc_get_message`, and `disc_summarize`. `[src: file: backend/src/api/disc_prompts.rs:346-361]`
+
+Runtime parity is capability-based:
+
+- Claude Code, Codex, Gemini CLI, Kiro and Copilot CLI call the
+  `kronn-internal` MCP tools. The injected explicit discussion id remains valid
+  even when the bridge reports `no disc bound` or `rejoin_required`.
+- Ollama and LiteLLM call a compact native catalogue through the same Rust
+  Planning handlers. Kronn enforces the current discussion scope server-side,
+  records the concrete agent and source user message, hashes retry keys into a
+  bounded discussion-scoped identity, and returns compact mutation receipts.
+- Vibe runs without MCP to avoid its stdio hang. It therefore emits a durable
+  `kronn-plan-action` proposal for human validation instead of pretending that
+  a direct task write succeeded.
+  `[src: file: backend/src/api/agent_tools.rs]`
+  `[src: file: backend/src/agents/runner.rs]`
 
 The first release is local-only. Actor/audit metadata must still distinguish
 the human from an agent and record which agent changed a task. Assignment fields

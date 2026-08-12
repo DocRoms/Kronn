@@ -1570,6 +1570,9 @@ mod tests {
                     connection,
                     "disc-portability-http",
                     &crate::models::DiscussionMessage {
+                        recovered_partial: false,
+                        session_tokens_at_message: None,
+                        author_cli_ordinal: None,
                         id: "portable-http-message".into(),
                         role: crate::models::MessageRole::User,
                         channel: crate::models::MessageChannel::Main,
@@ -2226,6 +2229,9 @@ mod tests {
                 let content = content.to_string();
                 move |conn| {
                     let msg = crate::models::DiscussionMessage {
+                        recovered_partial: false,
+                        session_tokens_at_message: None,
+                        author_cli_ordinal: None,
                         model: None,
                         lint_report: None,
                         id: uuid::Uuid::new_v4().to_string(),
@@ -4262,6 +4268,214 @@ mod tests {
             "route body must match the embedded constant byte-for-byte",
         );
     }
+    // ─── KT-255: the cross-agent memory survives the UI removal ─────────────
+    //
+    // The manual binding FORM is gone from the frontend. The routes behind it are
+    // not: `source_agent` / `source_session_id` is what lets Codex pick up a
+    // discussion Claude started, and what a restarting bridge uses to find its own
+    // room again. Removing the form is a UX change; these tests are what makes it
+    // provable that it was only a UX change.
+
+    /// Create a discussion straight in the DB, without going through an agent.
+    async fn seed_disc(state: &AppState, id: &str) {
+        let owned = id.to_string();
+        state
+            .db
+            .with_conn(move |conn| {
+                let now = chrono::Utc::now().to_rfc3339();
+                conn.execute(
+                    "INSERT INTO discussions (id, title, agent, language, created_at, updated_at)
+                     VALUES (?1, 'seeded', 'ClaudeCode', 'fr', ?2, ?2)",
+                    rusqlite::params![owned, now],
+                )?;
+                Ok(())
+            })
+            .await
+            .expect("seed discussion");
+    }
+
+    #[tokio::test]
+    async fn disc_link_and_find_by_session_still_answer_without_the_form() {
+        // The round trip a restarting CLI depends on: bind, then find the room
+        // again from nothing but the session id.
+        let state = test_state();
+        seed_disc(&state, "disc-link-a").await;
+
+        let (status, body) = send(
+            state.clone(),
+            false,
+            Request::builder()
+                .method("POST")
+                .uri("/api/disc/link")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"disc_id":"disc-link-a","source_agent":"Codex",
+                        "source_session_id":"codex-session-42"}"#,
+                ))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["success"], true, "link refused: {body}");
+
+        let (status, body) = send(
+            state,
+            false,
+            Request::builder()
+                .uri("/api/disc/find_by_session?source_agent=Codex&source_session_id=codex-session-42")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body["data"]["disc_id"], "disc-link-a",
+            "a restarting CLI could not find its room: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn disc_unlink_still_clears_a_stale_binding() {
+        // The one repair path the UI kept. If this route stopped working, the
+        // remaining button would be a lie.
+        let state = test_state();
+        seed_disc(&state, "disc-unlink-a").await;
+        let _ = send(
+            state.clone(),
+            false,
+            Request::builder()
+                .method("POST")
+                .uri("/api/disc/link")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"disc_id":"disc-unlink-a","source_agent":"Codex",
+                        "source_session_id":"codex-stale"}"#,
+                ))
+                .unwrap(),
+        )
+        .await;
+
+        let (status, body) = send(
+            state.clone(),
+            false,
+            Request::builder()
+                .method("POST")
+                .uri("/api/disc/unlink")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"disc_id":"disc-unlink-a"}"#))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["success"], true, "unlink refused: {body}");
+
+        let (_, body) = send(
+            state,
+            false,
+            Request::builder()
+                .uri("/api/disc/find_by_session?source_agent=Codex&source_session_id=codex-stale")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert!(
+            body["data"].is_null() || body["data"]["disc_id"].is_null(),
+            "the binding survived the unlink: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_read_only_ui_still_gets_the_binding_it_displays() {
+        // What the header now shows is served by this route alone. It has to carry
+        // the agent and the session id, or the read-only view has nothing to say.
+        let state = test_state();
+        seed_disc(&state, "disc-detail-a").await;
+        let _ = send(
+            state.clone(),
+            false,
+            Request::builder()
+                .method("POST")
+                .uri("/api/disc/link")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"disc_id":"disc-detail-a","source_agent":"ClaudeCode",
+                        "source_session_id":"claude-session-full-id"}"#,
+                ))
+                .unwrap(),
+        )
+        .await;
+
+        let (status, body) = send(
+            state,
+            false,
+            Request::builder()
+                .uri("/api/discussions/disc-detail-a/source")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["data"]["current"]["source_agent"], "ClaudeCode");
+        assert_eq!(
+            body["data"]["current"]["source_session_id"],
+            "claude-session-full-id"
+        );
+    }
+
+    #[tokio::test]
+    async fn linking_a_session_owned_elsewhere_is_refused_without_force() {
+        // The protection the removed form implemented in the CLIENT. Now that no
+        // client checks first, the SERVER has to be the one refusing — otherwise
+        // deleting the form would have deleted the safeguard with it.
+        let state = test_state();
+        seed_disc(&state, "disc-owner").await;
+        seed_disc(&state, "disc-thief").await;
+        let _ = send(
+            state.clone(),
+            false,
+            Request::builder()
+                .method("POST")
+                .uri("/api/disc/link")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"disc_id":"disc-owner","source_agent":"Codex",
+                        "source_session_id":"contested"}"#,
+                ))
+                .unwrap(),
+        )
+        .await;
+
+        let (_, body) = send(
+            state.clone(),
+            false,
+            Request::builder()
+                .method("POST")
+                .uri("/api/disc/link")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"disc_id":"disc-thief","source_agent":"Codex",
+                        "source_session_id":"contested"}"#,
+                ))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(body["success"], false, "a live thread was stolen: {body}");
+
+        let (_, body) = send(
+            state,
+            false,
+            Request::builder()
+                .uri("/api/disc/find_by_session?source_agent=Codex&source_session_id=contested")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            body["data"]["disc_id"], "disc-owner",
+            "ownership moved anyway: {body}"
+        );
+    }
+
     // ─── HTTP-agent tool executor (TD-20260808) ──────────────────────────────
     //
     // The loop and the model's comprehension were proven separately; this
@@ -4312,6 +4526,17 @@ mod tests {
         // and never a silent empty success.
         for (name, args, expect) in [
             ("qa_run", serde_json::json!({}), "quick_api_id"),
+            (
+                "plan_get",
+                serde_json::json!({}),
+                "inside a Kronn discussion",
+            ),
+            (
+                "task_create",
+                serde_json::json!({"title": "x"}),
+                "inside a Kronn discussion",
+            ),
+            ("task_get", serde_json::json!({}), "task_id"),
             ("api_endpoints", serde_json::json!({}), "api_plugin_slug"),
             (
                 "api_call",
@@ -4342,6 +4567,150 @@ mod tests {
             .as_str()
             .unwrap_or_default()
             .contains("ghost"));
+    }
+
+    #[tokio::test]
+    async fn http_agent_planning_tools_create_idempotently_in_the_current_discussion() {
+        use crate::agents::tools::ToolCall;
+        use crate::api::agent_tools::KronnToolExecutor;
+
+        let state = test_state();
+        let discussion_id = "http-agent-planning-disc";
+        let disc = crate::models::Discussion {
+            awaiting_agent: false,
+            id: discussion_id.into(),
+            project_id: None,
+            title: "Planning from Ollama".into(),
+            agent: crate::models::AgentType::Ollama,
+            language: "en".into(),
+            participants: Vec::new(),
+            messages: Vec::new(),
+            message_count: 0,
+            non_system_message_count: 0,
+            skill_ids: Vec::new(),
+            profile_ids: Vec::new(),
+            directive_ids: Vec::new(),
+            archived: false,
+            pinned: false,
+            workspace_mode: "Direct".into(),
+            workspace_path: None,
+            worktree_branch: None,
+            tier: crate::models::ModelTier::Default,
+            model: None,
+            pin_first_message: false,
+            summary_cache: None,
+            summary_up_to_msg_idx: None,
+            summary_strategy: crate::models::SummaryStrategy::Auto,
+            introspection_call_count: 0,
+            shared_id: None,
+            shared_with: Vec::new(),
+            workflow_run_id: None,
+            test_mode_restore_branch: None,
+            test_mode_stash_ref: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let seeded = disc.clone();
+        state
+            .db
+            .with_conn(move |conn| crate::db::discussions::insert_discussion(conn, &seeded))
+            .await
+            .expect("seed discussion");
+        let trigger = crate::models::DiscussionMessage {
+            recovered_partial: false,
+            session_tokens_at_message: None,
+            author_cli_ordinal: None,
+            model: None,
+            lint_report: None,
+            id: "user-message-1".into(),
+            role: crate::models::MessageRole::User,
+            channel: crate::models::MessageChannel::Main,
+            content: "Create the release plan".into(),
+            agent_type: None,
+            timestamp: chrono::Utc::now(),
+            tokens_used: 0,
+            auth_mode: None,
+            model_tier: None,
+            cost_usd: None,
+            author_pseudo: None,
+            author_avatar_email: None,
+            source_msg_id: None,
+            duration_ms: None,
+            target_agent: None,
+            reply_to_message_id: None,
+        };
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::discussions::insert_message(conn, discussion_id, &trigger)
+            })
+            .await
+            .expect("seed trigger message");
+
+        let exec = KronnToolExecutor::arc(
+            state.clone(),
+            Some(discussion_id.into()),
+            "Ollama".into(),
+            Some("user-message-1".into()),
+        );
+        let call = |name: &str, args: serde_json::Value| ToolCall {
+            id: format!("call-{name}"),
+            name: name.into(),
+            arguments: args,
+        };
+
+        let initial = exec.execute(&call("plan_get", serde_json::json!({}))).await;
+        assert!(initial.ok, "plan_get failed: {:?}", initial.content);
+        assert_eq!(initial.content["discussion_id"], discussion_id);
+
+        let create_args = serde_json::json!({
+            "title": "Write the release plan",
+            "status": "todo",
+            "priority": "high",
+            "idempotency_key": "release-plan-day-one",
+            // A model must never be able to escape the executor's discussion.
+            "discussion_id": "another-discussion"
+        });
+        let created = exec
+            .execute(&call("task_create", create_args.clone()))
+            .await;
+        assert!(created.ok, "task_create failed: {:?}", created.content);
+        let task_id = created.content["id"].as_str().expect("created task id");
+        assert_eq!(created.content["title"], "Write the release plan");
+
+        let retried = exec.execute(&call("task_create", create_args)).await;
+        assert!(retried.ok, "idempotent retry failed: {:?}", retried.content);
+        assert_eq!(retried.content["id"], task_id);
+
+        let plan = exec.execute(&call("plan_get", serde_json::json!({}))).await;
+        assert!(plan.ok, "plan_get after create failed: {:?}", plan.content);
+        assert_eq!(plan.content["active"].as_array().map(Vec::len), Some(1));
+        assert_eq!(plan.content["active"][0]["task"]["id"], task_id);
+
+        let listed = exec
+            .execute(&call(
+                "task_list",
+                serde_json::json!({
+                    // A stale/hallucinated room id cannot hide the current
+                    // room's tasks or broaden the native agent's scope.
+                    "discussion_id": "another-discussion"
+                }),
+            ))
+            .await;
+        assert!(listed.ok, "task_list failed: {:?}", listed.content);
+        assert_eq!(listed.content["items"].as_array().map(Vec::len), Some(1));
+        assert_eq!(listed.content["items"][0]["id"], task_id);
+
+        let detail = exec
+            .execute(&call("task_get", serde_json::json!({"task_id": task_id})))
+            .await;
+        assert!(detail.ok, "task_get failed: {:?}", detail.content);
+        assert_eq!(detail.content["events"][0]["actor_kind"], "agent");
+        assert_eq!(detail.content["events"][0]["actor_id"], "Ollama");
+        assert_eq!(
+            detail.content["events"][0]["source_message_id"],
+            "user-message-1"
+        );
     }
     /// `api_call` needs a config id, and asking the MODEL to carry it proved
     /// unreliable (a 4B paired `api-speedcurve` with Resend's id, 2026-08-09).

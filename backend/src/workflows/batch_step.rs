@@ -12,14 +12,17 @@ use std::time::{Duration, Instant};
 
 use crate::models::*;
 use crate::AppState;
+use rusqlite::OptionalExtension;
 
 use super::steps::StepOutcome;
 use super::template::TemplateContext;
 
-/// Safety timeout for `wait_for_completion`: the linear run will abandon the
-/// wait after this many hours even if no WS signal arrives. Sized to cover
-/// the worst-case agent latency for ~50 items.
-const BATCH_WAIT_TIMEOUT: Duration = Duration::from_secs(2 * 3600);
+/// Operational latency objectives for a BatchQuickPrompt. The first two are
+/// surfaced as SLO context; the hard budget is enforced on monotonic active
+/// time so laptop suspension does not falsely consume it.
+const BATCH_TARGET_ACTIVE: Duration = Duration::from_secs(10 * 60);
+const BATCH_MAX_ACTIVE: Duration = Duration::from_secs(15 * 60);
+const BATCH_HARD_ACTIVE_BUDGET: Duration = Duration::from_secs(20 * 60);
 
 /// Default cap on number of items when `batch_max_items` is unset. Matches
 /// the same 50-item hard cap enforced by `create_batch_run` for manual batches.
@@ -38,6 +41,45 @@ const DEFAULT_BATCH_CONCURRENT_LIMIT: u32 = 5;
 /// Hard ceiling regardless of operator override. Matches the `batch_apicall`
 /// hard cap and keeps a single batch from owning every agent slot.
 const MAX_BATCH_CONCURRENT_LIMIT: u32 = 20;
+
+#[derive(Debug, Clone, Copy)]
+struct BatchTiming {
+    active_ms: u64,
+    wall_ms: u64,
+    estimated_suspension_ms: u64,
+    target_active_ms: u64,
+    max_active_ms: u64,
+    hard_active_budget_ms: u64,
+}
+
+impl BatchTiming {
+    fn measure(active_start: Instant, wall_started_at: chrono::DateTime<chrono::Utc>) -> Self {
+        let active_ms = active_start.elapsed().as_millis() as u64;
+        let wall_ms = (chrono::Utc::now() - wall_started_at)
+            .num_milliseconds()
+            .max(0) as u64;
+        Self {
+            active_ms,
+            wall_ms,
+            estimated_suspension_ms: wall_ms.saturating_sub(active_ms),
+            target_active_ms: BATCH_TARGET_ACTIVE.as_millis() as u64,
+            max_active_ms: BATCH_MAX_ACTIVE.as_millis() as u64,
+            hard_active_budget_ms: BATCH_HARD_ACTIVE_BUDGET.as_millis() as u64,
+        }
+    }
+
+    #[cfg(test)]
+    fn zero() -> Self {
+        Self {
+            active_ms: 0,
+            wall_ms: 0,
+            estimated_suspension_ms: 0,
+            target_active_ms: BATCH_TARGET_ACTIVE.as_millis() as u64,
+            max_active_ms: BATCH_MAX_ACTIVE.as_millis() as u64,
+            hard_active_budget_ms: BATCH_HARD_ACTIVE_BUDGET.as_millis() as u64,
+        }
+    }
+}
 
 #[derive(Debug)]
 struct CollectedBatchResults {
@@ -81,13 +123,36 @@ fn collect_batch_results(
             measured_tokens = measured_tokens.saturating_add(child_tokens);
         }
 
+        let dispatch = conn
+            .query_row(
+                "SELECT created_at, claimed_at, agent_started_at, completed_at, status
+                 FROM agent_dispatch_jobs
+                 WHERE discussion_id = ?1
+                 ORDER BY created_at DESC LIMIT 1",
+                [discussion_id],
+                |row| {
+                    Ok(serde_json::json!({
+                        "queued_at": row.get::<_, String>(0)?,
+                        "claimed_at": row.get::<_, Option<String>>(1)?,
+                        "agent_started_at": row.get::<_, Option<String>>(2)?,
+                        "settled_at": row.get::<_, Option<String>>(3)?,
+                        "status": row.get::<_, String>(4)?,
+                    }))
+                },
+            )
+            .optional()?;
+
         results.push(serde_json::json!({
             "index": index,
             "discussion_id": discussion_id,
             "item": items.get(index).cloned().unwrap_or(serde_json::Value::Null),
             "output": output,
             "tokens_used": tokens_measured.then_some(child_tokens),
-            "tokens_status": if tokens_measured { "measured" } else { "unavailable" },
+            // "not_measured", not "unavailable": the count is missing, the
+            // feature is not down. The aggregate below is explicit for the same
+            // reason — a consumer must never read this as a service outage.
+            "tokens_status": if tokens_measured { "measured" } else { "not_measured" },
+            "dispatch": dispatch,
         }));
     }
 
@@ -112,7 +177,29 @@ pub async fn execute_batch_quick_prompt_step(
     state: AppState,
     ctx: &TemplateContext,
 ) -> StepOutcome {
+    execute_batch_quick_prompt_step_with_budget(
+        step,
+        parent_run_id,
+        state,
+        ctx,
+        BATCH_HARD_ACTIVE_BUDGET,
+    )
+    .await
+}
+
+/// Internal seam kept explicit so the production budget remains fixed at
+/// twenty active minutes while the cancellation contract can be exercised in
+/// milliseconds. This is deliberately not a workflow/user setting: the hard
+/// guard must not be accidentally disabled by malformed persisted input.
+async fn execute_batch_quick_prompt_step_with_budget(
+    step: &WorkflowStep,
+    parent_run_id: &str,
+    state: AppState,
+    ctx: &TemplateContext,
+    hard_active_budget: Duration,
+) -> StepOutcome {
     let start = Instant::now();
+    let wall_started_at = chrono::Utc::now();
 
     // ── Validate required fields ────────────────────────────────────────
     let qp_id = match step.batch_quick_prompt_id.as_ref() {
@@ -343,61 +430,11 @@ pub async fn execute_batch_quick_prompt_step(
     // `broadcast::Receiver::subscribe` captures messages from this point on.
     let mut ws_rx = state.ws_broadcast.subscribe();
 
-    // ── Fan out: spawn agent runs on every child discussion ─────────────
-    // Throttled by a per-batch semaphore so a single big batch (17+ items)
-    // doesn't saturate the global agent pool. The global
-    // `max_concurrent_agents` cap still applies on top — actual concurrency
-    // is `min(global, per_batch)`. Without this throttle, the spawn loop
-    // hands every child to the runtime instantly; the global semaphore's
-    // queue grows long, all children share a single auth-file mutex
-    // (`~/.claude/state.json`), and the network pool reaches its ceiling —
-    // amplifying the Claude Code silent-exit failure mode.
-    //
-    // If `batch_chain_prompt_ids` is non-empty, each discussion will
-    // sequentially execute the chained QPs after the initial response —
-    // all inside the same conversation thread. Each chain QP receives the
-    // SAME raw batch item (e.g. "EW-1234") as its first variable, so an
-    // `analyse → review → summary` chain all runs on the same ticket.
-    // The batch progress counter only bumps when the ENTIRE chain finishes:
-    // durable dispatch settles its terminal job and parent batch counter in
-    // one transaction.
-    let concurrent_limit = step
-        .batch_concurrent_limit
-        .unwrap_or(DEFAULT_BATCH_CONCURRENT_LIMIT)
-        .clamp(1, MAX_BATCH_CONCURRENT_LIMIT);
-    let batch_semaphore =
-        std::sync::Arc::new(tokio::sync::Semaphore::new(concurrent_limit as usize));
-    let chain_ids = step.batch_chain_prompt_ids.clone();
-    // `outcome.discussion_ids` is ordered identically to `items` (see
-    // `create_batch_run` in db/workflows.rs), so zipping by index is safe.
-    for (idx, disc_id) in outcome.discussion_ids.iter().enumerate() {
-        let batch_item = item_titles.get(idx).cloned();
-        let permit_holder = batch_semaphore.clone();
-        let state_for_spawn = state.clone();
-        let chain_for_spawn = chain_ids.clone();
-        let disc_for_spawn = disc_id.clone();
-        // Acquire the batch slot synchronously here so we block the spawn
-        // loop until there's room — without this, all N tokio tasks fire
-        // immediately and queue inside the global semaphore.
-        let permit = match permit_holder.clone().acquire_owned().await {
-            Ok(p) => p,
-            Err(_) => break, // semaphore closed (shouldn't happen)
-        };
-        tokio::spawn(async move {
-            // Permit is dropped when this task ends, freeing the next
-            // discussion's slot. Hold for the full duration of the agent
-            // run so the global pool isn't oversubscribed.
-            let _permit = permit;
-            crate::api::discussions::spawn_agent_run_with_chain(
-                state_for_spawn,
-                disc_for_spawn,
-                chain_for_spawn,
-                batch_item,
-            )
-            .await;
-        });
-        let _ = idx; // index already consumed via zip
-    }
+    // Creation already persisted one dispatch obligation per child, including
+    // the batch group/concurrency cap and optional QP chain. Wake the durable
+    // dispatcher instead of creating detached wrapper tasks here. This makes
+    // cancellation and restart recovery operate on a single source of truth.
+    state.agent_dispatch_notify.notify_waiters();
 
     // ── Wait for completion (optional) ──────────────────────────────────
     if !wait_for_completion {
@@ -413,6 +450,7 @@ pub async fn execute_batch_quick_prompt_step(
             results: &[],
             tokens_used: None,
             tokens_status: "pending",
+            timing: BatchTiming::measure(start, wall_started_at),
         });
         return StepOutcome {
             result: StepResult {
@@ -440,7 +478,7 @@ pub async fn execute_batch_quick_prompt_step(
     }
 
     let child_run_id = outcome.run_id.clone();
-    let wait_deadline = tokio::time::Instant::now() + BATCH_WAIT_TIMEOUT;
+    let wait_deadline = tokio::time::Instant::now() + hard_active_budget;
     let final_total: u32;
     let final_ok: u32;
     let final_failed: u32;
@@ -522,12 +560,30 @@ pub async fn execute_batch_quick_prompt_step(
                 );
             }
             Err(_elapsed) => {
+                let timing = BatchTiming::measure(start, wall_started_at);
+                let cancellation = super::cancellation::cancel_run_tree(
+                    &state,
+                    &child_run_id,
+                    super::cancellation::CancellationScope::RunTree,
+                    "LATENCY_BUDGET_EXCEEDED",
+                )
+                .await;
+                if let Err(error) = cancellation {
+                    tracing::error!(
+                        child_run_id = %child_run_id,
+                        "Batch latency cancellation failed: {error}"
+                    );
+                }
                 return fail(
                     step,
                     start,
                     format!(
-                        "Timed out after {:?} waiting for child batch {} to finish",
-                        BATCH_WAIT_TIMEOUT, child_run_id
+                        "LATENCY_BUDGET_EXCEEDED: child batch {} exceeded {} ms active \
+                         (wall={} ms, estimated_suspension={} ms); all child dispatches were cancelled",
+                        child_run_id,
+                        timing.active_ms,
+                        timing.wall_ms,
+                        timing.estimated_suspension_ms,
                     ),
                 );
             }
@@ -565,6 +621,7 @@ pub async fn execute_batch_quick_prompt_step(
         tokens_used: (collected.tokens_status != "unavailable_children_not_measured")
             .then_some(collected.measured_tokens),
         tokens_status: collected.tokens_status,
+        timing: BatchTiming::measure(start, wall_started_at),
     });
 
     // The step succeeds if AT LEAST one child succeeded — matches the
@@ -943,6 +1000,7 @@ struct BatchStructuredOutput<'a> {
     results: &'a [serde_json::Value],
     tokens_used: Option<u64>,
     tokens_status: &'a str,
+    timing: BatchTiming,
 }
 
 fn build_structured_output(input: BatchStructuredOutput<'_>) -> String {
@@ -956,6 +1014,7 @@ fn build_structured_output(input: BatchStructuredOutput<'_>) -> String {
         results,
         tokens_used,
         tokens_status,
+        timing,
     } = input;
     let status = if completed {
         if ok == total {
@@ -1004,6 +1063,17 @@ fn build_structured_output(input: BatchStructuredOutput<'_>) -> String {
     data.insert(
         "tokens_status",
         serde_json::Value::String(tokens_status.to_string()),
+    );
+    data.insert(
+        "timing",
+        serde_json::json!({
+            "active_ms": timing.active_ms,
+            "wall_ms": timing.wall_ms,
+            "estimated_suspension_ms": timing.estimated_suspension_ms,
+            "target_active_ms": timing.target_active_ms,
+            "max_active_ms": timing.max_active_ms,
+            "hard_active_budget_ms": timing.hard_active_budget_ms,
+        }),
     );
 
     // 0.8.5 — canonical Kronn envelope (markers + signal) via the
@@ -1260,6 +1330,7 @@ mod tests {
             results: &[],
             tokens_used: Some(42),
             tokens_status: "measured",
+            timing: BatchTiming::zero(),
         });
         let v = parse_envelope_for_test(&out);
         assert_eq!(v["status"], "OK");
@@ -1287,6 +1358,7 @@ mod tests {
             results: &[],
             tokens_used: None,
             tokens_status: "unavailable_children_not_measured",
+            timing: BatchTiming::zero(),
         });
         let v = parse_envelope_for_test(&out);
         assert_eq!(v["status"], "PARTIAL");
@@ -1305,6 +1377,7 @@ mod tests {
             results: &[],
             tokens_used: None,
             tokens_status: "unavailable_children_not_measured",
+            timing: BatchTiming::zero(),
         });
         let v = parse_envelope_for_test(&out);
         assert_eq!(v["status"], "ERROR");
@@ -1323,6 +1396,7 @@ mod tests {
             results: &[],
             tokens_used: None,
             tokens_status: "pending",
+            timing: BatchTiming::zero(),
         });
         let v = parse_envelope_for_test(&out);
         assert_eq!(v["status"], "PENDING");
@@ -1372,6 +1446,7 @@ mod tests {
             results: &collected.results,
             tokens_used: Some(collected.measured_tokens),
             tokens_status: collected.tokens_status,
+            timing: BatchTiming::zero(),
         });
         let envelope = parse_envelope_for_test(&output);
         let detail_sum: u64 = envelope["data"]["results"]
@@ -1402,14 +1477,11 @@ mod tests {
 
     // ─── E2E tests for `execute_batch_quick_prompt_step` ─────────────────────
     //
-    // These exercise the full pipeline (template render → QP load →
-    // `create_batch_run` → fan-out tokio::spawn → optional WS wait → structured
-    // output) against an in-memory DB. The fan-out tasks try to spawn a real
-    // agent CLI via `spawn_agent_run_with_chain` — in the test env there's no
-    // agent binary on PATH so each detached task fails fast inside its own
-    // tokio task. We don't observe those failures from the test thread; the
-    // BatchRunFinished WS event is the wait-loop's only completion signal, and
-    // for the wait-for-completion test we synthesize one via a watchdog task.
+    // These exercise the full pipeline (template render → QP load → durable
+    // dispatch fan-out → optional WS wait → structured output) against an
+    // in-memory DB. The test state intentionally does not start the durable
+    // dispatcher: jobs remain queued unless the test synthesizes the terminal
+    // BatchRunFinished event, which makes cancellation assertions deterministic.
     //
     // The original TD-20260510 (memory `project_batch_workflows`) called for
     // "an E2E test on `execute_batch_quick_prompt_step` full flow with mocked
@@ -1650,6 +1722,82 @@ mod tests {
             .expect("DB readback");
         assert_eq!(child_run.1, 3, "child batch_total = number of items");
         assert_eq!(disc_count, 3, "one discussion row per batch item");
+    }
+
+    #[tokio::test]
+    async fn active_budget_expiry_cancels_and_settles_all_eight_children() {
+        let state = e2e_state();
+        let qp = seed_qp(&state).await;
+        let parent_run_id = seed_parent_run(&state).await;
+        let mut step = batch_step(&qp.id, /* wait */ true);
+        step.batch_items_from = Some(
+            serde_json::to_string(
+                &(1..=8)
+                    .map(|index| format!("EW-{index}"))
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap(),
+        );
+        step.batch_max_items = Some(8);
+        step.batch_concurrent_limit = Some(8);
+
+        let outcome = execute_batch_quick_prompt_step_with_budget(
+            &step,
+            &parent_run_id,
+            state.clone(),
+            &TemplateContext::new(),
+            Duration::from_millis(20),
+        )
+        .await;
+
+        assert_eq!(outcome.result.status, RunStatus::Failed);
+        assert!(outcome.result.output.contains("LATENCY_BUDGET_EXCEEDED"));
+
+        let parent = parent_run_id.clone();
+        state
+            .db
+            .with_conn(move |conn| -> anyhow::Result<()> {
+                let child_run_id: String = conn.query_row(
+                    "SELECT id FROM workflow_runs WHERE parent_run_id = ?1",
+                    [parent],
+                    |row| row.get(0),
+                )?;
+                let counts: (i64, i64, i64) = conn.query_row(
+                    "SELECT
+                       COUNT(*),
+                       SUM(CASE WHEN status = 'Cancelled'
+                                      AND completed_at IS NOT NULL
+                                      AND last_error = 'LATENCY_BUDGET_EXCEEDED'
+                                THEN 1 ELSE 0 END),
+                       SUM(CASE WHEN status IN ('Pending', 'Running') THEN 1 ELSE 0 END)
+                     FROM agent_dispatch_jobs WHERE group_id = ?1",
+                    [&child_run_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )?;
+                let awaiting: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM discussions
+                     WHERE workflow_run_id = ?1 AND awaiting_agent = 1",
+                    [&child_run_id],
+                    |row| row.get(0),
+                )?;
+                let child_status: String = conn.query_row(
+                    "SELECT status FROM workflow_runs WHERE id = ?1",
+                    [&child_run_id],
+                    |row| row.get(0),
+                )?;
+
+                assert_eq!(
+                    counts.0, 8,
+                    "the integration fixture must fan out eight jobs"
+                );
+                assert_eq!(counts.1, 8, "all eight jobs must be durably cancelled");
+                assert_eq!(counts.2, 0, "no child may remain able to consume tokens");
+                assert_eq!(awaiting, 0, "no discussion may retain a false spinner");
+                assert_eq!(child_status, "Cancelled");
+                Ok(())
+            })
+            .await
+            .unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

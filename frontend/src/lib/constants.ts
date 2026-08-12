@@ -208,14 +208,17 @@ export function getProjectGroup(p: { repo_url: string | null }, localLabel = 'Lo
 /** Whether the agent can introspect the discussion it's running in
  *  (`disc_meta`, `disc_get_message`, `disc_summarize`).
  *
- *  Two paths exist on the backend (cf. `disc_prompts.rs` —
+ *  Three paths exist on the backend (cf. `disc_prompts.rs` —
  *  `agent_speaks_mcp` / `agent_uses_slash_markers` gates):
  *    - MCP tools (single-turn, fast) for Claude Code, Kiro, Gemini,
  *      Copilot, Codex (since 0.132) — see
  *      `mcp_scanner::inject_kronn_internal`.
- *    - Slash markers (multi-turn: agent emits `KRONN:DISC_*`, Kronn
- *      resolves on next turn) for Vibe + Ollama — see
- *      `slash_markers.rs`.
+ *    - Native HTTP tools for Ollama and LiteLLM, including compact Planning
+ *      reads/writes. Ollama also retains the legacy `KRONN:DISC_*` marker
+ *      fallback for discussion-history requests.
+ *    - Slash markers for Vibe. Planning writes use human-gated
+ *      `kronn-plan-action` proposals because its programmatic runner has no
+ *      MCP transport — see `slash_markers.rs` and `disc_prompts.rs`.
  *
  *  Every concrete `AgentType` now has at least one path → returns
  *  `true` unconditionally. Kept as a function rather than inlined

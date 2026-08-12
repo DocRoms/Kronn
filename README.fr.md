@@ -27,26 +27,25 @@
 
 **Prompts plus petits, code déterministe quand c'est possible : moins d'hallucinations, facture tokens divisée, écoconception par conception.**
 
-> **Statut : 0.9.5 (version actuelle).** Fonctionnel mais pré-1.0. Les versions mineures peuvent introduire des breaking changes ; les patch versions sont safe.
+> **Statut : 0.9.6 (version actuelle).** Fonctionnel mais pré-1.0. Les versions mineures peuvent introduire des breaking changes ; les patch versions sont safe.
 > **Licence : AGPL-3.0.** Utiliser Kronn localement pour développer *ton propre* produit ne déclenche pas le copyleft ; il ne s'applique que si tu redistribues une version modifiée à d'autres. Voir [Notes sur la licence](#notes-sur-la-licence-agpl-3-0).
 
-## Nouveautés de la 0.9.5
+## Nouveautés de la 0.9.6
 
-- **Démarrage multi-agent prévisible :** plusieurs `@alias` explicites lancent
-  des réponses indépendantes, pas un débat automatique. La collaboration reste
-  un réglage explicite de la discussion.
-- **Le raisonnement privé reste privé :** les blocs de réflexion DeepSeek-style
-  renvoyés par LiteLLM sont filtrés sans supprimer les balises littérales du
-  contenu réellement destiné à l’utilisateur.
-- **Discussions résistantes aux redémarrages :** les onglets ouverts se
-  reconnectent et se resynchronisent après une coupure, tandis qu’un texte non
-  confirmé reste dans le champ de saisie jusqu’à sa sauvegarde durable.
+- **Un planning accessible à tous les agents :** les CLI reçoivent explicitement
+  l’ID de discussion, tandis qu’Ollama et LiteLLM peuvent lire et modifier le même
+  plan via des outils natifs. Vibe conserve le flux de proposition validé par un humain.
+- **Un coût token mesuré et réduit :** contextes bornés, Quick Exec déterministe
+  et registre de revue par cause remplacent les passages agents répétés et non bornés.
+- **Des apps desktop fiables :** les paquets macOS lancent leur backend embarqué
+  et expliquent les erreurs de démarrage ; Windows utilise un runtime sidecar UCRT
+  compatible avec CPython.
 
-Voir les [notes complètes des versions 0.9.5 et 0.9.4](CHANGELOG.md).
+Voir les [notes complètes des versions 0.9.6 et 0.9.5](CHANGELOG.md).
 
 ## Sommaire
 
-- [Nouveautés de la 0.9.5](#nouveautés-de-la-095)
+- [Nouveautés de la 0.9.6](#nouveautés-de-la-096)
 - [Le pitch en 60 secondes](#le-pitch-en-60-secondes)
 - [L'approche Kronn : de l'ingénierie, pas de l'incantation](#lapproche-kronn--de-lingénierie-pas-de-lincantation)
 - [Démarrage rapide](#démarrage-rapide)
@@ -110,7 +109,7 @@ Télécharge l'installeur pour ton OS depuis [Releases](https://github.com/DocRo
 Requiert Docker + Docker Compose. Sur Windows, WSL2 (Docker Engine dans WSL fonctionne, Docker Desktop optionnel).
 
 ```bash
-git clone --branch 0.9.5 --depth 1 https://github.com/DocRoms/Kronn.git   # dernière release stable
+git clone --branch 0.9.6 --depth 1 https://github.com/DocRoms/Kronn.git   # dernière release stable
 cd Kronn
 ./kronn start
 # → http://localhost:3140

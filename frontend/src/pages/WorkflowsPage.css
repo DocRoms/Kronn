@@ -79,7 +79,7 @@
   border-radius: var(--kr-r-lg);
   border: 1px solid var(--kr-accent-border);
   background: var(--kr-accent-bg-hover);
-  color: var(--kr-accent);
+  color: var(--kr-accent-ink);
   cursor: pointer;
   display: flex;
   align-items: center;
@@ -4026,6 +4026,67 @@
   white-space: nowrap;
 }
 
+.wf-step-inspector-tabs {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 2px;
+}
+
+.wf-step-inspector-tabs button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-height: 28px;
+  padding: 3px 9px;
+  color: var(--kr-text-muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--kr-r-md);
+  font: inherit;
+  font-size: var(--kr-fs-xs);
+  cursor: pointer;
+}
+
+.wf-step-inspector-tabs button:hover,
+.wf-step-inspector-tabs button[data-active='true'] {
+  color: var(--kr-text-primary);
+  background: var(--kr-accent-bg);
+  border-color: var(--kr-accent-border);
+}
+
+.wf-step-inspector-tabs button[data-active='true'] {
+  font-weight: 650;
+}
+
+.wf-step-inspector-editor .wf-wizard-card[data-focused-step='true'] {
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.wf-step-inspector-editor .wf-wizard-card[data-focused-step='true'] .wf-wizard-content {
+  max-height: min(70vh, 820px);
+  overflow-y: auto;
+  /* Let the wheel/trackpad naturally bubble back to the workflow detail
+     pane once the inline editor reaches either edge. Keeping `contain` here
+     trapped users inside the editor until they moved the pointer outside. */
+  overscroll-behavior-y: auto;
+}
+
+.wf-wizard-card[data-focused-step='true'] .wf-wizard-body,
+.wf-wizard-card[data-focused-step='true'] .wf-wizard-content {
+  display: block;
+  padding: 0;
+}
+
+.wf-wizard-card[data-focused-step='true'] .wf-step-edit-card {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+}
+
 .wf-pipe-chip:hover {
   filter: brightness(1.15);
   transform: translateY(-1px);
@@ -4169,35 +4230,36 @@
 
 .wf-step-inspector {
   margin-top: var(--kr-sp-4);
-  border: 1px solid var(--kr-border);
-  border-radius: var(--kr-r-lg);
-  background: var(--kr-bg-subtle);
+  border: 1px solid var(--kr-border-strong);
+  border-radius: var(--kr-r-xl);
+  background: var(--kr-bg-input);
   overflow: hidden;
 }
 
 .wf-step-inspector-head {
   display: flex;
   align-items: center;
-  gap: var(--kr-sp-4);
-  padding: var(--kr-sp-4) var(--kr-sp-5);
+  gap: var(--kr-sp-3);
+  min-height: 38px;
+  padding: 3px 5px 3px 7px;
   border-bottom: 1px solid var(--kr-border-light);
-  background: rgba(var(--kr-accent-rgb), 0.035);
+  background: var(--kr-bg-subtle);
 }
 
 .wf-step-inspector-title {
   display: flex;
   flex: 1;
   min-width: 0;
-  flex-direction: column;
-  gap: 2px;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  padding-left: var(--kr-sp-2);
 }
 
 .wf-step-inspector-kicker {
   color: var(--kr-text-ghost);
   font-size: var(--kr-fs-2xs);
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+  font-weight: 600;
+  white-space: nowrap;
 }
 
 .wf-step-inspector-name {
@@ -4206,8 +4268,8 @@
   gap: var(--kr-sp-2);
   overflow: hidden;
   color: var(--kr-text-primary);
-  font-size: var(--kr-fs-base);
-  font-weight: 700;
+  font-size: var(--kr-fs-sm);
+  font-weight: 650;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -4222,10 +4284,10 @@
   align-items: center;
   gap: var(--kr-sp-1);
   padding: 4px 9px;
-  border: 1px solid rgba(var(--kr-accent-rgb), 0.28);
-  border-radius: var(--kr-r-sm);
-  color: var(--kr-accent);
-  background: rgba(var(--kr-accent-rgb), 0.06);
+  border: 1px solid transparent;
+  border-radius: var(--kr-r-md);
+  color: var(--kr-text-muted);
+  background: transparent;
   font: inherit;
   font-size: var(--kr-fs-xs);
   font-weight: 650;
@@ -4241,8 +4303,9 @@
 }
 
 .wf-step-provenance-toggle:hover {
-  border-color: var(--kr-accent);
-  background: rgba(var(--kr-accent-rgb), 0.12);
+  color: var(--kr-text-primary);
+  border-color: var(--kr-accent-border);
+  background: var(--kr-accent-bg);
 }
 
 .wf-step-origins {
@@ -4318,18 +4381,19 @@
   align-items: center;
   gap: var(--kr-sp-1);
   padding: 4px 9px;
-  border: 1px solid var(--kr-border);
-  border-radius: var(--kr-r-sm);
-  color: var(--kr-text-secondary);
-  background: var(--kr-bg-elevated);
+  border: 1px solid transparent;
+  border-radius: var(--kr-r-md);
+  color: var(--kr-text-muted);
+  background: transparent;
   font: inherit;
   font-size: var(--kr-fs-xs);
   cursor: pointer;
 }
 
 .wf-step-nav-btn:hover:not(:disabled) {
-  color: var(--kr-accent);
+  color: var(--kr-text-primary);
   border-color: var(--kr-accent-border);
+  background: var(--kr-accent-bg);
 }
 
 .wf-step-nav-btn:disabled {
@@ -4338,7 +4402,7 @@
 }
 
 .wf-step-inspector-body {
-  padding: var(--kr-sp-4);
+  padding: var(--kr-sp-3);
 }
 
 .wf-step-inspector-body > .wf-step-card {

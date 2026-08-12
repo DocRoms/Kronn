@@ -361,6 +361,12 @@ export function DiscussionsPage({
       return next;
     });
   }, []);
+  // Creating a note while notes are hidden would silently drop it out of view.
+  // Reveal them so the author sees what they just wrote.
+  const revealDiscussionNotes = useCallback(() => {
+    setShowDiscussionNotes(true);
+    try { localStorage.setItem('kronn:showDiscussionNotes', 'true'); } catch { /* non-fatal */ }
+  }, []);
   const [showGlobalSearch, setShowGlobalSearch] = useState(false);
   const [globalSearchTarget, setGlobalSearchTarget] = useState<GlobalSearchTarget | null>(null);
   const globalSearchTargetRef = useRef<GlobalSearchTarget | null>(null);
@@ -509,6 +515,10 @@ export function DiscussionsPage({
     targets: MessageTarget[];
     targetAll: boolean;
     replyTargetId?: string;
+    /** KT-251 — id of the answer that is blocking, when the backend knows it.
+     *  Undefined for a checkpoint predating migration 109: unknown, which is
+     *  not the same as "nothing in flight". */
+    blockingMessageId?: string;
   } | null>(null);
   const [partialForcing, setPartialForcing] = useState(false);
   const partialForcingRef = useRef(false);
@@ -1787,6 +1797,7 @@ export function DiscussionsPage({
 
     if (channel === 'note') {
       stopTts();
+      revealDiscussionNotes();
       const clientMessageId = newClientMessageId();
       optimisticMessageIdsRef.current.add(clientMessageId);
       setReplyToMessageId(null);
@@ -2013,12 +2024,26 @@ export function DiscussionsPage({
         // Backend refused: previous run still in recovery. Surface a banner with
         // a one-click force instead of a modal — `confirm()` freezes the whole
         // tab, and the user cannot even copy their text while waiting.
+        // Pull the id out of the error payload so the banner can name what is
+        // blocking. Without it the user reads "a previous reply" and has no way
+        // to identify it — the exact complaint that opened KT-251.
+        let blockingMessageId: string | undefined;
+        try {
+          const parsed = JSON.parse(errStr.slice(errStr.indexOf('{')));
+          if (typeof parsed?.blocking_message_id === 'string') {
+            blockingMessageId = parsed.blocking_message_id;
+          }
+        } catch {
+          // Older backend, or a non-JSON error: the banner degrades to its
+          // previous wording rather than failing the send path.
+        }
         setPartialPending({
           discId,
           message: msg,
           targets,
           targetAll,
           replyTargetId,
+          blockingMessageId,
         });
       } else {
         toast(errStr, 'error');
@@ -4182,6 +4207,11 @@ export function DiscussionsPage({
               ttsState={ttsState}
               worktreeError={worktreeError}
               partialPending={partialPending?.discId === activeDiscussion.id}
+              partialPendingMessageId={
+                partialPending?.discId === activeDiscussion.id
+                  ? partialPending.blockingMessageId
+                  : undefined
+              }
               partialForcing={partialForcing}
               onPartialPendingForce={handlePartialPendingForce}
               onPartialPendingDismiss={() => setPartialPending(null)}

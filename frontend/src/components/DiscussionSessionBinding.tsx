@@ -1,3 +1,18 @@
+/** Where a discussion came from — KT-255.
+ *
+ *  `source_agent` / `source_session_id` is the CROSS-AGENT MEMORY: it answers
+ *  "where does this thread come from", not "who is speaking now". It is what lets
+ *  Codex pick up a discussion Claude started, and what `disc_find_by_session` uses
+ *  to find the discussion of a CLI that restarted.
+ *
+ *  So this is READ-ONLY. The binding is established at join, automatically. The
+ *  form this replaces asked a human to pick from eight agents and type an opaque
+ *  uuid — a gesture that is almost always either wrong or unnecessary, and which
+ *  left users unsure what the control even was.
+ *
+ *  Unlink survives, alone. A stale binding needs a human escape hatch and there is
+ *  no other way to clear one from the UI; removing it with the form would have
+ *  deleted a repair path without an alternative. */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Check, Link2, Loader2, Unlink, X } from 'lucide-react';
 import { discussions as discussionsApi } from '../lib/api';
@@ -28,17 +43,6 @@ interface Props {
   t: (key: string, ...args: (string | number)[]) => string;
 }
 
-const SOURCE_AGENTS = [
-  'ClaudeCode',
-  'Codex',
-  'GeminiCli',
-  'Kiro',
-  'CopilotCli',
-  'Vibe',
-  'Ollama',
-  'Custom',
-] as const;
-
 export function DiscussionSessionBinding({ discussionId, toast, t }: Props) {
   return (
     <DiscussionSessionBindingContent
@@ -56,8 +60,6 @@ function DiscussionSessionBindingContent({ discussionId, toast, t }: Props) {
   const [current, setCurrent] = useState<SourceBinding | null>(null);
   const [history, setHistory] = useState<SourceHistory[]>([]);
   const [status, setStatus] = useState<DiscSessionStatusResponse | null>(null);
-  const [sourceAgent, setSourceAgent] = useState('ClaudeCode');
-  const [sessionId, setSessionId] = useState('');
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
 
@@ -76,11 +78,6 @@ function DiscussionSessionBindingContent({ discussionId, toast, t }: Props) {
     setCurrent(result.binding);
     setHistory(result.history);
     setStatus(result.status);
-    const binding = result.binding;
-    if (binding) {
-      setSourceAgent(binding.source_agent);
-      setSessionId(binding.source_session_id);
-    }
   }, []);
 
   const refresh = useCallback(async () => {
@@ -115,37 +112,6 @@ function DiscussionSessionBindingContent({ discussionId, toast, t }: Props) {
     };
   }, [open]);
 
-  const save = async () => {
-    const agent = sourceAgent.trim();
-    const session = sessionId.trim();
-    if (!agent || !session) {
-      setError(t('disc.session.required'));
-      return;
-    }
-    setSaving(true);
-    setError('');
-    try {
-      const nextStatus = await discussionsApi.sourceSessionStatus(agent, session);
-      if (nextStatus.bound_disc_id && nextStatus.bound_disc_id !== discussionId) {
-        setError(t('disc.session.alreadyLinked', nextStatus.bound_disc_id.slice(0, 8)));
-        return;
-      }
-      await discussionsApi.linkSourceSession({
-        disc_id: discussionId,
-        source_agent: agent,
-        source_session_id: session,
-        force_reassign: false,
-      });
-      await refresh();
-      window.dispatchEvent(new Event('kronn:disc-source-changed'));
-      toast(t('disc.session.linked'), 'success');
-    } catch {
-      setError(t('disc.session.linkFailed'));
-    } finally {
-      setSaving(false);
-    }
-  };
-
   const unlink = async () => {
     setSaving(true);
     setError('');
@@ -153,7 +119,6 @@ function DiscussionSessionBindingContent({ discussionId, toast, t }: Props) {
       await discussionsApi.unlinkSourceSession(discussionId);
       setCurrent(null);
       setStatus(null);
-      setSessionId('');
       await refresh();
       window.dispatchEvent(new Event('kronn:disc-source-changed'));
       toast(t('disc.session.unlinked'), 'success');
@@ -164,6 +129,10 @@ function DiscussionSessionBindingContent({ discussionId, toast, t }: Props) {
     }
   };
 
+  // No binding means nothing to explain. The old control still offered itself here
+  // as an empty form, which is what left people wondering what it was for.
+  if (!current) return null;
+
   const connected = Boolean(status?.connected_disc_id);
 
   return (
@@ -171,21 +140,15 @@ function DiscussionSessionBindingContent({ discussionId, toast, t }: Props) {
       <button
         type="button"
         className="disc-session-binding-trigger"
-        data-bound={Boolean(current)}
+        data-bound="true"
         data-connected={connected}
         onClick={() => setOpen(value => !value)}
         aria-expanded={open}
         aria-haspopup="dialog"
-        title={current
-          ? t('disc.session.boundTooltip', current.source_agent, current.source_session_id)
-          : t('disc.session.link')}
+        title={t('disc.session.boundTooltip', current.source_agent, current.source_session_id)}
       >
         <Link2 size={9} aria-hidden="true" />
-        {current ? (
-          <span>{current.source_agent} · {current.source_session_id.slice(0, 8)}</span>
-        ) : (
-          <span>{t('disc.session.short')}</span>
-        )}
+        <span>{current.source_agent} · {current.source_session_id.slice(0, 8)}</span>
       </button>
 
       {open && (
@@ -193,62 +156,35 @@ function DiscussionSessionBindingContent({ discussionId, toast, t }: Props) {
           <header>
             <div>
               <strong>{t('disc.session.title')}</strong>
-              <span>{t('disc.session.contractVersion', current?.binding_version ?? 1)}</span>
+              <span>{t('disc.session.contractVersion', current.binding_version)}</span>
             </div>
             <button type="button" onClick={() => setOpen(false)} aria-label={t('common.close')}>
               <X size={13} />
             </button>
           </header>
 
-          {current && (
-            <div className="disc-session-current">
-              <span className="disc-session-status" data-connected={connected}>
-                {connected ? <Check size={10} /> : <Unlink size={10} />}
-                {connected ? t('disc.session.connected') : t('disc.session.offline')}
-              </span>
-              <CopyIdPill
-                id={current.source_session_id}
-                label={current.source_session_id}
-                title={t('disc.session.copy', current.source_session_id)}
-              />
-            </div>
-          )}
-
-          <label>
-            <span>{t('disc.session.agent')}</span>
-            <select value={sourceAgent} onChange={event => setSourceAgent(event.target.value)}>
-              {SOURCE_AGENTS.map(agent => <option key={agent} value={agent}>{agent}</option>)}
-            </select>
-          </label>
-          <label>
-            <span>{t('disc.session.id')}</span>
-            <input
-              value={sessionId}
-              onChange={event => setSessionId(event.target.value)}
-              placeholder={t('disc.session.idPlaceholder')}
-              maxLength={512}
-              autoComplete="off"
-              spellCheck={false}
+          <div className="disc-session-current">
+            <span className="disc-session-status" data-connected={connected}>
+              {connected ? <Check size={10} /> : <Unlink size={10} />}
+              {connected ? t('disc.session.connected') : t('disc.session.offline')}
+            </span>
+            <CopyIdPill
+              id={current.source_session_id}
+              label={current.source_session_id}
+              title={t('disc.session.copy', current.source_session_id)}
             />
-          </label>
+          </div>
+
+          {/* Says where the binding comes from, so nobody looks for the control
+              that used to create one. */}
+          <p className="disc-session-origin">{t('disc.session.automatic')}</p>
 
           {error && <div className="disc-session-error" role="alert">{error}</div>}
 
           <div className="disc-session-actions">
-            {current && (
-              <button type="button" onClick={() => void unlink()} disabled={saving}>
-                <Unlink size={12} />
-                {t('disc.session.unlink')}
-              </button>
-            )}
-            <button
-              type="button"
-              className="primary"
-              onClick={() => void save()}
-              disabled={saving || !sessionId.trim()}
-            >
-              {saving ? <Loader2 size={12} className="spin" /> : <Link2 size={12} />}
-              {current ? t('disc.session.update') : t('disc.session.link')}
+            <button type="button" onClick={() => void unlink()} disabled={saving}>
+              {saving ? <Loader2 size={12} className="spin" /> : <Unlink size={12} />}
+              {t('disc.session.unlink')}
             </button>
           </div>
 

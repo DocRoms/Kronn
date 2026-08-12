@@ -809,6 +809,9 @@ pub async fn partial_audit(
             let now = Utc::now();
             let disc_id = uuid::Uuid::new_v4().to_string();
             let msg = DiscussionMessage {
+                recovered_partial: false,
+                session_tokens_at_message: None,
+                author_cli_ordinal: None,
                 model: None, lint_report: None,
                 id: uuid::Uuid::new_v4().to_string(),
                 role: MessageRole::User,
@@ -1082,6 +1085,9 @@ mod partial_finalize_tests {
     fn mini_disc(id: &str, project: &str) -> (Discussion, DiscussionMessage) {
         let now = chrono::Utc::now();
         let msg = DiscussionMessage {
+            recovered_partial: false,
+            session_tokens_at_message: None,
+            author_cli_ordinal: None,
             model: None,
             lint_report: None,
             id: format!("{id}-m"),

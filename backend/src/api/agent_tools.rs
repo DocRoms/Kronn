@@ -6,13 +6,19 @@
 //!
 //! The catalogue is deliberately small. Every tool costs context on a local
 //! model with a tight window, and a model given forty options picks worse
-//! than one given four. These four cover "what can I reach, and call it",
-//! which is what the bridge's own docs push agents towards (`qa_list` before
-//! hand-building an `api_call`).
+//! than one given four. It exposes the API/Quick-API primitives plus the
+//! compact Planning contract that every discussion agent needs to keep durable
+//! task context honest.
 
 use crate::agents::tools::{ToolCall, ToolExecutor, ToolOutcome};
+use crate::models::{
+    AddPlanningBlockerRequest, CreatePlanningTaskRequest, LinkPlanningDiscussionRequest,
+    PlanningActor, PlanningActorKind, PlanningTaskListQuery, RemovePlanningBlockerRequest,
+    UpdatePlanningDodItemRequest, UpdatePlanningTaskRequest,
+};
 use crate::AppState;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 pub struct KronnToolExecutor {
     state: AppState,
@@ -20,16 +26,36 @@ pub struct KronnToolExecutor {
     /// broker can resolve project-scoped credentials the same way it does for
     /// CLI agents.
     disc_id: Option<String>,
+    /// Durable attribution written to Planning's event log. The model cannot
+    /// override this value in tool arguments.
+    actor_id: String,
+    /// The User message that caused this run, when known.
+    source_message_id: Option<String>,
 }
 
 impl KronnToolExecutor {
     pub fn new(state: AppState, disc_id: Option<String>) -> Self {
-        Self { state, disc_id }
+        Self {
+            state,
+            disc_id,
+            actor_id: "Kronn HTTP agent".into(),
+            source_message_id: None,
+        }
     }
 
     /// Wrap into the `Arc` the runner takes, or `None` when tools are off.
-    pub fn arc(state: AppState, disc_id: Option<String>) -> std::sync::Arc<dyn ToolExecutor> {
-        std::sync::Arc::new(Self::new(state, disc_id))
+    pub fn arc(
+        state: AppState,
+        disc_id: Option<String>,
+        actor_id: String,
+        source_message_id: Option<String>,
+    ) -> std::sync::Arc<dyn ToolExecutor> {
+        std::sync::Arc::new(Self {
+            state,
+            disc_id,
+            actor_id,
+            source_message_id,
+        })
     }
 }
 
@@ -121,6 +147,158 @@ pub fn tool_catalogue() -> Vec<Value> {
                         "query": { "type": "object", "description": "query-string parameters" },
                     },
                     "required": ["api_plugin_slug", "endpoint_path"],
+                },
+            },
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "plan_get",
+                "description": "Read this discussion's compact shared plan: primary objective, active/later tasks and progress. Call before creating or changing tracked work.",
+                "parameters": { "type": "object", "properties": {}, "required": [] },
+            },
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "task_list",
+                "description": "Find compact Planning task summaries linked to this discussion. Use task_get only after choosing one result.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "search": { "type": "string" },
+                        "status": { "type": "string", "enum": ["idea", "todo", "in_progress", "blocked", "done", "archived"] },
+                        "priority": { "type": "string", "enum": ["critical", "high", "normal", "low"] },
+                        "project_id": { "type": "string" },
+                        "tag": { "type": "string" },
+                        "with_discussion": { "type": "boolean" },
+                        "cursor": { "type": "integer", "minimum": 0 },
+                        "limit": { "type": "integer", "minimum": 1, "maximum": 100 }
+                    },
+                    "required": []
+                },
+            },
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "task_get",
+                "description": "Read one full Planning task by KT reference or UUID, including DoD, blockers and history.",
+                "parameters": {
+                    "type": "object",
+                    "properties": { "task_id": { "type": "string" } },
+                    "required": ["task_id"]
+                },
+            },
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "task_create",
+                "description": "Create one task and atomically add it to this discussion's plan. Call plan_get first. Use one distinct idempotency_key per logical task when creating several.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "title": { "type": "string" },
+                        "idempotency_key": { "type": "string" },
+                        "description": { "type": "string" },
+                        "status": { "type": "string", "enum": ["idea", "todo", "in_progress", "blocked", "done", "archived"] },
+                        "priority": { "type": "string", "enum": ["critical", "high", "normal", "low"] },
+                        "parent_id": { "type": "string" },
+                        "project_ids": { "type": "array", "items": { "type": "string" } },
+                        "tags": { "type": "array", "items": { "type": "string" } },
+                        "definition_of_done": { "type": "array", "items": { "type": "object" } },
+                        "links": { "type": "array", "items": { "type": "object" } }
+                    },
+                    "required": ["title"]
+                },
+            },
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "task_update",
+                "description": "Patch one Planning task by KT reference or UUID. Only supplied fields change.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "task_id": { "type": "string" },
+                        "title": { "type": "string" },
+                        "description": { "type": "string" },
+                        "status": { "type": "string", "enum": ["idea", "todo", "in_progress", "blocked", "done", "archived"] },
+                        "priority": { "type": "string", "enum": ["critical", "high", "normal", "low"] },
+                        "parent_id": { "type": ["string", "null"] },
+                        "blocked_reason": { "type": ["string", "null"] },
+                        "rank": { "type": "integer" },
+                        "project_ids": { "type": "array", "items": { "type": "string" } },
+                        "tags": { "type": "array", "items": { "type": "string" } },
+                        "definition_of_done": { "type": "array", "items": { "type": "object" } },
+                        "links": { "type": "array", "items": { "type": "object" } }
+                    },
+                    "required": ["task_id"]
+                },
+            },
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "task_update_dod",
+                "description": "Check or uncheck one DoD item atomically, using ids returned by task_get.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "task_id": { "type": "string" },
+                        "dod_id": { "type": "string" },
+                        "completed": { "type": "boolean" }
+                    },
+                    "required": ["task_id", "dod_id", "completed"]
+                },
+            },
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "task_link_discussion",
+                "description": "Link an existing task to this discussion as active/later or as its primary objective.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "task_id": { "type": "string" },
+                        "placement": { "type": "string", "enum": ["active", "later"] },
+                        "is_primary": { "type": "boolean" },
+                        "position": { "type": "integer" }
+                    },
+                    "required": ["task_id"]
+                },
+            },
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "task_add_blocker",
+                "description": "Declare that one task is blocked by another. Cycles are rejected.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "task_id": { "type": "string" },
+                        "blocker_task_id": { "type": "string" }
+                    },
+                    "required": ["task_id", "blocker_task_id"]
+                },
+            },
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "task_remove_blocker",
+                "description": "Remove one dependency edge without changing task status or blocked reason. Safe to retry.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "task_id": { "type": "string" },
+                        "blocker_task_id": { "type": "string" }
+                    },
+                    "required": ["task_id", "blocker_task_id"]
                 },
             },
         }),
@@ -247,6 +425,200 @@ impl ToolExecutor for KronnToolExecutor {
                         .await;
                 unwrap_api(call, res.success, res.data, res.error)
             }
+            "plan_get" => {
+                let Some(disc_id) = self.discussion_id(call) else {
+                    return fail(call, "plan_get is available only inside a Kronn discussion");
+                };
+                let Json(res) = crate::api::planning::get_discussion_plan(
+                    State(self.state.clone()),
+                    Path(disc_id),
+                )
+                .await;
+                unwrap_api(call, res.success, res.data, res.error)
+            }
+            "task_list" => {
+                let mut query =
+                    match serde_json::from_value::<PlanningTaskListQuery>(call.arguments.clone()) {
+                        Ok(query) => query,
+                        Err(error) => {
+                            return fail(call, format!("invalid task_list fields: {error}"))
+                        }
+                    };
+                // HTTP agents are discussion-scoped. Do not let a model-supplied
+                // filter silently widen native Planning reads to another room.
+                if let Some(discussion_id) = &self.disc_id {
+                    query.discussion_id = Some(discussion_id.clone());
+                }
+                let Json(res) = crate::api::planning::list_tasks(
+                    State(self.state.clone()),
+                    axum::extract::Query(query),
+                )
+                .await;
+                unwrap_api(call, res.success, res.data, res.error)
+            }
+            "task_get" => {
+                let Some(task_id) = required_string(call, "task_id") else {
+                    return fail(call, "missing required field `task_id`");
+                };
+                let Json(res) =
+                    crate::api::planning::get_task(State(self.state.clone()), Path(task_id)).await;
+                unwrap_api(call, res.success, res.data, res.error)
+            }
+            "task_create" => {
+                let Some(discussion_id) = self.discussion_id(call) else {
+                    return fail(
+                        call,
+                        "task_create is available only inside a Kronn discussion",
+                    );
+                };
+                let mut value = call.arguments.clone();
+                let Some(fields) = value.as_object_mut() else {
+                    return fail(call, "task_create arguments must be an object");
+                };
+                fields.insert("discussion_id".into(), json!(discussion_id));
+                fields.insert("actor".into(), self.actor_json());
+                if let Some(key) = fields.get("idempotency_key").and_then(Value::as_str) {
+                    let digest =
+                        Sha256::digest(format!("{discussion_id}\0explicit\0{key}").as_bytes());
+                    fields.insert(
+                        "idempotency_key".into(),
+                        json!(format!("http-agent-task-create:{}", hex_digest(&digest))),
+                    );
+                }
+                let request = match serde_json::from_value::<CreatePlanningTaskRequest>(value) {
+                    Ok(request) => request,
+                    Err(error) => {
+                        return fail(call, format!("invalid task_create fields: {error}"))
+                    }
+                };
+                let Json(res) =
+                    crate::api::planning::create_task(State(self.state.clone()), Json(request))
+                        .await;
+                unwrap_api_compact_task(call, res.success, res.data, res.error)
+            }
+            "task_update" => {
+                let Some(task_id) = required_string(call, "task_id") else {
+                    return fail(call, "missing required field `task_id`");
+                };
+                let mut value = call.arguments.clone();
+                let Some(fields) = value.as_object_mut() else {
+                    return fail(call, "task_update arguments must be an object");
+                };
+                fields.remove("task_id");
+                fields.insert("actor".into(), self.actor_json());
+                let request = match serde_json::from_value::<UpdatePlanningTaskRequest>(value) {
+                    Ok(request) => request,
+                    Err(error) => {
+                        return fail(call, format!("invalid task_update fields: {error}"))
+                    }
+                };
+                let Json(res) = crate::api::planning::update_task(
+                    State(self.state.clone()),
+                    Path(task_id),
+                    Json(request),
+                )
+                .await;
+                unwrap_api_compact_task(call, res.success, res.data, res.error)
+            }
+            "task_update_dod" => {
+                let (Some(task_id), Some(dod_id)) = (
+                    required_string(call, "task_id"),
+                    required_string(call, "dod_id"),
+                ) else {
+                    return fail(call, "missing required fields `task_id` and/or `dod_id`");
+                };
+                let Some(completed) = call.arguments["completed"].as_bool() else {
+                    return fail(call, "missing boolean field `completed`");
+                };
+                let request = UpdatePlanningDodItemRequest {
+                    completed,
+                    actor: self.actor(),
+                };
+                let Json(res) = crate::api::planning::update_dod_item(
+                    State(self.state.clone()),
+                    Path((task_id, dod_id)),
+                    Json(request),
+                )
+                .await;
+                unwrap_api_compact_task(call, res.success, res.data, res.error)
+            }
+            "task_link_discussion" => {
+                let Some(task_id) = required_string(call, "task_id") else {
+                    return fail(call, "missing required field `task_id`");
+                };
+                let Some(discussion_id) = self.discussion_id(call) else {
+                    return fail(
+                        call,
+                        "task_link_discussion is available only inside a Kronn discussion",
+                    );
+                };
+                let mut value = call.arguments.clone();
+                let Some(fields) = value.as_object_mut() else {
+                    return fail(call, "task_link_discussion arguments must be an object");
+                };
+                fields.remove("task_id");
+                fields.insert("discussion_id".into(), json!(discussion_id));
+                fields.insert("actor".into(), self.actor_json());
+                let request = match serde_json::from_value::<LinkPlanningDiscussionRequest>(value) {
+                    Ok(request) => request,
+                    Err(error) => {
+                        return fail(
+                            call,
+                            format!("invalid task_link_discussion fields: {error}"),
+                        )
+                    }
+                };
+                let Json(res) = crate::api::planning::link_discussion(
+                    State(self.state.clone()),
+                    Path(task_id),
+                    Json(request),
+                )
+                .await;
+                unwrap_api(call, res.success, res.data, res.error)
+            }
+            "task_add_blocker" => {
+                let (Some(task_id), Some(blocker_task_id)) = (
+                    required_string(call, "task_id"),
+                    required_string(call, "blocker_task_id"),
+                ) else {
+                    return fail(
+                        call,
+                        "missing required fields `task_id` and/or `blocker_task_id`",
+                    );
+                };
+                let request = AddPlanningBlockerRequest {
+                    blocker_task_id,
+                    actor: self.actor(),
+                };
+                let Json(res) = crate::api::planning::add_blocker(
+                    State(self.state.clone()),
+                    Path(task_id),
+                    Json(request),
+                )
+                .await;
+                unwrap_api_compact_task(call, res.success, res.data, res.error)
+            }
+            "task_remove_blocker" => {
+                let (Some(task_id), Some(blocker_task_id)) = (
+                    required_string(call, "task_id"),
+                    required_string(call, "blocker_task_id"),
+                ) else {
+                    return fail(
+                        call,
+                        "missing required fields `task_id` and/or `blocker_task_id`",
+                    );
+                };
+                let request = RemovePlanningBlockerRequest {
+                    actor: self.actor(),
+                };
+                let Json(res) = crate::api::planning::remove_blocker(
+                    State(self.state.clone()),
+                    Path((task_id, blocker_task_id)),
+                    Json(request),
+                )
+                .await;
+                unwrap_api_compact_task(call, res.success, res.data, res.error)
+            }
             other => fail(
                 call,
                 format!("unknown tool `{other}` — call only the tools you were given"),
@@ -264,6 +636,26 @@ fn as_plain_string(v: &Value) -> String {
 }
 
 impl KronnToolExecutor {
+    fn discussion_id(&self, call: &ToolCall) -> Option<String> {
+        self.disc_id
+            .as_deref()
+            .filter(|id| !id.trim().is_empty())
+            .map(str::to_string)
+            .or_else(|| required_string(call, "discussion_id"))
+    }
+
+    fn actor(&self) -> PlanningActor {
+        PlanningActor {
+            kind: PlanningActorKind::Agent,
+            id: Some(self.actor_id.clone()),
+            source_message_id: self.source_message_id.clone(),
+        }
+    }
+
+    fn actor_json(&self) -> Value {
+        serde_json::to_value(self.actor()).expect("PlanningActor is serializable")
+    }
+
     /// Test seam for `resolve_config_id`, which is otherwise only reachable
     /// through a live tool call.
     #[cfg(test)]
@@ -284,6 +676,24 @@ impl KronnToolExecutor {
             .find(|c| c["server_id"] == slug)
             .and_then(|c| c["id"].as_str().map(str::to_string))
     }
+}
+
+fn required_string(call: &ToolCall, field: &str) -> Option<String> {
+    call.arguments[field]
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn hex_digest(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    output
 }
 
 /// Trim a description to something a model can scan without paying for prose.
@@ -406,6 +816,38 @@ fn unwrap_api<T: serde::Serialize>(
     }
 }
 
+/// Planning writes return a full task for the UI, including descriptions and
+/// history. The agent already knows what it wrote; keep only the receipt it
+/// needs to verify the mutation, matching the stdio bridge's `_task_ack`.
+fn unwrap_api_compact_task(
+    call: &ToolCall,
+    success: bool,
+    data: Option<crate::models::PlanningTaskDetail>,
+    error: Option<String>,
+) -> ToolOutcome {
+    match (success, data) {
+        (true, Some(task)) => ok(
+            call,
+            json!({
+                "id": task.summary.id,
+                "reference": task.summary.reference,
+                "title": task.summary.title,
+                "status": task.summary.status,
+                "priority": task.summary.priority,
+                "parent_reference": task.summary.parent_reference,
+                "blocker_count": task.summary.blocker_count,
+                "dod_progress": format!(
+                    "{}/{}",
+                    task.definition_of_done.iter().filter(|item| item.completed).count(),
+                    task.definition_of_done.len()
+                ),
+                "omitted": "description, full definition_of_done, events — call task_get for them"
+            }),
+        ),
+        _ => fail(call, error.unwrap_or_else(|| "call failed".into())),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -415,7 +857,22 @@ mod tests {
         // Ollama and OpenAI both read `type: function` + `function.parameters`
         // as a JSON Schema object; a malformed entry is silently ignored by the
         // model, which surfaces as "the tool never worked".
-        let expected = ["mcp_list", "api_endpoints", "qa_list", "qa_run", "api_call"];
+        let expected = [
+            "mcp_list",
+            "api_endpoints",
+            "qa_list",
+            "qa_run",
+            "api_call",
+            "plan_get",
+            "task_list",
+            "task_get",
+            "task_create",
+            "task_update",
+            "task_update_dod",
+            "task_link_discussion",
+            "task_add_blocker",
+            "task_remove_blocker",
+        ];
         let items = tool_catalogue();
         assert_eq!(items.len(), expected.len());
         for (item, name) in items.iter().zip(expected) {
@@ -543,5 +1000,26 @@ mod tests {
             by_name("mcp_list")["function"]["parameters"]["required"],
             serde_json::json!([])
         );
+        assert_eq!(
+            by_name("plan_get")["function"]["parameters"]["required"],
+            serde_json::json!([])
+        );
+        assert_eq!(
+            by_name("task_create")["function"]["parameters"]["required"],
+            serde_json::json!(["title"])
+        );
+        assert_eq!(
+            by_name("task_update_dod")["function"]["parameters"]["required"],
+            serde_json::json!(["task_id", "dod_id", "completed"])
+        );
+    }
+
+    #[test]
+    fn idempotency_digest_is_fixed_width_lowercase_hex() {
+        let digest = Sha256::digest(b"disc\0explicit\0one-logical-task");
+        let encoded = hex_digest(&digest);
+        assert_eq!(encoded.len(), 64);
+        assert!(encoded.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert_eq!(encoded, encoded.to_ascii_lowercase());
     }
 }

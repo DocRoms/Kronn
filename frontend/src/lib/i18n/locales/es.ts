@@ -899,6 +899,8 @@ const es: TranslationDict = {
   'planning.discussionLinked': 'Conversación vinculada',
   'planning.blockers': 'Bloqueada por',
   'planning.blockerAdded': 'Dependencia añadida',
+  'planning.blockerRemoved': 'Dependencia eliminada',
+  'planning.removeBlocker': 'Eliminar el bloqueo {0}',
   'planning.makePrimary': 'Definir como objetivo principal',
   'planning.removePrimary': 'Quitar como objetivo principal',
   'planning.moveLater': 'Mover a Más tarde',
@@ -1010,6 +1012,15 @@ const es: TranslationDict = {
   'disc.messagePlaceholder': 'Su mensaje...',
   'disc.attachFile': 'Agregar archivo de contexto',
   'disc.general': 'General',
+  // KT-254 — dos cifras, nunca una suma: un coste por respuesta y un total de
+  // sesión acumulado no tienen la misma unidad.
+  'disc.tokenCostInApp': 'agentes',
+  'disc.tokenCostInAppHint': 'Tokens de las respuestas de los agentes que Kronn ha lanzado en esta conversación. Un coste por respuesta, sumado.',
+  'disc.tokenCostCli': 'CLI',
+  'disc.tokenCostCliHint': 'Tráfico total notificado por las CLI unidas a esta conversación, lecturas de caché incluidas. Es el total de sus SESIONES: también cubre los ficheros leídos, los tests ejecutados y el trabajo hecho en otras salas. Deliberadamente NO se suma a la cifra de los agentes: no tienen la misma unidad.',
+  'disc.tokenCostCliUnknownHint': 'Hay una CLI unida pero ningún contador es legible: su coste es DESCONOCIDO, no cero. En una sesión real, 4100 millones de tokens se guardaron como cero.',
+  'disc.tokenCostUnknown': 'desconocido',
+  'disc.tokenCostPartial': '({0}/{1} sesiones medidas)',
   'disc.local': 'Local',
   'disc.system': 'Sistema',
   'disc.largeMessage': 'Mensaje voluminoso ({0} KB) — markdown desactivado, mostrado como texto plano para no bloquear la pestaña.',
@@ -1134,24 +1145,15 @@ const es: TranslationDict = {
   // 0.8.5 — disc-id pill in ChatHeader + sidebar tooltip + search by id prefix.
   'disc.idPillTooltip': 'ID completo: {0} · clic para copiar',
   'disc.idCopied': 'ID copiado al portapapeles',
-  'disc.session.short': 'Sesión',
   'disc.session.title': 'Sesión CLI vinculada',
   'disc.session.contractVersion': 'Contrato v{0}',
-  'disc.session.link': 'Vincular una sesión',
-  'disc.session.update': 'Actualizar',
   'disc.session.unlink': 'Desvincular',
   'disc.session.boundTooltip': '{0} · sesión {1}',
+  'disc.session.automatic': 'Establecido automáticamente al unirse la CLI. Dice de dónde viene este hilo, no quién habla ahora.',
   'disc.session.connected': 'Conectada',
   'disc.session.offline': 'Sin conexión o no detectada',
   'disc.session.copy': 'Copiar el ID de sesión {0}',
-  'disc.session.agent': 'CLI de origen',
-  'disc.session.id': 'ID de sesión',
-  'disc.session.idPlaceholder': 'ID proporcionado por Claude, Codex…',
-  'disc.session.required': 'El CLI y el ID de sesión son obligatorios.',
-  'disc.session.alreadyLinked': 'Esta sesión ya está vinculada a la conversación #{0}.',
-  'disc.session.linked': 'Sesión vinculada a la conversación',
   'disc.session.unlinked': 'Sesión desvinculada',
-  'disc.session.linkFailed': 'No se pudo vincular esta sesión',
   'disc.session.unlinkFailed': 'No se pudo desvincular esta sesión',
   'disc.session.history': 'Historial ({0})',
   'disc.session.closed': 'Cerrada',
@@ -2207,7 +2209,7 @@ const es: TranslationDict = {
   // ── MCP setup help (i18n overrides for token_help) ──
   'mcp.help.mcp-fastly': "Kronn incluye el CLI de Fastly y el servidor MCP oficial.\n\nAutenticación local recomendada:\n   fastly auth login\n   fastly auth list\n\nTambién puede guardar un FASTLY_API_TOKEN cifrado abajo. Kronn lo utiliza como respaldo si el CLI local no puede proporcionar su token.",
   'mcp.help.mcp-gitlab': "Requiere el CLI de GitLab (glab).\n\nAutenticación local recomendada:\n   glab auth login\n   glab auth status\n\nKronn reutiliza esta sesión para MCP y la detección de repositorios. Deje vacíos los campos siguientes o guarde un GITLAB_TOKEN cifrado (PAT con scope api) como respaldo. Para una instancia autogestionada, introduzca también su URL completa en GITLAB_HOST.",
-  'mcp.help.mcp-microsoft-365': "Conecta Outlook (correo, calendario), Teams, OneDrive y OneNote vía Microsoft Graph.\nServidor comunitario: @softeria/ms-365-mcp-server (--org-mode para cuentas profesionales).\nNo hay servidor MCP oficial de Microsoft por el momento.\n\nOpción 1 — App Softeria por defecto (rápido):\nDejar los campos vacíos. Al primer uso, el agente muestra un código y pide ir a https://microsoft.com/devicelogin. Su admin Microsoft puede bloquear apps de terceros.\n\nOpción 2 — Su propia app Azure (recomendado para organizaciones):\n1. portal.azure.com → Entra ID → Registros de aplicaciones → Nuevo registro\n2. Nombre: \"Kronn MCP\", tipo: Cuentas en esta org solamente\n3. Copiar ID de aplicación (cliente) → MS365_MCP_CLIENT_ID\n4. Copiar ID de directorio (inquilino) → MS365_MCP_TENANT_ID\n5. Autenticación → Marcar \"Permitir flujos de cliente público\" (¡obligatorio!)\n6. Permisos de API → Microsoft Graph → Permisos delegados:\n   Mail.Read, Mail.Send, Calendars.ReadWrite, Chat.Read, Files.ReadWrite, User.Read\n7. Conceder consentimiento del admin si es necesario\n\nAutenticación:\nAl primer uso, el servidor muestra un código y una URL.\nAbrir https://microsoft.com/devicelogin en un navegador, introducir el código, iniciar sesión.\nLos tokens se guardan localmente — no necesita re-autenticarse cada vez.\n\nSi obtiene \"Failed to reconnect\":\nnpx @softeria/ms-365-mcp-server --org-mode --logout\nnpx @softeria/ms-365-mcp-server --org-mode --login\n\nFunciona con todos los agentes Kronn (cross-agent).",
+  'mcp.help.api-microsoft-365': "Microsoft 365 (Outlook, Teams, OneDrive) a través de la API de Microsoft Graph, reutilizando la credencial de Azure CLI — sin token almacenado.\n\nInstala Azure CLI (multiplataforma):\n- macOS:   brew install azure-cli\n- Windows: winget install Microsoft.AzureCLI\n- Linux:   curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash  (Debian/Ubuntu)\n- Cualquier SO: https://aka.ms/installazurecli\n\nLuego, una vez: az login (usa el SSO/broker de tu organización — pasa la Conditional Access donde un device-code puro está bloqueado).\n\nVerifica: az account get-access-token --resource https://graph.microsoft.com\n\nKronn resuelve un token de Graph al vuelo vía el CLI, en memoria — nada se almacena en los ajustes ni en la config generada.",
 
   // ── Workflows ──
   'wf.title': 'Automatización',
@@ -2439,6 +2441,7 @@ const es: TranslationDict = {
   'wf.stepsShowDetails': 'Ver detalles',
   'wf.stepsHideDetails': 'Ocultar detalles',
   'wf.copyStepId': 'Copiar el ID del paso {0}',
+  'wf.stepInspectorMode': 'Modo de visualización del paso',
   'wf.stepPosition': 'Step {0} de {1}',
   'wf.stepPrevious': 'Mostrar el step anterior',
   'wf.stepNext': 'Mostrar el step siguiente',
@@ -3574,6 +3577,7 @@ Termina con [SIGNAL: OK].`,
 
   // ── Stale-stream watchdog (TD-20260504) ──
   'discussions.streamRecovered': 'Conexión con el agente perdida — último estado recargado',
+  'disc.interruptedFragment': 'Respuesta interrumpida — el agente fue cortado; sigue un reintento',
 
   // ── Migration ai/ → docs/ banner ──
   'migration.title': 'Convención `ai/` heredada detectada',

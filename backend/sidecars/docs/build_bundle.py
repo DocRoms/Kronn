@@ -81,7 +81,13 @@ def native_library_dirs(system: str) -> list[Path]:
             Path("/usr/lib64"),
             Path("/usr/lib"),
         ],
-        "Windows": [Path(r"C:\msys64\mingw64\bin")],
+        # Python.org CPython is built with UCRT. Keep MINGW64 second for
+        # existing local installs, but prefer MSYS2's current UCRT64 runtime so
+        # WeasyPrint never mixes incompatible CRT families in one process.
+        "Windows": [
+            Path(r"C:\msys64\ucrt64\bin"),
+            Path(r"C:\msys64\mingw64\bin"),
+        ],
     }
     return configured + defaults.get(system, [])
 

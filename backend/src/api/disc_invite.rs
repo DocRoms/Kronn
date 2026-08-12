@@ -100,6 +100,17 @@ fn normalize_conversation_id(raw: Option<&str>) -> Result<Option<String>, &'stat
 pub struct PeerJoinResponse {
     pub disc_id: String,
     pub session_pk: i64,
+    /// KT-247 — the joining agent's OWN durable room alias, e.g. `@claude-cli`
+    /// or `@claude-cli-2` when a second Claude Code is already in the room. The
+    /// agent uses it to recognise itself and to know which peer alias is NOT
+    /// it. `None` only for an unknown provider. Never a bare `@claude` that
+    /// would collide with the punctual agent.
+    #[serde(default)]
+    pub self_alias: Option<String>,
+    /// KT-247 — the numeric part of [`Self::self_alias`] (`1`, `2`, `3`…), so
+    /// the agent can say "I am CLI 2" without re-parsing the alias.
+    #[serde(default)]
+    pub cli_ordinal: Option<i64>,
     /// Opaque reload credential. Persist locally with mode 0600; never log or
     /// expose it to the model. The backend stores only its SHA-256 digest.
     pub resume_token: String,
@@ -227,6 +238,13 @@ pub struct PeerResumeResponse {
     pub session_pk: i64,
     /// Rotated credential replacing the one supplied in the request.
     pub resume_token: String,
+    /// KT-247 — the agent's own room alias, re-surfaced on resume so a CLI that
+    /// reloaded its MCP re-learns whether it is `@claude-cli` or `@claude-cli-2`
+    /// without a fresh join. `None` for an unknown provider.
+    #[serde(default)]
+    pub self_alias: Option<String>,
+    #[serde(default)]
+    pub cli_ordinal: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -342,6 +360,7 @@ pub async fn peer_join(
     }
 
     // Build the response from the resolved disc (shared by local + mirror paths).
+    let agent_type_for_alias = agent_type.clone();
     let res = state
         .db
         .with_conn(move |conn| {
@@ -394,7 +413,17 @@ pub async fn peer_join(
             // numbered, and tells the agent to introduce ITSELF
             // regardless of `peer_count` (don't wait for others to
             // arrive — the human watching the UI needs to see life).
-            let next_steps = join_next_steps(&disc_id, &disc_title, peer_count);
+            // KT-247 — resolve the joiner's own stable alias so its first reply
+            // can name itself and it never mistakes a same-provider peer for
+            // itself. Computed here (inside the conn closure) from the resolved
+            // session pk; a lookup miss degrades to None, never a guessed alias.
+            let cli_ordinal =
+                db::discussion_sessions::cli_session_ordinal(conn, session_pk).unwrap_or(None);
+            let self_alias =
+                db::discussion_sessions::cli_session_alias(&agent_type_for_alias, cli_ordinal);
+
+            let next_steps =
+                join_next_steps(&disc_id, &disc_title, peer_count, self_alias.as_deref());
             let plan_snapshot = peer_join_plan_snapshot(conn, &disc_id)?;
 
             Ok::<_, anyhow::Error>(PeerJoinResponse {
@@ -405,6 +434,8 @@ pub async fn peer_join(
                 pacing: Default::default(),
                 disc_id,
                 session_pk,
+                self_alias,
+                cli_ordinal,
                 resume_token,
                 peer_count,
                 disc_title,
@@ -428,9 +459,27 @@ pub async fn peer_join(
 /// The protocol handed to an agent that just joined a room. Extracted from
 /// the handler so the directives agents keep dropping — read the shared plan,
 /// stay in the room and follow it — are pinned by a test.
-fn join_next_steps(disc_id: &str, disc_title: &str, peer_count: i64) -> String {
+fn join_next_steps(
+    disc_id: &str,
+    disc_title: &str,
+    peer_count: i64,
+    self_alias: Option<&str>,
+) -> String {
+    // KT-247 — tell the agent its OWN durable room alias up front. Two
+    // same-provider CLIs (two Claude Code) otherwise both assume `@claude-cli`
+    // and answer for each other. `None` (unknown provider) omits the line
+    // rather than guessing an identity.
+    let identity_line = match self_alias {
+        Some(alias) => format!(
+            "🪪 YOUR ROOM IDENTITY: you are `{alias}` here. Address peers by \
+             their own alias; a message to `{alias}` is a message to YOU. \
+             Sign your intro with this alias.\n\n"
+        ),
+        None => String::new(),
+    };
     format!(
         "✅ You joined `{}` (title: {:?}, {} active participant(s) including you).\n\n\
+         {}\
          ⚠ REQUIRED PROTOCOL — execute IN ORDER, do NOT skip step 1 :\n\n\
          STEP 1 (DO IMMEDIATELY, EVEN IF YOU'RE THE FIRST/ONLY PARTICIPANT) :\n\
          Call `disc_append({{content: \"<your introduction>\"}})` to introduce \
@@ -449,7 +498,7 @@ fn join_next_steps(disc_id: &str, disc_title: &str, peer_count: i64) -> String {
          need the wider backlog, so you pick up the real work instead of \
          guessing or asking the human to re-explain. You may READ **and \
          UPDATE** those tasks — `task_create`, `task_update`, \
-         `task_update_dod`, `task_add_blocker` — and you are expected to keep \
+         `task_update_dod`, `task_add_blocker`, `task_remove_blocker` — and you are expected to keep \
          them honest as you go (a task you finished must not stay open, a \
          blocker you discovered must be recorded). Write only when tracked \
          work actually starts or materially changes; do not reload or rewrite \
@@ -502,7 +551,7 @@ fn join_next_steps(disc_id: &str, disc_title: &str, peer_count: i64) -> String {
          JOINING IS NOT THE TASK. Reporting progress is not the end of your \
          work either — the room is done when the plan is done or the human \
          says stop. To leave : `disc_leave()`, and only then.",
-        disc_id, disc_title, peer_count,
+        disc_id, disc_title, peer_count, identity_line,
     )
 }
 
@@ -557,14 +606,19 @@ pub async fn peer_resume(
                     &conversation_id,
                 )?;
             }
-            Ok(resumed)
+            let (cli_ordinal, self_alias) =
+                db::discussion_sessions::cli_session_identity(conn, resumed.session_pk)
+                    .unwrap_or((None, None));
+            Ok((resumed, cli_ordinal, self_alias))
         })
         .await
     {
-        Ok(resumed) => Json(ApiResponse::ok(PeerResumeResponse {
+        Ok((resumed, cli_ordinal, self_alias)) => Json(ApiResponse::ok(PeerResumeResponse {
             disc_id: resumed.disc_id,
             session_pk: resumed.session_pk,
             resume_token: resumed.resume_token,
+            self_alias,
+            cli_ordinal,
         })),
         Err(e) => Json(ApiResponse::err(e.to_string())),
     }
@@ -774,6 +828,15 @@ pub struct WaitForPeerQuery {
 /// remainder returns with the next wake).
 const AWARENESS_MAX_MESSAGES: usize = 20;
 
+/// Byte ceiling for one awareness batch, over message content. The message cap
+/// bounds the count but not the size — twenty long turns carry over 150 KiB.
+const AWARENESS_MAX_CONTENT_BYTES: usize = 24_576;
+
+/// KT-249 — consecutive unacknowledged offers that mean the client cannot
+/// acknowledge at all, rather than having discarded one delivery. Three: a
+/// healthy client resets the counter on every wake, so it never reaches two.
+const AWARENESS_STALLED_OFFERS_ALERT: i64 = 3;
+
 fn is_zero_u32(value: &u32) -> bool {
     *value == 0
 }
@@ -836,6 +899,13 @@ pub struct WaitForPeerMessage {
     /// insufficient because `@codex` and `@codex · CLI` are distinct targets.
     #[serde(default)]
     pub addressed_to_caller: bool,
+    /// KT-251 — `true` when this is the salvaged BEGINNING of an answer whose
+    /// agent was killed mid-sentence, not an answer. The dispatch job re-runs
+    /// after such a rescue, so a completed reply to the same turn exists further
+    /// down: treat the fragment as history, never as the peer's position. The DB
+    /// has always flagged these (`recovered_partial`) but never told a caller.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub recovered_partial: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -862,6 +932,22 @@ pub struct WaitForPeerResponse {
     /// the model's next tool call proves the delivery was consumed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub awareness_delivered_upto: Option<i64>,
+    /// KT-249 — consecutive awareness batches offered to this session without
+    /// it acknowledging any of them. Above [`AWARENESS_STALLED_OFFERS_ALERT`]
+    /// the caller is re-reading the same backlog on every wake and paying for
+    /// it, which no error would otherwise reveal — the usual cause is an MCP
+    /// bridge older than the acknowledgement protocol, cured by reconnecting.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub awareness_stalled_offers: u32,
+    /// KT-193 — how close this session is to its ceilings, present only when
+    /// there is something to say (`Warn`, `Rotate` or `Unknown`).
+    ///
+    /// Attached to the WAIT because that is where the agent already looks; a
+    /// cap nobody sees is not a cap. Omitted on a healthy session so the common
+    /// case costs nothing — the point of the whole release is to send fewer
+    /// bytes, not to add a status line to every response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_budget: Option<crate::core::session_budget::BudgetAssessment>,
     /// stab-3 — server-computed pacing: apply `next_delay_seconds` before
     /// the next wait, verbatim. Hot (short interval) while a User message is
     /// within the attention lease; otherwise the next DETERMINISTIC step of
@@ -1112,11 +1198,13 @@ pub async fn wait_for_peer(
     // `unused_assignments` under `-D warnings`).
     let mut awareness_omitted_total: u32;
     let mut awareness_delivered_upto: Option<i64>;
+    let mut awareness_stalled_offers: i64;
     loop {
         let disc_id_clone = disc_id.clone();
         let exclude_clone = exclude.clone();
         #[allow(clippy::type_complexity)]
-        let messages: anyhow::Result<(Vec<WaitForPeerMessage>, i64, u32, u32, Option<i64>)> = state
+        let messages: anyhow::Result<(Vec<WaitForPeerMessage>, i64, u32, u32, Option<i64>, i64)> =
+            state
             .db
             .with_conn(move |conn| {
                 let observed_latest: i64 = conn.query_row(
@@ -1138,7 +1226,7 @@ pub async fn wait_for_peer(
                     "SELECT message_id, sort_order, role, agent_type, content, timestamp,
                             author_pseudo, event_type, target_message_id, target_agent,
                             targets, author_agent_type, author_cli_session_id,
-                            native_fallback
+                            native_fallback, recovered_partial
                      FROM (
                          SELECT id AS message_id, sort_order, role, agent_type, content, timestamp,
                                 author_pseudo, NULL AS event_type,
@@ -1172,7 +1260,7 @@ pub async fn wait_for_peer(
                                     FROM message_cli_authors mca
                                     WHERE mca.message_id = messages.id
                                 ) AS author_cli_session_id,
-                                native_fallback
+                                native_fallback, recovered_partial
                          FROM messages
                          WHERE discussion_id = ?1
                            AND sort_order > ?2
@@ -1201,7 +1289,7 @@ pub async fn wait_for_peer(
                                 ) AS targets,
                                 NULL AS author_agent_type,
                                 NULL AS author_cli_session_id,
-                                0 AS native_fallback
+                                0 AS native_fallback, 0 AS recovered_partial
                          FROM message_revision_events
                          WHERE discussion_id = ?1
                            AND sort_order > ?2
@@ -1286,6 +1374,7 @@ pub async fn wait_for_peer(
                             targets,
                             reply_target,
                             awareness: false,
+                            recovered_partial: r.get::<_, Option<bool>>(14)?.unwrap_or(false),
                         })
                     })?
                     .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1343,6 +1432,7 @@ pub async fn wait_for_peer(
                     .collect();
                 let mut awareness_omitted: u32 = 0;
                 let mut awareness_upto: Option<i64> = None;
+                let mut stalled_offers: i64 = 0;
                 let mut merged = wake;
                 // Awareness attaches only when something legitimately wakes
                 // the model — an awareness-only window must not end the wait.
@@ -1370,6 +1460,10 @@ pub async fn wait_for_peer(
                             crate::db::discussion_sessions::advance_awareness_offered_upto(
                                 conn, session_pk, upto,
                             )?;
+                            stalled_offers =
+                                crate::db::discussion_sessions::note_awareness_offer(
+                                    conn, session_pk,
+                                )?;
                         }
                         // Deliver awareness before the wake turns and in
                         // transcript order; skip any row already in the wake
@@ -1392,18 +1486,26 @@ pub async fn wait_for_peer(
                 let delivered_in_window =
                     merged.iter().filter(|m| m.sort_order > since).count();
                 let withheld = peer_turns.saturating_sub(delivered_in_window) as u32;
-                Ok((merged, observed_latest, withheld, awareness_omitted, awareness_upto))
+                Ok((
+                    merged,
+                    observed_latest,
+                    withheld,
+                    awareness_omitted,
+                    awareness_upto,
+                    stalled_offers,
+                ))
             })
             .await;
 
         let messages = match messages {
-            Ok((messages, observed_latest, withheld, omitted, upto)) => {
+            Ok((messages, observed_latest, withheld, omitted, upto, stalled)) => {
                 observed_latest_order = observed_latest_order.max(observed_latest);
                 // The query always re-reads from the same `since`, so the latest
                 // count covers the whole window rather than one poll of it.
                 withheld_by_routing = withheld;
                 awareness_omitted_total = omitted;
                 awareness_delivered_upto = upto;
+                awareness_stalled_offers = stalled;
                 messages
             }
             Err(e) => return Json(ApiResponse::err(format!("wait_for_peer db error: {e}"))),
@@ -1439,6 +1541,42 @@ pub async fn wait_for_peer(
                     tracing::warn!("wait_for_peer: failed to set reading activity: {e}");
                 }
             }
+            // KT-249 — say it out loud. A caller that cannot acknowledge keeps
+            // being served the same backlog on every wake, at full cost, and
+            // nothing else in the exchange looks wrong.
+            if awareness_stalled_offers >= AWARENESS_STALLED_OFFERS_ALERT {
+                tracing::warn!(
+                    disc_id = %disc_id,
+                    session_id = ?session_id,
+                    stalled_offers = awareness_stalled_offers,
+                    "wait_for_peer: awareness offered {awareness_stalled_offers}x without a \
+                     single acknowledgement — this caller is re-reading the same backlog on \
+                     every wake. Usual cause: an MCP bridge older than the acknowledgement \
+                     protocol; reconnecting the MCP cures it."
+                );
+            }
+            // KT-193 — only surfaced when it is actionable. A healthy session
+            // gets no field at all, so the common path stays as small as it was.
+            let session_budget = if let Some(session_pk) = caller_session_pk {
+                let budget = crate::core::session_budget::SessionBudget::default();
+                state
+                    .db
+                    .with_read_conn(move |conn| {
+                        crate::db::cli_telemetry::assess_session(conn, session_pk, &budget)
+                    })
+                    .await
+                    .ok()
+                    // Only when actionable: a healthy session gets no field
+                    // at all, so the common path stays as small as it was.
+                    .filter(|assessment| {
+                        !matches!(
+                            assessment.verdict,
+                            crate::core::session_budget::BudgetVerdict::Ok
+                        )
+                    })
+            } else {
+                None
+            };
             let pacing = pacing_for_disc(&state, &disc_id).await;
             return Json(ApiResponse::ok(WaitForPeerResponse {
                 timed_out: false,
@@ -1450,6 +1588,8 @@ pub async fn wait_for_peer(
                 withheld_by_routing,
                 awareness_omitted: awareness_omitted_total,
                 awareness_delivered_upto,
+                awareness_stalled_offers: awareness_stalled_offers.max(0) as u32,
+                session_budget,
             }));
         }
 
@@ -1512,6 +1652,12 @@ pub async fn wait_for_peer(
                 // here would make the bridge wake the model for context alone.
                 awareness_omitted: 0,
                 awareness_delivered_upto: None,
+                // Nothing was offered, so nothing stalled on this return.
+                awareness_stalled_offers: 0,
+                // A quiet timeout says nothing new about the budget, and adding
+                // a status block to every empty poll would work against the
+                // release it belongs to.
+                session_budget: None,
             }));
         }
 
@@ -1522,9 +1668,10 @@ pub async fn wait_for_peer(
 /// KT-189 — load the AWARENESS backlog of one session: main-channel turns in
 /// `(cursor, upto]` that did not and will not wake this CLI — untargeted room
 /// traffic and turns addressed to another responder — excluding the session's
-/// own appends and its wake classes. Oldest first, bounded to
-/// [`AWARENESS_MAX_MESSAGES`]; the second value counts the rows left unacked
-/// beyond the cap (they return with the next wake).
+/// own appends and its wake classes. Oldest first, bounded by BOTH
+/// [`AWARENESS_MAX_MESSAGES`] and [`AWARENESS_MAX_CONTENT_BYTES`]; the second
+/// value counts the rows left unacked beyond either cap (they return with the
+/// next wake).
 fn load_awareness_batch(
     conn: &rusqlite::Connection,
     disc_id: &str,
@@ -1536,7 +1683,8 @@ fn load_awareness_batch(
     let mut stmt = conn.prepare(
         "SELECT message_id, sort_order, role, agent_type, content, timestamp,
                 author_pseudo, event_type, target_message_id, target_agent,
-                targets, author_cli_session_id
+                targets, author_cli_session_id, recovered_partial,
+                superseded_fragment
          FROM (
              SELECT id AS message_id, sort_order, role, agent_type, content,
                     timestamp, author_pseudo, NULL AS event_type,
@@ -1561,7 +1709,19 @@ fn load_awareness_batch(
                         SELECT mca.cli_session_id
                         FROM message_cli_authors mca
                         WHERE mca.message_id = messages.id
-                    ) AS author_cli_session_id
+                    ) AS author_cli_session_id,
+                    recovered_partial,
+                    (
+                        recovered_partial = 1
+                        AND EXISTS (
+                            SELECT 1 FROM messages complete
+                            WHERE complete.discussion_id = messages.discussion_id
+                              AND complete.channel = 'main'
+                              AND complete.role = 'Agent'
+                              AND complete.recovered_partial = 0
+                              AND complete.sort_order > messages.sort_order
+                        )
+                    ) AS superseded_fragment
              FROM messages
              WHERE discussion_id = ?1
                AND sort_order > ?2
@@ -1590,7 +1750,9 @@ fn load_awareness_batch(
                             ORDER BY mt.position ASC
                         ) AS ordered
                     ) AS targets,
-                    NULL AS author_cli_session_id
+                    NULL AS author_cli_session_id,
+                    0 AS recovered_partial,
+                    0 AS superseded_fragment
              FROM message_revision_events
              WHERE discussion_id = ?1
                AND sort_order > ?2
@@ -1605,7 +1767,7 @@ fn load_awareness_batch(
          )
          ORDER BY sort_order ASC",
     )?;
-    let rows: Vec<(WaitForPeerMessage, Option<i64>)> = stmt
+    let rows: Vec<(WaitForPeerMessage, Option<i64>, bool)> = stmt
         .query_map(rusqlite::params![disc_id, cursor, upto], |r| {
             let targets = r
                 .get::<_, Option<String>>(10)?
@@ -1661,13 +1823,16 @@ fn load_awareness_batch(
                 targets,
                 reply_target: None,
                 awareness: true,
+                recovered_partial: r.get::<_, Option<bool>>(12)?.unwrap_or(false),
             };
-            Ok((message, author_cli_session_id))
+            let superseded = r.get::<_, Option<bool>>(13)?.unwrap_or(false);
+            Ok((message, author_cli_session_id, superseded))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let mut batch: Vec<WaitForPeerMessage> = Vec::new();
     let mut omitted: u32 = 0;
-    for (message, author_cli_session_id) in rows {
+    let mut batch_bytes: usize = 0;
+    for (message, author_cli_session_id, superseded) in rows {
         // Wake classes and the session's own appends are not awareness.
         if author_cli_session_id == Some(session_pk)
             || message.addressed_to_caller
@@ -1675,7 +1840,24 @@ fn load_awareness_batch(
         {
             continue;
         }
-        if batch.len() < AWARENESS_MAX_MESSAGES {
+        // KT-251 — the truncated start of an answer whose complete version is
+        // already in the room. Shipping both as context pays twice for one
+        // reply, and the fragment stops mid-sentence. Only skipped once the
+        // complete reply EXISTS: when a retry never produced one, the fragment
+        // is the only trace of it and must still be read. Not counted as
+        // omitted — this is not deferred delivery, it is not context.
+        if superseded {
+            continue;
+        }
+        let bytes = message.content.len();
+        // The first eligible turn is admitted whatever its size. Only a
+        // DELIVERED row can be acknowledged, so omitting it would park the
+        // cursor in front of it and re-offer it on every wake forever.
+        let fits = batch.is_empty()
+            || (batch.len() < AWARENESS_MAX_MESSAGES
+                && batch_bytes + bytes <= AWARENESS_MAX_CONTENT_BYTES);
+        if fits {
+            batch_bytes += bytes;
             batch.push(message);
         } else {
             omitted += 1;
@@ -1775,7 +1957,7 @@ fn invite_handoff(token: &str) -> String {
          tâches en cours) et `task_list` si tu as besoin du reste du backlog — \
          ne demande pas qu'on te réexplique l'état, charge-le.\n\
          Tu peux créer, modifier, prioriser et cocher ces tâches \
-         (`task_create`, `task_update`, `task_update_dod`, `task_add_blocker`), \
+         (`task_create`, `task_update`, `task_update_dod`, `task_add_blocker`, `task_remove_blocker`), \
          en utilisant les outils `kronn-internal` autorisés.\n\
          Avant ta première action substantielle, annonce via `disc_append` la \
          tâche, le périmètre et la prochaine action dans la room.\n\
@@ -2288,6 +2470,7 @@ mod tests {
             "task_update",
             "task_update_dod",
             "task_add_blocker",
+            "task_remove_blocker",
         ] {
             assert!(handoff.contains(tool), "must state that {tool} is allowed");
         }
@@ -3876,6 +4059,613 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_session_budget_appears_only_when_it_is_actionable() {
+        // KT-193 — a healthy session must get NO field: adding a status block to
+        // every response would work against the release it belongs to. An
+        // unmeasured one must get `Unknown`, because a session nobody measured is
+        // the one that runs away unnoticed.
+        let state = make_state_with_disc("d-budget").await;
+        state
+            .db
+            .with_conn(|conn| {
+                let pk = crate::db::discussion_sessions::create_session(
+                    conn,
+                    "d-budget",
+                    "ClaudeCode",
+                    Some("cli-b"),
+                    "peer",
+                )?;
+                let now = chrono::Utc::now().to_rfc3339();
+                conn.execute(
+                    "INSERT INTO messages (id, discussion_id, role, content, timestamp,
+                         sort_order)
+                     VALUES ('u-wake', 'd-budget', 'User', 'ping', ?1, 1)",
+                    rusqlite::params![now],
+                )?;
+                crate::db::discussions::replace_message_targets(
+                    conn,
+                    "u-wake",
+                    &[crate::models::MessageTarget::cli(
+                        crate::models::AgentType::ClaudeCode,
+                        pk,
+                    )],
+                )?;
+                Ok(pk)
+            })
+            .await
+            .unwrap();
+
+        let response = wait_for_peer(
+            State(state.clone()),
+            Path("d-budget".to_string()),
+            Query(WaitForPeerQuery {
+                since_sort_order: Some(0),
+                timeout_secs: Some(1),
+                exclude_agent_type: Some("ClaudeCode".to_string()),
+                session_id: Some("cli-b".to_string()),
+                conversation_id: None,
+                ack_awareness_upto: None,
+            }),
+        )
+        .await
+        .0
+        .data
+        .unwrap();
+
+        // No telemetry row exists, so traffic is unmeasured → Unknown, and the
+        // field must be PRESENT to say so.
+        let assessment = response
+            .session_budget
+            .expect("an unmeasured session must be reported, not silently passed");
+        assert_eq!(
+            assessment.verdict,
+            crate::core::session_budget::BudgetVerdict::Unknown
+        );
+        assert!(
+            assessment.reason.contains("unwatched"),
+            "{}",
+            assessment.reason
+        );
+    }
+
+    #[tokio::test]
+    async fn a_healthy_session_gets_no_budget_field_at_all() {
+        // The token-saving half of the rule, and the one worth pinning: the
+        // common path must stay exactly as small as it was. A status block on
+        // every response would work against the release it belongs to.
+        let state = make_state_with_disc("d-budget-ok").await;
+        let pk = state
+            .db
+            .with_conn(|conn| {
+                let pk = crate::db::discussion_sessions::create_session(
+                    conn,
+                    "d-budget-ok",
+                    "ClaudeCode",
+                    Some("cli-ok"),
+                    "peer",
+                )?;
+                let now = chrono::Utc::now().to_rfc3339();
+                conn.execute(
+                    "INSERT INTO messages (id, discussion_id, role, content, timestamp,
+                         sort_order)
+                     VALUES ('u-wake', 'd-budget-ok', 'User', 'ping', ?1, 1)",
+                    rusqlite::params![now],
+                )?;
+                crate::db::discussions::replace_message_targets(
+                    conn,
+                    "u-wake",
+                    &[crate::models::MessageTarget::cli(
+                        crate::models::AgentType::ClaudeCode,
+                        pk,
+                    )],
+                )?;
+                Ok(pk)
+            })
+            .await
+            .unwrap();
+        // A real, cheap measurement — so traffic is KNOWN and small.
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::cli_telemetry::upsert(
+                    conn,
+                    &crate::db::cli_telemetry::CliSessionTelemetry {
+                        cli_session_pk: pk,
+                        vendor: "claude-code".into(),
+                        provenance: "claude-code-transcript".into(),
+                        input_tokens: Some(1_000),
+                        cache_creation_tokens: Some(1_000),
+                        cache_read_tokens: Some(1_000),
+                        output_tokens: Some(1_000),
+                        measured_responses: Some(3),
+                        models_json: None,
+                        window_start: None,
+                        window_end: None,
+                        vendor_cost_usd: None,
+                        read_offset: 10,
+                        updated_at: chrono::Utc::now().to_rfc3339(),
+                    },
+                )
+            })
+            .await
+            .unwrap();
+
+        let response = wait_for_peer(
+            State(state.clone()),
+            Path("d-budget-ok".to_string()),
+            Query(WaitForPeerQuery {
+                since_sort_order: Some(0),
+                timeout_secs: Some(1),
+                exclude_agent_type: Some("ClaudeCode".to_string()),
+                session_id: Some("cli-ok".to_string()),
+                conversation_id: None,
+                ack_awareness_upto: None,
+            }),
+        )
+        .await
+        .0
+        .data
+        .unwrap();
+        assert!(
+            response.session_budget.is_none(),
+            "a healthy session paid for a status block it did not need",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_recovered_fragment_is_flagged_to_the_caller_and_a_real_reply_is_not() {
+        // KT-251 — the DB has always flagged a salvaged half-answer, but the flag
+        // stopped at the API boundary, so a peer read the fragment as the other
+        // agent's position. The footer saying so is French prose in the content:
+        // not something a caller can branch on.
+        let state = make_state_with_disc("d-partial").await;
+        state
+            .db
+            .with_conn(|conn| {
+                let pk = crate::db::discussion_sessions::create_session(
+                    conn,
+                    "d-partial",
+                    "ClaudeCode",
+                    Some("cli-partial"),
+                    "peer",
+                )?;
+                let now = chrono::Utc::now().to_rfc3339();
+                // ORDER MATTERS: the complete reply comes FIRST, so the fragment
+                // that follows has none after it and is therefore not superseded.
+                // A superseded fragment leaves awareness entirely (its own test),
+                // and this one is about the flag, which needs the row delivered.
+                conn.execute(
+                    "INSERT INTO messages (id, discussion_id, role, content, timestamp,
+                         sort_order, recovered_partial)
+                     VALUES ('m-real', 'd-partial', 'Agent', 'a complete answer', ?1, 1, 0)",
+                    rusqlite::params![&now],
+                )?;
+                conn.execute(
+                    "INSERT INTO messages (id, discussion_id, role, content, timestamp,
+                         sort_order, recovered_partial)
+                     VALUES ('m-frag', 'd-partial', 'Agent', 'I was cut mid-sent', ?1, 2, 1)",
+                    rusqlite::params![&now],
+                )?;
+                // A fragment ADDRESSED to us, so the wake path carries one too.
+                // The two paths read different queries; an earlier version of
+                // this test only exercised awareness and passed with the wake
+                // read hardcoded to false.
+                conn.execute(
+                    "INSERT INTO messages (id, discussion_id, role, content, timestamp,
+                         sort_order, recovered_partial)
+                     VALUES ('m-frag-wake', 'd-partial', 'Agent', 'cut, and to you', ?1, 3, 1)",
+                    rusqlite::params![&now],
+                )?;
+                conn.execute(
+                    "INSERT INTO messages (id, discussion_id, role, content, timestamp,
+                         sort_order)
+                     VALUES ('m-wake', 'd-partial', 'User', 'ping', ?1, 4)",
+                    rusqlite::params![&now],
+                )?;
+                for id in ["m-frag-wake", "m-wake"] {
+                    crate::db::discussions::replace_message_targets(
+                        conn,
+                        id,
+                        &[crate::models::MessageTarget::cli(
+                            crate::models::AgentType::ClaudeCode,
+                            pk,
+                        )],
+                    )?;
+                }
+                Ok(pk)
+            })
+            .await
+            .unwrap();
+
+        let response = wait_for_peer(
+            State(state.clone()),
+            Path("d-partial".to_string()),
+            Query(WaitForPeerQuery {
+                since_sort_order: Some(0),
+                timeout_secs: Some(1),
+                exclude_agent_type: Some("ClaudeCode".to_string()),
+                session_id: Some("cli-partial".to_string()),
+                conversation_id: None,
+                ack_awareness_upto: None,
+            }),
+        )
+        .await
+        .0
+        .data
+        .unwrap();
+
+        let flagged = |id: &str| {
+            response
+                .messages
+                .iter()
+                .find(|m| m.message_id == id)
+                .map(|m| m.recovered_partial)
+        };
+        // Both must be DELIVERED — a fragment is history, not something to hide.
+        assert_eq!(
+            flagged("m-frag"),
+            Some(true),
+            "fragment not flagged on the awareness path",
+        );
+        assert_eq!(
+            flagged("m-frag-wake"),
+            Some(true),
+            "fragment not flagged on the wake path",
+        );
+        // The negative half: if everything came back true the flag would carry
+        // no information at all.
+        assert_eq!(flagged("m-real"), Some(false), "a real reply was flagged");
+    }
+
+    #[tokio::test]
+    async fn a_superseded_fragment_leaves_awareness_but_an_orphan_one_stays() {
+        // KT-251 — a truncated answer whose complete version is already in the
+        // room is paid for twice as context. Dropping it is only safe while a
+        // complete reply exists: when the retry never produced one, the fragment
+        // is the only trace there is.
+        async fn awareness_ids(disc: &'static str, with_complete_reply: bool) -> Vec<String> {
+            let state = make_state_with_disc(disc).await;
+            state
+                .db
+                .with_conn(move |conn| {
+                    let pk = crate::db::discussion_sessions::create_session(
+                        conn,
+                        disc,
+                        "ClaudeCode",
+                        Some("cli-sup"),
+                        "peer",
+                    )?;
+                    let now = chrono::Utc::now().to_rfc3339();
+                    conn.execute(
+                        "INSERT INTO messages (id, discussion_id, role, content, timestamp,
+                             sort_order, recovered_partial)
+                         VALUES ('s-frag', ?1, 'Agent', 'cut mid-sentence', ?2, 1, 1)",
+                        rusqlite::params![disc, &now],
+                    )?;
+                    if with_complete_reply {
+                        conn.execute(
+                            "INSERT INTO messages (id, discussion_id, role, content, timestamp,
+                                 sort_order, recovered_partial)
+                             VALUES ('s-real', ?1, 'Agent', 'the whole answer', ?2, 2, 0)",
+                            rusqlite::params![disc, &now],
+                        )?;
+                    }
+                    conn.execute(
+                        "INSERT INTO messages (id, discussion_id, role, content, timestamp,
+                             sort_order)
+                         VALUES ('s-wake', ?1, 'User', 'ping', ?2, 3)",
+                        rusqlite::params![disc, &now],
+                    )?;
+                    crate::db::discussions::replace_message_targets(
+                        conn,
+                        "s-wake",
+                        &[crate::models::MessageTarget::cli(
+                            crate::models::AgentType::ClaudeCode,
+                            pk,
+                        )],
+                    )?;
+                    Ok(pk)
+                })
+                .await
+                .unwrap();
+
+            wait_for_peer(
+                State(state.clone()),
+                Path(disc.to_string()),
+                Query(WaitForPeerQuery {
+                    since_sort_order: Some(0),
+                    timeout_secs: Some(1),
+                    exclude_agent_type: Some("ClaudeCode".to_string()),
+                    session_id: Some("cli-sup".to_string()),
+                    conversation_id: None,
+                    ack_awareness_upto: None,
+                }),
+            )
+            .await
+            .0
+            .data
+            .unwrap()
+            .messages
+            .into_iter()
+            .filter(|m| m.awareness)
+            .map(|m| m.message_id)
+            .collect()
+        }
+
+        let superseded = awareness_ids("d-sup-yes", true).await;
+        assert!(
+            !superseded.contains(&"s-frag".to_string()),
+            "a superseded fragment was still shipped as context: {superseded:?}",
+        );
+        assert!(
+            superseded.contains(&"s-real".to_string()),
+            "the complete reply must still arrive: {superseded:?}",
+        );
+
+        let orphan = awareness_ids("d-sup-no", false).await;
+        assert!(
+            orphan.contains(&"s-frag".to_string()),
+            "an unsuperseded fragment is the only trace of that answer and was dropped",
+        );
+    }
+
+    #[tokio::test]
+    async fn awareness_is_capped_on_bytes_before_the_message_count() {
+        // The message cap alone let one response carry over 150 KiB of
+        // re-delivered context. Long turns must hit the byte ceiling first.
+        let state = make_state_with_disc("d-awareness-bytes").await;
+        let long = "x".repeat(4_000);
+        state
+            .db
+            .with_conn(move |conn| {
+                let pk = crate::db::discussion_sessions::create_session(
+                    conn,
+                    "d-awareness-bytes",
+                    "ClaudeCode",
+                    Some("cli-bytes"),
+                    "peer",
+                )?;
+                let now = chrono::Utc::now().to_rfc3339();
+                for sort_order in 1..=10_i64 {
+                    conn.execute(
+                        "INSERT INTO messages (id, discussion_id, role, content,
+                             timestamp, sort_order)
+                         VALUES (?1, 'd-awareness-bytes', 'User', ?2, ?3, ?4)",
+                        rusqlite::params![
+                            format!("u-bytes-{sort_order}"),
+                            &long,
+                            &now,
+                            sort_order,
+                        ],
+                    )?;
+                }
+                conn.execute(
+                    "INSERT INTO messages (id, discussion_id, role, content,
+                         timestamp, sort_order)
+                     VALUES ('u-bytes-wake', 'd-awareness-bytes', 'User', 'ping', ?1, 11)",
+                    rusqlite::params![now],
+                )?;
+                crate::db::discussions::replace_message_targets(
+                    conn,
+                    "u-bytes-wake",
+                    &[crate::models::MessageTarget::cli(
+                        crate::models::AgentType::ClaudeCode,
+                        pk,
+                    )],
+                )?;
+                Ok(pk)
+            })
+            .await
+            .unwrap();
+
+        let first = wait_for_peer(
+            State(state.clone()),
+            Path("d-awareness-bytes".to_string()),
+            Query(WaitForPeerQuery {
+                since_sort_order: Some(0),
+                timeout_secs: Some(1),
+                exclude_agent_type: Some("ClaudeCode".to_string()),
+                session_id: Some("cli-bytes".to_string()),
+                conversation_id: None,
+                ack_awareness_upto: None,
+            }),
+        )
+        .await
+        .0
+        .data
+        .unwrap();
+
+        let awareness: Vec<_> = first.messages.iter().filter(|m| m.awareness).collect();
+        // Ten 4 000-byte turns are well under the 20-message cap, so anything
+        // the byte ceiling does not stop would be delivered whole.
+        assert!(
+            awareness.len() < 10,
+            "byte ceiling never engaged: {} turns delivered",
+            awareness.len(),
+        );
+        let delivered: usize = awareness.iter().map(|m| m.content.len()).sum();
+        assert!(
+            delivered <= AWARENESS_MAX_CONTENT_BYTES,
+            "batch carried {delivered} B, ceiling is {AWARENESS_MAX_CONTENT_BYTES} B",
+        );
+        // The remainder is reported, not dropped: it returns with the next wake.
+        assert_eq!(awareness.len() as u32 + first.awareness_omitted, 10);
+    }
+
+    #[tokio::test]
+    async fn a_turn_larger_than_the_byte_cap_is_still_delivered() {
+        // Negative control for the starvation trap: only a DELIVERED row can be
+        // acknowledged, so omitting an oversized turn would park the cursor in
+        // front of it and re-offer it on every wake, forever.
+        let state = make_state_with_disc("d-awareness-huge").await;
+        let huge = "y".repeat(AWARENESS_MAX_CONTENT_BYTES + 1_000);
+        state
+            .db
+            .with_conn(move |conn| {
+                let pk = crate::db::discussion_sessions::create_session(
+                    conn,
+                    "d-awareness-huge",
+                    "ClaudeCode",
+                    Some("cli-huge"),
+                    "peer",
+                )?;
+                let now = chrono::Utc::now().to_rfc3339();
+                conn.execute(
+                    "INSERT INTO messages (id, discussion_id, role, content,
+                         timestamp, sort_order)
+                     VALUES ('u-huge-1', 'd-awareness-huge', 'User', ?1, ?2, 1)",
+                    rusqlite::params![&huge, &now],
+                )?;
+                conn.execute(
+                    "INSERT INTO messages (id, discussion_id, role, content,
+                         timestamp, sort_order)
+                     VALUES ('u-huge-wake', 'd-awareness-huge', 'User', 'ping', ?1, 2)",
+                    rusqlite::params![now],
+                )?;
+                crate::db::discussions::replace_message_targets(
+                    conn,
+                    "u-huge-wake",
+                    &[crate::models::MessageTarget::cli(
+                        crate::models::AgentType::ClaudeCode,
+                        pk,
+                    )],
+                )?;
+                Ok(pk)
+            })
+            .await
+            .unwrap();
+
+        let response = wait_for_peer(
+            State(state.clone()),
+            Path("d-awareness-huge".to_string()),
+            Query(WaitForPeerQuery {
+                since_sort_order: Some(0),
+                timeout_secs: Some(1),
+                exclude_agent_type: Some("ClaudeCode".to_string()),
+                session_id: Some("cli-huge".to_string()),
+                conversation_id: None,
+                ack_awareness_upto: None,
+            }),
+        )
+        .await
+        .0
+        .data
+        .unwrap();
+
+        let awareness: Vec<_> = response.messages.iter().filter(|m| m.awareness).collect();
+        assert_eq!(awareness.len(), 1, "oversized turn was withheld");
+        assert_eq!(response.awareness_omitted, 0);
+        // Offered, so it can be acknowledged and never returns.
+        assert_eq!(response.awareness_delivered_upto, Some(1));
+    }
+
+    #[tokio::test]
+    async fn a_caller_that_never_acknowledges_is_flagged_and_one_that_does_is_not() {
+        // The offered cursor saturates one batch ahead of the ack cursor either
+        // way, so the gap cannot tell these two apart. The counter must.
+        async fn stalled_after_three_wakes(disc: &'static str, ack: bool) -> u32 {
+            let state = make_state_with_disc(disc).await;
+            let session_pk = state
+                .db
+                .with_conn(move |conn| {
+                    crate::db::discussion_sessions::create_session(
+                        conn,
+                        disc,
+                        "ClaudeCode",
+                        Some("cli-stall"),
+                        "peer",
+                    )
+                })
+                .await
+                .unwrap();
+
+            let mut stalled = 0;
+            let mut acked_upto: Option<i64> = None;
+            let mut since = 0_i64;
+            // One round = one new awareness turn plus one new wake. The rows are
+            // written between waits on purpose: seeded up front, the very first
+            // window swallows every wake, the healthy run is offered nothing
+            // after its first ack, and its counter can no longer move — the test
+            // would then pass with the reset deleted, which it must not.
+            for round in 0..3_i64 {
+                let context_order = round * 2 + 1;
+                state
+                    .db
+                    .with_conn(move |conn| {
+                        let now = chrono::Utc::now().to_rfc3339();
+                        conn.execute(
+                            "INSERT INTO messages (id, discussion_id, role, content,
+                                 timestamp, sort_order)
+                             VALUES (?1, ?2, 'User', 'room chatter', ?3, ?4)",
+                            rusqlite::params![
+                                format!("u-ctx-{context_order}"),
+                                disc,
+                                &now,
+                                context_order,
+                            ],
+                        )?;
+                        let wake_id = format!("u-wake-{}", context_order + 1);
+                        conn.execute(
+                            "INSERT INTO messages (id, discussion_id, role, content,
+                                 timestamp, sort_order)
+                             VALUES (?1, ?2, 'User', 'ping', ?3, ?4)",
+                            rusqlite::params![&wake_id, disc, &now, context_order + 1],
+                        )?;
+                        crate::db::discussions::replace_message_targets(
+                            conn,
+                            &wake_id,
+                            &[crate::models::MessageTarget::cli(
+                                crate::models::AgentType::ClaudeCode,
+                                session_pk,
+                            )],
+                        )?;
+                        Ok(())
+                    })
+                    .await
+                    .unwrap();
+
+                let response = wait_for_peer(
+                    State(state.clone()),
+                    Path(disc.to_string()),
+                    Query(WaitForPeerQuery {
+                        since_sort_order: Some(since),
+                        timeout_secs: Some(1),
+                        exclude_agent_type: Some("ClaudeCode".to_string()),
+                        session_id: Some("cli-stall".to_string()),
+                        conversation_id: None,
+                        // A healthy bridge echoes the previous batch here.
+                        ack_awareness_upto: if ack { acked_upto } else { None },
+                    }),
+                )
+                .await
+                .0
+                .data
+                .unwrap();
+                assert!(
+                    response.awareness_delivered_upto.is_some(),
+                    "round {round} offered no awareness — the test proves nothing",
+                );
+                stalled = response.awareness_stalled_offers;
+                acked_upto = response.awareness_delivered_upto.or(acked_upto);
+                since = response.latest_sort_order;
+            }
+            stalled
+        }
+
+        let neglected = stalled_after_three_wakes("d-stall-never", false).await;
+        assert!(
+            neglected >= AWARENESS_STALLED_OFFERS_ALERT as u32,
+            "three unacknowledged offers went unflagged (counter at {neglected})",
+        );
+
+        let healthy = stalled_after_three_wakes("d-stall-acks", true).await;
+        assert!(
+            healthy < AWARENESS_STALLED_OFFERS_ALERT as u32,
+            "an acknowledging caller was flagged (counter at {healthy})",
+        );
+    }
+
+    #[tokio::test]
     async fn rows_arriving_between_offer_and_ack_are_never_acked_away() {
         // KT-189 scan/offer/ack: a batch is offered (u-1), new awareness
         // rows land BEFORE the client acks, and the ack overshoots them.
@@ -4498,6 +5288,293 @@ mod tests {
         assert_eq!(data.latest_sort_order, 0);
     }
 
+    // ─── KT-198 DoD 1 — a silent room produces zero LLM turns ────────────
+
+    /// The release gate's headline property, asserted field by field.
+    ///
+    /// "Zero LLM turns" is not about the wait itself — it is about what the wait
+    /// HANDS BACK. Anything in that response reaches a CLI as something it has to
+    /// answer, and answering is the turn. So a silent room must return a response
+    /// with nothing actionable in it, and the check has to be exhaustive: a single
+    /// field that filled itself on an idle poll would put every waiting agent back
+    /// in the loop, which is exactly the leak KT-189 closed.
+    #[tokio::test]
+    async fn a_silent_room_hands_an_agent_nothing_to_answer() {
+        let state = make_state_with_disc("d-silent").await;
+        state
+            .db
+            .with_conn(|conn| {
+                let pk = crate::db::discussion_sessions::create_session(
+                    conn,
+                    "d-silent",
+                    "ClaudeCode",
+                    Some("cli-silent"),
+                    "peer",
+                )?;
+                // Telemetry present and HEALTHY. Without it `assess_session`
+                // returns nothing at all, and the assertion below would hold for
+                // the wrong reason — verified by a control that removed the
+                // actionability filter and left the test green.
+                crate::db::cli_telemetry::upsert(
+                    conn,
+                    &crate::db::cli_telemetry::CliSessionTelemetry {
+                        cli_session_pk: pk,
+                        vendor: "claude-code".into(),
+                        provenance: "test".into(),
+                        input_tokens: Some(1_000),
+                        cache_creation_tokens: Some(0),
+                        cache_read_tokens: Some(0),
+                        output_tokens: Some(500),
+                        measured_responses: Some(2),
+                        models_json: None,
+                        window_start: None,
+                        window_end: None,
+                        vendor_cost_usd: None,
+                        read_offset: 0,
+                        updated_at: chrono::Utc::now().to_rfc3339(),
+                    },
+                )?;
+                Ok(pk)
+            })
+            .await
+            .unwrap();
+
+        let resp = wait_for_peer(
+            State(state),
+            Path("d-silent".to_string()),
+            Query(WaitForPeerQuery {
+                since_sort_order: Some(0),
+                timeout_secs: Some(2),
+                exclude_agent_type: Some("ClaudeCode".to_string()),
+                session_id: Some("cli-silent".to_string()),
+                conversation_id: None,
+                ack_awareness_upto: None,
+            }),
+        )
+        .await;
+        let data = resp.0.data.expect("no response");
+
+        assert!(data.timed_out, "a silent room did not time out");
+        assert!(data.messages.is_empty(), "a silent room produced messages");
+        // Awareness: nothing offered, nothing omitted, no cursor moved. An offer
+        // here is a prompt.
+        assert_eq!(data.awareness_omitted, 0);
+        assert_eq!(data.awareness_delivered_upto, None);
+        assert_eq!(data.awareness_stalled_offers, 0);
+        // The quiet-timeout return hard-codes this to None: a status block on
+        // every empty poll would wake the model for context alone. Verified from
+        // the other side by `an_unhealthy_session_is_told_when_a_turn_is_happening_anyway`,
+        // which shows the field is not simply never populated.
+        assert!(
+            data.session_budget.is_none(),
+            "a budget assessment was attached to an idle poll: {:?}",
+            data.session_budget
+        );
+        assert_eq!(data.latest_sort_order, 0);
+    }
+
+    /// The positive half of the budget rule: an unhealthy session IS told — on the
+    /// delivery path, where a turn is happening anyway.
+    ///
+    /// I first wrote this test asserting the budget arrives on an IDLE poll, and it
+    /// failed. The handler hard-codes `session_budget: None` on the quiet-timeout
+    /// return, with a comment saying why: a status block on every empty poll would
+    /// wake the model for context alone, which is the leak this release closes. So
+    /// the design is the opposite of what I assumed, and the test is what was
+    /// wrong. Recorded here because the silent-room assertion above holds because
+    /// of THAT hard-coded None, not because of the actionability filter.
+    #[tokio::test]
+    async fn an_unhealthy_session_is_told_when_a_turn_is_happening_anyway() {
+        let state = make_state_with_disc("d-hot").await;
+        state
+            .db
+            .with_conn(|conn| {
+                let pk = crate::db::discussion_sessions::create_session(
+                    conn,
+                    "d-hot",
+                    "ClaudeCode",
+                    Some("cli-hot"),
+                    "peer",
+                )?;
+                crate::db::cli_telemetry::upsert(
+                    conn,
+                    &crate::db::cli_telemetry::CliSessionTelemetry {
+                        cli_session_pk: pk,
+                        vendor: "claude-code".into(),
+                        provenance: "test".into(),
+                        // Far past any sane budget: this session needs rotating.
+                        input_tokens: Some(4_000_000_000),
+                        cache_creation_tokens: Some(0),
+                        cache_read_tokens: Some(0),
+                        output_tokens: Some(0),
+                        measured_responses: Some(9_000),
+                        models_json: None,
+                        window_start: None,
+                        window_end: None,
+                        vendor_cost_usd: None,
+                        read_offset: 0,
+                        updated_at: chrono::Utc::now().to_rfc3339(),
+                    },
+                )?;
+                // A turn TARGETED at this CLI, so the wait returns on the delivery
+                // path. An untargeted user turn is awareness, not a wake — it would
+                // leave this test on the quiet-timeout path and prove nothing.
+                let now = chrono::Utc::now().to_rfc3339();
+                conn.execute(
+                    "INSERT INTO messages (
+                         id, discussion_id, role, content, timestamp, sort_order,
+                         target_agent
+                     ) VALUES ('m-hot', 'd-hot', 'User', 'hello', ?1, 1, 'ClaudeCode')",
+                    rusqlite::params![now],
+                )?;
+                conn.execute(
+                    "INSERT INTO message_targets (
+                         message_id, target_kind, agent_type, cli_session_id, position
+                     ) VALUES ('m-hot', 'cli', 'ClaudeCode', ?1, 0)",
+                    [pk],
+                )?;
+                Ok(pk)
+            })
+            .await
+            .unwrap();
+
+        let resp = wait_for_peer(
+            State(state),
+            Path("d-hot".to_string()),
+            Query(WaitForPeerQuery {
+                since_sort_order: Some(0),
+                timeout_secs: Some(2),
+                exclude_agent_type: Some("ClaudeCode".to_string()),
+                session_id: Some("cli-hot".to_string()),
+                conversation_id: None,
+                ack_awareness_upto: None,
+            }),
+        )
+        .await;
+        let data = resp.0.data.expect("no response");
+        assert!(!data.timed_out, "expected the delivery path");
+        assert!(
+            data.session_budget.is_some(),
+            "a session far past its budget was not told, on a turn it was already taking"
+        );
+    }
+
+    /// And a HEALTHY session gets no field, on that same delivery path.
+    ///
+    /// This is what makes the field mean something: attached always, it becomes a
+    /// block every wake carries and nobody reads.
+    #[tokio::test]
+    async fn a_healthy_session_gets_no_budget_block_even_on_a_delivery() {
+        let state = make_state_with_disc("d-cool").await;
+        state
+            .db
+            .with_conn(|conn| {
+                let pk = crate::db::discussion_sessions::create_session(
+                    conn,
+                    "d-cool",
+                    "ClaudeCode",
+                    Some("cli-cool"),
+                    "peer",
+                )?;
+                crate::db::cli_telemetry::upsert(
+                    conn,
+                    &crate::db::cli_telemetry::CliSessionTelemetry {
+                        cli_session_pk: pk,
+                        vendor: "claude-code".into(),
+                        provenance: "test".into(),
+                        input_tokens: Some(1_000),
+                        cache_creation_tokens: Some(0),
+                        cache_read_tokens: Some(0),
+                        output_tokens: Some(500),
+                        measured_responses: Some(2),
+                        models_json: None,
+                        window_start: None,
+                        window_end: None,
+                        vendor_cost_usd: None,
+                        read_offset: 0,
+                        updated_at: chrono::Utc::now().to_rfc3339(),
+                    },
+                )?;
+                let now = chrono::Utc::now().to_rfc3339();
+                conn.execute(
+                    "INSERT INTO messages (
+                         id, discussion_id, role, content, timestamp, sort_order,
+                         target_agent
+                     ) VALUES ('m-cool', 'd-cool', 'User', 'hello', ?1, 1, 'ClaudeCode')",
+                    rusqlite::params![now],
+                )?;
+                conn.execute(
+                    "INSERT INTO message_targets (
+                         message_id, target_kind, agent_type, cli_session_id, position
+                     ) VALUES ('m-cool', 'cli', 'ClaudeCode', ?1, 0)",
+                    [pk],
+                )?;
+                Ok(pk)
+            })
+            .await
+            .unwrap();
+
+        let resp = wait_for_peer(
+            State(state),
+            Path("d-cool".to_string()),
+            Query(WaitForPeerQuery {
+                since_sort_order: Some(0),
+                timeout_secs: Some(2),
+                exclude_agent_type: Some("ClaudeCode".to_string()),
+                session_id: Some("cli-cool".to_string()),
+                conversation_id: None,
+                ack_awareness_upto: None,
+            }),
+        )
+        .await;
+        let data = resp.0.data.expect("no response");
+        assert!(!data.timed_out, "expected the delivery path");
+        assert!(
+            data.session_budget.is_none(),
+            "a healthy session was handed a budget block: {:?}",
+            data.session_budget
+        );
+    }
+
+    /// The negative half: the same wait DOES deliver when there is something to
+    /// deliver. Without this, the test above would pass on a wait that never
+    /// returns anything at all.
+    #[tokio::test]
+    async fn the_same_wait_still_delivers_when_the_room_is_not_silent() {
+        let state = make_state_with_disc("d-not-silent").await;
+        state
+            .db
+            .with_conn(|conn| {
+                let now = chrono::Utc::now().to_rfc3339();
+                conn.execute(
+                    "INSERT INTO messages (id, discussion_id, role, content, timestamp,
+                         sort_order, tokens_used)
+                     VALUES ('m-1', 'd-not-silent', 'User', 'hello', ?1, 1, 0)",
+                    rusqlite::params![now],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let resp = wait_for_peer(
+            State(state),
+            Path("d-not-silent".to_string()),
+            Query(WaitForPeerQuery {
+                since_sort_order: Some(0),
+                timeout_secs: Some(2),
+                exclude_agent_type: None,
+                session_id: None,
+                conversation_id: None,
+                ack_awareness_upto: None,
+            }),
+        )
+        .await;
+        let data = resp.0.data.expect("no response");
+        assert!(!data.timed_out);
+        assert_eq!(data.messages.len(), 1, "the wait delivered nothing at all");
+    }
+
     // ─── KT-114 — late capture of the native resume id on the idle wait ──
 
     #[tokio::test]
@@ -4910,7 +5987,12 @@ mod tests {
     /// that a future edit keeps them.
     #[test]
     fn join_protocol_demands_reading_the_plan_and_staying() {
-        let steps = join_next_steps("d-1", "Room", 2);
+        let steps = join_next_steps("d-1", "Room", 2, Some("@claude-cli-2"));
+        // KT-247 — the agent must be told its own room identity up front.
+        assert!(
+            steps.contains("@claude-cli-2") && steps.contains("YOUR ROOM IDENTITY"),
+            "join protocol must state the agent's own durable alias"
+        );
 
         // Read the plan, and know the tasks are writable.
         assert!(steps.contains("plan_get"), "must point at the shared plan");
@@ -4920,6 +6002,7 @@ mod tests {
             "task_update",
             "task_update_dod",
             "task_add_blocker",
+            "task_remove_blocker",
         ] {
             assert!(steps.contains(tool), "must state that {tool} is allowed");
         }
@@ -4966,7 +6049,9 @@ mod tests {
 
     #[test]
     fn join_protocol_reports_the_room_it_joined() {
-        let steps = join_next_steps("disc-42", "Kronn 0.9.2", 3);
+        let steps = join_next_steps("disc-42", "Kronn 0.9.2", 3, None);
+        // Unknown/absent alias must simply omit the identity line, not guess one.
+        assert!(!steps.contains("YOUR ROOM IDENTITY"));
         assert!(steps.contains("disc-42"));
         assert!(steps.contains("Kronn 0.9.2"));
         assert!(steps.contains("3 active participant(s)"));

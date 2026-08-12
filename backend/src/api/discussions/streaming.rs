@@ -30,8 +30,9 @@ use super::{
     NON_STREAMING_STALL_TIMEOUT,
 };
 use crate::api::disc_helpers::{
-    agent_alias, agent_handoff_budget_instruction, agent_handoff_target_is_allowed, auth_mode_for,
-    estimate_extra_context_len, extract_agent_handoff_markers,
+    agent_alias, agent_display_name, agent_handoff_budget_instruction,
+    agent_handoff_target_is_allowed, auth_mode_for, estimate_extra_context_len,
+    extract_agent_handoff_markers,
 };
 use crate::api::disc_prompts::build_agent_prompt;
 
@@ -617,7 +618,7 @@ async fn make_agent_stream_inner(
     mut completion_tx: Option<tokio::sync::oneshot::Sender<AgentExecutionOutcome>>,
 ) -> Sse<SseStream> {
     let tracked_dispatch = dispatch_job_id.is_some();
-    let dispatch_trigger_message_id = if let Some(job_id) = dispatch_job_id.as_ref() {
+    let dispatch_metadata = if let Some(job_id) = dispatch_job_id.as_ref() {
         let job_id = job_id.clone();
         state
             .db
@@ -625,7 +626,7 @@ async fn make_agent_stream_inner(
             .await
             .ok()
             .flatten()
-            .map(|job| job.trigger_message_id)
+            .map(|job| (job.trigger_message_id, job.group_id))
     } else {
         let did = discussion_id.clone();
         state
@@ -636,7 +637,12 @@ async fn make_agent_stream_inner(
             .await
             .ok()
             .flatten()
+            .map(|trigger| (trigger, None))
     };
+    let dispatch_trigger_message_id = dispatch_metadata
+        .as_ref()
+        .map(|(trigger, _)| trigger.clone());
+    let dispatch_group_id = dispatch_metadata.and_then(|(_, group)| group);
     // 0.8.5 — capture the agent-run start wallclock. The delta between
     // this and the moment we commit the Agent message gives us the
     // real reply duration in milliseconds (excludes user typing time).
@@ -793,6 +799,9 @@ async fn make_agent_stream_inner(
                     // marker. Durable dispatch settlement owns batch progress
                     // atomically with the job's terminal state.
                     let persisted_err = DiscussionMessage {
+                        recovered_partial: false,
+                        session_tokens_at_message: None,
+                        author_cli_ordinal: None,
                         model: None,
                         lint_report: None,
                         id: Uuid::new_v4().to_string(),
@@ -872,6 +881,9 @@ async fn make_agent_stream_inner(
                         error = %error, "validation artifact redaction failed before agent spawn");
                     let safe_error = "Validation bloquée : impossible de garantir la suppression des secrets dans les artefacts d’audit.";
                     let persisted_err = DiscussionMessage {
+                        recovered_partial: false,
+                        session_tokens_at_message: None,
+                        author_cli_ordinal: None,
                         model: None,
                         lint_report: None,
                         id: Uuid::new_v4().to_string(),
@@ -925,6 +937,9 @@ async fn make_agent_stream_inner(
                     error = %error, "could not resolve durable validation-discussion link");
                 let safe_error = "Impossible de vérifier le périmètre de cette discussion avant le lancement de l’agent.";
                 let persisted_err = DiscussionMessage {
+                    recovered_partial: false,
+                    session_tokens_at_message: None,
+                    author_cli_ordinal: None,
                     model: None,
                     lint_report: None,
                     id: Uuid::new_v4().to_string(),
@@ -1446,6 +1461,49 @@ async fn make_agent_stream_inner(
             }
         };
 
+        // Durable execution boundary: `claimed_at` means the dispatcher owns
+        // the job, while `agent_started_at` means queueing is over and a paid
+        // or local provider call is about to begin. Persist it only after the
+        // global semaphore permit is held so capacity wait is measurable.
+        if let Some(job_id) = dispatch_job_id.as_ref() {
+            let started_id = job_id.clone();
+            match state
+                .db
+                .with_conn(move |conn| {
+                    crate::db::agent_dispatch::mark_agent_started(conn, &started_id)
+                })
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => {
+                    // Cancellation won after claim but before provider start.
+                    // The completion observer sees the durable Cancelled row.
+                    return;
+                }
+                Err(error) => {
+                    tracing::error!(
+                        dispatch_job_id = %job_id,
+                        "Unable to persist agent start boundary: {error}"
+                    );
+                    if let Some(sender) = completion_tx.take() {
+                        let _ = sender.send(AgentExecutionOutcome::RuntimeUnavailable {
+                            reason: "agent_start_boundary_persist_failed".to_string(),
+                        });
+                    }
+                    return;
+                }
+            }
+        }
+
+        if let Some(run_id) = dispatch_group_id.as_ref() {
+            let _ = state
+                .ws_broadcast
+                .send(crate::models::WsMessage::BatchRunChildStarted {
+                    run_id: run_id.clone(),
+                    discussion_id: disc_id.clone(),
+                });
+        }
+
         let _ = tx.send(AgentStreamEvent::Start).await;
         let _ = tx
             .send(AgentStreamEvent::Meta {
@@ -1476,6 +1534,8 @@ async fn make_agent_stream_inner(
                 crate::api::agent_tools::KronnToolExecutor::arc(
                     state.clone(),
                     Some(discussion_id.clone()),
+                    agent_display_name(&agent_type),
+                    dispatch_trigger_message_id.clone(),
                 )
             }),
             ..runner::AgentStartConfig::new(&agent_type, &project_path, &prompt, &tokens)
@@ -2084,6 +2144,9 @@ async fn make_agent_stream_inner(
                     Vec::new()
                 };
                 let agent_msg = DiscussionMessage {
+                    recovered_partial: false,
+                    session_tokens_at_message: None,
+                    author_cli_ordinal: None,
                     id: Uuid::new_v4().to_string(),
                     role: MessageRole::Agent,
                     channel: MessageChannel::Main,
@@ -2164,6 +2227,9 @@ async fn make_agent_stream_inner(
                     fabricated_count,
                 ) {
                     let refusal = DiscussionMessage {
+                        recovered_partial: false,
+                        session_tokens_at_message: None,
+                        author_cli_ordinal: None,
                         model: None,
                         lint_report: None,
                         id: Uuid::new_v4().to_string(),
@@ -2221,6 +2287,9 @@ async fn make_agent_stream_inner(
                         super::slash_markers::resolve_markers(&state, &disc_id, &markers).await;
                     for body in resolutions {
                         let sys_msg = DiscussionMessage {
+                            recovered_partial: false,
+                            session_tokens_at_message: None,
+                            author_cli_ordinal: None,
                             model: None,
                             lint_report: None,
                             id: Uuid::new_v4().to_string(),
@@ -2272,6 +2341,9 @@ async fn make_agent_stream_inner(
                 if !kronn_tool_calls.is_empty() {
                     for body in kronn_tool_calls.iter() {
                         let sys_msg = DiscussionMessage {
+                            recovered_partial: false,
+                            session_tokens_at_message: None,
+                            author_cli_ordinal: None,
                             model: None,
                             lint_report: None,
                             id: Uuid::new_v4().to_string(),
@@ -2322,6 +2394,9 @@ async fn make_agent_stream_inner(
                 if !native_tool_calls.is_empty() {
                     for body in native_tool_calls.iter() {
                         let sys_msg = DiscussionMessage {
+                            recovered_partial: false,
+                            session_tokens_at_message: None,
+                            author_cli_ordinal: None,
                             model: None,
                             lint_report: None,
                             id: Uuid::new_v4().to_string(),
@@ -2578,6 +2653,9 @@ async fn make_agent_stream_inner(
                 )
                 .unwrap_or_else(|| format!("Erreur: {e}"));
                 let err_msg = DiscussionMessage {
+                    recovered_partial: false,
+                    session_tokens_at_message: None,
+                    author_cli_ordinal: None,
                     model: attempted_model.clone(),
                     lint_report: None,
                     id: Uuid::new_v4().to_string(),
@@ -2689,6 +2767,9 @@ fn auth_required_system_message(
         ),
     };
     DiscussionMessage {
+        recovered_partial: false,
+        session_tokens_at_message: None,
+        author_cli_ordinal: None,
         model: None,
         lint_report: None,
         id: Uuid::new_v4().to_string(),

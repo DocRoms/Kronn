@@ -899,6 +899,8 @@ const en: TranslationDict = {
   'planning.discussionLinked': 'Discussion linked',
   'planning.blockers': 'Blocked by',
   'planning.blockerAdded': 'Dependency added',
+  'planning.blockerRemoved': 'Dependency removed',
+  'planning.removeBlocker': 'Remove blocker {0}',
   'planning.makePrimary': 'Make primary objective',
   'planning.removePrimary': 'Remove as primary objective',
   'planning.moveLater': 'Move to Later',
@@ -1010,6 +1012,15 @@ const en: TranslationDict = {
   'disc.messagePlaceholder': 'Your message...',
   'disc.attachFile': 'Add context file',
   'disc.general': 'General',
+  // KT-254 — two figures, never a sum: a per-reply cost and a cumulative session
+  // total are not the same unit.
+  'disc.tokenCostInApp': 'agents',
+  'disc.tokenCostInAppHint': 'Tokens from replies by agents Kronn spawned in this discussion. A per-reply cost, summed.',
+  'disc.tokenCostCli': 'CLI',
+  'disc.tokenCostCliHint': "Total traffic reported by the CLIs joined to this discussion, cache reads included. This is their SESSION total — it also covers files read, tests run, and work done in other rooms. Deliberately NOT added to the agent figure: the two are not the same unit.",
+  'disc.tokenCostCliUnknownHint': 'A CLI is joined but no counter is readable: its cost is UNKNOWN, not zero. On one real session, 4.1 billion tokens were stored as zero.',
+  'disc.tokenCostUnknown': 'unknown',
+  'disc.tokenCostPartial': '({0}/{1} sessions measured)',
   'disc.local': 'Local',
   'disc.system': 'System',
   'disc.largeMessage': 'Large message ({0} KB) — markdown disabled, shown as plain text to avoid freezing the tab.',
@@ -1135,24 +1146,15 @@ const en: TranslationDict = {
   // 0.8.5 — disc-id pill in ChatHeader + sidebar tooltip + search by id prefix.
   'disc.idPillTooltip': 'Full ID: {0} · click to copy',
   'disc.idCopied': 'ID copied to clipboard',
-  'disc.session.short': 'Session',
   'disc.session.title': 'Linked CLI session',
   'disc.session.contractVersion': 'Contract v{0}',
-  'disc.session.link': 'Link a session',
-  'disc.session.update': 'Update',
   'disc.session.unlink': 'Unlink',
   'disc.session.boundTooltip': '{0} · session {1}',
+  'disc.session.automatic': 'Established automatically when the CLI joined. It says where this thread came from, not who is speaking now.',
   'disc.session.connected': 'Connected',
   'disc.session.offline': 'Offline or not detected',
   'disc.session.copy': 'Copy session ID {0}',
-  'disc.session.agent': 'Source CLI',
-  'disc.session.id': 'Session ID',
-  'disc.session.idPlaceholder': 'ID provided by Claude, Codex…',
-  'disc.session.required': 'The CLI and session ID are required.',
-  'disc.session.alreadyLinked': 'This session is already linked to discussion #{0}.',
-  'disc.session.linked': 'Session linked to discussion',
   'disc.session.unlinked': 'Session unlinked',
-  'disc.session.linkFailed': 'Could not link this session',
   'disc.session.unlinkFailed': 'Could not unlink this session',
   'disc.session.history': 'History ({0})',
   'disc.session.closed': 'Closed',
@@ -2207,7 +2209,7 @@ const en: TranslationDict = {
   // ── MCP setup help (i18n overrides for token_help) ──
   'mcp.help.mcp-fastly': "Kronn includes the Fastly CLI and official MCP server.\n\nRecommended local authentication:\n   fastly auth login\n   fastly auth list\n\nYou can also store an encrypted FASTLY_API_TOKEN below. Kronn uses it as a fallback if the local CLI cannot provide its token.",
   'mcp.help.mcp-gitlab': "Requires the GitLab CLI (glab).\n\nRecommended local authentication:\n   glab auth login\n   glab auth status\n\nKronn reuses this session for MCP and repository discovery. Leave the fields below empty, or store an encrypted GITLAB_TOKEN (PAT with api scope) as a fallback. For a self-managed instance, also enter its full URL in GITLAB_HOST.",
-  'mcp.help.mcp-microsoft-365': "Connects Outlook (mail, calendar), Teams, OneDrive and OneNote via Microsoft Graph.\nCommunity server: @softeria/ms-365-mcp-server (--org-mode for work accounts).\nNo official Microsoft MCP server available yet.\n\nOption 1 — Default Softeria app (quick):\nLeave fields empty. On first launch, the agent shows a code and asks you to visit https://microsoft.com/devicelogin. Your Microsoft admin may block third-party apps.\n\nOption 2 — Your own Azure app (recommended for organizations):\n1. portal.azure.com → Entra ID → App registrations → New registration\n2. Name: \"Kronn MCP\", type: Accounts in this org only\n3. Copy Application (client) ID → MS365_MCP_CLIENT_ID\n4. Copy Directory (tenant) ID → MS365_MCP_TENANT_ID\n5. Authentication → Check \"Allow public client flows\" (required!)\n6. API permissions → Microsoft Graph → Delegated permissions:\n   Mail.Read, Mail.Send, Calendars.ReadWrite, Chat.Read, Files.ReadWrite, User.Read\n7. Grant admin consent if required\n\nAuthentication:\nOn first launch, the server displays a code and a URL.\nOpen https://microsoft.com/devicelogin in a browser, enter the code, sign in.\nTokens are cached locally — no need to re-authenticate each time.\n\nIf you get \"Failed to reconnect\":\nnpx @softeria/ms-365-mcp-server --org-mode --logout\nnpx @softeria/ms-365-mcp-server --org-mode --login\n\nWorks with all Kronn agents (cross-agent).",
+  'mcp.help.api-microsoft-365': "Microsoft 365 (Outlook, Teams, OneDrive) through the Microsoft Graph API, reusing the Azure CLI credential — no token stored.\n\nInstall the Azure CLI (cross-platform):\n- macOS:   brew install azure-cli\n- Windows: winget install Microsoft.AzureCLI\n- Linux:   curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash  (Debian/Ubuntu)\n- Any OS:  https://aka.ms/installazurecli\n\nThen, once: az login (uses your organization's SSO/broker — passes Conditional Access where a raw device-code flow is blocked).\n\nVerify: az account get-access-token --resource https://graph.microsoft.com\n\nKronn resolves a Graph token on the fly via the CLI, in memory — nothing is stored in settings or in the generated MCP config.",
 
   // ── Workflows ──
   'wf.title': 'Automation',
@@ -2439,6 +2441,7 @@ const en: TranslationDict = {
   'wf.stepsShowDetails': 'Show details',
   'wf.stepsHideDetails': 'Hide details',
   'wf.copyStepId': 'Copy step ID {0}',
+  'wf.stepInspectorMode': 'Step display mode',
   'wf.stepPosition': 'Step {0} of {1}',
   'wf.stepPrevious': 'Show previous step',
   'wf.stepNext': 'Show next step',
@@ -3574,6 +3577,7 @@ End with [SIGNAL: OK].`,
 
   // ── Stale-stream watchdog (TD-20260504) ──
   'discussions.streamRecovered': 'Connection to the agent was lost — latest state reloaded',
+  'disc.interruptedFragment': 'Interrupted reply — the agent was cut off; a retry follows',
 
   // ── Migration ai/ → docs/ banner ──
   'migration.title': 'Legacy `ai/` convention detected',

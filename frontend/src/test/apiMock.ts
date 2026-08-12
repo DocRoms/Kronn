@@ -60,6 +60,8 @@ export const API_NAMESPACES = [
   'apiCallLogs',
   'learnings',
   'health',
+  // KT-190 — joined-CLI token telemetry coverage.
+  'telemetry',
 ] as const;
 
 /** Flat top-level helpers (non-namespace exports). */
@@ -70,6 +72,7 @@ export const API_TOP_LEVEL_FNS = [
   'setApiBase',
   'getApiBase',
   'fetchHealth',
+  'measuredRatio',
 ] as const;
 
 interface DefaultMock {
@@ -107,6 +110,8 @@ interface DefaultMock {
   version: Record<string, AnyFn>;
   apiCallLogs: Record<string, AnyFn>;
   learnings: Record<string, AnyFn>;
+  telemetry: Record<string, AnyFn>;
+  measuredRatio: AnyFn;
 }
 
 /**
@@ -522,6 +527,12 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       reject: resolve(undefined),
       forDiscussion: resolve([]),
     },
+    // KT-190 — empty by default: a component must mount without inventing a
+    // coverage figure, and "no sessions" is the honest neutral state.
+    telemetry: {
+      coverage: resolve([]),
+    },
+    measuredRatio: vi.fn(() => null),
   };
 
   // Shallow-merge overrides onto base (namespace by namespace).

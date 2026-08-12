@@ -40,20 +40,34 @@ pub fn set_partial_response(
             let agent_type = provenance.map(|(agent, _)| format_agent_type(agent));
             let model = provenance.and_then(|(_, model)| model);
             conn.execute(
+                // KT-251 — the id is minted on the FIRST checkpoint and pinned by
+                // COALESCE, like the timestamp beside it. An answer therefore has
+                // one identity from its first streamed token to the salvaged
+                // message, instead of being named only once it is already dead.
                 "UPDATE discussions \
                  SET partial_response = ?2, \
                      partial_response_started_at = COALESCE(partial_response_started_at, ?3), \
                      partial_response_agent_type = ?4, \
-                     partial_response_model = ?5 \
+                     partial_response_model = ?5, \
+                     partial_response_message_id = \
+                         COALESCE(partial_response_message_id, ?6) \
                  WHERE id = ?1",
-                params![disc_id, text, Utc::now().to_rfc3339(), agent_type, model],
+                params![
+                    disc_id,
+                    text,
+                    Utc::now().to_rfc3339(),
+                    agent_type,
+                    model,
+                    uuid::Uuid::new_v4().to_string(),
+                ],
             )?;
         }
         None => {
             conn.execute(
                 "UPDATE discussions \
                  SET partial_response = NULL, partial_response_started_at = NULL, \
-                     partial_response_agent_type = NULL, partial_response_model = NULL \
+                     partial_response_agent_type = NULL, partial_response_model = NULL, \
+                     partial_response_message_id = NULL \
                  WHERE id = ?1",
                 params![disc_id],
             )?;
@@ -149,6 +163,8 @@ pub fn reconcile_awaiting_agents(conn: &Connection) -> Result<Vec<String>> {
         let owed = matches!(last_role.as_deref(), Some("User"));
         if owed {
             let msg = DiscussionMessage {
+                recovered_partial: false,
+                session_tokens_at_message: None,
                 model: None,
                 lint_report: None,
                 id: uuid::Uuid::new_v4().to_string(),
@@ -167,6 +183,7 @@ pub fn reconcile_awaiting_agents(conn: &Connection) -> Result<Vec<String>> {
                 duration_ms: None,
                 target_agent: None,
                 reply_to_message_id: None,
+                author_cli_ordinal: None,
             };
             // If the notice can't be persisted, KEEP awaiting_agent=1 so the
             // next boot retries: no notice landed, so retrying can't duplicate
@@ -201,11 +218,13 @@ pub fn recover_partial_responses(conn: &Connection) -> Result<Vec<String>> {
         Option<String>,
         Option<String>,
         Option<String>,
+        Option<String>,
     );
     let triples: Vec<PartialRow> = {
         let mut stmt = conn.prepare(
             "SELECT id, partial_response, partial_response_started_at, \
-                    partial_response_agent_type, partial_response_model \
+                    partial_response_agent_type, partial_response_model, \
+                    partial_response_message_id \
              FROM discussions WHERE partial_response IS NOT NULL",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -215,6 +234,7 @@ pub fn recover_partial_responses(conn: &Connection) -> Result<Vec<String>> {
                 row.get::<_, Option<String>>(2)?,
                 row.get::<_, Option<String>>(3)?,
                 row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<String>>(5)?,
             ))
         })?;
         rows.filter_map(|r| r.ok()).collect()
@@ -228,7 +248,7 @@ pub fn recover_partial_responses(conn: &Connection) -> Result<Vec<String>> {
         Voici ce qu'il avait écrit jusque-là. Relancez la discussion pour reprendre.";
 
     let mut recovered = Vec::with_capacity(triples.len());
-    for (disc_id, partial, started_at_str, agent_type_str, model) in triples {
+    for (disc_id, partial, started_at_str, agent_type_str, model, checkpoint_id) in triples {
         let content = format!("{}{}", partial.trim_end(), FOOTER);
         // Restore the checkpoint's provenance (KT-37). Legacy pre-089
         // checkpoints have NULL agent/model → the recovered bubble stays
@@ -245,9 +265,14 @@ pub fn recover_partial_responses(conn: &Connection) -> Result<Vec<String>> {
             .map(|d| d.with_timezone(&Utc))
             .unwrap_or_else(Utc::now);
         let msg = DiscussionMessage {
+            recovered_partial: false,
+            session_tokens_at_message: None,
             model,
             lint_report: None,
-            id: uuid::Uuid::new_v4().to_string(),
+            // KT-251 — reuse the id the checkpoint carried, so the salvaged
+            // message keeps the identity it had while streaming. A pre-109
+            // checkpoint has none: mint one rather than refuse to recover.
+            id: checkpoint_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
             role: MessageRole::Agent,
             channel: crate::models::MessageChannel::Main,
             content,
@@ -263,6 +288,7 @@ pub fn recover_partial_responses(conn: &Connection) -> Result<Vec<String>> {
             duration_ms: None,
             target_agent: None,
             reply_to_message_id: None,
+            author_cli_ordinal: None,
         };
         let recovery_result = (|| -> Result<()> {
             let transaction = conn.unchecked_transaction()?;
@@ -1676,7 +1702,13 @@ fn list_all_messages(
     conn: &Connection,
 ) -> Result<std::collections::HashMap<String, Vec<DiscussionMessage>>> {
     let mut stmt = conn.prepare(
-        "SELECT discussion_id, id, role, channel, content, agent_type, timestamp, tokens_used, auth_mode, model_tier, cost_usd, duration_ms, lint_report, model, reply_to_message_id
+        "SELECT discussion_id, id, role, channel, content, agent_type, timestamp, tokens_used, auth_mode, model_tier, cost_usd, duration_ms, lint_report, model, reply_to_message_id, session_tokens_at_message, recovered_partial,
+                (SELECT (SELECT COUNT(*) FROM discussion_sessions e
+                          WHERE e.disc_id = s.disc_id AND e.agent_type = s.agent_type
+                            AND e.id <= s.id)
+                   FROM message_cli_authors mca
+                   JOIN discussion_sessions s ON s.id = mca.cli_session_id
+                  WHERE mca.message_id = messages.id) AS author_cli_ordinal
          FROM messages ORDER BY sort_order, timestamp"
     )?;
 
@@ -1715,6 +1747,12 @@ fn list_all_messages(
                 model: row.get::<_, Option<String>>(13).unwrap_or(None),
                 target_agent: None,
                 reply_to_message_id: row.get::<_, Option<String>>(14).unwrap_or(None),
+                session_tokens_at_message: row.get::<_, Option<i64>>(15).unwrap_or(None),
+                recovered_partial: row
+                    .get::<_, Option<bool>>(16)
+                    .unwrap_or(Some(false))
+                    .unwrap_or(false),
+                author_cli_ordinal: row.get::<_, Option<i64>>(17).unwrap_or(None),
             },
         ))
     })?;
@@ -1743,7 +1781,15 @@ pub fn latest_main_user_message_id(
 
 pub fn list_messages(conn: &Connection, discussion_id: &str) -> Result<Vec<DiscussionMessage>> {
     let mut stmt = conn.prepare(
-        "SELECT id, role, channel, content, agent_type, timestamp, tokens_used, auth_mode, model_tier, cost_usd, author_pseudo, author_avatar_email, source_msg_id, duration_ms, lint_report, model, target_agent, reply_to_message_id
+        "SELECT id, role, channel, content, agent_type, timestamp, tokens_used, auth_mode, model_tier, cost_usd, author_pseudo, author_avatar_email, source_msg_id, duration_ms, lint_report, model, target_agent, reply_to_message_id, session_tokens_at_message, recovered_partial,
+                -- KT-247 stable ordinal of the authoring CLI session (NULL when
+                -- no message_cli_authors row: user/native/legacy).
+                (SELECT (SELECT COUNT(*) FROM discussion_sessions e
+                          WHERE e.disc_id = s.disc_id AND e.agent_type = s.agent_type
+                            AND e.id <= s.id)
+                   FROM message_cli_authors mca
+                   JOIN discussion_sessions s ON s.id = mca.cli_session_id
+                  WHERE mca.message_id = messages.id) AS author_cli_ordinal
          FROM messages WHERE discussion_id = ?1
          ORDER BY sort_order, timestamp"
     )?;
@@ -1782,6 +1828,12 @@ pub fn list_messages(conn: &Connection, discussion_id: &str) -> Result<Vec<Discu
                     .unwrap_or(None)
                     .map(|s| parse_agent_type(&s)),
                 reply_to_message_id: row.get::<_, Option<String>>(17).unwrap_or(None),
+                session_tokens_at_message: row.get::<_, Option<i64>>(18).unwrap_or(None),
+                recovered_partial: row
+                    .get::<_, Option<bool>>(19)
+                    .unwrap_or(Some(false))
+                    .unwrap_or(false),
+                author_cli_ordinal: row.get::<_, Option<i64>>(20).unwrap_or(None),
             })
         })?
         .filter_map(|r| r.ok())
@@ -1815,6 +1867,9 @@ pub fn list_notes(
             Ok((
                 row.get(0)?,
                 DiscussionMessage {
+                    recovered_partial: false,
+                    session_tokens_at_message: None,
+                    author_cli_ordinal: None,
                     id: row.get(1)?,
                     role: parse_role(&role),
                     channel: parse_message_channel(&channel),
@@ -3204,3 +3259,24 @@ pub fn get_context_files_for_prompt(
 #[cfg(test)]
 #[path = "discussions_test.rs"]
 mod discussions_test;
+
+/// KT-251 DoD 3 — the id an in-flight answer already carries.
+///
+/// Assigned on the first checkpoint (migration 109) and reused by the recovery,
+/// so it exists while the answer is still being written. Reported verbatim by the
+/// user who hit the problem: "je ne vois pas encore d'id, bizarre d'ailleurs,
+/// faudrait qu'on l'ait direct, ça t'aurait aidé au debug".
+///
+/// `None` when nothing is in flight, or for a checkpoint written before 109 —
+/// which must stay distinguishable from "in flight with an unknown id".
+pub fn pending_partial_message_id(conn: &Connection, disc_id: &str) -> Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT partial_response_message_id FROM discussions
+              WHERE id = ?1 AND partial_response IS NOT NULL",
+            params![disc_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten())
+}

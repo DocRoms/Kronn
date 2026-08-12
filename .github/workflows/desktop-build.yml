@@ -79,7 +79,11 @@ jobs:
         uses: msys2/setup-msys2@v2
         with:
           update: false
-          install: mingw-w64-x86_64-pango
+          # Python.org/Visual Studio builds use UCRT. MSYS2 recommends UCRT64
+          # for new software and deprecated MINGW64 in 2026; mixing the old
+          # MSVCRT DLL set with CPython made libgobject fail with Win32 0x7e.
+          msystem: UCRT64
+          install: mingw-w64-ucrt-x86_64-pango
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -125,6 +129,14 @@ jobs:
         working-directory: frontend
         run: pnpm build
 
+      # Fail before the expensive Rust/Tauri compile if WeasyPrint cannot load
+      # the host's native Pango DLLs. Tauri runs the same builder again through
+      # beforeBuildCommand; the prepared venv is reused.
+      - name: Build and smoke-test document exporter
+        run: node desktop/scripts/build-docs-sidecar.mjs
+        env:
+          KRONN_DOCS_NATIVE_LIB_DIRS: ${{ matrix.os == 'windows-latest' && 'C:\msys64\ucrt64\bin' || '' }}
+
       - name: Install Tauri CLI
         run: cargo install tauri-cli --version "^2" --locked
 
@@ -147,13 +159,18 @@ jobs:
           if [ -n "$_APPLE_CERTIFICATE" ]; then
             export APPLE_CERTIFICATE="$_APPLE_CERTIFICATE"
             export APPLE_CERTIFICATE_PASSWORD="$_APPLE_CERTIFICATE_PASSWORD"
+          fi
+          if [ -n "$_APPLE_SIGNING_IDENTITY" ]; then
             export APPLE_SIGNING_IDENTITY="$_APPLE_SIGNING_IDENTITY"
+          fi
+          if [ -n "$_APPLE_ID" ] && [ -n "$_APPLE_PASSWORD" ] && [ -n "$_APPLE_TEAM_ID" ]; then
             export APPLE_ID="$_APPLE_ID"
             export APPLE_PASSWORD="$_APPLE_PASSWORD"
             export APPLE_TEAM_ID="$_APPLE_TEAM_ID"
           fi
           cargo tauri build --target ${{ matrix.target }}
         env:
+          KRONN_DOCS_NATIVE_LIB_DIRS: ${{ matrix.os == 'windows-latest' && 'C:\msys64\ucrt64\bin' || '' }}
           # Tauri updater signing — safe to pass even if empty (Tauri ignores empty values)
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
@@ -175,30 +192,14 @@ jobs:
           fi
           python backend/sidecars/docs/smoke_bundle.py "$SIDECAR"
 
-      # Ad-hoc sign macOS .app when no Apple Developer certificate is configured.
-      # This removes the "app is damaged" error for most users. Without a paid
-      # Apple Developer ID ($99/yr), full notarization is not possible — users
-      # may still need to run: xattr -cr /Applications/Kronn.app
-      - name: Ad-hoc sign macOS app
+      # Tauri signs the .app BEFORE creating the DMG. `bundle.macOS.signingIdentity`
+      # defaults to the ad-hoc identity and APPLE_SIGNING_IDENTITY overrides it
+      # when release credentials are configured. Signing a bundle copy after the
+      # DMG was created leaves the uploaded image with an invalid linker signature.
+      - name: Verify macOS disk image and app signature
         if: startsWith(matrix.os, 'macos')
         shell: bash
         run: |
-          # `bash -e -o pipefail` propagates find's non-zero exit when its
-          # search path doesn't exist, which kills the whole step before
-          # the fallback message can run. Guard the directory explicitly
-          # and log diagnostics — useful when tauri-bundler decides to
-          # write the bundle under a different target prefix than we
-          # expect (happened on macos-15 / x86_64-apple-darwin where the
-          # bundle landed under `release/bundle` without the target prefix).
-          # Bundle path resolution. Two roots possible:
-          #   - LEGACY (pre-2026-05-15): `desktop/src-tauri/target/...`
-          #   - SHARED  (since `.cargo/config.toml` set `target-dir = "target"`
-          #     at the repo root to mutualise tokio/serde/reqwest between
-          #     backend/ and desktop/src-tauri/ → ~40-50% local cache savings,
-          #     cf. [[feedback_rust_target_bloat]]): `target/...` (project root).
-          # Two triple suffixes possible: `<triple>/release/bundle` when
-          # cross-compiling, plain `release/bundle` when host==target.
-          # Check all 4 combinations, use the first that exists.
           BUNDLE_CANDIDATES=(
             "desktop/src-tauri/target/${{ matrix.target }}/release/bundle"
             "desktop/src-tauri/target/release/bundle"
@@ -216,22 +217,34 @@ jobs:
           if [ -z "$BUNDLE_DIR" ]; then
             echo "No bundle dir found in any of:"
             printf '  - %s\n' "${BUNDLE_CANDIDATES[@]}"
-            echo "Diagnostics:"
-            ls -la "target/" 2>/dev/null || echo "  (root target/ missing)"
-            ls -la "desktop/src-tauri/target/" 2>/dev/null || echo "  (desktop/src-tauri/target/ missing)"
-            echo "Skipping ad-hoc sign — no bundle to sign."
-            exit 0
+            exit 1
           fi
-          APP_PATH=$(find "$BUNDLE_DIR" -maxdepth 3 -name "*.app" 2>/dev/null | head -1)
-          if [ -n "$APP_PATH" ] && [ -z "$_APPLE_CERTIFICATE" ]; then
-            echo "No Apple Developer certificate — applying ad-hoc signature"
-            codesign --force --deep -s - "$APP_PATH"
-            echo "Ad-hoc signed: $APP_PATH"
+          DMG_PATH=$(find "$BUNDLE_DIR/dmg" -maxdepth 1 -name "*.dmg" -print -quit)
+          if [ -z "$DMG_PATH" ]; then
+            echo "No DMG found under $BUNDLE_DIR/dmg"
+            exit 1
+          fi
+          hdiutil verify "$DMG_PATH"
+          MOUNT_DIR=$(mktemp -d)
+          trap 'hdiutil detach "$MOUNT_DIR" >/dev/null 2>&1 || true; rmdir "$MOUNT_DIR" >/dev/null 2>&1 || true' EXIT
+          hdiutil attach -nobrowse -readonly -mountpoint "$MOUNT_DIR" "$DMG_PATH"
+          APP_PATH=$(find "$MOUNT_DIR" -maxdepth 1 -name "*.app" -print -quit)
+          if [ -z "$APP_PATH" ]; then
+            echo "The DMG contains no .app bundle"
+            exit 1
+          fi
+          codesign --verify --deep --strict --verbose=4 "$APP_PATH"
+          codesign --display --verbose=2 "$APP_PATH"
+          if [ -n "$_APPLE_ID" ] && [ -n "$_APPLE_PASSWORD" ] && [ -n "$_APPLE_TEAM_ID" ]; then
+            xcrun stapler validate "$DMG_PATH"
+            spctl --assess --type execute --verbose=4 "$APP_PATH"
           else
-            echo "Skipping ad-hoc sign (Apple certificate configured or no .app found)"
+            echo "Ad-hoc build verified; Gatekeeper still requires explicit user approval."
           fi
         env:
-          _APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          _APPLE_ID: ${{ secrets.APPLE_ID }}
+          _APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          _APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
 
       # ─── Upload artifacts ─────────────────────────────────────────
 

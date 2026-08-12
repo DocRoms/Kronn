@@ -10,6 +10,10 @@ vi.mock('../../hooks/useWebSocket', () => ({
 
 // Mock ALL API modules used by Dashboard and its children
 vi.mock('../../lib/api', () => ({
+  // KT-190 — the Dashboard mounts TelemetryCoveragePanel. Empty coverage is
+  // the honest neutral: no sessions measured, nothing claimed.
+  telemetry: { coverage: vi.fn().mockResolvedValue([]) },
+  measuredRatio: vi.fn(() => null),
   projects: {
     list: vi.fn().mockResolvedValue([]),
     scan: vi.fn().mockResolvedValue([]),

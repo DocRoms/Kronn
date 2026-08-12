@@ -4,12 +4,13 @@ import { workflows as workflowsApi, quickPrompts as quickPromptsApi } from '../.
 import type { BatchPreview } from '../../lib/api';
 import { AGENT_LABELS, isAgentRestricted } from '../../lib/constants';
 import { extractLikelyOutput } from '../../lib/extractLikelyOutput';
-import type { Workflow, WorkflowRun, StepResult, AgentsConfig, WorkflowStep, QuickPrompt, BatchRunSummary, AgentType, ModelTier } from '../../types/generated';
+import type { Workflow, WorkflowRun, StepResult, AgentsConfig, WorkflowStep, QuickPrompt, BatchRunSummary, AgentType, ModelTier, Project } from '../../types/generated';
 import {
   Trash2, Play, Loader2, Check, X, ChevronLeft, ChevronRight, ChevronDown,
   Settings, RefreshCw, AlertTriangle, FlaskConical,
   Layers, GitBranch, MessageSquare, Plug, Send,
   Download, Square, Hand, Terminal, Braces, Sparkles, Zap, Search,
+  Eye, Pencil,
 } from 'lucide-react';
 import { filterRuns, groupRunsByParent, RUN_PAGE_SIZE, type RunStatusFilter } from '../../lib/runFilters';
 import { formatDurationCompact } from '../../lib/kronnToolParser';
@@ -19,6 +20,7 @@ import { RunDetail, RunStatusTrail } from './RunDetail';
 import { liveStepWaitingKey, runStatusTimeline } from '../../lib/workflowUiUtils';
 import { AgentSwitchPicker } from '../AgentSwitchPicker';
 import { CopyIdPill } from '../CopyIdPill';
+import { WorkflowWizard } from './WorkflowWizard';
 import '../../pages/WorkflowsPage.css';
 
 const checkAgentRestricted = isAgentRestricted;
@@ -154,6 +156,8 @@ export interface WorkflowDetailProps {
   onTrigger: () => void;
   onRefresh: () => void;
   onEdit: () => void;
+  projects?: Project[];
+  configLanguage?: string;
   onDeleteRun: (runId: string) => void;
   onDeleteAllRuns: () => void;
   triggering: boolean;
@@ -1421,7 +1425,7 @@ function SubWorkflowOverview({
   );
 }
 
-export function WorkflowDetail({ workflow, runs, availableAgentTypes, onChangeStepAgent, totalRuns, hasMoreRuns = false, loadingMoreRuns = false, onLoadMoreRuns, liveRun, onTrigger, onRefresh, onEdit, onDeleteRun, onDeleteAllRuns, triggering, agentAccess, onNavigateToBatch, onNavigateToWorkflow, onNavigateToRun, focusRunId, onExport, onGateDecided, onToggleEnabled, toast }: WorkflowDetailProps) {
+export function WorkflowDetail({ workflow, runs, availableAgentTypes, onChangeStepAgent, totalRuns, hasMoreRuns = false, loadingMoreRuns = false, onLoadMoreRuns, liveRun, onTrigger, onRefresh, onEdit, onDeleteRun, onDeleteAllRuns, triggering, agentAccess, onNavigateToBatch, onNavigateToWorkflow, onNavigateToRun, focusRunId, onExport, onGateDecided, onToggleEnabled, toast, projects = [], configLanguage }: WorkflowDetailProps) {
   const { t } = useT();
   const [showRuns, setShowRuns] = useState(true);
   const [isWorkflowIdCopied, setIsWorkflowIdCopied] = useState(false);
@@ -1489,12 +1493,12 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, onChangeSt
     });
     return () => cancelAnimationFrame(raf);
   }, [focusRunId, runs]);
-  // Steps panel collapses to a compact pipeline by default — the full
-  // per-step cards (with prompts + Test buttons) are heavy and rarely what
-  // you want at a glance, especially while a run is in flight. "Voir en
-  // détails" expands the legacy card list.
-  const [stepsExpanded, setStepsExpanded] = useState(false);
+  // The first step is selected as soon as a workflow opens, so its focused
+  // preview must be visible too. Users can still collapse the inspector when
+  // they only need the compact pipeline.
+  const [stepsExpanded, setStepsExpanded] = useState(true);
   const [selectedStepIndexRaw, setSelectedStepIndex] = useState(0);
+  const [stepInspectorMode, setStepInspectorMode] = useState<'preview' | 'edit'>('preview');
   const [provenanceOpenFor, setProvenanceOpenFor] = useState<number | null>(null);
   const gotoEdges = useMemo(() => computeGotoEdges(workflow.steps), [workflow.steps]);
   const selectedStepIndex = Math.min(
@@ -1503,6 +1507,7 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, onChangeSt
   );
   const selectStep = (index: number, openDetails = true) => {
     setSelectedStepIndex(index);
+    setStepInspectorMode('preview');
     if (openDetails) setStepsExpanded(true);
   };
   // Per-step expand state for the live run view. Keyed by step name (not
@@ -1663,7 +1668,7 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, onChangeSt
           </button>
         </div>
         <div className="wf-detail-actions">
-          <button className="wf-small-btn" onClick={onEdit}>
+          <button className="wf-small-btn" onClick={() => onEdit()}>
             <Settings size={10} /> {t('wf.edit')}
           </button>
           {/* 0.7.0 UX pass — export button bundles the workflow + any
@@ -1720,8 +1725,7 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, onChangeSt
         </div>
       )}
 
-      {/* Steps — collapsed compact pipeline by default; "Voir en détails"
-          reveals the full per-step cards. */}
+      {/* Steps — compact pipeline plus one focused preview by default. */}
       {(() => {
         const agentCount = workflow.steps.filter(s => compactStepMeta(s).usesTokens).length;
         const determCount = workflow.steps.length - agentCount;
@@ -1833,6 +1837,32 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, onChangeSt
             {stepsExpanded && selectedStep && selectedMeta && SelectedIcon && (
               <div className="wf-step-inspector" data-testid="wf-steps-detail">
                 <div className="wf-step-inspector-head">
+                  <div className="wf-step-inspector-tabs" role="tablist" aria-label={t('wf.stepInspectorMode')}>
+                    <button
+                      type="button"
+                      role="tab"
+                      id="wf-step-preview-tab"
+                      aria-controls="wf-step-preview-panel"
+                      aria-selected={stepInspectorMode === 'preview'}
+                      data-active={stepInspectorMode === 'preview'}
+                      onClick={() => setStepInspectorMode('preview')}
+                    >
+                      <Eye size={12} aria-hidden="true" />
+                      {t('markdown.preview')}
+                    </button>
+                    <button
+                      type="button"
+                      role="tab"
+                      id="wf-step-edit-tab"
+                      aria-controls="wf-step-edit-panel"
+                      aria-selected={stepInspectorMode === 'edit'}
+                      data-active={stepInspectorMode === 'edit'}
+                      onClick={() => setStepInspectorMode('edit')}
+                    >
+                      <Pencil size={12} aria-hidden="true" />
+                      {t('markdown.edit')}
+                    </button>
+                  </div>
                   <div className="wf-step-inspector-title">
                     <span className="wf-step-inspector-kicker">
                       {t('wf.stepPosition', selectedStepIndex + 1, workflow.steps.length)}
@@ -1908,7 +1938,12 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, onChangeSt
                     </div>
                   </div>
                 )}
-                <div className="wf-step-inspector-body">
+                {stepInspectorMode === 'preview' ? <div
+                  className="wf-step-inspector-body"
+                  id="wf-step-preview-panel"
+                  role="tabpanel"
+                  aria-labelledby="wf-step-preview-tab"
+                >
                   <StepCard
                     key={`${workflow.id}:${selectedStepIndex}`}
                     step={selectedStep}
@@ -1923,7 +1958,30 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, onChangeSt
                     onChangeAgent={onChangeStepAgent}
                     onSelectStep={index => selectStep(index)}
                   />
-                </div>
+                </div> : (
+                  <div
+                    className="wf-step-inspector-editor"
+                    id="wf-step-edit-panel"
+                    role="tabpanel"
+                    aria-labelledby="wf-step-edit-tab"
+                  >
+                    <WorkflowWizard
+                      key={`${workflow.id}:${selectedStep.id}:inline`}
+                      projects={projects}
+                      editWorkflow={workflow}
+                      initialStepId={selectedStep.id ?? undefined}
+                      focusedStepOnly
+                      installedAgentTypes={availableAgentTypes}
+                      agentAccess={agentAccess}
+                      configLanguage={configLanguage}
+                      onDone={() => {
+                        setStepInspectorMode('preview');
+                        onRefresh();
+                      }}
+                      onCancel={() => setStepInspectorMode('preview')}
+                    />
+                  </div>
+                )}
               </div>
             )}
           </div>

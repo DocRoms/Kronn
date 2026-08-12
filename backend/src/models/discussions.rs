@@ -146,6 +146,12 @@ fn default_workspace_mode() -> String {
     "Direct".into()
 }
 
+/// Skip a `false` on the wire: a fragment is the exception, and paying a field on
+/// every ordinary message would work against the release this lands in.
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct DiscussionMessage {
@@ -158,6 +164,28 @@ pub struct DiscussionMessage {
     pub timestamp: DateTime<Utc>,
     #[serde(default)]
     pub tokens_used: u64,
+    /// KT-190 — what the JOINED CLI SESSION had spent by the time this message
+    /// was posted. A running total, NOT this message's cost, and it lives apart
+    /// from `tokens_used` for that reason: a CLI's spend cannot be cut per
+    /// message, because between two room messages it also reads files, runs
+    /// tests, and may answer in another room. So the UI must label it
+    /// differently ("session: 220k"), never render it where a per-message cost
+    /// goes.
+    ///
+    /// `None` for an agent Kronn spawned (its cost IS `tokens_used`) and for a
+    /// CLI whose vendor has no collector — where absence means unmeasured, never
+    /// free.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_tokens_at_message: Option<i64>,
+    /// KT-251 — `true` when this is the salvaged BEGINNING of an answer whose
+    /// agent was killed mid-sentence, not an answer.
+    ///
+    /// Exposed so the UI can FOLD it rather than show it as a peer's position.
+    /// Nothing is deleted: a fragment is real history and may hold reasoning the
+    /// retry never repeated — a user reported seeing "three agents" precisely
+    /// because two half-answers looked like real ones.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub recovered_partial: bool,
     #[serde(default)]
     pub auth_mode: Option<String>,
     /// Which model tier was used for this message (economy/default/reasoning).
@@ -209,6 +237,14 @@ pub struct DiscussionMessage {
     /// identifier alongside message ids.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply_to_message_id: Option<String>,
+    /// KT-247 — stable ordinal of the joined CLI session that authored this
+    /// message (`1`, `2`, `3`…), resolved through `message_cli_authors`. Lets
+    /// the header show "CLI 2" so two same-provider CLIs (two Claude Code) are
+    /// distinguishable in the timeline, matching the `@claude-cli-2` alias.
+    /// `None` for User/System/native-agent messages and legacy rows with no
+    /// recorded CLI author.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author_cli_ordinal: Option<i64>,
 }
 
 /// Per-discussion summary strategy. Pre-fix the auto-summary loop fired

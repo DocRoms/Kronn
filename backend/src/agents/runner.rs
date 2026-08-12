@@ -530,8 +530,9 @@ pub(crate) fn http_agent_tools_notice(has_tools: bool) -> &'static str {
 }
 
 /// Agents executed over the HTTP chat path instead of a CLI subprocess.
-/// They share every consequence of that: no filesystem, no tool-execution
-/// loop, and token-level (not line-level) streaming.
+/// They share every consequence of that: no filesystem or stdio MCP, a
+/// bounded native tool-execution loop when an executor is supplied, and
+/// token-level (not line-level) streaming.
 pub(crate) fn is_http_chat_agent(agent_type: &AgentType) -> bool {
     matches!(agent_type, AgentType::Ollama | AgentType::LiteLlm)
 }

@@ -9,7 +9,12 @@
     <!-- Styles moved to src/styles/ — loaded via main.tsx import -->
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <main class="bootstrap-error" role="status" aria-live="polite">
+        <h1>Kronn</h1>
+        <p>Starting the local service… First launch may take a little longer.</p>
+      </main>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

@@ -287,6 +287,7 @@ test-backend:
 test-python:
 	@echo "$(CYAN)▸ Running Python helper tests...$(RESET)"
 	python3 -m unittest discover -s backend/scripts -p 'test_*.py' -v
+	cd backend/sidecars/docs && python3 -m unittest test_build_bundle.py -v
 
 ## Run frontend unit tests (vitest)
 test-frontend:

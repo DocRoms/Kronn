@@ -146,6 +146,104 @@ pub struct ParticipantView {
     /// Native CLI conversation id, when the joining bridge can prove one.
     /// `None` deliberately produces no resume affordance in the UI.
     pub conversation_id: Option<String>,
+    /// KT-247 — stable per-(disc, provider) ordinal that disambiguates two
+    /// joined CLIs of the SAME provider (two Claude Code, a Codex + Codex…).
+    /// Ranked by the AUTOINCREMENT `id`, which permanently encodes join order:
+    /// `1` = first session of this provider in the room, `2` = second, and so
+    /// on. It never shifts when a later session joins or an earlier one leaves,
+    /// so `@claude-cli-2` designates the same session in a message from
+    /// yesterday and in the live header. `None` only for synthesised
+    /// obligation rows (no real session). Powers the room alias
+    /// `@claude-cli-2` and the "CLI 2" header label, computed once here so the
+    /// front never re-derives (and diverges from) it.
+    pub cli_ordinal: Option<i64>,
+}
+
+/// Provider wire name (`ClaudeCode`, `Codex`…) → its canonical mention trigger
+/// WITHOUT the leading `@` (`claude`, `codex`…). Mirrors `AGENT_MENTIONS` in
+/// `frontend/src/lib/constants.ts` — the two MUST agree so an alias the backend
+/// hands an agent matches what the composer autocompletes. Unknown providers
+/// return `None` (no alias rather than a guessed one).
+pub fn cli_trigger_stem(agent_type: &str) -> Option<&'static str> {
+    Some(match agent_type {
+        "ClaudeCode" => "claude",
+        "Codex" => "codex",
+        "Vibe" => "vibe",
+        "GeminiCli" => "gemini",
+        "Kiro" => "kiro",
+        "CopilotCli" => "copilot",
+        "Ollama" => "ollama",
+        _ => return None,
+    })
+}
+
+/// The durable room alias for a joined CLI, e.g. `@claude-cli` (ordinal 1) or
+/// `@codex-cli-2` (ordinal 2). Returns `None` when the provider is unknown or
+/// the ordinal is absent (a synthesised obligation) — never a bare provider
+/// trigger that would collide with the punctual agent. Same shape as
+/// `messageTargets.ts` so the alias is identical everywhere.
+pub fn cli_session_alias(agent_type: &str, ordinal: Option<i64>) -> Option<String> {
+    let stem = cli_trigger_stem(agent_type)?;
+    let ordinal = ordinal?;
+    Some(if ordinal > 1 {
+        format!("@{stem}-cli-{ordinal}")
+    } else {
+        format!("@{stem}-cli")
+    })
+}
+
+/// Human label paired with [`cli_session_alias`]: `CLI` for the first session,
+/// `CLI 2`, `CLI 3`… afterwards. Used in the message header so a human can tell
+/// two same-provider CLIs apart at a glance.
+pub fn cli_session_label(ordinal: Option<i64>) -> Option<String> {
+    let ordinal = ordinal?;
+    Some(if ordinal > 1 {
+        format!("CLI {ordinal}")
+    } else {
+        "CLI".to_string()
+    })
+}
+
+/// The stable ordinal of ONE session (see [`ParticipantView::cli_ordinal`]):
+/// its rank by AUTOINCREMENT `id` among every session of the same provider in
+/// the same room, counting 'left' rows so the number is permanent. Returns
+/// `None` if the session id is unknown. This is the value an agent learns from
+/// `disc_join`/`disc_find_by_session` so it knows whether it is `@claude-cli`
+/// or `@claude-cli-2`.
+pub fn cli_session_ordinal(conn: &Connection, session_pk: i64) -> Result<Option<i64>> {
+    conn.query_row(
+        "SELECT (SELECT COUNT(*) FROM discussion_sessions e
+                  WHERE e.disc_id = s.disc_id AND e.agent_type = s.agent_type
+                    AND e.id <= s.id)
+           FROM discussion_sessions s
+          WHERE s.id = ?1",
+        params![session_pk],
+        |r| r.get::<_, i64>(0),
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+/// The agent's own room identity, resolved from its session pk. Returns
+/// `(ordinal, alias)` — both `None` when the session or provider is unknown.
+/// Handed back at join/resume so a CLI can address peers and recognise itself
+/// without guessing.
+pub fn cli_session_identity(
+    conn: &Connection,
+    session_pk: i64,
+) -> Result<(Option<i64>, Option<String>)> {
+    let ordinal = cli_session_ordinal(conn, session_pk)?;
+    let agent_type: Option<String> = conn
+        .query_row(
+            "SELECT agent_type FROM discussion_sessions WHERE id = ?1",
+            params![session_pk],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()?;
+    let alias = agent_type
+        .as_deref()
+        .and_then(|a| cli_session_alias(a, ordinal));
+    Ok((ordinal, alias))
 }
 
 /// Parse an RFC3339 (or SQLite `%Y-%m-%d %H:%M:%S`) timestamp, returning `None`
@@ -393,12 +491,19 @@ pub fn list_sessions(
 pub fn list_participant_views(conn: &Connection, disc_id: &str) -> Result<Vec<ParticipantView>> {
     let now = Utc::now();
     let mut stmt = conn.prepare(
-        "SELECT id, disc_id, agent_type, session_id, role, status, joined_at, left_at,
-                last_seen, activity, activity_expires_at, next_poll_at, last_write_at, write_state, model,
-                conversation_id
-           FROM discussion_sessions
-          WHERE disc_id = ?1 AND status != 'left'
-          ORDER BY joined_at ASC",
+        "SELECT s.id, s.disc_id, s.agent_type, s.session_id, s.role, s.status, s.joined_at, s.left_at,
+                s.last_seen, s.activity, s.activity_expires_at, s.next_poll_at, s.last_write_at, s.write_state, s.model,
+                s.conversation_id,
+                -- KT-247 stable ordinal: rank by AUTOINCREMENT id over EVERY
+                -- session of this provider in the room, including 'left' ones,
+                -- so a departed CLI keeps its number and the survivors don't
+                -- renumber. Correlated count is exact and index-friendly.
+                (SELECT COUNT(*) FROM discussion_sessions e
+                  WHERE e.disc_id = s.disc_id AND e.agent_type = s.agent_type
+                    AND e.id <= s.id) AS cli_ordinal
+           FROM discussion_sessions s
+          WHERE s.disc_id = ?1 AND s.status != 'left'
+          ORDER BY s.joined_at ASC",
     )?;
     let mut rows = stmt
         .query_map(params![disc_id], |r| {
@@ -453,6 +558,7 @@ pub fn list_participant_views(conn: &Connection, disc_id: &str) -> Result<Vec<Pa
                 last_write_at,
                 model: r.get(14)?,
                 conversation_id: r.get(15)?,
+                cli_ordinal: r.get(16)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -555,6 +661,8 @@ pub fn list_participant_views(conn: &Connection, disc_id: &str) -> Result<Vec<Pa
             // A synthesised obligation is not a joined session — nothing declared.
             model: None,
             conversation_id: None,
+            // No real session row, so no stable ordinal / room alias.
+            cli_ordinal: None,
         });
         synth_id -= 1;
     }
@@ -1459,12 +1567,40 @@ pub fn advance_awareness_offered_upto(conn: &Connection, session_pk: i64, to: i6
 /// catch-up batch idempotent across MCP reloads and re-joins.
 pub fn advance_user_catchup_cursor(conn: &Connection, session_pk: i64, to: i64) -> Result<()> {
     conn.execute(
+        // KT-249 — a real advance proves deliveries are being consumed, so the
+        // stalled-offer counter starts over. Folded into the same statement:
+        // the reset must not survive a cursor update that did not happen.
         "UPDATE discussion_sessions
-            SET user_catchup_cursor = ?2
+            SET user_catchup_cursor = ?2,
+                awareness_stalled_offers = 0
           WHERE id = ?1 AND user_catchup_cursor < ?2",
         params![session_pk, to],
     )?;
     Ok(())
+}
+
+/// KT-249 — count one awareness batch offered to this session, and return how
+/// many have piled up since the cursor last advanced.
+///
+/// Called on EVERY offer. A healthy client acknowledges the previous batch
+/// earlier in the same request, which resets the counter, so it never climbs
+/// past one. A client that cannot acknowledge — a bridge too old to send
+/// `ack_awareness_upto`, say — leaves it climbing, which is the only way to
+/// tell that case apart from a single discarded delivery: the offered cursor
+/// saturates one batch ahead of the ack cursor either way.
+pub fn note_awareness_offer(conn: &Connection, session_pk: i64) -> Result<i64> {
+    conn.execute(
+        "UPDATE discussion_sessions
+            SET awareness_stalled_offers = awareness_stalled_offers + 1
+          WHERE id = ?1",
+        params![session_pk],
+    )?;
+    let stalled: i64 = conn.query_row(
+        "SELECT awareness_stalled_offers FROM discussion_sessions WHERE id = ?1",
+        params![session_pk],
+        |r| r.get(0),
+    )?;
+    Ok(stalled)
 }
 
 #[cfg(test)]
@@ -1649,6 +1785,9 @@ mod tests {
         // appear as an honest "waiting for a runtime" participant, not vanish.
         let conn = setup_db();
         let msg = crate::models::DiscussionMessage {
+            recovered_partial: false,
+            session_tokens_at_message: None,
+            author_cli_ordinal: None,
             model: None,
             lint_report: None,
             id: "u1".to_string(),

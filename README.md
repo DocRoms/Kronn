@@ -27,25 +27,25 @@
 
 **Smaller prompts, more code where code is enough: fewer hallucinations, lower token bill, eco-design by default.**
 
-> **Status: 0.9.5 (current release).** Functional but pre-1.0. Breaking changes happen between minor versions; patch versions are safe.
+> **Status: 0.9.6 (current release).** Functional but pre-1.0. Breaking changes happen between minor versions; patch versions are safe.
 > **License: AGPL-3.0.** Using Kronn locally to build *your own* product is fine; the copyleft only kicks in if you distribute a modified Kronn to others. See [License notes](#license-notes-agpl-3-0).
 
-## What's new in 0.9.5
+## What's new in 0.9.6
 
-- **Predictable multi-agent starts:** several explicit `@aliases` launch
-  independent answers, not an automatic debate. Collaboration remains an
-  explicit discussion setting.
-- **Private reasoning stays private:** leading DeepSeek-style thinking returned
-  through LiteLLM is filtered without removing literal tags from the answer.
-- **Restart-safe conversations:** open tabs reconnect and resync after a backend
-  restart or broken socket, while unsent text stays in the composer until the
-  backend confirms it was durably stored.
+- **Planning for every agent:** CLI agents receive the discussion id explicitly,
+  while Ollama and LiteLLM can read and update the same plan through native
+  tools. Vibe keeps the existing human-approved proposal flow.
+- **Lower, measurable token cost:** bounded context paths, deterministic Quick
+  Exec and a cause-based review ledger replace repeated, unbounded agent work.
+- **Reliable desktop apps:** macOS packages boot their embedded backend and
+  report actionable startup failures; Windows uses a CPython-compatible UCRT
+  sidecar runtime.
 
-See the complete [0.9.5 and 0.9.4 release notes](CHANGELOG.md).
+See the complete [0.9.6 and 0.9.5 release notes](CHANGELOG.md).
 
 ## Contents
 
-- [What's new in 0.9.5](#whats-new-in-095)
+- [What's new in 0.9.6](#whats-new-in-096)
 - [60-second pitch](#60-second-pitch)
 - [The Kronn way: engineering, not prompting](#the-kronn-way-engineering-not-prompting)
 - [Quick start](#quick-start)
@@ -106,7 +106,7 @@ Download the installer for your OS from [Releases](https://github.com/DocRoms/Kr
 ### From source: one command
 
 ```bash
-git clone --branch 0.9.5 --depth 1 https://github.com/DocRoms/Kronn.git   # latest stable release
+git clone --branch 0.9.6 --depth 1 https://github.com/DocRoms/Kronn.git   # latest stable release
 cd Kronn
 ./kronn start        # guided setup & launch (Docker)
 ```
@@ -137,7 +137,7 @@ app, Docker deployment and a bare `make run-backend` do not require it.
 Requires Docker + Docker Compose. On Windows, WSL2 (Docker Engine inside WSL works, Docker Desktop optional).
 
 ```bash
-git clone --branch 0.9.5 --depth 1 https://github.com/DocRoms/Kronn.git   # latest stable release
+git clone --branch 0.9.6 --depth 1 https://github.com/DocRoms/Kronn.git   # latest stable release
 cd Kronn
 ./kronn start
 # → http://localhost:3140

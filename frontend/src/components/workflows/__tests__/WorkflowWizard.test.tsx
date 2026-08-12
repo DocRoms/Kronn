@@ -302,6 +302,44 @@ describe('WorkflowWizard — navigation', () => {
     expect(summaryStep).toHaveAttribute('aria-current', 'step');
     expect(screen.getByText('ExistingWorkflow')).toBeInTheDocument();
   });
+
+  it('opens an existing workflow directly on the requested step card', () => {
+    const targetId = '22222222-2222-4222-8222-222222222222';
+    renderWizard({
+      editWorkflow: mkWorkflow({
+        steps: [
+          mkStep(),
+          mkStep({ id: targetId, name: 'target-step' }),
+        ],
+      }),
+      initialStepId: targetId,
+    });
+
+    expect(screen.getByRole('button', { name: /wiz\.steps/ }))
+      .toHaveAttribute('aria-current', 'step');
+    const target = document.querySelector('[data-wizard-step-index="1"]');
+    expect(target).toHaveAttribute('data-outline-active', 'true');
+    expect(target?.querySelector('input')).toHaveValue('target-step');
+  });
+
+  it('focuses a late step in a long workflow without rendering sibling editors', () => {
+    const steps = Array.from({ length: 9 }, (_, index) => mkStep({
+      id: `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`,
+      name: `long-step-${index + 1}`,
+    }));
+    renderWizard({
+      editWorkflow: mkWorkflow({ steps }),
+      initialStepId: steps[7].id ?? undefined,
+      focusedStepOnly: true,
+    });
+
+    expect(document.querySelectorAll('[data-wizard-step-index]')).toHaveLength(1);
+    const target = document.querySelector('[data-wizard-step-index="7"]');
+    expect(target).toBeInTheDocument();
+    expect(target?.querySelector('input')).toHaveValue('long-step-8');
+    expect(screen.getByText('wiz.save')).toBeInTheDocument();
+    expect(screen.getByText('common.cancel')).toBeInTheDocument();
+  });
 });
 
 // ── Advanced: trigger selection ─────────────────────────────────────
