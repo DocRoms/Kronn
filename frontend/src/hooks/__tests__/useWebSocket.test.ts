@@ -2,10 +2,11 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import { useWebSocket } from '../useWebSocket';
 
-// Mock getAuthToken
-import { getAuthToken } from '../../lib/api';
+// Mock API runtime configuration
+import { getApiBase, getAuthToken } from '../../lib/api';
 vi.mock('../../lib/api', () => ({
   getAuthToken: vi.fn(() => null),
+  getApiBase: vi.fn(() => ''),
 }));
 
 // ─── Mock WebSocket ──────────────────────────────────────────────────────
@@ -56,6 +57,7 @@ describe('useWebSocket', () => {
     MockWebSocket.instances = [];
     originalWebSocket = globalThis.WebSocket;
     (globalThis as any).WebSocket = MockWebSocket;
+    vi.mocked(getApiBase).mockReturnValue('');
   });
 
   afterEach(() => {
@@ -79,6 +81,13 @@ describe('useWebSocket', () => {
 
     expect(result.current.connected).toBe(true);
     expect(result.current.connectionState).toBe('connected');
+  });
+
+  it('uses the configured desktop backend for WebSocket traffic', () => {
+    vi.mocked(getApiBase).mockReturnValue('http://127.0.0.1:43140');
+    renderHook(() => useWebSocket(vi.fn()));
+
+    expect(MockWebSocket.instances[0].url).toBe('ws://127.0.0.1:43140/api/ws');
   });
 
   it('calls onConnect on the first connect AND on every reconnect (re-sync hook)', () => {

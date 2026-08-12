@@ -181,9 +181,15 @@ export interface WorkflowWizardProps {
    *  the project no longer exists, the wizard falls back to its blank state. */
   initialPresetId?: string;
   initialProjectId?: string;
+  /** Open an existing advanced workflow directly on its Steps pane and focus
+   *  the durable step id selected from the detail/run view. */
+  initialStepId?: string;
+  /** Render only the requested step editor, without the workflow-wide wizard
+   *  chrome. Used by WorkflowDetail's Preview/Edit inspector. */
+  focusedStepOnly?: boolean;
 }
 
-export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, installedAgentTypes, agentAccess, configLanguage, initialPresetId, initialProjectId }: WorkflowWizardProps) {
+export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, installedAgentTypes, agentAccess, configLanguage, initialPresetId, initialProjectId, initialStepId, focusedStepOnly = false }: WorkflowWizardProps) {
   const { t } = useT();
   const availableAgents = (installedAgentTypes && installedAgentTypes.length > 0
     ? installedAgentTypes
@@ -218,6 +224,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
   const isEdit = !!editWorkflow;
   // Detect if an existing workflow needs advanced mode (multi-step, cron, hooks, etc.)
   const needsAdvanced = isEdit && (
+    !!initialStepId || focusedStepOnly ||
     (editWorkflow.steps?.length ?? 0) > 1 ||
     editWorkflow.trigger?.type !== 'Manual' ||
     editWorkflow.workspace_config ||
@@ -230,7 +237,10 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
   const initCron = initTrigger?.type === 'Cron' ? parseCronExpr(initTrigger.schedule) : null;
   const initTracker = initTrigger?.type === 'Tracker' ? initTrigger : null;
 
-  const [wizardStep, setWizardStep] = useState(0);
+  const initialStepIndex = initialStepId
+    ? Math.max(0, editWorkflow?.steps.findIndex(step => step.id === initialStepId) ?? 0)
+    : 0;
+  const [wizardStep, setWizardStep] = useState((initialStepId || focusedStepOnly) && needsAdvanced ? 2 : 0);
   const [expandedStepTypePicker, setExpandedStepTypePicker] = useState<number | null>(null);
   const [name, setName] = useState(editWorkflow?.name ?? '');
   const [projectId, setProjectId] = useState<string>(editWorkflow?.project_id ?? '');
@@ -346,7 +356,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
     // Structured by default — see addStep() for the rationale.
     output_format: { type: 'Structured' },
   }]);
-  const [focusedStepIndex, setFocusedStepIndex] = useState(0);
+  const [focusedStepIndex, setFocusedStepIndex] = useState(initialStepIndex);
   // 0.7.0 Phase 7 — rollback / compensation chain. Empty by default.
   // Wizard supports adding Notify-only rollback steps (the most common
   // case: "tell ops on failure"). Agent / ApiCall rollback steps can
@@ -973,10 +983,19 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
         ?.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
     });
   };
+  useEffect(() => {
+    if (!initialStepId || wizardStep !== 2) return;
+    setFocusedStepIndex(initialStepIndex);
+    const frame = requestAnimationFrame(() => {
+      document.querySelector<HTMLElement>(`[data-wizard-step-index="${initialStepIndex}"]`)
+        ?.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [initialStepId, initialStepIndex, wizardStep]);
 
   return (
-    <div className="wf-wizard-card">
-      <header className="wf-wizard-header">
+    <div className="wf-wizard-card" data-focused-step={focusedStepOnly}>
+      {!focusedStepOnly && <header className="wf-wizard-header">
         <div className="wf-wizard-heading">
           <span className="wf-wizard-heading-icon" aria-hidden="true"><Layers size={19} /></span>
           <span>
@@ -1003,10 +1022,10 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
             <HelpTip hint={t('wiz.helpSimpleVsAdvanced')} />
           </div>
         )}
-      </header>
+      </header>}
 
       <div className="wf-wizard-body">
-        <nav className="wf-wizard-progress" aria-label={t('wiz.progressLabel')}>
+        {!focusedStepOnly && <nav className="wf-wizard-progress" aria-label={t('wiz.progressLabel')}>
           <span className="wf-wizard-progress-label">
             {t('wiz.stepProgress', wizardStep + 1, WIZARD_STEPS.length)}
           </span>
@@ -1048,7 +1067,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
               )}
             </div>
           ))}
-        </nav>
+        </nav>}
 
         <main className="wf-wizard-content">
 
@@ -1622,6 +1641,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
           )}
 
           {steps.map((step, i) => {
+            if (focusedStepOnly && i !== initialStepIndex) return null;
             const isAdvOpen = expandedStepAdvanced === i;
             const hasAdvanced = (step.on_result && step.on_result.length > 0) ||
               step.agent_settings ||
@@ -1649,7 +1669,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                       - Entre 2 steps existants (i > 0)
                     Le bouton final ("Add at end") reste sous la liste,
                     inchangé. Pattern similaire au "+ Add cell" de Notion. */}
-                <div className="wf-step-insert-divider">
+                {!focusedStepOnly && <div className="wf-step-insert-divider">
                   <button
                     type="button"
                     className="wf-step-insert-btn"
@@ -1660,7 +1680,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                     <Plus size={11} />
                     <span>{t('wiz.insertStepHere')}</span>
                   </button>
-                </div>
+                </div>}
               <div
                 className="wf-step-edit-card mb-6"
                 data-step-type={activeTypeOption.dataType}
@@ -1692,7 +1712,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                       à côté du remove. Désactivés aux bornes. Le Goto par
                       nom rend la réordonnance safe (les conditions ne
                       pètent pas en swappant 2 steps). */}
-                  {steps.length > 1 && (
+                  {!focusedStepOnly && steps.length > 1 && (
                     <div className="wf-step-edit-actions">
                       <button
                         className="wf-icon-btn"
@@ -3458,15 +3478,15 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
               </div>
             );
           })}
-          <button className="wf-add-step-btn" onClick={addStep}>
+          {!focusedStepOnly && <button className="wf-add-step-btn" onClick={addStep}>
             <Plus size={12} /> {t('wiz.addStep')}
-          </button>
+          </button>}
 
           {/* 0.7.0 Phase 7 — Rollback / compensation chain (workflow-level).
               Wizard supports adding Notify-only rollback steps (most common
               "tell ops on failure" case). Agent / ApiCall rollback steps
               can be added via the API for advanced setups. */}
-          <div className="wf-rollback-section mt-8">
+          {!focusedStepOnly && <div className="wf-rollback-section mt-8">
             <div className="flex-row gap-3 mb-2">
               <RotateCcw size={14} className="text-warning" />
               <span className="text-md font-semibold text-secondary">{t('wiz.rollbackTitle')}</span>
@@ -3643,7 +3663,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
             >
               <Plus size={10} /> {t('wiz.addRollbackStep')}
             </button>
-          </div>
+          </div>}
         </div>
       )}
 
@@ -4119,7 +4139,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
           <button className="wf-cancel-btn" onClick={onCancel}>
             {t('common.cancel')}
           </button>
-          {wizardStep > 0 && (
+          {!focusedStepOnly && wizardStep > 0 && (
             <button className="wf-cancel-btn" onClick={() => setWizardStep(wizardStep - 1)}>
               {t('wiz.previous')}
             </button>
@@ -4139,7 +4159,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
           </div>
         )}
         <div className="wf-wizard-nav-actions">
-        {wizardStep < lastStep && (
+        {!focusedStepOnly && wizardStep < lastStep && (
           <button
             className="wf-next-btn"
             onClick={() => setWizardStep(wizardStep + 1)}

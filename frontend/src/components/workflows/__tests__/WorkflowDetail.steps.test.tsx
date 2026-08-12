@@ -1,13 +1,13 @@
-// Collapsed steps pipeline (WorkflowDetail).
+// Focused steps pipeline (WorkflowDetail).
 //
 // The Steps panel used to dump every per-step card (prompt + Test button)
 // stacked vertically — heavy and rarely what you want at a glance,
-// especially mid-run. It now collapses to a compact pipeline (number +
-// kind icon + name) with an agent/deterministic count split, and "Voir en
-// détails" reveals the legacy cards. These tests guard:
-//   - collapsed by default (no detail cards rendered),
+// especially mid-run. It now shows a compact pipeline (number + kind icon +
+// name) with an agent/deterministic count split and one focused inspector.
+// These tests guard:
+//   - the first selected step is open by default,
 //   - the agent (token) vs deterministic classification drives chip colors,
-//   - the toggle opens a focused single-step inspector.
+//   - the toggle can still collapse the focused single-step inspector.
 
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
@@ -89,19 +89,33 @@ const renderDetail = (steps: WorkflowStep[], overrides: Partial<DetailProps> = {
     />
   );
 
-describe('WorkflowDetail — collapsed steps pipeline', () => {
-  it('renders collapsed by default — pipeline shown, full detail cards hidden', () => {
+describe('WorkflowDetail — focused steps pipeline', () => {
+  it('opens the selected first step by default without dumping every card', () => {
     const { container } = renderDetail(mixedSteps);
     expect(screen.getByTestId('wf-steps-section')).toBeInTheDocument();
     expect(screen.getByTestId('wf-branch-map')).toBeInTheDocument();
     // Compact pipeline shows one chip per step, with the step name.
     const chips = container.querySelectorAll('.wf-pipe-chip');
     expect(chips.length).toBe(5);
-    expect(screen.getByText('analyze')).toBeInTheDocument();
-    expect(screen.getByText('notify_done')).toBeInTheDocument();
-    // The heavy per-step cards are NOT mounted until expanded.
+    expect(chips[0]).toHaveTextContent('analyze');
+    expect(chips[4]).toHaveTextContent('notify_done');
+    expect(screen.getByTestId('wf-steps-detail')).toBeInTheDocument();
+    expect(container.querySelectorAll('.wf-step-card')).toHaveLength(1);
+    expect(container.querySelector('.wf-step-card')).toHaveTextContent('analyze');
+  });
+
+  it('still lets users collapse and reopen the focused inspector', () => {
+    renderDetail(mixedSteps);
+    const toggle = screen.getByTestId('wf-steps-toggle');
+
+    expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
     expect(screen.queryByTestId('wf-steps-detail')).toBeNull();
-    expect(container.querySelector('.wf-step-card')).toBeNull();
+
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByTestId('wf-steps-detail')).toBeInTheDocument();
   });
 
   it('classifies agent (token) vs deterministic steps via chip kind', () => {
@@ -135,7 +149,8 @@ describe('WorkflowDetail — collapsed steps pipeline', () => {
       configurable: true,
     });
     const { container } = renderDetail(mixedSteps);
-    const ids = container.querySelectorAll<HTMLButtonElement>('.wf-step-id-pill');
+    const pipeline = container.querySelector('.wf-steps-pipeline');
+    const ids = pipeline?.querySelectorAll<HTMLButtonElement>('.wf-step-id-pill') ?? [];
     expect(ids).toHaveLength(mixedSteps.length);
     expect(ids[1]).toHaveTextContent('#22222222');
 
@@ -146,7 +161,6 @@ describe('WorkflowDetail — collapsed steps pipeline', () => {
 
   it('keeps the selected step ID visible in the expanded step card', () => {
     const { container } = renderDetail(mixedSteps);
-    fireEvent.click(screen.getByTestId('wf-steps-toggle'));
 
     const card = container.querySelector('.wf-step-card');
     expect(card).toBeInTheDocument();
@@ -166,16 +180,17 @@ describe('WorkflowDetail — collapsed steps pipeline', () => {
     // Every fixture step carries agent: 'ClaudeCode' in its data, but only
     // the genuine Agent step should surface the agent identity — same
     // whitelist as the detail card, so both views read the same label.
-    renderDetail(mixedSteps);
-    const agentLine = screen.getByText('Claude Code');
+    const { container } = renderDetail(mixedSteps);
+    const agentLine = container.querySelector('.wf-pipe-chip-agent');
     expect(agentLine).toHaveClass('wf-pipe-chip-agent');
-    // Exactly one occurrence: the 4 deterministic steps must NOT render it.
-    expect(screen.getAllByText('Claude Code').length).toBe(1);
+    expect(agentLine).toHaveTextContent('Claude Code');
+    // Exactly one pipeline occurrence: the 4 deterministic steps must not
+    // surface an agent, even though the open preview repeats this identity.
+    expect(container.querySelectorAll('.wf-pipe-chip-agent')).toHaveLength(1);
   });
 
   it('opens one focused step card instead of dumping every detail card', () => {
     const { container } = renderDetail(mixedSteps);
-    fireEvent.click(screen.getByTestId('wf-steps-toggle'));
     expect(screen.getByTestId('wf-steps-detail')).toBeInTheDocument();
     expect(container.querySelectorAll('.wf-step-card')).toHaveLength(1);
     expect(container.querySelector('.wf-step-card')).toHaveTextContent('analyze');
@@ -191,9 +206,71 @@ describe('WorkflowDetail — collapsed steps pipeline', () => {
     expect(container.querySelector('.wf-pipe-chip[data-selected="true"]')).toHaveTextContent('run_tests');
   });
 
+  it('switches the selected step inspector from preview to the shared editor', () => {
+    const { container } = renderDetail(mixedSteps);
+    fireEvent.click(container.querySelectorAll('.wf-pipe-chip-open')[3] as HTMLElement);
+
+    expect(screen.getByRole('tab', { name: 'markdown.preview' }))
+      .toHaveAttribute('aria-selected', 'true');
+    fireEvent.click(screen.getByRole('tab', { name: 'markdown.edit' }));
+
+    expect(screen.getByRole('tab', { name: 'markdown.edit' }))
+      .toHaveAttribute('aria-selected', 'true');
+    const focusedEditor = container.querySelector('.wf-wizard-card[data-focused-step="true"]');
+    expect(focusedEditor).toBeInTheDocument();
+    expect(focusedEditor?.querySelector('[data-wizard-step-index="3"] input'))
+      .toHaveValue('run_tests');
+    expect(focusedEditor?.querySelector('[data-wizard-step-index="0"]')).toBeNull();
+  });
+
+  it('saves a focused step through the regular workflow update and refreshes the preview', async () => {
+    const onRefresh = vi.fn();
+    vi.mocked(workflowsApi.update).mockClear();
+    const { container } = renderDetail([mixedSteps[0]], { onRefresh });
+    fireEvent.click(screen.getByRole('tab', { name: 'markdown.edit' }));
+
+    const nameInput = container.querySelector<HTMLInputElement>(
+      '[data-wizard-step-index="0"] input[aria-label="wiz.stepName"]',
+    );
+    expect(nameInput).toBeInTheDocument();
+    fireEvent.change(nameInput!, { target: { value: 'analyze_issue' } });
+    fireEvent.click(screen.getByText('wiz.save'));
+
+    await waitFor(() => expect(workflowsApi.update).toHaveBeenCalledWith(
+      'wf-1',
+      expect.objectContaining({
+        steps: expect.arrayContaining([
+          expect.objectContaining({
+            id: '11111111-1111-4111-8111-111111111111',
+            name: 'analyze_issue',
+          }),
+        ]),
+      }),
+    ));
+    await waitFor(() => expect(onRefresh).toHaveBeenCalledTimes(1));
+    expect(screen.getByRole('tab', { name: 'markdown.preview' }))
+      .toHaveAttribute('aria-selected', 'true');
+  });
+
+  it('cancels focused editing without persisting the draft', () => {
+    vi.mocked(workflowsApi.update).mockClear();
+    const { container } = renderDetail(mixedSteps);
+    fireEvent.click(screen.getByRole('tab', { name: 'markdown.edit' }));
+
+    const nameInput = container.querySelector<HTMLInputElement>(
+      '[data-wizard-step-index="0"] input[aria-label="wiz.stepName"]',
+    );
+    fireEvent.change(nameInput!, { target: { value: 'discard_me' } });
+    fireEvent.click(screen.getByText('common.cancel'));
+
+    expect(workflowsApi.update).not.toHaveBeenCalled();
+    expect(screen.getByRole('tab', { name: 'markdown.preview' }))
+      .toHaveAttribute('aria-selected', 'true');
+    expect(container.querySelector('.wf-step-card')).toHaveTextContent('analyze');
+  });
+
   it('navigates between focused steps with previous and next controls', () => {
     const { container } = renderDetail(mixedSteps);
-    fireEvent.click(screen.getByTestId('wf-steps-toggle'));
 
     const previous = screen.getByRole('button', { name: 'wf.stepPrevious' });
     const next = screen.getByRole('button', { name: 'wf.stepNext' });
@@ -215,7 +292,7 @@ describe('WorkflowDetail — collapsed steps pipeline', () => {
     const { container } = renderDetail(branched);
 
     expect(screen.getByTestId('wf-branch-map')).toBeInTheDocument();
-    expect(screen.queryByTestId('wf-steps-detail')).toBeNull();
+    expect(screen.getByTestId('wf-steps-detail')).toBeInTheDocument();
     fireEvent.click(screen.getByTestId('wf-bm-node-2'));
     expect(screen.getByTestId('wf-steps-detail')).toBeInTheDocument();
     expect(container.querySelector('.wf-step-card')).toHaveTextContent('finish');
@@ -231,7 +308,6 @@ describe('WorkflowDetail — collapsed steps pipeline', () => {
       mkStep({ name: 'finish' }),
     ];
     const { container } = renderDetail(branched);
-    fireEvent.click(screen.getByTestId('wf-steps-toggle'));
 
     const target = screen.getByRole('button', { name: 'wf.gotoTargetHint' });
     expect(target).toHaveTextContent('finish');
@@ -283,7 +359,6 @@ describe('WorkflowDetail — collapsed steps pipeline', () => {
     });
     const { container } = renderDetail([parentStep]);
 
-    fireEvent.click(screen.getByTestId('wf-steps-toggle'));
     const overview = await screen.findByTestId('wf-subworkflow-overview');
 
     expect(overview.querySelector('[data-testid="wf-branch-map"]')).toBeInTheDocument();
@@ -297,21 +372,24 @@ describe('WorkflowDetail — collapsed steps pipeline', () => {
     expect(container.querySelectorAll('.wf-step-card')).toHaveLength(2);
   });
 
-  it('switches an Agent step directly from the collapsed pipeline', async () => {
+  it('switches an Agent step directly from the compact pipeline', async () => {
     const onChangeStepAgent = vi.fn().mockResolvedValue(undefined);
-    renderDetail(mixedSteps, {
+    const { container } = renderDetail(mixedSteps, {
       availableAgentTypes: ['ClaudeCode', 'Codex'],
       onChangeStepAgent,
     });
 
-    const trigger = screen.getByLabelText('wf.stepAgentSwitchLabel');
+    const trigger = container.querySelector<HTMLButtonElement>(
+      '.wf-steps-pipeline [aria-label="wf.stepAgentSwitchLabel"]',
+    );
+    expect(trigger).not.toBeNull();
     expect(trigger).toHaveClass('kr-agent-switch-btn');
-    fireEvent.click(trigger);
-    expect(trigger.closest('.kr-agent-switch')).toHaveAttribute('data-open', 'true');
+    fireEvent.click(trigger!);
+    expect(trigger!.closest('.kr-agent-switch')).toHaveAttribute('data-open', 'true');
     expect(screen.getByRole('menu').parentElement).toBe(document.body);
     fireEvent.click(screen.getByRole('menuitem', { name: 'Codex · disc.tier.default' }));
 
     await waitFor(() => expect(onChangeStepAgent).toHaveBeenCalledWith(0, 'Codex', 'default'));
-    expect(screen.queryByTestId('wf-steps-detail')).toBeNull();
+    expect(screen.getByTestId('wf-steps-detail')).toBeInTheDocument();
   });
 });

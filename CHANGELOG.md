@@ -9,6 +9,111 @@ Release notes for 0.9.3 and earlier are available in the
 
 ---
 
+## [Unreleased]
+
+## [0.9.6] - 2026-08-12
+
+Kronn's own token cost, measured and then bounded. Every figure below is a byte
+count from this machine; token counts are estimates and gate nothing.
+
+Full release documentation, including what each measurement does NOT prove and the
+rollback matrix: `docs/operations/token-economy-0.9.6.md`.
+
+### Added
+
+- Workflow step details now open as a compact inspector with a familiar
+  Preview/Edit switch. Preview remains the default; Edit embeds the canonical
+  step editor in place, keeps long forms scrollable, saves without walking the
+  whole wizard, and preserves Cancel as a no-write action. A selected late step
+  in a long workflow opens directly without rendering every sibling editor.
+- `BatchQuickPrompt` receipts expose each child's queued, claimed,
+  agent-started and settled timestamps, plus monotonic active time, calendar
+  wall time and estimated machine suspension. The 10/15-minute objectives are
+  explicit; a 20-minute active-time overrun fails with
+  `LATENCY_BUDGET_EXCEEDED` and transactionally cancels/settles every child so
+  no orphan agent can continue spending tokens.
+- Planning dependencies can now be removed explicitly from the Planning UI,
+  the REST API and the `kronn-internal` MCP through the narrow,
+  retry-safe `task_remove_blocker` operation. It removes only the selected
+  dependency edge, preserves task status and blocked reason, and records the
+  acting agent when a relation actually changes.
+- **Quick Exec** — runs a deterministic command (tests, typecheck, lint, PR and CI
+  collection) and returns a bounded summary instead of a full log, with the streams
+  kept as an artifact on disk. No shell, ever: an allowlist of binaries by bare
+  name, a denylist consulted first so a shell added later is still refused, a
+  literal argv, a cwd that must canonicalise inside a declared root, and an explicit
+  stdin. `Passed` means exit 0 and nothing else — a timeout, a cancellation, a
+  signal death and a binary that never spawned are four distinct states and none is
+  a pass. A truncated stream says so on the summary's first line.
+- **Review ledger** — a finding is keyed to a CAUSE, not to a comment, so five
+  comments about one unwrapped error are one finding with five symptoms. The ledger
+  is pinned to a head SHA, so a re-review replays only what the diff touched. A
+  re-review of the two reference discussions costs 564 B per pass at the measured
+  p90, against 40.9 MB for a cold pass over the whole thread.
+- **Deterministic PR collection** — six templates fetch metadata, changed files,
+  both comment streams, checks and reactions with no agent pass, leaving the payload
+  in an artifact rather than in a context.
+- **Context Architecture Audit** (`GET /api/projects/{id}/context-audit`) — what
+  each of nine agent conventions actually loads in any monitored project, with
+  sizes, duplication, dead references and redirect cycles. It proposes a tier split
+  and never writes: a Critical section is never proposed for a move, however large.
+- **RTK adoption state** (`GET /api/rtk/state`) — folds five RTK commands into one
+  bounded panel. A source that cannot answer says why AND what to do; two currently
+  cannot on this machine, and both are named rather than shown as empty.
+- **Discussion token cost in the header** — two figures, never a total. A Kronn
+  agent reports a cost per reply; a joined CLI reports a running total for its whole
+  session, which also covers files read, tests run and work in other rooms. Adding
+  them would double-count and misattribute.
+- **CLI telemetry** — a joined CLI reports its own vendor counters. On one real
+  session 4 308 007 075 tokens of traffic had been stored as `0`; unmeasured is now
+  `NULL` and renders as "unknown", never as free.
+- **Benchmarks and gates** — review-pass input (cold and warm), RTK compression
+  floors with residual ranking, the instruction-file ratchet, and the MCP surface
+  ratchet.
+- **Planning parity for discussion agents** — CLI agents receive the exact
+  discussion id on their first turn and can use it even when an MCP runtime
+  binding is stale. Ollama and LiteLLM expose compact native Planning reads and
+  writes executed inside Kronn, scoped to the current room and attributed to the
+  triggering message. Vibe emits the existing human-gated proposal fence because
+  its runtime deliberately runs without MCP.
+
+### Changed
+
+- `docs/AGENTS.md` went from 84 224 B to 13 471 B behind a ratchet that tightens on
+  every gain and refuses growth.
+- The manual "linked CLI session" form is gone. The binding is provenance — where a
+  thread came from — established automatically at join and now shown read-only. The
+  cross-agent memory API is untouched: it is what lets one agent pick up a
+  discussion another started. Unlink survives alone, because a stale binding needs
+  a human escape hatch.
+- A silent room hands a waiting agent nothing to answer, asserted field by field.
+
+### Fixed
+
+- Databases opened by pre-rebase 0.9.6 builds now reconcile the former
+  migration names with their final 113–119 identifiers before startup checks.
+  Existing columns and tables are recognized instead of replaying their SQL
+  and failing on a duplicate column.
+- Three unbounded paths found by measuring rather than by reasoning: a debate
+  context that sent 1 320 210 B to a model, `disc_load_other` returning whole
+  discussions, and CLI sessions with no ceiling.
+- Awareness backlogs are capped by bytes as well as by message count, with a
+  starvation guard so one oversized message cannot block the queue behind it.
+- Windows desktop builds use MSYS2's UCRT64 Pango runtime, matching Python.org
+  CPython instead of mixing it with legacy MSVCRT DLLs. The docs exporter is
+  now built and smoke-tested before the expensive Tauri compile.
+- macOS applications are ad-hoc signed by Tauri before the DMG is assembled.
+  CI verifies the uploaded image checksum and the strict signature of the app
+  mounted from that image, preventing another internally invalid installer.
+- The desktop shell no longer navigates to a dead random port or reuses an
+  unverifiable CLI/dev/Docker listener. It acquires the shared data-directory
+  lock before launch, renders a clear conflict or startup error in its embedded
+  UI, and restarts the native process on Retry. Missing optional Docs-sidecar
+  resources degrade without terminating the desktop shell. First boot now has
+  a visible loading state and a realistic bounded startup window for database,
+  keychain or antivirus initialization instead of failing after 15 seconds.
+
+
 ## [0.9.5] - 2026-08-11
 
 ### Changed

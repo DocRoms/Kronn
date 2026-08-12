@@ -66,9 +66,10 @@ jobs:
         with:
           components: clippy, rustfmt
 
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.10
-
+      # Keep compilation independent from an optional binary cache. The
+      # sccache setup action downloads a release asset before any test runs;
+      # transient GitHub Releases failures used to abort this whole job and
+      # its post-step then failed again while looking for an undefined binary.
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
@@ -93,9 +94,6 @@ jobs:
       # verdict at all.
       - name: cargo test — backend (early verdict)
         run: cargo test
-        env:
-          SCCACHE_GHA_ENABLED: "true"
-          RUSTC_WRAPPER: "sccache"
 
       # ── Desktop crate compile-check ────────────────────────────────────
       # backend/ and desktop/src-tauri/ are separate crates (no root
@@ -223,6 +221,30 @@ jobs:
           python3 scripts/ci/test_lint_with_conn_unwrap.py
           python3 scripts/ci/lint_with_conn_unwrap.py
 
+      - name: Context Budget Gate — agent bootstrap size
+        run: |
+          # KT-191 — the mandatory bootstrap is paid by EVERY session before any
+          # useful work, so it is a product cost. Ratchet: no growth until the
+          # re-split lands; the remaining debt to target is printed each run.
+          python3 scripts/ci/test_context_budget.py
+          python3 scripts/ci/context_budget.py
+
+      - name: MCP Surface Budget Gate — tool catalogue size
+        run: |
+          # KT-192 — the tool catalogue is injected before any work is exchanged,
+          # so it is the same kind of unconditional cost as the bootstrap. Same
+          # ratchet rule: lower a ceiling when a reduction lands, never raise one
+          # to go green.
+          python3 scripts/ci/test_mcp_surface_budget.py
+          python3 scripts/ci/mcp_surface_budget.py
+
+      - name: Agent task matrix — every task still reaches its content
+        run: |
+          # KT-191 DoD 7 — shrinking the bootstrap is only safe if each
+          # representative task can still reach what it needs. Checks the router
+          # tables, not just whether the text exists somewhere.
+          python3 scripts/ci/agent_task_matrix.py
+
       # ── Coverage threshold floor ────────────────────────────────
       # Pinned just below the 2026-05-29 measured baseline
       # (Regions 79.02 / Functions 81.49 / Lines 77.48) so a single
@@ -238,9 +260,6 @@ jobs:
             --fail-under-lines 78 \
             --fail-under-functions 82 \
             --fail-under-regions 80
-        env:
-          SCCACHE_GHA_ENABLED: "true"
-          RUSTC_WRAPPER: "sccache"
 
       # Scoped, stricter floor on the encryption-key / config-persistence modules
       # (2026-06-30 secret-loss hardening). Reuses the instrumented build from the
@@ -250,9 +269,6 @@ jobs:
         # The job's default working-directory is `backend/` — the script lives at
         # the repo root and handles its own `cd`, so reference it relatively.
         run: ../scripts/check-keymgmt-coverage.sh
-        env:
-          SCCACHE_GHA_ENABLED: "true"
-          RUSTC_WRAPPER: "sccache"
 
       # ── Desktop compilation check ───────────────────────────────────
       # The Tauri desktop app (desktop/src-tauri/) imports the backend as
@@ -262,9 +278,6 @@ jobs:
       - name: cargo check desktop (type-check only)
         working-directory: desktop/src-tauri
         run: cargo check --lib 2>/dev/null || cargo check 2>&1 | head -40
-        env:
-          SCCACHE_GHA_ENABLED: "true"
-          RUSTC_WRAPPER: "sccache"
 
   # ── Code-duplication ceiling (jscpd, all 3 languages) ──────────────────
   # Copy-paste detector across Rust + TS/TSX + Python. Baseline 2026-05-29 =
@@ -310,6 +323,10 @@ jobs:
 
       - name: Run MCP helper tests
         run: python3 -m unittest discover -s backend/scripts -p 'test_*.py' -v
+
+      - name: Run document-sidecar build bootstrap tests
+        working-directory: backend/sidecars/docs
+        run: python3 -m unittest test_build_bundle.py -v
 
   test-frontend:
     if: contains(github.event.pull_request.labels.*.name, 'ci-test')
@@ -415,9 +432,8 @@ jobs:
             | sh -s -- -y --default-toolchain stable --profile minimal
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
-      - name: Setup sccache (cargo cache for backend)
-        uses: mozilla-actions/sccache-action@v0.0.10
-
+      # Do not wrap this release build in sccache: E2E reliability must not
+      # depend on downloading an optional compiler-cache executable.
       - name: Enable corepack (provides pnpm pinned by package.json)
         run: corepack enable
 
@@ -432,9 +448,6 @@ jobs:
       - name: Build backend (release)
         working-directory: backend
         run: cargo build --release --bin kronn
-        env:
-          SCCACHE_GHA_ENABLED: "true"
-          RUSTC_WRAPPER: "sccache"
 
       - name: Start backend in background
         # KRONN_DATA_DIR points at a fresh tmp dir so each CI run starts
@@ -548,9 +561,8 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.10
-
+      # cargo-audit itself has a regular Actions cache below. Avoid adding a
+      # second, network-dependent sccache bootstrap to this security gate.
       - name: Cache cargo-audit binary
         id: cache-audit
         uses: actions/cache@v4
@@ -561,16 +573,10 @@ jobs:
       - name: Install cargo-audit
         if: steps.cache-audit.outputs.cache-hit != 'true'
         run: cargo install cargo-audit --locked
-        env:
-          SCCACHE_GHA_ENABLED: "true"
-          RUSTC_WRAPPER: "sccache"
 
       - name: Run cargo audit
         working-directory: backend
         run: cargo audit
-        env:
-          SCCACHE_GHA_ENABLED: "true"
-          RUSTC_WRAPPER: "sccache"
 
       - name: Setup Node.js
         uses: actions/setup-node@v4

@@ -19,7 +19,7 @@ test.afterAll(async ({ request }) => {
   }
 });
 
-test('links, displays, copies and unlinks an offline Claude session', async ({ page, request }) => {
+test('displays, copies and unlinks an automatically bound offline Claude session', async ({ page, request }) => {
   const created = await request.post('/api/discussions', {
     data: {
       title,
@@ -36,15 +36,25 @@ test('links, displays, copies and unlinks an offline Claude session', async ({ p
   expect(discId).toBeTruthy();
   if (!discId) throw new Error('discussion creation returned no id');
 
+  // A source binding is provenance established by a CLI join, not something
+  // users create by typing an opaque session id in the chat header. Reproduce
+  // that bridge-owned lifecycle through the API, then verify the UI remains a
+  // transparent read/repair surface.
+  const linked = await request.post('/api/disc/link', {
+    data: {
+      disc_id: discId,
+      source_agent: 'ClaudeCode',
+      source_session_id: sessionId,
+    },
+  });
+  expect(linked.ok()).toBe(true);
+
   const dashboard = new DashboardPage(page);
   await dashboard.goto();
   await dashboard.openDiscussion(discId);
 
-  await page.getByRole('button', { name: 'Session', exact: true }).click();
+  await page.getByRole('button', { name: /ClaudeCode · claude-u/ }).click();
   const dialog = page.getByRole('dialog', { name: 'Session CLI liée' });
-  await dialog.locator('select').selectOption('ClaudeCode');
-  await dialog.locator('input').fill(sessionId);
-  await dialog.getByRole('button', { name: 'Lier une session' }).click();
 
   await expect(page.getByRole('button', { name: /ClaudeCode · claude-u/ })).toBeVisible();
   await expect(dialog.getByText('Hors ligne ou non détectée')).toBeVisible();
@@ -60,5 +70,5 @@ test('links, displays, copies and unlinks an offline Claude session', async ({ p
   });
 
   await dialog.getByRole('button', { name: 'Délier' }).click();
-  await expect(page.getByRole('button', { name: 'Session', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: /ClaudeCode · claude-u/ })).toBeHidden();
 });

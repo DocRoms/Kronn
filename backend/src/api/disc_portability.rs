@@ -962,6 +962,9 @@ fn tour_demo_envelope(ui_language: &str) -> DiscussionExportEnvelope {
         },
         messages: vec![
             DiscussionMessage {
+                recovered_partial: false,
+                session_tokens_at_message: None,
+                author_cli_ordinal: None,
                 id: user_message_id.clone(),
                 role: crate::models::MessageRole::User,
                 channel: crate::models::MessageChannel::Main,
@@ -982,6 +985,9 @@ fn tour_demo_envelope(ui_language: &str) -> DiscussionExportEnvelope {
                 reply_to_message_id: None,
             },
             DiscussionMessage {
+                recovered_partial: false,
+                session_tokens_at_message: None,
+                author_cli_ordinal: None,
                 id: preview_message_id,
                 role: crate::models::MessageRole::Agent,
                 channel: crate::models::MessageChannel::Main,
@@ -1366,6 +1372,9 @@ mod tests {
                 let source_id = "portable-source";
                 crate::db::discussions::insert_discussion(conn, &test_discussion(source_id))?;
                 let source_message = DiscussionMessage {
+                    recovered_partial: false,
+                    session_tokens_at_message: None,
+                    author_cli_ordinal: None,
                     id: "portable-message".into(),
                     role: crate::models::MessageRole::User,
                     channel: crate::models::MessageChannel::Main,

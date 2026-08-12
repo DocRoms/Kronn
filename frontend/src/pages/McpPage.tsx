@@ -82,9 +82,6 @@ const ENV_PLACEHOLDERS: Record<string, string> = {
   // Slack
   SLACK_BOT_TOKEN: 'xoxb-xxxxxxxxxxxx',
   SLACK_TEAM_ID: 'T0XXXXXXX',
-  // Microsoft 365 (optional — leave empty to use default app)
-  MS365_MCP_TENANT_ID: 'e59fa28a-... (ID annuaire, optionnel)',
-  MS365_MCP_CLIENT_ID: '2ac5e4f9-... (ID application, optionnel)',
   // MongoDB
   MDB_MCP_CONNECTION_STRING: 'mongodb+srv://user:pass@cluster.mongodb.net/db',
   MDB_MCP_ATLAS_CLIENT_ID: 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx',

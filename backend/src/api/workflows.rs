@@ -2388,150 +2388,20 @@ pub async fn cancel_run(
     State(state): State<AppState>,
     Path((_workflow_id, run_id)): Path<(String, String)>,
 ) -> Json<ApiResponse<CancelRunResponse>> {
-    // 1. Trigger the linear run's own token
-    let run_cancelled = {
-        let mut map = match state.cancel_registry.lock() {
-            Ok(m) => m,
-            Err(_) => return Json(ApiResponse::err("Cancel registry poisoned")),
-        };
-        if let Some(token) = map.remove(&run_id) {
-            token.cancel();
-            true
-        } else {
-            false
-        }
-    };
-
-    // 2. Cascade to child disc agents. Covers BOTH shapes: a linear run whose
-    //    child batches carry parent_run_id = run_id, and a batch run cancelled
-    //    directly (its discs carry workflow_run_id = run_id — same predicate
-    //    delete_batch_run uses). For each disc, trigger its cancel token if one
-    //    is registered (i.e. agent still running).
-    let run_id_for_db = run_id.clone();
-    let child_disc_ids: Vec<String> = match state
-        .db
-        .with_conn(move |conn| {
-            let mut stmt = conn.prepare(
-                "SELECT d.id FROM discussions d \
-             JOIN workflow_runs wr ON d.workflow_run_id = wr.id \
-             WHERE wr.parent_run_id = ?1 OR d.workflow_run_id = ?1",
-            )?;
-            let ids: Vec<String> = stmt
-                .query_map(rusqlite::params![&run_id_for_db], |row| {
-                    row.get::<_, String>(0)
-                })?
-                .filter_map(|r| r.ok())
-                .collect();
-            Ok(ids)
-        })
-        .await
+    match crate::workflows::cancellation::cancel_run_tree(
+        &state,
+        &run_id,
+        crate::workflows::cancellation::CancellationScope::RunTree,
+        "cancelled_by_operator",
+    )
+    .await
     {
-        Ok(ids) => ids,
-        Err(e) => {
-            return Json(ApiResponse::err(format!(
-                "DB error finding child discs: {}",
-                e
-            )))
-        }
-    };
-
-    let mut never_started: Vec<String> = Vec::new();
-    let child_discs_cancelled = {
-        let mut map = match state.cancel_registry.lock() {
-            Ok(m) => m,
-            Err(_) => return Json(ApiResponse::err("Cancel registry poisoned")),
-        };
-        let mut n: u32 = 0;
-        for disc_id in &child_disc_ids {
-            if let Some(token) = map.remove(disc_id) {
-                token.cancel();
-                n += 1;
-            } else {
-                never_started.push(disc_id.clone());
-            }
-        }
-        n
-    };
-
-    // Children with NO live token never spawned an agent (or already
-    // finished, where clearing is a no-op): drop their awaiting_agent marker,
-    // or the boot reconcile would flag this deliberate cancel as an
-    // interruption. Running children keep the flag — their own cancelled
-    // path persists the ⏹️ footer and clears it, which stays crash-safe.
-    // A child that still spawns after this clear re-sets the marker itself
-    // at spawn, so the race is self-correcting. Best-effort.
-    if !never_started.is_empty() {
-        let ids = never_started;
-        let _ = state
-            .db
-            .with_conn(move |conn| {
-                for id in &ids {
-                    // No `?`: one failed clear must not skip the remaining ids.
-                    if let Err(e) = crate::db::discussions::set_awaiting_agent(conn, id, false) {
-                        tracing::warn!(
-                            "cancel_run: failed to clear awaiting_agent for {}: {}",
-                            id,
-                            e
-                        );
-                    }
-                }
-                Ok(())
-            })
-            .await;
+        Ok(outcome) => Json(ApiResponse::ok(CancelRunResponse {
+            run_cancelled: outcome.run_cancelled,
+            child_discs_cancelled: outcome.child_discs_cancelled,
+        })),
+        Err(error) => Json(ApiResponse::err(format!("Cancel run failed: {error}"))),
     }
-
-    // 3. Force-mark this run AND any Running child batch runs as Cancelled in
-    //    the DB. The token cancel (step 1) is best-effort — when it fires
-    //    inside a deep `await` (e.g. waiting on child batch completion via
-    //    ws_broadcast), the runner may never reach its status-writing path,
-    //    leaving the row stuck on "Running" forever. Without this DB update,
-    //    a second cancel click returns `run_cancelled=false` (token already
-    //    consumed) and the user sees nothing happen. Idempotent: the
-    //    `WHERE status = 'Running'` clause no-ops finished runs.
-    //
-    //    We don't touch discussions — they get their Cancelled/Failed status
-    //    from the agent-task finally path on their own tokens.
-    let run_id_for_db2 = run_id.clone();
-    let forced_statuses = state
-        .db
-        .with_conn(move |conn| {
-            // Pending (inserted, runner not started) and WaitingApproval (gate-
-            // paused, token dropped at pause) runs were UNCANCELLABLE before:
-            // the token no-ops and this UPDATE only matched 'Running'.
-            let parent_n = conn.execute(
-                "UPDATE workflow_runs SET status = 'Cancelled', finished_at = datetime('now') \
-             WHERE id = ?1 AND status IN ('Running', 'Pending', 'WaitingApproval')",
-                rusqlite::params![&run_id_for_db2],
-            )?;
-            let children_n = conn.execute(
-                "UPDATE workflow_runs SET status = 'Cancelled', finished_at = datetime('now') \
-             WHERE parent_run_id = ?1 AND status IN ('Running', 'Pending', 'WaitingApproval')",
-                rusqlite::params![&run_id_for_db2],
-            )?;
-            Ok((parent_n, children_n))
-        })
-        .await
-        .unwrap_or((0, 0));
-
-    tracing::info!(
-        "Cancel run {}: token_triggered={}, {} child disc agents stopped, \
-         parent_forced={}, child_batches_forced={}",
-        run_id,
-        run_cancelled,
-        child_discs_cancelled,
-        forced_statuses.0,
-        forced_statuses.1,
-    );
-
-    // From the user's point of view, "cancel worked" if either the in-memory
-    // token fired OR we had to forcibly mark the orphaned DB row. The UI
-    // uses this to decide between "stopping…" and "nothing to stop" toasts.
-    let run_cancelled = run_cancelled || forced_statuses.0 > 0;
-
-    Json(ApiResponse::ok(CancelRunResponse {
-        run_cancelled,
-        child_discs_cancelled,
-    }))
 }
 
 /// 0.7.0 Phase 4 — payload for `POST /api/workflows/:id/runs/:run_id/decide`.
@@ -3986,10 +3856,9 @@ mod tests {
 
     /// Cancelling a batch run directly must (a) cascade to its
     /// own children (workflow_run_id = run_id, not just parent_run_id) and
-    /// (b) clear awaiting_agent on children that never spawned, or the boot
-    /// reconcile mislabels a deliberate cancel as an interruption. A RUNNING
-    /// child keeps its flag: its own cancelled path persists the ⏹️ footer
-    /// and clears it (crash-safe).
+    /// (b) settle every durable dispatch and clear `awaiting_agent` on every
+    /// child. The cancellation helper owns that terminal transition now, so a
+    /// running child must not remain visually pending while its token unwinds.
     #[tokio::test]
     async fn cancel_run_clears_awaiting_marker_on_unstarted_children() {
         let state = state_with_batch("run-c", &["d-running", "d-queued"]).await;
@@ -4045,8 +3914,8 @@ mod tests {
             "unstarted child cleared: {flags:?}"
         );
         assert!(
-            flags.contains(&("d-running".to_string(), 1)),
-            "running child keeps its flag: {flags:?}"
+            flags.contains(&("d-running".to_string(), 0)),
+            "running child is settled immediately by the cancellation transaction: {flags:?}"
         );
     }
 

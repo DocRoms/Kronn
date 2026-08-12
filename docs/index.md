@@ -7,24 +7,18 @@ This folder is the project's living knowledge base, shared by humans and AI agen
 - **[AGENTS.md](AGENTS.md)** — Tiered context loader read by Claude Code, Codex, Gemini, Vibe, Copilot, Kiro and any agent that follows the `AGENTS.md` convention. Start here if you're an LLM.
 - **This file (`index.md`)** — Plain landing page for humans browsing the folder. Extend it with whatever helps onboarding.
 
-## Current release: 0.9.5
+## Current release: 0.9.6
 
-- New discussions containing several explicit agent aliases launch independent
-  replies rather than silently entering debate mode. Collaboration remains an
-  explicit, visible discussion policy, and generated alias prose cannot trigger
-  a handoff without Kronn's internal delegation marker.
-- Leading DeepSeek-style private-reasoning blocks returned through LiteLLM are
-  filtered from the visible response while later literal tags remain intact.
-- Open tabs recover after a backend restart or a half-open WebSocket: heartbeat
-  detection, bounded reconnects and automatic discussion resynchronization are
-  now one explicit reliability contract.
-- Reconnecting discussions explain that drafts are preserved, while the global
-  backend indicator retries quickly during an outage and disappears as soon as
-  service recovers.
-- Message sends are confirmed only by a durable persistence receipt. A failure
-  before that point restores the draft and removes the optimistic transcript
-  row instead of silently losing user input.
-- See the concise [`CHANGELOG.md`](../CHANGELOG.md) for 0.9.5 and 0.9.4, and
+- Every discussion agent can use the shared plan: explicit room ids for CLIs,
+  native planning tools for Ollama and LiteLLM, and human-gated proposals for Vibe.
+- Previously unbounded context paths are capped and disclose truncation. Quick
+  Exec handles deterministic checks without spending an agent turn.
+- Discussion cost distinguishes Kronn replies from whole-session CLI telemetry;
+  an unavailable measurement is shown as unknown, never as zero.
+- macOS desktop packages own and start their embedded backend, expose actionable
+  startup failures and tolerate missing optional Docs resources. Windows sidecars
+  use the CPython-compatible UCRT runtime and are smoke-tested before Tauri builds.
+- See the concise [`CHANGELOG.md`](../CHANGELOG.md) for 0.9.6 and 0.9.5, and
   [`releases/`](releases/) for older release history.
 
 ## Layout

@@ -59,14 +59,22 @@ export function composerMentions(
     });
   }
 
-  const ordinalByAgent = new Map<AgentType, number>();
+  // KT-247 — the ordinal is now the backend's STABLE per-(disc, provider) rank
+  // (`participant.cli_ordinal`), not a positional count over the rendered list.
+  // A positional count renumbers the moment a CLI leaves or the list is
+  // filtered, so `@claude-cli-2` could silently point at a different session
+  // between two renders. The backend ranks by the AUTOINCREMENT session id, so
+  // the alias is permanent. Fallback to a positional count only when the field
+  // is absent (older payload), never guessing a different number.
+  const positionalFallback = new Map<AgentType, number>();
   for (const participant of participants) {
     const type = agentByWireName.get(participant.agent_type);
     if (!type) continue;
     const canonical = AGENT_MENTIONS.find(mention => mention.type === type);
     if (!canonical) continue;
-    const ordinal = (ordinalByAgent.get(type) ?? 0) + 1;
-    ordinalByAgent.set(type, ordinal);
+    const fallback = (positionalFallback.get(type) ?? 0) + 1;
+    positionalFallback.set(type, fallback);
+    const ordinal = participant.cli_ordinal ?? fallback;
     const trigger = `${canonical.trigger}-cli${ordinal > 1 ? `-${ordinal}` : ''}`;
     options.push({
       trigger,

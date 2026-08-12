@@ -484,6 +484,17 @@ export function PlanningPage({
                     throw cause;
                   }
                 }}
+                onRemoveBlocker={async blockerTaskId => {
+                  try {
+                    const refreshed = await planning.removeBlocker(detail.id, blockerTaskId);
+                    setDetail(refreshed);
+                    setTasks(previous => previous.map(item => item.id === refreshed.id ? refreshed : item));
+                    toast(t('planning.blockerRemoved'), 'success');
+                  } catch (cause) {
+                    toast(userError(cause), 'error');
+                    throw cause;
+                  }
+                }}
                 onLinkDiscussion={async discussionId => {
                   try {
                     await planning.linkDiscussion(detail.id, {
@@ -550,6 +561,7 @@ interface DetailProps {
   onToggleDod: (dodId: string, completed: boolean) => Promise<void>;
   onCreateSubtask: (title: string) => Promise<void>;
   onAddBlocker: (blockerTaskId: string) => Promise<void>;
+  onRemoveBlocker: (blockerTaskId: string) => Promise<void>;
   onLinkDiscussion: (discussionId: string) => Promise<void>;
   onOpenTask: (taskId: string) => void;
   onNavigateDiscussion: (discussionId: string) => void;
@@ -564,6 +576,7 @@ function PlanningDetailForm({
   onToggleDod,
   onCreateSubtask,
   onAddBlocker,
+  onRemoveBlocker,
   onLinkDiscussion,
   onOpenTask,
   onNavigateDiscussion,
@@ -856,10 +869,27 @@ function PlanningDetailForm({
       <section className="planning-detail-blockers">
         <h3>{t('planning.blockers')}</h3>
         {task.blockers.map(blocker => (
-          <button type="button" key={blocker.id} onClick={() => onOpenTask(blocker.id)}>
-            <Circle size={12} /> {blocker.reference} · {blocker.title}
-            <ChevronRight size={12} />
-          </button>
+          <div className="planning-blocker-row" key={blocker.id}>
+            <button type="button" onClick={() => onOpenTask(blocker.id)}>
+              <Circle size={12} /> {blocker.reference} · {blocker.title}
+              <ChevronRight size={12} />
+            </button>
+            <button
+              type="button"
+              className="planning-blocker-remove"
+              disabled={linking}
+              aria-label={t('planning.removeBlocker', blocker.reference)}
+              title={t('planning.removeBlocker', blocker.reference)}
+              onClick={() => {
+                setLinking(true);
+                void onRemoveBlocker(blocker.id)
+                  .catch(() => undefined)
+                  .finally(() => setLinking(false));
+              }}
+            >
+              <X size={13} />
+            </button>
+          </div>
         ))}
         <div className="planning-blocker-create">
           <input

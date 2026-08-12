@@ -36,6 +36,8 @@ fn gate_db() -> Connection {
 
 fn message(id: &str, role: MessageRole, agent: Option<AgentType>) -> DiscussionMessage {
     DiscussionMessage {
+        recovered_partial: false,
+        session_tokens_at_message: None,
         model: None,
         lint_report: None,
         id: id.to_string(),
@@ -54,6 +56,7 @@ fn message(id: &str, role: MessageRole, agent: Option<AgentType>) -> DiscussionM
         duration_ms: None,
         target_agent: None,
         reply_to_message_id: None,
+        author_cli_ordinal: None,
     }
 }
 

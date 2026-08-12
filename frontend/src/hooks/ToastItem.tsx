@@ -20,6 +20,15 @@ export function ToastItem({ toast, onDismiss }: { toast: Toast; onDismiss: () =>
     : toast.type === 'warning' ? 'warning'
     : 'cyan';
 
+  // KT-252 — text paired with THIS background, spelled out rather than built
+  // from a template. A dynamic `--kr-on-${type}` defeats the phantom-token
+  // scanner in tokens-defined.test.ts, which is what caught it; written
+  // literally, every pairing is verifiable by that test and by eye.
+  const textVar = toast.type === 'error' ? 'var(--kr-on-error)'
+    : toast.type === 'success' ? 'var(--kr-on-success)'
+    : toast.type === 'warning' ? 'var(--kr-on-warning)'
+    : 'var(--kr-on-cyan)';
+
   return (
     <div
       role="alert"
@@ -28,7 +37,11 @@ export function ToastItem({ toast, onDismiss }: { toast: Toast; onDismiss: () =>
       data-type={toast.type}
       style={{
         padding: '10px 12px', borderRadius: 8, fontSize: 13,
-        color: 'var(--kr-text-on-dark)',
+        // The old `--kr-text-on-dark` meant "text on a DARK surface", and a
+        // toast filled with bright yellow is not one: gotham rendered #ffd400
+        // on #ffc800, a contrast of 1.00. The default theme was 1.55 and matrix
+        // 1.12, so it was never a Batman-only bug.
+        color: textVar,
         background: `rgba(var(--kr-${colorVar}-rgb), 0.95)`,
         border: `1px solid rgba(var(--kr-${colorVar}-rgb), 0.3)`,
         backdropFilter: 'blur(10px)', maxWidth: 420, minWidth: 240,

@@ -55,6 +55,9 @@ mod tests {
 
     fn make_message(id: &str, role: MessageRole, agent: Option<AgentType>) -> DiscussionMessage {
         DiscussionMessage {
+            recovered_partial: false,
+            session_tokens_at_message: None,
+            author_cli_ordinal: None,
             model: None,
             lint_report: None,
             id: id.into(),

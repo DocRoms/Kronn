@@ -624,10 +624,18 @@
   color: var(--kr-text-primary);
 }
 
-.planning-detail-blockers > button {
+.planning-blocker-row {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+}
+
+.planning-blocker-row > button:first-child {
   display: flex;
   align-items: center;
   gap: 5px;
+  flex: 1;
+  min-width: 0;
   padding: 5px 0;
   border: 0;
   background: transparent;
@@ -636,8 +644,28 @@
   cursor: pointer;
 }
 
-.planning-detail-blockers > button svg:last-child {
+.planning-blocker-row > button:first-child svg:last-child {
   margin-left: auto;
+}
+
+.planning-blocker-remove {
+  display: grid;
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--kr-r-sm);
+  background: transparent;
+  color: var(--kr-text-muted);
+  cursor: pointer;
+  place-items: center;
+}
+
+.planning-blocker-remove:hover:not(:disabled) {
+  border-color: rgba(var(--kr-error-rgb), 0.3);
+  background: rgba(var(--kr-error-rgb), 0.1);
+  color: var(--kr-danger);
 }
 
 .planning-detail-events {

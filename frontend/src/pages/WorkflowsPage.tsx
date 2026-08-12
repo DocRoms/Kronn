@@ -82,13 +82,30 @@ const TRIGGER_LABELS: Record<string, string> = {
 const RUN_FETCH_PAGE_SIZE = 10;
 const RUN_FETCH_MAX_PAGE_SIZE = 500;
 
+function readPostImprovedQuickPromptId(): string | null {
+  try {
+    return sessionStorage.getItem('kronn:postQpImproved');
+  } catch {
+    // sessionStorage may be unavailable in private/restricted browser modes.
+    return null;
+  }
+}
+
 export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, configLanguage, onNavigateDiscussion, onBatchLaunched, initialSelectedWorkflowId, onInitialSelectionConsumed, onNavigateToBatch, toast: toastProp, pendingPreset, onPendingPresetConsumed }: WorkflowsPageProps) {
   const { t } = useT();
   // The 380px workflow list plus the detail panel needs substantially more
   // room than a phone-only breakpoint. Switch to the existing single-pane
   // navigation on tablets too, before the detail content becomes cramped.
   const isMobile = useIsMobile(1024);
-  const [tab, setTab] = useState<'workflows' | 'quickPrompts' | 'quickApis'>('workflows');
+  // Consume the one-shot navigation target during initial state creation.
+  // Deriving the initial tab here avoids a second render solely to mirror
+  // sessionStorage from a mount effect.
+  const [postImprovedQpId, setPostImprovedQpId] = useState<string | null>(
+    readPostImprovedQuickPromptId,
+  );
+  const [tab, setTab] = useState<'workflows' | 'quickPrompts' | 'quickApis'>(
+    postImprovedQpId ? 'quickPrompts' : 'workflows',
+  );
   const [quickPromptSort, setQuickPromptSort] = useState<QuickPromptSort>('name');
   const [quickPromptSortReversed, setQuickPromptSortReversed] = useState(false);
   const [quickPromptAgentFilter, setQuickPromptAgentFilter] = useState<string>('all');
@@ -98,9 +115,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   const [quickPromptUsage, setQuickPromptUsage] = useState<Record<string, number>>({});
   // 0.8.5 — post-deploy focus: when the user lands here right after
   // clicking "Deploy improved QP" in DiscussionsPage, this state holds
-  // the target QP id; the page switches to the Quick Prompts tab and
-  // briefly highlights the matching card (CSS class with a fade-out).
-  const [postImprovedQpId, setPostImprovedQpId] = useState<string | null>(null);
+  // the target QP id and briefly highlights the matching card.
   const { data: workflowList, refetch } = useApi(() => workflowsApi.list(), []);
   const { data: quickPromptList, refetch: refetchQP } = useApi(() => quickPromptsApi.list(), []);
   const { data: quickApiList, refetch: refetchQA } = useApi(() => quickApisApi.list(), []);
@@ -225,21 +240,13 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pendingPreset]);
 
-  // 0.8.5 — post-deploy QP focus. Read the sessionStorage flag set by
-  // the DiscussionsPage "Deploy improved QP" CTA, switch to the Quick
-  // Prompts tab, clear the flag, and remember the target id so we can
-  // scroll + flash-highlight the card once the QP list is loaded.
+  // A mount effect is appropriate for consuming the external navigation
+  // receipt; unlike the previous implementation, it does not derive React
+  // state or cause an additional render.
   useEffect(() => {
-    let qpId: string | null = null;
-    try { qpId = sessionStorage.getItem('kronn:postQpImproved'); } catch { /* private mode */ }
-    if (!qpId) return;
-    setTab('quickPrompts');
-    setPostImprovedQpId(qpId);
-    try { sessionStorage.removeItem('kronn:postQpImproved'); } catch { /* ignore */ }
-    // The list might not be loaded yet; the scroll+flash effect below
-    // re-fires when quickPromptList resolves. No dependency on quickPromptList here —
-    // running once on mount is enough because state mutates trigger the next effect.
-  }, []);
+    if (!postImprovedQpId) return;
+    try { sessionStorage.removeItem('kronn:postQpImproved'); } catch { /* private mode */ }
+  }, [postImprovedQpId]);
 
   // Scroll + flash highlight the deep-linked QP card once the list is
   // available. Uses a 1.4s CSS animation (defined in WorkflowsPage.css)
@@ -1688,6 +1695,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
 
             {selectedId && !loadingDetail && detailWorkflow && (
               <WorkflowDetail
+                key={detailWorkflow.id}
                 workflow={detailWorkflow}
                 runs={detailRuns}
                 availableAgentTypes={installedAgentTypes}
@@ -1704,6 +1712,8 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                   Math.max(RUN_FETCH_PAGE_SIZE, detailRunPageCount),
                 )}
                 onEdit={() => setEditingWorkflow(detailWorkflow)}
+                projects={projects}
+                configLanguage={configLanguage}
                 onDeleteRun={async (runId) => {
                   if (!confirm(t('wf.deleteRunConfirm'))) return;
                   await workflowsApi.deleteRun(detailWorkflow.id, runId);

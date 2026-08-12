@@ -8,8 +8,12 @@ import {
 } from '../messageTargets';
 import type { Discussion, ParticipantView } from '../../types/generated';
 
-const cli = (id: number, agent_type: string): ParticipantView => ({
+// `cli_ordinal` defaults to null so the existing cases keep exercising the
+// positional fallback they were written for; pass it explicitly to pin the
+// backend-ranked behaviour.
+const cli = (id: number, agent_type: string, cli_ordinal: number | null = null): ParticipantView => ({
   id,
+  cli_ordinal,
   disc_id: 'disc-1',
   agent_type,
   session_id: `session-${id}`,
@@ -65,6 +69,32 @@ describe('typed composer targets', () => {
         displayTrigger: '@codex-cli',
         label: 'CLI',
         target: expect.objectContaining({ kind: 'cli', cli_session_id: 42 }),
+      }),
+    ]));
+  });
+
+  it('ranks CLIs by the backend ordinal, not by their position in the list', () => {
+    // The whole point of KT-247: the ordinal is a property of the session, not
+    // of the rendered order. Here the session ranked 2 by the backend comes
+    // FIRST in the list — a positional counter would label it `CLI` and rename
+    // the other one, rewriting who authored what in past messages.
+    const mentions = composerMentions(
+      'ClaudeCode',
+      ['ClaudeCode'],
+      [cli(80, 'ClaudeCode', 2), cli(66, 'ClaudeCode', 1)],
+      labels,
+    );
+
+    expect(mentions).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        trigger: '@claude-cli-2',
+        label: 'CLI 2',
+        target: expect.objectContaining({ kind: 'cli', cli_session_id: 80 }),
+      }),
+      expect.objectContaining({
+        trigger: '@claude-cli',
+        label: 'CLI',
+        target: expect.objectContaining({ kind: 'cli', cli_session_id: 66 }),
       }),
     ]));
   });

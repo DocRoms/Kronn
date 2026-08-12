@@ -1,0 +1,25 @@
+-- KT-190 — what the CLI session had cost by the time a message was posted.
+--
+-- A joined CLI's messages have always read `tokens_used = 0` (994 of them on
+-- the real database, against 1 045 non-zero for the agents Kronn spawns), so the
+-- UI could price an agent's bubble and not a CLI's.
+--
+-- This is DELIBERATELY NOT `tokens_used`, and the distinction is the whole point.
+-- For an agent, `tokens_used` means "this reply cost that much". A CLI's spend
+-- cannot be cut up that way: between two room messages the CLI also read files,
+-- ran tests, and possibly answered in ANOTHER room. Charging that window to the
+-- message that follows would attribute work it did not do.
+--
+-- So this column holds a RUNNING TOTAL: what the whole session had spent at that
+-- instant. That is a fact about the session, not a claim about the message —
+-- monotonically increasing, and the gap between two rows stays visible to anyone
+-- who wants to estimate it, without Kronn asserting it.
+--
+-- Reusing `tokens_used` would have put a cumulative figure in the slot the UI
+-- renders as a per-message cost: same column, different meaning, misled reader.
+-- Hence a separate column and a separate label.
+--
+-- NULL means not measured. A CLI whose vendor has no collector keeps NULL rather
+-- than 0, so an unmeasured session can never be read as a free one.
+
+ALTER TABLE messages ADD COLUMN session_tokens_at_message INTEGER;

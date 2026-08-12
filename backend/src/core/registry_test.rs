@@ -228,7 +228,7 @@ mod tests {
             "mcp-slack",
             "mcp-linear",
             "mcp-atlassian",
-            "mcp-microsoft-365",
+            "api-microsoft-365",
             // Design
             "mcp-figma",
             "mcp-drawio",
@@ -807,16 +807,27 @@ mod tests {
     }
 
     #[test]
-    fn microsoft_365_mcp_configuration() {
+    fn microsoft_365_api_configuration() {
         let reg = builtin_registry();
         let m = reg
             .iter()
-            .find(|m| m.id == "mcp-microsoft-365")
-            .expect("mcp-microsoft-365 missing");
-        assert_eq!(m.publisher, "Softeria (community)");
-        assert!(!m.official);
+            .find(|m| m.id == "api-microsoft-365")
+            .expect("api-microsoft-365 missing");
+        assert_eq!(m.publisher, "Microsoft (Azure CLI)");
+        assert!(m.official);
         assert!(m.tags.contains(&"email".into()));
         assert!(m.tags.contains(&"teams".into()));
+        assert!(m.env_keys.is_empty(), "CLI-token card stores no env keys");
+        assert!(matches!(m.transport, McpTransport::ApiOnly));
+        match &m
+            .api_spec
+            .as_ref()
+            .expect("microsoft must expose api_spec")
+            .auth
+        {
+            ApiAuthKind::CliToken { command, .. } => assert_eq!(command, "az"),
+            other => panic!("expected CliToken(az), got {other:?}"),
+        }
     }
 
     #[test]

@@ -1,3 +1,9 @@
+/** KT-255 — the session binding is provenance, shown read-only.
+ *
+ *  The removed form asked a human to pick from eight agents and type an opaque
+ *  uuid. What is tested here is that the form is GONE from every angle a user
+ *  could reach it, that an existing binding is still explained, and that the one
+ *  repair action a stale binding needs survived the removal. */
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { discussions } from '../../lib/api';
@@ -25,12 +31,8 @@ const labels: Record<string, string> = {
   'disc.session.copy': 'Copier {0}',
   'disc.session.agent': 'CLI source',
   'disc.session.id': 'ID de session',
-  'disc.session.idPlaceholder': 'ID fourni',
-  'disc.session.required': 'Champs obligatoires',
-  'disc.session.alreadyLinked': 'Déjà liée à #{0}',
-  'disc.session.linked': 'Session liée',
+  'disc.session.automatic': 'Liaison établie automatiquement au join de la CLI.',
   'disc.session.unlinked': 'Session déliée',
-  'disc.session.linkFailed': 'Échec liaison',
   'disc.session.unlinkFailed': 'Échec déliaison',
   'disc.session.history': 'Historique ({0})',
   'disc.session.closed': 'Terminée',
@@ -48,6 +50,18 @@ const t = (key: string, ...args: (string | number)[]) => {
 
 const emptyDetail = { current: null, history: [] };
 
+const bound = {
+  current: {
+    binding_version: 1,
+    disc_id: 'disc-a',
+    source_agent: 'ClaudeCode',
+    source_session_id: 'claude-session-full-id',
+    imported_at: null,
+    diverged_at: null,
+  },
+  history: [],
+};
+
 describe('DiscussionSessionBinding', () => {
   const toast = vi.fn();
 
@@ -64,70 +78,119 @@ describe('DiscussionSessionBinding', () => {
     vi.mocked(discussions.unlinkSourceSession).mockResolvedValue(true);
   });
 
-  it('links an unowned session and emits the sidebar refresh event', async () => {
-    const changed = vi.fn();
-    window.addEventListener('kronn:disc-source-changed', changed);
+  // ── the form is gone ──────────────────────────────────────────────
+
+  it('offers no control at all when no binding exists', async () => {
+    // The old empty form sat here inviting a gesture that is almost always wrong.
+    // Nothing to explain means nothing to show.
     render(<DiscussionSessionBinding discussionId="disc-a" toast={toast} t={t} />);
     await waitFor(() => expect(discussions.sourceDetail).toHaveBeenCalledWith('disc-a'));
-
-    fireEvent.click(screen.getByRole('button', { name: 'Session' }));
-    fireEvent.change(screen.getByLabelText('ID de session'), {
-      target: { value: 'codex-session-42' },
-    });
-    fireEvent.change(screen.getByLabelText('CLI source'), {
-      target: { value: 'Codex' },
-    });
-    fireEvent.click(screen.getByRole('button', { name: 'Lier une session' }));
-
-    await waitFor(() => expect(discussions.linkSourceSession).toHaveBeenCalledWith({
-      disc_id: 'disc-a',
-      source_agent: 'Codex',
-      source_session_id: 'codex-session-42',
-      force_reassign: false,
-    }));
-    expect(changed).toHaveBeenCalledOnce();
-    expect(toast).toHaveBeenCalledWith('Session liée', 'success');
-    window.removeEventListener('kronn:disc-source-changed', changed);
+    expect(screen.queryByRole('button')).toBeNull();
   });
 
-  it('refuses to steal a session already linked elsewhere', async () => {
-    vi.mocked(discussions.sourceSessionStatus).mockResolvedValue({
-      binding_version: 1,
-      bound_disc_id: 'disc-other-1234',
-      connected_disc_id: null,
-      connection_status: null,
-    });
+  it('exposes no agent menu and no session-id field on an existing binding', async () => {
+    // The two inputs the ticket names, checked by role rather than by label so a
+    // renamed label cannot make this pass while the field is still there.
+    vi.mocked(discussions.sourceDetail).mockResolvedValue(bound);
     render(<DiscussionSessionBinding discussionId="disc-a" toast={toast} t={t} />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Session' }));
-    fireEvent.change(screen.getByLabelText('ID de session'), {
-      target: { value: 'shared-session' },
-    });
-    fireEvent.click(screen.getByRole('button', { name: 'Lier une session' }));
+    fireEvent.click(await screen.findByRole('button', { name: /ClaudeCode · claude-s/ }));
 
-    expect(await screen.findByRole('alert')).toHaveTextContent('Déjà liée à #disc-oth');
+    expect(await screen.findByRole('dialog')).toBeVisible();
+    expect(screen.queryByRole('combobox')).toBeNull();
+    expect(screen.queryByRole('textbox')).toBeNull();
+  });
+
+  it('never calls the link endpoint from the UI', async () => {
+    // The route stays for the bridge; the UI must have no path to it. This is the
+    // assertion that would catch a form reintroduced under another name.
+    vi.mocked(discussions.sourceDetail).mockResolvedValue(bound);
+    render(<DiscussionSessionBinding discussionId="disc-a" toast={toast} t={t} />);
+    fireEvent.click(await screen.findByRole('button', { name: /ClaudeCode · claude-s/ }));
+    await screen.findByRole('dialog');
+
+    screen
+      .getAllByRole('button')
+      .forEach(button => fireEvent.click(button));
     expect(discussions.linkSourceSession).not.toHaveBeenCalled();
   });
 
-  it('shows offline state, copies the full id and can unlink', async () => {
-    vi.mocked(discussions.sourceDetail).mockResolvedValue({
-      current: {
-        binding_version: 1,
-        disc_id: 'disc-a',
-        source_agent: 'ClaudeCode',
-        source_session_id: 'claude-session-full-id',
-        imported_at: null,
-        diverged_at: null,
-      },
-      history: [],
-    });
+  // ── an existing binding is still explained ────────────────────────
+
+  it('shows the bound agent, its state and the full id', async () => {
+    // Provenance is information: which CLI this thread came from, and whether it
+    // is still there.
+    vi.mocked(discussions.sourceDetail).mockResolvedValue(bound);
     render(<DiscussionSessionBinding discussionId="disc-a" toast={toast} t={t} />);
     fireEvent.click(await screen.findByRole('button', { name: /ClaudeCode · claude-s/ }));
 
     expect(await screen.findByText('Hors ligne ou non détectée')).toBeVisible();
     expect(screen.getByRole('button', { name: 'Copier claude-session-full-id' })).toBeVisible();
-    fireEvent.click(screen.getByRole('button', { name: 'Délier' }));
+  });
+
+  it('says the binding was established automatically', async () => {
+    // Otherwise a reader looks for the control that used to create one.
+    vi.mocked(discussions.sourceDetail).mockResolvedValue(bound);
+    render(<DiscussionSessionBinding discussionId="disc-a" toast={toast} t={t} />);
+    fireEvent.click(await screen.findByRole('button', { name: /ClaudeCode · claude-s/ }));
+    expect(await screen.findByText(/automatiquement/)).toBeVisible();
+  });
+
+  it('reports a live session as connected', async () => {
+    vi.mocked(discussions.sourceDetail).mockResolvedValue(bound);
+    vi.mocked(discussions.sourceSessionStatus).mockResolvedValue({
+      binding_version: 1,
+      bound_disc_id: 'disc-a',
+      connected_disc_id: 'disc-a',
+      connection_status: 'connected',
+    });
+    render(<DiscussionSessionBinding discussionId="disc-a" toast={toast} t={t} />);
+    fireEvent.click(await screen.findByRole('button', { name: /ClaudeCode · claude-s/ }));
+    expect(await screen.findByText('Connectée')).toBeVisible();
+  });
+
+  // ── the repair path survived ──────────────────────────────────────
+
+  it('can still unlink a stale binding', async () => {
+    // DoD: no repair path lost without an alternative. This is the alternative —
+    // there is no other way to clear a binding from the UI.
+    vi.mocked(discussions.sourceDetail).mockResolvedValue(bound);
+    render(<DiscussionSessionBinding discussionId="disc-a" toast={toast} t={t} />);
+    fireEvent.click(await screen.findByRole('button', { name: /ClaudeCode · claude-s/ }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Délier' }));
 
     await waitFor(() => expect(discussions.unlinkSourceSession).toHaveBeenCalledWith('disc-a'));
     expect(toast).toHaveBeenCalledWith('Session déliée', 'success');
+  });
+
+  it('emits the sidebar refresh event after unlinking', async () => {
+    vi.mocked(discussions.sourceDetail).mockResolvedValue(bound);
+    const changed = vi.fn();
+    window.addEventListener('kronn:disc-source-changed', changed);
+    render(<DiscussionSessionBinding discussionId="disc-a" toast={toast} t={t} />);
+    fireEvent.click(await screen.findByRole('button', { name: /ClaudeCode · claude-s/ }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Délier' }));
+
+    await waitFor(() => expect(changed).toHaveBeenCalled());
+    window.removeEventListener('kronn:disc-source-changed', changed);
+  });
+
+  it('reports a failed unlink instead of pretending it worked', async () => {
+    vi.mocked(discussions.sourceDetail).mockResolvedValue(bound);
+    vi.mocked(discussions.unlinkSourceSession).mockRejectedValue(new Error('offline'));
+    render(<DiscussionSessionBinding discussionId="disc-a" toast={toast} t={t} />);
+    fireEvent.click(await screen.findByRole('button', { name: /ClaudeCode · claude-s/ }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Délier' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Échec déliaison');
+  });
+
+  it('survives a failed read without breaking the header', async () => {
+    // The binding is optional metadata sitting in the chat header.
+    vi.mocked(discussions.sourceDetail).mockRejectedValue(new Error('offline'));
+    expect(() =>
+      render(<DiscussionSessionBinding discussionId="disc-a" toast={toast} t={t} />),
+    ).not.toThrow();
+    await waitFor(() => expect(discussions.sourceDetail).toHaveBeenCalled());
+    expect(screen.queryByRole('button')).toBeNull();
   });
 });

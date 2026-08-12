@@ -59,6 +59,10 @@ pub struct AgentDispatchJob {
     pub turn_attempts: u32,
     pub available_at: DateTime<Utc>,
     pub claimed_at: Option<DateTime<Utc>>,
+    /// First instant at which the global agent permit was acquired and the
+    /// native/HTTP runtime was about to be invoked. Unlike `claimed_at`, this
+    /// excludes time spent queued behind the process-wide semaphore.
+    pub agent_started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
     pub last_error: Option<String>,
     pub created_at: DateTime<Utc>,
@@ -108,17 +112,18 @@ fn map_job(row: &Row<'_>) -> rusqlite::Result<AgentDispatchJob> {
         turn_attempts: row.get::<_, i64>(13)?.max(0) as u32,
         available_at: parse_dt(row.get(14)?),
         claimed_at: row.get::<_, Option<String>>(15)?.map(parse_dt),
-        completed_at: row.get::<_, Option<String>>(16)?.map(parse_dt),
-        last_error: row.get(17)?,
-        created_at: parse_dt(row.get(18)?),
-        updated_at: parse_dt(row.get(19)?),
+        agent_started_at: row.get::<_, Option<String>>(16)?.map(parse_dt),
+        completed_at: row.get::<_, Option<String>>(17)?.map(parse_dt),
+        last_error: row.get(18)?,
+        created_at: parse_dt(row.get(19)?),
+        updated_at: parse_dt(row.get(20)?),
     })
 }
 
 const JOB_COLUMNS: &str = "id, discussion_id, trigger_message_id, trigger_sort_order,
     dedupe_key, agent_override_json, chain_prompt_ids_json, next_chain_index,
     batch_item, group_id, group_concurrency_limit, status, attempts, turn_attempts,
-    available_at, claimed_at, completed_at, last_error, created_at, updated_at";
+    available_at, claimed_at, agent_started_at, completed_at, last_error, created_at, updated_at";
 
 pub fn list_active_for_discussion(
     conn: &Connection,
@@ -376,12 +381,28 @@ pub fn reset_running_after_restart(conn: &Connection) -> Result<u64> {
     let now = Utc::now().to_rfc3339();
     let changed = conn.execute(
         "UPDATE agent_dispatch_jobs
-         SET status = 'Pending', claimed_at = NULL, available_at = ?1, updated_at = ?1,
+         SET status = 'Pending', claimed_at = NULL, agent_started_at = NULL,
+             available_at = ?1, updated_at = ?1,
              last_error = 'backend_restarted'
          WHERE status = 'Running'",
         [now],
     )?;
     Ok(changed as u64)
+}
+
+/// Persist the boundary between queueing and real agent execution.
+///
+/// Returning `false` means cancellation or another terminal transition won
+/// the race after claim; callers must then skip the provider invocation.
+pub fn mark_agent_started(conn: &Connection, id: &str) -> Result<bool> {
+    let now = Utc::now().to_rfc3339();
+    let changed = conn.execute(
+        "UPDATE agent_dispatch_jobs
+         SET agent_started_at = COALESCE(agent_started_at, ?2), updated_at = ?2
+         WHERE id = ?1 AND status = 'Running'",
+        params![id, now],
+    )?;
+    Ok(changed > 0)
 }
 
 pub fn mark_completed(conn: &Connection, id: &str) -> Result<bool> {
@@ -413,7 +434,7 @@ pub fn retry_after(conn: &Connection, id: &str, delay_seconds: i64, error: &str)
     let available_at = (now + Duration::seconds(delay_seconds.max(0))).to_rfc3339();
     let changed = conn.execute(
         "UPDATE agent_dispatch_jobs
-         SET status = 'Pending', claimed_at = NULL, available_at = ?2,
+         SET status = 'Pending', claimed_at = NULL, agent_started_at = NULL, available_at = ?2,
              updated_at = ?3, last_error = ?4
          WHERE id = ?1 AND status = 'Running'",
         params![id, available_at, now.to_rfc3339(), error],
@@ -439,6 +460,7 @@ pub fn defer_runtime_unavailable(
              attempts = MAX(attempts - 1, 0),
              turn_attempts = MAX(turn_attempts - 1, 0),
              claimed_at = NULL,
+             agent_started_at = NULL,
              available_at = ?2,
              updated_at = ?3,
              last_error = ?4
@@ -456,6 +478,7 @@ pub fn release_unstarted_claim(conn: &Connection, id: &str, error: &str) -> Resu
              attempts = MAX(attempts - 1, 0),
              turn_attempts = MAX(turn_attempts - 1, 0),
              claimed_at = NULL,
+             agent_started_at = NULL,
              available_at = ?2,
              updated_at = ?2,
              last_error = ?3
@@ -582,6 +605,7 @@ pub fn advance_chain_trigger(
          SET trigger_message_id = ?2, trigger_sort_order = ?3,
              next_chain_index = next_chain_index + 1,
              status = 'Pending', turn_attempts = 0, claimed_at = NULL,
+             agent_started_at = NULL,
              available_at = ?4, updated_at = ?4, last_error = NULL
          WHERE id = ?1 AND status = 'Running'",
         params![job_id, message.id, sort_order, now],
@@ -733,6 +757,42 @@ mod tests {
                 .unwrap(),
             0
         );
+    }
+
+    #[test]
+    fn lifecycle_timestamps_distinguish_queue_claim_start_and_settlement() {
+        let connection = connection();
+        let job = enqueue(
+            &connection,
+            NewAgentDispatchJob {
+                id: "lifecycle-job",
+                discussion_id: "d1",
+                trigger_message_id: "u1",
+                trigger_sort_order: 1,
+                dedupe_key: "lifecycle-key",
+                agent_override: None,
+                chain_prompt_ids: &[],
+                batch_item: None,
+                group_id: None,
+                group_concurrency_limit: None,
+            },
+        )
+        .unwrap();
+        assert!(job.claimed_at.is_none());
+        assert!(job.agent_started_at.is_none());
+        assert!(job.completed_at.is_none());
+
+        let claimed = claim(&connection, "lifecycle-job").unwrap().unwrap();
+        assert!(claimed.claimed_at.is_some());
+        assert!(claimed.agent_started_at.is_none());
+        assert!(mark_agent_started(&connection, "lifecycle-job").unwrap());
+        assert!(mark_completed(&connection, "lifecycle-job").unwrap());
+
+        let settled = get(&connection, "lifecycle-job").unwrap().unwrap();
+        assert!(settled.created_at <= settled.claimed_at.unwrap());
+        assert!(settled.agent_started_at.is_some());
+        assert!(settled.completed_at >= settled.agent_started_at);
+        assert_eq!(settled.status, DispatchStatus::Completed);
     }
 
     #[test]

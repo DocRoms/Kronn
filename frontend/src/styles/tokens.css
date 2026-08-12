@@ -82,6 +82,19 @@
   --kr-text-on-accent: #111;
   --kr-text-on-dark: #fff;
 
+  /* KT-252 — text ON a toast background, per type.
+     Distinct from --kr-text-on-dark, which means "text on a DARK
+     surface": a toast filled with bright yellow is not a dark surface.
+     Conflating the two made gotham render #ffd400 on #ffc800 — a
+     contrast of 1.00, the same colour. The default theme was 1.55 and
+     matrix 1.12, so this was never a Batman-only bug. Each value is
+     whichever of black/white actually contrasts with THAT accent. */
+  --kr-on-warning: #000;
+  --kr-on-error: #000;
+  --kr-on-success: #000;
+  --kr-on-cyan: #000;
+
+
   /* ── Borders ──────────────────────────────────────────────────────────── */
   --kr-border-ghost: rgba(255, 255, 255, 0.04);
   --kr-border: rgba(255, 255, 255, 0.07);
@@ -301,7 +314,20 @@
      which is exactly the "noir sur sombre" the user caught on the
      git-panel pending badge + the "Créer avec IA" workflow CTA. */
   --kr-text-on-accent: #ffffff; /* white text on the dark-teal fill — 5.5:1 AA ✓ */
-  --kr-text-on-dark: #fff;      /* unchanged — for tokens that keep dark bg in light theme (code blocks) */
+  --kr-text-on-dark: #fff;
+
+  /* KT-252 — text ON a toast background, per type.
+     Distinct from --kr-text-on-dark, which means "text on a DARK
+     surface": a toast filled with bright yellow is not a dark surface.
+     Conflating the two made gotham render #ffd400 on #ffc800 — a
+     contrast of 1.00, the same colour. The default theme was 1.55 and
+     matrix 1.12, so this was never a Batman-only bug. Each value is
+     whichever of black/white actually contrasts with THAT accent. */
+  --kr-on-warning: #fff;
+  --kr-on-error: #fff;
+  --kr-on-success: #fff;
+  --kr-on-cyan: #fff;
+      /* unchanged — for tokens that keep dark bg in light theme (code blocks) */
 
   /* ── Borders — visible but not noisy ───────────────────────────────── */
   --kr-border-ghost: rgba(10, 14, 30, 0.05);
@@ -427,6 +453,19 @@
   --kr-text-on-accent: #000;
   --kr-text-on-dark: #39ff14;
 
+  /* KT-252 — text ON a toast background, per type.
+     Distinct from --kr-text-on-dark, which means "text on a DARK
+     surface": a toast filled with bright yellow is not a dark surface.
+     Conflating the two made gotham render #ffd400 on #ffc800 — a
+     contrast of 1.00, the same colour. The default theme was 1.55 and
+     matrix 1.12, so this was never a Batman-only bug. Each value is
+     whichever of black/white actually contrasts with THAT accent. */
+  --kr-on-warning: #000;
+  --kr-on-error: #000;
+  --kr-on-success: #000;
+  --kr-on-cyan: #000;
+
+
   --kr-border-ghost: rgba(0, 255, 65, 0.06);
   --kr-border: rgba(0, 255, 65, 0.12);
   --kr-border-light: rgba(0, 255, 65, 0.08);
@@ -511,6 +550,19 @@
   --kr-text-on-accent: #0a0d14;
   --kr-text-on-dark: #ffd400;
 
+  /* KT-252 — text ON a toast background, per type.
+     Distinct from --kr-text-on-dark, which means "text on a DARK
+     surface": a toast filled with bright yellow is not a dark surface.
+     Conflating the two made gotham render #ffd400 on #ffc800 — a
+     contrast of 1.00, the same colour. The default theme was 1.55 and
+     matrix 1.12, so this was never a Batman-only bug. Each value is
+     whichever of black/white actually contrasts with THAT accent. */
+  --kr-on-warning: #000;
+  --kr-on-error: #000;
+  --kr-on-success: #000;
+  --kr-on-cyan: #000;
+
+
   --kr-border-ghost: rgba(255, 212, 0, 0.05);
   --kr-border: rgba(255, 212, 0, 0.10);
   --kr-border-light: rgba(255, 212, 0, 0.07);
@@ -594,6 +646,19 @@
   --kr-text-on-accent: #ffffff;
   --kr-text-on-dark: #fff;
 
+  /* KT-252 — text ON a toast background, per type.
+     Distinct from --kr-text-on-dark, which means "text on a DARK
+     surface": a toast filled with bright yellow is not a dark surface.
+     Conflating the two made gotham render #ffd400 on #ffc800 — a
+     contrast of 1.00, the same colour. The default theme was 1.55 and
+     matrix 1.12, so this was never a Batman-only bug. Each value is
+     whichever of black/white actually contrasts with THAT accent. */
+  --kr-on-warning: #fff;
+  --kr-on-error: #fff;
+  --kr-on-success: #000;
+  --kr-on-cyan: #fff;
+
+
   --kr-border-ghost: rgba(190, 24, 93, 0.06);
   --kr-border: rgba(190, 24, 93, 0.13);
   --kr-border-light: rgba(190, 24, 93, 0.09);
@@ -676,6 +741,19 @@
   --kr-cancelled: #566880;
   --kr-text-on-accent: #ffffff;
   --kr-text-on-dark: #fff;
+
+  /* KT-252 — text ON a toast background, per type.
+     Distinct from --kr-text-on-dark, which means "text on a DARK
+     surface": a toast filled with bright yellow is not a dark surface.
+     Conflating the two made gotham render #ffd400 on #ffc800 — a
+     contrast of 1.00, the same colour. The default theme was 1.55 and
+     matrix 1.12, so this was never a Batman-only bug. Each value is
+     whichever of black/white actually contrasts with THAT accent. */
+  --kr-on-warning: #fff;
+  --kr-on-error: #fff;
+  --kr-on-success: #000;
+  --kr-on-cyan: #fff;
+
 
   /* Neutral slate hairlines (not saturated blue) — soft on a light base,
      avoids the "blue lines everywhere" eye strain. Alphas aligned with the

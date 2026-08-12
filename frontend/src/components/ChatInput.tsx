@@ -86,6 +86,10 @@ export interface ChatInputProps {
   worktreeError: string | null;
   /** True while a send is refused because the previous run is still recovering. */
   partialPending?: boolean;
+  /** KT-251 — id of the answer currently blocking this send, when known.
+   *  Shown so the user can name it: "je ne vois pas encore d'id […] ça t'aurait
+   *  aidé au debug". Undefined = unknown, never rendered as an empty id. */
+  partialPendingMessageId?: string;
   partialForcing?: boolean;
   onPartialPendingForce?: () => void;
   onPartialPendingDismiss?: () => void;
@@ -133,6 +137,7 @@ export function ChatInput({
   ttsState,
   worktreeError,
   partialPending = false,
+  partialPendingMessageId,
   partialForcing = false,
   onPartialPendingForce,
   onPartialPendingDismiss,
@@ -1465,6 +1470,14 @@ export function ChatInput({
             <AlertTriangle size={14} className="text-warning flex-shrink-0" />
             <span className="flex-1">
               {partialForcing ? t('disc.partialForcing') : t('disc.partialPendingNotice')}
+              {/* KT-251 — name the answer that is blocking. Rendered only when
+                  the backend knows it: an empty or fabricated id would be worse
+                  than none, since the user would go looking for it. */}
+              {partialPendingMessageId && (
+                <code className="disc-partial-pending-id">
+                  {' '}#{partialPendingMessageId.slice(0, 8)}
+                </code>
+              )}
             </span>
             <button
               className="disc-worktree-retry-btn"
@@ -1762,6 +1775,7 @@ export function ChatInput({
                     type="button"
                     className="disc-tool-btn disc-note-visibility-btn"
                     data-color="warning"
+                    data-active={showDiscussionNotes}
                     onClick={onToggleDiscussionNotes}
                     title={showDiscussionNotes ? t('disc.note.hide') : t('disc.note.show')}
                     aria-label={showDiscussionNotes ? t('disc.note.hide') : t('disc.note.show')}

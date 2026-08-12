@@ -425,7 +425,101 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "112_message_target_tiers",
         include_str!("sql/112_message_target_tiers.sql"),
     ),
+    (
+        "113_session_alias_ordinal",
+        include_str!("sql/113_session_alias_ordinal.sql"),
+    ),
+    (
+        "114_awareness_stalled_offers",
+        include_str!("sql/114_awareness_stalled_offers.sql"),
+    ),
+    (
+        "115_partial_response_message_id",
+        include_str!("sql/115_partial_response_message_id.sql"),
+    ),
+    (
+        "116_cli_session_telemetry",
+        include_str!("sql/116_cli_session_telemetry.sql"),
+    ),
+    (
+        "117_message_session_tokens",
+        include_str!("sql/117_message_session_tokens.sql"),
+    ),
+    (
+        "118_review_ledger",
+        include_str!("sql/118_review_ledger.sql"),
+    ),
+    (
+        "119_quick_exec_runs",
+        include_str!("sql/119_quick_exec_runs.sql"),
+    ),
+    (
+        "120_agent_dispatch_started_at",
+        include_str!("sql/120_agent_dispatch_started_at.sql"),
+    ),
 ];
+
+// These migrations shipped on the 0.9.6 development branch before its rebase
+// onto 0.9.5. Main had meanwhile claimed 107–112, so the SQL files had to move
+// without making databases created by the earlier branch replay the same SQL.
+const RENAMED_MIGRATIONS: &[(&str, &str)] = &[
+    ("107_session_alias_ordinal", "113_session_alias_ordinal"),
+    (
+        "108_awareness_stalled_offers",
+        "114_awareness_stalled_offers",
+    ),
+    (
+        "109_partial_response_message_id",
+        "115_partial_response_message_id",
+    ),
+    ("110_cli_session_telemetry", "116_cli_session_telemetry"),
+    ("111_message_session_tokens", "117_message_session_tokens"),
+    ("112_review_ledger", "118_review_ledger"),
+    ("113_quick_exec_runs", "119_quick_exec_runs"),
+];
+
+fn reconcile_renamed_migrations(conn: &Connection) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    for (legacy_name, current_name) in RENAMED_MIGRATIONS {
+        tx.execute(
+            "INSERT INTO _migrations (name, applied_at)
+             SELECT ?2, applied_at
+               FROM _migrations
+              WHERE name = ?1
+                AND NOT EXISTS (
+                    SELECT 1 FROM _migrations WHERE name = ?2
+                )
+              LIMIT 1",
+            [legacy_name, current_name],
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+fn migration_is_applied(conn: &Connection, current_name: &str) -> Result<bool> {
+    let current_applied: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM _migrations WHERE name = ?1)",
+        [current_name],
+        |row| row.get(0),
+    )?;
+    if current_applied {
+        return Ok(true);
+    }
+
+    let Some((legacy_name, _)) = RENAMED_MIGRATIONS
+        .iter()
+        .find(|(_, renamed)| *renamed == current_name)
+    else {
+        return Ok(false);
+    };
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM _migrations WHERE name = ?1)",
+        [legacy_name],
+        |row| row.get(0),
+    )
+    .map_err(Into::into)
+}
 
 /// Run all migrations, optionally backing up the database file first.
 pub fn run_with_backup(conn: &Connection, db_path: Option<&Path>) -> Result<()> {
@@ -442,16 +536,9 @@ pub fn run_with_backup(conn: &Connection, db_path: Option<&Path>) -> Result<()> 
     // Check if there are pending migrations before backing up
     if let Some(path) = db_path {
         if path.exists() {
-            let has_pending = migrations.iter().any(|(name, _)| {
-                let applied: bool = conn
-                    .query_row(
-                        "SELECT COUNT(*) > 0 FROM _migrations WHERE name = ?1",
-                        [name],
-                        |row| row.get(0),
-                    )
-                    .unwrap_or(false);
-                !applied
-            });
+            let has_pending = migrations
+                .iter()
+                .any(|(name, _)| !migration_is_applied(conn, name).unwrap_or(false));
             if has_pending {
                 // Fold the WAL back into the main db file FIRST, so a plain
                 // file copy is a consistent snapshot. Without this, recent
@@ -484,6 +571,8 @@ pub fn run_with_backup(conn: &Connection, db_path: Option<&Path>) -> Result<()> 
             }
         }
     }
+
+    reconcile_renamed_migrations(conn)?;
 
     for (name, sql) in migrations {
         let already_applied: bool = conn.query_row(
@@ -608,6 +697,70 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         run_with_backup(&conn, None).expect("run_with_backup with None path should succeed");
         // No assertion on files — just ensure it doesn't panic
+    }
+
+    #[test]
+    fn renamed_development_migrations_are_not_replayed() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_through(&conn, "112_message_target_tiers").unwrap();
+
+        let historical_migrations = [
+            (
+                "107_session_alias_ordinal",
+                include_str!("sql/113_session_alias_ordinal.sql"),
+            ),
+            (
+                "108_awareness_stalled_offers",
+                include_str!("sql/114_awareness_stalled_offers.sql"),
+            ),
+            (
+                "109_partial_response_message_id",
+                include_str!("sql/115_partial_response_message_id.sql"),
+            ),
+            (
+                "110_cli_session_telemetry",
+                include_str!("sql/116_cli_session_telemetry.sql"),
+            ),
+            (
+                "111_message_session_tokens",
+                include_str!("sql/117_message_session_tokens.sql"),
+            ),
+            (
+                "112_review_ledger",
+                include_str!("sql/118_review_ledger.sql"),
+            ),
+            (
+                "113_quick_exec_runs",
+                include_str!("sql/119_quick_exec_runs.sql"),
+            ),
+        ];
+        for (name, sql) in historical_migrations {
+            conn.execute_batch(sql).unwrap();
+            conn.execute("INSERT INTO _migrations (name) VALUES (?1)", [name])
+                .unwrap();
+        }
+
+        run(&conn).expect("renumbered migrations must be recognized as already applied");
+
+        for (_, current_name) in RENAMED_MIGRATIONS {
+            let applied: bool = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM _migrations WHERE name = ?1)",
+                    [current_name],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(applied, "missing migration receipt for {current_name}");
+        }
+        let alias_column_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('discussion_sessions')
+                 WHERE name = 'alias_ordinal'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(alias_column_count, 1);
     }
 
     #[test]

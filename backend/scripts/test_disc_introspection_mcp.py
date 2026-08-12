@@ -1515,6 +1515,53 @@ class DiscAppendSimpleModeTests(unittest.TestCase):
         }])
         self.assertEqual(msg["target_agent"], "Codex")
 
+    def test_cli_alias_follows_backend_ordinal_not_list_position(self):
+        """KT-247 — the ordinal belongs to the session, not to the list order.
+
+        Session 42 is ranked 2 by the backend but comes FIRST here. Positional
+        resolution would send `@codex-cli-2` to session 41, i.e. to whoever the
+        header does NOT name.
+        """
+        participants = [
+            {"id": 42, "agent_type": "Codex", "cli_ordinal": 2},
+            {"id": 41, "agent_type": "Codex", "cli_ordinal": 1},
+        ]
+
+        def http(method, path, body=None):
+            if method == "GET" and path.endswith("/participants"):
+                return {"success": True, "data": participants}
+            return {"success": True, "data": {}}
+
+        with mock.patch.object(self.mod, "_current_disc_meta", return_value={
+            "agent": "ClaudeCode",
+        }), mock.patch.object(self.mod, "_http", side_effect=http) as mock_http:
+            self.mod.call_disc_append({"content": "@codex-cli-2 à toi"})
+        msg = _append_body(mock_http)["messages"][0]
+        self.assertEqual(msg["targets"], [{
+            "kind": "cli",
+            "agent_type": "Codex",
+            "cli_session_id": 42,
+        }])
+
+    def test_cli_alias_refuses_a_room_mixing_ranked_and_unranked_sessions(self):
+        """Half-ranked is the one shape that silently mis-targets, so it fails closed."""
+        participants = [
+            {"id": 41, "agent_type": "Codex", "cli_ordinal": 1},
+            {"id": 42, "agent_type": "Codex"},
+        ]
+
+        def http(method, path, body=None):
+            if method == "GET" and path.endswith("/participants"):
+                return {"success": True, "data": participants}
+            return {"success": True, "data": {}}
+
+        with mock.patch.object(self.mod, "_current_disc_meta", return_value={
+            "agent": "ClaudeCode",
+        }), mock.patch.object(self.mod, "_http", side_effect=http):
+            with self.assertRaises(RuntimeError) as ctx:
+                self.mod.call_disc_append({"content": "@codex-cli-2 à toi"})
+        self.assertIn("stable ordinal", str(ctx.exception))
+
     def _reply_guard_http(self, reply_target, participants=None):
         def http(method, path, body=None, **kwargs):
             if "/message/" in path:
@@ -3341,27 +3388,31 @@ class QaCreateDraftProbeFirstGuidanceTests(unittest.TestCase):
     """The `qa_create_draft` description was rewritten in PR 1.8 to push
     the PROBE-then-PERSIST workflow. Pin the key teaching points so a
     future description refactor doesn't accidentally drop them.
+
+    KT-192 moved the guidance itself into `tool_manual` — every session paid
+    for a method only QA authors read. What these tests protect is unchanged:
+    the teaching must not be LOST. So they now assert it in the manual, and
+    that the description still sends the caller there.
     """
 
     def setUp(self):
         self.mod = _load_module()
         self.tool = next(t for t in self.mod.TOOLS if t["name"] == "qa_create_draft")
+        self.guidance = self.mod.TOOL_MANUALS["qa_create_draft"]
 
-    def test_description_recommends_probe_first(self):
-        # The PROBE keyword + the recommendation to do an `api_call`
-        # first MUST be present — without them the description reads
-        # like "create + hope" and agents will repeat the 12k-token boo-boo.
-        desc = self.tool["description"]
-        self.assertIn("PROBE", desc)
-        self.assertIn("api_call", desc)
+    def test_probe_first_is_taught_and_the_description_points_at_it(self):
+        # Without the probe step the advice reads like "create + hope" and
+        # agents repeat the 12k-token boo-boo. Relocating it is fine; losing
+        # it, or pointing nowhere, is not.
+        self.assertIn("Probe", self.guidance)
+        self.assertIn("api_call", self.guidance)
+        self.assertIn("tool_manual", self.tool["description"])
 
-    def test_description_mentions_vendor_payload_sizes(self):
-        # Concrete numbers anchor the lesson — a future agent reading
-        # the description sees that the "12k tokens" warning is real.
-        desc = self.tool["description"]
-        # Loose check : the word "tokens" + a "10-40k"-ish range must appear.
-        self.assertIn("tokens", desc.lower())
-        self.assertIn("10-40k", desc)
+    def test_vendor_payload_sizes_anchor_the_lesson(self):
+        # Concrete numbers are what make the warning credible rather than
+        # decorative.
+        self.assertIn("tokens", self.guidance.lower())
+        self.assertIn("10-40k", self.guidance)
 
     def test_description_points_to_qa_update_for_iteration(self):
         # Agents who DID skip the probe should know they can recover
@@ -6059,6 +6110,31 @@ class ResumeBindingTests(unittest.TestCase):
         self.assertIn("wait_error", result)
         self.assertIn("posted", result["hint"])
 
+    def test_chained_wait_hint_ships_once(self):
+        """KT-192 — the hint was emitted at the top level AND inside `waited`.
+
+        ~400 B of unchanging protocol text, twice per response: over a long
+        multi-agent session that repetition costs more than the whole
+        documentation bootstrap. Pin the single copy so it cannot come back.
+        """
+        self.mod._CURRENT_DISC_ID = "d-hint"
+
+        def fake_http(method, path, body=None, **kwargs):
+            if path == "/api/disc/append":
+                return self._envelope({"appended": 1, "last_sort_order": 5})
+            return self._envelope({})
+
+        with mock.patch.object(self.mod, "_http", side_effect=fake_http), \
+             mock.patch.object(self.mod, "_wait_once", return_value={
+                 "timed_out": True, "messages": [], "latest_sort_order": 5,
+                 "hint": "No peer posted during this window. …",
+             }):
+            result = self.mod.call_disc_append({"content": "hi"})
+
+        self.assertIn("hint", result)
+        self.assertNotIn("hint", result["waited"],
+                         "the hint must be lifted, not duplicated into `waited`")
+
 
 class PlanningToolTests(unittest.TestCase):
     def setUp(self):
@@ -6074,7 +6150,7 @@ class PlanningToolTests(unittest.TestCase):
             "plan_get", "task_list", "task_get", "task_changes",
             "proposal_list", "proposal_get",
             "task_create", "task_update", "task_update_dod", "task_link_discussion",
-            "task_add_blocker",
+            "task_add_blocker", "task_remove_blocker",
         }
         names = {tool["name"] for tool in self.mod.TOOLS}
         self.assertTrue(expected.issubset(names))
@@ -6138,7 +6214,7 @@ class PlanningToolTests(unittest.TestCase):
         resp = self.mod._handle(
             {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}
         )
-        self.assertEqual(resp["result"]["serverInfo"]["version"], "0.3.1")
+        self.assertEqual(resp["result"]["serverInfo"]["version"], "0.3.2")
 
     def test_plan_get_defaults_to_current_discussion(self):
         with mock.patch.object(self.mod, "_http", self.fake_http):
@@ -6296,6 +6372,27 @@ class PlanningToolTests(unittest.TestCase):
     def test_task_add_blocker_requires_both_references(self):
         with self.assertRaisesRegex(RuntimeError, "task_id and blocker_task_id"):
             self.mod.call_task_add_blocker({"task_id": "KT-1"})
+
+    def test_task_remove_blocker_encodes_both_references_and_attributes_actor(self):
+        with mock.patch.object(self.mod, "_http", self.fake_http), \
+             mock.patch.object(self.mod, "_agent_type_for_session", return_value="Codex"):
+            self.mod.call_task_remove_blocker({
+                "task_id": "KT/42",
+                "blocker_task_id": "KT/7",
+                "source_message_id": "MSG-12345678",
+            })
+        method, path, body = self.fake_http.call_args.args
+        self.assertEqual(method, "DELETE")
+        self.assertEqual(path, "/api/planning/tasks/KT%2F42/blockers/KT%2F7")
+        self.assertEqual(body["actor"], {
+            "kind": "agent",
+            "id": "Codex",
+            "source_message_id": "MSG-12345678",
+        })
+
+    def test_task_remove_blocker_requires_both_references(self):
+        with self.assertRaisesRegex(RuntimeError, "task_id and blocker_task_id"):
+            self.mod.call_task_remove_blocker({"blocker_task_id": "KT-1"})
 
 
 class MentionConventionTests(unittest.TestCase):
@@ -7280,6 +7377,323 @@ class WaitOutsideLlmLoopTests(unittest.TestCase):
 
         self.assertEqual(wait_once.call_count, 1)
         self.assertTrue(result["waited"]["timed_out"])
+
+
+class ToolManualTests(unittest.TestCase):
+    """KT-192 — reference material moved out of the catalogue must stay reachable.
+
+    Trimming a description is only safe if the content it pointed away still
+    arrives on demand. A pointer to nothing is worse than the paragraph it
+    replaced: the caller reads an instruction, follows it, and learns less.
+    """
+
+    def setUp(self):
+        self.mod = _load_module()
+
+    def _tool(self, name):
+        return next(t for t in self.mod.TOOLS if t["name"] == name)
+
+    def test_the_tool_is_declared_and_dispatched(self):
+        self._tool("tool_manual")
+        self.assertIn("tool_manual", self.mod.DISPATCH)
+
+    def test_a_known_manual_comes_back_whole(self):
+        result = self.mod.call_tool_manual({"tool": "qa_create_draft"})
+        self.assertEqual(result["tool"], "qa_create_draft")
+        # The probe-then-persist method is the reason this manual exists.
+        self.assertIn("Probe", result["manual"])
+        self.assertIn("api_extract", result["manual"])
+
+    def test_no_argument_lists_what_exists(self):
+        result = self.mod.call_tool_manual({})
+        self.assertIn("qa_create_draft", result["available"])
+
+    def test_an_unknown_name_names_the_alternatives(self):
+        result = self.mod.call_tool_manual({"tool": "qa_create_drafts"})
+        self.assertIn("error", result)
+        self.assertIn("qa_create_draft", result["available"])
+
+    def test_a_blank_name_is_treated_as_no_argument(self):
+        self.assertIn("available", self.mod.call_tool_manual({"tool": "   "}))
+
+    def test_every_manual_belongs_to_a_real_tool(self):
+        # A manual for a tool that no longer exists is dead weight nobody reads,
+        # and it would keep passing a naive "is it reachable" check.
+        names = {t["name"] for t in self.mod.TOOLS}
+        orphans = sorted(set(self.mod.TOOL_MANUALS) - names)
+        self.assertEqual(orphans, [], f"manuals with no tool: {orphans}")
+
+    def test_every_tool_pointing_here_actually_has_a_manual(self):
+        # The failure this guards: trimming a description, writing the pointer,
+        # and forgetting the entry. The caller would follow the instruction into
+        # an error message.
+        dangling = sorted(
+            t["name"]
+            for t in self.mod.TOOLS
+            if "tool_manual({tool:" in t["description"].replace('"', "").replace(" ", "")
+            or f'tool_manual({{tool: "{t["name"]}"}})' in t["description"]
+            if t["name"] not in self.mod.TOOL_MANUALS
+        )
+        self.assertEqual(dangling, [], f"pointer without a manual: {dangling}")
+
+    def test_no_manual_is_an_empty_stub(self):
+        # A future trim could gut a manual and leave the pointer standing. The
+        # wiring tests would still pass; the caller would learn nothing.
+        thin = sorted(
+            name for name, text in self.mod.TOOL_MANUALS.items()
+            if len(text.strip()) < 300
+        )
+        self.assertEqual(thin, [], f"manuals too thin to be worth a call: {thin}")
+
+    def test_the_trimmed_description_keeps_the_run_breaking_rules(self):
+        # The methodology moved; the constraints that fail at run time must not.
+        description = self._tool("qa_create_draft")["description"]
+        self.assertIn("mcp_list", description)
+        self.assertIn("allow-listed", description)
+        self.assertIn("{{var_name}}", description)
+        self.assertIn("tool_manual", description)
+
+
+class TelemetryTriggerTests(unittest.TestCase):
+    """KT-190 — the bridge reports its own cost, and must never cost the room.
+
+    The wait is the hot path KT-189 fought to keep out of the model loop. So the
+    properties under test are mostly negative: it does not block, does not add
+    bytes to the response, and cannot raise into the caller.
+    """
+
+    def setUp(self):
+        self.mod = _load_module()
+        self.mod._TELEMETRY_STATE.clear()
+        self.mod._TELEMETRY_STATE.update({"last_run": 0.0, "in_flight": False})
+
+    def test_only_supported_vendors_are_collected(self):
+        # Codex and Copilot must stay unmeasured rather than report zero: that
+        # zero IS the blind spot this ticket exists to remove.
+        for agent, expected in (
+            ("ClaudeCode", "claude-code"),
+            ("Vibe", "vibe"),
+            ("Codex", None),
+            ("CopilotCli", None),
+            ("Unknown", None),
+        ):
+            with mock.patch.object(self.mod, "_agent_type_for_session", return_value=agent):
+                self.assertEqual(self.mod._telemetry_vendor(), expected, agent)
+
+    def test_an_unsupported_vendor_starts_no_thread(self):
+        with mock.patch.object(self.mod, "_agent_type_for_session", return_value="Codex"), \
+             mock.patch.object(self.mod.threading, "Thread") as thread:
+            self.mod._maybe_report_telemetry()
+        thread.assert_not_called()
+
+    def test_a_supported_vendor_starts_a_daemon_thread(self):
+        # Daemon: a pending report must never keep the bridge alive at exit.
+        with mock.patch.object(self.mod, "_agent_type_for_session", return_value="ClaudeCode"), \
+             mock.patch.object(self.mod, "_disc_id", return_value="d-1"), \
+             mock.patch.object(self.mod, "_session_id_for_caller", return_value="cli-1"), \
+             mock.patch.object(self.mod.threading, "Thread") as thread:
+            self.mod._maybe_report_telemetry()
+        thread.assert_called_once()
+        self.assertTrue(thread.call_args.kwargs["daemon"])
+
+    def test_it_is_throttled(self):
+        # The wait runs every ~170s; collecting on each one would re-walk the
+        # transcript directory for nothing.
+        self.mod._TELEMETRY_STATE["last_run"] = self.mod.time.monotonic()
+        with mock.patch.object(self.mod, "_agent_type_for_session", return_value="ClaudeCode"), \
+             mock.patch.object(self.mod, "_disc_id", return_value="d-1"), \
+             mock.patch.object(self.mod, "_session_id_for_caller", return_value="cli-1"), \
+             mock.patch.object(self.mod.threading, "Thread") as thread:
+            self.mod._maybe_report_telemetry()
+        thread.assert_not_called()
+
+    def test_a_report_already_in_flight_is_not_duplicated(self):
+        self.mod._TELEMETRY_STATE["in_flight"] = True
+        with mock.patch.object(self.mod, "_agent_type_for_session", return_value="ClaudeCode"), \
+             mock.patch.object(self.mod, "_disc_id", return_value="d-1"), \
+             mock.patch.object(self.mod, "_session_id_for_caller", return_value="cli-1"), \
+             mock.patch.object(self.mod.threading, "Thread") as thread:
+            self.mod._maybe_report_telemetry()
+        thread.assert_not_called()
+
+    def test_no_disc_binding_means_no_report(self):
+        # Without a disc there is nothing to attribute the tokens to, and
+        # guessing one would be worse than staying silent.
+        with mock.patch.object(self.mod, "_agent_type_for_session", return_value="ClaudeCode"), \
+             mock.patch.object(self.mod, "_disc_id", return_value=None), \
+             mock.patch.object(self.mod, "_session_id_for_caller", return_value="cli-1"), \
+             mock.patch.object(self.mod.threading, "Thread") as thread:
+            self.mod._maybe_report_telemetry()
+        thread.assert_not_called()
+
+    def test_a_failing_trigger_never_raises_into_the_wait(self):
+        # A session whose cost is unknown is a nuisance. A wait that throws is
+        # an outage.
+        with mock.patch.object(self.mod, "_agent_type_for_session",
+                          side_effect=RuntimeError("boom")):
+            self.mod._maybe_report_telemetry()  # must not raise
+        self.assertFalse(self.mod._TELEMETRY_STATE["in_flight"])
+
+    def test_a_failing_collection_clears_the_in_flight_flag(self):
+        # Otherwise one failure would silence telemetry for the whole session.
+        self.mod._TELEMETRY_STATE["in_flight"] = True
+        with mock.patch.object(self.mod, "_http", side_effect=RuntimeError("nope")):
+            self.mod._collect_and_report_telemetry("d-1", "cli-1", "claude-code")
+        self.assertFalse(self.mod._TELEMETRY_STATE["in_flight"])
+
+    def test_absent_counters_are_posted_as_null_not_zero(self):
+        # The load-bearing rule of the whole ticket, checked at the wire.
+        posted = {}
+
+        def fake_http(method, path, body=None, **kwargs):
+            if method == "POST":
+                posted.update(body)
+                return {"data": {"read_offset": 123}}
+            return {}
+
+        fake_collector = type("C", (), {
+            "collect_for_session": staticmethod(lambda *a, **k: {
+                "status": "measured",
+                "vendor": "vibe",
+                "provenance": "vibe-session-meta",
+                # Vibe publishes no cache split.
+                "counters": {"input": 10, "output": 2},
+                "measured_responses": 3,
+                "models": {"mistral-medium-3.5": 3},
+                "next_offset": 0,
+            }),
+            "resolve_vibe_session_id": staticmethod(lambda *a, **k: {
+                "status": "resolved", "session_id": "s-1"}),
+        })
+        with mock.patch.object(self.mod, "_http", side_effect=fake_http), \
+             mock.patch.object(self.mod.importlib.util, "module_from_spec",
+                          return_value=fake_collector), \
+             mock.patch.object(self.mod.importlib.util, "spec_from_file_location",
+                          return_value=type("S", (), {
+                              "loader": type("L", (), {
+                                  "exec_module": staticmethod(lambda m: None)})()})()):
+            self.mod._collect_and_report_telemetry("d-1", "cli-1", "vibe")
+
+        self.assertEqual(posted["input_tokens"], 10)
+        self.assertIsNone(posted["cache_read_tokens"])
+        self.assertIsNone(posted["cache_creation_tokens"])
+        self.assertEqual(posted["provenance"], "vibe-session-meta")
+
+    def test_the_servers_cursor_wins_over_ours(self):
+        # If another report landed, the server is ahead; resuming from our own
+        # value would re-read a span already counted.
+        def fake_http(method, path, body=None, **kwargs):
+            return {"data": {"read_offset": 999}} if method == "POST" else {}
+
+        fake_collector = type("C", (), {
+            "collect_for_session": staticmethod(lambda *a, **k: {
+                "status": "measured", "vendor": "claude-code",
+                "provenance": "claude-code-transcript",
+                "counters": {"input": 1, "cache_creation": 1,
+                             "cache_read": 1, "output": 1},
+                "next_offset": 5,
+            }),
+        })
+        with mock.patch.object(self.mod, "_http", side_effect=fake_http), \
+             mock.patch.object(self.mod, "_native_conversation_id", return_value="conv-1"), \
+             mock.patch.object(self.mod.importlib.util, "module_from_spec",
+                          return_value=fake_collector), \
+             mock.patch.object(self.mod.importlib.util, "spec_from_file_location",
+                          return_value=type("S", (), {
+                              "loader": type("L", (), {
+                                  "exec_module": staticmethod(lambda m: None)})()})()):
+            self.mod._collect_and_report_telemetry("d-1", "cli-1", "claude-code")
+        self.assertEqual(self.mod._TELEMETRY_STATE["offset:conv-1"], 999)
+
+
+class TaskAckTests(unittest.TestCase):
+    """KT-250 — a narrow write must not answer with the task's whole history.
+
+    The planning API returns the full task on every write, event log included,
+    and an earlier `updated` event still carries a verbatim copy of the previous
+    description. So the reply grows with the task: measured on KT-249, 11 512 B
+    per call for a single boolean. These tests pin the shape of the receipt AND
+    that it stays honest about what it dropped.
+    """
+
+    def setUp(self):
+        self.mod = _load_module()
+        self.task = {
+            "id": "t-1",
+            "reference": "KT-999",
+            "title": "A task",
+            "status": "todo",
+            "priority": "high",
+            "parent_reference": "KT-187",
+            "blocker_count": 0,
+            "description": "D" * 3000,
+            "definition_of_done": [
+                {"id": "d-1", "sentence": "first", "completed": True},
+                {"id": "d-2", "sentence": "second", "completed": False},
+            ],
+            "events": [
+                {"action": "updated", "changes": {"description": "OLD" * 1000}},
+            ],
+            "links": [],
+            "subtasks": [],
+        }
+
+    def test_the_task_identity_survives(self):
+        # An agent that just created a task needs its id and reference back.
+        ack = self.mod._task_ack(self.task)
+        for key in ("id", "reference", "title", "status", "priority"):
+            self.assertIn(key, ack)
+
+    def test_the_history_does_not(self):
+        ack = self.mod._task_ack(self.task)
+        for key in ("events", "description", "definition_of_done"):
+            self.assertNotIn(key, ack)
+
+    def test_it_is_smaller_by_an_order_of_magnitude(self):
+        before = len(json.dumps(self.task, ensure_ascii=False).encode())
+        after = len(json.dumps(self.mod._task_ack(self.task), ensure_ascii=False).encode())
+        self.assertLess(after * 5, before, f"{before} B -> {after} B is not a real cut")
+
+    def test_the_touched_checklist_item_comes_back_named(self):
+        # A bare "1/2" cannot show that the RIGHT box moved.
+        ack = self.mod._task_ack(self.task, dod_id="d-2")
+        self.assertEqual(ack["dod_item"]["id"], "d-2")
+        self.assertEqual(ack["dod_item"]["completed"], False)
+        self.assertEqual(ack["dod_item"]["sentence"], "second")
+
+    def test_progress_is_reported_even_without_a_touched_item(self):
+        ack = self.mod._task_ack(self.task)
+        self.assertEqual(ack["dod_progress"], "1/2")
+        self.assertNotIn("dod_item", ack)
+
+    def test_an_unknown_dod_id_does_not_invent_an_item(self):
+        ack = self.mod._task_ack(self.task, dod_id="d-nope")
+        self.assertNotIn("dod_item", ack)
+        self.assertEqual(ack["dod_progress"], "1/2")
+
+    def test_the_receipt_says_what_it_left_out(self):
+        # Silence about a dropped field reads as "there was none".
+        self.assertIn("task_get", self.mod._task_ack(self.task)["omitted"])
+
+    def test_a_task_with_no_checklist_reports_no_progress(self):
+        bare = dict(self.task, definition_of_done=[])
+        self.assertNotIn("dod_progress", self.mod._task_ack(bare))
+
+    def test_a_non_dict_payload_passes_through_untouched(self):
+        # An error body must never be silently reshaped into a fake receipt.
+        self.assertEqual(self.mod._task_ack("boom"), "boom")
+
+    def test_every_narrow_write_returns_a_receipt(self):
+        # The failure this guards: adding a sixth narrow write and forgetting to
+        # wrap it, so one call keeps paying the full price unnoticed.
+        import inspect
+        for name in (
+            "call_task_create", "call_task_update", "call_task_update_dod",
+            "call_task_add_blocker", "call_task_remove_blocker",
+            "call_task_link_discussion",
+        ):
+            source = inspect.getsource(getattr(self.mod, name))
+            self.assertIn("_task_ack", source, f"{name} still returns the whole task")
 
 
 if __name__ == "__main__":

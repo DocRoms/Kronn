@@ -29,6 +29,7 @@ import { LearningsBadge } from './LearningsBadge';
 import { DiscParticipantsHeader } from './DiscParticipantsHeader';
 import { AgentSwitchPicker } from './AgentSwitchPicker';
 import { DiscussionSessionBinding } from './DiscussionSessionBinding';
+import { DiscussionTokenCost } from './DiscussionTokenCost';
 import { triggerDownload } from '../lib/downloadBlob';
 import { ContextHelp } from './ContextHelp';
 
@@ -348,6 +349,9 @@ export function ChatHeader({
           </div>
         </div>
         <div className="disc-chat-header-sub">
+          {/* KT-254 — what this room cost, as two figures. Next to the project
+              name because that is where a reader looks for "what is this". */}
+          <DiscussionTokenCost discussionId={discussion.id} t={t} />
           <span className="disc-chat-context-project">
             {discussion.project_id
               ? (projects.find(p => p.id === discussion.project_id)?.name ?? '?')

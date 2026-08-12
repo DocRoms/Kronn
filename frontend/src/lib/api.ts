@@ -148,8 +148,11 @@ import type {
   ProposalDecisionRequest,
   ProposalDecisionResponse,
   ProposalListResponse,
+  RemovePlanningBlockerRequest,
   UpdatePlanningDodItemRequest,
   UpdatePlanningTaskRequest,
+  TelemetryCoverage,
+  DiscussionTokenCost,
 } from '../types/generated';
 import type { DiscoverKeysResponse, TestModeEnterResult, TestModeExitResponse } from '../types/extensions';
 
@@ -1803,6 +1806,15 @@ export const planning = {
       `/planning/tasks/${encodeURIComponent(taskId)}/blockers`,
       request,
     ),
+  removeBlocker: (
+    taskId: string,
+    blockerTaskId: string,
+    request: RemovePlanningBlockerRequest = {},
+  ) => api<PlanningTaskDetail>(
+    'DELETE',
+    `/planning/tasks/${encodeURIComponent(taskId)}/blockers/${encodeURIComponent(blockerTaskId)}`,
+    request,
+  ),
   discussionPlan: (discussionId: string) =>
     api<DiscussionPlan>('GET', `/discussions/${encodeURIComponent(discussionId)}/plan`),
   proposals: (discussionId: string, pendingOnly = true) => {
@@ -2333,6 +2345,34 @@ export const apiCallLogs = {
   get: (id: string) => api<ApiCallLogRow | null>('GET', `/api-call-logs/${id}`),
   purge: (days?: number) => api<number>('POST', '/api-call-logs/purge', { days }),
 };
+
+/** KT-190 — how much of the CLI token spend Kronn can actually account for.
+ *
+ *  A session with no telemetry row is UNKNOWN, not free: Kronn never spawned a
+ *  joined CLI, so it has no counter of its own for anything that CLI posts.
+ *  Measured on one real session, 4.1 billion tokens of traffic were stored as
+ *  zero — which is why the UI must show coverage rather than a total that looks
+ *  complete. */
+export const telemetry = {
+  coverage: () => api<TelemetryCoverage[]>('GET', '/telemetry/coverage'),
+  /** KT-254 — one discussion's cost, as two figures the caller must keep apart.
+   *  There is no `total` field and there should not be one: see
+   *  `DiscussionTokenCost` on the backend for why. */
+  discussionCost: (id: string) =>
+    api<DiscussionTokenCost>('GET', `/discussions/${id}/token-cost`),
+};
+
+/** Share of an agent type's sessions carrying at least one real counter.
+ *
+ *  `null` when there are no sessions at all: 0% would read as a failure where
+ *  there is simply nothing to measure yet. Rows attributed but holding no
+ *  counters (a vendor with no collector) are excluded, so coverage cannot
+ *  flatter itself. */
+export function measuredRatio(row: TelemetryCoverage): number | null {
+  if (row.sessions === 0) return null;
+  const measured = row.attributed - row.attributed_without_counters;
+  return measured / row.sessions;
+}
 
 /** Shape returned by `GET /api/debug/logs`. Not a `ts-rs`-generated type
  *  because this is a purely internal endpoint — the wrapper is enough. */

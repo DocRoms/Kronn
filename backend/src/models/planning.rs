@@ -400,6 +400,13 @@ pub struct AddPlanningBlockerRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
+pub struct RemovePlanningBlockerRequest {
+    #[serde(default)]
+    pub actor: PlanningActor,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
 pub struct UpdatePlanningDodItemRequest {
     pub completed: bool,
     #[serde(default)]

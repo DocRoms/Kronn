@@ -338,7 +338,7 @@ async fn planning_api_rejects_dependency_cycles_and_identifies_agent_events() {
     assert_eq!(first_link["data"]["events"][0]["actor_id"], "Codex");
 
     let (_, cycle) = post_json(
-        app,
+        app.clone(),
         &format!("/api/planning/tasks/{}/blockers", task_ids[1]),
         serde_json::json!({"blocker_task_id": task_ids[0]}),
     )
@@ -346,6 +346,38 @@ async fn planning_api_rejects_dependency_cycles_and_identifies_agent_events() {
     assert_eq!(cycle["success"], false);
     assert_eq!(cycle["error_code"], "validation");
     assert!(cycle["error"].as_str().unwrap().contains("cycle"));
+
+    let (_, removed) = delete_json_body(
+        app.clone(),
+        &format!(
+            "/api/planning/tasks/{}/blockers/{}",
+            task_ids[0], task_ids[1]
+        ),
+        serde_json::json!({"actor": {"kind": "agent", "id": "Codex"}}),
+    )
+    .await;
+    assert_eq!(removed["success"], true);
+    assert_eq!(removed["data"]["blocker_count"], 0);
+    assert_eq!(removed["data"]["blockers"].as_array().unwrap().len(), 0);
+    assert_eq!(removed["data"]["events"][0]["action"], "blocker_removed");
+    assert_eq!(removed["data"]["events"][0]["actor_id"], "Codex");
+
+    // A lost response may make an MCP client retry. The edge removal is
+    // idempotent and the retry must not manufacture a second audit event.
+    let (_, retried) = delete_json_body(
+        app,
+        &format!(
+            "/api/planning/tasks/{}/blockers/{}",
+            task_ids[0], task_ids[1]
+        ),
+        serde_json::json!({"actor": {"kind": "agent", "id": "Codex"}}),
+    )
+    .await;
+    assert_eq!(retried["success"], true);
+    assert_eq!(
+        retried["data"]["events"].as_array().unwrap().len(),
+        removed["data"]["events"].as_array().unwrap().len(),
+    );
 }
 
 fn test_state() -> AppState {
@@ -5629,6 +5661,9 @@ async fn disc_sync_request_resends_missing_messages() {
         .unwrap()
         .unwrap();
     let msg = kronn::models::DiscussionMessage {
+        recovered_partial: false,
+        session_tokens_at_message: None,
+        author_cli_ordinal: None,
         model: None,
         lint_report: None,
         id: "sync-msg-1".into(),
@@ -5843,6 +5878,9 @@ async fn wait_for_peer_surfaces_same_agent_type_peer_but_not_own_local() {
         .unwrap();
 
     let mk = |id: &str, content: &str, author: Option<&str>| kronn::models::DiscussionMessage {
+        recovered_partial: false,
+        session_tokens_at_message: None,
+        author_cli_ordinal: None,
         model: None,
         lint_report: None,
         id: id.into(),

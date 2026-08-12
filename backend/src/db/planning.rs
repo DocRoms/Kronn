@@ -1277,6 +1277,40 @@ pub fn add_blocker(
     get_task(conn, task_id)?.context("Planning task disappeared")
 }
 
+/// Remove one explicit dependency edge without changing either task's status.
+///
+/// The operation is intentionally idempotent: MCP clients can safely retry a
+/// request after losing the HTTP response. We only append an audit event when
+/// a relation was actually removed, so retries do not invent history.
+pub fn remove_blocker(
+    conn: &Connection,
+    task_reference: &str,
+    blocker_reference: &str,
+    actor: &PlanningActor,
+) -> Result<PlanningTaskDetail> {
+    let task_id = resolve_task_id(conn, task_reference)?;
+    let blocker_task_id = resolve_task_id(conn, blocker_reference)?;
+    validate_actor(actor)?;
+
+    let transaction = NestableTx::begin(conn)?;
+    let removed = transaction.execute(
+        "DELETE FROM planning_task_blockers
+         WHERE task_id = ?1 AND blocker_task_id = ?2",
+        params![task_id, blocker_task_id],
+    )?;
+    if removed > 0 {
+        insert_event(
+            &transaction,
+            &task_id,
+            "blocker_removed",
+            actor,
+            serde_json::json!({"blocker_task_id": blocker_task_id}),
+        )?;
+    }
+    transaction.commit()?;
+    get_task(conn, &task_id)?.context("Planning task disappeared")
+}
+
 pub fn task_changes(
     conn: &Connection,
     discussion_id: &str,
@@ -1970,6 +2004,44 @@ mod tests {
         .unwrap_err()
         .to_string()
         .contains("cycle"));
+    }
+
+    #[test]
+    fn blocker_removal_accepts_references_and_is_idempotent() {
+        let connection = connection();
+        let task = create_task(&connection, &request("Blocked task")).unwrap();
+        let blocker = create_task(&connection, &request("Dependency")).unwrap();
+        let actor = PlanningActor {
+            kind: PlanningActorKind::Agent,
+            id: Some("Codex".into()),
+            source_message_id: None,
+        };
+        add_blocker(
+            &connection,
+            &task.summary.reference,
+            &AddPlanningBlockerRequest {
+                blocker_task_id: blocker.summary.reference.clone(),
+                actor: actor.clone(),
+            },
+        )
+        .unwrap();
+
+        let removed = remove_blocker(
+            &connection,
+            &task.summary.reference,
+            &blocker.summary.reference,
+            &actor,
+        )
+        .unwrap();
+        assert!(removed.blockers.is_empty());
+        assert_eq!(removed.summary.blocker_count, 0);
+        assert_eq!(removed.events[0].action, "blocker_removed");
+        assert_eq!(removed.events[0].actor_id.as_deref(), Some("Codex"));
+
+        let retried =
+            remove_blocker(&connection, &task.summary.id, &blocker.summary.id, &actor).unwrap();
+        assert_eq!(retried.events.len(), removed.events.len());
+        assert_eq!(retried.events[0].action, "blocker_removed");
     }
 
     #[test]

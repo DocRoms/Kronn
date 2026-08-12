@@ -713,6 +713,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             post(api::planning::add_blocker),
         )
         .route(
+            "/api/planning/tasks/{id}/blockers/{blocker_id}",
+            delete(api::planning::remove_blocker),
+        )
+        .route(
             "/api/discussions/{id}/plan",
             get(api::planning::get_discussion_plan),
         )
@@ -746,6 +750,13 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         )
         .route("/api/projects/{id}", get(api::projects::get))
         .route("/api/projects/{id}", delete(api::projects::delete))
+        // KT-194 — what each agent actually loads in this project, and which
+        // sections could leave the always-loaded tier. Read-only: the audit
+        // proposes moves and never rewrites an instruction file.
+        .route(
+            "/api/projects/{id}/context-audit",
+            get(api::context_audit::project_context_audit),
+        )
         .route(
             "/api/projects/{id}/install-template",
             post(api::projects::install_template),
@@ -975,6 +986,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/rtk/deactivate", post(api::rtk::deactivate))
         .route("/api/rtk/savings", get(api::rtk::savings))
         .route("/api/rtk/version", get(api::rtk::version))
+        // KT-197 — adoption, not just savings. `/savings` says how well RTK works
+        // where it is used; this says how often it is used at all, and names every
+        // source that could not answer.
+        .route("/api/rtk/state", get(api::rtk_state::rtk_state))
         // ── Ollama (local LLM) ──
         .route("/api/ollama/health", get(api::ollama::health))
         .route("/api/ollama/models", get(api::ollama::models))
@@ -1381,6 +1396,29 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route(
             "/api/discussions/{id}/wait",
             get(api::disc_invite::wait_for_peer),
+        )
+        // KT-190 — a joined CLI reports its OWN native token counters. The
+        // collector must run where the CLI runs: only that machine holds the
+        // vendor's transcript.
+        .route(
+            "/api/discussions/{id}/telemetry",
+            post(api::cli_telemetry::report_telemetry),
+        )
+        .route(
+            "/api/telemetry/coverage",
+            get(api::cli_telemetry::telemetry_coverage),
+        )
+        // KT-254 — what one discussion cost, as TWO figures. Separate from
+        // /telemetry/coverage because a header asks about one room, not the fleet.
+        .route(
+            "/api/discussions/{id}/token-cost",
+            get(api::cli_telemetry::discussion_token_cost),
+        )
+        // KT-193 DoD 3 — what a FRESH session needs to carry on, without the
+        // transcript. Bounded, assembled from the plan.
+        .route(
+            "/api/discussions/{id}/resume-bundle",
+            get(api::cli_telemetry::resume_bundle),
         )
         // Companion : the bridge calls this from `disc_join({token})`
         // to validate the token and bind itself to the resolved disc.

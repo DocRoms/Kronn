@@ -7,8 +7,8 @@ use axum::{
 use crate::models::{
     AddPlanningBlockerRequest, ApiErrorCode, ApiResponse, CreatePlanningTaskRequest,
     DiscussionPlan, LinkPlanningDiscussionRequest, PlanningTaskChange, PlanningTaskDetail,
-    PlanningTaskListQuery, PlanningTaskListResponse, UpdatePlanningDodItemRequest,
-    UpdatePlanningTaskRequest,
+    PlanningTaskListQuery, PlanningTaskListResponse, RemovePlanningBlockerRequest,
+    UpdatePlanningDodItemRequest, UpdatePlanningTaskRequest,
 };
 use crate::AppState;
 
@@ -133,6 +133,23 @@ pub async fn add_blocker(
     match state
         .db
         .with_conn(move |connection| crate::db::planning::add_blocker(connection, &id, &request))
+        .await
+    {
+        Ok(task) => Json(ApiResponse::ok(task)),
+        Err(error) => planning_error(error),
+    }
+}
+
+pub async fn remove_blocker(
+    State(state): State<AppState>,
+    Path((id, blocker_id)): Path<(String, String)>,
+    Json(request): Json<RemovePlanningBlockerRequest>,
+) -> Json<ApiResponse<PlanningTaskDetail>> {
+    match state
+        .db
+        .with_conn(move |connection| {
+            crate::db::planning::remove_blocker(connection, &id, &blocker_id, &request.actor)
+        })
         .await
     {
         Ok(task) => Json(ApiResponse::ok(task)),

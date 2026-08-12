@@ -6,6 +6,7 @@ const mocks = vi.hoisted(() => ({
   create: vi.fn(),
   get: vi.fn(),
   update: vi.fn(),
+  removeBlocker: vi.fn(),
 }));
 
 vi.mock('../../lib/api', () => ({
@@ -13,6 +14,7 @@ vi.mock('../../lib/api', () => ({
     ...mocks,
     linkDiscussion: vi.fn(),
     addBlocker: vi.fn(),
+    removeBlocker: mocks.removeBlocker,
     discussionPlan: vi.fn(),
     changes: vi.fn(),
   },
@@ -91,6 +93,7 @@ describe('PlanningPage', () => {
     })));
     mocks.get.mockResolvedValue(detail());
     mocks.update.mockImplementation(async (_id, patch) => detail({ ...summary(), ...patch }));
+    mocks.removeBlocker.mockResolvedValue(detail());
   });
 
   it('renders active work by priority and keeps completed work collapsed', async () => {
@@ -261,5 +264,40 @@ describe('PlanningPage', () => {
       status: 'todo',
       blocked_reason: null,
     }));
+  });
+
+  it('removes one blocker without changing the task status', async () => {
+    const blocked = detail(summary({ status: 'blocked', blocker_count: 1 }));
+    blocked.blockers = [summary({
+      id: 'blocker-9',
+      reference: 'KT-9',
+      title: 'Dependency',
+      status: 'todo',
+    })];
+    mocks.get.mockResolvedValue(blocked);
+    mocks.removeBlocker.mockResolvedValue(detail(summary({
+      status: 'blocked',
+      blocker_count: 0,
+    })));
+
+    render(
+      <PlanningPage
+        projects={[]}
+        discussions={[]}
+        toast={vi.fn()}
+        onNavigateDiscussion={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(await screen.findByText('Upgrade PHP'));
+    fireEvent.click(await screen.findByRole('button', {
+      name: 'planning.removeBlocker:KT-9',
+    }));
+
+    await waitFor(() => expect(mocks.removeBlocker).toHaveBeenCalledWith(
+      'task-1',
+      'blocker-9',
+    ));
+    expect(mocks.update).not.toHaveBeenCalled();
   });
 });

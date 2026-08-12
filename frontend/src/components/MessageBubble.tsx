@@ -321,6 +321,16 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
   const [isMessageIdCopied, setIsMessageIdCopied] = useState(false);
   const messageIdResetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // KT-251 — a salvaged FRAGMENT: the start of an answer whose agent was killed
+  // mid-sentence, then retried. Folded by default because two half-answers beside
+  // a real one read as several agents replying — that is exactly what a user
+  // reported ("j'ai trois réponses 😱").
+  //
+  // Folded, never hidden: a fragment is real history and may hold reasoning the
+  // retry never repeated, so it stays one click away.
+  const isFragment = msg.recovered_partial === true;
+  const [fragmentOpen, setFragmentOpen] = useState(false);
+
   useEffect(() => () => {
     if (messageIdResetTimer.current) clearTimeout(messageIdResetTimer.current);
   }, []);
@@ -502,6 +512,18 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
                    *  reads as "Romu's ClaudeCode on the other instance". */}
                   <Cpu size={10} /> {agentTrigger}
                   <span className="disc-msg-agent-kind"> · {agentIdentityLabel}</span>
+                  {/* KT-247 — stable per-provider CLI ordinal, so two joined
+                   *  Claude Code (or two Codex) are distinguishable in the
+                   *  timeline. Matches the `@claude-cli-2` room alias. */}
+                  {msg.author_cli_ordinal != null && (
+                    <span
+                      className="disc-msg-agent-cli"
+                      style={{ opacity: 0.75, fontWeight: 600 }}
+                      title={`Session ${agentTrigger}-cli${msg.author_cli_ordinal > 1 ? `-${msg.author_cli_ordinal}` : ''}`}
+                    >
+                      {' '}· CLI{msg.author_cli_ordinal > 1 ? ` ${msg.author_cli_ordinal}` : ''}
+                    </span>
+                  )}
                   {/* Prefer the CONCRETE model ("qwen3:32b", "sonnet") — a disc can
                    *  switch models mid-thread, so this is per-message. Fall back to
                    *  the tier when the model wasn't recorded (legacy rows / a
@@ -736,8 +758,34 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
             // only renders the visible prefix.
             const { visible, seed } = splitMessageSeed(visibleContent);
             const cleaned = visible.replace(/KRONN:(BRIEFING_COMPLETE|VALIDATION_COMPLETE|BOOTSTRAP_COMPLETE|WORKFLOW_READY|REPO_READY|ARCHITECTURE_READY|PLAN_READY|STRUCTURE_READY|ISSUES_READY|ISSUES_CREATED|QP_IMPROVED|BUNDLE_READY|CHAIN_QP:[0-9a-fA-F-]+)/gi, '').trim();
+            // KT-251 — a salvaged fragment is folded behind a toggle. Two
+            // half-answers next to a real one read as several agents replying,
+            // which is what a user reported. Folded and NOT hidden: the fragment
+            // is real history and may hold reasoning the retry never repeated.
+            if (isFragment && !fragmentOpen) {
+              return (
+                <button
+                  type="button"
+                  className="disc-icon-btn disc-msg-fragment-toggle"
+                  onClick={() => setFragmentOpen(true)}
+                  aria-expanded={false}
+                >
+                  ▸ {t('disc.interruptedFragment')}
+                </button>
+              );
+            }
             return (
               <>
+                {isFragment && (
+                  <button
+                    type="button"
+                    className="disc-icon-btn disc-msg-fragment-toggle"
+                    onClick={() => setFragmentOpen(false)}
+                    aria-expanded
+                  >
+                    ▾ {t('disc.interruptedFragment')}
+                  </button>
+                )}
                 {isUser || msg.role === 'Agent'
                   ? (
                       <MentionDiscussionAgentContext.Provider value={defaultAgent}>
@@ -868,6 +916,25 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
           <div className="disc-msg-time-row">
             <span className="disc-msg-time">{formattedTime}</span>
             {msg.tokens_used > 0 && <span className="disc-msg-token-count">{msg.tokens_used.toLocaleString()} tok</span>}
+            {/* KT-190 — a joined CLI's spend cannot be cut per message: between
+                two room messages it also reads files, runs tests, and may answer
+                in another room. So this is the SESSION's running total at this
+                point, labelled as such and never rendered where a per-message
+                cost goes. Kronn never spawned that CLI, so `tokens_used` above
+                stays 0 for it — the two are different facts, not two formats. */}
+            {typeof msg.session_tokens_at_message === 'number'
+              && msg.session_tokens_at_message > 0 && (
+              <span
+                className="disc-msg-session-tokens"
+                title={
+                  'Total de la session CLI à ce message, pas le coût de ce '
+                  + 'message : entre deux messages la CLI a aussi lu des '
+                  + 'fichiers et lancé des tests. Croissant par construction.'
+                }
+              >
+                session&nbsp;: {msg.session_tokens_at_message.toLocaleString()} tok
+              </span>
+            )}
             {msg.auth_mode && <span className="disc-msg-auth-mode" data-mode={msg.auth_mode === 'override' ? 'override' : 'local'}>{msg.auth_mode === 'override' ? 'API key' : 'auth locale'}</span>}
             {durationLabel && <span className="disc-msg-duration"><Clock size={8} /> {durationLabel}</span>}
             {msg.role === 'Agent' && lintSeverity && lint && (

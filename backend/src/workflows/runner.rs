@@ -1385,80 +1385,109 @@ async fn execute_run_with_notify_policy(
 
         let deadline =
             workflow_timeout_deadline(run.started_at, resolved_guards.timeout_seconds, Utc::now());
-        let mut outcome: StepOutcome =
-            match await_in_flight_step(step_future, &cancel_token, deadline).await {
-                InFlightStepOutcome::Completed(outcome) => *outcome,
-                InFlightStepOutcome::Cancelled => {
-                    tracing::info!(
-                        "Workflow run {} cancelled mid-step '{}' — dropping in-flight executor",
-                        run.id,
-                        step.name
-                    );
-                    cancelled_by_user = true;
-                    StepOutcome {
-                        result: StepResult {
-                            step_name: step.name.clone(),
-                            status: RunStatus::Cancelled,
-                            output: format!("Step '{}' cancelled by user mid-flight.", step.name),
-                            tokens_used: 0,
-                            duration_ms: step_start.elapsed().as_millis() as u64,
-                            started_at: None,
-                            condition_result: None,
-                            envelope_detected: None,
-                            step_kind: None,
-                            step_agent: None,
-                            step_model: None,
-                            step_api_plugin_slug: None,
-                            step_api_endpoint_path: None,
-                            is_rollback: false,
-                            child_run_id: None,
-                        },
-                        condition_action: None,
+        let mut outcome: StepOutcome = match await_in_flight_step(
+            step_future,
+            &cancel_token,
+            deadline,
+        )
+        .await
+        {
+            InFlightStepOutcome::Completed(outcome) => *outcome,
+            InFlightStepOutcome::Cancelled => {
+                tracing::info!(
+                    "Workflow run {} cancelled mid-step '{}' — dropping in-flight executor",
+                    run.id,
+                    step.name
+                );
+                if matches!(step.step_type, StepType::BatchQuickPrompt) {
+                    if let Err(error) = super::cancellation::cancel_run_tree(
+                        &state,
+                        &run.id,
+                        super::cancellation::CancellationScope::DescendantsOnly,
+                        "cancelled_by_parent_workflow",
+                    )
+                    .await
+                    {
+                        tracing::error!(run_id = %run.id, "Unable to cancel batch descendants: {error}");
                     }
                 }
-                InFlightStepOutcome::TimedOut => {
-                    let elapsed_secs = (Utc::now() - run.started_at).num_seconds().max(0) as u64;
-                    let actual_secs = elapsed_secs.max(resolved_guards.timeout_seconds);
-                    tracing::warn!(
-                        target: "kronn::workflow_guard",
-                        run_id = %run.id,
-                        step = %step.name,
-                        kind = "Timeout",
-                        threshold_secs = resolved_guards.timeout_seconds,
-                        actual_secs,
-                        "Workflow run stopped by Timeout guard during an in-flight step"
-                    );
-                    emit(RunEvent::GuardTriggered {
-                        kind: GuardKind::Timeout,
-                        threshold: resolved_guards.timeout_seconds,
-                        actual: actual_secs,
-                    });
-                    stopped_by_guard = true;
-                    StepOutcome {
-                        result: StepResult {
-                            step_name: step.name.clone(),
-                            status: RunStatus::StoppedByGuard,
-                            output: format!(
+                cancelled_by_user = true;
+                StepOutcome {
+                    result: StepResult {
+                        step_name: step.name.clone(),
+                        status: RunStatus::Cancelled,
+                        output: format!("Step '{}' cancelled by user mid-flight.", step.name),
+                        tokens_used: 0,
+                        duration_ms: step_start.elapsed().as_millis() as u64,
+                        started_at: None,
+                        condition_result: None,
+                        envelope_detected: None,
+                        step_kind: None,
+                        step_agent: None,
+                        step_model: None,
+                        step_api_plugin_slug: None,
+                        step_api_endpoint_path: None,
+                        is_rollback: false,
+                        child_run_id: None,
+                    },
+                    condition_action: None,
+                }
+            }
+            InFlightStepOutcome::TimedOut => {
+                let elapsed_secs = (Utc::now() - run.started_at).num_seconds().max(0) as u64;
+                let actual_secs = elapsed_secs.max(resolved_guards.timeout_seconds);
+                tracing::warn!(
+                    target: "kronn::workflow_guard",
+                    run_id = %run.id,
+                    step = %step.name,
+                    kind = "Timeout",
+                    threshold_secs = resolved_guards.timeout_seconds,
+                    actual_secs,
+                    "Workflow run stopped by Timeout guard during an in-flight step"
+                );
+                emit(RunEvent::GuardTriggered {
+                    kind: GuardKind::Timeout,
+                    threshold: resolved_guards.timeout_seconds,
+                    actual: actual_secs,
+                });
+                if matches!(step.step_type, StepType::BatchQuickPrompt) {
+                    if let Err(error) = super::cancellation::cancel_run_tree(
+                        &state,
+                        &run.id,
+                        super::cancellation::CancellationScope::DescendantsOnly,
+                        "workflow_timeout_guard",
+                    )
+                    .await
+                    {
+                        tracing::error!(run_id = %run.id, "Unable to cancel timed-out batch descendants: {error}");
+                    }
+                }
+                stopped_by_guard = true;
+                StepOutcome {
+                    result: StepResult {
+                        step_name: step.name.clone(),
+                        status: RunStatus::StoppedByGuard,
+                        output: format!(
                             "Step '{}' stopped by workflow Timeout guard after {}s (limit {}s).",
                             step.name, actual_secs, resolved_guards.timeout_seconds
                         ),
-                            tokens_used: 0,
-                            duration_ms: step_start.elapsed().as_millis() as u64,
-                            started_at: None,
-                            condition_result: None,
-                            envelope_detected: None,
-                            step_kind: None,
-                            step_agent: None,
-                            step_model: None,
-                            step_api_plugin_slug: None,
-                            step_api_endpoint_path: None,
-                            is_rollback: false,
-                            child_run_id: None,
-                        },
-                        condition_action: None,
-                    }
+                        tokens_used: 0,
+                        duration_ms: step_start.elapsed().as_millis() as u64,
+                        started_at: None,
+                        condition_result: None,
+                        envelope_detected: None,
+                        step_kind: None,
+                        step_agent: None,
+                        step_model: None,
+                        step_api_plugin_slug: None,
+                        step_api_endpoint_path: None,
+                        is_rollback: false,
+                        child_run_id: None,
+                    },
+                    condition_action: None,
                 }
-            };
+            }
+        };
 
         if outcome.result.started_at.is_none() {
             outcome.result.started_at = Some(step_started_at);

@@ -2,6 +2,7 @@ pub mod agent_decisions;
 pub mod agent_dispatch;
 pub mod api_call_logs;
 pub mod audit_runs;
+pub mod cli_telemetry;
 pub mod contacts;
 pub mod disc_source;
 pub mod discussion_sessions;
@@ -16,7 +17,9 @@ pub mod planning;
 pub mod planning_proposals;
 pub mod projects;
 pub mod quick_apis;
+pub mod quick_exec_runs;
 pub mod quick_prompts;
+pub mod review_ledger;
 pub mod workflows;
 
 #[cfg(test)]

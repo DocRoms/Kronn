@@ -321,15 +321,6 @@ pub(crate) async fn stream_claimed_dispatch_job(
     initial_event: Option<Event>,
 ) -> Option<Sse<SseStream>> {
     let mut handoff_guard = DispatchHandoffGuard::new(state.clone(), job.id.clone());
-    if let Some(ref run_id) = job.group_id {
-        let _ = state
-            .ws_broadcast
-            .send(crate::models::WsMessage::BatchRunChildStarted {
-                run_id: run_id.clone(),
-                discussion_id: job.discussion_id.clone(),
-            });
-    }
-
     // If the process crashed after persisting the answer but before marking
     // the job complete, do not spend tokens a second time.
     let existing = if job.attempts > 1 {
@@ -562,6 +553,9 @@ async fn finish_dispatch_turn(
             }
         };
         let message = crate::models::DiscussionMessage {
+            recovered_partial: false,
+            session_tokens_at_message: None,
+            author_cli_ordinal: None,
             model: None,
             lint_report: None,
             id: uuid::Uuid::new_v4().to_string(),

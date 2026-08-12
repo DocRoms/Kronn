@@ -114,36 +114,17 @@ pub async fn orchestrate(
         .unwrap_or_default();
     // Build raw conversation context (all messages except the last user message being debated)
     // This will be summarized by the primary agent before injection into the debate.
-    let raw_conv_context = {
+    let prior_msgs_for_context: Vec<_> = {
         let msgs = &disc.messages;
         let last_user_idx = msgs
             .iter()
             .rposition(|m| matches!(m.role, MessageRole::User));
-        let prior_msgs: Vec<_> = match last_user_idx {
+        match last_user_idx {
             Some(idx) => msgs[..idx].to_vec(),
             None => vec![],
-        };
-        if prior_msgs.is_empty() {
-            String::new()
-        } else {
-            let mut ctx = String::new();
-            for msg in &prior_msgs {
-                match msg.role {
-                    MessageRole::User => ctx.push_str(&format!("User: {}\n\n", msg.content)),
-                    MessageRole::Agent => {
-                        let label = msg
-                            .agent_type
-                            .as_ref()
-                            .map(agent_display_name)
-                            .unwrap_or_else(|| "Agent".into());
-                        ctx.push_str(&format!("{}: {}\n\n", label, msg.content));
-                    }
-                    MessageRole::System => {}
-                }
-            }
-            ctx
         }
     };
+    let raw_conv_context = build_debate_context(&prior_msgs_for_context);
     let disc_language = disc.language.clone();
     let disc_tier = disc.tier;
     let primary_agent_type = disc.agent.clone();
@@ -337,6 +318,9 @@ pub async fn orchestrate(
         // Save system message
         {
             let msg = DiscussionMessage {
+                recovered_partial: false,
+                session_tokens_at_message: None,
+                author_cli_ordinal: None,
                 model: None,
                 lint_report: None,
                 id: Uuid::new_v4().to_string(),
@@ -561,6 +545,9 @@ pub async fn orchestrate(
                                 Some(&model_tiers_config),
                             );
                             let msg = DiscussionMessage {
+                                recovered_partial: false,
+                                session_tokens_at_message: None,
+                                author_cli_ordinal: None,
                                 model: round_model,
                                 lint_report: None,
                                 id: Uuid::new_v4().to_string(),
@@ -683,6 +670,9 @@ pub async fn orchestrate(
                             Some(&model_tiers_config),
                         );
                         let msg = DiscussionMessage {
+                            recovered_partial: false,
+                            session_tokens_at_message: None,
+                            author_cli_ordinal: None,
                             model: synthesis_model,
                             lint_report: None,
                             id: Uuid::new_v4().to_string(),
@@ -1015,6 +1005,9 @@ pub(super) async fn maybe_generate_summary(
                                 non_system_count,
                             )?;
                             let sys_msg = crate::models::DiscussionMessage {
+                                recovered_partial: false,
+                                session_tokens_at_message: None,
+                                author_cli_ordinal: None,
                                 model: None,
                                 lint_report: None,
                                 id: uuid::Uuid::new_v4().to_string(),
@@ -1412,6 +1405,73 @@ pub(crate) fn detect_agent_error_hint(
     None
 }
 
+/// KT-193 DoD 5 — the conversation history handed to the debate summariser,
+/// BOUNDED.
+///
+/// This string is sent to a model, so its size is a bill and not just memory.
+/// Unbounded it reached 1 320 210 bytes on the real database: one discussion's
+/// entire history, paid for on every debate.
+///
+/// Built from the END backwards, because the debate answers the LAST question
+/// and the messages next to it are the ones that bear on it. When something is
+/// cut, the string SAYS so — a summariser told its history is partial can
+/// qualify its answer; one told nothing presents a fragment as the whole
+/// conversation.
+pub(crate) fn build_debate_context(prior_msgs: &[crate::models::DiscussionMessage]) -> String {
+    if prior_msgs.is_empty() {
+        return String::new();
+    }
+    let mut kept: Vec<String> = Vec::new();
+    let mut used = 0_usize;
+    let mut dropped = 0_usize;
+    let eligible = prior_msgs
+        .iter()
+        .filter(|m| !matches!(m.role, MessageRole::System))
+        .count();
+    for msg in prior_msgs.iter().rev() {
+        let line = match msg.role {
+            MessageRole::User => format!("User: {}\n\n", msg.content),
+            MessageRole::Agent => {
+                let label = msg
+                    .agent_type
+                    .as_ref()
+                    .map(agent_display_name)
+                    .unwrap_or_else(|| "Agent".into());
+                format!("{}: {}\n\n", label, msg.content)
+            }
+            MessageRole::System => continue,
+        };
+        if used + line.len() > DEBATE_CONTEXT_MAX_BYTES {
+            dropped = eligible - kept.len();
+            break;
+        }
+        used += line.len();
+        kept.push(line);
+    }
+    kept.reverse();
+    let mut ctx = String::new();
+    if dropped > 0 {
+        ctx.push_str(&format!(
+            "[{dropped} older message(s) omitted — this is the END of the \
+             conversation, not all of it]\n\n"
+        ));
+    }
+    for line in kept {
+        ctx.push_str(&line);
+    }
+    ctx
+}
+
+/// Ceiling on the history handed to the debate summariser. ~8 000 tokens at
+/// 3.7 B/token: enough for the recent thread, far from the 1 320 210 bytes one
+/// real discussion had reached.
+const DEBATE_CONTEXT_MAX_BYTES: usize = 30_000;
+// Raising it must break the build, not slip through review.
+const _: () = assert!(
+    DEBATE_CONTEXT_MAX_BYTES <= 40_000,
+    "debate context ceiling raised: this string is billed to a model"
+);
+
 #[cfg(test)]
 mod orchestrate_validation_tests {
     // The validation logic itself (matching usable agent types against the
@@ -1771,5 +1831,124 @@ mod error_hint_tests {
     fn provider_status_kiro_points_at_kiro_dev() {
         let hint = detect_agent_error_hint("rate limit", &AgentType::Kiro).unwrap();
         assert!(hint.contains("kiro.dev"));
+    }
+}
+
+#[cfg(test)]
+mod debate_context_tests {
+    use super::*;
+    use crate::models::{DiscussionMessage, MessageChannel, MessageRole};
+
+    fn msg(role: MessageRole, content: &str) -> DiscussionMessage {
+        DiscussionMessage {
+            recovered_partial: false,
+            id: "m".into(),
+            role,
+            channel: MessageChannel::Main,
+            content: content.to_string(),
+            agent_type: None,
+            timestamp: chrono::Utc::now(),
+            tokens_used: 0,
+            session_tokens_at_message: None,
+            auth_mode: None,
+            model_tier: None,
+            model: None,
+            cost_usd: None,
+            author_pseudo: None,
+            author_avatar_email: None,
+            source_msg_id: None,
+            duration_ms: None,
+            lint_report: None,
+            target_agent: None,
+            reply_to_message_id: None,
+            author_cli_ordinal: None,
+        }
+    }
+
+    #[test]
+    fn a_short_conversation_is_passed_whole() {
+        let msgs = vec![
+            msg(MessageRole::User, "question"),
+            msg(MessageRole::Agent, "answer"),
+        ];
+        let ctx = build_debate_context(&msgs);
+        assert!(ctx.contains("question"));
+        assert!(ctx.contains("answer"));
+        assert!(!ctx.contains("omitted"));
+    }
+
+    #[test]
+    fn a_long_conversation_is_bounded() {
+        // The defect this fixes: unbounded, this string reached 1 320 210 bytes
+        // on the real database — a whole history, billed to a model on every
+        // debate.
+        let big = "x".repeat(5_000);
+        let msgs: Vec<_> = (0..500).map(|_| msg(MessageRole::Agent, &big)).collect();
+        let ctx = build_debate_context(&msgs);
+        assert!(
+            ctx.len() <= 32_000,
+            "{} B — the ceiling is not holding",
+            ctx.len()
+        );
+    }
+
+    #[test]
+    fn the_end_of_the_conversation_is_what_survives() {
+        // The debate answers the LAST question, so the messages next to it are
+        // the ones that bear on it. Keeping the oldest would drop exactly the
+        // context that matters.
+        let big = "y".repeat(20_000);
+        let msgs = vec![
+            msg(MessageRole::Agent, &format!("OLDEST {big}")),
+            msg(MessageRole::Agent, &format!("NEWEST {big}")),
+        ];
+        let ctx = build_debate_context(&msgs);
+        assert!(ctx.contains("NEWEST"), "the newest message was dropped");
+        assert!(
+            !ctx.contains("OLDEST"),
+            "the oldest survived over the newest"
+        );
+    }
+
+    #[test]
+    fn a_truncated_history_says_so() {
+        // A summariser told its history is partial can qualify its answer. One
+        // told nothing presents a fragment as the whole conversation.
+        let big = "z".repeat(20_000);
+        let msgs: Vec<_> = (0..5).map(|_| msg(MessageRole::Agent, &big)).collect();
+        let ctx = build_debate_context(&msgs);
+        assert!(
+            ctx.contains("omitted"),
+            "a silent truncation: {}",
+            &ctx[..80]
+        );
+        assert!(ctx.contains("not all of it"));
+    }
+
+    #[test]
+    fn system_messages_are_left_out_and_not_counted_as_dropped() {
+        // They carry tool-call noise, not conversation — and counting them as
+        // "omitted" would overstate what was lost.
+        let msgs = vec![
+            msg(MessageRole::System, "[tool call]"),
+            msg(MessageRole::User, "question"),
+        ];
+        let ctx = build_debate_context(&msgs);
+        assert!(!ctx.contains("[tool call]"));
+        assert!(!ctx.contains("omitted"));
+    }
+
+    #[test]
+    fn an_empty_history_is_an_empty_string() {
+        assert_eq!(build_debate_context(&[]), "");
+    }
+
+    #[test]
+    fn one_oversized_message_does_not_produce_an_empty_context() {
+        // Everything is dropped, so the caller must at least learn that rather
+        // than receive a blank string that reads as "no prior conversation".
+        let huge = "w".repeat(100_000);
+        let ctx = build_debate_context(&[msg(MessageRole::Agent, &huge)]);
+        assert!(ctx.contains("omitted"), "a total drop went unannounced");
     }
 }

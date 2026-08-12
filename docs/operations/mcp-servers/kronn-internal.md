@@ -76,7 +76,10 @@ Bidirectional gateway between a CLI agent (Claude Code, Codex, Gemini, Kiro, Vib
 5. **Planning** (0.9.1–0.9.3) — `plan_get`, `task_list`, `task_get` and
    `task_changes` provide compact, on-demand task context. Narrow
    `task_create`, `task_update`, `task_update_dod`, `task_link_discussion` and
-   `task_add_blocker` writes attribute every change to the calling agent.
+   `task_add_blocker` and `task_remove_blocker` attribute every dependency
+   change to the calling agent. Removal is a narrow, idempotent write: it
+   removes only the selected edge and leaves task status and free-form blocked
+   reason untouched.
    `proposal_list` and `proposal_get` expose the human validation inbox as
    read-only context; no MCP tool can accept or reject a proposal.
    `[src: file: backend/scripts/disc-introspection-mcp.py:169-365]`
@@ -140,6 +143,11 @@ actually needed.
   content, never identity: distinct keys may create tasks with the same title.
   Creating several tasks from one source message therefore requires one
   explicit key per logical task.
+- A Kronn-launched CLI receives its current discussion UUID in the first-turn
+  Planning notice. Prefer that explicit UUID for `plan_get` and `task_create`:
+  it remains valid when a stale bridge reports `no disc bound` or
+  `rejoin_required`, so the agent must not ask for a join token merely to write
+  the room that launched it.
 - MCP writes stamp the client-derived agent identity automatically; callers
   may add `source_message_id` for provenance.
 - If the Planning tools named by the contract are absent from the client's
@@ -154,6 +162,14 @@ actually needed.
   never persisted as a proposal.
   `[src: file: backend/src/db/planning.rs:801-850]`
   `[src: file: backend/scripts/disc-introspection-mcp.py:3035-3165]`
+
+Ollama and LiteLLM do not run this stdio bridge. Kronn exposes their compact
+Planning catalogue natively and executes it through the same HTTP handlers,
+with the discussion scope and actor provenance supplied server-side. Vibe's
+programmatic runner deliberately disables MCP; its supported Planning write
+path is the human-gated `kronn-plan-action` fence.
+`[src: file: backend/src/api/agent_tools.rs]`
+`[src: file: backend/scripts/vibe-runner.py]`
 
 Agent-library catalogs deliberately stay compact:
 `skills_list` / `profiles_list` / `directives_list` omit their potentially long

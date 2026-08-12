@@ -10,6 +10,7 @@ pub mod api_call_step;
 pub mod batch_apicall_step;
 pub mod batch_step;
 pub mod big_ticket_template;
+pub mod cancellation;
 pub mod exec_step;
 pub mod gate_checkpoint;
 pub mod gate_step;

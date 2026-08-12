@@ -7,25 +7,25 @@ import { ThemeProvider } from './lib/ThemeContext';
 import { LayoutDensityProvider } from './lib/LayoutDensityContext';
 import { LocalIdentityProvider } from './lib/LocalIdentityContext';
 import { ThemeEffects } from './components/ThemeEffects';
-import { setApiBase } from './lib/api';
 import { loadInitialLocale, renderBootstrapFailure } from './lib/bootstrapLocale';
+import {
+  getDesktopBackendUrl,
+  isTauriAssetLocation,
+  isTauriRuntime,
+  retryDesktopStartup,
+} from './lib/tauri';
 
-// Detect Tauri desktop mode and configure API base URL
-async function initApiBase() {
-  if ('__TAURI__' in window) {
-    try {
-      // Dynamic import hidden from TypeScript to avoid build-time dependency
-      const mod = await new Function("return import('@tauri-apps/api/core')")();
-      const url: string = await mod.invoke('get_backend_url');
-      setApiBase(url);
-    } catch {
-      // Fallback: relative URLs (web mode)
-    }
-  }
+// The packaged shell waits for its owned backend before loading the real UI.
+async function navigateToDesktopBackend(): Promise<boolean> {
+  if (!isTauriRuntime() || !isTauriAssetLocation(window.location)) return false;
+  const url = await getDesktopBackendUrl();
+  if (!url) return false;
+  window.location.replace(url);
+  return true;
 }
 
 async function bootstrap() {
-  await initApiBase();
+  if (await navigateToDesktopBackend()) return;
   // Load exactly the active dictionary before first paint. Other locales stay
   // in their own Vite chunks until the user switches language.
   await loadInitialLocale();
@@ -50,5 +50,6 @@ async function bootstrap() {
 void bootstrap().catch(error => {
   console.error('[bootstrap] failed to load the interface:', error);
   const rootEl = document.getElementById('root');
-  if (rootEl) renderBootstrapFailure(rootEl);
+  const detail = error instanceof Error ? error.message : String(error);
+  if (rootEl) renderBootstrapFailure(rootEl, () => void retryDesktopStartup(), detail);
 });

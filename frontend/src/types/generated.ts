@@ -145,6 +145,24 @@ mention_color?: string | null,
 base_url?: string | null, };
 
 /**
+ * One agent's effective context.
+ */
+export type AgentContext = { agent: string,
+/**
+ * Present files, in the agent's own precedence order.
+ */
+files: Array<string>,
+/**
+ * Sum over readable files. `None` when at least one is unreadable, because a
+ * partial sum presented as a total understates the cost.
+ */
+total_bytes: number | null, unreadable_files: Array<string>, duplicated_bytes: number, broken_links: number,
+/**
+ * A redirect chain that comes back to a file already in the chain.
+ */
+redirect_cycles: Array<Array<string>>, };
+
+/**
  * One decision row. Mirrors the `agent_decisions` table 1:1 — see
  * migration `051_agent_decisions.sql`.
  */
@@ -391,6 +409,12 @@ tts_voices?: Record<string, string>, disabled_agents: Array<AgentType>, };
 export type AppendLintSummary = { fabricated_count: number, unsourced_count: number, note: string, };
 
 /**
+ * Where the full streams were kept. Bytes are the real size on disk; `truncated`
+ * says the process produced more than that.
+ */
+export type ArtifactRef = { path: string, bytes: number, truncated: boolean, };
+
+/**
  * Declared artifact in a workflow. Phase-3 minimal model — only
  * path + optional format hint. Path is resolved relative to the run's
  * workspace; absolute paths and `..` traversal are rejected at
@@ -408,6 +432,8 @@ path: string,
 format?: string | null, };
 
 export type AuditFileInfo = { path: string, filled: boolean, };
+
+export type AuditFinding = { severity: string, what: string, where_: string, };
 
 export type AuditInfo = { files: Array<AuditFileInfo>, todos: Array<AuditTodo>, tech_debt_items: Array<TechDebtItem>, };
 
@@ -678,6 +704,34 @@ export type BootstrapProjectRequest = { name: string, description: string, agent
 export type BootstrapProjectResponse = { project_id: string, discussion_id: string, };
 
 /**
+ * The whole assessment: a verdict, plus every axis so the reason is visible.
+ */
+export type BudgetAssessment = { verdict: BudgetVerdict, axes: Array<BudgetAxis>,
+/**
+ * Why, in one sentence, for whoever reads it in a log or a tooltip.
+ */
+reason: string, };
+
+/**
+ * One axis of the assessment, kept separate so a report can name WHICH ceiling
+ * is close instead of a bare colour.
+ */
+export type BudgetAxis = { name: string,
+/**
+ * `None` when unmeasured — never 0, which would read as "cost nothing".
+ */
+current: number | null, ceiling: number,
+/**
+ * Share of the ceiling used. `None` when unmeasured.
+ */
+ratio: number | null, };
+
+/**
+ * Which ceiling a session is closest to, and how close.
+ */
+export type BudgetVerdict = "ok" | "warn" | "rotate" | "unknown";
+
+/**
  * One **child workflow** declared inside a bundle (2026-06-11). The
  * parent workflow's `SubWorkflow` step references it via
  * `sub_workflow_id: "@bundle:<bundle_id>"`; the server creates the
@@ -784,7 +838,23 @@ child_workflows: Array<BundleCreated>,
  */
 workflow: BundleWorkflowCreated, };
 
+/**
+ * One line about a task: enough to recognise it, not enough to re-read it.
+ */
+export type BundleTask = { reference: string, title: string, status: string,
+/**
+ * `n/m` — an agent needs the shape of the remaining work, not every
+ * sentence of it.
+ */
+dod_progress: string | null, };
+
 export type BundleWorkflowCreated = { id: string, name: string, };
+
+/**
+ * What a CI check is known to be. `Unknown` is its own value: a check nobody
+ * could read is not a passing one.
+ */
+export type CiState = "passing" | "failing" | "unknown";
 
 /**
  * Body of `POST /api/disc/claim-by-token`. A PEER calls this to ask "do you
@@ -807,6 +877,22 @@ found: boolean, shared_id: string | null, title: string | null, };
 export type CleanupOrphanEnvRequest = { keys: Array<string>, };
 
 export type CleanupOrphanEnvResponse = { configs_updated: number, total_keys_removed: number, };
+
+/**
+ * One vendor's counters for one CLI session. A `None` counter is a counter the
+ * vendor does not publish — never a zero.
+ */
+export type CliSessionTelemetry = { cli_session_pk: number, vendor: string,
+/**
+ * Where the numbers came from, e.g. `claude-code-transcript`. Nothing in
+ * this table is an estimate, and a consumer must be able to prove it.
+ */
+provenance: string, input_tokens: number | null, cache_creation_tokens: number | null, cache_read_tokens: number | null, output_tokens: number | null, measured_responses: number | null, models_json: string | null, window_start: string | null, window_end: string | null,
+/**
+ * The VENDOR's own cost figure when it publishes one (Vibe does, Claude
+ * Code does not). Never merged with a Kronn estimate.
+ */
+vendor_cost_usd: number | null, read_offset: number, updated_at: string, };
 
 /**
  * Body for `POST /api/projects/:id/clone-and-remap` — re-clone a project's
@@ -835,6 +921,33 @@ export type CloneProjectResponse = { project_id: string, discussion_id: string |
 export type ConditionAction = { "type": "Stop" } | { "type": "Skip" } | { "type": "Goto", step_name: string, max_iterations?: number | null, };
 
 export type Contact = { id: string, pseudo: string, avatar_email: string | null, kronn_url: string, invite_code: string, status: string, created_at: string, updated_at: string, };
+
+export type ContextAudit = { files: Array<InstructionFile>, per_agent: Array<AgentContext>, proposal: Array<TierMove>, findings: Array<AuditFinding>,
+/**
+ * True when no known instruction file was found. Reported explicitly: an
+ * empty audit must not read as a clean one.
+ */
+no_convention_found: boolean, };
+
+export type ContextAuditResponse = { project_id: string, audit: ContextAudit,
+/**
+ * The report as text, already bounded.
+ */
+rendered: string, };
+
+/**
+ * One measured block of injected context.
+ */
+export type ContextBlock = { name: string, bytes: number,
+/**
+ * True when this block is injected regardless of what the caller selected.
+ * Those are the ones that multiply by every run.
+ */
+always: boolean,
+/**
+ * What makes it worth its bytes, or what to do about them.
+ */
+note: string, };
 
 /**
  * A file uploaded as context for a discussion.
@@ -1046,6 +1159,8 @@ kind: string, label: string, };
 
 export type DetectedRepo = { path: string, name: string, remote_url: string | null, branch: string, ai_configs: Array<AiConfigType>, has_project: boolean, hidden: boolean, };
 
+export type Diagnostic = { path: string | null, line: number | null, message: string, };
+
 export type Directive = { id: string, name: string, description: string, icon: string, category: DirectiveCategory, content: string, is_builtin: boolean, conflicts?: Array<string>,
 /**
  * Estimated token cost when injected into an agent prompt (~4 chars = 1 token).
@@ -1139,7 +1254,14 @@ created: boolean, };
 
 export type DiscFindBySessionQuery = { source_agent: string, source_session_id: string, };
 
-export type DiscFindBySessionResponse = { disc_id: string | null, };
+export type DiscFindBySessionResponse = { disc_id: string | null,
+/**
+ * KT-247 — the agent's own room alias (`@claude-cli`, `@claude-cli-2`…),
+ * re-surfaced on the idempotent resume lookup so a CLI recovers its
+ * identity after an MCP reload without a fresh join. `None` when no bound
+ * session resolves or the provider is unknown.
+ */
+self_alias: string | null, cli_ordinal: number | null, };
 
 export type DiscLinkRequest = { disc_id: string, source_agent: string, source_session_id: string,
 /**
@@ -1456,7 +1578,31 @@ export type DiscussionImportProvenance = { disc_id: string,
  */
 provenance_kind: string, imported_by_pseudo: string | null, imported_by_avatar_email: string | null, imported_at: string, };
 
-export type DiscussionMessage = { id: string, role: MessageRole, channel: MessageChannel, content: string, agent_type: AgentType | null, timestamp: string, tokens_used: number, auth_mode: string | null,
+export type DiscussionMessage = { id: string, role: MessageRole, channel: MessageChannel, content: string, agent_type: AgentType | null, timestamp: string, tokens_used: number,
+/**
+ * KT-190 — what the JOINED CLI SESSION had spent by the time this message
+ * was posted. A running total, NOT this message's cost, and it lives apart
+ * from `tokens_used` for that reason: a CLI's spend cannot be cut per
+ * message, because between two room messages it also reads files, runs
+ * tests, and may answer in another room. So the UI must label it
+ * differently ("session: 220k"), never render it where a per-message cost
+ * goes.
+ *
+ * `None` for an agent Kronn spawned (its cost IS `tokens_used`) and for a
+ * CLI whose vendor has no collector — where absence means unmeasured, never
+ * free.
+ */
+session_tokens_at_message?: number | null,
+/**
+ * KT-251 — `true` when this is the salvaged BEGINNING of an answer whose
+ * agent was killed mid-sentence, not an answer.
+ *
+ * Exposed so the UI can FOLD it rather than show it as a peer's position.
+ * Nothing is deleted: a fragment is real history and may hold reasoning the
+ * retry never repeated — a user reported seeing "three agents" precisely
+ * because two half-answers looked like real ones.
+ */
+recovered_partial?: boolean, auth_mode: string | null,
 /**
  * Which model tier was used for this message (economy/default/reasoning).
  */
@@ -1512,7 +1658,16 @@ target_agent?: AgentType | null,
  * message must belong to the same discussion. Portable imports remap the
  * identifier alongside message ids.
  */
-reply_to_message_id?: string | null, };
+reply_to_message_id?: string | null,
+/**
+ * KT-247 — stable ordinal of the joined CLI session that authored this
+ * message (`1`, `2`, `3`…), resolved through `message_cli_authors`. Lets
+ * the header show "CLI 2" so two same-provider CLIs (two Claude Code) are
+ * distinguishable in the timeline, matching the `@claude-cli-2` alias.
+ * `None` for User/System/native-agent messages and legacy rows with no
+ * recorded CLI author.
+ */
+author_cli_ordinal?: number | null, };
 
 /**
  * Lean surrounding-message shape for a `disc_get_message` window.
@@ -1623,6 +1778,41 @@ model: string | null,
  */
 conversation_id: string | null, };
 
+/**
+ * What one discussion cost — KT-254.
+ *
+ * TWO figures, deliberately never one. The agents Kronn spawns report a cost PER
+ * REPLY; a joined CLI reports a RUNNING TOTAL for its whole session, which also
+ * covers file reads, test runs and work in other rooms. Adding them would both
+ * double-count the CLI's own messages and charge this discussion for work done
+ * elsewhere, and the sum would carry no unit anyone could name.
+ *
+ * So the header shows them side by side, each with what it covers.
+ */
+export type DiscussionTokenCost = { disc_id: string,
+/**
+ * Summed `tokens_used` over replies from agents Kronn spawned. Exact for what
+ * it covers, and 0 genuinely means no in-app agent replied.
+ */
+in_app_tokens: number, in_app_messages: number,
+/**
+ * The CLI side: traffic the vendors reported for the sessions joined here.
+ * `None` when nothing was measured — never 0, because an unmeasured session
+ * is unknown, not free.
+ */
+cli_traffic_tokens: number | null,
+/**
+ * Traffic minus cache reads. `None` unless every measured session reports
+ * cache reads; see `ObjectSpend::billable_tokens` for why mixing vendors
+ * makes this underivable rather than approximable.
+ */
+cli_billable_tokens: number | null, cli_sessions: number, cli_sessions_measured: number,
+/**
+ * Sessions with no readable counter. A reader needs this number to judge the
+ * figure beside it.
+ */
+cli_sessions_unmeasured: number, };
+
 export type DiscussionWorkspace = { id: string, disc_id: string, session_pk: number | null, session_agent_type: string | null, task_id: string | null, task_reference: string | null, project_id: string, workspace_path: string | null, canonical_path: string | null, branch: string, head_sha: string | null, ownership: string, state: string, created_at: string, updated_at: string, };
 
 export type DiscWorkspaceBlocker = { kind: string, message: string, };
@@ -1634,6 +1824,24 @@ export type DiscWorkspaceSetRequest = { source_agent: string, source_session_id:
 export type DiscWorkspaceSetResponse = { workspace: DiscussionWorkspace, blockers: Array<DiscWorkspaceBlocker>, };
 
 export type DiscWorkspaceState = { disc_id: string, session_pk: number, current: DiscussionWorkspace | null, workspaces: Array<DiscussionWorkspace>, };
+
+/**
+ * What changed since a previous audit — KT-194 drift.
+ */
+export type Drift = {
+/**
+ * Files that grew, with the delta.
+ */
+grown: Array<[string, number]>,
+/**
+ * Instruction files that did not exist before. Reported because a new one
+ * changes every session's cost without anyone deciding to.
+ */
+new_files: Array<string>, newly_broken_routes: Array<string>,
+/**
+ * Files no agent reads. Real cost, zero effect — the pack nobody loads.
+ */
+unused_files: Array<string>, };
 
 export type DriftCheckResponse = { audit_date: string | null, stale_sections: Array<DriftSection>, fresh_sections: Array<string>, total_sections: number, };
 
@@ -1651,6 +1859,11 @@ export type Evidence = { kind: string, ref: string, quote?: string | null, };
  * Gate-1 verdict for one evidence row (rendered per-row in the validation modal).
  */
 export type EvidenceCheck = { reference: string, status: string, fabricated: boolean, };
+
+/**
+ * What a run may be evidence for.
+ */
+export type EvidenceTarget = "task" | "review_finding";
 
 export type ExecResponse = { stdout: string, stderr: string, exit_code: number, };
 
@@ -1706,6 +1919,12 @@ export type FetchFileResponse = { found: boolean, filename: string | null, mime_
 data_base64: string | null, };
 
 /**
+ * Where a finding stands. `Open` and `Unproven` are distinct on purpose: a
+ * finding nobody has evidence for is not the same as one known to be live.
+ */
+export type FindingStatus = "open" | "fixed" | "dismissed" | "unproven";
+
+/**
  * One flagged sentence: a short excerpt + the cue that tripped the heuristic.
  */
 export type FlaggedSpan = {
@@ -1717,6 +1936,11 @@ text: string,
  * The claim cue that matched (helps the user judge the flag + tune later).
  */
 reason: string, };
+
+/**
+ * Why a final verdict cannot be issued yet.
+ */
+export type GateBlocker = { "kind": "nothing_was_checked" } | { "kind": "open_findings", count: number, } | { "kind": "unproven_findings", count: number, } | { "kind": "stale_evidence", finding_ids: Array<string>, } | { "kind": "settled_without_evidence", finding_ids: Array<string>, } | { "kind": "ci_not_green", state: CiState, };
 
 export type GitBlameLine = { line_number: number, commit: string, author: string, author_time: number, };
 
@@ -1912,6 +2136,21 @@ export type ImportResult = { warnings: Array<string>, invalid_paths: Array<strin
  * unattached (the user picks a project later via the wizard).
  */
 export type ImportWorkflowRequest = { content: string, project_id?: string | null, };
+
+export type InstructionFile = { path: string,
+/**
+ * `None` when the file could not be read. NOT 0 — an unreadable file is not
+ * an empty one, and its cost is unknown rather than absent.
+ */
+bytes: number | null, agents: Array<string>, sections: Array<Section>,
+/**
+ * Markdown link targets that do not exist on disk.
+ */
+broken_links: Array<string>,
+/**
+ * Files this one tells the reader to load.
+ */
+redirects_to: Array<string>, };
 
 /**
  * Wire shape returned by the invite endpoint. The frontend displays
@@ -2339,6 +2578,8 @@ tier?: ModelTier | null, };
 
 export type MessageTargetKind = "discussion_agent" | "agent" | "cli";
 
+export type Metric = { label: string, value: string, };
+
 /**
  * Abstract model capability tier. Kronn maps each tier to a concrete --model flag per agent.
  * Priority: AgentSettings.model (explicit) > ModelTier > Default (no flag).
@@ -2471,6 +2712,39 @@ body_template: string, };
  */
 export type OAuth2ExtraHeader = { name: string, value_template: string, };
 
+/**
+ * Token spend rolled up to one Kronn object (a task, a project, a discussion).
+ *
+ * The counts are as important as the tokens. Summing the measured sessions and
+ * presenting the result as "what this task cost" would be wrong whenever one
+ * session was never measured — and that is the normal case today, since Codex
+ * and Copilot have no collector. So the unmeasured count travels with the
+ * figure, and the figure itself is `None` when nothing at all was measured.
+ */
+export type ObjectSpend = {
+/**
+ * Human-facing key: a task reference, a project id, a discussion id.
+ */
+object_key: string, sessions: number, measured_sessions: number,
+/**
+ * Sessions with no readable counter. Their cost is UNKNOWN, not zero, and a
+ * reader must see the number to judge the total beside it.
+ */
+unmeasured_sessions: number,
+/**
+ * Everything the vendors reported, cache reads included. `None` when no
+ * session was measured.
+ */
+traffic_tokens: number | null,
+/**
+ * Traffic minus cache reads. `None` unless EVERY measured session reports
+ * cache reads: mixing a vendor that splits caches (Claude Code) with one
+ * that does not (Vibe) makes the difference underivable, and summing what
+ * is available would understate the cache share instead of admitting the
+ * gap.
+ */
+billable_tokens: number | null, };
+
 export type OllamaHealthResponse = {
 /**
  * "online", "offline", "not_installed", "unreachable"
@@ -2550,7 +2824,30 @@ model: string | null,
  * Native CLI conversation id, when the joining bridge can prove one.
  * `None` deliberately produces no resume affordance in the UI.
  */
-conversation_id: string | null, };
+conversation_id: string | null,
+/**
+ * KT-247 — stable per-(disc, provider) ordinal that disambiguates two
+ * joined CLIs of the SAME provider (two Claude Code, a Codex + Codex…).
+ * Ranked by the AUTOINCREMENT `id`, which permanently encodes join order:
+ * `1` = first session of this provider in the room, `2` = second, and so
+ * on. It never shifts when a later session joins or an earlier one leaves,
+ * so `@claude-cli-2` designates the same session in a message from
+ * yesterday and in the live header. `None` only for synthesised
+ * obligation rows (no real session). Powers the room alias
+ * `@claude-cli-2` and the "CLI 2" header label, computed once here so the
+ * front never re-derives (and diverges from) it.
+ */
+cli_ordinal: number | null, };
+
+/**
+ * One finding as the agent sees it.
+ */
+export type PayloadFinding = { id: string, path: string | null, line_start: number | null, scenario: string, status: FindingStatus,
+/**
+ * Short excerpt, or `None` when nothing was ever established. The
+ * distinction is the whole reason `Unproven` exists.
+ */
+evidence_excerpt: string | null, symptom_count: number, };
 
 export type PeerJoinPlanSnapshot = { primary_objective: PeerJoinPlanTaskPreview | null,
 /**
@@ -2601,6 +2898,19 @@ conversation_id?: string | null, };
  * preview so the joiner has immediate context.
  */
 export type PeerJoinResponse = { disc_id: string, session_pk: number,
+/**
+ * KT-247 — the joining agent's OWN durable room alias, e.g. `@claude-cli`
+ * or `@claude-cli-2` when a second Claude Code is already in the room. The
+ * agent uses it to recognise itself and to know which peer alias is NOT
+ * it. `None` only for an unknown provider. Never a bare `@claude` that
+ * would collide with the punctual agent.
+ */
+self_alias: string | null,
+/**
+ * KT-247 — the numeric part of [`Self::self_alias`] (`1`, `2`, `3`…), so
+ * the agent can say "I am CLI 2" without re-parsing the alias.
+ */
+cli_ordinal: number | null,
 /**
  * Opaque reload credential. Persist locally with mode 0600; never log or
  * expose it to the model. The backend stores only its SHA-256 digest.
@@ -2680,7 +2990,13 @@ export type PeerResumeResponse = { disc_id: string, session_pk: number,
 /**
  * Rotated credential replacing the one supplied in the request.
  */
-resume_token: string, };
+resume_token: string,
+/**
+ * KT-247 — the agent's own room alias, re-surfaced on resume so a CLI that
+ * reloaded its MCP re-learns whether it is `@claude-cli` or `@claude-cli-2`
+ * without a fresh join. `None` for an unknown provider.
+ */
+self_alias: string | null, cli_ordinal: number | null, };
 
 export type PlanningActor = { kind: PlanningActorKind, id: string | null, source_message_id: string | null, };
 
@@ -3001,6 +3317,50 @@ export type QuickApiExportEnvelope = { kind: string, version: number, exported_a
  */
 quick_api: QuickApi, };
 
+export type QuickExecResult = { status: QuickExecStatus,
+/**
+ * `None` when the process died on a signal or never started. Not 0 — an
+ * unknown exit code must not read as a clean one.
+ */
+exit_code: number | null, summary: string, failed_tests: Array<string>, diagnostics: Array<Diagnostic>, artifact: ArtifactRef | null, duration_ms: number, stdout_bytes: number, stderr_bytes: number,
+/**
+ * Whether `failed_tests` and `diagnostics` can be treated as exhaustive.
+ * False when a stream was truncated or never reached EOF: an empty list
+ * drawn from a partial log is not evidence of no failures.
+ */
+findings_complete: boolean, };
+
+/**
+ * What a caller asks for. Every field is explicit — nothing is inherited from
+ * the server process, because an inherited cwd, environment or stdin is exactly
+ * how a bounded runner turns into an arbitrary one.
+ */
+export type QuickExecSpec = {
+/**
+ * Bare binary name, matched against [`ALLOWED_BINARIES`].
+ */
+binary: string,
+/**
+ * Passed as separate arguments. Never joined, never re-split, never handed
+ * to a shell — a `;` or `$(…)` in here is a literal character.
+ */
+argv: Array<string>,
+/**
+ * Absolute, and required to resolve inside one of the caller's roots.
+ */
+cwd: string, timeout_secs: number | null,
+/**
+ * `None` closes stdin. It is never inherited: a command that waits for input
+ * it will never get looks exactly like a hang.
+ */
+stdin: string | null,
+/**
+ * Which extractor turns the streams into a summary.
+ */
+summariser: Summariser, };
+
+export type QuickExecStatus = "passed" | "failed" | "timed_out" | "cancelled" | "rejected";
+
 export type QuickPrompt = { id: string, name: string, icon: string, prompt_template: string, variables: Array<PromptVariable>, agent: AgentType, project_id: string | null, skill_ids: Array<string>,
 /**
  * 0.8.5 — optional profile binding (persona injection at launch).
@@ -3071,7 +3431,96 @@ export type RecoveryStatus = { configured: boolean, };
 
 export type RemoteRepo = { name: string, full_name: string, clone_url: string, ssh_url: string, description: string | null, language: string | null, stargazers_count: number, updated_at: string, source: string, already_cloned: boolean, };
 
+export type RemovePlanningBlockerRequest = { actor?: PlanningActor, };
+
+export type ReportTelemetryRequest = {
+/**
+ * The CLI's own durable session id, as sent at join. Resolved to the Kronn
+ * session row; an unknown one is refused rather than stored orphaned.
+ */
+session_id: string, vendor: string,
+/**
+ * Where the numbers came from, e.g. `claude-code-transcript`. Required:
+ * a figure whose origin is unstated cannot be audited later.
+ */
+provenance: string,
+/**
+ * `None` means the vendor does not publish this counter. It is NOT zero,
+ * and the distinction survives all the way to the column.
+ */
+input_tokens?: number | null, cache_creation_tokens?: number | null, cache_read_tokens?: number | null, output_tokens?: number | null, measured_responses?: number | null, models_json?: string | null, window_start?: string | null, window_end?: string | null,
+/**
+ * The vendor's own cost figure when it publishes one. Kept separate from
+ * any Kronn estimate.
+ */
+vendor_cost_usd?: number | null,
+/**
+ * Byte cursor the collector reached. Stored monotonically, so a replayed
+ * report cannot rewind it and cause a span to be counted twice.
+ */
+read_offset?: number,
+/**
+ * Timestamped responses covered by THIS report. Used to stamp each of the
+ * session's messages with the running session total at that instant — not
+ * with a per-message cost, which a CLI's spend cannot be cut into.
+ */
+timeline?: Array<ResponseUsage>, };
+
+export type ReportTelemetryResponse = { cli_session_pk: number,
+/**
+ * Where the NEXT collection should resume. Echoed back because the stored
+ * value can be ahead of what this caller sent (another report landed, or
+ * this one was stale).
+ */
+read_offset: number,
+/**
+ * Counters this report left unmeasured, echoed so a caller can see that
+ * its absences were understood as absences.
+ */
+unmeasured: Array<string>,
+/**
+ * How many of this session's messages were stamped with a running total.
+ */
+messages_stamped: number, };
+
 export type RepoSource = { id: string, label: string, provider: string, };
+
+/**
+ * One timestamped response from a vendor transcript, as the bridge reports it.
+ */
+export type ResponseUsage = {
+/**
+ * RFC3339 instant the vendor recorded for this response.
+ */
+at: string, input: number | null, cache_creation: number | null, cache_read: number | null, output: number | null, };
+
+/**
+ * What a fresh session needs to continue, and nothing else.
+ */
+export type ResumeBundle = {
+/**
+ * The current objective, truncated if enormous.
+ */
+objective: string | null,
+/**
+ * Unticked DoD sentences of the objective: what "done" still means.
+ */
+open_dod: Array<string>,
+/**
+ * Tasks in flight — the shape of the work, one line each.
+ */
+active_tasks: Array<BundleTask>,
+/**
+ * Blocked tasks with their stated reason. Kept even when the budget is
+ * tight: a fresh session that re-attempts a blocked task wastes far more
+ * than the bytes this costs.
+ */
+blockers: Array<string>,
+/**
+ * Sections that were cut for size, named. A bundle that silently dropped
+ * blockers would be worse than one that admits it.
+ */
+omitted: Array<string>, bytes: number, };
 
 export type ResumeInterruptedRequest = {
 /**
@@ -3089,6 +3538,51 @@ export type ResumeRunResponse = { run_id: string, new_status: RunStatus, };
 export type RetryConfig = { max_retries: number, backoff: string, };
 
 /**
+ * One finding: a cause, where it lives, and what is known about it.
+ */
+export type ReviewFinding = { id: string, repo: string, pr_number: number,
+/**
+ * The head the evidence was gathered against. A finding settled at one SHA
+ * is not automatically settled at the next.
+ */
+settled_at_sha: string, root_cause_fingerprint: string, path: string | null, line_start: number | null, line_end: number | null, scenario: string, status: FindingStatus,
+/**
+ * What makes the status checkable. `None` = unproven, which must stay
+ * distinguishable from proven-clean.
+ */
+evidence: string | null, proving_test: string | null, fixing_commit: string | null,
+/**
+ * How many comments described this one cause. A count above one is a signal
+ * about the review, not noise — it is why dedup was needed.
+ */
+symptom_count: number, };
+
+export type ReviewPayload = { repo: string, pr_number: number, head_sha: string,
+/**
+ * The findings this head can have changed. Everything else keeps the
+ * evidence it already has.
+ */
+to_replay: Array<PayloadFinding>,
+/**
+ * Settled and untouched, so deliberately absent. A count rather than a list:
+ * leaving them out IS the delta.
+ */
+settled_untouched: number, changed_paths: Array<string>,
+/**
+ * The real number, which may exceed what `changed_paths` shows.
+ */
+changed_paths_total: number,
+/**
+ * One line per mechanical check already run, from Quick Exec.
+ */
+mechanical_evidence: Array<string>,
+/**
+ * Everything left out, named. An omission a reader cannot see is
+ * indistinguishable from an absence.
+ */
+omissions: Array<string>, };
+
+/**
  * Atomic edit/resend request. `expected_revision` is the opaque timestamp
  * exposed on the target message. `idempotency_key` is generated once by the
  * UI and reused when the same HTTP request is retried.
@@ -3098,6 +3592,45 @@ export type ReviseMessageRequest = { message_id: string, content: string, expect
  * Plural replacement for `target_agent`; empty preserves legacy clients.
  */
 target_agents?: Array<AgentType>, };
+
+/**
+ * Rotation metrics — KT-193 DoD 6.
+ *
+ * "Show the gain and any loss of quality or continuity." Both halves matter: a
+ * figure that only showed the saving would be advertising, and the whole release
+ * rests on numbers being checkable.
+ *
+ * The gain is what rotating buys: traffic per turn falls when a session stops
+ * carrying a week of history. The loss is what it costs: a fresh session may
+ * re-ask something the old one knew.
+ */
+export type RotationMetrics = { agent_type: string,
+/**
+ * Sessions with at least one real counter. The rest are excluded from the
+ * averages entirely rather than counted as cheap.
+ */
+measured_sessions: number,
+/**
+ * Sessions with no readable counter. Named so an average over 3 of 40
+ * sessions cannot pass for a fact about all 40.
+ */
+unmeasured_sessions: number,
+/**
+ * Median traffic per posted turn, across measured sessions. Median and not
+ * mean: one 4-billion-token session would drag a mean anywhere.
+ */
+median_traffic_per_turn: number | null,
+/**
+ * The heaviest measured session — the case a cap is meant to catch.
+ */
+worst_traffic: number | null,
+/**
+ * Turns posted by sessions that produced no measurable traffic. A CONTINUITY
+ * signal, not a saving: a session that spoke without spending is usually one
+ * whose telemetry is missing, and reading it as efficiency would be exactly
+ * the wrong conclusion.
+ */
+turns_without_traffic: number, };
 
 export type RtkActivateRequest = {
 /**
@@ -3151,6 +3684,15 @@ ratio_percent: number,
  * Number of compression samples RTK has on record.
  */
 sample_count: number, };
+
+export type RtkState = { gain: SourceState, session: SourceState, discover: SourceState, hook_audit: SourceState, cc_economics: SourceState, };
+
+export type RtkStateResponse = { state: RtkState,
+/**
+ * The panel as text, already bounded — what an agent should read instead of
+ * five command outputs.
+ */
+rendered: string, };
 
 export type RtkVersionInfo = {
 /**
@@ -3222,6 +3764,19 @@ export type ScanConfig = { paths: Array<string>, ignore: Array<string>,
  * Max depth when scanning for git repos (2–10, default 4)
  */
 scan_depth: number, };
+
+export type Section = { heading: string, bytes: number, class: SectionClass,
+/**
+ * Why it was classed that way. Kept because a classification a human cannot
+ * check is a classification they will either trust blindly or ignore.
+ */
+because: string, };
+
+/**
+ * What a section is, for the purpose of deciding whether it must be loaded every
+ * time.
+ */
+export type SectionClass = "critical" | "universal" | "routed" | "historical" | "duplicated" | "possibly_obsolete";
 
 export type SendMessageRequest = { content: string,
 /**
@@ -3411,6 +3966,35 @@ default_model_tier: ModelTier,
  */
 default_summary_strategy: SummaryStrategy, agent_handoffs_enabled: boolean, agent_handoff_paid_limit: number, agent_handoff_paid_unlimited: boolean, agent_handoff_blocked_agents: Array<AgentType>, };
 
+/**
+ * Configurable ceilings for one CLI session.
+ *
+ * Defaults come from the real measurement above, deliberately generous: a cap
+ * that fires on ordinary work would train people to ignore it, which is worse
+ * than no cap at all.
+ */
+export type SessionBudget = {
+/**
+ * Cumulative traffic — everything the vendor reported, cache reads
+ * included. It is the right axis because cache reads ARE the cost of a long
+ * thread: they were 98.4% of that 4.1 billion.
+ */
+max_traffic_tokens: number,
+/**
+ * Wall-clock age. A session open for days accumulates context it will
+ * never use again.
+ */
+max_age_hours: number,
+/**
+ * Messages this session posted to rooms.
+ */
+max_turns: number,
+/**
+ * Fraction of each ceiling at which a WARNING fires, leaving room to
+ * prepare a handover instead of being cut off mid-task.
+ */
+soft_ratio: number, };
+
 export type SetAgentAccessRequest = { agent: AgentType, full_access: boolean, };
 
 export type SetAgentMentionColorRequest = { agent: AgentType,
@@ -3502,11 +4086,41 @@ export type SourceFileNode = { path: string, name: string, is_dir: boolean, chil
 export type SourceKind = "file" | "url" | "user" | "commit" | "api" | "code_comment" | "inferred" | "hypothesis" | "training_data" | "other";
 
 /**
+ * One source's contribution, or a stated reason it has none.
+ */
+export type SourceState = { "state": "ready",
+/**
+ * One line, already compact.
+ */
+summary: string,
+/**
+ * The figures worth charting, when the source gives numbers.
+ */
+metrics: Array<Metric>, } | { "state": "unavailable", diagnosis: string, remedy: string, };
+
+/**
  * Result of mechanically verifying one `[src: …]` marker.
  */
 export type SourceStatus = "verified" | "not_found" | "out_of_bounds" | "empty_ref" | "outside_project" | "unchecked" | "rejected";
 
 export type StartBriefingResponse = { discussion_id: string, };
+
+export type StaticContextInventory = { blocks: Array<ContextBlock>,
+/**
+ * Sum of the `always` blocks that come from CODE — identical on every
+ * machine, and the only figure the ceiling gates on.
+ */
+floor_bytes: number,
+/**
+ * The user's own context, read from disk. Always injected, but its size is
+ * the user's to choose, so it is reported beside the floor rather than folded
+ * into it.
+ */
+user_bytes: number,
+/**
+ * Sum of everything measured, selection and user context included.
+ */
+total_bytes: number, };
 
 export type StepConditionRule = { contains: string, action: ConditionAction, };
 
@@ -3620,6 +4234,13 @@ child_run_id?: string | null, };
 
 export type StepType = { "type": "Agent" } | { "type": "ApiCall" } | { "type": "BatchQuickPrompt" } | { "type": "Notify" } | { "type": "Gate" } | { "type": "Exec" } | { "type": "BatchApiCall" } | { "type": "JsonData" } | { "type": "SubWorkflow" };
 
+/**
+ * A stored run, as a later reader gets it back.
+ */
+export type StoredRun = { id: string, template_id: string | null, spec_fingerprint: string, head_sha: string | null, status: QuickExecStatus, exit_code: number | null, summary: string, failed_tests: Array<string>, artifact_path: string | null, findings_complete: boolean, duration_ms: number, created_at: string, };
+
+export type Summariser = "cargo_test" | "clippy" | "tsc" | "vitest" | "generic" | "collected";
+
 export type SummarizeRequest = {
 /**
  * 0-based start index (inclusive). `None` = start of transcript.
@@ -3660,6 +4281,24 @@ tokens_used: number, };
 export type SummaryStrategy = "Auto" | "OnDemand" | "Off";
 
 export type TechDebtItem = { id: string, problem: string, area: string, severity: string, };
+
+/**
+ * Telemetry coverage for one agent type, as a dashboard must state it.
+ */
+export type TelemetryCoverage = { agent_type: string,
+/**
+ * CLI sessions of this agent type that exist.
+ */
+sessions: number,
+/**
+ * Sessions with a telemetry row. The rest are UNKNOWN, not free.
+ */
+attributed: number,
+/**
+ * Attributed sessions whose counters are all absent — a vendor with no
+ * collector yet. Counted apart so "attributed" cannot flatter itself.
+ */
+attributed_without_counters: number, };
 
 export type TestApiCallRequest = {
 /**
@@ -3750,6 +4389,15 @@ mock_variables?: { [key in string]: string } | null,
  * Dry run: agent describes what it would do without executing any write actions
  */
 dry_run?: boolean, };
+
+/**
+ * A move the audit suggests. Never applied.
+ */
+export type TierMove = { from_path: string, heading: string, bytes: number,
+/**
+ * 0 = always loaded, 1 = per-session bootstrap, 2 = on demand, 3 = archive.
+ */
+to_tier: number, because: string, };
 
 /**
  * 0.8.6 — Body serialization format for `TokenExchange`.
@@ -4018,7 +4666,15 @@ awareness?: boolean,
  * when this is true; matching the provider name is intentionally
  * insufficient because `@codex` and `@codex · CLI` are distinct targets.
  */
-addressed_to_caller: boolean, };
+addressed_to_caller: boolean,
+/**
+ * KT-251 — `true` when this is the salvaged BEGINNING of an answer whose
+ * agent was killed mid-sentence, not an answer. The dispatch job re-runs
+ * after such a rescue, so a completed reply to the same turn exists further
+ * down: treat the fragment as history, never as the peer's position. The DB
+ * has always flagged these (`recovered_partial`) but never told a caller.
+ */
+recovered_partial?: boolean, };
 
 export type WaitForPeerResponse = {
 /**
@@ -4050,6 +4706,24 @@ awareness_omitted?: number,
  * the model's next tool call proves the delivery was consumed.
  */
 awareness_delivered_upto?: number | null,
+/**
+ * KT-249 — consecutive awareness batches offered to this session without
+ * it acknowledging any of them. Above [`AWARENESS_STALLED_OFFERS_ALERT`]
+ * the caller is re-reading the same backlog on every wake and paying for
+ * it, which no error would otherwise reveal — the usual cause is an MCP
+ * bridge older than the acknowledgement protocol, cured by reconnecting.
+ */
+awareness_stalled_offers?: number,
+/**
+ * KT-193 — how close this session is to its ceilings, present only when
+ * there is something to say (`Warn`, `Rotate` or `Unknown`).
+ *
+ * Attached to the WAIT because that is where the agent already looks; a
+ * cap nobody sees is not a cap. Omitted on a healthy session so the common
+ * case costs nothing — the point of the whole release is to send fewer
+ * bytes, not to add a status line to every response.
+ */
+session_budget?: BudgetAssessment | null,
 /**
  * stab-3 — server-computed pacing: apply `next_delay_seconds` before
  * the next wait, verbatim. Hot (short interval) while a User message is
