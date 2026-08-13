@@ -474,6 +474,7 @@ pub fn list_configs_display(
     let configs = list_configs(conn)?;
     let preferences = list_config_preferences(conn)?;
     let servers = list_servers(conn)?;
+    let registry = crate::core::registry::builtin_registry();
 
     let projects = crate::db::projects::list_projects(conn)?;
     let project_map: HashMap<String, String> = projects
@@ -481,9 +482,11 @@ pub fn list_configs_display(
         .map(|p| (p.id.clone(), p.name.clone()))
         .collect();
 
-    let server_map: HashMap<String, String> = servers
+    let server_map: HashMap<String, &McpServer> =
+        servers.iter().map(|s| (s.id.clone(), s)).collect();
+    let registry_map: HashMap<String, &McpDefinition> = registry
         .iter()
-        .map(|s| (s.id.clone(), s.name.clone()))
+        .map(|definition| (definition.id.clone(), definition))
         .collect();
 
     Ok(configs
@@ -516,10 +519,73 @@ pub fn list_configs_display(
                 false
             };
 
+            let registry_drift = server_map.get(&c.server_id).and_then(|server| {
+                if server.source != McpSource::Registry {
+                    return None;
+                }
+                let mut stored_env_keys = c.env_keys.clone();
+                stored_env_keys.sort();
+                stored_env_keys.dedup();
+                match registry_map.get(&c.server_id) {
+                    Some(definition) => {
+                        let mut expected_env_keys = definition.env_keys.clone();
+                        if let Some(ApiSpec {
+                            auth:
+                                ApiAuthKind::CliToken {
+                                    fallback_env_key: Some(fallback),
+                                    ..
+                                },
+                            ..
+                        }) = definition.api_spec.as_ref()
+                        {
+                            expected_env_keys.push(fallback.clone());
+                        }
+                        expected_env_keys.sort();
+                        expected_env_keys.dedup();
+                        let unexpected_env_keys = stored_env_keys
+                            .iter()
+                            .filter(|key| !expected_env_keys.contains(key))
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        let missing_env_keys = expected_env_keys
+                            .iter()
+                            .filter(|key| !stored_env_keys.contains(key))
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        if unexpected_env_keys.is_empty() && missing_env_keys.is_empty() {
+                            None
+                        } else {
+                            Some(McpConfigRegistryDrift {
+                                orphaned: false,
+                                stored_env_keys,
+                                expected_env_keys,
+                                unexpected_env_keys,
+                                missing_env_keys,
+                                replacement_server_id: None,
+                            })
+                        }
+                    }
+                    None => Some(McpConfigRegistryDrift {
+                        orphaned: true,
+                        stored_env_keys,
+                        expected_env_keys: vec![],
+                        unexpected_env_keys: c.env_keys.clone(),
+                        missing_env_keys: vec![],
+                        replacement_server_id: crate::core::registry::legacy_registry_replacement(
+                            &c.server_id,
+                        )
+                        .map(str::to_owned),
+                    }),
+                }
+            });
+
             McpConfigDisplay {
                 id: c.id,
                 server_id: c.server_id.clone(),
-                server_name: server_map.get(&c.server_id).cloned().unwrap_or_default(),
+                server_name: server_map
+                    .get(&c.server_id)
+                    .map(|server| server.name.clone())
+                    .unwrap_or_else(|| c.server_id.clone()),
                 label: c.label,
                 env_keys: c.env_keys,
                 env_masked,
@@ -532,6 +598,7 @@ pub fn list_configs_display(
                 secrets_broken,
                 host_sync: c.host_sync,
                 preferred_interface,
+                registry_drift,
             }
         })
         .collect())
@@ -900,6 +967,160 @@ mod tests {
             !disp[0].secrets_broken,
             "no active key → do not false-flag broken"
         );
+    }
+
+    #[test]
+    fn list_display_reports_decryptable_registry_env_key_drift_without_rewriting_it() {
+        let conn = test_conn();
+        let secret = crypto::generate_secret();
+        let definition = crate::core::registry::builtin_registry()
+            .into_iter()
+            .find(|definition| definition.id == "api-chartbeat")
+            .unwrap();
+        upsert_server(
+            &conn,
+            &McpServer {
+                id: definition.id.clone(),
+                name: definition.name,
+                description: definition.description,
+                transport: definition.transport,
+                source: McpSource::Registry,
+                api_spec: definition.api_spec,
+            },
+        )
+        .unwrap();
+        let mut env = HashMap::new();
+        env.insert("CHARTBEAT_API_KEY".into(), "still-decryptable".into());
+        env.insert("LEGACY_HOST".into(), "example.test".into());
+        let config = McpConfig {
+            id: "drifted-chartbeat".into(),
+            server_id: "api-chartbeat".into(),
+            label: "Chartbeat legacy".into(),
+            env_keys: vec!["CHARTBEAT_API_KEY".into(), "LEGACY_HOST".into()],
+            env_encrypted: encrypt_env(&env, &secret).unwrap(),
+            args_override: None,
+            is_global: false,
+            config_hash: "drifted-chartbeat".into(),
+            project_ids: vec![],
+            host_sync: HostSyncMode::None,
+            include_general: true,
+        };
+        insert_config(&conn, &config).unwrap();
+
+        let display = list_configs_display(&conn, Some(&secret)).unwrap();
+        assert!(!display[0].secrets_broken, "the ciphertext remains valid");
+        let drift = display[0].registry_drift.as_ref().unwrap();
+        assert!(!drift.orphaned);
+        assert_eq!(
+            drift.stored_env_keys,
+            vec!["CHARTBEAT_API_KEY", "LEGACY_HOST"]
+        );
+        assert_eq!(
+            drift.expected_env_keys,
+            vec!["CHARTBEAT_API_KEY", "CHARTBEAT_HOST"]
+        );
+        assert_eq!(drift.unexpected_env_keys, vec!["LEGACY_HOST"]);
+        assert_eq!(drift.missing_env_keys, vec!["CHARTBEAT_HOST"]);
+        assert_eq!(
+            get_config(&conn, "drifted-chartbeat")
+                .unwrap()
+                .unwrap()
+                .env_keys,
+            config.env_keys,
+            "display diagnostics must never remap stored keys"
+        );
+    }
+
+    #[test]
+    fn list_display_signals_known_orphaned_registry_id_and_replacement() {
+        let conn = test_conn();
+        upsert_server(&conn, &mk_server("mcp-microsoft-365")).unwrap();
+        let config = McpConfig {
+            id: "legacy-m365".into(),
+            server_id: "mcp-microsoft-365".into(),
+            label: "Microsoft 365 legacy".into(),
+            env_keys: vec!["MICROSOFT_CLIENT_ID".into()],
+            env_encrypted: String::new(),
+            args_override: None,
+            is_global: false,
+            config_hash: "legacy-m365".into(),
+            project_ids: vec![],
+            host_sync: HostSyncMode::None,
+            include_general: true,
+        };
+        insert_config(&conn, &config).unwrap();
+
+        let display = list_configs_display(&conn, None).unwrap();
+        let drift = display[0].registry_drift.as_ref().unwrap();
+        assert!(drift.orphaned);
+        assert_eq!(
+            drift.replacement_server_id.as_deref(),
+            Some("api-microsoft-365")
+        );
+        assert_eq!(drift.stored_env_keys, vec!["MICROSOFT_CLIENT_ID"]);
+    }
+
+    #[test]
+    fn list_display_does_not_apply_registry_contract_to_manual_servers() {
+        let conn = test_conn();
+        let mut server = mk_server("manual-plugin");
+        server.source = McpSource::Manual;
+        upsert_server(&conn, &server).unwrap();
+        let config = McpConfig {
+            id: "manual-config".into(),
+            server_id: server.id,
+            label: "Manual".into(),
+            env_keys: vec!["ANY_CUSTOM_KEY".into()],
+            env_encrypted: String::new(),
+            args_override: None,
+            is_global: false,
+            config_hash: "manual-config".into(),
+            project_ids: vec![],
+            host_sync: HostSyncMode::None,
+            include_general: true,
+        };
+        insert_config(&conn, &config).unwrap();
+
+        let display = list_configs_display(&conn, None).unwrap();
+        assert!(display[0].registry_drift.is_none());
+    }
+
+    #[test]
+    fn list_display_accepts_optional_cli_fallback_declared_by_registry_auth() {
+        let conn = test_conn();
+        let definition = crate::core::registry::builtin_registry()
+            .into_iter()
+            .find(|definition| definition.id == "mcp-fastly")
+            .unwrap();
+        upsert_server(
+            &conn,
+            &McpServer {
+                id: definition.id.clone(),
+                name: definition.name,
+                description: definition.description,
+                transport: definition.transport,
+                source: McpSource::Registry,
+                api_spec: definition.api_spec,
+            },
+        )
+        .unwrap();
+        let config = McpConfig {
+            id: "fastly-fallback".into(),
+            server_id: "mcp-fastly".into(),
+            label: "Fastly".into(),
+            env_keys: vec!["FASTLY_API_TOKEN".into()],
+            env_encrypted: String::new(),
+            args_override: None,
+            is_global: false,
+            config_hash: "fastly-fallback".into(),
+            project_ids: vec![],
+            host_sync: HostSyncMode::None,
+            include_general: true,
+        };
+        insert_config(&conn, &config).unwrap();
+
+        let display = list_configs_display(&conn, None).unwrap();
+        assert!(display[0].registry_drift.is_none());
     }
 
     #[test]

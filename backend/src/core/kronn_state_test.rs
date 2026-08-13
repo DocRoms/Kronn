@@ -80,12 +80,41 @@ fn record_audit_creates_file_with_readme() {
     let state = read(&tmp).expect("file should exist");
     assert_eq!(state.audits.len(), 1);
     assert_eq!(state.audits[0].audit_type, "full");
+    assert_eq!(state.audits[0].provenance, AuditProvenance::KronnAudit);
     assert!(state.audits[0]
         .kronn_version
         .chars()
         .any(|c| c.is_ascii_digit()));
     assert!(state.readme.contains("Kronn"), "readme must mention Kronn");
     cleanup(&tmp);
+}
+
+#[test]
+fn human_attestation_has_distinct_provenance_and_is_idempotent_per_day() {
+    let tmp = fresh_tmp("human-attestation");
+    std::fs::write(tmp.join("docs/AGENTS.md"), "# Existing human docs\n").unwrap();
+
+    attest_documentation(&tmp).unwrap();
+    attest_documentation(&tmp).unwrap();
+
+    let state = read(&tmp).unwrap();
+    assert_eq!(state.audits.len(), 1);
+    assert_eq!(state.audits[0].audit_type, "attested");
+    assert_eq!(
+        state.audits[0].provenance,
+        AuditProvenance::HumanAttestation
+    );
+    let raw = std::fs::read_to_string(state_path(&tmp)).unwrap();
+    assert!(raw.contains("\"provenance\": \"human_attestation\""));
+    cleanup(&tmp);
+}
+
+#[test]
+fn old_entries_without_provenance_remain_kronn_audits() {
+    let entry: AuditEntry =
+        serde_json::from_str(r#"{"date":"2026-01-01","kronn_version":"0.9.6","type":"full"}"#)
+            .unwrap();
+    assert_eq!(entry.provenance, AuditProvenance::KronnAudit);
 }
 
 #[test]
@@ -225,6 +254,7 @@ fn backfill_seeds_audit_entry_from_checksums_alone() {
 
     let state = read(&tmp).expect("file should exist after backfill");
     assert_eq!(state.audits.len(), 1);
+    assert_eq!(state.audits[0].provenance, AuditProvenance::LegacyEvidence);
     assert_eq!(state.audits[0].audit_type, "legacy");
     assert_eq!(state.audits[0].kronn_version, "legacy");
     assert!(state.validated_at.is_none());

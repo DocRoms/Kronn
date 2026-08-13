@@ -316,14 +316,80 @@ async fn main() -> anyhow::Result<()> {
     // reply without spending tokens twice.
     match state
         .db
-        .with_conn(kronn::db::agent_dispatch::reset_running_after_restart)
+        .with_conn(kronn::db::agent_dispatch::recover_after_restart)
         .await
     {
-        Ok(count) if count > 0 => {
-            tracing::warn!("Agent dispatch recovery: requeued {count} interrupted job(s)")
+        Ok(recovery) if recovery.requeued > 0 || recovery.cancelled_workflow_children > 0 => {
+            tracing::warn!(
+                "Agent dispatch recovery: requeued {} ordinary job(s), cancelled {} child job(s) whose workflow owner was interrupted",
+                recovery.requeued,
+                recovery.cancelled_workflow_children
+            )
         }
         Ok(_) => {}
         Err(error) => tracing::warn!("Agent dispatch recovery failed: {error}"),
+    }
+
+    // KT-289 — remove checkout directories left discoverable by terminal runs
+    // from an earlier process. Run this after dispatch recovery: children owned
+    // by an interrupted workflow have now been cancelled, so a terminal parent
+    // whose final durable reader disappeared during recovery can be purged on
+    // this boot instead of remaining visible until the next one. Interrupted
+    // runs themselves remain evidence/resumable and are deliberately excluded.
+    let cleanup_candidates = state
+        .db
+        .with_conn(kronn::db::workflows::terminal_workspace_cleanup_candidates)
+        .await
+        .unwrap_or_else(|error| {
+            tracing::warn!("Terminal workflow worktree scan failed: {error}");
+            Vec::new()
+        });
+    for candidate in cleanup_candidates {
+        let repo_path = kronn::core::scanner::resolve_host_path(&candidate.project_path);
+        let workspace_path = kronn::core::scanner::resolve_host_path(&candidate.workspace_path);
+        let managed_root = repo_path.join(".kronn").join("worktrees");
+        let is_managed =
+            workspace_path.starts_with(&managed_root) && workspace_path != managed_root;
+        let purged = if !workspace_path.exists() {
+            true
+        } else if !is_managed {
+            tracing::warn!(
+                run_id = %candidate.run_id,
+                path = %workspace_path.display(),
+                "refusing to purge terminal workflow path outside .kronn/worktrees"
+            );
+            false
+        } else {
+            match kronn::workflows::workspace::Workspace::purge_terminal_checkout(
+                &repo_path,
+                &workspace_path,
+            )
+            .await
+            {
+                Ok(()) => true,
+                Err(error) => {
+                    tracing::warn!(
+                        run_id = %candidate.run_id,
+                        path = %workspace_path.display(),
+                        "terminal workflow worktree purge failed: {error}"
+                    );
+                    false
+                }
+            }
+        };
+        if purged {
+            let run_id = candidate.run_id;
+            let persisted_path = candidate.workspace_path;
+            if let Err(error) = state
+                .db
+                .with_conn(move |conn| {
+                    kronn::db::workflows::mark_workspace_cleaned(conn, &run_id, &persisted_path)
+                })
+                .await
+            {
+                tracing::warn!("failed to clear purged workflow workspace path: {error}");
+            }
+        }
     }
 
     // Partial-response recovery — agents whose `full_response` was being

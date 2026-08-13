@@ -3,7 +3,7 @@
 - **ID**: TD-20260808-http-agents-no-tool-calling
 - **Area**: Backend / Agents
 
-- **Status**: **Shipped 2026-08-09.** Agents on the HTTP path (Ollama, LiteLLM) now call Kronn primitives through a native tool loop. Calls are executed, projected for small windows, and rendered in the transcript like every other agent's. The row stays open for the guards listed at the bottom (capability probe, access gating, workflows).
+- **Status**: **Core shipped 2026-08-09; workflow parity added in 0.9.7.** Agents on the HTTP path (Ollama, LiteLLM) call Kronn primitives through a native tool loop in discussions and Workflow Agent steps. Calls are executed, projected for small windows, and rendered as bounded, secret-free receipts. The row stays open for the remaining per-model capability probe and an explicit tool-exposure policy.
 
 - **Problem (fact, as filed)**: agents running over Kronn's HTTP path could call **no tools at all** — not Kronn's APIs, not MCP servers, not the deagentified primitives. CLI agents got all of it through the `kronn-internal` stdio bridge; HTTP agents got nothing, which left a local model as a read-only advisor.
 
@@ -28,7 +28,7 @@
     | `mcp_list` | ~13 000 tokens | **~543** (10 plugins) |
     | `api_endpoints` | — | ~291 for one plugin |
     | `qa_list` | ~4 400 tokens | **~1 161** (19 entries) |
-  - Wired **only** on the discussion reply path [src: file: backend/src/api/discussions/streaming.rs:1004], and **only** for HTTP agents: CLI agents already have the bridge, and the internal summarisation passes must not gain tools (recursion).
+  - Initially wired only on the discussion reply path. In 0.9.7, Workflow Agent steps receive a project/run-scoped executor with API and Quick API tools plus read-only Planning (`task_list`, `task_get`) when a project exists. Planning mutations remain excluded; CLI agents still use the bridge, and internal summarisation passes do not gain tools.
 
 - **Verified in three layers**, because each caught what the previous could not:
   1. *Does the loop work?* Mock-based tests (happy path + iteration cap), plus an `#[ignore]`d live test (`live_tool_loop_against_a_real_model`).
@@ -50,8 +50,8 @@
   - **`qa_list` still costs ~1 161 tokens** at 19 entries and grows linearly with the library. It will need the same list/detail split as `mcp_list` once a user has a few dozen.
   - **`api_call` results are passed through unprojected.** A plugin returning a large body lands whole in the model's context; a size guard belongs there too.
   - **No per-model capability gate.** Every HTTP agent is offered tools; a model without support may error or ignore them. Ollama exposes `capabilities` via `/api/show` so this is detectable, but LiteLLM does not expose it for an `ollama_chat` backend — the proxy path needs try-and-recover or an explicit setting.
-  - **Tool exposure is not gated by the agent-access model**: the catalogue is offered whenever an executor is present.
-  - **Workflow steps get no tools** — only the discussion path is wired.
-  - **The `=== TOOLS ===` prose has no regression test.** It is built inline in `start_agent_with_config`, which spawns a process, so asserting on it would need the context builder extracted. That prose silently defeated the whole feature once; the `tools_declared` log line on `kronn::agent::tools` is the interim guard, but a test belongs here.
+  - **No dedicated tool-exposure policy.** Project/API scope is enforced and workflow Planning mutations are excluded, but operators cannot independently disable native HTTP tools for an otherwise enabled model.
+  - ~~**Workflow steps get no tools.**~~ **Done in 0.9.7.** Ollama and LiteLLM Workflow Agent steps receive the bounded project/run-scoped catalogue. Both wire shapes are exercised through complete step execution; run details persist only tool name + success, and an empty receipt explicitly points to a tool-capable model or deterministic ApiCall fallback when external data was expected.
+  - ~~**The `=== TOOLS ===` prose has no regression test.**~~ **Done.** `tools_notice_matches_whether_tools_were_actually_declared` pins both the executable-tool and no-tool variants, including the configured REST API discovery route.
 
-- **Next step**: gate tool exposure through the agent-access model, and add the per-model capability probe. Both are correctness guards on a feature that now works end to end.
+- **Next step**: add the per-model capability probe and an operator-facing native-tool exposure policy. Both are correctness guards on a feature that now works end to end in discussions and workflows.

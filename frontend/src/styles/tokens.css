@@ -185,6 +185,7 @@
      A vitest guard (tokens-defined.test.ts) fails the build if a new phantom
      var appears. */
   --kr-danger: var(--kr-error);
+  --kr-danger-rgb: var(--kr-error-rgb);
   --kr-border-faint: var(--kr-border-ghost);
   --kr-border-soft: var(--kr-border-light);
   --kr-border-subtle: var(--kr-border-light);

@@ -546,6 +546,25 @@ pub struct RunAgentRequest {
     pub idempotency_key: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize, TS)]
+#[ts(export)]
+pub struct RetryAgentDispatchRequest {
+    /// Failed dispatch referenced by the durable System error card.
+    pub dispatch_id: String,
+    /// Stable per-click key. A repeated browser request returns the same
+    /// replacement job instead of launching the provider twice.
+    pub idempotency_key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct RetryAgentDispatchResponse {
+    pub dispatch_id: String,
+    pub trigger_message_id: String,
+    pub agent_type: AgentType,
+    pub duplicate: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct MessageRevisionReceipt {

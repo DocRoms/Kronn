@@ -4,6 +4,7 @@
 //! and on_result condition evaluation.
 
 use anyhow::Result;
+use std::sync::Arc;
 use std::time::Instant;
 use tokio::time::{timeout, Duration};
 
@@ -24,6 +25,7 @@ pub struct StepOutcome {
 struct AgentOutput {
     text: String,
     tokens_used: u64,
+    native_tool_calls: Vec<NativeToolCallLog>,
 }
 
 /// Optional sender for streaming partial agent output during step execution.
@@ -37,7 +39,8 @@ pub type ProgressSender = tokio::sync::mpsc::Sender<String>;
 ///
 /// Extracted from [`execute_step`] in 0.8.3 (TD-265) so the prompt
 /// assembly is unit-testable independently from the agent spawn path.
-/// Returns `Err(String)` only when `ctx.render` fails on the template —
+/// Returns `Err(String)` when strict rendering rejects an unknown variable,
+/// incomplete placeholder or unsupported filter —
 /// the caller maps that into a `Failed` StepOutcome.
 pub(crate) fn build_step_prompt(
     step: &WorkflowStep,
@@ -45,7 +48,7 @@ pub(crate) fn build_step_prompt(
     extra_context: &str,
 ) -> Result<String, String> {
     let mut prompt = ctx
-        .render(&step.prompt_template)
+        .render_strict(&step.prompt_template)
         .map_err(|e| format!("Template render error: {}", e))?;
 
     // 0.8.3 — audit-pipeline symmetry: append the pre-computed
@@ -120,6 +123,7 @@ pub async fn execute_step(
     // Discussions already plumb this (streaming.rs:484); workflows now do too.
     model_tiers: Option<&crate::models::setup::ModelTiersConfig>,
     lite_llm_base_url: Option<&str>,
+    native_tools: Option<Arc<dyn crate::agents::tools::ToolExecutor>>,
 ) -> StepOutcome {
     let start = Instant::now();
 
@@ -145,6 +149,7 @@ pub async fn execute_step(
                     step_api_endpoint_path: None,
                     is_rollback: false,
                     child_run_id: None,
+                    native_tool_calls: Box::default(),
                 },
                 condition_action: None,
             };
@@ -243,6 +248,7 @@ pub async fn execute_step(
             full_access,
             model_tiers,
             lite_llm_base_url,
+            native_tools.clone(),
             progress_tx.as_ref(),
         )
         .await
@@ -251,6 +257,7 @@ pub async fn execute_step(
                 let duration_ms = start.elapsed().as_millis() as u64;
                 let mut final_output = agent_output.text.clone();
                 let mut total_tokens = agent_output.tokens_used;
+                let mut native_tool_calls = agent_output.native_tool_calls;
 
                 // For Structured / TypedSchema steps: verify envelope exists,
                 // try repair if missing. TypedSchema additionally validates
@@ -312,6 +319,7 @@ pub async fn execute_step(
                             full_access,
                             model_tiers,
                             lite_llm_base_url,
+                            native_tools.clone(),
                             None,
                         )
                         .await;
@@ -322,6 +330,7 @@ pub async fn execute_step(
                         }
                         if let Ok(repair_output) = repair_res {
                             total_tokens += repair_output.tokens_used;
+                            native_tool_calls.extend(repair_output.native_tool_calls.clone());
                             let repaired_env = crate::workflows::template::extract_step_envelope(
                                 &repair_output.text,
                             );
@@ -385,6 +394,7 @@ pub async fn execute_step(
                                 full_access,
                                 model_tiers,
                                 lite_llm_base_url,
+                                native_tools.clone(),
                                 None,
                             )
                             .await;
@@ -398,6 +408,7 @@ pub async fn execute_step(
                             }
                             if let Ok(esc) = esc_res {
                                 total_tokens += esc.tokens_used;
+                                native_tool_calls.extend(esc.native_tool_calls.clone());
                                 let esc_env =
                                     crate::workflows::template::extract_step_envelope(&esc.text);
                                 let esc_error = match (&step.output_format, &esc_env) {
@@ -455,6 +466,7 @@ pub async fn execute_step(
                                         step_api_endpoint_path: None,
                                         is_rollback: false,
                                         child_run_id: None,
+                                        native_tool_calls: native_tool_calls.into_boxed_slice(),
                                     },
                                     condition_action: None,
                                 };
@@ -475,10 +487,12 @@ pub async fn execute_step(
                     match run_multi_agent_debate(
                         step, &mar, &final_output, project_path, work_dir,
                         tokens_config, full_access, model_tiers, lite_llm_base_url,
+                        native_tools.clone(),
                         progress_tx.as_ref(),
                     ).await {
-                        Ok((converged, debate_tokens)) => {
+                        Ok((converged, debate_tokens, debate_tool_calls)) => {
                             total_tokens += debate_tokens;
+                            native_tool_calls.extend(debate_tool_calls);
                             // Envelope safety: on a Structured/TypedSchema step
                             // the converged output MUST still carry a valid
                             // envelope (the debate author re-emits it). If the
@@ -576,6 +590,7 @@ pub async fn execute_step(
                         step_api_endpoint_path: None,
                         is_rollback: false,
                         child_run_id: None,
+                        native_tool_calls: native_tool_calls.into_boxed_slice(),
                     },
                     condition_action,
                 };
@@ -617,6 +632,7 @@ pub async fn execute_step(
             step_api_endpoint_path: None,
             is_rollback: false,
             child_run_id: None,
+            native_tool_calls: Box::default(),
         },
         condition_action,
     }
@@ -744,6 +760,7 @@ async fn run_agent_with_timeout(
     full_access: bool,
     model_tiers: Option<&crate::models::setup::ModelTiersConfig>,
     lite_llm_base_url: Option<&str>,
+    native_tools: Option<Arc<dyn crate::agents::tools::ToolExecutor>>,
     progress_tx: Option<&ProgressSender>,
 ) -> Result<AgentOutput> {
     // 30 min default — generous safety net rather than aggressive ceiling.
@@ -782,6 +799,7 @@ async fn run_agent_with_timeout(
             .agent_settings
             .as_ref()
             .and_then(|s| s.model.as_deref()),
+        tools: native_tools,
         ..runner::AgentStartConfig::new(&step.agent, project_path, prompt, tokens_config)
     })
     .await
@@ -996,10 +1014,45 @@ async fn drive_agent_to_output(
         tokens_used
     );
 
+    let native_tool_calls = native_tool_calls_from_stderr(&stderr_lines);
+
     Ok(AgentOutput {
         text: output,
         tokens_used,
+        native_tool_calls,
     })
+}
+
+/// Extract the safe, durable part of an HTTP agent's tool trace. The runner's
+/// stderr breadcrumb contains arguments for live diagnostics; workflow rows
+/// intentionally retain only the public tool name and success bit.
+fn native_tool_calls_from_stderr(lines: &[String]) -> Vec<NativeToolCallLog> {
+    lines
+        .iter()
+        .filter_map(|line| {
+            let rest = line.strip_prefix("[kronn-internal: ")?;
+            let name_end = rest.find('(')?;
+            let name = &rest[..name_end];
+            if name.is_empty()
+                || !name
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+            {
+                return None;
+            }
+            let ok = if rest.ends_with("→ ok]") {
+                true
+            } else if rest.ends_with("→ error]") {
+                false
+            } else {
+                return None;
+            };
+            Some(NativeToolCallLog {
+                name: name.to_string(),
+                ok,
+            })
+        })
+        .collect()
 }
 
 /// 2026-06-13 — "Multi-agent review" debate (see `WorkflowStep.multi_agent_review`).
@@ -1025,8 +1078,9 @@ async fn run_multi_agent_debate(
     full_access: bool,
     model_tiers: Option<&crate::models::setup::ModelTiersConfig>,
     lite_llm_base_url: Option<&str>,
+    native_tools: Option<Arc<dyn crate::agents::tools::ToolExecutor>>,
     progress_tx: Option<&ProgressSender>,
-) -> Result<(String, u64)> {
+) -> Result<(String, u64, Vec<NativeToolCallLog>)> {
     let max_rounds = cfg.max_rounds.unwrap_or(3).clamp(1, 5);
     let approved = |t: &str| {
         t.lines()
@@ -1041,6 +1095,7 @@ async fn run_multi_agent_debate(
     );
     let mut converged = planner_output.to_string();
     let mut tokens = 0u64;
+    let mut native_tool_calls = Vec::new();
 
     // A reviewer turn: a synthetic step running the reviewer agent (different
     // family + its own tier), FreeText, no nested debate / on_result.
@@ -1085,10 +1140,12 @@ async fn run_multi_agent_debate(
             full_access,
             model_tiers,
             lite_llm_base_url,
+            native_tools.clone(),
             progress_tx,
         )
         .await?;
         tokens += rev.tokens_used;
+        native_tool_calls.extend(rev.native_tool_calls);
         transcript.push_str(&format!(
             "\n\n=== REVIEWER ({:?}, round {}) ===\n{}",
             cfg.reviewer_agent,
@@ -1131,10 +1188,12 @@ async fn run_multi_agent_debate(
             full_access,
             model_tiers,
             lite_llm_base_url,
+            native_tools.clone(),
             progress_tx,
         )
         .await?;
         tokens += auth.tokens_used;
+        native_tool_calls.extend(auth.native_tool_calls);
         transcript.push_str(&format!(
             "\n\n=== AUTHOR ({:?}, round {}) ===\n{}",
             step.agent,
@@ -1150,7 +1209,7 @@ async fn run_multi_agent_debate(
             break;
         }
     }
-    Ok((converged, tokens))
+    Ok((converged, tokens, native_tool_calls))
 }
 
 /// Evaluate on_result conditions against the step output.
@@ -1231,6 +1290,7 @@ fn fail_fast_on_unresolved(step_name: &str, prompt: &str, elapsed_ms: u64) -> Op
             step_api_endpoint_path: None,
             is_rollback: false,
             child_run_id: None,
+            native_tool_calls: Box::default(),
         },
         condition_action: None,
     })
@@ -1534,6 +1594,19 @@ mod tests {
     }
 
     #[test]
+    fn build_step_prompt_rejects_a_typo_before_an_agent_can_start() {
+        let step = make_step("Review {{issue.titel}}");
+        let mut ctx = TemplateContext::new();
+        ctx.set_issue("Correct title", "Body", "7", "https://example/7", &[]);
+
+        let error = build_step_prompt(&step, &ctx, "")
+            .expect_err("strict runtime rendering must stop before agent startup");
+
+        assert!(error.contains("issue.titel"));
+        assert!(error.contains("Unknown workflow template variable"));
+    }
+
+    #[test]
     fn build_step_prompt_appends_extra_context_after_render() {
         // The runner pre-computes `## Linked repositories ...` + the
         // `## Other Kronn projects ...` block ONCE and passes them as
@@ -1798,8 +1871,8 @@ mod drive_agent_to_output_tests {
     //! scripted `AgentIo` (0.8.8 test-seam). Pins text/token accumulation,
     //! tool-call progress breadcrumbs, raw-vs-stream-json handling, and the
     //! non-zero-exit error path — without spawning a CLI or burning tokens.
-    use super::drive_agent_to_output;
     use super::format_silent_exit_error;
+    use super::{drive_agent_to_output, native_tool_calls_from_stderr};
     use crate::agents::runner::ScriptedProcess;
     use crate::models::AgentType;
     use std::time::Duration;
@@ -1868,6 +1941,25 @@ mod drive_agent_to_output_tests {
     }
 
     const LONG: Duration = Duration::from_secs(3600);
+
+    #[test]
+    fn native_tool_history_keeps_name_and_status_but_drops_arguments() {
+        let lines = vec![
+            r#"[kronn-internal: api_call({"token":"must-not-persist","path":"/usage"}) → ok]"#
+                .to_string(),
+            "[kronn-internal: task_get({\"task_id\":\"KT-189\"}) → error]".to_string(),
+            "LiteLLM request completed".to_string(),
+        ];
+        let calls = native_tool_calls_from_stderr(&lines);
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].name, "api_call");
+        assert!(calls[0].ok);
+        assert_eq!(calls[1].name, "task_get");
+        assert!(!calls[1].ok);
+        let durable = serde_json::to_string(&calls).expect("serialize safe log");
+        assert!(!durable.contains("must-not-persist"));
+        assert!(!durable.contains("KT-189"));
+    }
 
     #[tokio::test]
     async fn stream_json_collects_text_and_tokens() {
@@ -1958,5 +2050,207 @@ mod drive_agent_to_output_tests {
             .expect("clean empty exit is ok");
         assert_eq!(out.text, "");
         assert_eq!(out.tokens_used, 0);
+    }
+}
+
+#[cfg(test)]
+mod http_native_tool_step_tests {
+    use super::*;
+    use crate::agents::tools::{ToolCall, ToolExecutor, ToolOutcome};
+    use serde_json::json;
+    use serial_test::serial;
+    use std::sync::{Arc, Mutex};
+    use wiremock::matchers::{body_string_contains, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    struct ReadOnlyTools {
+        calls: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ToolExecutor for ReadOnlyTools {
+        fn catalogue(&self) -> Vec<serde_json::Value> {
+            vec![json!({
+                "type": "function",
+                "function": {
+                    "name": "task_list",
+                    "description": "List workflow project tasks.",
+                    "parameters": { "type": "object", "properties": {}, "required": [] }
+                }
+            })]
+        }
+
+        async fn execute(&self, call: &ToolCall) -> ToolOutcome {
+            self.calls.lock().unwrap().push(call.name.clone());
+            ToolOutcome {
+                call: call.clone(),
+                content: json!({ "items": [{ "reference": "KT-189", "title": "Native tools" }] }),
+                ok: true,
+            }
+        }
+    }
+
+    fn sse(frames: &[&str]) -> String {
+        frames
+            .iter()
+            .map(|frame| format!("data: {frame}\n\n"))
+            .collect::<String>()
+            + "data: [DONE]\n\n"
+    }
+
+    #[tokio::test]
+    async fn litellm_workflow_step_executes_a_native_read_and_consumes_its_result() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(body_string_contains("\"name\":\"task_list\""))
+            .respond_with(ResponseTemplate::new(200).set_body_string(sse(&[
+                r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"tool-1","function":{"name":"task_list","arguments":"{}"}}]}}]}"#,
+            ])))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(body_string_contains("KT-189"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(sse(&[
+                r#"{"choices":[{"index":0,"delta":{"content":"KT-189 is Native tools"}}]}"#,
+                r#"{"choices":[],"usage":{"prompt_tokens":12,"completion_tokens":5}}"#,
+            ])))
+            .mount(&server)
+            .await;
+
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let tools: Arc<dyn ToolExecutor> = Arc::new(ReadOnlyTools {
+            calls: calls.clone(),
+        });
+        let step = WorkflowStep {
+            name: "inspect-planning".into(),
+            step_type: StepType::Agent,
+            agent: AgentType::LiteLlm,
+            prompt_template: "Which task is active?".into(),
+            agent_settings: Some(AgentSettings {
+                model: Some("test-model".into()),
+                tier: None,
+                reasoning_effort: None,
+                max_tokens: None,
+            }),
+            ..WorkflowStep::default()
+        };
+        let tokens = TokensConfig {
+            anthropic: None,
+            openai: None,
+            google: None,
+            keys: Vec::new(),
+            disabled_overrides: Vec::new(),
+        };
+        let dir = tempfile::tempdir().expect("temporary project");
+        let project = dir.path().to_string_lossy();
+        let outcome = execute_step(
+            &step,
+            &project,
+            &project,
+            &tokens,
+            false,
+            &TemplateContext::new(),
+            "",
+            None,
+            None,
+            Some(&server.uri()),
+            Some(tools),
+        )
+        .await;
+
+        assert_eq!(outcome.result.status, RunStatus::Success);
+        assert!(outcome.result.output.contains("KT-189 is Native tools"));
+        assert_eq!(calls.lock().unwrap().as_slice(), &["task_list"]);
+        assert_eq!(outcome.result.native_tool_calls.len(), 1);
+        assert_eq!(outcome.result.native_tool_calls[0].name, "task_list");
+        assert!(outcome.result.native_tool_calls[0].ok);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn ollama_workflow_step_executes_a_native_read_and_consumes_its_result() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/show"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/chat"))
+            .and(body_string_contains("\"name\":\"task_list\""))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                "{\"message\":{\"content\":\"\",\"tool_calls\":[{\"function\":{\"name\":\"task_list\",\"arguments\":{}}}]},\"done\":false}\n\
+                 {\"done\":true,\"prompt_eval_count\":6,\"eval_count\":2}\n",
+            ))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/chat"))
+            .and(body_string_contains("KT-189"))
+            .and(body_string_contains(r#""role":"tool""#))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                "{\"message\":{\"content\":\"KT-189 is Native tools\"},\"done\":false}\n\
+                 {\"done\":true,\"prompt_eval_count\":10,\"eval_count\":4}\n",
+            ))
+            .mount(&server)
+            .await;
+
+        let previous_host = std::env::var("OLLAMA_HOST").ok();
+        std::env::set_var("OLLAMA_HOST", server.uri());
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let tools: Arc<dyn ToolExecutor> = Arc::new(ReadOnlyTools {
+            calls: calls.clone(),
+        });
+        let step = WorkflowStep {
+            name: "inspect-local-planning".into(),
+            step_type: StepType::Agent,
+            agent: AgentType::Ollama,
+            prompt_template: "Which task is active?".into(),
+            agent_settings: Some(AgentSettings {
+                model: Some("test-model".into()),
+                tier: None,
+                reasoning_effort: None,
+                max_tokens: None,
+            }),
+            ..WorkflowStep::default()
+        };
+        let tokens = TokensConfig {
+            anthropic: None,
+            openai: None,
+            google: None,
+            keys: Vec::new(),
+            disabled_overrides: Vec::new(),
+        };
+        let dir = tempfile::tempdir().expect("temporary project");
+        let project = dir.path().to_string_lossy();
+        let outcome = execute_step(
+            &step,
+            &project,
+            &project,
+            &tokens,
+            false,
+            &TemplateContext::new(),
+            "",
+            None,
+            None,
+            None,
+            Some(tools),
+        )
+        .await;
+        match previous_host {
+            Some(value) => std::env::set_var("OLLAMA_HOST", value),
+            None => std::env::remove_var("OLLAMA_HOST"),
+        }
+
+        assert_eq!(outcome.result.status, RunStatus::Success);
+        assert!(outcome.result.output.contains("KT-189 is Native tools"));
+        assert_eq!(calls.lock().unwrap().as_slice(), &["task_list"]);
+        assert_eq!(outcome.result.native_tool_calls.len(), 1);
+        assert_eq!(outcome.result.native_tool_calls[0].name, "task_list");
+        assert!(outcome.result.native_tool_calls[0].ok);
     }
 }

@@ -457,6 +457,14 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "120_agent_dispatch_started_at",
         include_str!("sql/120_agent_dispatch_started_at.sql"),
     ),
+    (
+        "121_discussion_workspace_history_leases",
+        include_str!("sql/121_discussion_workspace_history_leases.sql"),
+    ),
+    (
+        "122_context_audit_snapshots",
+        include_str!("sql/122_context_audit_snapshots.sql"),
+    ),
 ];
 
 // These migrations shipped on the 0.9.6 development branch before its rebase

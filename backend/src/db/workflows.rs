@@ -814,6 +814,78 @@ pub fn has_running_run(conn: &Connection) -> Result<bool> {
     Ok(count > 0)
 }
 
+/// A parent workflow must retain its worktree while a batch child still owns
+/// a dispatch that can read it. This durable query is the lifecycle refcount:
+/// it survives process death and covers both queued and running children.
+pub fn active_child_dispatch_count(conn: &Connection, parent_run_id: &str) -> Result<u64> {
+    let count = conn.query_row(
+        "SELECT COUNT(*)
+           FROM agent_dispatch_jobs dispatch
+           JOIN workflow_runs child ON child.id = dispatch.group_id
+          WHERE child.parent_run_id = ?1
+            AND child.run_type = 'batch'
+            AND dispatch.status IN ('Pending', 'Running')",
+        [parent_run_id],
+        |row| row.get::<_, i64>(0),
+    )?;
+    Ok(count.max(0) as u64)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowWorkspaceCleanupCandidate {
+    pub run_id: String,
+    pub workflow_name: String,
+    pub project_path: String,
+    pub workspace_path: String,
+}
+
+/// Terminal workflow worktrees left behind by an earlier process are safe to
+/// purge only when no queued/running child retains read ownership. Interrupted
+/// runs are intentionally excluded: they remain manually resumable evidence.
+pub fn terminal_workspace_cleanup_candidates(
+    conn: &Connection,
+) -> Result<Vec<WorkflowWorkspaceCleanupCandidate>> {
+    let mut stmt = conn.prepare(
+        "SELECT run.id, workflow.name, project.path, run.workspace_path
+           FROM workflow_runs run
+           JOIN workflows workflow ON workflow.id = run.workflow_id
+           JOIN projects project ON project.id = workflow.project_id
+          WHERE run.workspace_path IS NOT NULL
+            AND run.status IN ('Success', 'Failed', 'Cancelled', 'StoppedByGuard')
+            AND NOT EXISTS (
+                SELECT 1
+                  FROM workflow_runs child
+                  JOIN agent_dispatch_jobs dispatch ON dispatch.group_id = child.id
+                 WHERE child.parent_run_id = run.id
+                   AND dispatch.status IN ('Pending', 'Running')
+            )",
+    )?;
+    let candidates = stmt
+        .query_map([], |row| {
+            Ok(WorkflowWorkspaceCleanupCandidate {
+                run_id: row.get(0)?,
+                workflow_name: row.get(1)?,
+                project_path: row.get(2)?,
+                workspace_path: row.get(3)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(candidates)
+}
+
+pub fn mark_workspace_cleaned(
+    conn: &Connection,
+    run_id: &str,
+    workspace_path: &str,
+) -> Result<bool> {
+    Ok(conn.execute(
+        "UPDATE workflow_runs SET workspace_path = NULL
+          WHERE id = ?1 AND workspace_path = ?2
+            AND status IN ('Success', 'Failed', 'Cancelled', 'StoppedByGuard')",
+        params![run_id, workspace_path],
+    )? > 0)
+}
+
 pub fn list_runs_paginated(
     conn: &Connection,
     workflow_id: &str,

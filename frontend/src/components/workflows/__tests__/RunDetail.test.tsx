@@ -136,6 +136,54 @@ describe('RunDetail — step_kind snapshot badges (run history honesty)', () => 
     expect(screen.getByText('Codex')).toBeInTheDocument();
   });
 
+  it('shows a secret-free audit of Kronn-native calls made by an HTTP Agent step', async () => {
+    const run = mkRun({
+      step_results: [mkResult({
+        step_kind: 'Agent',
+        step_agent: 'LiteLlm',
+        native_tool_calls: [
+          { name: 'task_list', ok: true },
+          { name: 'api_call', ok: false },
+        ],
+      })],
+    });
+    render(<RunDetail run={run} onDelete={() => {}} />);
+    fireEvent.click(screen.getByRole('button', { name: /main/ }));
+    const audit = screen.getByTestId('wf-native-tools');
+    expect(audit).toHaveTextContent('wf.nativeTools');
+    expect(audit).toHaveTextContent('✓ task_list');
+    expect(audit).toHaveTextContent('! api_call');
+    expect(audit).toHaveTextContent('wf.nativeToolsSafeLog');
+  });
+
+  it('makes an HTTP Agent step with no native call explicit and suggests the deterministic fallback', () => {
+    const run = mkRun({
+      step_results: [mkResult({
+        step_kind: 'Agent',
+        step_agent: 'Ollama',
+        native_tool_calls: [],
+      })],
+    });
+    render(<RunDetail run={run} onDelete={() => {}} />);
+    fireEvent.click(screen.getByRole('button', { name: /main/ }));
+    const notice = screen.getByTestId('wf-native-tools-empty');
+    expect(notice).toHaveTextContent('wf.nativeToolsNone');
+    expect(notice).toHaveTextContent('wf.nativeToolsNoneHint');
+  });
+
+  it('does not imply native-tool support for a CLI Agent step with no calls', () => {
+    const run = mkRun({
+      step_results: [mkResult({
+        step_kind: 'Agent',
+        step_agent: 'ClaudeCode',
+        native_tool_calls: [],
+      })],
+    });
+    render(<RunDetail run={run} onDelete={() => {}} />);
+    fireEvent.click(screen.getByRole('button', { name: /main/ }));
+    expect(screen.queryByTestId('wf-native-tools-empty')).not.toBeInTheDocument();
+  });
+
   it('renders a NOTIFY badge for snapshotted Notify steps', () => {
     const run = mkRun({
       step_results: [mkResult({ step_kind: 'Notify' })],

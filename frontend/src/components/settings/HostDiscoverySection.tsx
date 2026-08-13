@@ -389,6 +389,7 @@ function AdoptModal({ entry, onConfirm, onCancel, loading, error }: AdoptModalPr
         {showTech && (
           <pre style={{
             background: 'var(--kr-code-bg, rgba(0,0,0,0.04))',
+            color: 'var(--kr-text-primary)',
             padding: 10, borderRadius: 4, fontSize: '0.78em',
             margin: '0 0 12px 0', overflow: 'auto',
           }}>{`McpConfig {

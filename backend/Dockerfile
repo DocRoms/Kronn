@@ -61,7 +61,7 @@ RUN if getent group ${APP_GID} >/dev/null 2>&1; then \
     && useradd -u ${APP_UID} -g kronn -m kronn
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates git curl nodejs npm python3 python3-pip python3-venv \
+    ca-certificates git curl gnupg nodejs npm python3 python3-pip python3-venv \
     make gh openssh-client unzip \
     # kronn-docs sidecar (WeasyPrint) runtime libs. WeasyPrint >=62 renders via
     # Pango + HarfBuzz; the older cairo/gdk-pixbuf libs are kept as a harmless
@@ -70,6 +70,32 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libpango-1.0-0 libpangoft2-1.0-0 libharfbuzz-subset0 \
     libgdk-pixbuf-2.0-0 libcairo2 libffi8 fonts-dejavu-core libfontconfig1 \
     && rm -rf /var/lib/apt/lists/*
+
+# Microsoft 365's API-only plugin obtains a delegated Graph token from Azure
+# CLI. Microsoft supports Bookworm packages (the runtime itself is Trixie), so
+# pin that signed repository suite and the exact CLI version for reproducible
+# amd64/arm64 images. `/usr/bin/az` is wrapped below to read the host's mounted
+# `~/.azure` profile; stdout remains the short-lived token consumed in memory.
+ARG AZURE_CLI_VERSION=2.88.0
+RUN mkdir -p /etc/apt/keyrings \
+    && curl -sLS https://packages.microsoft.com/keys/microsoft.asc \
+      | gpg --dearmor > /etc/apt/keyrings/microsoft.gpg \
+    && chmod go+r /etc/apt/keyrings/microsoft.gpg \
+    && printf '%s\n' \
+      'Types: deb' \
+      'URIs: https://packages.microsoft.com/repos/azure-cli/' \
+      'Suites: bookworm' \
+      'Components: main' \
+      "Architectures: $(dpkg --print-architecture)" \
+      'Signed-by: /etc/apt/keyrings/microsoft.gpg' \
+      > /etc/apt/sources.list.d/azure-cli.sources \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+      "azure-cli=${AZURE_CLI_VERSION}-1~bookworm" \
+    && mv /usr/bin/az /usr/bin/az-real \
+    && rm -rf /var/lib/apt/lists/*
+COPY scripts/azure-docker-wrapper.sh /usr/bin/az
+RUN chmod 0755 /usr/bin/az
 
 # ── Playwright / Chromium for agent browser tooling ────────────────────────
 # Agents drive a REAL browser through the Playwright MCP (inspect prod pages,
@@ -221,6 +247,4 @@ EXPOSE 3140
 USER kronn
 ENTRYPOINT ["entrypoint.sh"]
 CMD ["kronn"]
-
-
 

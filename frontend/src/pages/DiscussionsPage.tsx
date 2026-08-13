@@ -2302,6 +2302,27 @@ export function DiscussionsPage({
     );
   };
 
+  const retryDispatchKeys = useRef(new Map<string, string>());
+  const handleRetryAgentDispatch = useCallback(async (
+    dispatchId: string,
+    agentType: AgentType,
+  ) => {
+    if (!activeDiscussionId) return;
+    const key = retryDispatchKeys.current.get(dispatchId) ?? crypto.randomUUID();
+    retryDispatchKeys.current.set(dispatchId, key);
+    try {
+      await discussionsApi.retryAgentDispatch(activeDiscussionId, dispatchId, key);
+      // Keep this key for the lifetime of the page. The card disappears after
+      // reload, but a delayed second click or a transport replay must still
+      // resolve to the exact same replacement dispatch.
+      toast(t('disc.agentRetryStarted', AGENT_LABELS[agentType] ?? agentType), 'info');
+      await reloadDiscussion(activeDiscussionId);
+      refetchDiscussions();
+    } catch (error) {
+      toast(t('disc.agentRetryFailed', userError(error)), 'error');
+    }
+  }, [activeDiscussionId, refetchDiscussions, reloadDiscussion, t, toast]);
+
   // Stable MessageBubble callbacks (avoid breaking memo)
   const handleMsgCopy = useCallback((msgId: string, content: string) => {
     navigator.clipboard.writeText(content);
@@ -3447,6 +3468,7 @@ export function DiscussionsPage({
                         onEditSubmit={handleEditMessage}
                         onEditTextChange={setEditingText}
                         onRetry={handleRetry}
+                        onRetryAgentDispatch={handleRetryAgentDispatch}
                         onExpandSummary={handleMsgExpandSummary}
                         onNavigate={onNavigate}
                         discussionId={activeDiscussion.id}

@@ -1,24 +1,40 @@
-const MODEL_ERROR_PREFIX = '[kronn:model-error]\n';
+const AGENT_ERROR_PREFIX = '[kronn:agent-error]\n';
+const LEGACY_MODEL_ERROR_PREFIX = '[kronn:model-error]\n';
 
-export interface ModelErrorEvent {
-  kind: 'model_error';
-  status: number;
+export interface AgentErrorEvent {
+  kind: 'model_error' | 'agent_error';
+  status: number | null;
   summary: string;
   detail: string;
   tier: 'economy' | 'default' | 'reasoning';
+  retry_dispatch_id: string | null;
+  retried: boolean;
 }
 
-export function parseModelErrorEvent(content: string): ModelErrorEvent | null {
-  if (!content.startsWith(MODEL_ERROR_PREFIX)) return null;
+export function parseAgentErrorEvent(content: string): AgentErrorEvent | null {
+  const payload = content.startsWith(AGENT_ERROR_PREFIX)
+    ? content.slice(AGENT_ERROR_PREFIX.length)
+    : content.startsWith(LEGACY_MODEL_ERROR_PREFIX)
+      ? content.slice(LEGACY_MODEL_ERROR_PREFIX.length)
+      : null;
+  if (payload === null) return null;
   try {
-    const parsed = JSON.parse(content.slice(MODEL_ERROR_PREFIX.length)) as Partial<ModelErrorEvent>;
-    if (parsed.kind !== 'model_error'
-      || typeof parsed.status !== 'number'
+    const parsed = JSON.parse(payload) as Partial<AgentErrorEvent>;
+    if (!['model_error', 'agent_error'].includes(parsed.kind ?? '')
+      || !(parsed.status === null || typeof parsed.status === 'number')
       || typeof parsed.summary !== 'string'
       || typeof parsed.detail !== 'string'
       || !['economy', 'default', 'reasoning'].includes(parsed.tier ?? '')) return null;
-    return parsed as ModelErrorEvent;
+    return {
+      ...parsed,
+      retry_dispatch_id: typeof parsed.retry_dispatch_id === 'string'
+        ? parsed.retry_dispatch_id
+        : null,
+      retried: parsed.retried === true,
+    } as AgentErrorEvent;
   } catch {
     return null;
   }
 }
+
+export const parseModelErrorEvent = parseAgentErrorEvent;

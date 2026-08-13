@@ -1856,12 +1856,20 @@ args = ["@example/old-mcp"]
         let (server, env) = api_server("api-test", "https://api.example.com");
         let out = build_api_context_block(&[(server, "cfg-1".into(), env)]);
         assert!(out.contains("REST APIs available"), "header present");
+        assert!(
+            out.contains("NOT vendor MCP servers"),
+            "agents must not waste time searching for a vendor MCP: {out}"
+        );
         assert!(out.contains("https://api.example.com"), "base URL rendered");
         // Discovery via the broker, not a catalogue.
         assert!(out.contains("api_call"), "points at the api_call MCP tool");
         assert!(
             out.contains("mcp_list"),
             "points at mcp_list for endpoint discovery"
+        );
+        assert!(
+            out.contains("api_endpoints") && out.contains("qa_list") && out.contains("qa_run"),
+            "the full native API discovery path must be explicit: {out}"
         );
         assert!(
             out.contains("2 endpoints"),
@@ -2143,6 +2151,46 @@ args = ["@example/old-mcp"]
             "key-of-B",
             "cfg-B must carry ITS key, not cfg-A's"
         );
+    }
+
+    #[test]
+    fn general_discussion_catalogue_includes_global_apis_but_not_project_only_apis() {
+        use std::collections::HashMap;
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        let secret = crate::core::crypto::generate_secret();
+        let (server, _) = api_server("api-portable", "https://api.example.com");
+        crate::db::mcps::upsert_server(&conn, &server).unwrap();
+
+        let make_config = |id: &str, is_global: bool, include_general: bool| {
+            let env = HashMap::from([("TEST_API_KEY".to_string(), id.to_string())]);
+            crate::models::McpConfig {
+                id: id.into(),
+                server_id: server.id.clone(),
+                label: id.into(),
+                env_keys: vec!["TEST_API_KEY".into()],
+                env_encrypted: crate::db::mcps::encrypt_env(&env, &secret).unwrap(),
+                args_override: None,
+                is_global,
+                include_general,
+                config_hash: format!("hash-{id}"),
+                project_ids: Vec::new(),
+                host_sync: crate::models::HostSyncMode::None,
+            }
+        };
+        crate::db::mcps::insert_config(&conn, &make_config("global", true, false)).unwrap();
+        crate::db::mcps::insert_config(&conn, &make_config("general", false, true)).unwrap();
+        crate::db::mcps::insert_config(&conn, &make_config("project-only", false, false)).unwrap();
+
+        let plugins = collect_active_api_plugins_for_scope(&conn, None, &secret).unwrap();
+        let mut ids = plugins
+            .iter()
+            .map(|(_, config_id, _)| config_id.as_str())
+            .collect::<Vec<_>>();
+        ids.sort_unstable();
+
+        assert_eq!(ids, vec!["general", "global"]);
+        assert!(!ids.contains(&"project-only"));
     }
 
     #[test]

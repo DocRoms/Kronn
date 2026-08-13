@@ -1,7 +1,10 @@
-//! Liquid-compatible template engine for workflow prompts.
+//! Small, purpose-built template engine for workflow values.
 //!
-//! Supports `{{variable}}` syntax with nested access via dots.
-//! Built-in variables: issue.*, steps.<name>.output, previous_step.output
+//! Supports `{{variable}}` syntax with nested access via dots. This is not a
+//! Liquid implementation and filters are deliberately unsupported. Preview
+//! rendering keeps unresolved placeholders visible to the author; execution
+//! rendering is strict so a typo can never be sent to an agent or an external
+//! command/API.
 
 use anyhow::Result;
 use std::collections::HashMap;
@@ -162,8 +165,24 @@ impl TemplateContext {
             .map(|v| serde_json::Value::String(v.clone()))
     }
 
-    /// Render a template string, replacing all `{{variable}}` occurrences.
+    /// Render a template for an editor/preview surface.
+    ///
+    /// Unknown or incomplete placeholders remain visible verbatim so authors
+    /// can spot and correct them. Runtime code must use [`Self::render_strict`].
     pub fn render(&self, template: &str) -> Result<String> {
+        self.render_with_mode(template, false)
+    }
+
+    /// Render a template for execution.
+    ///
+    /// Unknown variables, unsupported filters and incomplete placeholders are
+    /// errors. Callers therefore fail before starting an agent, command or HTTP
+    /// request instead of spending tokens or performing a malformed action.
+    pub fn render_strict(&self, template: &str) -> Result<String> {
+        self.render_with_mode(template, true)
+    }
+
+    fn render_with_mode(&self, template: &str, strict: bool) -> Result<String> {
         let mut result = String::with_capacity(template.len());
         let mut chars = template.chars().peekable();
 
@@ -180,7 +199,13 @@ impl TemplateContext {
                         }
                         Some(ch) => var_name.push(ch),
                         None => {
-                            // Unclosed template — output as-is
+                            if strict {
+                                anyhow::bail!(
+                                    "Unclosed workflow template placeholder `{{{{{}}}`",
+                                    var_name.trim()
+                                );
+                            }
+                            // Preview: keep the unfinished placeholder visible.
                             result.push_str("{{");
                             result.push_str(&var_name);
                             return Ok(result);
@@ -189,12 +214,23 @@ impl TemplateContext {
                 }
 
                 let key = var_name.trim();
+                if strict && key.contains('|') {
+                    let filter = key
+                        .split_once('|')
+                        .map(|(_, filter)| filter.trim())
+                        .unwrap_or_default();
+                    anyhow::bail!(
+                        "Unsupported workflow template filter `{filter}` in `{{{{{key}}}}}`; Kronn templates support variables and dotted paths, not Liquid filters"
+                    );
+                }
                 if let Some(value) = self.values.get(key) {
                     result.push_str(value);
                 } else if let Some(value) = resolve_nested_path(&self.values, key) {
                     result.push_str(&value);
+                } else if strict {
+                    anyhow::bail!("Unknown workflow template variable `{key}`");
                 } else {
-                    // Unknown variable — leave placeholder for debugging
+                    // Preview: leave the unknown placeholder visible.
                     result.push_str("{{");
                     result.push_str(key);
                     result.push_str("}}");
@@ -1082,6 +1118,57 @@ mod tests {
     fn test_unknown_variable_preserved() {
         let ctx = TemplateContext::new();
         assert_eq!(ctx.render("{{unknown}}").unwrap(), "{{unknown}}");
+    }
+
+    #[test]
+    fn strict_render_names_unknown_variable_before_execution() {
+        let mut ctx = TemplateContext::new();
+        ctx.set_issue("Real title", "Body", "42", "https://example/42", &[]);
+
+        let error = ctx
+            .render_strict("Fix {{issue.titel}}")
+            .expect_err("a misspelled variable must fail closed");
+
+        assert!(
+            error.to_string().contains("issue.titel"),
+            "the author must be told which variable is invalid: {error}"
+        );
+        assert_eq!(
+            ctx.render("Fix {{issue.titel}}").unwrap(),
+            "Fix {{issue.titel}}",
+            "preview remains permissive and keeps the typo visible"
+        );
+    }
+
+    #[test]
+    fn strict_render_rejects_liquid_filters_with_an_actionable_message() {
+        let mut ctx = TemplateContext::new();
+        ctx.set("name", "Kronn");
+
+        let error = ctx
+            .render_strict("{{ name | upcase }}")
+            .expect_err("filters are not part of Kronn's template grammar");
+
+        assert!(error.to_string().contains("upcase"));
+        assert!(error.to_string().contains("not Liquid"));
+        assert_eq!(
+            ctx.render("{{ name | upcase }}").unwrap(),
+            "{{name | upcase}}",
+            "the preview shows the unsupported expression instead of hiding it"
+        );
+    }
+
+    #[test]
+    fn strict_render_rejects_an_unclosed_placeholder() {
+        let ctx = TemplateContext::new();
+        let error = ctx
+            .render_strict("prefix {{unfinished")
+            .expect_err("execution must reject incomplete syntax");
+        assert!(error.to_string().contains("unfinished"));
+        assert_eq!(
+            ctx.render("prefix {{unfinished").unwrap(),
+            "prefix {{unfinished"
+        );
     }
 
     #[test]

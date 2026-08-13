@@ -15,7 +15,7 @@ import {
   saveAuditCheckpoint, loadAuditCheckpoint, clearAuditCheckpoint,
   type AuditCheckpointKind,
 } from '../lib/audit-resume';
-import type { Project, AgentDetection, AgentType, DriftCheckResponse, Discussion, Skill, McpConfigDisplay, WorkflowSummary, GitStatusResponse, DependencyUpdateSummary } from '../types/generated';
+import type { Project, AgentDetection, AgentType, DriftCheckResponse, Discussion, Skill, McpConfigDisplay, WorkflowSummary, GitStatusResponse, DependencyUpdateSummary, AuditEvidenceResponse, ContextAuditResponse } from '../types/generated';
 import {
   ChevronRight, ChevronDown, Cpu, Workflow,
   Plus, Trash2, Zap,
@@ -128,6 +128,13 @@ export function ProjectCard({
   const [dependencyUpdatesError, setDependencyUpdatesError] = useState(false);
   const [dependencyMonitoringSaving, setDependencyMonitoringSaving] = useState(false);
   const dependencyRefreshRef = useRef(false);
+  const [auditEvidence, setAuditEvidence] = useState<AuditEvidenceResponse | null>(null);
+  const [contextAudit, setContextAudit] = useState<ContextAuditResponse | null>(null);
+  const [contextAuditLoading, setContextAuditLoading] = useState(false);
+  const [contextAuditError, setContextAuditError] = useState(false);
+  const [attestingDocumentation, setAttestingDocumentation] = useState(false);
+  const [acceptingContextBaseline, setAcceptingContextBaseline] = useState(false);
+  const attestationGuardRef = useRef(false);
   const recentProjectDiscussions = useMemo(
     () => [...projDiscussions].sort(
       (left, right) => Date.parse(right.updated_at) - Date.parse(left.updated_at),
@@ -171,6 +178,71 @@ export function ProjectCard({
       alive = false;
     };
   }, [detailMode, detailView, isOpen, proj.id, proj.path_exists]);
+
+  const refreshContextAudit = useCallback(async () => {
+    if (contextAuditLoading || proj.path_exists === false) return;
+    setContextAuditLoading(true);
+    setContextAuditError(false);
+    try {
+      const [evidence, audit] = await Promise.all([
+        projectsApi.auditEvidence(proj.id),
+        projectsApi.contextAudit(proj.id),
+      ]);
+      setAuditEvidence(evidence);
+      setContextAudit(audit);
+    } catch {
+      setContextAuditError(true);
+    } finally {
+      setContextAuditLoading(false);
+    }
+  }, [contextAuditLoading, proj.id, proj.path_exists]);
+
+  useEffect(() => {
+    if (!detailMode || !isOpen || detailView !== 'overview' || proj.path_exists === false) return;
+    let alive = true;
+    void Promise.all([
+      projectsApi.auditEvidence(proj.id),
+      projectsApi.contextAudit(proj.id),
+    ]).then(([evidence, audit]) => {
+      if (!alive) return;
+      setAuditEvidence(evidence);
+      setContextAudit(audit);
+      setContextAuditError(false);
+    }).catch(() => {
+      if (alive) setContextAuditError(true);
+    });
+    return () => { alive = false; };
+  }, [detailMode, detailView, isOpen, proj.id, proj.path_exists]);
+
+  const attestExistingDocumentation = useCallback(async () => {
+    if (attestationGuardRef.current) return;
+    if (!window.confirm(t('projects.contextAudit.attestConfirm'))) return;
+    attestationGuardRef.current = true;
+    setAttestingDocumentation(true);
+    try {
+      setAuditEvidence(await projectsApi.attestDocumentation(proj.id));
+      onRefetch();
+      toast(t('projects.contextAudit.attested'), 'success');
+    } catch {
+      toast(t('projects.contextAudit.attestFailed'), 'error');
+    } finally {
+      attestationGuardRef.current = false;
+      setAttestingDocumentation(false);
+    }
+  }, [onRefetch, proj.id, t, toast]);
+
+  const acceptCurrentContextBaseline = useCallback(async () => {
+    if (acceptingContextBaseline) return;
+    setAcceptingContextBaseline(true);
+    try {
+      setContextAudit(await projectsApi.acceptContextBaseline(proj.id));
+      toast(t('projects.contextAudit.baselineAccepted'), 'success');
+    } catch {
+      toast(t('projects.contextAudit.baselineFailed'), 'error');
+    } finally {
+      setAcceptingContextBaseline(false);
+    }
+  }, [acceptingContextBaseline, proj.id, t, toast]);
 
   const refreshGitLanguages = useCallback(async () => {
     if (gitLanguageRefreshRef.current) return;
@@ -1518,6 +1590,135 @@ export function ProjectCard({
                   <strong>{proj.repo_url ? t('projects.master.overview.linked') : t('projects.master.overview.local')}</strong>
                 </div>
               </div>
+              <section className="project-context-audit" data-testid="project-context-audit">
+                <header>
+                  <div>
+                    <span className="project-overview-repository-icon" aria-hidden="true">
+                      <Cpu size={17} />
+                    </span>
+                    <div>
+                      <strong>{t('projects.contextAudit.title')}</strong>
+                      <small>{t('projects.contextAudit.subtitle')}</small>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => void refreshContextAudit()}
+                    disabled={contextAuditLoading}
+                    aria-label={t('projects.contextAudit.refresh')}
+                  >
+                    <RefreshCw size={12} className={contextAuditLoading ? 'spin' : undefined} />
+                    {t('projects.contextAudit.refresh')}
+                  </button>
+                </header>
+                {contextAuditError ? (
+                  <p className="project-context-audit-error">
+                    <AlertTriangle size={13} /> {t('projects.contextAudit.unavailable')}
+                  </p>
+                ) : auditEvidence && contextAudit ? (
+                  <>
+                    <div className="project-context-audit-evidence" data-kind={auditEvidence.kind}>
+                      <div>
+                        {auditEvidence.kind === 'kronn_audit' || auditEvidence.kind === 'legacy_evidence'
+                          ? <ShieldCheck size={15} />
+                          : auditEvidence.kind === 'human_attestation'
+                            ? <Check size={15} />
+                            : <AlertTriangle size={15} />}
+                        <p>
+                          <strong>{t(`projects.contextAudit.evidence.${auditEvidence.kind}`)}</strong>
+                          <span>{t(`projects.contextAudit.evidence.${auditEvidence.kind}.help`)}</span>
+                        </p>
+                      </div>
+                      {auditEvidence.kind === 'missing_evidence' && (
+                        <button
+                          type="button"
+                          onClick={() => void attestExistingDocumentation()}
+                          disabled={attestingDocumentation}
+                        >
+                          {attestingDocumentation && <Loader2 size={12} className="spin" />}
+                          {t('projects.contextAudit.attest')}
+                        </button>
+                      )}
+                    </div>
+                    <p className="project-context-audit-paths">
+                      {t('projects.contextAudit.paths', auditEvidence.state_file, auditEvidence.runtime_workspace)}
+                    </p>
+                    {auditEvidence.audit_runs > 0 && (
+                      <div className="project-context-audit-reliability">
+                        <span>{t('projects.contextAudit.runs', auditEvidence.audit_runs)}</span>
+                        <span data-warning={auditEvidence.interrupted_runs > 0}>
+                          {t(
+                            'projects.contextAudit.interruptions',
+                            auditEvidence.interrupted_runs,
+                            auditEvidence.interruption_rate_percent.toFixed(1),
+                          )}
+                        </span>
+                        {auditEvidence.resumable_after_step !== null && (
+                          <span data-tone="success">
+                            {t('projects.contextAudit.resume', auditEvidence.resumable_after_step + 1)}
+                          </span>
+                        )}
+                      </div>
+                    )}
+                    {contextAudit.drift === null ? (
+                      <p className="project-context-audit-baseline">
+                        <Check size={13} /> {t('projects.contextAudit.baselineCreated')}
+                      </p>
+                    ) : (
+                      <div className="project-context-audit-signals">
+                        {contextAudit.drift.paid_agent_growth.map(growth => (
+                          <div key={growth.agent} data-tone="warning">
+                            <AlertTriangle size={13} />
+                            <span>
+                              {t(
+                                'projects.contextAudit.paidGrowth',
+                                growth.agent,
+                                growth.delta_bytes,
+                                growth.current_bytes,
+                              )}
+                            </span>
+                          </div>
+                        ))}
+                        {contextAudit.drift.newly_broken_routes.map(route => (
+                          <div key={`broken-${route}`} data-tone="error">
+                            <AlertTriangle size={13} />
+                            <span>{t('projects.contextAudit.brokenRoute', route)}</span>
+                          </div>
+                        ))}
+                        {contextAudit.drift.unused_files.map(path => (
+                          <div key={`unused-${path}`} data-tone="warning">
+                            <FileText size={13} />
+                            <span>{t('projects.contextAudit.orphanFile', path)}</span>
+                          </div>
+                        ))}
+                        {contextAudit.drift.paid_agent_growth.length === 0
+                          && contextAudit.drift.newly_broken_routes.length === 0
+                          && contextAudit.drift.unused_files.length === 0 && (
+                            <p className="project-context-audit-baseline">
+                              <Check size={13} /> {t('projects.contextAudit.stable')}
+                            </p>
+                          )}
+                        {(contextAudit.drift.paid_agent_growth.length > 0
+                          || contextAudit.drift.newly_broken_routes.length > 0
+                          || contextAudit.drift.unused_files.length > 0) && (
+                            <button
+                              type="button"
+                              onClick={() => void acceptCurrentContextBaseline()}
+                              disabled={acceptingContextBaseline}
+                            >
+                              {acceptingContextBaseline && <Loader2 size={12} className="spin" />}
+                              {t('projects.contextAudit.acceptBaseline')}
+                            </button>
+                          )}
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  <p className="project-context-audit-loading">
+                    <Loader2 size={13} className="spin" /> {t('projects.contextAudit.loading')}
+                  </p>
+                )}
+              </section>
               <div className="project-overview-repository" data-testid="project-overview-repository">
                 <div className="project-overview-repository-head">
                   <div className="project-overview-repository-title">

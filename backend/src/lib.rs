@@ -408,6 +408,8 @@ fn is_destructive(method: &axum::http::Method, path: &str) -> bool {
     method == axum::http::Method::DELETE
         || DESTRUCTIVE_POSTS.contains(&path)
         || path.ends_with("/cleanup-orphan-env")
+        || path.ends_with("/context-audit/baseline")
+        || path.ends_with("/audit-attestation")
 }
 
 /// Pure auth decision for a request that already cleared the always-open
@@ -756,6 +758,18 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route(
             "/api/projects/{id}/context-audit",
             get(api::context_audit::project_context_audit),
+        )
+        .route(
+            "/api/projects/{id}/context-audit/baseline",
+            post(api::context_audit::accept_project_context_baseline),
+        )
+        .route(
+            "/api/projects/{id}/audit-evidence",
+            get(api::context_audit::project_audit_evidence),
+        )
+        .route(
+            "/api/projects/{id}/audit-attestation",
+            post(api::context_audit::attest_project_documentation),
         )
         .route(
             "/api/projects/{id}/install-template",
@@ -1366,6 +1380,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             post(api::discussions::run_agent),
         )
         .route(
+            "/api/discussions/{id}/agent-dispatches/retry",
+            post(api::discussions::retry_agent_dispatch),
+        )
+        .route(
             "/api/discussions/{id}/stop",
             post(api::discussions::stop_agent),
         )
@@ -1487,6 +1505,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             "/api/disc/workspace",
             get(api::disc_workspace::disc_workspace_get)
                 .post(api::disc_workspace::disc_workspace_set),
+        )
+        .route(
+            "/api/disc/workspace/history-lease",
+            post(api::disc_workspace::disc_workspace_history_lease),
         )
         .route(
             "/api/disc/find_by_session",
@@ -1956,6 +1978,8 @@ mod auth_tests {
             "/api/agents/uninstall",
             "/api/rtk/deactivate",
             "/api/mcps/custom/srv-1/cleanup-orphan-env",
+            "/api/projects/p1/context-audit/baseline",
+            "/api/projects/p1/audit-attestation",
         ] {
             assert!(
                 !auth_allows(&Method::POST, p, false, true, false, false),

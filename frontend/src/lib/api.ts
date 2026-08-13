@@ -41,6 +41,7 @@ import type {
   SendMessageRequest,
   ReviseMessageRequest,
   MessageRevisionReceipt,
+  RetryAgentDispatchResponse,
   OrchestrationRequest,
   AgentDetection,
   AgentType,
@@ -94,6 +95,8 @@ import type {
   GitBranchesResponse,
   GitStatusResponse,
   DependencyUpdateSummary,
+  AuditEvidenceResponse,
+  ContextAuditResponse,
   ModelTier,
   ModelTiersConfig,
   DriftCheckResponse,
@@ -728,6 +731,12 @@ export const projects = {
       `/projects/${id}/redirectors/sync`,
     ),
   auditInfo: (id: string) => api<{ files: { path: string; filled: boolean }[]; todos: { file: string; line: number; text: string }[] }>('GET', `/projects/${id}/audit-info`),
+  contextAudit: (id: string) => api<ContextAuditResponse>('GET', `/projects/${id}/context-audit`),
+  acceptContextBaseline: (id: string) =>
+    api<ContextAuditResponse>('POST', `/projects/${id}/context-audit/baseline`),
+  auditEvidence: (id: string) => api<AuditEvidenceResponse>('GET', `/projects/${id}/audit-evidence`),
+  attestDocumentation: (id: string) =>
+    api<AuditEvidenceResponse>('POST', `/projects/${id}/audit-attestation`, { confirmed: true }),
   validateAudit: (id: string) => api<AiAuditStatus>('POST', `/projects/${id}/validate-audit`),
   markBootstrapped: (id: string) => api<AiAuditStatus>('POST', `/projects/${id}/mark-bootstrapped`),
   cancelAudit: (id: string) => api<AiAuditStatus>('POST', `/projects/${id}/cancel-audit`),
@@ -1666,6 +1675,17 @@ export const discussions = {
     signal,
     onStart,
     onLog,
+  ),
+
+  /** Retry one failed target from a multi-agent turn without replaying siblings. */
+  retryAgentDispatch: (
+    id: string,
+    dispatchId: string,
+    idempotencyKey: string,
+  ) => api<RetryAgentDispatchResponse>(
+    'POST',
+    `/discussions/${id}/agent-dispatches/retry`,
+    { dispatch_id: dispatchId, idempotency_key: idempotencyKey },
   ),
 
   /** Launch multi-agent orchestration debate. */

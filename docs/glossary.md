@@ -124,14 +124,14 @@ Project-specific terms. For deep dives, follow the linked `docs/architecture/` f
 
 ## Workflows
 
-**Workflow** — Unified automation unit: `Trigger → Steps`. Replaces the old scheduled tasks concept. Created via 5-step dashboard wizard (infos → trigger → steps → config → resume) or imported from WORKFLOW.md files. Post-step operations (create PR, comment issue, etc.) are handled by agents using MCP tools within steps.
+**Workflow** — Unified automation unit: `Trigger → Steps`. Replaces the old scheduled tasks concept. Created via the dashboard wizard and portable through Kronn's versioned JSON export/import envelope. `WORKFLOW.md` import is not implemented. Post-step operations (create PR, comment issue, etc.) are handled by agents using the tools available within steps.
 
 **WorkflowTrigger** — What starts a workflow run. Three types:
 - **Cron** — time-based schedule. 1 tick = 1 run, always same prompt.
 - **Tracker** — polls an issue tracker API at intervals. Each new matching issue = 1 run with issue context injected. Pull-based (polling, not webhooks).
 - **Manual** — triggered from dashboard or CLI on demand.
 
-**WorkflowStep** — A single unit of work within a workflow. Has an agent, optional per-step MCPs, a prompt template (Liquid-compatible), optional debate mode, optional `on_result` conditions, and optional `AgentSettings` override.
+**WorkflowStep** — A single unit of work within a workflow. Has an agent, optional per-step capabilities, a prompt using Kronn's purpose-built `{{variable}}` syntax (not Liquid; no filters), optional debate mode, optional `on_result` conditions, and optional `AgentSettings` override.
 
 **StepMode** — `Normal` (single agent) or `Debate` (multi-agent rounds).
 
@@ -161,9 +161,9 @@ Project-specific terms. For deep dives, follow the linked `docs/architecture/` f
 
 **Workspace** — Isolated git worktree created for a workflow run. Branch: `kronn/<workflow>/<run-id>`. Cleaned up after completion.
 
-**Symphony** — OpenAI's `WORKFLOW.md`-based automation system. Single-agent, single-prompt, tracker-driven. Kronn reads Symphony format natively as a strict subset — a Symphony WORKFLOW.md maps to a single-step Kronn workflow. Kronn adds: multi-step, multi-agent, conditional branching, per-step MCPs.
+**Symphony** — OpenAI's `WORKFLOW.md`-based automation system: single-agent, single-prompt and tracker-driven. Kronn does not currently import this format and is not a superset of Symphony's orchestration. The systems intentionally share the four workspace-hook names; Kronn otherwise uses its own versioned JSON model and adds multi-step/multi-agent execution, conditional branching, native APIs, approval gates and cost guards.
 
-**Liquid templates** — Template engine used in workflow prompts. Variables: `{{issue.title}}`, `{{issue.body}}`, `{{issue.number}}`, `{{previous_step.output}}`, `{{steps.<name>.output}}`. Compatible with Symphony's template syntax.
+**Kronn workflow templates** — Purpose-built `{{variable}}` substitution used in workflow prompts and deterministic step fields. Examples: `{{issue.title}}`, `{{issue.body}}`, `{{issue.number}}`, `{{previous_step.output}}`, `{{steps.<name>.output}}`. It is not Liquid and supports no filters. Runtime rendering is strict; preview rendering preserves unresolved placeholders for human diagnosis.
 
 ## Agents
 

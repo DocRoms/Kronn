@@ -1113,6 +1113,7 @@ Response shape:
     }
   ]
 }
+
 ```
 
 **Status values:** `success`, `error`. Partial failures are surfaced
@@ -1131,6 +1132,7 @@ There is no separate batch URL. You just push N messages into the
     { "From": {…}, "To": [{…}], "Subject": "…", "HTMLPart": "…" }
   ]
 }
+
 ```
 
 Each message is processed independently. Mix and match templates,
@@ -2458,7 +2460,17 @@ is well within bounds for typical fan-outs.
     ]
 }
 
-/// Search the registry by name or tag
+/// Known registry-id replacements used only to explain orphaned persisted
+/// configs. The caller must require an explicit user action: a rename can also
+/// change the transport and credential contract, as Microsoft 365 did.
+pub fn legacy_registry_replacement(server_id: &str) -> Option<&'static str> {
+    match server_id {
+        "mcp-microsoft-365" => Some("api-microsoft-365"),
+        _ => None,
+    }
+}
+
+/// Search the registry by name or tag.
 pub fn search(query: &str) -> Vec<McpDefinition> {
     let q = query.to_lowercase();
     builtin_registry()

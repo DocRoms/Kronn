@@ -1326,6 +1326,27 @@ pub fn resume_disc_session(
     new_session_id: &str,
     next_resume_token: Option<&str>,
 ) -> Result<JoinViaTokenResult> {
+    resume_disc_session_in_disc(
+        conn,
+        agent_type,
+        resume_token,
+        new_session_id,
+        next_resume_token,
+        None,
+    )
+}
+
+/// Resume while proving that the credential belongs to the room the client
+/// persisted locally. The expectation participates in the credential lookup,
+/// so a mismatch cannot rotate the secret or rewrite the participant row.
+pub fn resume_disc_session_in_disc(
+    conn: &Connection,
+    agent_type: &str,
+    resume_token: &str,
+    new_session_id: &str,
+    next_resume_token: Option<&str>,
+    expected_disc_id: Option<&str>,
+) -> Result<JoinViaTokenResult> {
     let old_hash = sha256_hex(resume_token);
     let next_token = next_resume_token.unwrap_or(resume_token).to_string();
     let next_hash = sha256_hex(&next_token);
@@ -1340,15 +1361,19 @@ pub fn resume_disc_session(
         .query_row(
             "SELECT id, disc_id, resume_token_hash, agent_type FROM discussion_sessions
               WHERE resume_token_hash IN (?1, ?2)
+                AND (?3 IS NULL OR disc_id = ?3)
                 AND status != 'left'
               ORDER BY CASE WHEN resume_token_hash = ?1 THEN 0 ELSE 1 END
               LIMIT 1",
-            params![&old_hash, &next_hash],
+            params![&old_hash, &next_hash, expected_disc_id],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .optional()?;
-    let (session_pk, disc_id, stored_hash, stored_agent_type) =
-        row.ok_or_else(|| anyhow!("resume credential invalid, replayed, or no longer active"))?;
+    let (session_pk, disc_id, stored_hash, stored_agent_type) = row.ok_or_else(|| {
+        anyhow!(
+            "resume credential invalid, replayed, bound to another discussion, or no longer active"
+        )
+    })?;
     // The opaque credential authenticates exactly one session row. It may
     // repair the historical fallback identity once a reloaded bridge can
     // finally identify itself (notably Vibe on macOS), but it must never
@@ -1702,6 +1727,11 @@ mod tests {
         assert_eq!(v[0].presence_state, PresenceState::Dormant);
         assert!(!v[0].read_live, "dormant is not currently reading");
 
+        // A CLI blocked on a local permission dialog cannot keep its old
+        // listening lease alive. Even while its next poll remains scheduled,
+        // the public capability is explicitly read_live=false.
+        assert_ne!(v[0].presence_state, PresenceState::Listening);
+
         // A landed append flips write-liveness to ok (independent of read side).
         mark_write_ok(&conn, "d1", "Codex", Some("s1"), Utc::now()).unwrap();
         let v = list_participant_views(&conn, "d1").unwrap();
@@ -2006,6 +2036,59 @@ mod tests {
 
         let row = list_sessions(&conn, "d1", false).unwrap().pop().unwrap();
         assert_eq!(row.session_id.as_deref(), Some("after-response-loss"));
+    }
+
+    #[test]
+    fn resume_expected_discussion_mismatch_is_rejected_without_mutation() {
+        let conn = setup_db();
+        let invite = create_invite_token(&conn, "d1").unwrap();
+        let joined = join_via_token(&conn, &invite.token, "Codex", "before").unwrap();
+        let hash_before: String = conn
+            .query_row(
+                "SELECT resume_token_hash FROM discussion_sessions WHERE id = ?1",
+                [joined.session_pk],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        let error = resume_disc_session_in_disc(
+            &conn,
+            "Codex",
+            &joined.resume_token,
+            "must-not-win",
+            Some("kr-resume-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            Some("d-other"),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("another discussion"));
+
+        let row = list_sessions(&conn, "d1", false).unwrap().pop().unwrap();
+        assert_eq!(row.session_id.as_deref(), Some("before"));
+        let hash_after: String = conn
+            .query_row(
+                "SELECT resume_token_hash FROM discussion_sessions WHERE id = ?1",
+                [joined.session_pk],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            hash_after, hash_before,
+            "a rejected room must not rotate the secret"
+        );
+
+        let valid = resume_disc_session_in_disc(
+            &conn,
+            "Codex",
+            &joined.resume_token,
+            "after",
+            Some("kr-resume-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+            Some("d1"),
+        )
+        .unwrap();
+        assert_eq!(
+            valid.disc_id, "d1",
+            "the unconsumed credential remains usable"
+        );
     }
 
     #[test]

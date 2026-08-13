@@ -1,12 +1,14 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../../lib/I18nContext';
-import type { McpConfigDisplay, PluginBundlePreview } from '../../types/generated';
+import type { McpConfigDisplay, PluginBundlePreview, Project } from '../../types/generated';
 
 const mocks = vi.hoisted(() => ({
   previewBundle: vi.fn(),
   exportBundle: vi.fn(),
   importBundle: vi.fn(),
+  updateConfig: vi.fn(),
+  setConfigProjects: vi.fn(),
   triggerDownload: vi.fn(),
   toast: vi.fn(),
 }));
@@ -18,6 +20,8 @@ vi.mock('../../lib/api', async () => {
       previewBundle: mocks.previewBundle,
       exportBundle: mocks.exportBundle,
       importBundle: mocks.importBundle,
+      updateConfig: mocks.updateConfig,
+      setConfigProjects: mocks.setConfigProjects,
     },
   });
 });
@@ -66,11 +70,17 @@ const preview: PluginBundlePreview = {
   minimum_passphrase_length: 12,
 };
 
+const project = {
+  id: 'project-1',
+  name: 'Website',
+} as Project;
+
 const renderModal = (mode: 'export' | 'import') => render(
   <I18nProvider>
     <PluginPortabilityModal
       mode={mode}
       configs={[config]}
+      projects={[project]}
       onClose={vi.fn()}
       onImported={vi.fn()}
     />
@@ -142,6 +152,12 @@ describe('PluginPortabilityModal', () => {
       bundle_id: 'bundle-1',
       already_imported: false,
       imported_config_ids: ['imported-1'],
+      imported_configs: [{
+        config_id: 'imported-1',
+        server_id: 'api-fastly',
+        label: 'Fastly production',
+        server_name: 'Fastly',
+      }],
       skipped_plugins: 0,
       includes_values: true,
       warnings: [],
@@ -174,5 +190,100 @@ describe('PluginPortabilityModal', () => {
       content: expect.stringContaining('"kind":"kronn.plugins"'),
       passphrase: 'long-passphrase',
     }));
+    expect(screen.getByRole('checkbox', {
+      name: /Global — tous les projets/,
+    })).toBeChecked();
+    expect(mocks.updateConfig).not.toHaveBeenCalled();
+  });
+
+  it('applies the default global scope only after explicit confirmation', async () => {
+    mocks.importBundle.mockResolvedValue({
+      bundle_id: 'bundle-1',
+      already_imported: false,
+      imported_config_ids: ['imported-1'],
+      imported_configs: [{
+        config_id: 'imported-1',
+        server_id: 'api-fastly',
+        label: 'Fastly production',
+        server_name: 'Fastly',
+      }],
+      skipped_plugins: 0,
+      includes_values: false,
+      warnings: [],
+      conflicts: [],
+    });
+    mocks.updateConfig.mockResolvedValue(config);
+    mocks.setConfigProjects.mockResolvedValue(undefined);
+    renderModal('import');
+    const bundle = new File(
+      [JSON.stringify({
+        kind: 'kronn.plugins',
+        encrypted: false,
+        includes_values: false,
+        plugin_labels: ['Fastly production'],
+      })],
+      'fastly.kronn-plugins.json',
+      { type: 'application/json' },
+    );
+    fireEvent.change(document.querySelector('input[type="file"]')!, {
+      target: { files: [bundle] },
+    });
+    fireEvent.click(await screen.findByRole('button', { name: 'Importer le bundle' }));
+    const finish = await screen.findByRole('button', {
+      name: /Appliquer la portée et terminer/,
+    });
+
+    expect(mocks.updateConfig).not.toHaveBeenCalled();
+    fireEvent.click(finish);
+
+    await waitFor(() => expect(mocks.updateConfig).toHaveBeenCalledWith(
+      'imported-1',
+      { is_global: true },
+    ));
+    expect(mocks.setConfigProjects).toHaveBeenCalledWith('imported-1', {
+      project_ids: [],
+    });
+  });
+
+  it('can replace the default global scope with selected projects', async () => {
+    mocks.importBundle.mockResolvedValue({
+      bundle_id: 'bundle-2',
+      already_imported: false,
+      imported_config_ids: ['imported-2'],
+      imported_configs: [{
+        config_id: 'imported-2',
+        server_id: 'api-fastly',
+        label: 'Fastly staging',
+        server_name: 'Fastly',
+      }],
+      skipped_plugins: 0,
+      includes_values: false,
+      warnings: [],
+      conflicts: [],
+    });
+    mocks.updateConfig.mockResolvedValue(config);
+    mocks.setConfigProjects.mockResolvedValue(undefined);
+    renderModal('import');
+    const bundle = new File(
+      [JSON.stringify({ kind: 'kronn.plugins', encrypted: false, plugin_labels: ['Fastly staging'] })],
+      'fastly.kronn-plugins.json',
+      { type: 'application/json' },
+    );
+    fireEvent.change(document.querySelector('input[type="file"]')!, {
+      target: { files: [bundle] },
+    });
+    fireEvent.click(await screen.findByRole('button', { name: 'Importer le bundle' }));
+    const global = await screen.findByRole('checkbox', { name: /Global — tous les projets/ });
+    fireEvent.click(global);
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Website' }));
+    fireEvent.click(screen.getByRole('button', { name: /Appliquer la portée et terminer/ }));
+
+    await waitFor(() => expect(mocks.updateConfig).toHaveBeenCalledWith(
+      'imported-2',
+      { is_global: false },
+    ));
+    expect(mocks.setConfigProjects).toHaveBeenCalledWith('imported-2', {
+      project_ids: ['project-1'],
+    });
   });
 });

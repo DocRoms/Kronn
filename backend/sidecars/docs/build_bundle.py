@@ -6,8 +6,10 @@ from __future__ import annotations
 import argparse
 import os
 import platform
+import shutil
 import subprocess
 import sys
+import traceback
 from pathlib import Path
 
 
@@ -15,6 +17,7 @@ ROOT = Path(__file__).resolve().parent
 REPO_ROOT = ROOT.parents[2]
 DEFAULT_OUTPUT = REPO_ROOT / "desktop" / "src-tauri" / "resources" / "docs-sidecar"
 WORK_ROOT = REPO_ROOT / "target" / "docs-sidecar-pyinstaller"
+DIAGNOSTICS = REPO_ROOT / "target" / "docs-sidecar-bootstrap.log"
 
 COLLECT_PACKAGES = (
     "kronn_docs",
@@ -98,13 +101,11 @@ def native_libraries(system: str) -> list[Path]:
     for directory in native_library_dirs(system):
         if not directory.is_dir():
             continue
-        for pattern in NATIVE_LIBRARY_PATTERNS.get(system, ()):
-            for candidate in directory.glob(pattern):
-                # Preserve every ABI-name symlink. WeasyPrint and Pango load
-                # specific names (for example libharfbuzz.0.dylib), so
-                # collapsing aliases by resolved inode produces a bundle that
-                # silently falls back to Homebrew on the build machine.
-                found.setdefault(str(candidate), candidate)
+        for candidate in native_libraries_in(directory, system):
+            # Preserve every ABI-name symlink. WeasyPrint and Pango load
+            # specific names (for example libharfbuzz.0.dylib), so collapsing
+            # aliases by resolved inode silently falls back to Homebrew.
+            found.setdefault(str(candidate), candidate)
     return sorted(found.values())
 
 
@@ -137,10 +138,38 @@ def verify_weasyprint(env: dict[str, str]) -> None:
     )
     if result.returncode != 0:
         detail = (result.stderr or result.stdout).strip()
+        diagnostics = native_loader_diagnostics(platform.system(), env)
         raise SystemExit(
             "WeasyPrint cannot load its native libraries; the desktop sidecar "
-            f"would ship broken.\n{detail}"
+            f"would ship broken.\n{diagnostics}\n{detail}"
         )
+
+
+def native_loader_diagnostics(system: str, env: dict[str, str]) -> str:
+    """Return actionable, non-secret diagnostics for native loader failures."""
+    directories = native_library_dirs(system)
+    lines = [f"platform={system}"]
+    for directory in directories:
+        lines.append(f"native_dir={directory} exists={directory.is_dir()}")
+        if directory.is_dir():
+            roots = sorted(path.name for path in native_libraries_in(directory, system))
+            lines.append(f"native_roots={','.join(roots) if roots else '<none>'}")
+    if system == "Windows":
+        lines.append(
+            "WEASYPRINT_DLL_DIRECTORIES="
+            + (env.get("WEASYPRINT_DLL_DIRECTORIES") or "<unset>")
+        )
+        for dll in ("libgobject-2.0-0.dll", "libglib-2.0-0.dll", "libpango-1.0-0.dll"):
+            lines.append(f"where_{dll}={shutil.which(dll, path=env.get('PATH')) or '<missing>'}")
+    return "\n".join(lines)
+
+
+def native_libraries_in(directory: Path, system: str) -> list[Path]:
+    found: dict[str, Path] = {}
+    for pattern in NATIVE_LIBRARY_PATTERNS.get(system, ()):
+        for candidate in directory.glob(pattern):
+            found.setdefault(str(candidate), candidate)
+    return sorted(found.values())
 
 
 def build(output: Path) -> Path:
@@ -189,7 +218,14 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     args = parser.parse_args()
-    build(args.output.resolve())
+    DIAGNOSTICS.unlink(missing_ok=True)
+    try:
+        build(args.output.resolve())
+    except BaseException:
+        DIAGNOSTICS.parent.mkdir(parents=True, exist_ok=True)
+        DIAGNOSTICS.write_text(traceback.format_exc(), encoding="utf-8")
+        print(f"document exporter diagnostics saved to {DIAGNOSTICS}", file=sys.stderr)
+        raise
 
 
 if __name__ == "__main__":

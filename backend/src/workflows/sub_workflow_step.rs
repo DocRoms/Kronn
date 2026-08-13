@@ -270,6 +270,7 @@ pub async fn execute_sub_workflow_step(
             step_api_endpoint_path: None,
             is_rollback: false,
             child_run_id: Some(child_run.id.clone()),
+            native_tool_calls: Box::default(),
         },
         condition_action,
     }
@@ -947,6 +948,7 @@ async fn execute_foreach(
             step_api_endpoint_path: None,
             is_rollback: false,
             child_run_id: last_child_id,
+            native_tool_calls: Box::default(),
         },
         condition_action,
     }
@@ -982,6 +984,7 @@ fn fail(step: &WorkflowStep, start: Instant, msg: String) -> StepOutcome {
             step_api_endpoint_path: None,
             is_rollback: false,
             child_run_id: None,
+            native_tool_calls: Box::default(),
         },
         condition_action: None,
     }

@@ -119,7 +119,6 @@ Never load everything "just in case".
 - Do **not** slice `&str` with a hard-coded byte index (`&s[..N]`) when truncating user/agent text — UTF-8 (French, emoji, accented filenames) panics at non-boundary bytes. Use `s.chars().take(N).collect::<String>()` instead. Pattern documented in `feedback_rust_str_slicing` memory.
 - Do **not** rely on `disabled={state}` alone to gate an async button handler — React's state update is async, so two synchronous clicks read the stale closure and fire two API calls. Use `useRef` + check at top of handler. Helper: `useAsyncGuard` in `frontend/src/hooks/useAsyncGuard.ts`.
 - Do **not** nest a `<button>` inside another `<button>` — invalid HTML and produces a React dev warning. Convert the outer to `<div role="button" tabIndex={0}>` with explicit `onKeyDown` for Enter/Space.
-
 ---
 
 ## 4. Development constraints

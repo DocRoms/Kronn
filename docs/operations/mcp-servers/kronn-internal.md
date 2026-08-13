@@ -70,6 +70,15 @@ Bidirectional gateway between a CLI agent (Claude Code, Codex, Gemini, Kiro, Vib
    agents never need to parse prose errors. The optional task
    reference creates the bidirectional Planning link shown in both the
    discussion header and the task detail.
+   Sessions in the same discussion may intentionally declare the same physical
+   checkout. Before `rebase`, squash, `reset` or force-push in such a checkout,
+   create a backup ref at the current HEAD (for example
+   `git update-ref refs/kronn-backup/<name> HEAD`) and call
+   `disc_workspace_history_lease({action: "acquire", backup_ref: "refs/kronn-backup/<name>"})`.
+   Kronn verifies that the ref resolves to the declared HEAD and refuses a
+   second session while the 15-minute lease is active. Release it afterward
+   with `{action: "release"}`. This is deliberately advisory: Kronn arbitrates
+   cooperating agents but cannot intercept a CLI that runs Git without asking.
    `[src: file: backend/src/api/disc_workspace.rs]`
    `[src: file: backend/src/db/sql/101_discussion_workspaces.sql]`
    `[src: file: backend/scripts/disc-introspection-mcp.py]`
@@ -171,6 +180,31 @@ path is the human-gated `kronn-plan-action` fence.
 `[src: file: backend/src/api/agent_tools.rs]`
 `[src: file: backend/scripts/vibe-runner.py]`
 
+## Rich discussion output
+
+Every Kronn discussion message supports Markdown. Agents launched by Kronn and
+CLI agents connected through `kronn-internal` receive the same compact rendering
+contract:
+
+- A fenced `mermaid` block renders as a diagram. Supported roots are
+  `flowchart`/`graph`, `sequenceDiagram`, `classDiagram`, `stateDiagram`,
+  `erDiagram`, `journey`, `gantt`, `pie`, `gitGraph`, the C4 families,
+  `requirementDiagram`, `mindmap`, `timeline`, `sankey-beta`, `xychart-beta`,
+  `block-beta` and `packet-beta`.
+- A fenced `kronn-doc-preview` block renders its HTML in a sandboxed iframe and
+  exposes PDF/DOCX actions. A normal `html` fence remains source code.
+- A fenced `kronn-doc-data` JSON payload exposes CSV, XLSX or PPTX export when
+  its `format` and payload shape match the Kronn Docs skill.
+
+The MCP `initialize` instructions expose this contract before any room tool is
+called, and `disc_join` repeats it in the room protocol. The full document and
+diagram examples remain on demand in the Kronn Docs skill so the permanent MCP
+catalogue does not pay for a long manual.
+`[src: file: frontend/src/components/MessageBubble.tsx:1376-1434]`
+`[src: file: frontend/src/components/MermaidDiagram.tsx:97-108]`
+`[src: file: backend/src/api/disc_prompts.rs:390-398]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:8214-8224]`
+
 Agent-library catalogs deliberately stay compact:
 `skills_list` / `profiles_list` / `directives_list` omit their potentially long
 instruction bodies. After selecting an id, use `skill_get`, `profile_get`, or
@@ -210,6 +244,12 @@ These reads reuse the existing list endpoints and do not mutate the library.
 - Call `disc_workspace_set({task_ref: "KT-140"})` from the worktree root (or
   pass an explicit `workspace_path`) whenever the CLI changes worktree or
   branch. Kronn refreshes branch and HEAD from Git on each declaration.
+- Before every destructive history rewrite in a shared checkout, create the
+  mandatory `refs/kronn-backup/...` ref, acquire
+  `disc_workspace_history_lease`, and stop immediately when `acquired` is
+  false. Release the lease after the operation. The lease is advisory and
+  expires after 15 minutes; renew by acquiring again if the operation runs
+  longer.
 - External worktrees are adopted, not managed: the discussion can target them
   for status, diff, commit, push, PR creation and allowlisted terminal commands,
   but lock/unlock never removes an external path. Legacy Isolated worktrees are

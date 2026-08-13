@@ -311,6 +311,15 @@ mod tests {
             "the model must be told to use what it was given: {with}"
         );
         assert!(
+            with.contains("NOT MCP servers")
+                && with.contains("mcp_list")
+                && with.contains("api_endpoints")
+                && with.contains("api_call")
+                && with.contains("qa_list")
+                && with.contains("qa_run"),
+            "HTTP discussion agents need the complete native API route instead of searching for a vendor MCP: {with}"
+        );
+        assert!(
             without.contains("NO executable tools"),
             "without an executor the model must not invent calls: {without}"
         );
@@ -489,6 +498,64 @@ mod tests {
         assert!(
             !out.contains("call_1"),
             "tool plumbing must not leak into the reply: {out:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_rejecting_declared_tools_returns_an_actionable_error() {
+        use wiremock::matchers::{body_string_contains, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(body_string_contains("\"tools\""))
+            .respond_with(
+                ResponseTemplate::new(400)
+                    .set_body_string(r#"{"error":{"message":"tools are not supported"}}"#),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let started = start_ollama_http(
+            &AgentType::LiteLlm,
+            "which MCP servers are there?",
+            "",
+            "text-only-model",
+            None,
+            Some(&server.uri()),
+            None,
+            Some(std::sync::Arc::new(FakeTools { seen: seen.clone() })),
+        )
+        .await;
+        let error = match started {
+            Ok(_) => panic!(
+                "a provider that rejects the declared catalogue must fail before the step runs blind"
+            ),
+            Err(error) => error,
+        };
+
+        assert!(
+            error.contains("400"),
+            "the provider status must survive: {error}"
+        );
+        assert!(
+            error.contains("may not support tool calling"),
+            "the diagnostic must explain the capability mismatch: {error}"
+        );
+        assert!(
+            error.contains("tool-capable model") && error.contains("ApiCall step"),
+            "the operator needs both recovery paths: {error}"
+        );
+        assert!(
+            error.contains("tools are not supported"),
+            "provider detail lost: {error}"
+        );
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "no tool executes after request rejection"
         );
     }
 

@@ -102,8 +102,10 @@ explicitly owns boot/setup behavior.
 - `backend/src/api_tests.rs` proves an HTTP agent can read a plan and create an
   idempotent task in the current discussion while Kronn owns discussion scope,
   actor identity and source-message provenance.
-- `backend/sidecars/docs/test_build_bundle.py` pins Windows UCRT64 precedence
-  and the loader environment. Desktop CI builds the sidecar before Rust,
+- `backend/sidecars/docs/test_build_bundle.py` pins Windows UCRT64 precedence,
+  the dynamic `setup-msys2` install location, loader diagnostics and the rule
+  that Cargo caches never archive Python/PyInstaller output. Desktop CI builds
+  the sidecar before Rust,
   verifies each DMG checksum, mounts it and strictly verifies the contained
   application signature.
 - `WorkflowDetail.steps.test.tsx` pins the workflow step inspector's default
@@ -113,6 +115,37 @@ explicitly owns boot/setup behavior.
   expires a real eight-child BatchQuickPrompt under an accelerated active-time
   budget and proves that all eight dispatches settle as cancelled, none remains
   active and no discussion retains `awaiting_agent`.
+
+## 0.9.7 reliability regression map
+
+- Discussion-prompt, MCP-initialization and join-protocol tests pin the shared
+  rich-output contract: Mermaid diagrams, sandboxed HTML previews and
+  CSV/XLSX/PPTX export are discoverable by native and CLI agents without
+  loading the full document-generation manual. Mermaid component tests also
+  pin shared, bounded zoom controls across inline and fullscreen rendering.
+- Discussion dispatch, component and browser tests pin a durable attributed
+  error for an unavailable native agent, the shared model/provider diagnostic
+  card, and an idempotent one-target retry anchored to the original turn. A
+  failed LiteLLM target cannot replay successful Claude, Codex or Ollama
+  siblings, and legacy structured 404 messages remain parseable.
+- Discussion-session and peer-wait suites pin expected-room resume, credential
+  rotation rollback, cursor-based peer receipts and content-free awareness.
+- Workflow workspace, dispatch and restart suites pin shared ownership leases,
+  inherited child references, safe terminal cleanup and stale-child cancellation.
+- Template tests exercise every executing step family and reject unknown keys,
+  unsupported filters and unclosed placeholders before side effects.
+- LiteLLM workflow integration performs a real two-request tool loop against a
+  scripted OpenAI-compatible server; catalogue tests pin project/global API and
+  Quick API scope, read-only Planning and secret-free durable receipts.
+- Plugin portability unit and browser tests require explicit post-import scope
+  confirmation and prove the default Global choice reaches the persisted config.
+- Project audit tests distinguish legacy evidence, bootstrap, completed audit,
+  human attestation and validation; Context Audit tests pin persisted drift.
+- `backend/sidecars/docs/test_build_bundle.py` pins Windows UCRT discovery and
+  diagnostics. Desktop CI additionally rejects any incomplete or empty
+  four-platform installer matrix.
+- The axe browser suite scans Projects, Discussions, Plugins, Workflows and
+  Settings against a zero serious/critical baseline and attaches exact targets.
 
 The browser tests deliberately simulate network boundaries without launching a
 paid agent. Unit and integration suites own transport edge cases; Playwright

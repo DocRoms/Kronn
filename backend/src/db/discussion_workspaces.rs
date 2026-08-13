@@ -1,7 +1,7 @@
 //! KT-140 — durable multi-worktree bindings for discussions and joined CLIs.
 
 use anyhow::{bail, Result};
-use chrono::Utc;
+use chrono::{Duration, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -26,6 +26,54 @@ pub struct DiscussionWorkspace {
     pub created_at: String,
     pub updated_at: String,
 }
+
+pub const HISTORY_LEASE_SECONDS: i64 = 15 * 60;
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[ts(export)]
+pub struct WorkspaceHistoryLease {
+    pub id: String,
+    pub disc_id: String,
+    pub session_pk: i64,
+    pub session_agent_type: String,
+    pub session_id: Option<String>,
+    pub canonical_path: String,
+    pub branch: String,
+    pub backup_ref: String,
+    pub head_sha: String,
+    pub acquired_at: String,
+    pub expires_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HistoryLeaseAcquire {
+    Acquired(WorkspaceHistoryLease),
+    Blocked(WorkspaceHistoryLease),
+}
+
+fn map_history_lease(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkspaceHistoryLease> {
+    Ok(WorkspaceHistoryLease {
+        id: row.get(0)?,
+        disc_id: row.get(1)?,
+        session_pk: row.get(2)?,
+        session_agent_type: row.get(3)?,
+        session_id: row.get(4)?,
+        canonical_path: row.get(5)?,
+        branch: row.get(6)?,
+        backup_ref: row.get(7)?,
+        head_sha: row.get(8)?,
+        acquired_at: row.get(9)?,
+        expires_at: row.get(10)?,
+    })
+}
+
+const SELECT_HISTORY_LEASE: &str = "
+    SELECT lease.id, lease.disc_id, lease.session_pk, session.agent_type,
+           session.session_id, lease.canonical_path, lease.branch,
+           lease.backup_ref, lease.head_sha, lease.acquired_at, lease.expires_at
+      FROM discussion_workspace_history_leases lease
+      JOIN discussion_sessions session ON session.id = lease.session_pk
+";
 
 fn map_workspace(row: &rusqlite::Row<'_>) -> rusqlite::Result<DiscussionWorkspace> {
     Ok(DiscussionWorkspace {
@@ -169,6 +217,112 @@ pub fn mark_missing(
     get_for_session(conn, disc_id, session_pk)
 }
 
+/// Acquire or renew the advisory history-rewrite lease for a declared
+/// workspace. The caller must first create `backup_ref` at the declared HEAD;
+/// we persist both values as an auditable proof, not a model assertion.
+pub fn acquire_history_lease(
+    conn: &Connection,
+    disc_id: &str,
+    session_pk: i64,
+    backup_ref: &str,
+) -> Result<HistoryLeaseAcquire> {
+    let tx = conn.unchecked_transaction()?;
+    let now = Utc::now();
+    let now_text = now.to_rfc3339();
+    tx.execute(
+        "UPDATE discussion_workspace_history_leases
+            SET released_at = ?1, release_reason = 'expired'
+          WHERE released_at IS NULL AND unixepoch(expires_at) <= unixepoch(?1)",
+        [&now_text],
+    )?;
+
+    let workspace = get_for_session(&tx, disc_id, session_pk)?.ok_or_else(|| {
+        anyhow::anyhow!("declare this session workspace before acquiring a lease")
+    })?;
+    if workspace.state != "attached" {
+        bail!("the declared workspace is not attached");
+    }
+    let canonical_path = workspace
+        .canonical_path
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("the declared workspace has no canonical path"))?;
+    let head_sha = workspace
+        .head_sha
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("the declared workspace has no HEAD"))?;
+
+    let active_sql = format!(
+        "{SELECT_HISTORY_LEASE}
+         WHERE lease.canonical_path = ?1 AND lease.branch = ?2
+           AND lease.released_at IS NULL
+         LIMIT 1"
+    );
+    if let Some(active) = tx
+        .query_row(
+            &active_sql,
+            params![&canonical_path, &workspace.branch],
+            map_history_lease,
+        )
+        .optional()?
+    {
+        if active.session_pk != session_pk {
+            tx.commit()?;
+            return Ok(HistoryLeaseAcquire::Blocked(active));
+        }
+        let expires_at = (now + Duration::seconds(HISTORY_LEASE_SECONDS)).to_rfc3339();
+        tx.execute(
+            "UPDATE discussion_workspace_history_leases
+                SET backup_ref = ?2, head_sha = ?3, expires_at = ?4
+              WHERE id = ?1 AND released_at IS NULL",
+            params![active.id, backup_ref, head_sha, expires_at],
+        )?;
+        let renewed = tx.query_row(
+            &active_sql,
+            params![&canonical_path, &workspace.branch],
+            map_history_lease,
+        )?;
+        tx.commit()?;
+        return Ok(HistoryLeaseAcquire::Acquired(renewed));
+    }
+
+    let id = Uuid::new_v4().to_string();
+    let expires_at = (now + Duration::seconds(HISTORY_LEASE_SECONDS)).to_rfc3339();
+    tx.execute(
+        "INSERT INTO discussion_workspace_history_leases (
+             id, disc_id, session_pk, canonical_path, branch, backup_ref,
+             head_sha, acquired_at, expires_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            id,
+            disc_id,
+            session_pk,
+            canonical_path,
+            workspace.branch,
+            backup_ref,
+            head_sha,
+            now_text,
+            expires_at,
+        ],
+    )?;
+    let lease = tx.query_row(
+        &active_sql,
+        params![canonical_path, workspace.branch],
+        map_history_lease,
+    )?;
+    tx.commit()?;
+    Ok(HistoryLeaseAcquire::Acquired(lease))
+}
+
+pub fn release_history_lease(conn: &Connection, disc_id: &str, session_pk: i64) -> Result<bool> {
+    let changed = conn.execute(
+        "UPDATE discussion_workspace_history_leases
+            SET released_at = ?3, release_reason = 'released'
+          WHERE disc_id = ?1 AND session_pk = ?2 AND released_at IS NULL",
+        params![disc_id, session_pk, Utc::now().to_rfc3339()],
+    )?;
+    Ok(changed > 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -259,7 +413,7 @@ mod tests {
             &conn, "d2", 8, None, "p1", "/repo-wt", "/repo-wt", "a", "abc",
         )
         .unwrap_err();
-        assert!(error.to_string().contains("UNIQUE constraint failed"));
+        assert!(error.to_string().contains("another discussion"));
     }
 
     #[test]
@@ -284,5 +438,148 @@ mod tests {
         assert_eq!(missing.state, "missing");
         assert_eq!(missing.ownership, "external");
         assert_eq!(missing.workspace_path.as_deref(), Some("/repo-wt"));
+    }
+
+    #[test]
+    fn same_room_sessions_share_a_workspace_but_another_room_is_rejected() {
+        let conn = fixture();
+        conn.execute(
+            "INSERT INTO discussion_sessions (
+                 id, disc_id, agent_type, session_id, role, status, joined_at
+             ) VALUES (8, 'd1', 'ClaudeCode', 'sess-2', 'peer', 'active', 'now')",
+            [],
+        )
+        .unwrap();
+        upsert_external(
+            &conn, "d1", 7, None, "p1", "/repo-wt", "/repo-wt", "shared", "abc",
+        )
+        .unwrap();
+        upsert_external(
+            &conn, "d1", 8, None, "p1", "/repo-wt", "/repo-wt", "shared", "abc",
+        )
+        .expect("the same discussion may intentionally share one checkout");
+        assert_eq!(list_for_discussion(&conn, "d1").unwrap().len(), 2);
+
+        conn.execute(
+            "INSERT INTO discussions (
+                 id, project_id, title, created_at, updated_at, workspace_mode
+             ) VALUES ('d2', 'p1', 'Other', 'now', 'now', 'Direct')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO discussion_sessions (
+                 id, disc_id, agent_type, session_id, role, status, joined_at
+             ) VALUES (9, 'd2', 'Gemini', 'sess-3', 'peer', 'active', 'now')",
+            [],
+        )
+        .unwrap();
+        let error = upsert_external(
+            &conn, "d2", 9, None, "p1", "/repo-wt", "/repo-wt", "shared", "abc",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("another discussion"));
+    }
+
+    #[test]
+    fn history_rewrite_lease_is_exclusive_renewable_and_releasable() {
+        let conn = fixture();
+        conn.execute(
+            "INSERT INTO discussion_sessions (
+                 id, disc_id, agent_type, session_id, role, status, joined_at
+             ) VALUES (8, 'd1', 'ClaudeCode', 'sess-2', 'peer', 'active', 'now')",
+            [],
+        )
+        .unwrap();
+        for session_pk in [7, 8] {
+            upsert_external(
+                &conn,
+                "d1",
+                session_pk,
+                None,
+                "p1",
+                "/repo-wt",
+                "/repo-wt",
+                "release/0.9.7",
+                "abc",
+            )
+            .unwrap();
+        }
+
+        let first = acquire_history_lease(
+            &conn,
+            "d1",
+            7,
+            "refs/kronn-backup/release-0.9.7-before-squash",
+        )
+        .unwrap();
+        let HistoryLeaseAcquire::Acquired(first) = first else {
+            panic!("first holder must acquire")
+        };
+        let renewed = acquire_history_lease(
+            &conn,
+            "d1",
+            7,
+            "refs/kronn-backup/release-0.9.7-before-squash",
+        )
+        .unwrap();
+        let HistoryLeaseAcquire::Acquired(renewed) = renewed else {
+            panic!("same holder must renew idempotently")
+        };
+        assert_eq!(renewed.id, first.id);
+
+        let blocked = acquire_history_lease(
+            &conn,
+            "d1",
+            8,
+            "refs/kronn-backup/release-0.9.7-before-squash-2",
+        )
+        .unwrap();
+        let HistoryLeaseAcquire::Blocked(owner) = blocked else {
+            panic!("the second session must be refused")
+        };
+        assert_eq!(owner.session_pk, 7);
+        assert_eq!(owner.session_agent_type, "Codex");
+
+        assert!(!release_history_lease(&conn, "d1", 8).unwrap());
+        assert!(release_history_lease(&conn, "d1", 7).unwrap());
+        assert!(matches!(
+            acquire_history_lease(
+                &conn,
+                "d1",
+                8,
+                "refs/kronn-backup/release-0.9.7-before-squash-2"
+            )
+            .unwrap(),
+            HistoryLeaseAcquire::Acquired(_)
+        ));
+    }
+
+    #[test]
+    fn expired_history_lease_never_blocks_the_next_session() {
+        let conn = fixture();
+        conn.execute(
+            "INSERT INTO discussion_sessions (
+                 id, disc_id, agent_type, session_id, role, status, joined_at
+             ) VALUES (8, 'd1', 'ClaudeCode', 'sess-2', 'peer', 'active', 'now')",
+            [],
+        )
+        .unwrap();
+        for session_pk in [7, 8] {
+            upsert_external(
+                &conn, "d1", session_pk, None, "p1", "/repo-wt", "/repo-wt", "shared", "abc",
+            )
+            .unwrap();
+        }
+        acquire_history_lease(&conn, "d1", 7, "refs/kronn-backup/first").unwrap();
+        conn.execute(
+            "UPDATE discussion_workspace_history_leases SET expires_at = '2000-01-01T00:00:00Z'",
+            [],
+        )
+        .unwrap();
+        assert!(matches!(
+            acquire_history_lease(&conn, "d1", 8, "refs/kronn-backup/second").unwrap(),
+            HistoryLeaseAcquire::Acquired(_)
+        ));
     }
 }

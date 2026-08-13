@@ -29,7 +29,7 @@ Kronn/
 │       │   ├── disc_helpers.rs # Pure agent/text helpers (~320L, 15 tests): agent_prompt_budget, auth_mode_for, agent_display_name, smart_truncate, summary_threshold/cooldown, is_compact_agent, language_instruction, estimate_extra_context_len
 │       │   ├── disc_prompts.rs # Pure prompt builders (~625L, 9 tests): build_agent_prompt, build_orchestration_prompt, build_synthesis_prompt, OrchestrationContext struct
 │       │   ├── disc_git.rs     # Discussion Git actions, optionally scoped to one declared CLI workspace
-│       │   ├── disc_workspace.rs # Per-joined-session worktree declaration, validation and compact room listing
+│       │   ├── disc_workspace.rs # Joined-session worktree declaration plus advisory history-rewrite lease
 │       │   ├── contacts.rs     # Contacts CRUD + invite codes + network info + ping
 │       │   ├── ws.rs           # WebSocket handler — peer-to-peer presence + auto-add unknown peers + PartialResponseRecovered / BatchRunProgress / BatchRunFinished broadcasts
 │       │   ├── mcps.rs         # MCP 3-tier API: overview, configs CRUD, registry, refresh, secrets
@@ -134,7 +134,7 @@ Kronn/
 │           ├── steps.rs        # Step execution: prompt rendering, stall detection, retry, on_result conditions
 │           ├── batch_step.rs   # BatchQuickPrompt fan-out (0.3.5): resolves batch_items_from (5 input shapes), creates parent_run + N child discussions, optional worktree isolation, aggregates child status via WsMessage::BatchRunProgress/BatchRunFinished
 │           ├── notify_step.rs  # StepType::Notify webhook execution (0.3.5): POST/PUT/GET via reqwest, template rendering in URL + body, zero tokens
-│           ├── template.rs     # Liquid-compatible template engine for {{variable}} substitution
+│           ├── template.rs     # Purpose-built {{variable}} renderer: permissive preview, strict runtime, no Liquid filters
 │           ├── workspace.rs    # Git worktree create/cleanup with lifecycle hooks
 │           └── tracker/
 │               ├── mod.rs      # TrackerSource trait (poll, update_status, comment, create_pr)
@@ -167,7 +167,7 @@ Kronn/
 │       │   ├── AgentSwitchPicker.tsx # Shared compact agent × reasoning-tier picker used by discussion, Quick Prompt and workflow surfaces
 │       │   ├── MarkdownComposerTools.tsx # Shared edit/preview tabs, Markdown help, insertable examples and emoji guidance
 │       │   ├── workflows/WorkflowWizard.tsx # Full workflow editor (~4170L): progressive modes, direct stage/step navigation, reusable prompt editor, save/cancel from each stage
-│       │   ├── PluginPortabilityModal.tsx # Safe-by-default plugin bundle export/import; explicit encrypted-value danger zone
+│       │   ├── PluginPortabilityModal.tsx # Safe bundle export/import, encrypted-value danger zone, explicit post-import Global/project assignment
 │       │   ├── DocPreview.tsx    # HTML doc preview + export (0.5.1) — sandboxed iframe (empty `sandbox=""`) renders the agent-authored HTML, two buttons export PDF / DOCX via /api/docs/{pdf,docx}. Per-format state (idle/loading/ready/error).
 │       │   ├── DocDataExport.tsx # Structured-data export (0.5.1) — JSON payload card for CSV / XLSX / PPTX (no iframe). Header shows format + summary (row/sheet/slide count), single "Export" button per card.
 │       │   ├── SwipeableDiscItem.tsx  # Swipeable sidebar item (110L) — swipe-to-archive/delete

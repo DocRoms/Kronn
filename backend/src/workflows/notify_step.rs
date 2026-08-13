@@ -67,11 +67,11 @@ pub async fn execute_notify_step_with_policy(
     };
 
     // ── Render URL + body via the template engine ───────────────────────
-    let url = match ctx.render(&config.url) {
+    let url = match ctx.render_strict(&config.url) {
         Ok(u) => u,
         Err(e) => return fail(step, start, format!("Template render error on url: {}", e)),
     };
-    let body = match ctx.render(&config.body_template) {
+    let body = match ctx.render_strict(&config.body_template) {
         Ok(b) => b,
         Err(e) => return fail(step, start, format!("Template render error on body: {}", e)),
     };
@@ -181,6 +181,7 @@ pub async fn execute_notify_step_with_policy(
             step_api_endpoint_path: None,
             is_rollback: false,
             child_run_id: None,
+            native_tool_calls: Box::default(),
         },
         condition_action,
     }
@@ -236,6 +237,7 @@ fn fail(step: &WorkflowStep, start: Instant, msg: impl Into<String>) -> StepOutc
             step_api_endpoint_path: None,
             is_rollback: false,
             child_run_id: None,
+            native_tool_calls: Box::default(),
         },
         condition_action,
     }

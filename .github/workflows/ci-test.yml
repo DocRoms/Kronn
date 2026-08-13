@@ -328,6 +328,62 @@ jobs:
         working-directory: backend/sidecars/docs
         run: python3 -m unittest test_build_bundle.py -v
 
+  # A Linux unit test cannot prove that CPython can load MSYS2's DLL graph.
+  # Exercise the exact Windows release-sidecar path on every tested PR so a
+  # broken installer cannot remain hidden until the next version tag.
+  test-docs-sidecar-windows:
+    if: contains(github.event.pull_request.labels.*.name, 'ci-test')
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Windows document-rendering libraries
+        id: msys2
+        uses: msys2/setup-msys2@v2.32.0
+        with:
+          update: false
+          msystem: UCRT64
+          install: mingw-w64-ucrt-x86_64-pango
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: backend/sidecars/docs/pyproject.toml
+
+      - name: Build frozen document exporter
+        id: docs-sidecar
+        run: node desktop/scripts/build-docs-sidecar.mjs
+        env:
+          KRONN_DOCS_NATIVE_LIB_DIRS: ${{ format('{0}/ucrt64/bin', steps.msys2.outputs.msys2-location) }}
+
+      - name: Smoke-test frozen PDF and DOCX exports
+        id: docs-smoke
+        run: >-
+          python backend/sidecars/docs/smoke_bundle.py
+          desktop/src-tauri/resources/docs-sidecar/kronn-docs/kronn-docs.exe
+          --diagnostics target/docs-sidecar-smoke.log
+
+      - name: Upload sidecar diagnostics on failure
+        if: always() && (steps.docs-sidecar.outcome == 'failure' || steps.docs-smoke.outcome == 'failure')
+        uses: actions/upload-artifact@v7
+        with:
+          name: docs-sidecar-windows-diagnostics
+          path: |
+            target/docs-sidecar-bootstrap.log
+            target/docs-sidecar-pyinstaller/*.spec
+            target/docs-sidecar-pyinstaller/work/warn-*.txt
+            target/docs-sidecar-pyinstaller/work/xref-*.html
+            target/docs-sidecar-smoke.log
+          if-no-files-found: warn
+          retention-days: 7
+
   test-frontend:
     if: contains(github.event.pull_request.labels.*.name, 'ci-test')
     runs-on: ubuntu-latest
@@ -452,22 +508,32 @@ jobs:
       - name: Start backend in background
         # KRONN_DATA_DIR points at a fresh tmp dir so each CI run starts
         # from a clean SQLite. The backend needs ~5s to boot + first-run
-        # config seeding.
+        # config seeding. Container jobs run steps with /bin/sh, so keep this
+        # loop POSIX (Bash brace expansion would make only one attempt).
         run: |
-          export KRONN_DATA_DIR=$(mktemp -d)
+          KRONN_DATA_DIR=$(mktemp -d)
+          export KRONN_DATA_DIR
           ./target/release/kronn > /tmp/backend.log 2>&1 &
           echo $! > /tmp/backend.pid
           # Wait for backend to be ready (max 60s).
-          for i in {1..60}; do
+          backend_ready=0
+          attempt=1
+          while [ "$attempt" -le 60 ]; do
             if curl -fsS http://localhost:3140/api/setup/status > /dev/null 2>&1; then
-              echo "Backend ready after ${i}s"
+              backend_ready=1
+              echo "Backend ready after ${attempt}s"
+              break
+            fi
+            if ! kill -0 "$(cat /tmp/backend.pid)" 2>/dev/null; then
+              echo "Backend process exited before becoming ready"
               break
             fi
             sleep 1
+            attempt=$((attempt + 1))
           done
-          if ! curl -fsS http://localhost:3140/api/setup/status > /dev/null 2>&1; then
+          if [ "$backend_ready" -ne 1 ]; then
             echo "Backend failed to start"
-            tail -50 /tmp/backend.log
+            tail -100 /tmp/backend.log
             exit 1
           fi
 

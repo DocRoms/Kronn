@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { beforeEach, describe, it, expect, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { buildApiMock } from '../../test/apiMock';
 
@@ -101,6 +101,107 @@ const PROJECT: Project = {
 };
 
 describe('ProjectCard — repository overview', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('explains audit provenance, paid drift and records an explicit human attestation', async () => {
+    vi.mocked(projectsApi.auditEvidence).mockResolvedValueOnce({
+      project_id: PROJECT.id,
+      status: 'TemplateInstalled',
+      kind: 'missing_evidence',
+      state_file: 'docs/.kronn.json',
+      runtime_workspace: '.kronn/',
+      audit_runs: 2,
+      interrupted_runs: 1,
+      interruption_rate_percent: 50,
+      resumable_after_step: 4,
+    });
+    vi.mocked(projectsApi.contextAudit).mockResolvedValueOnce({
+      project_id: PROJECT.id,
+      audit: { files: [], per_agent: [], proposal: [], findings: [], no_convention_found: false },
+      rendered: '',
+      drift: {
+        grown: [['AGENTS.md', 420]],
+        new_files: [],
+        newly_broken_routes: ['docs/missing.md'],
+        unused_files: ['frontend/AGENTS.md'],
+        paid_agent_growth: [{
+          agent: 'Codex', previous_bytes: 1000, current_bytes: 1420, delta_bytes: 420,
+        }],
+      },
+    });
+    vi.mocked(projectsApi.attestDocumentation).mockResolvedValueOnce({
+      project_id: PROJECT.id,
+      status: 'Audited',
+      kind: 'human_attestation',
+      state_file: 'docs/.kronn.json',
+      runtime_workspace: '.kronn/',
+      audit_runs: 2,
+      interrupted_runs: 1,
+      interruption_rate_percent: 50,
+      resumable_after_step: 4,
+    });
+    vi.mocked(projectsApi.acceptContextBaseline).mockResolvedValueOnce({
+      project_id: PROJECT.id,
+      audit: { files: [], per_agent: [], proposal: [], findings: [], no_convention_found: false },
+      rendered: '',
+      drift: {
+        grown: [], new_files: [], newly_broken_routes: [], unused_files: [], paid_agent_growth: [],
+      },
+    });
+    const confirm = vi.fn().mockReturnValue(true);
+    vi.stubGlobal('confirm', confirm);
+    const toast = vi.fn();
+    const onRefetch = vi.fn();
+
+    render(
+      <ProjectCard
+        project={PROJECT}
+        detailMode
+        isOpen
+        onToggleOpen={noop}
+        discussions={[]}
+        driftStatus={undefined}
+        agents={[]}
+        allSkills={[]}
+        mcpConfigs={[]}
+        workflows={[]}
+        configLanguage="fr"
+        toast={toast}
+        onNavigate={noop}
+        onSetDiscPrefill={noop}
+        onAutoRunDiscussion={noop}
+        onOpenDiscussion={noop}
+        onRefetch={onRefetch}
+        onRefetchDiscussions={noop}
+        onRefetchSkills={noop}
+        onRefetchDrift={noop}
+      />,
+    );
+
+    expect(await screen.findByText('projects.contextAudit.evidence.missing_evidence'))
+      .toBeInTheDocument();
+    expect(screen.getByText('projects.contextAudit.paidGrowth')).toBeInTheDocument();
+    expect(screen.getByText('projects.contextAudit.brokenRoute')).toBeInTheDocument();
+    expect(screen.getByText('projects.contextAudit.orphanFile')).toBeInTheDocument();
+    expect(screen.getByText('projects.contextAudit.resume')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'projects.contextAudit.acceptBaseline' }));
+    await waitFor(() => expect(projectsApi.acceptContextBaseline).toHaveBeenCalledWith(PROJECT.id));
+    expect(await screen.findByText('projects.contextAudit.stable')).toBeInTheDocument();
+    expect(toast).toHaveBeenCalledWith('projects.contextAudit.baselineAccepted', 'success');
+
+    fireEvent.click(screen.getByRole('button', { name: 'projects.contextAudit.attest' }));
+    await waitFor(() => expect(projectsApi.attestDocumentation).toHaveBeenCalledWith(PROJECT.id));
+    expect(confirm).toHaveBeenCalledWith('projects.contextAudit.attestConfirm');
+    expect(await screen.findByText('projects.contextAudit.evidence.human_attestation'))
+      .toBeInTheDocument();
+    expect(onRefetch).toHaveBeenCalled();
+    expect(toast).toHaveBeenCalledWith('projects.contextAudit.attested', 'success');
+    vi.unstubAllGlobals();
+  });
+
   it('shows repository and dependency health, then allows a forced refresh', async () => {
     render(
       <ProjectCard

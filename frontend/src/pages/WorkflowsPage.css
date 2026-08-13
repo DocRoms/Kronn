@@ -735,6 +735,44 @@
   border-top: 1px solid var(--kr-border-light);
 }
 
+.wf-native-tools {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-bottom: 0.65rem;
+}
+
+.wf-native-tools-label {
+  color: var(--kr-text-muted);
+  font-size: 0.7rem;
+  font-weight: 650;
+}
+
+.wf-native-tool-chip {
+  border: 1px solid rgba(var(--kr-success-rgb), 0.35);
+  border-radius: 999px;
+  color: var(--kr-success);
+  font-family: var(--kr-font-mono);
+  font-size: 0.65rem;
+  padding: 0.12rem 0.42rem;
+}
+
+.wf-native-tool-chip[data-ok='false'] {
+  border-color: rgba(var(--kr-danger-rgb), 0.4);
+  color: var(--kr-danger);
+}
+
+.wf-native-tools-empty {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  margin-bottom: 0.65rem;
+  padding: 0.5rem 0.65rem;
+  border-left: 2px solid var(--kr-warning);
+  background: rgba(var(--kr-warning-rgb), 0.06);
+}
+
 .wf-step-output-code {
   padding: var(--kr-sp-5) var(--kr-sp-6);
   border-radius: var(--kr-r-md);

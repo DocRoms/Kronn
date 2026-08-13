@@ -27,25 +27,27 @@
 
 **Smaller prompts, more code where code is enough: fewer hallucinations, lower token bill, eco-design by default.**
 
-> **Status: 0.9.6 (current release).** Functional but pre-1.0. Breaking changes happen between minor versions; patch versions are safe.
+> **Status: 0.9.7 (current release).** Functional but pre-1.0. Breaking changes happen between minor versions; patch versions are safe.
 > **License: AGPL-3.0.** Using Kronn locally to build *your own* product is fine; the copyleft only kicks in if you distribute a modified Kronn to others. See [License notes](#license-notes-agpl-3-0).
 
-## What's new in 0.9.6
+## What's new in 0.9.7
 
-- **Planning for every agent:** CLI agents receive the discussion id explicitly,
-  while Ollama and LiteLLM can read and update the same plan through native
-  tools. Vibe keeps the existing human-approved proposal flow.
-- **Lower, measurable token cost:** bounded context paths, deterministic Quick
-  Exec and a cause-based review ledger replace repeated, unbounded agent work.
-- **Reliable desktop apps:** macOS packages boot their embedded backend and
-  report actionable startup failures; Windows uses a CPython-compatible UCRT
-  sidecar runtime.
+- **Safer collaboration:** session resume is pinned to the expected room, peer
+  receipts are explicit and shared workflow worktrees survive only while their
+  durable children still need them.
+- **Native tools where agents run:** LiteLLM and Ollama workflow steps can call
+  project-scoped Kronn APIs, Quick APIs and read-only Planning tools without
+  receiving credentials. Imported API configurations get an explicit
+  Global/project assignment step.
+- **Release evidence, not hope:** project audit drift and attestation are
+  visible, serious/critical main-page accessibility debt is at zero, and every
+  desktop release requires four non-empty platform installers.
 
-See the complete [0.9.6 and 0.9.5 release notes](CHANGELOG.md).
+See the complete [0.9.7 and 0.9.6 release notes](CHANGELOG.md).
 
 ## Contents
 
-- [What's new in 0.9.6](#whats-new-in-096)
+- [What's new in 0.9.7](#whats-new-in-097)
 - [60-second pitch](#60-second-pitch)
 - [The Kronn way: engineering, not prompting](#the-kronn-way-engineering-not-prompting)
 - [Quick start](#quick-start)
@@ -106,7 +108,7 @@ Download the installer for your OS from [Releases](https://github.com/DocRoms/Kr
 ### From source: one command
 
 ```bash
-git clone --branch 0.9.6 --depth 1 https://github.com/DocRoms/Kronn.git   # latest stable release
+git clone --branch 0.9.7 --depth 1 https://github.com/DocRoms/Kronn.git   # latest stable release
 cd Kronn
 ./kronn start        # guided setup & launch (Docker)
 ```
@@ -137,7 +139,7 @@ app, Docker deployment and a bare `make run-backend` do not require it.
 Requires Docker + Docker Compose. On Windows, WSL2 (Docker Engine inside WSL works, Docker Desktop optional).
 
 ```bash
-git clone --branch 0.9.6 --depth 1 https://github.com/DocRoms/Kronn.git   # latest stable release
+git clone --branch 0.9.7 --depth 1 https://github.com/DocRoms/Kronn.git   # latest stable release
 cd Kronn
 ./kronn start
 # → http://localhost:3140
@@ -215,7 +217,7 @@ A real Auto-Dev workflow in Kronn looks like:
 
 5 steps, 3 deterministic. AI fires only on the 2 reasoning steps, each with a small bounded prompt. Result: **predictable cost, predictable output, debuggable when it breaks.** See [The Kronn way](#the-kronn-way-engineering-not-prompting).
 
-You build this via the **wizard UI** (drag-drop step types, autocomplete on agent/MCP/QP references) or a hand-written `WORKFLOW.md` file (Symphony-compatible), no DSL to learn, both modes interop.
+You build this via the **wizard UI** (drag-drop step types, autocomplete on agent/API/QP references) and can export/import Kronn's versioned JSON bundle. The workflow model deliberately shares Symphony's four workspace-hook names, but Kronn does not currently import `WORKFLOW.md` files.
 
 Workflow engine supports **9 step types** total: `Agent`, `ApiCall`, `BatchApiCall`, `BatchQuickPrompt`, `JsonData`, `Notify`, `Gate` (human approval), `Exec` (allowlist-gated process execution), and `SubWorkflow` for composing reusable workflows. Full reference in [docs/architecture/overview.md](docs/architecture/overview.md#workflow-engine).
 

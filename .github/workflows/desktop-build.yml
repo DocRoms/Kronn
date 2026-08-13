@@ -41,7 +41,11 @@ jobs:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
     steps:
-      - uses: actions/checkout@v4
+      # checkout@v7 retries Git fetch three times. The step timeout keeps
+      # hosted-runner DNS failures bounded and visibly separate from packaging.
+      - name: Checkout source (bounded network retry)
+        uses: actions/checkout@v7
+        timeout-minutes: 5
 
       - name: Install Linux dependencies
         if: matrix.os == 'ubuntu-22.04'
@@ -76,7 +80,8 @@ jobs:
 
       - name: Install Windows document-rendering libraries
         if: matrix.os == 'windows-latest'
-        uses: msys2/setup-msys2@v2
+        id: msys2
+        uses: msys2/setup-msys2@v2.32.0
         with:
           update: false
           # Python.org/Visual Studio builds use UCRT. MSYS2 recommends UCRT64
@@ -91,25 +96,24 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
-          # Keep the legacy desktop-specific directory for branches or local
-          # configs that have not moved to the shared root target yet.
+          # Cache registries only. `target/` also contains the document-sidecar
+          # venv and PyInstaller work tree, which are native to one Python and
+          # one Pango/MSYS2 runtime and must never be restored as Cargo data.
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
-            desktop/src-tauri/target
           key: ${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ matrix.target }}-cargo-
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 24
 
       - name: Setup Python for bundled document exporter
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: '3.12'
           cache: pip
@@ -130,12 +134,43 @@ jobs:
         run: pnpm build
 
       # Fail before the expensive Rust/Tauri compile if WeasyPrint cannot load
-      # the host's native Pango DLLs. Tauri runs the same builder again through
-      # beforeBuildCommand; the prepared venv is reused.
-      - name: Build and smoke-test document exporter
+      # the host's native Pango DLLs or the frozen executable cannot perform
+      # its real health, PDF and DOCX operations. Tauri runs the builder again
+      # through beforeBuildCommand; the prepared venv is reused.
+      - name: Build frozen document exporter
+        id: docs-sidecar
         run: node desktop/scripts/build-docs-sidecar.mjs
         env:
-          KRONN_DOCS_NATIVE_LIB_DIRS: ${{ matrix.os == 'windows-latest' && 'C:\msys64\ucrt64\bin' || '' }}
+          # setup-msys2 may install below the runner temp directory. Its output
+          # is the only supported source of truth; C:\msys64 is not stable.
+          KRONN_DOCS_NATIVE_LIB_DIRS: ${{ matrix.os == 'windows-latest' && format('{0}/ucrt64/bin', steps.msys2.outputs.msys2-location) || '' }}
+
+      - name: Smoke-test frozen PDF and DOCX exporter
+        id: docs-smoke
+        shell: bash
+        run: |
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            SIDECAR="desktop/src-tauri/resources/docs-sidecar/kronn-docs/kronn-docs.exe"
+          else
+            SIDECAR="desktop/src-tauri/resources/docs-sidecar/kronn-docs/kronn-docs"
+          fi
+          python backend/sidecars/docs/smoke_bundle.py \
+            "$SIDECAR" \
+            --diagnostics target/docs-sidecar-smoke.log
+
+      - name: Upload document-exporter diagnostics on failure
+        if: always() && (steps.docs-sidecar.outcome == 'failure' || steps.docs-smoke.outcome == 'failure')
+        uses: actions/upload-artifact@v7
+        with:
+          name: kronn-docs-diagnostics-${{ matrix.label }}
+          path: |
+            target/docs-sidecar-bootstrap.log
+            target/docs-sidecar-pyinstaller/*.spec
+            target/docs-sidecar-pyinstaller/work/warn-*.txt
+            target/docs-sidecar-pyinstaller/work/xref-*.html
+            target/docs-sidecar-smoke.log
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Install Tauri CLI
         run: cargo install tauri-cli --version "^2" --locked
@@ -170,7 +205,7 @@ jobs:
           fi
           cargo tauri build --target ${{ matrix.target }}
         env:
-          KRONN_DOCS_NATIVE_LIB_DIRS: ${{ matrix.os == 'windows-latest' && 'C:\msys64\ucrt64\bin' || '' }}
+          KRONN_DOCS_NATIVE_LIB_DIRS: ${{ matrix.os == 'windows-latest' && format('{0}/ucrt64/bin', steps.msys2.outputs.msys2-location) || '' }}
           # Tauri updater signing — safe to pass even if empty (Tauri ignores empty values)
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
@@ -181,16 +216,6 @@ jobs:
           _APPLE_ID: ${{ secrets.APPLE_ID }}
           _APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           _APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-
-      - name: Smoke-test bundled PDF and DOCX exporter
-        shell: bash
-        run: |
-          if [[ "${{ runner.os }}" == "Windows" ]]; then
-            SIDECAR="desktop/src-tauri/resources/docs-sidecar/kronn-docs/kronn-docs.exe"
-          else
-            SIDECAR="desktop/src-tauri/resources/docs-sidecar/kronn-docs/kronn-docs"
-          fi
-          python backend/sidecars/docs/smoke_bundle.py "$SIDECAR"
 
       # Tauri signs the .app BEFORE creating the DMG. `bundle.macOS.signingIdentity`
       # defaults to the ad-hoc identity and APPLE_SIGNING_IDENTITY overrides it
@@ -258,7 +283,7 @@ jobs:
 
       - name: Upload Windows artifacts
         if: matrix.os == 'windows-latest'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: kronn-windows
           path: |
@@ -266,10 +291,11 @@ jobs:
             desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
             target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
             target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
+          if-no-files-found: error
 
       - name: Upload macOS artifacts
         if: startsWith(matrix.os, 'macos')
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: kronn-${{ matrix.label }}
           # Four candidate paths: legacy vs shared target root × prefixed
@@ -285,7 +311,7 @@ jobs:
 
       - name: Upload Linux artifacts
         if: matrix.os == 'ubuntu-22.04'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: kronn-linux
           path: |
@@ -293,22 +319,42 @@ jobs:
             desktop/src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage
             target/x86_64-unknown-linux-gnu/release/bundle/deb/*.deb
             target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage
+          if-no-files-found: error
+
+  # ─── Prove that every matrix leg produced an installer ─────────────
+
+  verify-installers:
+    needs: build-desktop
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout verifier
+        uses: actions/checkout@v7
+        timeout-minutes: 5
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+
+      - name: Verify the complete installer matrix
+        run: python backend/sidecars/docs/verify_artifacts.py artifacts
 
   # ─── Create GitHub Release on tag ─────────────────────────────────
 
   release:
-    needs: build-desktop
+    needs: [build-desktop, verify-installers]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
 
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: artifacts
 
-      - name: List artifacts
-        run: find artifacts -type f | head -20
+      - name: List verified artifacts
+        run: find artifacts -type f | sort
 
       - name: Create Release
         uses: softprops/action-gh-release@v2

@@ -2085,6 +2085,154 @@ fn reconcile_stale_runs_flips_only_old_running_pending_to_interrupted() {
 }
 
 #[test]
+fn active_child_dispatch_count_is_a_durable_workspace_refcount() {
+    let conn = test_db();
+    crate::db::workflows::insert_workflow(&conn, &sample_workflow("w1")).unwrap();
+    let parent = sample_run("parent-refcount", "w1");
+    crate::db::workflows::insert_run(&conn, &parent).unwrap();
+    let mut child = sample_run("batch-refcount", "w1");
+    child.run_type = "batch".into();
+    child.parent_run_id = Some(parent.id.clone());
+    child.batch_total = 1;
+    crate::db::workflows::insert_run(&conn, &child).unwrap();
+    conn.execute(
+        "INSERT INTO discussions (
+             id, title, workflow_run_id, created_at, updated_at
+         ) VALUES ('disc-refcount', 'Child', 'batch-refcount', 'now', 'now')",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO messages (
+             id, discussion_id, role, content, timestamp, sort_order
+         ) VALUES ('msg-refcount', 'disc-refcount', 'User', 'work', 'now', 0)",
+        [],
+    )
+    .unwrap();
+    crate::db::agent_dispatch::enqueue(
+        &conn,
+        crate::db::agent_dispatch::NewAgentDispatchJob {
+            id: "job-refcount",
+            discussion_id: "disc-refcount",
+            trigger_message_id: "msg-refcount",
+            trigger_sort_order: 0,
+            dedupe_key: "refcount",
+            agent_override: None,
+            chain_prompt_ids: &[],
+            batch_item: None,
+            group_id: Some("batch-refcount"),
+            group_concurrency_limit: Some(1),
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        crate::db::workflows::active_child_dispatch_count(&conn, "parent-refcount").unwrap(),
+        1
+    );
+    crate::db::agent_dispatch::cancel_for_discussion(&conn, "disc-refcount").unwrap();
+    assert_eq!(
+        crate::db::workflows::active_child_dispatch_count(&conn, "parent-refcount").unwrap(),
+        0
+    );
+}
+
+#[test]
+fn terminal_workspace_cleanup_candidates_exclude_interrupted_and_owned_paths() {
+    let conn = test_db();
+    let mut workflow = sample_workflow("w-cleanup");
+    workflow.project_id = Some("p1".into());
+    conn.execute(
+        "INSERT INTO projects (id, name, path, created_at, updated_at)
+         VALUES ('p1', 'Cleanup', '/repo', 'now', 'now')",
+        [],
+    )
+    .unwrap();
+    crate::db::workflows::insert_workflow(&conn, &workflow).unwrap();
+
+    let mut done = sample_run("done-cleanup", "w-cleanup");
+    done.status = RunStatus::Success;
+    done.workspace_path = Some("/repo/.kronn/worktrees/done".into());
+    crate::db::workflows::insert_run(&conn, &done).unwrap();
+    let mut interrupted = sample_run("interrupted-cleanup", "w-cleanup");
+    interrupted.status = RunStatus::Interrupted;
+    interrupted.workspace_path = Some("/repo/.kronn/worktrees/evidence".into());
+    crate::db::workflows::insert_run(&conn, &interrupted).unwrap();
+
+    let mut owned = sample_run("owned-cleanup", "w-cleanup");
+    owned.status = RunStatus::Failed;
+    owned.workspace_path = Some("/repo/.kronn/worktrees/owned".into());
+    crate::db::workflows::insert_run(&conn, &owned).unwrap();
+    let mut owned_batch = sample_run("owned-batch", "w-cleanup");
+    owned_batch.run_type = "batch".into();
+    owned_batch.parent_run_id = Some(owned.id.clone());
+    owned_batch.batch_total = 1;
+    crate::db::workflows::insert_run(&conn, &owned_batch).unwrap();
+    conn.execute(
+        "INSERT INTO discussions (
+             id, title, workflow_run_id, created_at, updated_at
+         ) VALUES ('disc-owned-cleanup', 'Child', 'owned-batch', 'now', 'now')",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO messages (
+             id, discussion_id, role, content, timestamp, sort_order
+         ) VALUES ('msg-owned-cleanup', 'disc-owned-cleanup', 'User', 'work', 'now', 0)",
+        [],
+    )
+    .unwrap();
+    crate::db::agent_dispatch::enqueue(
+        &conn,
+        crate::db::agent_dispatch::NewAgentDispatchJob {
+            id: "job-owned-cleanup",
+            discussion_id: "disc-owned-cleanup",
+            trigger_message_id: "msg-owned-cleanup",
+            trigger_sort_order: 0,
+            dedupe_key: "owned-cleanup",
+            agent_override: None,
+            chain_prompt_ids: &[],
+            batch_item: None,
+            group_id: Some("owned-batch"),
+            group_concurrency_limit: Some(1),
+        },
+    )
+    .unwrap();
+
+    let candidates = crate::db::workflows::terminal_workspace_cleanup_candidates(&conn).unwrap();
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].run_id, "done-cleanup");
+    assert!(crate::db::workflows::mark_workspace_cleaned(
+        &conn,
+        "done-cleanup",
+        "/repo/.kronn/worktrees/done"
+    )
+    .unwrap());
+    assert!(crate::db::workflows::get_run(&conn, "done-cleanup")
+        .unwrap()
+        .unwrap()
+        .workspace_path
+        .is_none());
+    assert_eq!(
+        crate::db::workflows::get_run(&conn, "interrupted-cleanup")
+            .unwrap()
+            .unwrap()
+            .workspace_path
+            .as_deref(),
+        Some("/repo/.kronn/worktrees/evidence")
+    );
+    assert_eq!(
+        crate::db::workflows::get_run(&conn, "owned-cleanup")
+            .unwrap()
+            .unwrap()
+            .workspace_path
+            .as_deref(),
+        Some("/repo/.kronn/worktrees/owned"),
+        "an active child retains durable ownership of the checkout"
+    );
+}
+
+#[test]
 fn set_run_state_key_merges_one_key_under_status_guard() {
     use crate::models::RunStatus::*;
     let conn = test_db();
@@ -2438,6 +2586,7 @@ fn workflow_runs_update() {
         step_api_endpoint_path: None,
         is_rollback: false,
         child_run_id: None,
+        native_tool_calls: Box::default(),
     }];
     crate::db::workflows::update_run(&conn, &run).unwrap();
 

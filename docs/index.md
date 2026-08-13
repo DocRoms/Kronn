@@ -7,18 +7,17 @@ This folder is the project's living knowledge base, shared by humans and AI agen
 - **[AGENTS.md](AGENTS.md)** — Tiered context loader read by Claude Code, Codex, Gemini, Vibe, Copilot, Kiro and any agent that follows the `AGENTS.md` convention. Start here if you're an LLM.
 - **This file (`index.md`)** — Plain landing page for humans browsing the folder. Extend it with whatever helps onboarding.
 
-## Current release: 0.9.6
+## Current release: 0.9.7
 
-- Every discussion agent can use the shared plan: explicit room ids for CLIs,
-  native planning tools for Ollama and LiteLLM, and human-gated proposals for Vibe.
-- Previously unbounded context paths are capped and disclose truncation. Quick
-  Exec handles deterministic checks without spending an agent turn.
-- Discussion cost distinguishes Kronn replies from whole-session CLI telemetry;
-  an unavailable measurement is shown as unknown, never as zero.
-- macOS desktop packages own and start their embedded backend, expose actionable
-  startup failures and tolerate missing optional Docs resources. Windows sidecars
-  use the CPython-compatible UCRT runtime and are smoke-tested before Tauri builds.
-- See the concise [`CHANGELOG.md`](../CHANGELOG.md) for 0.9.6 and 0.9.5, and
+- Session resume and shared-worktree ownership now fail closed instead of
+  silently binding or replaying work in stale contexts.
+- LiteLLM and Ollama workflow steps receive bounded, project-scoped native API,
+  Quick API and read-only Planning tools with secret-free execution receipts.
+- Plugin imports explicitly assign Global/project scope, while project cards
+  expose Context Audit drift and honest human-attestation provenance.
+- Desktop releases smoke-test document generation and require a complete
+  Windows, macOS Intel, macOS ARM and Linux installer matrix.
+- See the concise [`CHANGELOG.md`](../CHANGELOG.md) for 0.9.7 and 0.9.6, and
   [`releases/`](releases/) for older release history.
 
 ## Layout

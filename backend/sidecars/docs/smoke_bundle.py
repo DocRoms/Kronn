@@ -11,6 +11,7 @@ import socket
 import subprocess
 import tempfile
 import time
+import traceback
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -33,11 +34,7 @@ def post_json(url: str, payload: dict[str, object]) -> dict[str, object]:
         return json.load(response)
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("executable", type=Path)
-    args = parser.parse_args()
-
+def smoke(executable: Path) -> None:
     port = free_port()
     env = os.environ.copy()
     env["KRONN_DOCS_PORT"] = str(port)
@@ -50,7 +47,7 @@ def main() -> None:
             Path(tempfile.gettempdir()) / "kronn-no-external-dylibs"
         )
     child = subprocess.Popen(
-        [str(args.executable.resolve())],
+        [str(executable.resolve())],
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -125,6 +122,28 @@ def main() -> None:
             child.wait()
 
     print("kronn-docs frozen bundle smoke test passed (DOCX + PDF)")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("executable", type=Path)
+    parser.add_argument(
+        "--diagnostics",
+        type=Path,
+        help="Write a traceback here when the frozen exporter smoke test fails.",
+    )
+    args = parser.parse_args()
+
+    if args.diagnostics:
+        args.diagnostics.unlink(missing_ok=True)
+    try:
+        smoke(args.executable)
+    except BaseException:
+        diagnostics = traceback.format_exc()
+        if args.diagnostics:
+            args.diagnostics.parent.mkdir(parents=True, exist_ok=True)
+            args.diagnostics.write_text(diagnostics, encoding="utf-8")
+        raise
 
 
 if __name__ == "__main__":

@@ -198,7 +198,7 @@ pub async fn execute_api_call_step_core(
     // unescaped — workflow-step values are typically URL-safe (issue
     // keys, project slugs, etc.); if you need percent-encoding, use the
     // explicit `{key}` + `path_params` form which encodes per RFC 3986.
-    let templated_endpoint = match ctx.render(endpoint_path) {
+    let templated_endpoint = match ctx.render_strict(endpoint_path) {
         Ok(s) => s,
         Err(e) => return fail(step, start, format!("Endpoint template render error: {e}")),
     };
@@ -385,6 +385,7 @@ pub async fn execute_api_call_step_core(
             step_api_endpoint_path: None,
             is_rollback: false,
             child_run_id: None,
+            native_tool_calls: Box::default(),
         },
         condition_action,
     }
@@ -730,12 +731,12 @@ async fn resolve_cli_token(command: &str, args: &[String]) -> Result<String, Str
     let output = tokio::time::timeout(std::time::Duration::from_secs(5), cmd.output())
         .await
         .map_err(|_| format!("Credential CLI `{command}` timed out after 5 seconds"))?
-        .map_err(|e| format!("Credential CLI `{command}` is unavailable: {e}"))?;
+        .map_err(|e| cli_token_unavailable_message(command, &e.to_string()))?;
 
     if !output.status.success() {
-        return Err(format!(
-            "Credential CLI `{command}` failed (exit {})",
-            output.status.code().unwrap_or(-1)
+        return Err(cli_token_failure_message(
+            command,
+            output.status.code().unwrap_or(-1),
         ));
     }
 
@@ -749,6 +750,24 @@ async fn resolve_cli_token(command: &str, args: &[String]) -> Result<String, Str
         ));
     }
     Ok(token)
+}
+
+fn cli_token_unavailable_message(command: &str, detail: &str) -> String {
+    if command == "az" {
+        return format!(
+            "Azure CLI `az` is unavailable: {detail}. Install Azure CLI and run `az login` on the host; Docker users must rebuild the Kronn backend image so the bundled CLI is present"
+        );
+    }
+    format!("Credential CLI `{command}` is unavailable: {detail}")
+}
+
+fn cli_token_failure_message(command: &str, exit_code: i32) -> String {
+    if command == "az" {
+        return format!(
+            "Azure CLI `az` could not resolve a Microsoft Graph credential (exit {exit_code}). Run `az login` on the host, verify `az account get-access-token --resource https://graph.microsoft.com`, then retry. Your organisation's Conditional Access policy may require its SSO/broker flow"
+        );
+    }
+    format!("Credential CLI `{command}` failed (exit {exit_code})")
 }
 
 fn configured_cli_token_fallback(
@@ -957,7 +976,7 @@ fn render_map(
     };
     let mut out = HashMap::with_capacity(map.len());
     for (k, v) in map {
-        out.insert(k.clone(), ctx.render(v)?);
+        out.insert(k.clone(), ctx.render_strict(v)?);
     }
     Ok(out)
 }
@@ -1070,7 +1089,7 @@ pub(crate) fn resolve_path_params(
                     .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
             if is_clean {
                 if let Some(raw_value) = path_params.get(key) {
-                    let rendered = ctx.render(raw_value)?;
+                    let rendered = ctx.render_strict(raw_value)?;
                     // Percent-encode for path-segment safety: any char outside
                     // RFC 3986 unreserved (`A-Za-z0-9-._~`) is escaped, so `/`
                     // in a value can't break out into a different endpoint.
@@ -1138,7 +1157,7 @@ fn render_json_value(value: &Value, ctx: &TemplateContext) -> anyhow::Result<Val
                     return Ok(v);
                 }
             }
-            Ok(Value::String(ctx.render(s)?))
+            Ok(Value::String(ctx.render_strict(s)?))
         }
         Value::Array(items) => {
             let mut out = Vec::with_capacity(items.len());
@@ -1849,6 +1868,7 @@ fn fail(step: &WorkflowStep, start: Instant, msg: String) -> StepOutcome {
             step_api_endpoint_path: None,
             is_rollback: false,
             child_run_id: None,
+            native_tool_calls: Box::default(),
         },
         condition_action,
     }
@@ -2093,6 +2113,32 @@ mod tests {
     }
 
     #[test]
+    fn missing_azure_cli_diagnostic_is_actionable_and_keeps_conditional_access_visible() {
+        let unavailable = cli_token_unavailable_message("az", "No such file");
+        assert!(unavailable.contains("Azure CLI"));
+        assert!(unavailable.contains("az login"));
+        assert!(unavailable.contains("rebuild the Kronn backend image"));
+
+        let failed = cli_token_failure_message("az", 1);
+        assert!(failed.contains("https://graph.microsoft.com"));
+        assert!(failed.contains("Conditional Access"));
+        assert!(failed.contains("SSO/broker"));
+    }
+
+    #[test]
+    fn generic_cli_diagnostics_do_not_claim_azure_remediation() {
+        let unavailable = cli_token_unavailable_message("fastly", "No such file");
+        assert_eq!(
+            unavailable,
+            "Credential CLI `fastly` is unavailable: No such file"
+        );
+        assert_eq!(
+            cli_token_failure_message("fastly", 3),
+            "Credential CLI `fastly` failed (exit 3)"
+        );
+    }
+
+    #[test]
     fn resolve_auth_missing_env_key_errors() {
         // Misconfigured env must surface a clear error, not silently send
         // an unauthenticated request.
@@ -2303,13 +2349,15 @@ mod tests {
     }
 
     #[test]
-    fn endpoint_double_brace_var_unknown_stays_literal_after_render() {
-        // Unknown {{var}} → ctx.render leaves it literal (existing
-        // contract); resolve_path_params then has nothing to do.
+    fn endpoint_double_brace_var_unknown_is_rejected_before_http() {
+        // Execution is strict: a misspelled variable must never become a
+        // malformed outbound URL. The preview renderer remains permissive.
         let ctx = TemplateContext::new();
-        let templated = ctx.render("/items/{{nope}}").unwrap();
-        let resolved = resolve_path_params(&templated, &None, &ctx).unwrap();
-        assert_eq!(resolved, "/items/{{nope}}");
+        let error = ctx
+            .render_strict("/items/{{nope}}")
+            .expect_err("unknown endpoint variable must fail closed");
+        assert!(error.to_string().contains("nope"));
+        assert_eq!(ctx.render("/items/{{nope}}").unwrap(), "/items/{{nope}}");
     }
 
     #[test]
@@ -4058,11 +4106,13 @@ mod tests {
     }
 
     #[test]
-    fn render_body_unknown_ref_stays_literal() {
-        // Unknown ref stays the literal placeholder (broken ref visible, not blanked).
+    fn render_body_unknown_ref_is_rejected_before_http() {
+        // An unresolved body reference must not be sent to the API. Its exact
+        // name stays in the error so the workflow author can repair it.
         let ctx = TemplateContext::new();
         let body = serde_json::json!({ "x": "{{steps.nope.data.foo}}" });
-        let out = render_json_value(&body, &ctx).unwrap();
-        assert_eq!(out["x"], "{{steps.nope.data.foo}}");
+        let error =
+            render_json_value(&body, &ctx).expect_err("unknown body reference must fail closed");
+        assert!(error.to_string().contains("steps.nope.data.foo"));
     }
 }

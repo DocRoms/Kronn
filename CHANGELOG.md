@@ -11,6 +11,74 @@ Release notes for 0.9.3 and earlier are available in the
 
 ## [Unreleased]
 
+## [0.9.7] - 2026-08-13
+
+This release is a reliability sweep across discussions, workflows, project
+audits, plugins and desktop packaging. GitHub Copilot CLI issue #150 remains in
+the backlog because that provider is no longer available in the test
+environment; it is not presented as fixed.
+
+### Added
+
+- LiteLLM and Ollama Agent workflow steps can use a bounded set of Kronn-native
+  tools for configured APIs, Quick APIs and read-only Planning. Tool execution
+  stays project-scoped, secrets remain server-side and run details retain only
+  the tool name and outcome—not arguments or credentials. A completed HTTP
+  Agent step with no recorded call says so explicitly and points operators to
+  a tool-capable model or deterministic `ApiCall` step when external data was
+  expected.
+- Plugin imports now end with an explicit assignment table. Every imported
+  configuration starts with **Global** selected for convenience, but Kronn
+  applies that scope only after confirmation; operators can instead select one
+  or more projects.
+- Context Audit snapshots make documentation drift visible on project cards,
+  and existing documentation can be explicitly attested without pretending an
+  AI audit ran.
+- Desktop CI now smoke-tests PDF and DOCX generation before Tauri packaging,
+  preserves platform diagnostics and requires non-empty Windows, macOS Intel,
+  macOS ARM and Linux installers before a release can proceed.
+
+### Changed
+
+- All discussion agents now receive the same compact rich-output contract.
+  Native and CLI agents can intentionally produce Mermaid diagrams, sandboxed
+  HTML previews with PDF/DOCX actions, or CSV/XLSX/PPTX export cards without
+  relying on the document-generation skill having been auto-selected. Mermaid
+  diagrams now expose shared 50–250% zoom controls in inline and fullscreen
+  views, with scrollable overflow for dense graphs.
+- HTTP discussion agents are told that configured REST APIs are Kronn-native
+  tools, not MCP servers, and are directed through API/Quick API discovery
+  before inventing an unavailable vendor integration.
+- Plugin cards expose registry/configuration drift and retired registry entries
+  instead of silently rewriting encrypted configuration. Microsoft Graph's
+  Docker CLI-token path again uses the authenticated Azure CLI when available.
+- Workflow documentation now describes the exact, limited overlap with OpenAI
+  Symphony: four workspace-hook names are shared, but Kronn does not import
+  `WORKFLOW.md` and does not implement Liquid templates.
+- Serious/critical axe findings on the five main pages now have a zero baseline;
+  future browser failures attach the precise violation targets as diagnostics.
+
+### Fixed
+
+- Native discussion-agent startup failures are no longer left as silent,
+  indefinitely pending targets. Catalogue/model errors and temporary provider
+  outages now share one compact diagnostic card; the latter can retry only the
+  failed agent against the original user turn without replaying successful
+  sibling agents. Legacy structured LiteLLM 404 messages remain readable.
+- Resuming a CLI session can no longer rotate credentials into a different
+  discussion. Peer traffic receipts are cursor-based and content-free, so an
+  agent can detect unseen work without rereading the transcript.
+- Shared and inherited workflow worktrees retain durable ownership while child
+  jobs need them. Restart reconciliation cancels stale workflow children,
+  refuses unsafe fire-and-forget fan-out and purges only managed terminal
+  worktrees.
+- Unknown workflow template variables, malformed filters and unclosed
+  placeholders fail before a step performs an API call, command, notification,
+  gate or agent invocation.
+- Project audit badges distinguish installed templates, bootstrap evidence,
+  completed audits, human attestations and validation without allowing legacy
+  backfill markers to overwrite a newer state.
+
 ## [0.9.6] - 2026-08-12
 
 Kronn's own token cost, measured and then bounded. Every figure below is a byte

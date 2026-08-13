@@ -31,11 +31,11 @@ BRIDGE = "backend/scripts/disc-introspection-mcp.py"
 # The measurement serialises with `ensure_ascii=True`, exactly like the wire:
 # every accented character in a French description travels as a 6-byte
 # `\uXXXX` escape, not as its 2 bytes of UTF-8. The ceiling is pinned to this
-# tree's 86-tool payload after moving reference material to on-demand manuals
+# tree's 87-tool payload after moving reference material to on-demand manuals
 # and keeping field descriptions to the information needed at selection time.
 # It carries no slack: lower it whenever the catalogue shrinks, never raise it
 # to make a build pass.
-CATALOGUE_MAX_BYTES = 92_707
+CATALOGUE_MAX_BYTES = 90_932
 
 # Per-declaration ceiling. The five heaviest tools were 29% of the catalogue for
 # 6% of the tools; their descriptions had grown into manuals. A per-tool cap is

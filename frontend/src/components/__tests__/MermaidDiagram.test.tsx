@@ -111,6 +111,55 @@ describe('MermaidDiagram (0.8.3 #289)', () => {
     expect(document.body.querySelector('.kronn-mermaid-fullscreen-overlay')).toBeNull();
   });
 
+  it('shares bounded zoom controls between inline and fullscreen views', async () => {
+    const src = 'flowchart TD\n  A --> B';
+    const { container } = wrap(<MermaidDiagram source={src} />);
+    await waitFor(() => {
+      expect(container.querySelector('.kronn-mermaid-svg svg')).not.toBeNull();
+    });
+
+    const inlineGroup = container.querySelector(
+      '.kronn-mermaid-zoom-controls[data-mode="inline"]',
+    ) as HTMLElement;
+    expect(inlineGroup).not.toBeNull();
+    expect(screen.getByText('100%')).toBeInTheDocument();
+
+    const zoomIn = inlineGroup.querySelector(
+      'button[aria-label="Zoomer"]',
+    ) as HTMLButtonElement;
+    await act(async () => { fireEvent.click(zoomIn); });
+    expect(screen.getByText('125%')).toBeInTheDocument();
+    expect(container.querySelector('.kronn-mermaid-svg')).toHaveStyle({
+      '--kronn-mermaid-zoom': '125%',
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Plein écran/ }));
+    });
+    const fullscreenGroup = document.body.querySelector(
+      '.kronn-mermaid-zoom-controls[data-mode="fullscreen"]',
+    ) as HTMLElement;
+    expect(fullscreenGroup).not.toBeNull();
+    expect(fullscreenGroup).toHaveTextContent('125%');
+    expect(document.body.querySelector('.kronn-mermaid-fullscreen-svg')).toHaveStyle({
+      '--kronn-mermaid-zoom': '125%',
+    });
+
+    const reset = fullscreenGroup.querySelector('.kronn-mermaid-zoom-level') as HTMLButtonElement;
+    await act(async () => { fireEvent.click(reset); });
+    expect(fullscreenGroup).toHaveTextContent('100%');
+    expect(inlineGroup).toHaveTextContent('100%');
+
+    const zoomOut = fullscreenGroup.querySelector(
+      'button[aria-label="Dézoomer"]',
+    ) as HTMLButtonElement;
+    for (let i = 0; i < 4; i += 1) {
+      await act(async () => { fireEvent.click(zoomOut); });
+    }
+    expect(fullscreenGroup).toHaveTextContent('50%');
+    expect(zoomOut).toBeDisabled();
+  });
+
   it('Print button opens a popup window with the SVG inlined', async () => {
     // Print uses a popup over `@media print` because it sidesteps
     // the host page's 100+ unrelated nodes. We assert that the
@@ -183,7 +232,9 @@ describe('MermaidDiagram (0.8.3 #289)', () => {
     const roots = [
       'flowchart TD', 'graph LR', 'sequenceDiagram', 'classDiagram',
       'stateDiagram-v2', 'erDiagram', 'journey', 'gantt', 'pie',
-      'gitGraph', 'C4Context', 'mindmap', 'timeline',
+      'gitGraph', 'C4Context', 'C4Container', 'C4Component', 'C4Dynamic',
+      'C4Deployment', 'requirementDiagram', 'mindmap', 'timeline',
+      'sankey-beta', 'xychart-beta', 'block-beta', 'packet-beta',
     ];
     for (const root of roots) {
       const src = `${root}\n  X --> Y`;

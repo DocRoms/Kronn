@@ -38,7 +38,10 @@ use std::collections::HashMap;
 use ts_rs::TS;
 
 use crate::models::*;
-use crate::workflows::api_call_executor::{execute_api_call_step_with_db, SecurityPolicy};
+use crate::workflows::api_call_executor::{
+    execute_api_call_step_with_db, execute_api_call_step_with_db_as, ApiCallLogContext,
+    SecurityPolicy,
+};
 use crate::workflows::template::TemplateContext;
 use crate::AppState;
 
@@ -105,6 +108,17 @@ pub struct AgentApiCallRequest {
     /// JSON extract specification (same shape as workflow ApiCall).
     #[serde(default)]
     pub extract: Option<ExtractSpec>,
+
+    /// Server-owned workflow attribution. This field is never advertised in
+    /// the native tool schema; `KronnToolExecutor` stamps it after parsing the
+    /// model's arguments so the model cannot impersonate another run.
+    #[serde(skip)]
+    #[ts(skip)]
+    pub workflow_run_id: Option<String>,
+    /// Server-owned display attribution for audit rows (step/run identity).
+    #[serde(skip)]
+    #[ts(skip)]
+    pub agent: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, TS)]
@@ -292,14 +306,29 @@ pub async fn agent_api_call(
     //    a misconfigured plugin pointing at localhost fails identically
     //    to a real workflow run.
     let ctx = TemplateContext::new();
-    let outcome = execute_api_call_step_with_db(
-        &step,
-        project_id.as_deref(),
-        &state,
-        &ctx,
-        SecurityPolicy::production(),
-    )
-    .await;
+    let workflow_attribution = req.workflow_run_id.clone();
+    let outcome = if let Some(run_id) = workflow_attribution.as_deref() {
+        let mut log_context = ApiCallLogContext::workflow_for_run(run_id);
+        log_context.agent = req.agent.clone();
+        execute_api_call_step_with_db_as(
+            &step,
+            project_id.as_deref(),
+            &state,
+            &ctx,
+            SecurityPolicy::production(),
+            log_context,
+        )
+        .await
+    } else {
+        execute_api_call_step_with_db(
+            &step,
+            project_id.as_deref(),
+            &state,
+            &ctx,
+            SecurityPolicy::production(),
+        )
+        .await
+    };
 
     // 5. Parse the canonical envelope from the executor's output. The
     //    output now carries a trailing `\n[SIGNAL: ...]` for branching
@@ -400,7 +429,7 @@ pub async fn agent_api_call(
     // has a unified audit/debug surface for ALL agent-broker calls.
     // Best-effort: a logging failure must NOT short-circuit the agent's
     // response, so we just `tracing::warn!` and move on.
-    {
+    if workflow_attribution.is_none() {
         use crate::db::api_call_logs::{self, ApiCallSource, ApiCallStatus, NewApiCallLog};
         let plugin = req
             .api_plugin_slug
@@ -429,7 +458,7 @@ pub async fn agent_api_call(
                         project_id: project_for_log.as_deref(),
                         run_id: None,
                         disc_id: disc_for_log.as_deref(),
-                        agent: None,
+                        agent: req.agent.as_deref(),
                         plugin_slug: &plugin,
                         config_id: cfg_id.as_deref(),
                         endpoint_path: &endpoint,
@@ -487,6 +516,8 @@ mod tests {
             headers: None,
             body: None,
             extract: None,
+            workflow_run_id: None,
+            agent: None,
         }
     }
 

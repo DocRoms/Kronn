@@ -98,6 +98,7 @@ pub async fn execute_json_data_step(step: &WorkflowStep) -> StepOutcome {
             step_api_endpoint_path: None,
             is_rollback: false,
             child_run_id: None,
+            native_tool_calls: Box::default(),
         },
         condition_action,
     }
@@ -134,6 +135,7 @@ fn fail(step: &WorkflowStep, start: Instant, msg: impl Into<String>) -> StepOutc
             step_api_endpoint_path: None,
             is_rollback: false,
             child_run_id: None,
+            native_tool_calls: Box::default(),
         },
         condition_action: None,
     }

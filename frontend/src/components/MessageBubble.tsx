@@ -219,6 +219,7 @@ export interface MessageBubbleProps {
   onEditSubmit: () => void;
   onEditTextChange: (text: string) => void;
   onRetry: () => void;
+  onRetryAgentDispatch?: (dispatchId: string, agentType: AgentType) => void;
   onExpandSummary: (msgId: string) => void;
   onNavigate: (page: string, opts?: { scrollTo?: string }) => void;
   /** Discussion id, threaded through to MarkdownContent so the
@@ -261,7 +262,7 @@ export interface MessageBubbleProps {
 export const MessageBubble = memo(function MessageBubble(props: MessageBubbleProps) {
   const { msg, isLastUser, isLastAgent, isEditing, isCopied, isTtsActive, ttsState: tts, isExpandedSummary,
     prevUserTs, defaultAgent, summaryCache, language, sending, editingText, hasFullAccess,
-    onCopy, onTts, onEditStart, onEditCancel, onEditSubmit, onEditTextChange, onRetry, onExpandSummary, onNavigate, discussionId, projectId, chainableQPs, onLaunchQp, attachments, pendingAttachment, isSearchMatch, isSearchCurrent, replyTarget, replies = [], onReply, onReplyNavigate, targets = [], t } = props;
+    onCopy, onTts, onEditStart, onEditCancel, onEditSubmit, onEditTextChange, onRetry, onRetryAgentDispatch, onExpandSummary, onNavigate, discussionId, projectId, chainableQPs, onLaunchQp, attachments, pendingAttachment, isSearchMatch, isSearchCurrent, replyTarget, replies = [], onReply, onReplyNavigate, targets = [], t } = props;
   const editTextareaRef = useRef<HTMLTextAreaElement>(null);
   useLayoutEffect(() => {
     if (isEditing && editTextareaRef.current) {
@@ -289,11 +290,15 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
       summary: t('disc.modelErrorSummary', 'LiteLLM', status, msg.model),
       detail: msg.content,
       tier,
+      retry_dispatch_id: null,
+      retried: false,
     };
   }, [msg.role, msg.content, msg.agent_type, msg.model, msg.model_tier, t]);
   const visibleContent = isUser
     ? stripAgentHandoff(msg.content)
     : modelError?.summary ?? msg.content;
+  const retryDispatchId = modelError?.retry_dispatch_id ?? null;
+  const errorAgentType = msg.agent_type ?? defaultAgent;
   const agentType = msg.agent_type ?? defaultAgent;
   const isTourDemo = msg.role === 'Agent'
     && msg.source_msg_id === 'kronn-guided-tour-demo-preview';
@@ -843,6 +848,20 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
         )}
         {modelError && msg.agent_type && (
           <div className="disc-auth-error-cta">
+            {retryDispatchId && !modelError.retried && onRetryAgentDispatch && (
+              <button
+                className="disc-scan-btn"
+                data-testid="retry-agent-dispatch"
+                style={{ fontSize: 11, padding: '5px 12px' }}
+                onClick={() => onRetryAgentDispatch(retryDispatchId, errorAgentType)}
+              >
+                <RotateCcw size={11} />
+                {t('disc.retryAgent', AGENT_LABELS[msg.agent_type] ?? msg.agent_type)}
+              </button>
+            )}
+            {retryDispatchId && modelError.retried && (
+              <span className="disc-auth-error-hint">{t('disc.agentRetryQueued')}</span>
+            )}
             <button
               className="disc-scan-btn"
               style={{ fontSize: 11, padding: '5px 12px' }}
@@ -859,9 +878,11 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
               <Settings size={11} />
               {t('disc.changeTierModel', t(`disc.tier.${modelError.tier}`))}
             </button>
-            <span className="disc-auth-error-hint">
-              {t('disc.modelErrorHint', modelError.status)}
-            </span>
+            {modelError.status !== null && (
+              <span className="disc-auth-error-hint">
+                {t('disc.modelErrorHint', modelError.status)}
+              </span>
+            )}
           </div>
         )}
         {/* 0.8.3 — End-of-validation CTA. When the agent emits
