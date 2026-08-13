@@ -528,6 +528,15 @@ pub fn detect_audit_status(project_path: &str) -> crate::models::AiAuditStatus {
         if state.validated_at.is_some() {
             return AiAuditStatus::Validated;
         }
+        // A real audit (or an explicit human attestation) performed after
+        // bootstrap advances the project to Audited. Legacy backfill also
+        // seeds an audit entry, so it must not outrank its more precise
+        // Bootstrapped marker below.
+        if state.audits.iter().any(|entry| {
+            entry.provenance != crate::core::kronn_state::AuditProvenance::LegacyEvidence
+        }) {
+            return AiAuditStatus::Audited;
+        }
         if state.bootstrapped_at.is_some() {
             return AiAuditStatus::Bootstrapped;
         }

@@ -133,10 +133,23 @@ pub struct PluginBundleEnvelope {
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
+pub struct ImportedPluginConfig {
+    pub config_id: String,
+    pub server_id: String,
+    pub label: String,
+    pub server_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
 pub struct ImportPluginBundleReport {
     pub bundle_id: String,
     pub already_imported: bool,
     pub imported_config_ids: Vec<String>,
+    /// Human-readable rows for the post-import scope assignment UI. Kept in
+    /// addition to `imported_config_ids` for backwards API compatibility.
+    #[serde(default)]
+    pub imported_configs: Vec<ImportedPluginConfig>,
     pub skipped_plugins: u32,
     pub includes_values: bool,
     pub warnings: Vec<String>,
@@ -643,6 +656,7 @@ fn import_payload(
 
     let transaction = conn.unchecked_transaction()?;
     let mut imported_config_ids = Vec::new();
+    let mut imported_configs = Vec::new();
     let mut warnings = Vec::new();
     let mut conflicts = Vec::new();
     let mut skipped_plugins = 0_u32;
@@ -743,9 +757,11 @@ fn import_payload(
         }
         let config_id = Uuid::new_v4().to_string();
         let encrypted = db::mcps::encrypt_env(&env, instance_secret).map_err(anyhow::Error::msg)?;
+        let imported_server_id = server.id.clone();
+        let imported_server_name = server.name.clone();
         let config = McpConfig {
             id: config_id.clone(),
-            server_id: server.id,
+            server_id: imported_server_id.clone(),
             label: portable.label.clone(),
             env_keys,
             env_encrypted: encrypted,
@@ -778,7 +794,13 @@ fn import_payload(
             ));
         }
         existing_configs.push(config);
-        imported_config_ids.push(config_id);
+        imported_config_ids.push(config_id.clone());
+        imported_configs.push(ImportedPluginConfig {
+            config_id,
+            server_id: imported_server_id,
+            label: portable.label,
+            server_name: imported_server_name,
+        });
     }
 
     let report = ImportPluginBundleReport {
@@ -787,6 +809,7 @@ fn import_payload(
         skipped_plugins,
         includes_values: envelope.includes_values,
         imported_config_ids: imported_config_ids.clone(),
+        imported_configs,
         warnings,
         conflicts,
     };
@@ -1206,6 +1229,13 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(report.imported_config_ids.len(), 1);
+        assert_eq!(report.imported_configs.len(), 1);
+        assert_eq!(
+            report.imported_configs[0].config_id,
+            report.imported_config_ids[0]
+        );
+        assert_eq!(report.imported_configs[0].label, "Portable production");
+        assert_eq!(report.imported_configs[0].server_name, "Portable API");
         assert_eq!(report.skipped_plugins, 0);
         assert!(report
             .conflicts

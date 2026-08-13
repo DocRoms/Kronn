@@ -387,6 +387,16 @@ pub fn build_agent_prompt(
     );
     let agent_has_native_planning = matches!(agent_type, AgentType::Ollama | AgentType::LiteLlm);
 
+    // This is the compact room-rendering contract, not the document authoring
+    // manual. Keep it visible to every runtime; exact payload shapes remain in
+    // the Kronn Docs skill and are only loaded when needed.
+    let rich_output_notice = match disc.language.as_str() {
+        "fr" => "Rendu enrichi Kronn — réponds en Markdown. Si un visuel apporte réellement quelque chose, utilise un bloc `mermaid` (flowchart/graph, sequenceDiagram, classDiagram, stateDiagram, erDiagram, journey, gantt, pie, gitGraph, C4*, requirementDiagram, mindmap, timeline, sankey-beta, xychart-beta, block-beta ou packet-beta). Pour un aperçu HTML isolé avec boutons PDF/DOCX, utilise `kronn-doc-preview` — pas un bloc `html` ordinaire. Pour exporter des données CSV/XLSX/PPTX, utilise un JSON `kronn-doc-data` au format attendu par le skill Kronn Docs.\n\n",
+        "es" => "Salida enriquecida de Kronn — responde en Markdown. Si un recurso visual aporta valor real, usa un bloque `mermaid` (flowchart/graph, sequenceDiagram, classDiagram, stateDiagram, erDiagram, journey, gantt, pie, gitGraph, C4*, requirementDiagram, mindmap, timeline, sankey-beta, xychart-beta, block-beta o packet-beta). Para una vista previa HTML aislada con botones PDF/DOCX, usa `kronn-doc-preview`, no un bloque `html` normal. Para exportar datos CSV/XLSX/PPTX, usa JSON `kronn-doc-data` con la forma indicada por el skill Kronn Docs.\n\n",
+        "zh" => "Kronn 富文本输出 — 请使用 Markdown。仅在图示确有帮助时使用 `mermaid` 代码块（flowchart/graph、sequenceDiagram、classDiagram、stateDiagram、erDiagram、journey、gantt、pie、gitGraph、C4*、requirementDiagram、mindmap、timeline、sankey-beta、xychart-beta、block-beta 或 packet-beta）。如需带 PDF/DOCX 按钮的隔离 HTML 预览，请使用 `kronn-doc-preview`，不要使用普通 `html` 代码块。导出 CSV/XLSX/PPTX 数据时，请按 Kronn Docs skill 的格式输出 `kronn-doc-data` JSON。\n\n",
+        _ => "Kronn rich output — reply in Markdown. When a visual materially helps, use a `mermaid` fence (flowchart/graph, sequenceDiagram, classDiagram, stateDiagram, erDiagram, journey, gantt, pie, gitGraph, C4*, requirementDiagram, mindmap, timeline, sankey-beta, xychart-beta, block-beta or packet-beta). For a sandboxed HTML preview with PDF/DOCX buttons, use `kronn-doc-preview`, not a normal `html` fence. For CSV/XLSX/PPTX data export, use `kronn-doc-data` JSON in the shape documented by the Kronn Docs skill.\n\n",
+    };
+
     // Planning is useful durable context even on turn one. Keep the notice
     // compact and inject no task body: agents pull `plan_get` only when the
     // request concerns tracked work. The explicit id makes CLI writes robust
@@ -506,8 +516,8 @@ pub fn build_agent_prompt(
         // Language instruction at end only — LLMs weight recent text more heavily,
         // and MCP context is injected via --append-system-prompt (separate from prompt).
         return format!(
-            "{}{}{}{}\n\n{}",
-            title_ctx, worktree_notice, planning_notice, content, lang_instr
+            "{}{}{}{}{}\n\n{}",
+            title_ctx, worktree_notice, planning_notice, rich_output_notice, content, lang_instr
         );
     }
 
@@ -565,8 +575,14 @@ pub fn build_agent_prompt(
         ""
     };
     let header = format!(
-        "{}{}{}{}{}{}",
-        title_ctx, worktree_notice, planning_notice, intro_block, interactive_hint, prev_conv_label
+        "{}{}{}{}{}{}{}",
+        title_ctx,
+        worktree_notice,
+        planning_notice,
+        rich_output_notice,
+        intro_block,
+        interactive_hint,
+        prev_conv_label
     );
     let overhead = header.len() + footer.len() + 100; // 100 = notice template space
 
@@ -869,6 +885,41 @@ mod tests {
             assert!(prompt.contains("native `plan_get` and `task_*` tools"));
             assert!(prompt.contains("scoped to this discussion"));
             assert!(!prompt.contains("no disc bound"));
+        }
+    }
+
+    #[test]
+    fn every_discussion_agent_knows_the_rich_output_fences() {
+        for agent in [
+            AgentType::ClaudeCode,
+            AgentType::Codex,
+            AgentType::Vibe,
+            AgentType::GeminiCli,
+            AgentType::Kiro,
+            AgentType::CopilotCli,
+            AgentType::Ollama,
+            AgentType::LiteLlm,
+            AgentType::Custom,
+        ] {
+            let disc = disc_with_messages(vec![user_msg("Show the architecture")], "en");
+            let prompt = build_agent_prompt(&disc, &agent, 0);
+
+            for contract in [
+                "`mermaid`",
+                "sequenceDiagram",
+                "C4*",
+                "packet-beta",
+                "`kronn-doc-preview`",
+                "not a normal `html` fence",
+                "PDF/DOCX",
+                "`kronn-doc-data`",
+                "CSV/XLSX/PPTX",
+            ] {
+                assert!(
+                    prompt.contains(contract),
+                    "{agent:?} prompt must expose rich-output contract {contract}: {prompt}"
+                );
+            }
         }
     }
 

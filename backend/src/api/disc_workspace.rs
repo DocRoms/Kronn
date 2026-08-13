@@ -11,7 +11,9 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use crate::core::cmd::sync_cmd;
-use crate::db::discussion_workspaces::DiscussionWorkspace;
+use crate::db::discussion_workspaces::{
+    DiscussionWorkspace, HistoryLeaseAcquire, WorkspaceHistoryLease,
+};
 use crate::models::{ApiErrorCode, ApiResponse, Project};
 use crate::AppState;
 
@@ -53,6 +55,26 @@ pub struct DiscWorkspaceBlocker {
 pub struct DiscWorkspaceSetResponse {
     pub workspace: DiscussionWorkspace,
     pub blockers: Vec<DiscWorkspaceBlocker>,
+}
+
+#[derive(Debug, Clone, Deserialize, TS)]
+#[ts(export)]
+pub struct DiscWorkspaceHistoryLeaseRequest {
+    pub source_agent: String,
+    pub source_session_id: String,
+    /// `acquire` (or idempotent renewal) / `release`.
+    pub action: String,
+    #[serde(default)]
+    pub backup_ref: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct DiscWorkspaceHistoryLeaseResponse {
+    pub acquired: bool,
+    pub advisory: bool,
+    pub lease: Option<WorkspaceHistoryLease>,
+    pub blocker: Option<DiscWorkspaceBlocker>,
 }
 
 #[derive(Debug)]
@@ -425,13 +447,192 @@ pub async fn disc_workspace_set(
         Ok(workspace) => Json(ApiResponse::ok(workspace)),
         Err(error) => {
             let message = error.to_string();
-            let code = if message.contains("UNIQUE constraint failed") {
+            let code = if message.contains("UNIQUE constraint failed")
+                || message.contains("another discussion")
+            {
                 ApiErrorCode::Conflict
             } else {
                 ApiErrorCode::Validation
             };
             Json(ApiResponse::err_coded(code, message))
         }
+    }
+}
+
+/// `POST /api/disc/workspace/history-lease` — advisory Git rewrite guard.
+pub async fn disc_workspace_history_lease(
+    State(state): State<AppState>,
+    Json(request): Json<DiscWorkspaceHistoryLeaseRequest>,
+) -> Json<ApiResponse<DiscWorkspaceHistoryLeaseResponse>> {
+    let (source_agent, source_session_id) =
+        match required_identity(&request.source_agent, &request.source_session_id) {
+            Ok(identity) => identity,
+            Err(error) => return Json(ApiResponse::err_coded(ApiErrorCode::Validation, error)),
+        };
+    let (session, project) = match session_context(&state, source_agent, source_session_id).await {
+        Ok(context) => context,
+        Err(error) => {
+            return Json(ApiResponse::err_coded(
+                ApiErrorCode::NotFound,
+                error.to_string(),
+            ))
+        }
+    };
+    let action = request.action.trim().to_ascii_lowercase();
+    let disc_id = session.disc_id.clone();
+    let session_pk = session.id;
+
+    if action == "release" {
+        let result = state
+            .db
+            .with_conn(move |conn| {
+                crate::db::discussion_workspaces::release_history_lease(conn, &disc_id, session_pk)
+            })
+            .await;
+        return match result {
+            Ok(released) => Json(ApiResponse::ok(DiscWorkspaceHistoryLeaseResponse {
+                acquired: false,
+                advisory: true,
+                lease: None,
+                blocker: (!released).then(|| DiscWorkspaceBlocker {
+                    kind: "not_held".into(),
+                    message: "this session did not hold an active history-rewrite lease".into(),
+                }),
+            })),
+            Err(error) => Json(ApiResponse::err_coded(
+                ApiErrorCode::Internal,
+                error.to_string(),
+            )),
+        };
+    }
+    if action != "acquire" {
+        return Json(ApiResponse::err_coded(
+            ApiErrorCode::Validation,
+            "action must be `acquire` or `release`",
+        ));
+    }
+
+    let backup_ref = match request
+        .backup_ref
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| value.starts_with("refs/kronn-backup/") && value.len() <= 240)
+    {
+        Some(value) => value.to_string(),
+        None => {
+            return Json(ApiResponse::err_coded(
+                ApiErrorCode::Validation,
+                "acquire requires a backup_ref under refs/kronn-backup/",
+            ))
+        }
+    };
+
+    let lookup_disc_id = disc_id.clone();
+    let workspace = match state
+        .db
+        .with_read_conn(move |conn| {
+            crate::db::discussion_workspaces::get_for_session(conn, &lookup_disc_id, session_pk)?
+                .ok_or_else(|| {
+                    anyhow::anyhow!("declare this session workspace before acquiring a lease")
+                })
+        })
+        .await
+    {
+        Ok(workspace) => workspace,
+        Err(error) => {
+            return Json(ApiResponse::err_coded(
+                ApiErrorCode::Validation,
+                error.to_string(),
+            ))
+        }
+    };
+    let workspace_path = match workspace.workspace_path {
+        Some(path) if workspace.state == "attached" => path,
+        _ => {
+            return Json(ApiResponse::err_coded(
+                ApiErrorCode::Validation,
+                "the declared workspace is not attached",
+            ))
+        }
+    };
+    let project_id = project.id.clone();
+    let repo_roots = local_repo_roots(&project);
+    let backup_ref_for_git = backup_ref.clone();
+    let verified = tokio::task::spawn_blocking(move || {
+        let workspace = validate_workspace(&project_id, repo_roots, &workspace_path)?;
+        let backup_sha = git_value(
+            Path::new(&workspace.canonical_path),
+            &["rev-parse", "--verify", &format!("{backup_ref_for_git}^{{commit}}")],
+        )?;
+        if backup_sha != workspace.head_sha {
+            return Err(format!(
+                "backup_ref points to {backup_sha}, not the current HEAD {}; create or refresh it before acquiring the lease",
+                workspace.head_sha
+            ));
+        }
+        Ok::<_, String>(workspace)
+    })
+    .await;
+    let verified = match verified {
+        Ok(Ok(workspace)) => workspace,
+        Ok(Err(error)) => return Json(ApiResponse::err_coded(ApiErrorCode::Validation, error)),
+        Err(error) => {
+            return Json(ApiResponse::err_coded(
+                ApiErrorCode::Internal,
+                format!("history-lease validation task failed: {error}"),
+            ))
+        }
+    };
+    if workspace.branch != verified.branch
+        || workspace.head_sha.as_deref() != Some(&verified.head_sha)
+    {
+        return Json(ApiResponse::err_coded(
+            ApiErrorCode::Conflict,
+            "the worktree branch or HEAD changed since disc_workspace_set; refresh the declaration and backup ref",
+        ));
+    }
+
+    let result = state
+        .db
+        .with_conn(move |conn| {
+            crate::db::discussion_workspaces::acquire_history_lease(
+                conn,
+                &disc_id,
+                session_pk,
+                &backup_ref,
+            )
+        })
+        .await;
+    match result {
+        Ok(HistoryLeaseAcquire::Acquired(lease)) => {
+            Json(ApiResponse::ok(DiscWorkspaceHistoryLeaseResponse {
+                acquired: true,
+                advisory: true,
+                lease: Some(lease),
+                blocker: None,
+            }))
+        }
+        Ok(HistoryLeaseAcquire::Blocked(owner)) => {
+            let message = format!(
+                "history rewrite refused: {} ({}) already holds the advisory lease until {}",
+                owner.session_agent_type,
+                owner.session_id.as_deref().unwrap_or("unknown session"),
+                owner.expires_at
+            );
+            Json(ApiResponse::ok(DiscWorkspaceHistoryLeaseResponse {
+                acquired: false,
+                advisory: true,
+                lease: Some(owner),
+                blocker: Some(DiscWorkspaceBlocker {
+                    kind: "history_rewrite_locked".into(),
+                    message,
+                }),
+            }))
+        }
+        Err(error) => Json(ApiResponse::err_coded(
+            ApiErrorCode::Conflict,
+            error.to_string(),
+        )),
     }
 }
 

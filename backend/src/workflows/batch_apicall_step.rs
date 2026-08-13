@@ -117,7 +117,7 @@ pub async fn execute_batch_apicall_step(
     let max_items = step.batch_max_items.unwrap_or(DEFAULT_MAX_ITEMS);
 
     // ── Render items_from + parse JSON array of objects ────────────────
-    let rendered = match ctx.render(items_from) {
+    let rendered = match ctx.render_strict(items_from) {
         Ok(s) => s,
         Err(e) => {
             return fail(
@@ -324,6 +324,7 @@ pub async fn execute_batch_apicall_step(
             step_api_endpoint_path: None,
             is_rollback: false,
             child_run_id: None,
+            native_tool_calls: Box::default(),
         },
         condition_action,
     }
@@ -532,6 +533,7 @@ fn empty_success(step: &WorkflowStep, start: Instant) -> StepOutcome {
             step_api_endpoint_path: None,
             is_rollback: false,
             child_run_id: None,
+            native_tool_calls: Box::default(),
         },
         condition_action,
     }
@@ -561,6 +563,7 @@ fn fail(step: &WorkflowStep, start: Instant, msg: impl Into<String>) -> StepOutc
             step_api_endpoint_path: None,
             is_rollback: false,
             child_run_id: None,
+            native_tool_calls: Box::default(),
         },
         condition_action: None,
     }
@@ -843,6 +846,7 @@ mod tests {
                 step_api_endpoint_path: None,
                 is_rollback: false,
                 child_run_id: None,
+                native_tool_calls: Box::default(),
             },
             condition_action: None,
         };

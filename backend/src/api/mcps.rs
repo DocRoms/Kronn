@@ -220,12 +220,10 @@ async fn probe_api_with_policy(
             required,
             detail: format!("GET {} authenticated successfully", definition.path),
         },
-        Ok(_) => failed_probe(
-            "api",
-            "Authenticated API",
-            required,
-            "The safe authentication request failed; check credentials and plugin scope",
-        ),
+        Ok(outcome) => {
+            let detail = api_probe_failure_detail(&outcome.result.output);
+            failed_probe("api", "Authenticated API", required, &detail)
+        }
         Err(_) => failed_probe(
             "api",
             "Authenticated API",
@@ -233,6 +231,13 @@ async fn probe_api_with_policy(
             "The safe authentication request timed out after 15 seconds",
         ),
     }
+}
+
+fn api_probe_failure_detail(output: &str) -> String {
+    if output.contains("Azure CLI `az`") {
+        return output.to_string();
+    }
+    "The safe authentication request failed; check credentials and plugin scope".into()
 }
 
 async fn probe_mcp(
@@ -2915,6 +2920,16 @@ mod tests {
     }
 
     #[test]
+    fn api_probe_preserves_actionable_azure_cli_diagnostic_but_not_remote_body() {
+        let azure = "Azure CLI `az` could not resolve a Microsoft Graph credential (exit 1). Run `az login` on the host; Conditional Access may require SSO/broker";
+        assert_eq!(api_probe_failure_detail(azure), azure);
+        assert_eq!(
+            api_probe_failure_detail("HTTP 401 — upstream body with private details"),
+            "The safe authentication request failed; check credentials and plugin scope"
+        );
+    }
+
+    #[test]
     fn probe_without_any_executable_interface_is_not_ready() {
         let response = build_probe_response("invalid-empty-plugin", vec![]);
         assert!(!response.ready);
@@ -3518,6 +3533,7 @@ mod tests {
             secrets_broken: false,
             host_sync: HostSyncMode::None,
             preferred_interface: PluginInterface::Mcp,
+            registry_drift: None,
         }
     }
 

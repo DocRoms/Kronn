@@ -400,16 +400,23 @@ pub async fn run_qa(
         multi_agent_review: None,
     };
 
-    // 0.8.6 (#59) — record as manual_test : Quick API standalone runs
-    // are user-direct invocations (not part of a workflow). Same audit
-    // category as wizard "Test the call".
+    // Standalone runs are manual tests. A native-tool call made inside an
+    // HTTP Agent step carries server-owned workflow attribution instead.
+    let log_context = if let Some(run_id) = req.workflow_run_id.as_deref() {
+        let mut context =
+            crate::workflows::api_call_executor::ApiCallLogContext::workflow_for_run(run_id);
+        context.agent = req.agent.clone();
+        context
+    } else {
+        crate::workflows::api_call_executor::ApiCallLogContext::manual_test()
+    };
     let outcome = crate::workflows::api_call_executor::execute_api_call_step_with_db_as(
         &step,
         qa.project_id.as_deref(),
         &state,
         &ctx,
         crate::workflows::api_call_executor::SecurityPolicy::production(),
-        crate::workflows::api_call_executor::ApiCallLogContext::manual_test(),
+        log_context,
     )
     .await;
 

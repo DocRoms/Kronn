@@ -924,6 +924,19 @@ pub struct Drift {
     pub newly_broken_routes: Vec<String>,
     /// Files no agent reads. Real cost, zero effect — the pack nobody loads.
     pub unused_files: Vec<String>,
+    /// Growth of the effective instruction payload per agent. This is the
+    /// paid, repeated cost users need to act on; total documentation size is
+    /// intentionally absent because most docs are loaded only on demand.
+    pub paid_agent_growth: Vec<AgentContextGrowth>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct AgentContextGrowth {
+    pub agent: String,
+    pub previous_bytes: usize,
+    pub current_bytes: usize,
+    pub delta_bytes: usize,
 }
 
 /// Compare two audits.
@@ -974,11 +987,33 @@ pub fn drift(previous: &ContextAudit, current: &ContextAudit) -> Drift {
         .map(|file| file.path.clone())
         .collect();
 
+    let previous_agents: HashMap<&str, Option<usize>> = previous
+        .per_agent
+        .iter()
+        .map(|context| (context.agent.as_str(), context.total_bytes))
+        .collect();
+    let mut paid_agent_growth: Vec<AgentContextGrowth> = current
+        .per_agent
+        .iter()
+        .filter_map(|context| {
+            let previous_bytes = previous_agents.get(context.agent.as_str())?.as_ref()?;
+            let current_bytes = context.total_bytes?;
+            (current_bytes > *previous_bytes).then(|| AgentContextGrowth {
+                agent: context.agent.clone(),
+                previous_bytes: *previous_bytes,
+                current_bytes,
+                delta_bytes: current_bytes - *previous_bytes,
+            })
+        })
+        .collect();
+    paid_agent_growth.sort_by_key(|growth| std::cmp::Reverse(growth.delta_bytes));
+
     Drift {
         grown,
         new_files,
         newly_broken_routes,
         unused_files,
+        paid_agent_growth,
     }
 }
 

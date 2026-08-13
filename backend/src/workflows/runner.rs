@@ -7,6 +7,7 @@ use anyhow::Result;
 use chrono::Utc;
 use std::future::Future;
 
+use crate::api::agent_tools::KronnToolExecutor;
 use crate::models::*;
 use crate::AppState;
 
@@ -515,6 +516,7 @@ async fn execute_run_with_notify_policy(
                                 step_api_endpoint_path: None,
                                 is_rollback: false,
                                 child_run_id: None,
+                                native_tool_calls: Box::default(),
                                 step_agent: None,
                                 step_model: None,
                             });
@@ -567,6 +569,7 @@ async fn execute_run_with_notify_policy(
                     step_api_endpoint_path: None,
                     is_rollback: false,
                     child_run_id: None,
+                    native_tool_calls: Box::default(),
                     step_agent: None,
                     step_model: None,
                 });
@@ -709,6 +712,7 @@ async fn execute_run_with_notify_policy(
                     step_api_endpoint_path: None,
                     is_rollback: false,
                     child_run_id: None,
+                    native_tool_calls: Box::default(),
                     step_agent: None,
                     step_model: None,
                 });
@@ -789,6 +793,7 @@ async fn execute_run_with_notify_policy(
                 step_api_endpoint_path: None,
                 is_rollback: false,
                 child_run_id: None,
+                native_tool_calls: Box::default(),
             });
             all_success = false;
             break;
@@ -816,6 +821,7 @@ async fn execute_run_with_notify_policy(
                 step_api_endpoint_path: None,
                 is_rollback: false,
                 child_run_id: None,
+                    native_tool_calls: Box::default(),
             });
             break;
         }
@@ -857,6 +863,7 @@ async fn execute_run_with_notify_policy(
                 step_api_endpoint_path: None,
                 is_rollback: false,
                 child_run_id: None,
+                native_tool_calls: Box::default(),
             });
             stopped_by_guard = true;
             break;
@@ -897,6 +904,7 @@ async fn execute_run_with_notify_policy(
                 step_api_endpoint_path: None,
                 is_rollback: false,
                 child_run_id: None,
+                native_tool_calls: Box::default(),
             });
             stopped_by_guard = true;
             break;
@@ -952,6 +960,7 @@ async fn execute_run_with_notify_policy(
                 step_api_endpoint_path: None,
                 is_rollback: false,
                 child_run_id: None,
+                native_tool_calls: Box::default(),
             });
             stopped_by_guard = true;
             break;
@@ -1009,6 +1018,7 @@ async fn execute_run_with_notify_policy(
             step_api_endpoint_path: None,
             is_rollback: false,
             child_run_id: None,
+            native_tool_calls: Box::default(),
         };
         apply_step_snapshot(
             step,
@@ -1144,6 +1154,7 @@ async fn execute_run_with_notify_policy(
                                 step_api_endpoint_path: None,
                                 is_rollback: false,
                                 child_run_id: None,
+                                native_tool_calls: Box::default(),
                             },
                             condition_action: None,
                         }
@@ -1161,6 +1172,12 @@ async fn execute_run_with_notify_policy(
                         );
                         let step = &hydrated;
                         let full_access = agents_config.full_access_for(&step.agent);
+                        let native_tools = Some(KronnToolExecutor::workflow_arc(
+                            state.clone(),
+                            workflow.project_id.clone(),
+                            run.id.clone(),
+                            step.name.clone(),
+                        ));
                         // Live-progress wiring — without this the user gets a
                         // "step is running" pulse with no visible content until
                         // the step finishes (typical Agent step = 30-120s of
@@ -1199,6 +1216,7 @@ async fn execute_run_with_notify_policy(
                             Some(progress_tx),
                             Some(&agents_config.model_tiers),
                             agents_config.lite_llm.base_url.as_deref(),
+                            native_tools,
                         )
                         .await;
                         // execute_step took ownership of progress_tx and dropped
@@ -1429,6 +1447,7 @@ async fn execute_run_with_notify_policy(
                         step_api_endpoint_path: None,
                         is_rollback: false,
                         child_run_id: None,
+                        native_tool_calls: Box::default(),
                     },
                     condition_action: None,
                 }
@@ -1483,6 +1502,7 @@ async fn execute_run_with_notify_policy(
                         step_api_endpoint_path: None,
                         is_rollback: false,
                         child_run_id: None,
+                        native_tool_calls: Box::default(),
                     },
                     condition_action: None,
                 }
@@ -1838,7 +1858,7 @@ async fn execute_run_with_notify_policy(
             // background, errors logged only, never blocks the run.
             // The URL is templated so `{{state.slack_url}}` etc work.
             if let Some(raw_url) = step.gate_notify_url.as_deref() {
-                if let Ok(rendered_url) = ctx.render(raw_url) {
+                if let Ok(rendered_url) = ctx.render_strict(raw_url) {
                     if !rendered_url.trim().is_empty() {
                         let payload = serde_json::json!({
                             "run_id": run.id,
@@ -2150,6 +2170,12 @@ async fn execute_run_with_notify_policy(
                 }
                 StepType::Agent => {
                     let full_access = agents_config.full_access_for(&rb_step.agent);
+                    let native_tools = Some(KronnToolExecutor::workflow_arc(
+                        state.clone(),
+                        workflow.project_id.clone(),
+                        run.id.clone(),
+                        rb_step.name.clone(),
+                    ));
                     execute_step(
                         rb_step,
                         &project_path,
@@ -2161,6 +2187,7 @@ async fn execute_run_with_notify_policy(
                         None,
                         Some(&agents_config.model_tiers),
                         agents_config.lite_llm.base_url.as_deref(),
+                        native_tools,
                     )
                     .await
                 }
@@ -2268,7 +2295,24 @@ async fn execute_run_with_notify_policy(
     // INHERITED the parent's worktree (Phase 2 sub-workflow child): the
     // parent owns that tree's lifecycle — cleaning it here would delete
     // the child's implementation before the parent's `create_pr` runs.
-    if !paused_for_approval && !is_inherited_workspace {
+    let active_child_dispatches = if run.workspace_path.is_some() {
+        let owner_run_id = run.id.clone();
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::workflows::active_child_dispatch_count(conn, &owner_run_id)
+            })
+            .await
+            .unwrap_or_else(|error| {
+                tracing::error!(run_id = %run.id, "failed to verify child workspace ownership: {error}");
+                // Fail closed: an unavailable refcount must never authorize
+                // deletion of a checkout children may still be reading.
+                1
+            })
+    } else {
+        0
+    };
+    if !paused_for_approval && !is_inherited_workspace && active_child_dispatches == 0 {
         if let Some(ws) = workspace {
             match ws.cleanup().await {
                 Ok(outcome) => {
@@ -2303,6 +2347,12 @@ async fn execute_run_with_notify_policy(
                 }
             }
         }
+    } else if active_child_dispatches > 0 {
+        tracing::warn!(
+            run_id = %run.id,
+            active_child_dispatches,
+            "workspace cleanup deferred: child dispatches still own read access"
+        );
     }
 
     tracing::info!("Workflow run {} finished: {:?}", run.id, run.status);
@@ -3119,6 +3169,7 @@ mod tests {
             step_api_endpoint_path: None,
             is_rollback: false,
             child_run_id: None,
+            native_tool_calls: Box::default(),
         }
     }
 
@@ -3452,6 +3503,7 @@ mod tests {
             step_api_endpoint_path: None,
             is_rollback: false,
             child_run_id: None,
+            native_tool_calls: Box::default(),
         }
     }
 
@@ -3568,6 +3620,7 @@ mod tests {
             step_api_endpoint_path: None,
             is_rollback: false,
             child_run_id: None,
+            native_tool_calls: Box::default(),
         }
     }
 

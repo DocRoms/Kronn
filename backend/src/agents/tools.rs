@@ -189,21 +189,11 @@ pub(crate) fn tool_result_message(outcome: &ToolOutcome) -> Value {
 /// already parses for CLI agents (`frontend/src/lib/kronnToolParser.ts`), so
 /// HTTP-agent calls render like every other agent's.
 pub(crate) fn trace_line(outcome: &ToolOutcome) -> String {
-    let args = if outcome
-        .call
-        .arguments
-        .as_object()
-        .is_some_and(|o| o.is_empty())
-    {
-        String::new()
-    } else {
-        outcome.call.arguments.to_string()
-    };
     let status = if outcome.ok { "ok" } else { "error" };
-    format!(
-        "[kronn-internal: {}({}) → {}]",
-        outcome.call.name, args, status
-    )
+    // Never put arguments into stderr: these lines are consumed by workflow
+    // history and discussion diagnostics, and a model can pass arbitrary API
+    // bodies/query values. Name + outcome are enough for observability.
+    format!("[kronn-internal: {}() → {}]", outcome.call.name, status)
 }
 
 #[cfg(test)]
@@ -337,12 +327,13 @@ mod tests {
             call: ToolCall {
                 id: "c".into(),
                 name: "api_call".into(),
-                arguments: json!({"endpoint_path": "/x"}),
+                arguments: json!({"endpoint_path": "/x", "token": "secret"}),
             },
             content: json!({"error": "boom"}),
             ok: false,
         };
         assert!(trace_line(&failed).ends_with("→ error]"));
-        assert!(trace_line(&failed).contains("/x"));
+        assert!(!trace_line(&failed).contains("/x"));
+        assert!(!trace_line(&failed).contains("secret"));
     }
 }

@@ -1114,6 +1114,16 @@ impl RunStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
+pub struct NativeToolCallLog {
+    /// Public Kronn-native tool name. Arguments and results are deliberately
+    /// absent: workflow history must remain useful without persisting request
+    /// payloads, API parameters, or anything that could contain a secret.
+    pub name: String,
+    pub ok: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
 pub struct StepResult {
     pub step_name: String,
     pub status: RunStatus,
@@ -1193,6 +1203,15 @@ pub struct StepResult {
     /// for legacy rows. The inverse of `WorkflowRun.parent_run_id`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub child_run_id: Option<String>,
+    /// Bounded Kronn-native calls made by an HTTP Agent step (Ollama or
+    /// LiteLLM). Only tool name + outcome are persisted; arguments/results
+    /// stay in the provider round-trip and can never leak into run history.
+    #[serde(default, skip_serializing_if = "is_empty_tool_call_log")]
+    pub native_tool_calls: Box<[NativeToolCallLog]>,
+}
+
+fn is_empty_tool_call_log(value: &[NativeToolCallLog]) -> bool {
+    value.is_empty()
 }
 
 // ─── Workflow API requests ────────────────────────────────────────────────

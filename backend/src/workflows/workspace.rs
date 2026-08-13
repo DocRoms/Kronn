@@ -364,6 +364,25 @@ impl Workspace {
         Ok(outcome)
     }
 
+    /// Purge a worktree left behind by an already-terminal run after a crash.
+    /// Unlike `cleanup`, this never runs user hooks and never deletes the
+    /// branch ref: the original runner may already have persisted/pushed it,
+    /// and boot recovery must remove discoverable checkout data only.
+    pub async fn purge_terminal_checkout(repo_path: &Path, worktree_path: &Path) -> Result<()> {
+        let output = async_cmd("git")
+            .args(["worktree", "remove", "--force"])
+            .arg(worktree_path)
+            .current_dir(repo_path)
+            .output()
+            .await
+            .context("Failed to purge terminal workflow worktree")?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("git worktree remove failed: {}", stderr.trim());
+        }
+        Ok(())
+    }
+
     /// Execute a lifecycle hook shell command in the workspace directory.
     async fn run_hook(&self, hook_name: &str) -> Result<()> {
         let cmd = match (&self.hooks, hook_name) {
@@ -725,6 +744,40 @@ mod tests {
         assert_eq!(preserved.ahead, 1, "exactly one commit beyond main");
         assert!(!preserved.head_sha.is_empty());
         assert!(!preserved.pushed_upstream, "no remote → no upstream");
+    }
+
+    #[tokio::test]
+    async fn terminal_purge_removes_checkout_but_preserves_branch_evidence() {
+        let (_dir, repo) = make_test_repo().await;
+        let ws = Workspace::create(&repo, "boot-cleanup", "aabbccdd-run", None)
+            .await
+            .expect("create worktree");
+        let path = ws.path.clone();
+        let branch = ws.branch.clone();
+        assert!(path.exists());
+
+        // Boot cleanup is intentionally narrower than normal cleanup: it
+        // removes only the discoverable checkout and keeps the branch ref as
+        // crash evidence, even when that branch is still synced with main.
+        drop(ws);
+        Workspace::purge_terminal_checkout(&repo, &path)
+            .await
+            .expect("purge terminal checkout");
+
+        assert!(
+            !path.exists(),
+            "the stale checkout must no longer be visible"
+        );
+        let branch_check = crate::core::cmd::async_cmd("git")
+            .args(["show-ref", "--verify", &format!("refs/heads/{branch}")])
+            .current_dir(&repo)
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            branch_check.status.success(),
+            "boot cleanup must preserve the branch ref"
+        );
     }
 
     #[tokio::test]

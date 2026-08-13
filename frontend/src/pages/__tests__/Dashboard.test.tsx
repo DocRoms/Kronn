@@ -26,6 +26,21 @@ vi.mock('../../lib/api', () => ({
     auditStatus: vi.fn().mockResolvedValue(null),
     auditResumable: vi.fn().mockResolvedValue(null),
     auditStatusAll: vi.fn().mockResolvedValue([]),
+    auditEvidence: vi.fn().mockResolvedValue({
+      project_id: '', status: 'NoTemplate', kind: 'no_documentation',
+      state_file: 'docs/.kronn.json', runtime_workspace: '.kronn/',
+      audit_runs: 0, interrupted_runs: 0, interruption_rate_percent: 0,
+      resumable_after_step: null,
+    }),
+    contextAudit: vi.fn().mockResolvedValue({
+      project_id: '',
+      audit: {
+        files: [], per_agent: [], proposal: [], findings: [],
+        no_convention_found: true,
+      },
+      rendered: '',
+      drift: null,
+    }),
     // 0.8.7 — ProjectCard polls antiHalluStatus at mount.
     antiHalluStatus: vi.fn().mockResolvedValue({ present: false, file_exists: false }),
     injectAntiHallu: vi.fn().mockResolvedValue({ status: 'ok', result: 'noop' }),

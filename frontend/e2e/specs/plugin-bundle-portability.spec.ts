@@ -56,12 +56,26 @@ test('exports a selection and imports it again through the Plugins UI', async ({
   await expect(importDialog.getByText(label)).toBeVisible();
   await importDialog.getByRole('button', { name: 'Importer le bundle' }).click();
   await expect(importDialog.getByText(/1 configuration\(s\) créée\(s\)/)).toBeVisible();
+  await expect(importDialog.getByRole('checkbox', {
+    name: /Global — tous les projets/,
+  })).toBeChecked();
+  await importDialog.getByRole('button', {
+    name: /Appliquer la portée et terminer/,
+  }).click();
+
+  // A Playwright click resolves once the event is dispatched, not once the
+  // async handler has persisted both scope writes. The modal closes only
+  // after updateConfig + setConfigProjects have completed, so use that
+  // user-visible transition as the durable write receipt before reading the
+  // overview. Without it, the assertion raced the PATCH and was flaky.
+  await expect(importDialog).not.toBeVisible();
 
   const overview = await request.get('/api/mcps');
   const overviewBody = await overview.json();
   const imported = (overviewBody?.data?.configs ?? []).filter(
-    (config: { id: string; label: string }) => config.label === label,
+    (config: { id: string; label: string; is_global: boolean }) => config.label === label,
   );
   expect(imported).toHaveLength(1);
+  expect(imported[0].is_global).toBe(true);
   createdConfigIds.add(imported[0].id);
 });

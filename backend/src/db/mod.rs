@@ -4,6 +4,7 @@ pub mod api_call_logs;
 pub mod audit_runs;
 pub mod cli_telemetry;
 pub mod contacts;
+pub mod context_audits;
 pub mod disc_source;
 pub mod discussion_sessions;
 pub mod discussion_workspaces;

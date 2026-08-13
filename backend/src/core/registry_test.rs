@@ -825,9 +825,24 @@ mod tests {
             .expect("microsoft must expose api_spec")
             .auth
         {
-            ApiAuthKind::CliToken { command, .. } => assert_eq!(command, "az"),
+            ApiAuthKind::CliToken { command, args, .. } => {
+                assert_eq!(command, "az");
+                assert!(args
+                    .windows(2)
+                    .any(|pair| pair == ["--resource", "https://graph.microsoft.com"]));
+            }
             other => panic!("expected CliToken(az), got {other:?}"),
         }
+        assert!(m
+            .token_help
+            .as_deref()
+            .unwrap()
+            .contains("Conditional Access"));
+        assert_eq!(
+            legacy_registry_replacement("mcp-microsoft-365"),
+            Some("api-microsoft-365")
+        );
+        assert_eq!(legacy_registry_replacement("unknown-old-plugin"), None);
     }
 
     #[test]

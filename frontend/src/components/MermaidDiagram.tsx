@@ -13,9 +13,9 @@
  * initial bundle stays light — only mounted when the user actually
  * opens a doc that contains a diagram.
  */
-import { useEffect, useRef, useState, useId, memo } from 'react';
+import { useEffect, useRef, useState, useId, memo, type CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
-import { ChevronDown, ChevronRight, AlertTriangle, Maximize2, Printer, X } from 'lucide-react';
+import { ChevronDown, ChevronRight, AlertTriangle, Maximize2, Minus, Plus, Printer, X } from 'lucide-react';
 import { useT } from '../lib/I18nContext';
 import { sanitizeMermaidSource } from '../lib/mermaidSanitize';
 import './MermaidDiagram.css';
@@ -23,6 +23,14 @@ import './MermaidDiagram.css';
 interface MermaidDiagramProps {
   /** Raw mermaid source (without the opening ```mermaid / closing ``` fence). */
   source: string;
+}
+
+const MIN_ZOOM = 50;
+const MAX_ZOOM = 250;
+const ZOOM_STEP = 25;
+
+function zoomStyle(zoom: number): CSSProperties {
+  return { '--kronn-mermaid-zoom': `${zoom}%` } as CSSProperties;
 }
 
 /**
@@ -73,6 +81,7 @@ function MermaidDiagramImpl({ source }: MermaidDiagramProps) {
   } | null>(null);
   const [showSource, setShowSource] = useState(false);
   const [fullscreen, setFullscreen] = useState(false);
+  const [zoom, setZoom] = useState(100);
   // Cached SVG markup. Stored so we can re-inject it into the
   // fullscreen overlay's DOM node when the user toggles fullscreen
   // (the inline container's innerHTML is the source of truth).
@@ -204,6 +213,48 @@ function MermaidDiagramImpl({ source }: MermaidDiagramProps) {
     win.document.close();
   };
 
+  const zoomOut = () => setZoom(value => Math.max(MIN_ZOOM, value - ZOOM_STEP));
+  const zoomIn = () => setZoom(value => Math.min(MAX_ZOOM, value + ZOOM_STEP));
+
+  const zoomControls = (mode: 'inline' | 'fullscreen') => (
+    <div
+      className="kronn-mermaid-zoom-controls"
+      role="group"
+      aria-label={t('mermaid.zoomControls')}
+      data-mode={mode}
+    >
+      <button
+        type="button"
+        className="kronn-mermaid-zoom-btn"
+        onClick={zoomOut}
+        disabled={zoom <= MIN_ZOOM}
+        aria-label={t('mermaid.zoomOut')}
+        title={t('mermaid.zoomOut')}
+      >
+        <Minus size={13} />
+      </button>
+      <button
+        type="button"
+        className="kronn-mermaid-zoom-level"
+        onClick={() => setZoom(100)}
+        aria-label={`${t('mermaid.resetZoom')} — ${zoom}%`}
+        title={t('mermaid.resetZoom')}
+      >
+        {zoom}%
+      </button>
+      <button
+        type="button"
+        className="kronn-mermaid-zoom-btn"
+        onClick={zoomIn}
+        disabled={zoom >= MAX_ZOOM}
+        aria-label={t('mermaid.zoomIn')}
+        title={t('mermaid.zoomIn')}
+      >
+        <Plus size={13} />
+      </button>
+    </div>
+  );
+
   if (!source.trim()) return null;
 
   return (
@@ -224,8 +275,15 @@ function MermaidDiagramImpl({ source }: MermaidDiagramProps) {
         </div>
       ) : (
         <>
-          <div ref={containerRef} className="kronn-mermaid-svg" />
+          <div className="kronn-mermaid-viewport" data-testid="mermaid-inline-viewport">
+            <div
+              ref={containerRef}
+              className="kronn-mermaid-svg"
+              style={zoomStyle(zoom)}
+            />
+          </div>
           <div className="kronn-mermaid-actions">
+            {zoomControls('inline')}
             <button
               type="button"
               className="kronn-mermaid-action-btn"
@@ -279,15 +337,27 @@ function MermaidDiagramImpl({ source }: MermaidDiagramProps) {
                 className="kronn-mermaid-fullscreen-content"
                 onClick={e => e.stopPropagation()}
               >
-                <button
-                  type="button"
-                  className="kronn-mermaid-fullscreen-close"
-                  onClick={() => setFullscreen(false)}
-                  aria-label={t('mermaid.closeFullscreen')}
+                <div className="kronn-mermaid-fullscreen-toolbar">
+                  {zoomControls('fullscreen')}
+                  <button
+                    type="button"
+                    className="kronn-mermaid-fullscreen-close"
+                    onClick={() => setFullscreen(false)}
+                    aria-label={t('mermaid.closeFullscreen')}
+                  >
+                    <X size={20} />
+                  </button>
+                </div>
+                <div
+                  className="kronn-mermaid-fullscreen-viewport"
+                  data-testid="mermaid-fullscreen-viewport"
                 >
-                  <X size={20} />
-                </button>
-                <div ref={fullscreenRef} className="kronn-mermaid-fullscreen-svg" />
+                  <div
+                    ref={fullscreenRef}
+                    className="kronn-mermaid-fullscreen-svg"
+                    style={zoomStyle(zoom)}
+                  />
+                </div>
               </div>
             </div>,
             document.body

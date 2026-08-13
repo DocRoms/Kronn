@@ -2176,6 +2176,12 @@ pub async fn test_step(
     // tiers exactly like a real run (run-9 finding: overrides were dropped).
     let model_tiers = agents.model_tiers.clone();
     let lite_llm_base_url = agents.lite_llm.base_url.clone();
+    let native_tools = Some(crate::api::agent_tools::KronnToolExecutor::workflow_arc(
+        state.clone(),
+        req.project_id.clone(),
+        "test-step".to_string(),
+        req.step.name.clone(),
+    ));
 
     // In dry_run mode, prepend a simulation preamble. The preamble is
     // adaptive so it does not fight the output contract downstream steps rely on:
@@ -2228,6 +2234,7 @@ pub async fn test_step(
             Some(progress_tx),
             Some(&model_tiers),
             lite_llm_base_url.as_deref(),
+            native_tools,
         )
         .await;
 

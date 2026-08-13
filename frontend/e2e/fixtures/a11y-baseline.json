@@ -1,12 +1,8 @@
 {
-  "_doc": "Per-page a11y baseline — `<rule_id>: <node_count>`. Updates require explicit review (= a passing PR that intentionally raised or lowered a count). axe rules listed here are KNOWN serious/critical issues that pre-existed this baseline; the test enforces 'no new rule' AND 'no count increase' against this snapshot. Lower a count when fixing nodes; remove the entry when fixing the rule entirely. Last lowered 2026-08-12 against the local 0.9.6 release backend.",
+  "_doc": "Per-page a11y baseline — `<rule_id>: <node_count>`. Updates require explicit review (= a passing PR that intentionally raised or lowered a count). axe rules listed here are KNOWN serious/critical issues that pre-existed this baseline; the test enforces 'no new rule' AND 'no count increase' against this snapshot. Lower a count when fixing nodes; remove the entry when fixing the rule entirely. All main-page serious/critical counts reached zero for 0.9.7 on 2026-08-13.",
   "Projects": {},
   "Discussions": {},
-  "Plugins": {
-    "color-contrast": 1
-  },
+  "Plugins": {},
   "Workflows": {},
-  "Settings": {
-    "color-contrast": 2
-  }
+  "Settings": {}
 }

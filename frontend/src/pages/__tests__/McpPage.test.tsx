@@ -69,6 +69,7 @@ const makeConfig = (id: string, serverId: string, serverName: string, opts?: Par
   secrets_broken: opts?.secrets_broken ?? false,
   host_sync: opts?.host_sync ?? 'None',
   preferred_interface: opts?.preferred_interface ?? 'mcp',
+  registry_drift: opts?.registry_drift,
 });
 
 const makeProject = (id: string, name: string): Project => ({
@@ -195,6 +196,59 @@ describe('McpPage', () => {
     expect(screen.getByText('Fastly CLI version 15.4.0')).toBeTruthy();
     expect(screen.getByText('Optionnel')).toBeTruthy();
     expect(screen.getByText('Optional exploratory MCP is unavailable')).toBeTruthy();
+  });
+
+  it('surfaces registry drift with stored and expected key names', () => {
+    const server = makeServer('api-chartbeat', 'Chartbeat');
+    server.transport = 'ApiOnly';
+    const config = makeConfig('chartbeat-config', 'api-chartbeat', 'Chartbeat', {
+      env_keys: ['CHARTBEAT_API_KEY', 'LEGACY_HOST'],
+      registry_drift: {
+        orphaned: false,
+        stored_env_keys: ['CHARTBEAT_API_KEY', 'LEGACY_HOST'],
+        expected_env_keys: ['CHARTBEAT_API_KEY', 'CHARTBEAT_HOST'],
+        unexpected_env_keys: ['LEGACY_HOST'],
+        missing_env_keys: ['CHARTBEAT_HOST'],
+      },
+    });
+    const overview: McpOverview = {
+      servers: [server], configs: [config], customized_contexts: [], incompatibilities: [], incomplete_configs: [],
+    };
+
+    wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
+    expect(screen.getByRole('button', { name: 'Chartbeat — Voir les détails' })).toHaveTextContent('Config obsolète');
+    fireEvent.click(screen.getByRole('button', { name: 'Chartbeat — Voir les détails' }));
+
+    const warning = screen.getByTestId('mcp-registry-drift');
+    expect(warning).toHaveTextContent('Clés de configuration désynchronisées');
+    expect(warning).toHaveTextContent('CHARTBEAT_API_KEY, LEGACY_HOST');
+    expect(warning).toHaveTextContent('CHARTBEAT_API_KEY, CHARTBEAT_HOST');
+    expect(warning).toHaveTextContent('Kronn ne renomme ni ne supprime');
+  });
+
+  it('names the known replacement for an orphaned Microsoft 365 config', () => {
+    const config = makeConfig('legacy-m365', 'mcp-microsoft-365', 'Microsoft 365', {
+      registry_drift: {
+        orphaned: true,
+        stored_env_keys: ['MICROSOFT_CLIENT_ID'],
+        expected_env_keys: [],
+        unexpected_env_keys: ['MICROSOFT_CLIENT_ID'],
+        missing_env_keys: [],
+        replacement_server_id: 'api-microsoft-365',
+      },
+    });
+    const overview: McpOverview = {
+      servers: [makeServer('mcp-microsoft-365', 'Microsoft 365')],
+      configs: [config], customized_contexts: [], incompatibilities: [], incomplete_configs: [],
+    };
+
+    wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Microsoft 365 — Voir les détails' }));
+
+    const warning = screen.getByTestId('mcp-registry-drift');
+    expect(warning).toHaveTextContent('Ancienne configuration de plugin détectée');
+    expect(warning).toHaveTextContent('mcp-microsoft-365');
+    expect(warning).toHaveTextContent('api-microsoft-365');
   });
 
   it('anchors the plugin panel below the list controls boundary', async () => {

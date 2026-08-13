@@ -7744,6 +7744,97 @@ async fn disc_workspace_declaration_round_trips_through_http_and_rejects_other_r
     assert_eq!(room_list["success"], true);
     assert_eq!(room_list["data"][0]["branch"], "feature/http-workspace");
 
+    // KT-244: two CLIs in ONE room can declare the same checkout, but only
+    // one may hold the advisory history-rewrite lease at a time.
+    let second_disc_id = disc_id.to_string();
+    state
+        .db
+        .with_conn(move |connection| {
+            kronn::db::discussion_sessions::create_session(
+                connection,
+                &second_disc_id,
+                "ClaudeCode",
+                Some("workspace-http-session-2"),
+                "peer",
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let (_, second_declared) = post_json(
+        app.clone(),
+        "/api/disc/workspace",
+        serde_json::json!({
+            "source_agent": "ClaudeCode",
+            "source_session_id": "workspace-http-session-2",
+            "workspace_path": worktree,
+        }),
+    )
+    .await;
+    assert_eq!(second_declared["success"], true, "{second_declared:?}");
+
+    git(
+        &worktree,
+        &["update-ref", "refs/kronn-backup/http-before-squash", "HEAD"],
+    );
+    let (_, acquired) = post_json(
+        app.clone(),
+        "/api/disc/workspace/history-lease",
+        serde_json::json!({
+            "source_agent": "Codex",
+            "source_session_id": "workspace-http-session",
+            "action": "acquire",
+            "backup_ref": "refs/kronn-backup/http-before-squash",
+        }),
+    )
+    .await;
+    assert_eq!(acquired["success"], true, "{acquired:?}");
+    assert_eq!(acquired["data"]["acquired"], true);
+    assert_eq!(acquired["data"]["advisory"], true);
+
+    let (_, blocked) = post_json(
+        app.clone(),
+        "/api/disc/workspace/history-lease",
+        serde_json::json!({
+            "source_agent": "ClaudeCode",
+            "source_session_id": "workspace-http-session-2",
+            "action": "acquire",
+            "backup_ref": "refs/kronn-backup/http-before-squash",
+        }),
+    )
+    .await;
+    assert_eq!(blocked["success"], true, "{blocked:?}");
+    assert_eq!(blocked["data"]["acquired"], false);
+    assert_eq!(blocked["data"]["blocker"]["kind"], "history_rewrite_locked");
+    assert!(blocked["data"]["blocker"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("Codex"));
+
+    let (_, released) = post_json(
+        app.clone(),
+        "/api/disc/workspace/history-lease",
+        serde_json::json!({
+            "source_agent": "Codex",
+            "source_session_id": "workspace-http-session",
+            "action": "release",
+        }),
+    )
+    .await;
+    assert_eq!(released["success"], true);
+    let (_, acquired_after_release) = post_json(
+        app.clone(),
+        "/api/disc/workspace/history-lease",
+        serde_json::json!({
+            "source_agent": "ClaudeCode",
+            "source_session_id": "workspace-http-session-2",
+            "action": "acquire",
+            "backup_ref": "refs/kronn-backup/http-before-squash",
+        }),
+    )
+    .await;
+    assert_eq!(acquired_after_release["data"]["acquired"], true);
+
     let (_, rejected) = post_json(
         app,
         "/api/disc/workspace",
@@ -12069,6 +12160,7 @@ mod cold_api_handlers_tests {
             step_api_endpoint_path: None,
             is_rollback: false,
             child_run_id: None,
+            native_tool_calls: Box::default(),
         };
         let run_for_update = run_id.clone();
         state

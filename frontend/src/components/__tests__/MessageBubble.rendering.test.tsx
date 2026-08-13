@@ -862,6 +862,44 @@ describe('MessageBubble — inline CTAs', () => {
     });
   });
 
+  it('renders an unreachable LiteLLM failure with a targeted one-agent retry', () => {
+    const onRetryAgentDispatch = vi.fn();
+    const content = '[kronn:agent-error]\n' + JSON.stringify({
+      kind: 'agent_error',
+      status: null,
+      summary: 'LiteLlm is temporarily unreachable.',
+      detail: 'LiteLLM unreachable at http://proxy: connection refused',
+      tier: 'default',
+      retry_dispatch_id: 'job-lite',
+      retried: false,
+    });
+    renderBubble(makeMessage({
+      role: 'System',
+      content,
+      agent_type: 'LiteLlm',
+      model: 'model-a',
+      model_tier: 'default',
+    }), { onRetryAgentDispatch });
+
+    expect(screen.getByTestId('disc-model-error-content')).toHaveTextContent('temporarily unreachable');
+    fireEvent.click(screen.getByText('disc.retryAgent'));
+    expect(onRetryAgentDispatch).toHaveBeenCalledWith('job-lite', 'LiteLlm');
+  });
+
+  it('marks a retried failure without offering a second immediate retry', () => {
+    const onRetryAgentDispatch = vi.fn();
+    const content = '[kronn:agent-error]\n' + JSON.stringify({
+      kind: 'agent_error', status: null, summary: 'unreachable', detail: 'vpn',
+      tier: 'default', retry_dispatch_id: 'job-lite', retried: true,
+    });
+    renderBubble(makeMessage({ role: 'System', content, agent_type: 'LiteLlm' }), {
+      onRetryAgentDispatch,
+    });
+
+    expect(screen.getByText('disc.agentRetryQueued')).toBeInTheDocument();
+    expect(screen.queryByText('disc.retryAgent')).not.toBeInTheDocument();
+  });
+
   it('rejects malformed model-error events instead of hiding their raw content', () => {
     expect(parseModelErrorEvent('[kronn:model-error]\n{"status":404}')).toBeNull();
     expect(parseModelErrorEvent('ordinary system error')).toBeNull();

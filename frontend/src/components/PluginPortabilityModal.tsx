@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { Download, KeyRound, LockKeyhole, Upload, X } from 'lucide-react';
+import { Check, Download, Globe2, KeyRound, LockKeyhole, Upload, X } from 'lucide-react';
 import { mcps as mcpsApi } from '../lib/api';
 import { triggerDownload } from '../lib/downloadBlob';
 import { useT } from '../lib/I18nContext';
@@ -9,11 +9,13 @@ import type {
   ImportPluginBundleReport,
   McpConfigDisplay,
   PluginBundlePreview,
+  Project,
 } from '../types/generated';
 
 interface PluginPortabilityModalProps {
   mode: 'export' | 'import';
   configs: McpConfigDisplay[];
+  projects: Project[];
   onClose: () => void;
   onImported: () => void;
 }
@@ -28,6 +30,7 @@ interface BundleHeader {
 export function PluginPortabilityModal({
   mode,
   configs,
+  projects,
   onClose,
   onImported,
 }: PluginPortabilityModalProps) {
@@ -44,6 +47,10 @@ export function PluginPortabilityModal({
   const [importHeader, setImportHeader] = useState<BundleHeader | null>(null);
   const [importFilename, setImportFilename] = useState('');
   const [report, setReport] = useState<ImportPluginBundleReport | null>(null);
+  const [importScopes, setImportScopes] = useState<Record<string, {
+    global: boolean;
+    projectIds: string[];
+  }>>({});
 
   const orderedConfigs = useMemo(
     () => [...configs].sort((left, right) => left.label.localeCompare(right.label)),
@@ -128,6 +135,10 @@ export function PluginPortabilityModal({
         passphrase: importHeader?.encrypted ? passphrase : null,
       });
       setReport(nextReport);
+      setImportScopes(Object.fromEntries(nextReport.imported_configs.map(item => [
+        item.config_id,
+        { global: true, projectIds: [] },
+      ])));
       onImported();
       toast(
         nextReport.already_imported
@@ -135,6 +146,36 @@ export function PluginPortabilityModal({
           : t('mcp.portability.importDone', nextReport.imported_config_ids.length),
         nextReport.conflicts.length > 0 ? 'warning' : 'success',
       );
+    } catch (caught) {
+      setError(userError(caught));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const saveImportScopes = async () => {
+    if (!report || busy) return;
+    const missingScope = report.imported_configs.some(item => {
+      const scope = importScopes[item.config_id];
+      return scope && !scope.global && scope.projectIds.length === 0;
+    });
+    if (missingScope) {
+      setError(t('mcp.portability.scopeRequired'));
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      for (const item of report.imported_configs) {
+        const scope = importScopes[item.config_id] ?? { global: true, projectIds: [] };
+        await mcpsApi.updateConfig(item.config_id, { is_global: scope.global });
+        await mcpsApi.setConfigProjects(item.config_id, {
+          project_ids: scope.global ? [] : scope.projectIds,
+        });
+      }
+      onImported();
+      toast(t('mcp.portability.scopeSaved'), 'success');
+      onClose();
     } catch (caught) {
       setError(userError(caught));
     } finally {
@@ -352,6 +393,84 @@ export function PluginPortabilityModal({
               <div className="mcp-portability-report">
                 <strong>{t('mcp.portability.report')}</strong>
                 <span>{t('mcp.portability.importedCount', report.imported_config_ids.length)}</span>
+                {report.imported_configs.length > 0 && (
+                  <div className="mcp-portability-scope-editor">
+                    <div className="mcp-portability-scope-heading">
+                      <strong>{t('mcp.portability.scopeTitle')}</strong>
+                      <span>{t('mcp.portability.scopeHint')}</span>
+                    </div>
+                    <div className="mcp-portability-scope-table" role="table">
+                      <div className="mcp-portability-scope-header" role="row">
+                        <span role="columnheader">{t('mcp.portability.pluginColumn')}</span>
+                        <span role="columnheader">{t('mcp.portability.projectsColumn')}</span>
+                      </div>
+                      {report.imported_configs.map(item => {
+                        const scope = importScopes[item.config_id] ?? {
+                          global: true,
+                          projectIds: [],
+                        };
+                        return (
+                          <div className="mcp-portability-scope-row" role="row" key={item.config_id}>
+                            <span role="cell" className="mcp-portability-scope-plugin">
+                              <strong>{item.label}</strong>
+                              <small>{item.server_name}</small>
+                            </span>
+                            <span role="cell" className="mcp-portability-scope-choices">
+                              <label className="mcp-portability-global-choice">
+                                <input
+                                  type="checkbox"
+                                  checked={scope.global}
+                                  onChange={event => setImportScopes(previous => ({
+                                    ...previous,
+                                    [item.config_id]: {
+                                      global: event.target.checked,
+                                      projectIds: event.target.checked ? [] : scope.projectIds,
+                                    },
+                                  }))}
+                                />
+                                <Globe2 size={13} /> {t('mcp.portability.global')}
+                              </label>
+                              {!scope.global && (
+                                <div className="mcp-portability-project-choices">
+                                  {projects.map(project => (
+                                    <label key={project.id}>
+                                      <input
+                                        type="checkbox"
+                                        checked={scope.projectIds.includes(project.id)}
+                                        onChange={event => setImportScopes(previous => ({
+                                          ...previous,
+                                          [item.config_id]: {
+                                            global: false,
+                                            projectIds: event.target.checked
+                                              ? [...scope.projectIds, project.id]
+                                              : scope.projectIds.filter(id => id !== project.id),
+                                          },
+                                        }))}
+                                      />
+                                      {project.name}
+                                    </label>
+                                  ))}
+                                  {projects.length === 0 && (
+                                    <small>{t('mcp.portability.noProjects')}</small>
+                                  )}
+                                </div>
+                              )}
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                    <button
+                      type="button"
+                      className="mcp-btn-action mcp-btn-action-primary"
+                      disabled={busy}
+                      onClick={saveImportScopes}
+                    >
+                      <Check size={13} />
+                      {busy ? t('common.loading') : t('mcp.portability.applyScope')}
+                    </button>
+                  </div>
+                )}
                 {report.warnings.map((warning, index) => (
                   <span key={`warning-${index}`}>⚠ {warning}</span>
                 ))}

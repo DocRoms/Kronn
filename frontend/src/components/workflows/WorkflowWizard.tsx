@@ -3141,20 +3141,19 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                         Gate/Exec/BatchQuickPrompt. */}
                     {(!step.step_type || step.step_type.type === 'Agent') && (
                       <div className="mb-5">
-                        {/* Ollama = local, tool-less HTTP model: no file/repo/MCP
-                            access. It only ever sees the prompt text, so a WF that
-                            relies on the agent reading the worktree won't work with
-                            Ollama unless the content is injected into the prompt. */}
-                        {step.agent === 'Ollama' && (
+                        {/* HTTP agents have no filesystem or arbitrary MCP bridge,
+                            but workflow runs now expose a bounded Kronn-native
+                            catalogue for APIs, Quick APIs and Planning reads. */}
+                        {(step.agent === 'Ollama' || step.agent === 'LiteLlm') && (
                           <div className="wf-ollama-note" role="note">
                             <Info size={12} />
-                            <span>{t('wiz.ollamaNoFilesNote')}</span>
+                            <span>{t('wiz.httpAgentNoFilesNote')}</span>
                           </div>
                         )}
                         {/* Active lint: the prompt looks like it asks the agent to
                             READ files/worktree — impossible for a tool-less Ollama.
                             Escalate to a warning so the user injects the content. */}
-                        {step.agent === 'Ollama' && promptNeedsFileAccess(step.prompt_template) && (
+                        {(step.agent === 'Ollama' || step.agent === 'LiteLlm') && promptNeedsFileAccess(step.prompt_template) && (
                           <div className="wf-ollama-note wf-ollama-note--warn" role="alert">
                             <AlertTriangle size={12} />
                             <span>{t('wiz.ollamaContextLint')}</span>

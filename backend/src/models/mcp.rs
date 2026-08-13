@@ -369,6 +369,30 @@ pub struct McpConfigDisplay {
     pub host_sync: HostSyncMode,
     #[serde(default)]
     pub preferred_interface: PluginInterface,
+    /// Display-safe warning when a persisted registry config no longer matches
+    /// the built-in registry. Key *names* are exposed, never decrypted values.
+    /// `None` means the config still matches, or belongs to a user-managed
+    /// (manual/detected/imported) server for which no registry contract exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub registry_drift: Option<McpConfigRegistryDrift>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct McpConfigRegistryDrift {
+    /// True when the config still targets a registry-owned DB server whose id
+    /// no longer exists in the current built-in registry.
+    pub orphaned: bool,
+    pub stored_env_keys: Vec<String>,
+    pub expected_env_keys: Vec<String>,
+    pub unexpected_env_keys: Vec<String>,
+    pub missing_env_keys: Vec<String>,
+    /// Explicit migration hint for a known registry rename. Kronn never
+    /// applies it automatically because the auth contract may also differ.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub replacement_server_id: Option<String>,
 }
 
 /// Result of a real plugin readiness probe. Checks are deliberately

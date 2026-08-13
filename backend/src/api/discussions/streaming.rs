@@ -238,10 +238,13 @@ pub(crate) enum AgentExecutionOutcome {
     RuntimeUnavailable { reason: String },
 }
 
-fn agent_start_failure_outcome(error: &str) -> AgentExecutionOutcome {
+fn agent_start_failure_outcome(agent_type: &AgentType, error: &str) -> AgentExecutionOutcome {
     let non_retryable_http_status = agent_http_status(error)
         .is_some_and(|status| (400..500).contains(&status) && !matches!(status, 408 | 425 | 429));
-    if error.starts_with("Project path not found:") || non_retryable_http_status {
+    if matches!(agent_type, AgentType::LiteLlm | AgentType::Ollama)
+        || error.starts_with("Project path not found:")
+        || non_retryable_http_status
+    {
         AgentExecutionOutcome::PreflightFailed
     } else {
         AgentExecutionOutcome::RuntimeUnavailable {
@@ -262,32 +265,68 @@ fn agent_http_status(error: &str) -> Option<u16> {
 /// unreadable. Keep the raw diagnostic in a machine-readable System event so
 /// the UI can collapse it, while exposing the HTTP code, attempted model and
 /// reasoning tier for a one-click settings shortcut.
-fn model_start_error_content(
+fn agent_start_error_content(
     agent_type: &AgentType,
     model: Option<&str>,
     tier: crate::models::ModelTier,
     language: &str,
     error: &str,
+    retry_dispatch_id: Option<&str>,
 ) -> Option<String> {
-    let status = agent_http_status(error)?;
-    if !matches!(status, 400 | 404 | 422) {
+    let backend = format!("{agent_type:?}");
+    let status = agent_http_status(error);
+    let is_model_error =
+        status.is_some_and(|code| matches!(code, 400 | 404 | 422)) && model.is_some();
+    if !is_model_error && !matches!(agent_type, AgentType::LiteLlm | AgentType::Ollama) {
         return None;
     }
-    let model = model?;
-    let backend = format!("{agent_type:?}");
-    let summary = match language {
-        "fr" => format!(
-            "{backend} a répondu HTTP {status} : le modèle « {model} » est introuvable, indisponible dans cette région ou non autorisé."
-        ),
-        "es" => format!(
-            "{backend} respondió HTTP {status}: el modelo «{model}» no existe, no está disponible en esta región o no está autorizado."
-        ),
-        "zh" => format!(
-            "{backend} 返回 HTTP {status}：模型“{model}”不存在、在此区域不可用或未获授权。"
-        ),
-        _ => format!(
-            "{backend} returned HTTP {status}: model “{model}” was not found, is unavailable in this region, or is not authorized."
-        ),
+    let summary = if is_model_error {
+        let status = status.expect("model error has an HTTP status");
+        let model = model.expect("model error has an attempted model");
+        match language {
+            "fr" => format!(
+                "{backend} a répondu HTTP {status} : le modèle « {model} » est introuvable, indisponible dans cette région ou non autorisé."
+            ),
+            "es" => format!(
+                "{backend} respondió HTTP {status}: el modelo «{model}» no existe, no está disponible en esta región o no está autorizado."
+            ),
+            "zh" => format!(
+                "{backend} 返回 HTTP {status}：模型“{model}”不存在、在此区域不可用或未获授权。"
+            ),
+            _ => format!(
+                "{backend} returned HTTP {status}: model “{model}” was not found, is unavailable in this region, or is not authorized."
+            ),
+        }
+    } else if let Some(status) = status {
+        match language {
+            "fr" => format!(
+                "{backend} a échoué avec le code HTTP {status}. Vérifiez l'accès, le VPN ou le service, puis relancez uniquement cet agent."
+            ),
+            "es" => format!(
+                "{backend} falló con el código HTTP {status}. Comprueba el acceso, la VPN o el servicio y vuelve a ejecutar solo este agente."
+            ),
+            "zh" => format!(
+                "{backend} 请求失败（HTTP {status}）。请检查访问权限、VPN 或服务，然后仅重试此智能体。"
+            ),
+            _ => format!(
+                "{backend} failed with HTTP {status}. Check access, the VPN or service, then retry only this agent."
+            ),
+        }
+    } else {
+        match language {
+            "fr" => format!(
+                "{backend} est momentanément inaccessible. Vérifiez la connexion, le VPN ou le service, puis relancez uniquement cet agent."
+            ),
+            "es" => format!(
+                "{backend} no está disponible temporalmente. Comprueba la conexión, la VPN o el servicio y vuelve a ejecutar solo este agente."
+            ),
+            "zh" => format!(
+                "{backend} 暂时无法访问。请检查网络、VPN 或服务，然后仅重试此智能体。"
+            ),
+            _ => format!(
+                "{backend} is temporarily unreachable. Check the connection, VPN or service, then retry only this agent."
+            ),
+        }
     };
     let tier = match tier {
         crate::models::ModelTier::Economy => "economy",
@@ -295,13 +334,15 @@ fn model_start_error_content(
         crate::models::ModelTier::Reasoning => "reasoning",
     };
     let payload = serde_json::json!({
-        "kind": "model_error",
+        "kind": if is_model_error { "model_error" } else { "agent_error" },
         "status": status,
         "summary": summary,
         "detail": error,
         "tier": tier,
+        "retry_dispatch_id": retry_dispatch_id,
+        "retried": false,
     });
-    Some(format!("[kronn:model-error]\n{payload}"))
+    Some(format!("[kronn:agent-error]\n{payload}"))
 }
 
 fn finish_tracked_preflight(
@@ -1079,14 +1120,14 @@ async fn make_agent_stream_inner(
         // disk-read MCP context so both reach the agent via
         // `mcp_context_override`. Without this, API plugins never surface
         // because `.mcp.json` doesn't carry them by design.
-        let plugin_block = if let Some(ref pid) = disc.project_id {
+        let plugin_block = {
             let secret = {
                 let cfg = state.config.read().await;
                 cfg.encryption_secret.clone()
             };
             match secret {
                 Some(secret) => {
-                    let pid = pid.clone();
+                    let project_id = disc.project_id.clone();
                     let secret_c = secret.clone();
                     // Decrypt configs only to resolve NON-SECRET values used
                     // by the broker metadata block (tenant id, workspace
@@ -1095,13 +1136,16 @@ async fn make_agent_stream_inner(
                     let (api_plugins, preference_plugins) = state
                         .db
                         .with_conn(move |conn| {
-                            let api_plugins = crate::core::mcp_scanner::collect_active_api_plugins(
-                                conn, &pid, &secret_c,
-                            )?;
+                            let api_plugins =
+                                crate::core::mcp_scanner::collect_active_api_plugins_for_scope(
+                                    conn,
+                                    project_id.as_deref(),
+                                    &secret_c,
+                                )?;
                             let preference_plugins =
                                 crate::core::mcp_scanner::collect_active_plugin_preferences(
                                     conn,
-                                    Some(&pid),
+                                    project_id.as_deref(),
                                 )?;
                             Ok::<_, anyhow::Error>((api_plugins, preference_plugins))
                         })
@@ -1121,8 +1165,6 @@ async fn make_agent_stream_inner(
                 }
                 None => String::new(),
             }
-        } else {
-            String::new()
         };
 
         if plugin_block.is_empty() {
@@ -2593,14 +2635,15 @@ async fn make_agent_stream_inner(
 
                 let tracked_outcome = completion_tx
                     .as_ref()
-                    .map(|_| agent_start_failure_outcome(&e));
+                    .map(|_| agent_start_failure_outcome(&agent_type, &e));
                 if matches!(
                     &tracked_outcome,
                     Some(AgentExecutionOutcome::RuntimeUnavailable { .. })
                 ) {
-                    // A durable dispatch still owes this run. Keep awaiting_agent
-                    // set and avoid persisting a System error on every retry;
-                    // the completion observer returns the claim to Pending.
+                    // Keep the established durable deferral for absent CLI
+                    // binaries. HTTP-native agents are excluded above: an
+                    // unavailable proxy/local service must be visible and
+                    // explicitly retryable instead of spinning forever.
                     let err = serde_json::json!({ "error": e });
                     let _ = tx.send(AgentStreamEvent::Error { data: err }).await;
                     if let (Some(sender), Some(outcome)) = (completion_tx.take(), tracked_outcome) {
@@ -2644,12 +2687,13 @@ async fn make_agent_stream_inner(
                         }
                     }
                 }
-                let content = model_start_error_content(
+                let content = agent_start_error_content(
                     &agent_type,
                     attempted_model.as_deref(),
                     disc_tier,
                     &disc.language,
                     &e,
+                    dispatch_job_id.as_deref(),
                 )
                 .unwrap_or_else(|| format!("Erreur: {e}"));
                 let err_msg = DiscussionMessage {
@@ -2677,6 +2721,8 @@ async fn make_agent_stream_inner(
                 };
 
                 let did = disc_id.clone();
+                let error_message_id = err_msg.id.clone();
+                let error_dispatch_id = dispatch_job_id.clone();
                 let err_msg_fed = err_msg.clone();
                 if let Err(db_err) = state
                     .db
@@ -2687,8 +2733,18 @@ async fn make_agent_stream_inner(
                         // ops run even if the insert fails — a `?` would leave the
                         // marker stale exactly when the run never started.
                         let inserted = crate::db::discussions::insert_message(conn, &did, &err_msg);
+                        let linked = match error_dispatch_id.as_deref() {
+                            Some(job_id) => conn
+                                .execute(
+                                    "UPDATE messages SET agent_dispatch_job_id = ?2 WHERE id = ?1",
+                                    rusqlite::params![error_message_id, job_id],
+                                )
+                                .map(|_| ())
+                                .map_err(anyhow::Error::from),
+                            None => Ok(()),
+                        };
                         let cleared = clear_awaiting_after_terminal(conn, &did, tracked_dispatch);
-                        inserted.and(cleared)
+                        inserted.and(linked).and(cleared)
                     })
                     .await
                 {
@@ -3168,8 +3224,8 @@ mod pretty_kronn_args_tests {
 #[cfg(test)]
 mod agent_lifecycle_tests {
     use super::{
-        agent_start_failure_outcome, auth_required_system_message, cap_agent_response,
-        child_run_counts_as_success, effective_stall_timeout, model_start_error_content,
+        agent_start_error_content, agent_start_failure_outcome, auth_required_system_message,
+        cap_agent_response, child_run_counts_as_success, effective_stall_timeout,
         AgentExecutionOutcome, AGENT_GLOBAL_TIMEOUT, NON_STREAMING_STALL_TIMEOUT,
     };
     use crate::models::{AgentType, MessageRole};
@@ -3304,58 +3360,38 @@ mod agent_lifecycle_tests {
     }
 
     #[test]
-    fn missing_runtime_is_retryable_but_invalid_project_path_is_not() {
+    fn http_agents_surface_runtime_outages_but_cli_runtime_absence_stays_deferred() {
         assert_eq!(
-            agent_start_failure_outcome("Binary 'codex' not found"),
+            agent_start_failure_outcome(&AgentType::LiteLlm, "LiteLLM unreachable at http://proxy"),
+            AgentExecutionOutcome::PreflightFailed
+        );
+        assert_eq!(
+            agent_start_failure_outcome(&AgentType::Ollama, "Ollama unreachable at localhost"),
+            AgentExecutionOutcome::PreflightFailed
+        );
+        assert_eq!(
+            agent_start_failure_outcome(&AgentType::Codex, "Binary 'codex' not found"),
             AgentExecutionOutcome::RuntimeUnavailable {
                 reason: "Binary 'codex' not found".into()
             }
         );
-        assert_eq!(
-            agent_start_failure_outcome("Ollama unreachable at http://localhost:11434"),
-            AgentExecutionOutcome::RuntimeUnavailable {
-                reason: "Ollama unreachable at http://localhost:11434".into()
-            }
-        );
-        assert_eq!(
-            agent_start_failure_outcome("Project path not found: /missing"),
-            AgentExecutionOutcome::PreflightFailed
-        );
-        assert_eq!(
-            agent_start_failure_outcome("LiteLLM error 404 Not Found: model unavailable"),
-            AgentExecutionOutcome::PreflightFailed
-        );
-        assert_eq!(
-            agent_start_failure_outcome("LiteLLM error 401 Unauthorized: invalid key"),
-            AgentExecutionOutcome::PreflightFailed
-        );
-        for error in [
-            "LiteLLM error 429 Too Many Requests: retry later",
-            "LiteLLM error 503 Service Unavailable: retry later",
-        ] {
-            assert_eq!(
-                agent_start_failure_outcome(error),
-                AgentExecutionOutcome::RuntimeUnavailable {
-                    reason: error.into()
-                }
-            );
-        }
     }
 
     #[test]
     fn model_http_error_is_a_structured_actionable_system_event() {
         let raw = r#"LiteLLM error 404 Not Found: {"error":{"message":"Vertex details"}}"#;
-        let content = model_start_error_content(
+        let content = agent_start_error_content(
             &AgentType::LiteLlm,
             Some("vertex_ai/mistral-large-2411"),
             crate::models::ModelTier::Default,
             "fr",
             raw,
+            Some("job-lite"),
         )
         .expect("404 model errors should be structured");
 
         let json = content
-            .strip_prefix("[kronn:model-error]\n")
+            .strip_prefix("[kronn:agent-error]\n")
             .expect("system event marker");
         let payload: serde_json::Value = serde_json::from_str(json).expect("valid payload");
         assert_eq!(payload["status"], 404);
@@ -3366,20 +3402,25 @@ mod agent_lifecycle_tests {
             .unwrap()
             .contains("vertex_ai/mistral-large-2411"));
         assert_eq!(payload["detail"], raw);
+        assert_eq!(payload["retry_dispatch_id"], "job-lite");
     }
 
     #[test]
-    fn transient_http_error_stays_unstructured_for_retry() {
-        assert_eq!(
-            model_start_error_content(
-                &AgentType::LiteLlm,
-                Some("model-a"),
-                crate::models::ModelTier::Default,
-                "en",
-                "LiteLLM error 429 Too Many Requests: retry later",
-            ),
-            None,
-        );
+    fn unreachable_http_agent_is_a_structured_retryable_event() {
+        let content = agent_start_error_content(
+            &AgentType::LiteLlm,
+            Some("model-a"),
+            crate::models::ModelTier::Default,
+            "en",
+            "LiteLLM unreachable at http://proxy: connection refused",
+            Some("job-lite"),
+        )
+        .expect("HTTP runtime failures must stay visible");
+        let payload: serde_json::Value =
+            serde_json::from_str(content.strip_prefix("[kronn:agent-error]\n").unwrap()).unwrap();
+        assert_eq!(payload["kind"], "agent_error");
+        assert_eq!(payload["status"], serde_json::Value::Null);
+        assert_eq!(payload["retry_dispatch_id"], "job-lite");
     }
 }
 

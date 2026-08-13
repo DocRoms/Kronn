@@ -1313,8 +1313,8 @@ body"#;
             "bootstrap-architect must reference workflow-architect as the next-step skill after Stage 3");
     }
 
-    /// `kronn-docs` is about document EXPORT (PDF/DOCX/XLSX/PPTX),
-    /// not about Kronn's `docs/AGENTS.md` project-context system.
+    /// `kronn-docs` is about rich conversation output (Mermaid plus document
+    /// export), not about Kronn's `docs/AGENTS.md` project-context system.
     /// The name collision is a known UX trap so the skill MUST
     /// disambiguate in the description, AND it MUST follow the
     /// project rule `feedback_no_real_names` (no `EW-XXXX` / real
@@ -1350,6 +1350,16 @@ body"#;
         assert!(
             d.contains("export") || d.contains("download") || d.contains("report"),
             "kronn-docs description should include 'export' / 'download' / 'report' triggers"
+        );
+        assert!(
+            d.contains("mermaid") && d.contains("diagram"),
+            "kronn-docs description must advertise the visual-diagram path"
+        );
+        assert!(
+            s.auto_triggers
+                .as_ref()
+                .is_some_and(|triggers| triggers.common.iter().any(|p| p.contains("mermaid"))),
+            "kronn-docs must auto-trigger on an explicit Mermaid request"
         );
     }
 

@@ -166,6 +166,14 @@ with typed extraction.
   template after picking. Plugin tips registry (`mcp-github` slug)
   warns the AI helper about the placeholder pitfall, the issue/PR
   list overlap, the `q=` URL-encoding, and the SSO-required 403.
+- **Microsoft 365** (`api-microsoft-365`, API-only): delegated Graph
+  authentication is resolved by the trusted Azure CLI contract. Native Kronn
+  executes the host `az`; Docker bundles a pinned Azure CLI and points it at
+  the read-only `/host-home/.azure` profile. Authenticate once with `az login`
+  on the host. This preserves organisation SSO/broker and Conditional Access
+  flows while keeping the short-lived token in backend memory. A missing CLI
+  or profile produces an actionable `az login`/rebuild diagnostic rather than
+  degrading to an opaque Graph 401.
 
 ## Path placeholders + wizard validation polish (2026-04-26)
 
@@ -227,6 +235,15 @@ for the same plugin (perso vs Euronews on GitHub):
    (env, label, project_ids on configs) untouched. Only updates
    EXISTING rows — never creates rows for plugins the user hasn't
    added. Test: `sync_registry_refreshes_api_spec_on_existing_rows_only`.
+
+3. **Config-vs-registry credential drift** — startup intentionally does not
+   rewrite each config's encrypted `env_keys_json`. The overview compares the
+   stored key names with the current registry contract and exposes both lists
+   in Settings. Registry-owned rows whose id disappeared are marked orphaned;
+   known replacements (currently `mcp-microsoft-365` →
+   `api-microsoft-365`) are named, but never applied automatically because a
+   rename may also change transport and authentication semantics. Manual,
+   detected, and host-imported plugins are excluded from this comparison.
 
 ## Plugins planned (Phase 2)
 

@@ -518,9 +518,14 @@ pub(crate) fn http_agent_tools_notice(has_tools: bool) -> &'static str {
     if has_tools {
         "=== TOOLS ===\n\nYou have NO file access in this mode: you cannot read, \
          write or modify ANY file (including docs/), and must never claim to have \
-         done so. You DO have executable tools, declared with this request — when \
-         the answer depends on data you were not given, CALL the matching tool \
-         instead of guessing or saying you cannot."
+         done so. You DO have executable Kronn-native tools declared with this \
+         request. Configured REST APIs are NOT MCP servers: discover them with \
+         `mcp_list` (legacy name), inspect one with `api_endpoints`, then execute \
+         it with `api_call`, or use `qa_list`/`qa_run` for a saved Quick API. Do \
+         not search for or invent a vendor MCP when one of those tools lists the \
+         requested API. When the answer depends on data you were not given, CALL \
+         the matching tool declared in this request instead of guessing or saying \
+         you cannot."
     } else {
         "=== TOOLS ===\n\nYou have NO executable tools and NO file access in this \
          mode. You cannot read, write or modify ANY file (including docs/). Answer \
@@ -1954,7 +1959,15 @@ async fn start_ollama_http(
     if !response.status().is_success() {
         let status = response.status();
         let err_body = response.text().await.unwrap_or_default();
-        return Err(format!("{} error {}: {}", backend, status, err_body));
+        let tool_hint = if tools_declared > 0 {
+            " Kronn declared native tools on this request; this provider route/model may not support tool calling. Choose a tool-capable model or move the call to an ApiCall step."
+        } else {
+            ""
+        };
+        return Err(format!(
+            "{} error {}:{} Provider response: {}",
+            backend, status, tool_hint, err_body
+        ));
     }
 
     // Stream the response — each line is a JSON object with a `message.content` field.
@@ -2148,7 +2161,7 @@ async fn start_ollama_http(
                     let status = r.status();
                     let body = r.text().await.unwrap_or_default();
                     let msg = format!(
-                        "{backend} error {status} on tool round-trip {turn}: {}",
+                        "{backend} error {status} on tool round-trip {turn}. The provider accepted the initial tool declaration but rejected the follow-up; verify that this route/model supports native tool calling. Provider response: {}",
                         body.trim()
                     );
                     tracing::warn!(target: "kronn::agent::tools", "{}", msg);

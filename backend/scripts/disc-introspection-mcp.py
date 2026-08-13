@@ -579,12 +579,9 @@ TOOLS = [
             "  To answer one specific message, also pass its durable "
             "`reply_to_message_id` (available from `disc_get_message`). "
             "Kronn validates that the target belongs to this discussion.\n"
-            "  ⚠ POSTING ALSO LISTENS : in SIMPLE mode this call keeps the "
-            "long-poll open after posting (result under `waited`), so you "
-            "cannot speak without getting back into the room. That is "
-            "deliberate — an agent that posts and stops polling shows as "
-            "offline and reads to the human as having left. Pass "
-            "`wait_for_reply: false` only to post twice in a row.\n"
+            "  ⚠ POSTING ALSO LISTENS: SIMPLE mode returns a chained long-poll "
+            "under `waited`; use `wait_for_reply: false` only before another "
+            "immediate post.\n"
             "  ⚠ MENTIONS — NEVER invent a pseudo; use what Kronn exposes. "
             "Native agents: `@claude`, `@codex`, `@vibe`, `@gemini`, `@kiro`, "
             "`@copilot`, `@ollama`. Joined CLIs use the `-cli` alias shown in "
@@ -596,11 +593,12 @@ TOOLS = [
             "  • BULK — import a whole transcript at once via `messages: [...]`, "
             "idempotently. Rare; see `tool_manual({tool: \"disc_append\"})`.\n\n"
             "Returns `{appended, skipped_as_duplicates, diverged, "
-            "last_sort_order}`. `last_sort_order` is only the WRITE receipt "
-            "for the message just posted — NEVER use it as a read cursor: a "
-            "peer message may have landed immediately before this write and "
-            "would be skipped. The bridge keeps a distinct durable read "
-            "cursor and uses it automatically for the chained wait."
+            "last_sort_order, peer_messages_since_cursor, latest_peer_role}`. "
+            "A non-zero peer count means: read/listen before continuing "
+            "(`User` role first). It contains no message body. "
+            "`last_sort_order` is only the WRITE receipt "
+            "for the post — NEVER a read cursor. The bridge uses its distinct "
+            "durable read cursor for the chained wait."
         ),
         "inputSchema": {
             "type": "object",
@@ -813,6 +811,29 @@ TOOLS = [
                 },
             },
             "required": [],
+        },
+    },
+    {
+        "name": "disc_workspace_history_lease",
+        "description": (
+            "Advisory guard for destructive Git history rewrites in THIS "
+            "session's declared worktree. Before rebase/squash/reset/force "
+            "push: create a ref under refs/kronn-backup/ at current HEAD, then "
+            "acquire with that exact ref. Refusal means another room peer owns "
+            "the lease: do not rewrite. Release afterward. Kronn verifies the "
+            "ref and arbitrates cooperating agents, but cannot stop a CLI that "
+            "runs Git without calling this tool."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["acquire", "release"]},
+                "backup_ref": {
+                    "type": "string",
+                    "description": "Required for acquire; refs/kronn-backup/... at current HEAD.",
+                },
+            },
+            "required": ["action"],
         },
     },
     {
@@ -1848,35 +1869,12 @@ TOOLS = [
     {
         "name": "qa_create_draft",
         "description": (
-            "Create a Kronn Quick API (QA) in the user's QA library. "
-            "Closes the symmetry gap with `workflow_create_draft` + "
-            "`qp_create_draft` — agents can now SAVE a reusable API "
-            "request shape (endpoint + method + query + body + extract "
-            "+ pagination) for later one-shot invocation via `qa_run`. "
-            "Use this when the conversation has converged on a "
-            "recurring API call the user will want to launch again "
-            "later (e.g. \"fetch active sprint tickets\", \"check "
-            "domain config\", \"trigger a webhook\"). Saves token cost "
-            "on every future invocation : `qa_run(id, vars)` instead "
-            "of rebuilding the `api_call` payload from scratch.\n\n"
-            "**Discovery first** : call `mcp_list` to find the right "
-            "`api_plugin_slug` + `api_config_id`. The QA's endpoint "
-            "must match one of the plugin's allow-listed endpoints "
-            "(or the executor will refuse it at run time).\n\n"
-            "**Templating** : `endpoint_path`, `api_query`, "
-            "`api_path_params`, `api_headers`, `api_body` string "
-            "leaves can contain `{{var_name}}` placeholders that "
-            "match `variables[].name`. At `qa_run` time the user "
-            "(or `qa_run`'s `vars` arg) provides the values.\n\n"
-            "**Call `tool_manual({tool: \"qa_create_draft\"})` first.** It "
-            "carries the probe-then-persist method that decides `api_extract` "
-            "(the difference between a 40k-token payload and a useful one), the "
-            "`variables[]` entry shape, and how `qa_update` patches a QA "
-            "afterwards. Skipping it is how a QA gets persisted with the wrong "
-            "extract path — which only shows up at `qa_run` time.\n\n"
-            "Returns the created QA JSON (id, all fields) so the "
-            "agent can echo the id back to the user "
-            "(`Quick API created as <id> — try it with qa_run({qa_id, vars})`)."
+            "Save a Quick API for later `qa_run` calls. "
+            "Discover `api_plugin_slug`/`api_config_id` with `mcp_list`; the "
+            "endpoint remains allow-listed and Kronn owns credentials. String "
+            "leaves may use declared `{{var_name}}` values. Call "
+            "`tool_manual({tool: \"qa_create_draft\"})` first for the required "
+            "probe/extract method and variable contract; iterate with `qa_update`."
         ),
         "inputSchema": {
             "type": "object",
@@ -1910,33 +1908,10 @@ TOOLS = [
     {
         "name": "qa_update",
         "description": (
-            "Patch an existing Quick API (QA). Loads the current QA, "
-            "merges your patch on top of it field-by-field, and writes "
-            "the result back via `PUT /api/quick-apis/<id>`. You only "
-            "specify what CHANGES — every field you don't pass keeps "
-            "its existing value (variables / profile_ids / "
-            "directive_ids included, which the bare PUT route would "
-            "reset to empty).\n\n"
-            "**Typical iterations** :\n"
-            "  - Adding `api_extract` to a verbose-payload QA after "
-            "  probing showed 12k+ token responses\n"
-            "  - Adding `fields=summary,status` to `api_query` for "
-            "  vendor-side filtering\n"
-            "  - Fixing a typo in `name` / `description`\n"
-            "  - Adding a missing `variables[]` entry after realising "
-            "  the endpoint needed a path param\n"
-            "  - Bumping `api_max_retries` after a flaky vendor "
-            "  surfaced\n\n"
-            "**Pure additive — no need to re-supply existing fields**. "
-            "Pass `{qa_id, api_extract: {path: \"$.fields\"}}` and the "
-            "rest of the QA stays exactly as it was. Inverse of "
-            "`qa_create_draft` — only `qa_id` is required; every other "
-            "field is optional and skipped when absent.\n\n"
-            "**Returns the updated QA** so the agent can confirm the "
-            "patch applied as intended. If you intend further calls "
-            "(e.g. test the change with `qa_run` right after), the "
-            "returned shape lets you do so without an extra `qa_list` "
-            "round-trip."
+            "Patch a saved Quick API field-by-field. Only `qa_id` is required; "
+            "omitted fields are preserved and explicit empty collections clear "
+            "them. Returns the complete updated QA for immediate verification "
+            "or `qa_run`."
         ),
         "inputSchema": {
             "type": "object",
@@ -3111,6 +3086,7 @@ def _agent_type_for_session():
 # settable at runtime by `disc_join({token})`. Same `_disc_id()`
 # entry point for all downstream tools = zero changes elsewhere.
 _CURRENT_DISC_ID = os.environ.get("KRONN_DISCUSSION_ID") or None
+_LAST_RESUME_ERROR = None
 _LAST_READ_SORT_ORDER_BY_DISC = {}
 _PENDING_READ_SORT_ORDER_BY_DISC = {}
 # KT-189 — two-phase awareness acknowledgement, mirroring the read cursor:
@@ -3601,6 +3577,8 @@ def _attempt_resume():
     credential, or backend unreachable — in which case the agent falls back
     to a manual disc_join). The binding is kept on failure: a transient
     backend outage (e.g. a rebuild) must not cost the reload capability."""
+    global _LAST_RESUME_ERROR
+    _LAST_RESUME_ERROR = None
     with _binding_transaction_lock() as locked:
         if not locked:
             return None
@@ -3641,6 +3619,7 @@ def _attempt_resume():
             "session_id": _session_id_for_caller(),
             "resume_token": old_token,
             "next_resume_token": next_token,
+            "expected_disc_id": disc_id_before,
         }
         conversation_id = _native_conversation_id()
         if conversation_id:
@@ -3655,8 +3634,6 @@ def _attempt_resume():
         acknowledged_token = result.get("resume_token")
         if disc_id != disc_id_before or acknowledged_token != next_token:
             return None  # fail closed on a mismatched ack; keep pending
-        _set_current_disc_id(disc_id)
-        _set_read_cursor(disc_id, b.get("last_read_sort_order"))
         # Promotion failure is recoverable: the pending file still contains
         # `(old,next)` and the backend accepts that exact replay.
         promoted = _write_binding(
@@ -3671,7 +3648,12 @@ def _attempt_resume():
         # between reloads (new terminal, moved project), which would leave the
         # old link pointing at a room this identity no longer uses. Rebinding the
         # disc we just re-attached to is safe by definition.
-        _bind_session_to_disc(disc_id, agent_type)
+        bind_result = _bind_session_to_disc(disc_id, agent_type)
+        if bind_result.get("session_bind_error"):
+            _LAST_RESUME_ERROR = bind_result["session_bind_error"]
+            return None
+        _set_current_disc_id(disc_id)
+        _set_read_cursor(disc_id, b.get("last_read_sort_order"))
         return disc_id
 
 
@@ -3694,9 +3676,11 @@ def _disc_id():
         resumed = _attempt_resume()
         if resumed:
             return resumed
+        detail = f" Resume refused: {_LAST_RESUME_ERROR}." if _LAST_RESUME_ERROR else ""
         raise RuntimeError(
             "no disc bound — set KRONN_DISCUSSION_ID env (Kronn-launched) "
-            "or call disc_join({token: \"kr-join-...\"}) first (host-launched)"
+            "or call disc_join({token: \"kr-join-...\"}) first (host-launched)."
+            + detail
         )
     return _CURRENT_DISC_ID
 
@@ -4511,11 +4495,15 @@ def call_disc_append(args):
     # never to every session of the same agent_type (multi-machine / sibling
     # peer safety). A legacy bridge that omits it gets no presence refresh on
     # append — deliberately conservative, matching disc_wait_for_peer.
-    appended = _unwrap(_http("POST", "/api/disc/append", {
+    append_body = {
         "disc_id": disc_id,
         "messages": messages,
         "session_id": _session_id_for_caller(),
-    }))
+    }
+    consumed_cursor = _read_cursor(disc_id)
+    if consumed_cursor is not None:
+        append_body["since_sort_order"] = consumed_cursor
+    appended = _unwrap(_http("POST", "/api/disc/append", append_body))
 
     # KT-43 — post AND listen in ONE tool call.
     #
@@ -4687,7 +4675,33 @@ def call_disc_find_by_session(args):
     # the durable link already exists or not. Explicit third-party lookups stay
     # pure reads.
     asked_about_self = not args.get("source_agent") and not args.get("source_session_id")
-    if not asked_about_self or _CURRENT_DISC_ID:
+    if not asked_about_self:
+        return found
+
+    found_disc_id = found.get("disc_id") if isinstance(found, dict) else None
+    local_binding = _read_binding()
+    resume_disc_id = (
+        local_binding.get("disc_id") if isinstance(local_binding, dict) else None
+    )
+    runtime_disc_id = _CURRENT_DISC_ID
+    expected_disc_id = runtime_disc_id or resume_disc_id
+    if found_disc_id and expected_disc_id and found_disc_id != expected_disc_id:
+        return {
+            "disc_id": found_disc_id,
+            "runtime_bound": False,
+            "binding_conflict": True,
+            "runtime_disc_id": runtime_disc_id,
+            "resume_disc_id": resume_disc_id,
+            "rejoin_required": True,
+            "hint": (
+                "Kronn refused to choose between conflicting room bindings: "
+                f"the durable session link points to {found_disc_id}, while "
+                f"this bridge is bound or can resume {expected_disc_id}. "
+                "Open the intended room and join it once with a fresh kr-join "
+                "token; do not append until the conflict is resolved."
+            ),
+        }
+    if runtime_disc_id:
         return found
     resumed = _attempt_resume()
     if resumed:
@@ -4779,6 +4793,33 @@ def call_disc_workspace_set(args):
             raise RuntimeError("disc_workspace_set: task_ref must be a non-empty string")
         body["task_ref"] = task_ref.strip()
     return _unwrap_disc_workspace_set(_http("POST", "/api/disc/workspace", body))
+
+
+def call_disc_workspace_history_lease(args):
+    source_agent, source_session_id = _workspace_identity(
+        args, "disc_workspace_history_lease"
+    )
+    action = args.get("action")
+    if action not in ("acquire", "release"):
+        raise RuntimeError(
+            "disc_workspace_history_lease: action must be acquire or release"
+        )
+    body = {
+        "source_agent": source_agent,
+        "source_session_id": source_session_id,
+        "action": action,
+    }
+    backup_ref = args.get("backup_ref")
+    if action == "acquire":
+        if not isinstance(backup_ref, str) or not backup_ref.startswith(
+            "refs/kronn-backup/"
+        ):
+            raise RuntimeError(
+                "disc_workspace_history_lease: acquire requires backup_ref "
+                "under refs/kronn-backup/"
+            )
+        body["backup_ref"] = backup_ref
+    return _unwrap(_http("POST", "/api/disc/workspace/history-lease", body))
 
 
 def call_disc_search(args):
@@ -7501,6 +7542,11 @@ def call_kronn_intro(_args):
             "Chaque conversation vit dans Kronn, cherchable et rechargeable par N'IMPORTE quel agent.\n"
             "→ 'Retrouve ce qu'on a décidé sur l'auth le mois dernier' (disc_search + disc_load_other)\n"
             "→ 'Crée une disc pour ce sujet et notes-y nos conclusions' (disc_create + disc_append)\n\n"
+            "## 🖼️ Rendus enrichis dans les rooms\n"
+            "Les messages sont en Markdown. Un bloc `mermaid` devient un diagramme ; "
+            "`kronn-doc-preview` affiche un HTML isolé avec export PDF/DOCX ; "
+            "`kronn-doc-data` prépare un export CSV/XLSX/PPTX. Un simple bloc `html` "
+            "reste du code : j'utilise les balises Kronn uniquement quand le rendu aide vraiment.\n\n"
             "## 🤝 Mode join — plusieurs CLI agents dans la MÊME conversation\n"
             "Ton Claude Code, un Codex, un Gemini : tous peuvent rejoindre la même room et se répondre "
             "(même depuis deux machines différentes).\n"
@@ -7895,6 +7941,7 @@ DISPATCH = {
     "disc_unlink": call_disc_unlink,
     "disc_workspace_get": call_disc_workspace_get,
     "disc_workspace_set": call_disc_workspace_set,
+    "disc_workspace_history_lease": call_disc_workspace_history_lease,
     "disc_find_by_session": call_disc_find_by_session,
     "disc_search": call_disc_search,
     "disc_list": call_disc_list,
@@ -8173,6 +8220,7 @@ def _handle(req):
                     "Your tools, by area:\n"
                     "• Opaque IDs: when the user pastes an ID without naming its type, call `resolve_id` FIRST; it returns compact routing context and the object-specific tool to use next.\n"
                     "• Discussions (multi-agent threads): `disc_meta`/`disc_get_message`/`disc_search`/`disc_load_other`/`disc_create`/`disc_append`/`disc_join`/`disc_invite_peer`…\n"
+                    "• Rich room output: messages are Markdown. A `mermaid` fence renders a diagram; `kronn-doc-preview` renders sandboxed HTML with PDF/DOCX actions (a plain `html` fence is only code); `kronn-doc-data` exposes CSV/XLSX/PPTX export. Use visual output only when it materially helps.\n"
                     "• Planning: a discussion may have a shared plan made of prioritized, editable tasks. The user may refer to it naturally as “the plan”, “the tasks”, “what remains”, “the priority”, and similar wording. Use `plan_get` (compact current objective/plan) · `task_list` (compact filtered backlog) · `task_get` (FULL task) · `task_changes` (deltas) · `proposal_list`/`proposal_get` (durable proposals, read-only) · narrow writes `task_create`/`task_update`/`task_update_dod`/`task_link_discussion`/`task_add_blocker`/`task_remove_blocker`. Read the relevant plan first. Immediately before any direct `task_create`, call `plan_get` again so a peer's recent write is visible. Apply unambiguous intent directly; otherwise propose a human-gated `kronn-plan-action` fence (`create`, `create_many`, `status`, `complete`, `unblock`, `open`). You may read and propose, but only a human accepts, rejects or decides a durable proposal. Never replace a requested plan update with a prose-only summary. Whenever tracked work starts or materially changes, keep its status, DoD and priority honest in the plan. Write only on a real change: never reload or rewrite an unchanged task merely to report progress. If the announced Planning tools are missing from your MCP surface, use the read-only `plan_snapshot` from `disc_join`, ask @user to reconnect the Kronn MCP, and never fabricate an update.\n"
                     "• Workflows (multi-step pipelines): `workflow_list` (compact) · `workflow_get` (FULL, every step) · `workflow_step_schema` (CANONICAL step schema as an untruncatable result — the closed 9 `step_type`s, per-type fields, runtime contracts; call before authoring) · `workflow_create_draft` · `workflow_clone`/`workflow_update`/`workflow_set_enabled` · `workflow_trigger`/`workflow_run_status` · run history `workflow_runs`/`workflow_run_get` · `workflow_active_runs`/`workflow_cancel_run`. Agent-step bindings (full CRUD): `skills_list`/`profiles_list`/`directives_list` enumerate valid ids; `skill_get`/`profile_get`/`directive_get` read FULL bodies; `skill_create`/`skill_update`/`skill_delete` (+ `profile_*`/`directive_*`) author & edit custom ones.\n"
                     "• Quick Prompts (reusable prompt templates): `qp_list` (no body) · `qp_get` (FULL incl `prompt_template` — read this to know what a QP does, or to run it yourself) · `qp_create_draft`/`qp_update`/`qp_delete` · `qp_run`/`qp_batch_run`.\n"

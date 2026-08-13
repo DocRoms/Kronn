@@ -1634,6 +1634,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
         <PluginPortabilityModal
           mode={portabilityMode}
           configs={configs}
+          projects={projects}
           onClose={() => setPortabilityMode(null)}
           onImported={() => {
             refetchMcps();
@@ -2291,6 +2292,11 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                         ⚠ {t('mcp.secretsBrokenShort')}
                       </span>
                     )}
+                    {cfg.registry_drift && (
+                      <span className="mcp-scope-badge mcp-scope-drift" title={t('mcp.registryDrift')}>
+                        ⚠ {t(cfg.registry_drift.orphaned ? 'mcp.registryOrphanShort' : 'mcp.registryDriftShort')}
+                      </span>
+                    )}
                   </div>
 
                   <div className="mcp-plugin-card-footer">
@@ -2442,6 +2448,32 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                         editing: everything happens here, no jump to the
                         top Add panel, no scroll. */}
                     {isEditingThisCustom ? customApiForm : (<>
+                    {cfg.registry_drift && (
+                      <div className="mcp-registry-drift" role="status" data-testid="mcp-registry-drift">
+                        <Info size={16} aria-hidden="true" />
+                        <div>
+                          <strong>
+                            {t(cfg.registry_drift.orphaned ? 'mcp.registryOrphanTitle' : 'mcp.registryDriftTitle')}
+                          </strong>
+                          <p>
+                            {cfg.registry_drift.orphaned
+                              ? t('mcp.registryOrphanBody', cfg.server_id, cfg.registry_drift.replacement_server_id ?? t('mcp.registryNoReplacement'))
+                              : t('mcp.registryDriftBody')}
+                          </p>
+                          <dl>
+                            <div>
+                              <dt>{t('mcp.registryStoredKeys')}</dt>
+                              <dd>{cfg.registry_drift.stored_env_keys.join(', ') || '—'}</dd>
+                            </div>
+                            <div>
+                              <dt>{t('mcp.registryExpectedKeys')}</dt>
+                              <dd>{cfg.registry_drift.expected_env_keys.join(', ') || '—'}</dd>
+                            </div>
+                          </dl>
+                          <small>{t('mcp.registryNoSilentRemap')}</small>
+                        </div>
+                      </div>
+                    )}
                     <section className="mcp-detail-section mcp-interface-section">
                       <h3 className="mcp-detail-section-title">
                         <Plug size={12} /> {t('mcp.interfaces')}

@@ -1069,6 +1069,30 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, on
 
                 {isExpanded && (
                   <div className="wf-step-output-full">
+                    {sr.native_tool_calls && sr.native_tool_calls.length > 0 && (
+                      <div className="wf-native-tools" data-testid="wf-native-tools">
+                        <span className="wf-native-tools-label">{t('wf.nativeTools')}</span>
+                        {sr.native_tool_calls.map((call, callIndex) => (
+                          <span
+                            key={`${call.name}-${callIndex}`}
+                            className="wf-native-tool-chip"
+                            data-ok={call.ok ? 'true' : 'false'}
+                            title={call.ok ? t('wf.nativeToolSucceeded') : t('wf.nativeToolFailed')}
+                          >
+                            {call.ok ? '✓' : '!'} {call.name}
+                          </span>
+                        ))}
+                        <span className="text-2xs text-ghost">{t('wf.nativeToolsSafeLog')}</span>
+                      </div>
+                    )}
+                    {sr.step_kind === 'Agent'
+                      && (sr.step_agent === 'Ollama' || sr.step_agent === 'LiteLlm')
+                      && (!sr.native_tool_calls || sr.native_tool_calls.length === 0) && (
+                        <div className="wf-native-tools-empty" data-testid="wf-native-tools-empty" role="note">
+                          <span className="wf-native-tools-label">{t('wf.nativeToolsNone')}</span>
+                          <span className="text-2xs text-ghost">{t('wf.nativeToolsNoneHint')}</span>
+                        </div>
+                    )}
                     {foreach && (
                       <table className="wf-foreach-table" data-testid="wf-foreach-table">
                         <thead>

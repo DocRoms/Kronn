@@ -1,27 +1,31 @@
 ---
 name: Kronn Docs
-description: Generate downloadable documents (PDF / DOCX / XLSX / CSV / PPTX) directly from a Kronn conversation. Use whenever the user asks for an exportable report, a formatted summary, a spreadsheet/table they'd open in Excel, a Word doc, slides, an invoice — or anything they describe with phrasings like "export to PDF", "make me a Word version", "give me an Excel of…", "build a deck" — even if the file format isn't named explicitly. Kronn ships a Python sidecar with WeasyPrint, python-docx, XlsxWriter and python-pptx; no external install needed. (Note: this skill is about document export — for navigating Kronn's `docs/AGENTS.md` project-context system, that's the bootstrap-architect / workflow-architect skills instead.)
+description: Create rich Kronn conversation output — rendered Mermaid diagrams, sandboxed HTML previews, and downloadable documents (PDF / DOCX / XLSX / CSV / PPTX). Use whenever the user asks for a diagram, flowchart, sequence/schema visualization, exportable report, formatted summary, spreadsheet, Word doc, slides or invoice. Kronn renders the dedicated fences and ships its document sidecar; no external install is needed. (This skill is not the repository docs/ context system.)
 icon: 📄
 category: domain
 auto_triggers:
   common:
     # File-format tokens don't translate — one regex covers every language.
     - "\\b(pdf|docx?|xlsx?|pptx?|csv)\\b"
+    - "\\b(mermaid|flowchart|sequenceDiagram|classDiagram|stateDiagram|erDiagram|gitGraph|mindmap)\\b"
   fr:
     # Stems that cover the full conjugation space, incl. grave-accent
     # forms: "génère", "génères" → `génèr`; "générer", "généré",
     # "génération" → `génér`. Same trick for "crée/créer", "exporte/-r".
     - "\\b(gén[eéè]r\\w*|crée[rz]?|créer|exporte[rz]?|exporter|produi[rst]\\w*|rédig\\w*|écri[rts]\\w*).{0,40}(fichier|document|rapport|tableau|présentation|feuille)"
     - "\\b(word|excel|powerpoint|tableur)\\b"
+    - "\\b(schéma|diagramme|organigramme)\\b"
   en:
     - "(generate|create|export|produce|write).{0,40}(file|document|report|spreadsheet|presentation|sheet)"
     - "\\b(word|excel|powerpoint|spreadsheet)\\b"
+    - "\\b(diagram|flowchart)\\b"
   es:
     - "(gener|crear?|exportar?|produ[zc]ir).{0,40}(archivo|documento|informe|hoja|presentación)"
     - "\\b(word|excel|powerpoint)\\b"
+    - "\\b(diagrama|organigrama)\\b"
 ---
 
-# Document generation — Kronn Docs
+# Rich previews and document generation — Kronn Docs
 
 You have access to Kronn's built-in document generation endpoints. The
 user doesn't need to install anything — Kronn ships a Python sidecar
@@ -30,6 +34,33 @@ format out of the box. If an installed release reports that document
 export is unavailable, tell the user to update or reinstall Kronn and
 restart it. `make docs-setup` is only a source-development fallback.
 
+## Workflow — visual diagrams in the conversation
+
+When a diagram materially improves an explanation, wrap valid Mermaid source
+in a `mermaid` fenced block. Kronn renders it directly in the discussion, with
+source and fullscreen controls. Keep the useful explanation in ordinary
+Markdown around the diagram; a diagram must not be the only place where an
+important conclusion appears.
+
+````markdown
+```mermaid
+sequenceDiagram
+  participant UI as Kronn UI
+  participant API as Kronn backend
+  UI->>API: Send discussion message
+  API-->>UI: Stream agent response
+```
+````
+
+The renderer accepts these Mermaid roots: `flowchart`/`graph`,
+`sequenceDiagram`, `classDiagram`, `stateDiagram`/`stateDiagram-v2`,
+`erDiagram`, `journey`, `gantt`, `pie`, `gitGraph`, `C4Context`,
+`C4Container`, `C4Component`, `C4Dynamic`, `C4Deployment`,
+`requirementDiagram`, `mindmap`, `timeline`, `sankey-beta`, `xychart-beta`,
+`block-beta` and `packet-beta`. Invalid diagrams fall back to their source.
+Mermaid runs in strict security mode, so do not rely on click handlers or
+embedded JavaScript.
+
 ## Workflow — HTML preview + export (recommended)
 
 For **PDF** and **DOCX**, compose the content as a complete HTML
@@ -37,6 +68,9 @@ document (with `<style>` if you need layout) and wrap it in a
 `kronn-doc-preview` fenced code block. Kronn's chat UI detects the
 fence, renders the HTML in a sandboxed preview, and shows export
 buttons below — the user clicks to generate the final file.
+
+The fence name is part of the contract: a normal `html` fenced block is shown
+as source code and does **not** open the preview.
 
 ````markdown
 Here's the Jira annual report I put together. Review the preview below

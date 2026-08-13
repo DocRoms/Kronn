@@ -44,7 +44,7 @@ pub fn execute_gate_step(step: &WorkflowStep, ctx: &TemplateContext) -> StepOutc
         .as_deref()
         .unwrap_or("Décision humaine requise.");
 
-    let rendered = match ctx.render(raw_message) {
+    let rendered = match ctx.render_strict(raw_message) {
         Ok(r) => r,
         Err(e) => {
             return StepOutcome {
@@ -64,6 +64,7 @@ pub fn execute_gate_step(step: &WorkflowStep, ctx: &TemplateContext) -> StepOutc
                     step_api_endpoint_path: None,
                     is_rollback: false,
                     child_run_id: None,
+                    native_tool_calls: Box::default(),
                 },
                 condition_action: None,
             };
@@ -87,6 +88,7 @@ pub fn execute_gate_step(step: &WorkflowStep, ctx: &TemplateContext) -> StepOutc
             step_api_endpoint_path: None,
             is_rollback: false,
             child_run_id: None,
+            native_tool_calls: Box::default(),
         },
         condition_action: None,
     }

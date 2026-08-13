@@ -162,6 +162,8 @@ total_bytes: number | null, unreadable_files: Array<string>, duplicated_bytes: n
  */
 redirect_cycles: Array<Array<string>>, };
 
+export type AgentContextGrowth = { agent: string, previous_bytes: number, current_bytes: number, delta_bytes: number, };
+
 /**
  * One decision row. Mirrors the `agent_decisions` table 1:1 — see
  * migration `051_agent_decisions.sql`.
@@ -431,6 +433,34 @@ path: string,
  */
 format?: string | null, };
 
+export type AuditEntry = {
+/**
+ * ISO date `YYYY-MM-DD` — when the audit completed.
+ */
+date: string,
+/**
+ * Kronn version that wrote this entry (`CARGO_PKG_VERSION`).
+ */
+kronn_version: string,
+/**
+ * Free-form discriminator: `"full"`, `"partial"`, `"legacy"`, ...
+ */
+type: string, provenance: AuditProvenance, };
+
+export type AuditEvidenceKind = "no_documentation" | "incomplete_template" | "missing_evidence" | "corrupt_state" | "kronn_audit" | "human_attestation" | "legacy_evidence" | "bootstrap_only";
+
+export type AuditEvidenceResponse = { project_id: string, status: AiAuditStatus, kind: AuditEvidenceKind,
+/**
+ * Repository-relative persisted evidence file. Kept distinct from
+ * `.kronn/`, which is the ignored runtime/worktree workspace.
+ */
+state_file: string, runtime_workspace: string, audit_runs: number, interrupted_runs: number, interruption_rate_percent: number,
+/**
+ * Present only when the authoritative newest run passes the exact resume
+ * gate. The next usable step is this checkpoint + 1.
+ */
+resumable_after_step: number | null, };
+
 export type AuditFileInfo = { path: string, filled: boolean, };
 
 export type AuditFinding = { severity: string, what: string, where_: string, };
@@ -501,6 +531,8 @@ step_tokens?: number | null, total_tokens_so_far?: number | null, current_tool?:
  * confused the user during the 8-min Step 8 of the Full audit).
  */
 current_tool_call_count?: number | null, };
+
+export type AuditProvenance = "kronn_audit" | "human_attestation" | "legacy_evidence";
 
 /**
  * Recommendation emitted by the completion-time cluster detector. Lives in
@@ -933,7 +965,11 @@ export type ContextAuditResponse = { project_id: string, audit: ContextAudit,
 /**
  * The report as text, already bounded.
  */
-rendered: string, };
+rendered: string,
+/**
+ * `None` on the first inspection, which establishes the baseline.
+ */
+drift: Drift | null, };
 
 /**
  * One measured block of injected context.
@@ -1205,7 +1241,13 @@ export type DiscAppendRequest = { disc_id: string, messages: Array<DiscAppendMes
  * Calling bridge session. New bridges always send this so heartbeat and
  * activity cleanup cannot affect a sibling of the same agent type.
  */
-session_id?: string | null, };
+session_id?: string | null,
+/**
+ * Highest message position the calling bridge has actually consumed.
+ * Used only to report whether peer traffic arrived while it was working;
+ * it never advances the durable read cursor.
+ */
+since_sort_order?: number | null, };
 
 export type DiscAppendResponse = { appended: number, skipped_as_duplicates: number,
 /**
@@ -1223,7 +1265,17 @@ lint?: AppendLintSummary,
  * receipt, not a read cursor: another message may have landed between
  * the caller's last read and this append. `None` when nothing was appended.
  */
-last_sort_order?: number, };
+last_sort_order?: number,
+/**
+ * Number of main-channel messages written by somebody other than this
+ * exact CLI session since its consumed read cursor. Content stays on the
+ * explicit wait/read path.
+ */
+peer_messages_since_cursor: number,
+/**
+ * Role of the newest peer message in that window, when one exists.
+ */
+latest_peer_role?: string, };
 
 /**
  * Body of `POST /api/disc/create`. The triple `(source_agent,
@@ -1817,6 +1869,14 @@ export type DiscussionWorkspace = { id: string, disc_id: string, session_pk: num
 
 export type DiscWorkspaceBlocker = { kind: string, message: string, };
 
+export type DiscWorkspaceHistoryLeaseRequest = { source_agent: string, source_session_id: string,
+/**
+ * `acquire` (or idempotent renewal) / `release`.
+ */
+action: string, backup_ref?: string | null, };
+
+export type DiscWorkspaceHistoryLeaseResponse = { acquired: boolean, advisory: boolean, lease: WorkspaceHistoryLease | null, blocker: DiscWorkspaceBlocker | null, };
+
 export type DiscWorkspaceQuery = { source_agent: string, source_session_id: string, };
 
 export type DiscWorkspaceSetRequest = { source_agent: string, source_session_id: string, workspace_path: string, task_ref?: string | null, };
@@ -1841,7 +1901,13 @@ new_files: Array<string>, newly_broken_routes: Array<string>,
 /**
  * Files no agent reads. Real cost, zero effect — the pack nobody loads.
  */
-unused_files: Array<string>, };
+unused_files: Array<string>,
+/**
+ * Growth of the effective instruction payload per agent. This is the
+ * paid, repeated cost users need to act on; total documentation size is
+ * intentionally absent because most docs are loaded only on demand.
+ */
+paid_agent_growth: Array<AgentContextGrowth>, };
 
 export type DriftCheckResponse = { audit_date: string | null, stale_sections: Array<DriftSection>, fresh_sections: Array<string>, total_sections: number, };
 
@@ -2111,7 +2177,14 @@ export type ImportDiscussionReport = { discussion_id: string, source_discussion_
 
 export type ImportDiscussionRequest = { content: string, project_id?: string | null, };
 
-export type ImportPluginBundleReport = { bundle_id: string, already_imported: boolean, imported_config_ids: Array<string>, skipped_plugins: number, includes_values: boolean, warnings: Array<string>, conflicts: Array<string>, };
+export type ImportedPluginConfig = { config_id: string, server_id: string, label: string, server_name: string, };
+
+export type ImportPluginBundleReport = { bundle_id: string, already_imported: boolean, imported_config_ids: Array<string>,
+/**
+ * Human-readable rows for the post-import scope assignment UI. Kept in
+ * addition to `imported_config_ids` for backwards API compatibility.
+ */
+imported_configs: Array<ImportedPluginConfig>, skipped_plugins: number, includes_values: boolean, warnings: Array<string>, conflicts: Array<string>, };
 
 export type ImportPluginBundleRequest = { content: string, passphrase?: string | null, };
 
@@ -2398,7 +2471,26 @@ secrets_broken: boolean,
 /**
  * See `McpConfig::host_sync`.
  */
-host_sync: HostSyncMode, preferred_interface: PluginInterface, };
+host_sync: HostSyncMode, preferred_interface: PluginInterface,
+/**
+ * Display-safe warning when a persisted registry config no longer matches
+ * the built-in registry. Key *names* are exposed, never decrypted values.
+ * `None` means the config still matches, or belongs to a user-managed
+ * (manual/detected/imported) server for which no registry contract exists.
+ */
+registry_drift?: McpConfigRegistryDrift, };
+
+export type McpConfigRegistryDrift = {
+/**
+ * True when the config still targets a registry-owned DB server whose id
+ * no longer exists in the current built-in registry.
+ */
+orphaned: boolean, stored_env_keys: Array<string>, expected_env_keys: Array<string>, unexpected_env_keys: Array<string>, missing_env_keys: Array<string>,
+/**
+ * Explicit migration hint for a known registry rename. Kronn never
+ * applies it automatically because the auth contract may also differ.
+ */
+replacement_server_id?: string, };
 
 export type McpContextEntry = { slug: string, label: string, content: string, };
 
@@ -2635,6 +2727,14 @@ debate_prompt: string,
  * (bounded so a never-converging debate can't hang the run). Default 3.
  */
 max_rounds?: number | null, };
+
+export type NativeToolCallLog = {
+/**
+ * Public Kronn-native tool name. Arguments and results are deliberately
+ * absent: workflow history must remain useful without persisting request
+ * payloads, API parameters, or anything that could contain a secret.
+ */
+name: string, ok: boolean, };
 
 /**
  * State of the LAN/Tailscale exposure toggle.
@@ -2984,7 +3084,13 @@ conversation_id?: string | null,
  * the response is lost. Omitted by legacy bridges, which resume without
  * rotation rather than risking a server-first, unacknowledged cut-over.
  */
-next_resume_token?: string | null, };
+next_resume_token?: string | null,
+/**
+ * Discussion the local credential is expected to resume. Modern bridges
+ * always send it, so a stale/misplaced credential is rejected before its
+ * secret or participant row can be mutated. Optional for legacy clients.
+ */
+expected_disc_id?: string | null, };
 
 export type PeerResumeResponse = { disc_id: string, session_pk: number,
 /**
@@ -3534,6 +3640,19 @@ retry_uncertain_effect?: boolean, };
  * Response for [`resume_interrupted`].
  */
 export type ResumeRunResponse = { run_id: string, new_status: RunStatus, };
+
+export type RetryAgentDispatchRequest = {
+/**
+ * Failed dispatch referenced by the durable System error card.
+ */
+dispatch_id: string,
+/**
+ * Stable per-click key. A repeated browser request returns the same
+ * replacement job instead of launching the provider twice.
+ */
+idempotency_key: string, };
+
+export type RetryAgentDispatchResponse = { dispatch_id: string, trigger_message_id: string, agent_type: AgentType, duplicate: boolean, };
 
 export type RetryConfig = { max_retries: number, backoff: string, };
 
@@ -4230,7 +4349,13 @@ is_rollback: boolean,
  * run tree (`GET /runs/:id/tree`). `None` for every other step type and
  * for legacy rows. The inverse of `WorkflowRun.parent_run_id`.
  */
-child_run_id?: string | null, };
+child_run_id?: string | null,
+/**
+ * Bounded Kronn-native calls made by an HTTP Agent step (Ollama or
+ * LiteLLM). Only tool name + outcome are persisted; arguments/results
+ * stay in the provider round-trip and can never leak into run history.
+ */
+native_tool_calls?: Array<NativeToolCallLog>, };
 
 export type StepType = { "type": "Agent" } | { "type": "ApiCall" } | { "type": "BatchQuickPrompt" } | { "type": "Notify" } | { "type": "Gate" } | { "type": "Exec" } | { "type": "BatchApiCall" } | { "type": "JsonData" } | { "type": "SubWorkflow" };
 
@@ -5289,6 +5414,8 @@ export type WorkspaceConfig = { hooks: WorkspaceHooks,
  * (fine for read-only audit/briefing workflows on non-git projects).
  */
 require_isolation: boolean, };
+
+export type WorkspaceHistoryLease = { id: string, disc_id: string, session_pk: number, session_agent_type: string, session_id: string | null, canonical_path: string, branch: string, backup_ref: string, head_sha: string, acquired_at: string, expires_at: string, };
 
 export type WorkspaceHooks = { after_create?: string | null, before_run?: string | null, after_run?: string | null, before_remove?: string | null, };
 

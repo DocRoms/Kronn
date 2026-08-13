@@ -42,9 +42,10 @@ mod tests {
 
     #[test]
     fn detect_audit_status_bootstrapped() {
-        let tmp = std::env::temp_dir().join("kronn-test-audit-bootstrapped");
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let tmp = tmp_dir.path();
         let ai_dir = tmp.join("ai");
-        let _ = std::fs::create_dir_all(&ai_dir);
+        std::fs::create_dir_all(&ai_dir).unwrap();
         std::fs::write(
             ai_dir.join("index.md"),
             "# Project\n<!-- KRONN:BOOTSTRAPPED:2026-03-14 -->\n",
@@ -52,7 +53,6 @@ mod tests {
         .unwrap();
         let status = detect_audit_status(&tmp.to_string_lossy());
         assert!(matches!(status, crate::models::AiAuditStatus::Bootstrapped));
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
@@ -183,6 +183,23 @@ mod tests {
         crate::core::kronn_state::write(&tmp, &mut state).unwrap();
         let status = detect_audit_status(&tmp.to_string_lossy());
         assert!(matches!(status, crate::models::AiAuditStatus::Bootstrapped));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn completed_or_attested_audit_advances_a_bootstrapped_project() {
+        let tmp = std::env::temp_dir().join(format!(
+            "kronn-test-audit-after-bootstrap-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(tmp.join("docs")).unwrap();
+        std::fs::write(tmp.join("docs/AGENTS.md"), "# Project\nContent\n").unwrap();
+        crate::core::kronn_state::mark_bootstrapped(&tmp).unwrap();
+        crate::core::kronn_state::record_audit(&tmp, "full").unwrap();
+        assert!(matches!(
+            detect_audit_status(&tmp.to_string_lossy()),
+            crate::models::AiAuditStatus::Audited
+        ));
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

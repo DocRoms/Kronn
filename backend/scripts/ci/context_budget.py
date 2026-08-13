@@ -38,7 +38,7 @@ BUDGETS: list[dict[str, object]] = [
         # (UI structure, prerequisites, RTK internals, release history, stack).
         # A ratchet must tighten on every gain, or the slack gets refilled.
         "path": "docs/AGENTS.md",
-        "max_bytes": 13_471,
+        "max_bytes": 13_470,
         "target_bytes": 16 * 1024,
         # Stretch goal beyond the DoD ceiling: 12 KiB / ~3 000 tokens. Recorded
         # here so the next objective stays visible once the target is met —
@@ -62,7 +62,7 @@ BUDGETS: list[dict[str, object]] = [
 
 # Aggregate ceiling for everything an agent must read before starting (DoD 5).
 # Lowered from 89 760 by the same moves.
-AGGREGATE_MAX_BYTES = 19_007
+AGGREGATE_MAX_BYTES = 19_006
 AGGREGATE_TARGET_BYTES = 24 * 1024
 
 # Files whose content was deliberately moved OUT of the bootstrap. If a paragraph

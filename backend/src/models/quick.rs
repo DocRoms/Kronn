@@ -304,6 +304,15 @@ pub struct RunQuickApiRequest {
     #[serde(default)]
     #[ts(type = "Record<string, string>")]
     pub variables: ::std::collections::HashMap<String, String>,
+    /// Server-owned attribution for a Quick API invoked by an HTTP workflow
+    /// Agent. Skipped at the HTTP/TypeScript boundary so callers cannot forge
+    /// a workflow run identity.
+    #[serde(skip)]
+    #[ts(skip)]
+    pub workflow_run_id: Option<String>,
+    #[serde(skip)]
+    #[ts(skip)]
+    pub agent: Option<String>,
 }
 
 /// Response from `POST /api/quick-apis/:id/run`. Mirrors the

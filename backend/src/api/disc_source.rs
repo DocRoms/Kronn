@@ -29,6 +29,7 @@ use axum::{
     Json,
 };
 use chrono::Utc;
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 use uuid::Uuid;
@@ -221,6 +222,11 @@ pub struct DiscAppendRequest {
     /// activity cleanup cannot affect a sibling of the same agent type.
     #[serde(default)]
     pub session_id: Option<String>,
+    /// Highest message position the calling bridge has actually consumed.
+    /// Used only to report whether peer traffic arrived while it was working;
+    /// it never advances the durable read cursor.
+    #[serde(default)]
+    pub since_sort_order: Option<i64>,
 }
 
 /// Compact lint feedback echoed to the POSTING agent (tool result), so it can
@@ -253,6 +259,14 @@ pub struct DiscAppendResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub last_sort_order: Option<i64>,
+    /// Number of main-channel messages written by somebody other than this
+    /// exact CLI session since its consumed read cursor. Content stays on the
+    /// explicit wait/read path.
+    pub peer_messages_since_cursor: u32,
+    /// Role of the newest peer message in that window, when one exists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub latest_peer_role: Option<String>,
 }
 
 fn is_live_peer_turn(single_agent_append: bool, session_id: Option<&str>, appended: u32) -> bool {
@@ -732,10 +746,66 @@ pub async fn disc_append(
         );
     }
 
+    let (peer_messages_since_cursor, latest_peer_role) =
+        match (author_cli_session_id, req.since_sort_order) {
+            (Some(session_pk), Some(cursor)) => {
+                let did = req.disc_id.clone();
+                state
+                    .db
+                    .with_read_conn(move |conn| {
+                        let count = conn.query_row(
+                            "SELECT COUNT(*)
+                           FROM messages m
+                          WHERE m.discussion_id = ?1
+                            AND m.channel = 'main'
+                            AND m.sort_order > ?2
+                            AND NOT EXISTS (
+                                SELECT 1 FROM message_cli_authors own
+                                 WHERE own.message_id = m.id
+                                   AND own.cli_session_id = ?3
+                            )",
+                            rusqlite::params![&did, cursor, session_pk],
+                            |row| row.get::<_, i64>(0),
+                        )?;
+                        let role = conn
+                            .query_row(
+                                "SELECT m.role
+                               FROM messages m
+                              WHERE m.discussion_id = ?1
+                                AND m.channel = 'main'
+                                AND m.sort_order > ?2
+                                AND NOT EXISTS (
+                                    SELECT 1 FROM message_cli_authors own
+                                     WHERE own.message_id = m.id
+                                       AND own.cli_session_id = ?3
+                                )
+                              ORDER BY m.sort_order DESC
+                              LIMIT 1",
+                                rusqlite::params![&did, cursor, session_pk],
+                                |row| row.get::<_, String>(0),
+                            )
+                            .optional()?;
+                        Ok((u32::try_from(count).unwrap_or(u32::MAX), role))
+                    })
+                    .await
+                    .unwrap_or_else(|error| {
+                        tracing::warn!(
+                            disc = %req.disc_id,
+                            %error,
+                            "disc_append: peer-message receipt unavailable"
+                        );
+                        (0, None)
+                    })
+            }
+            _ => (0, None),
+        };
+
     Json(ApiResponse::ok(DiscAppendResponse {
         appended,
         skipped_as_duplicates: skipped,
         last_sort_order,
+        peer_messages_since_cursor,
+        latest_peer_role,
         diverged,
         lint: lint_summary,
     }))
@@ -1445,6 +1515,7 @@ mod tests {
                 disc_id: "d-lint".into(),
                 messages: msgs,
                 session_id: session_id.map(str::to_owned),
+                since_sort_order: None,
             }),
         )
         .await;
@@ -1453,6 +1524,251 @@ mod tests {
 
     async fn append(state: &crate::AppState, msgs: Vec<DiscAppendMessage>) -> DiscAppendResponse {
         append_as(state, msgs, None).await
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn append_reports_peer_traffic_since_the_consumed_cursor_without_content() {
+        crate::core::anti_halluc::set_mode("off");
+        let (state, _tmp) = lint_state(false).await;
+        state
+            .db
+            .with_conn(|conn| {
+                crate::db::discussion_sessions::create_session(
+                    conn,
+                    "d-lint",
+                    "Codex",
+                    Some("cli-me"),
+                    "peer",
+                )?;
+                let user = DiscussionMessage {
+                    id: "peer-user".into(),
+                    role: MessageRole::User,
+                    channel: MessageChannel::Main,
+                    content: "private payload that must not be echoed".into(),
+                    agent_type: None,
+                    timestamp: Utc::now(),
+                    tokens_used: 0,
+                    auth_mode: None,
+                    model_tier: None,
+                    cost_usd: None,
+                    author_pseudo: None,
+                    author_avatar_email: None,
+                    source_msg_id: None,
+                    duration_ms: None,
+                    lint_report: None,
+                    model: None,
+                    target_agent: None,
+                    reply_to_message_id: None,
+                    recovered_partial: false,
+                    session_tokens_at_message: None,
+                    author_cli_ordinal: None,
+                };
+                crate::db::discussions::insert_message(conn, "d-lint", &user)?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let response = disc_append(
+            axum::extract::State(state.clone()),
+            Json(DiscAppendRequest {
+                disc_id: "d-lint".into(),
+                messages: vec![agent_msg("my-reply", "ack")],
+                session_id: Some("cli-me".into()),
+                since_sort_order: Some(0),
+            }),
+        )
+        .await
+        .0
+        .data
+        .expect("append succeeds");
+
+        assert_eq!(response.peer_messages_since_cursor, 1);
+        assert_eq!(response.latest_peer_role.as_deref(), Some("User"));
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(!json.contains("private payload"));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn append_reports_zero_peer_messages_when_only_the_caller_wrote() {
+        crate::core::anti_halluc::set_mode("off");
+        let (state, _tmp) = lint_state(false).await;
+        state
+            .db
+            .with_conn(|conn| {
+                crate::db::discussion_sessions::create_session(
+                    conn,
+                    "d-lint",
+                    "Codex",
+                    Some("cli-me"),
+                    "peer",
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let response = disc_append(
+            axum::extract::State(state.clone()),
+            Json(DiscAppendRequest {
+                disc_id: "d-lint".into(),
+                messages: vec![agent_msg("my-only-message", "still working")],
+                session_id: Some("cli-me".into()),
+                since_sort_order: Some(0),
+            }),
+        )
+        .await
+        .0
+        .data
+        .expect("append succeeds");
+
+        assert_eq!(response.peer_messages_since_cursor, 0);
+        assert!(response.latest_peer_role.is_none());
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(
+            json.contains("\"peer_messages_since_cursor\":0"),
+            "zero is a durable protocol signal, not an omitted optional field"
+        );
+        let baseline = serde_json::to_string(&serde_json::json!({
+            "appended": response.appended,
+            "skipped_as_duplicates": response.skipped_as_duplicates,
+            "last_sort_order": response.last_sort_order,
+            "diverged": response.diverged,
+        }))
+        .unwrap();
+        assert!(
+            json.len().saturating_sub(baseline.len()) <= 96,
+            "the explicit receipt must remain a sub-100-byte hint, not a hidden backlog"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn append_counts_a_same_provider_sibling_but_not_the_exact_caller() {
+        crate::core::anti_halluc::set_mode("off");
+        let (state, _tmp) = lint_state(false).await;
+        state
+            .db
+            .with_conn(|conn| {
+                crate::db::discussion_sessions::create_session(
+                    conn,
+                    "d-lint",
+                    "Codex",
+                    Some("cli-me"),
+                    "peer",
+                )?;
+                crate::db::discussion_sessions::create_session(
+                    conn,
+                    "d-lint",
+                    "Codex",
+                    Some("cli-sibling"),
+                    "peer",
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        append_as(
+            &state,
+            vec![agent_msg("mine-before", "my earlier progress")],
+            Some("cli-me"),
+        )
+        .await;
+        append_as(
+            &state,
+            vec![agent_msg("sibling-before", "same provider, different peer")],
+            Some("cli-sibling"),
+        )
+        .await;
+
+        let response = disc_append(
+            axum::extract::State(state),
+            Json(DiscAppendRequest {
+                disc_id: "d-lint".into(),
+                messages: vec![agent_msg("mine-now", "new progress")],
+                session_id: Some("cli-me".into()),
+                since_sort_order: Some(0),
+            }),
+        )
+        .await
+        .0
+        .data
+        .expect("append succeeds");
+
+        assert_eq!(
+            response.peer_messages_since_cursor, 1,
+            "peer means exact CLI identity, not provider name"
+        );
+        assert_eq!(response.latest_peer_role.as_deref(), Some("Agent"));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn append_peer_receipt_respects_cursor_and_ignores_notes() {
+        crate::core::anti_halluc::set_mode("off");
+        let (state, _tmp) = lint_state(false).await;
+        let cursor = state
+            .db
+            .with_conn(|conn| {
+                crate::db::discussion_sessions::create_session(
+                    conn,
+                    "d-lint",
+                    "Codex",
+                    Some("cli-me"),
+                    "peer",
+                )?;
+                let old = DiscussionMessage {
+                    id: "peer-old".into(),
+                    role: MessageRole::User,
+                    channel: MessageChannel::Main,
+                    content: "already consumed".into(),
+                    agent_type: None,
+                    timestamp: Utc::now(),
+                    tokens_used: 0,
+                    auth_mode: None,
+                    model_tier: None,
+                    cost_usd: None,
+                    author_pseudo: None,
+                    author_avatar_email: None,
+                    source_msg_id: None,
+                    duration_ms: None,
+                    lint_report: None,
+                    model: None,
+                    target_agent: None,
+                    reply_to_message_id: None,
+                    recovered_partial: false,
+                    session_tokens_at_message: None,
+                    author_cli_ordinal: None,
+                };
+                let cursor = crate::db::discussions::insert_message(conn, "d-lint", &old)?;
+                let mut note = old.clone();
+                note.id = "peer-note".into();
+                note.channel = MessageChannel::Note;
+                note.content = "out of context".into();
+                crate::db::discussions::insert_note_message(conn, "d-lint", &note)?;
+                Ok(cursor)
+            })
+            .await
+            .unwrap();
+
+        let response = disc_append(
+            axum::extract::State(state),
+            Json(DiscAppendRequest {
+                disc_id: "d-lint".into(),
+                messages: vec![agent_msg("mine-after-note", "progress")],
+                session_id: Some("cli-me".into()),
+                since_sort_order: Some(cursor),
+            }),
+        )
+        .await
+        .0
+        .data
+        .expect("append succeeds");
+        assert_eq!(response.peer_messages_since_cursor, 0);
+        assert!(response.latest_peer_role.is_none());
     }
 
     #[tokio::test]
@@ -1507,6 +1823,7 @@ mod tests {
                     ..agent_msg("reply-source", "Precise answer")
                 }],
                 session_id: None,
+                since_sort_order: None,
             }),
         )
         .await;

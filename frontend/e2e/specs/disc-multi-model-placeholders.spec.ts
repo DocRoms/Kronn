@@ -492,4 +492,83 @@ test.describe('Discussion chat — multi-model reply lifecycle', () => {
     ), await laterQuestionNode.elementHandle())).toBe(true);
     await expect(placeholder).toBeHidden();
   });
+
+  test('an unavailable LiteLLM target exposes one targeted retry without replaying siblings', async ({ page }) => {
+    const failedDispatchId = 'failed-lite-dispatch';
+    let retried = false;
+    let retryBody: { dispatch_id?: string; idempotency_key?: string } | null = null;
+    const errorContent = () => '[kronn:agent-error]\n' + JSON.stringify({
+      kind: 'agent_error',
+      status: null,
+      summary: 'LiteLLM est temporairement indisponible.',
+      detail: 'LiteLLM unreachable: VPN unavailable',
+      tier: 'default',
+      retry_dispatch_id: failedDispatchId,
+      retried,
+    });
+
+    await page.route('**/api/agents', route => {
+      if (route.request().method() !== 'GET') return route.continue();
+      return route.fulfill({ status: 200, contentType: 'application/json', body: envelope(agents) });
+    });
+    await page.route('**/api/discussions', route => {
+      if (route.request().method() !== 'GET') return route.continue();
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: envelope([discussion([message('seed', 'User', USER_TEXT)], false)]),
+      });
+    });
+    await page.route(`**/api/discussions/${DISC_ID}/participants`, route => route.fulfill({
+      status: 200, contentType: 'application/json', body: envelope([]),
+    }));
+    await page.route(`**/api/discussions/${DISC_ID}/native-agent`, route => route.fulfill({
+      status: 200, contentType: 'application/json', body: envelope({ disabled: false }),
+    }));
+    await page.route(`**/api/discussions/${DISC_ID}/agent-dispatches/retry`, async route => {
+      retryBody = route.request().postDataJSON() as typeof retryBody;
+      retried = true;
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: envelope({
+          dispatch_id: 'retry-lite-dispatch',
+          trigger_message_id: 'seed',
+          agent_type: 'LiteLlm',
+          duplicate: false,
+        }),
+      });
+    });
+    await page.route(`**/api/discussions/${DISC_ID}`, route => {
+      if (route.request().method() !== 'GET') return route.continue();
+      const failed = message('lite-error', 'System', errorContent(), 'LiteLlm', 'seed');
+      failed.model = 'proxy-model';
+      failed.model_tier = 'default';
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: envelope({
+          ...discussion([message('seed', 'User', USER_TEXT), failed], retried),
+          active_agent_dispatches: retried ? [{
+            id: 'retry-lite-dispatch',
+            trigger_message_id: 'seed',
+            agent_type: 'LiteLlm',
+            status: 'Pending',
+          }] : [],
+        }),
+      });
+    });
+
+    const dashboard = new DashboardPage(page);
+    await dashboard.goto();
+    await dashboard.openDiscussion(DISC_ID);
+
+    await expect(page.getByTestId('disc-model-error-content'))
+      .toContainText('LiteLLM est temporairement indisponible.');
+    await page.getByTestId('retry-agent-dispatch').click();
+
+    await expect.poll(() => retryBody?.dispatch_id ?? null).toBe(failedDispatchId);
+    expect(retryBody?.idempotency_key).toMatch(/^[0-9a-f-]{36}$/);
+    await expect(page.getByTestId('retry-agent-dispatch')).toBeHidden();
+  });
 });

@@ -153,7 +153,7 @@ pub async fn execute_exec_step(
     // ── Render args via the template engine ──
     let mut rendered_args: Vec<String> = Vec::with_capacity(step.exec_args.len());
     for (i, arg_template) in step.exec_args.iter().enumerate() {
-        match ctx.render(arg_template) {
+        match ctx.render_strict(arg_template) {
             Ok(rendered) => rendered_args.push(rendered),
             Err(e) => {
                 return fail(
@@ -225,7 +225,7 @@ pub async fn execute_exec_step(
         // Render setup args.
         let mut setup_args: Vec<String> = Vec::with_capacity(step.exec_setup_args.len());
         for (i, arg_template) in step.exec_setup_args.iter().enumerate() {
-            match ctx.render(arg_template) {
+            match ctx.render_strict(arg_template) {
                 Ok(rendered) => setup_args.push(rendered),
                 Err(e) => {
                     return fail(
@@ -343,7 +343,7 @@ pub async fn execute_exec_step(
     // past ~16 tickets) can reach a `jq` / reshape script. `None` (or an
     // all-whitespace template) → stdin stays `/dev/null`, unchanged behaviour.
     let stdin_bytes: Option<Vec<u8>> = match step.exec_stdin.as_deref() {
-        Some(t) if !t.trim().is_empty() => match ctx.render(t) {
+        Some(t) if !t.trim().is_empty() => match ctx.render_strict(t) {
             Ok(rendered) => Some(rendered.into_bytes()),
             Err(e) => {
                 return fail(
@@ -518,6 +518,7 @@ pub async fn execute_exec_step(
             step_api_endpoint_path: None,
             is_rollback: false,
             child_run_id: None,
+            native_tool_calls: Box::default(),
         },
         condition_action,
     }
@@ -547,6 +548,7 @@ fn fail(step: &WorkflowStep, start: Instant, msg: impl Into<String>) -> StepOutc
             step_api_endpoint_path: None,
             is_rollback: false,
             child_run_id: None,
+            native_tool_calls: Box::default(),
         },
         condition_action: None,
     }

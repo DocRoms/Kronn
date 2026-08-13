@@ -229,6 +229,11 @@ pub struct PeerResumeRequest {
     /// rotation rather than risking a server-first, unacknowledged cut-over.
     #[serde(default)]
     pub next_resume_token: Option<String>,
+    /// Discussion the local credential is expected to resume. Modern bridges
+    /// always send it, so a stale/misplaced credential is rejected before its
+    /// secret or participant row can be mutated. Optional for legacy clients.
+    #[serde(default)]
+    pub expected_disc_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -505,6 +510,11 @@ fn join_next_steps(
          unchanged tasks merely to report progress. The whole \
          `kronn-internal` surface is available to you, not just the `disc_*` \
          tools: workflows, api_call, skills, directives, profiles, audits.\n\
+         Room messages support Markdown plus visual fences: `mermaid` renders \
+         a diagram, `kronn-doc-preview` renders sandboxed HTML with PDF/DOCX \
+         actions, and `kronn-doc-data` exposes CSV/XLSX/PPTX export. A plain \
+         `html` fence is only code. Use these formats only when they improve \
+         the room result.\n\
          If one of the Planning tools named above is missing from your actual \
          MCP tool surface, your client cached an older catalogue: use the \
          read-only `plan_snapshot` in this join response, tell @user to \
@@ -573,6 +583,10 @@ pub async fn peer_resume(
     if req.resume_token.trim().is_empty() {
         return Json(ApiResponse::err("resume_token required"));
     }
+    let expected_disc_id = req.expected_disc_id.map(|value| value.trim().to_string());
+    if expected_disc_id.as_deref() == Some("") {
+        return Json(ApiResponse::err("expected_disc_id cannot be empty"));
+    }
     let conversation_id = match normalize_conversation_id(req.conversation_id.as_deref()) {
         Ok(id) => id,
         Err(error) => return Json(ApiResponse::err(error)),
@@ -592,12 +606,13 @@ pub async fn peer_resume(
     match state
         .db
         .with_conn(move |conn| {
-            let resumed = db::discussion_sessions::resume_disc_session(
+            let resumed = db::discussion_sessions::resume_disc_session_in_disc(
                 conn,
                 &agent_type,
                 &resume_token,
                 &session_id,
                 next_resume_token.as_deref(),
+                expected_disc_id.as_deref(),
             )?;
             if let Some(conversation_id) = conversation_id {
                 db::discussion_sessions::set_session_conversation_id(
@@ -2632,6 +2647,7 @@ mod tests {
                 resume_token: joined.resume_token.clone(),
                 conversation_id: Some("019f8fc7-dd84-7843-abad-162a97ca836b".into()),
                 next_resume_token: Some(successor.clone()),
+                expected_disc_id: Some("d-resume-1".into()),
             }),
         )
         .await
@@ -2650,6 +2666,7 @@ mod tests {
                 resume_token: joined.resume_token.clone(),
                 conversation_id: Some("019f8fc7-dd84-7843-abad-162a97ca836b".into()),
                 next_resume_token: Some(successor),
+                expected_disc_id: Some("d-resume-1".into()),
             }),
         )
         .await
@@ -2666,6 +2683,7 @@ mod tests {
                 resume_token: joined.resume_token,
                 conversation_id: None,
                 next_resume_token: Some("kr-resume-22222222222222222222222222222222".into()),
+                expected_disc_id: Some("d-resume-1".into()),
             }),
         )
         .await
@@ -2725,6 +2743,7 @@ mod tests {
                 resume_token: joined.resume_token.clone(),
                 conversation_id: None,
                 next_resume_token: Some("kr-resume-not-hex".into()),
+                expected_disc_id: Some("d-resume-invalid-next".into()),
             }),
         )
         .await
@@ -2740,6 +2759,7 @@ mod tests {
                 resume_token: joined.resume_token,
                 conversation_id: None,
                 next_resume_token: Some("kr-resume-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into()),
+                expected_disc_id: Some("d-resume-invalid-next".into()),
             }),
         )
         .await
@@ -2747,6 +2767,65 @@ mod tests {
         assert!(
             valid.success,
             "validation failure must not consume current token"
+        );
+    }
+
+    #[tokio::test]
+    async fn peer_resume_rejects_a_different_expected_room_without_consuming_the_token() {
+        let state = make_state_with_disc("d-resume-expected").await;
+        let token = invite_peer(State(state.clone()), Path("d-resume-expected".to_string()))
+            .await
+            .0
+            .data
+            .unwrap()
+            .token;
+        let joined = peer_join(
+            State(state.clone()),
+            Json(PeerJoinRequest {
+                token,
+                agent_type: "Codex".into(),
+                session_id: "before".into(),
+                model: None,
+                conversation_id: None,
+            }),
+        )
+        .await
+        .0
+        .data
+        .unwrap();
+
+        let rejected = peer_resume(
+            State(state.clone()),
+            Json(PeerResumeRequest {
+                agent_type: "Codex".into(),
+                session_id: "wrong-room".into(),
+                resume_token: joined.resume_token.clone(),
+                conversation_id: None,
+                next_resume_token: Some("kr-resume-11111111111111111111111111111111".into()),
+                expected_disc_id: Some("d-somewhere-else".into()),
+            }),
+        )
+        .await
+        .0;
+        assert!(!rejected.success);
+        assert!(rejected.error.unwrap().contains("another discussion"));
+
+        let valid = peer_resume(
+            State(state),
+            Json(PeerResumeRequest {
+                agent_type: "Codex".into(),
+                session_id: "right-room".into(),
+                resume_token: joined.resume_token,
+                conversation_id: None,
+                next_resume_token: Some("kr-resume-22222222222222222222222222222222".into()),
+                expected_disc_id: Some("d-resume-expected".into()),
+            }),
+        )
+        .await
+        .0;
+        assert!(
+            valid.success,
+            "the rejected request must leave the token usable"
         );
     }
 
@@ -6010,6 +6089,18 @@ mod tests {
             steps.contains("kronn-internal"),
             "must say the whole MCP surface is available, not only disc_* tools",
         );
+        for contract in [
+            "`mermaid`",
+            "`kronn-doc-preview`",
+            "`kronn-doc-data`",
+            "CSV/XLSX/PPTX",
+            "plain `html` fence is only code",
+        ] {
+            assert!(
+                steps.contains(contract),
+                "joined CLI must know the room rendering contract {contract}",
+            );
+        }
         assert!(
             steps.contains("materially changes") && steps.contains("unchanged tasks"),
             "plan maintenance must be event-driven, never a noisy no-op rewrite",

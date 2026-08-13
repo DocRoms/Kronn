@@ -186,6 +186,32 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       delete: resolve(undefined),
       installTemplate: resolve({}),
       auditInfo: resolve({ files: [], todos: [] }),
+      contextAudit: resolve({
+        project_id: '',
+        audit: { files: [], per_agent: [], proposal: [], findings: [], no_convention_found: true },
+        rendered: '',
+        drift: null,
+      }),
+      acceptContextBaseline: resolve({
+        project_id: '',
+        audit: { files: [], per_agent: [], proposal: [], findings: [], no_convention_found: true },
+        rendered: '',
+        drift: {
+          grown: [], new_files: [], newly_broken_routes: [], unused_files: [], paid_agent_growth: [],
+        },
+      }),
+      auditEvidence: resolve({
+        project_id: '', status: 'NoTemplate', kind: 'no_documentation',
+        state_file: 'docs/.kronn.json', runtime_workspace: '.kronn/',
+        audit_runs: 0, interrupted_runs: 0, interruption_rate_percent: 0,
+        resumable_after_step: null,
+      }),
+      attestDocumentation: resolve({
+        project_id: '', status: 'Audited', kind: 'human_attestation',
+        state_file: 'docs/.kronn.json', runtime_workspace: '.kronn/',
+        audit_runs: 0, interrupted_runs: 0, interruption_rate_percent: 0,
+        resumable_after_step: null,
+      }),
       validateAudit: resolve('NoTemplate'),
       cancelAudit: resolve('NoTemplate'),
       checkDrift: resolve({ stale_steps: [], checksums_outdated: false }),
@@ -322,6 +348,9 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       deleteContextFile: resolve(undefined),
       uploadContextFile: resolve({}),
       deleteLastAgentMessages: resolve(undefined),
+      retryAgentDispatch: resolve({
+        dispatch_id: '', trigger_message_id: '', agent_type: 'ClaudeCode', duplicate: false,
+      }),
       exportDiscussion: resolve({
         filename: 'discussion.kronn-discussion.json',
         blob: new Blob([], { type: 'application/json' }),

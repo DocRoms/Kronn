@@ -1205,6 +1205,7 @@ mod tests {
             step_api_endpoint_path: None,
             is_rollback: false,
             child_run_id: None,
+                    native_tool_calls: Box::default(),
         }
     }
 

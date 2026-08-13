@@ -28,7 +28,9 @@ the with/without-values flag, but no value, passphrase or payload.
 - Unknown executable and MCP server definitions are refused. Only a manual
   API-only definition without a CLI credential command may be materialized.
 - Imported configurations are unscoped, non-global and have host sync disabled.
-  The operator must explicitly choose their eventual exposure.
+  After a successful import the UI lists every created configuration with
+  **Global** selected by default; the operator must explicitly confirm that
+  choice or replace it with one or more projects before the scope is applied.
 - A configuration with the same plugin/label or semantic configuration hash is
   skipped and reported rather than overwritten.
 - Exact replay is idempotent. Reusing a bundle id with changed content is an

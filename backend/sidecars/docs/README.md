@@ -20,11 +20,12 @@ HarfBuzz/FreeType/libpng copies from replacing Pango's ABI-compatible copies.
 The DOCX smoke test also verifies that the frozen exporter embeds a rendered
 page and configures edge-to-edge Word pages.
 
-Windows builds use MSYS2 UCRT64 Pango (`C:\msys64\ucrt64\bin`), matching the
-runtime used by Python.org CPython. The legacy MINGW64 directory remains a local
-fallback, after UCRT64. CI builds and verifies the exporter before compiling
-Tauri so a missing native DLL fails early rather than after the desktop matrix
-has spent most of its time in Rust.
+Windows builds use MSYS2 UCRT64 Pango, matching the runtime used by Python.org
+CPython. CI resolves the real installation directory from `setup-msys2`'s
+`msys2-location` output; hosted runners do not guarantee `C:\msys64`. The legacy
+MINGW64 directory remains a local fallback, after UCRT64. CI builds and verifies
+the exporter before compiling Tauri so a missing native DLL fails early, with
+the searched directories and root DLL locations in the job log.
 
 PDF exports use no implicit page margin unless the HTML declares one in
 `@page`; spacing authored inside the HTML remains intact. DOCX exports render

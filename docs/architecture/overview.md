@@ -114,6 +114,15 @@ Three Docker services behind nginx gateway:
   - New MCP tools: `disc_join`, `disc_wait_for_peer`, `disc_leave`. `disc_append` extended with simple-mode `{content: "..."}` ; bulk-mode `{disc_id, messages: […]}` still works for cross-agent-memory transcript replay.
   - Doc fiche: `docs/operations/mcp-servers/kronn-internal.md`. `docs/AGENTS.md` rule relaxed: read the MCP context file IF it exists, otherwise proceed (was blocking on Codex's strict reading of the rule).
 - **Isolated workspace (worktree)**: discussions can run in `workspace_mode: "Isolated"`, creating a git worktree in `<repo>/.kronn-worktrees/` with a `kronn/<slug>` branch. The worktree isolates agent changes from the main working tree.
+  - **Workflow lifecycle safety (0.9.7 / KT-289):** a parent worktree is not
+    cleaned while queued/running batch children retain a durable read
+    reference. Fire-and-forget fan-out is refused from an isolated parent.
+    At boot, child dispatches owned by newly Interrupted workflow runs are
+    cancelled rather than replayed in a stale environment; ordinary discussion
+    jobs remain restartable. Terminal (non-Interrupted) worktrees left by an
+    earlier process are purged only under the managed `.kronn/worktrees`
+    directory. Batch outputs expose total dispatch attempts and redispatches,
+    and item-level `repo_path` preconditions fail before child creation.
   - **Multiple joined-CLI worktrees (0.9.3 / KT-140)**:
     `discussion_workspaces` is an additive per-discussion/per-session registry.
     Migration 101 backfills the legacy Isolated path/branch as a managed row
@@ -121,8 +130,13 @@ Three Docker services behind nginx gateway:
     external worktrees through `disc_workspace_set`; the backend canonicalizes
     the path, verifies the Git common directory against the primary and linked
     project repositories, confirms the checkout is registered by
-    `git worktree list`, and records the real branch/HEAD. A partial unique
-    index prevents two discussions from claiming the same physical checkout.
+    `git worktree list`, and records the real branch/HEAD. Database triggers
+    prevent two discussions from claiming the same physical checkout while
+    allowing several sessions in one room to declare an intentional shared
+    checkout. Destructive history rewrites use an advisory, expiring lease on
+    `(canonical_path, branch)` and require a server-verified backup ref at the
+    declared HEAD. This coordinates cooperating CLIs but cannot intercept a
+    process that bypasses Kronn.
     The Git panel passes an explicit workspace id to every operation; no
     selection preserves the legacy resolver.
   - **Lock/Unlock**: the worktree "locks" the branch (git forbids checkout elsewhere). User can **unlock** (`POST /discussions/:id/worktree-unlock`) to free the branch for testing in the main repo. **Lock** (`POST /discussions/:id/worktree-lock`) re-creates the worktree.
@@ -277,20 +291,24 @@ All three axes are available in:
 
 ### Workflow engine
 
-Unified automation system: `Trigger → Steps`. Superset of OpenAI Symphony's WORKFLOW.md format. Post-step operations (create PR, comment on issue, etc.) are handled directly by agents using MCP tools within steps, not as a separate "actions" phase.
+Unified automation system: `Trigger → Steps`. Kronn and OpenAI Symphony overlap on workspace lifecycle hooks, but are different orchestration systems rather than one being a superset of the other. Post-step operations (create PR, comment on issue, etc.) are handled directly by agents using available tools within steps, not as a separate "actions" phase.
 
 **Triggers:**
 - **Cron** — scheduled execution (simple recurring task). 1 tick = 1 run.
   Five-field expressions use standard cron weekday numbering (`0`/`7` Sunday,
   `1-5` Monday-Friday); the engine translates numeric weekdays to the Rust
   scheduler crate's Sunday-first numbering at evaluation time.
-- **Tracker** — polls an issue tracker API (GitHub, Linear...) at a cron interval. Each new matching issue = 1 separate run with issue context injected via Liquid templates. Pull-based (polling), not push (webhooks). Tracks processed issue IDs for reconciliation (no duplicate runs).
+- **Tracker** — polls an issue tracker API (GitHub, Linear...) at a cron interval. Each new matching issue = 1 separate run with issue context injected via Kronn's `{{variable}}` templates. Pull-based (polling), not push (webhooks). Tracks processed issue IDs for reconciliation (no duplicate runs).
 - **Manual** — triggered from dashboard UI or CLI.
 
 **Steps:**
 - Sequential execution, each step runs an agent with optional per-step MCPs (resolved and synced before execution).
+- LiteLLM and Ollama Agent steps also receive a bounded Kronn-native catalogue:
+  configured API/Quick API discovery and execution, plus read-only Planning for
+  project workflows. Scope is enforced server-side and persisted receipts keep
+  only tool names and outcomes, never arguments or credentials.
 - Steps can use `mode: debate` for multi-agent discussion at any point.
-- Context flows between steps via Liquid-compatible template variables: `{{issue.title}}`, `{{issue.body}}`, `{{issue.number}}`, `{{issue.url}}`, `{{issue.labels}}`, `{{previous_step.output}}`, `{{steps.<name>.output}}`.
+- Context flows between steps via Kronn's purpose-built `{{variable}}` syntax: `{{issue.title}}`, `{{issue.body}}`, `{{issue.number}}`, `{{issue.url}}`, `{{issue.labels}}`, `{{previous_step.output}}`, `{{steps.<name>.output}}`. It is not Liquid and supports no filters; runtime rendering rejects unknown variables, filters and unclosed placeholders before executing the step, while preview rendering keeps them visible.
 - **Conditional branching**: `on_result` rules per step — e.g. `{ contains: "NO_RESULTS", action: stop }`. Actions: `Stop`, `Skip`, `Goto(step_name)`.
 - **Per-step agent config**: optional `AgentSettings { model, reasoning_effort, max_tokens }` override.
 - **Stall detection**: configurable timeout — kill step if no agent output for N seconds.
@@ -314,17 +332,17 @@ Unified automation system: `Trigger → Steps`. Superset of OpenAI Symphony's WO
 - Per-step and per-run token totals tracked in `StepResult` and `WorkflowRun`.
 
 **Key design decisions:**
-- Workflows are created step-by-step via the dashboard UI (wizard), not just WORKFLOW.md files.
+- Workflows are created step-by-step via the dashboard UI (wizard) and can be exported/imported as Kronn's versioned JSON envelope.
 - The editor keeps its stage/step outline and save/cancel actions visible while
   only the active pane scrolls. Existing workflows can jump directly between
   stages, and the Steps stage exposes direct navigation to every step.
 - Agent prompts reuse the shared Markdown edit/preview/help component and the
   shared agent × reasoning-tier picker used by discussions and Quick Prompts.
-- WORKFLOW.md files can be imported/detected from repos (Symphony format → single-step Kronn workflow).
+- `WORKFLOW.md` detection/import is not implemented; the import endpoint accepts Kronn's JSON envelope only.
 - Import auto-detects missing MCPs and suggests installation from registry.
 - Storage format in DB is JSON (not YAML).
 - Reuses existing agent runner and multi-agent debate system.
-- Symphony is a strict subset: single-agent, single-prompt, tracker-driven. Kronn adds multi-step, multi-agent, conditional branching, per-step MCPs.
+- Symphony's `WORKFLOW.md` format is single-agent, single-prompt and tracker-driven. Kronn has a different multi-step/multi-agent runtime with conditional branching, native APIs, approval gates and cost guards. The four hook names (`after_create`, `before_run`, `after_run`, `before_remove`) intentionally match, but this hook-level compatibility does not imply import or orchestration compatibility.
 
 **0.6.0 engine extensions** (full detail in `docs/AGENTS.md § Workflow Engine 0.7.x features`):
 - `WorkflowGuards` (timeout / max-llm-calls / loop-revisits) → `RunStatus::StoppedByGuard`.

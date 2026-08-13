@@ -3291,11 +3291,8 @@ pub fn build_api_context_block(plugins_with_env: &[ActiveApiPlugin]) -> String {
         return String::new();
     }
 
-    let mut out = String::from("## REST APIs available\n\n");
-    out.push_str("The following REST APIs are configured for this project. Use the `api_call` MCP tool — \
-                  Kronn injects auth server-side and already knows each API's endpoints (call `mcp_list` to see them). \
-                  Never reconstruct authenticated `curl` commands or ask for credentials: secret values are intentionally \
-                  absent from this prompt.\n\n");
+    let mut out = String::from("## REST APIs available through Kronn\n\n");
+    out.push_str("The following are configured REST APIs, NOT vendor MCP servers. Do not search for, install, or invent an Adobe/SpeedCurve/etc. MCP. Use Kronn's `api_call` tool directly — it is exposed as a native tool to HTTP agents and through `kronn-internal` to CLI agents. Kronn injects auth server-side and already knows each API's endpoints. The legacy-named `mcp_list` tool lists these API plugins; then `api_endpoints` lists one plugin's paths. Prefer `qa_list`/`qa_run` when a saved Quick API already matches. Never reconstruct authenticated `curl` commands or ask for credentials: secret values are intentionally absent from this prompt.\n\n");
 
     for (server, env, spec) in api_plugins {
         out.push_str(&format!("### {}\n", server.name));
@@ -3445,8 +3442,8 @@ pub fn build_api_context_block(plugins_with_env: &[ActiveApiPlugin]) -> String {
         // point at those tools for the rest — not the whole catalogue.
         let n = spec.endpoints.len();
         out.push_str(&format!(
-            "{} endpoint{} listed — invoke via the `api_call` MCP tool (Kronn injects auth), \
-             or list the exact paths on demand with `mcp_list`.\n",
+            "{} endpoint{} listed — invoke via Kronn's `api_call` tool (Kronn injects auth), \
+             or list the exact paths on demand with `api_endpoints` after `mcp_list`.\n",
             n,
             if n == 1 { "" } else { "s" },
         ));
@@ -3588,6 +3585,20 @@ pub fn collect_active_api_plugins(
     project_id: &str,
     secret: &str,
 ) -> Result<Vec<ActiveApiPlugin>, anyhow::Error> {
+    collect_active_api_plugins_for_scope(conn, Some(project_id), secret)
+}
+
+/// Collect the API configurations visible to one discussion scope.
+/// Project discussions get project-linked + global configs. General
+/// discussions get global configs and the legacy `include_general` opt-in.
+/// Keeping this decision here prevents the prompt catalogue from advertising
+/// APIs the broker will later refuse, while ensuring a global imported API is
+/// visible even before the discussion is attached to a project.
+pub fn collect_active_api_plugins_for_scope(
+    conn: &rusqlite::Connection,
+    project_id: Option<&str>,
+    secret: &str,
+) -> Result<Vec<ActiveApiPlugin>, anyhow::Error> {
     let servers = crate::db::mcps::list_servers(conn)?;
     let configs = crate::db::mcps::list_configs(conn)?;
     let server_map: std::collections::HashMap<&str, &crate::models::McpServer> =
@@ -3595,8 +3606,13 @@ pub fn collect_active_api_plugins(
 
     let mut out: Vec<ActiveApiPlugin> = Vec::new();
     for config in &configs {
-        let on_project = config.is_global || config.project_ids.iter().any(|pid| pid == project_id);
-        if !on_project {
+        let enabled = match project_id {
+            Some(project_id) => {
+                config.is_global || config.project_ids.iter().any(|pid| pid == project_id)
+            }
+            None => config.is_global || config.include_general,
+        };
+        if !enabled {
             continue;
         }
         let Some(server) = server_map.get(config.server_id.as_str()) else {

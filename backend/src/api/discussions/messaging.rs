@@ -9,6 +9,7 @@
 
 use std::convert::Infallible;
 
+use anyhow::Context;
 use axum::{
     extract::{Path, State},
     http::StatusCode,
@@ -932,6 +933,87 @@ pub async fn run_agent(
         .unwrap_or_else(|| sse_events(Vec::new()))
 }
 
+/// POST /api/discussions/:id/agent-dispatches/retry
+///
+/// Retry exactly one failed native target without deleting sibling replies or
+/// rebinding the request to the discussion's latest User message.
+pub async fn retry_agent_dispatch(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<RetryAgentDispatchRequest>,
+) -> Response {
+    if Uuid::parse_str(&request.idempotency_key).is_err() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::<()>::err("Invalid idempotency_key")),
+        )
+            .into_response();
+    }
+
+    let discussion_id = id.clone();
+    let failed_dispatch_id = request.dispatch_id.clone();
+    let idempotency_key = request.idempotency_key.clone();
+    let new_job_id = Uuid::new_v4().to_string();
+    let default_agent_id = id.clone();
+    let result = state
+        .db
+        .with_conn(move |conn| {
+            let transaction = conn.unchecked_transaction()?;
+            let default_agent =
+                crate::db::discussions::get_discussion(&transaction, &default_agent_id)?
+                    .context("discussion not found")?
+                    .agent;
+            let (job, duplicate) = crate::db::agent_dispatch::enqueue_retry(
+                &transaction,
+                &discussion_id,
+                &failed_dispatch_id,
+                &idempotency_key,
+                &new_job_id,
+            )?;
+            crate::db::agent_dispatch::mark_error_retried(&transaction, &failed_dispatch_id)?;
+            let should_wake = matches!(
+                job.status,
+                crate::db::agent_dispatch::DispatchStatus::Pending
+                    | crate::db::agent_dispatch::DispatchStatus::Running
+            );
+            if should_wake {
+                crate::db::discussions::set_awaiting_agent(&transaction, &discussion_id, true)?;
+            }
+            transaction.commit()?;
+            Ok((job, duplicate, default_agent, should_wake))
+        })
+        .await;
+
+    let (job, duplicate, default_agent, should_wake) = match result {
+        Ok(value) => value,
+        Err(error) => {
+            let message = error.to_string();
+            let status = if message.contains("not found") {
+                StatusCode::NOT_FOUND
+            } else if message.contains("another discussion")
+                || message.contains("not failed")
+                || message.contains("not supported")
+            {
+                StatusCode::CONFLICT
+            } else {
+                tracing::error!(discussion_id = %id, "Failed to retry agent dispatch: {error}");
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            return (status, Json(ApiResponse::<()>::err(&message))).into_response();
+        }
+    };
+    if should_wake {
+        state.agent_dispatch_notify.notify_one();
+    }
+    Json(ApiResponse::ok(RetryAgentDispatchResponse {
+        dispatch_id: job.id,
+        trigger_message_id: job.trigger_message_id,
+        agent_type: job.agent_override.unwrap_or(default_agent),
+        duplicate,
+    }))
+    .into_response()
+}
+
 /// POST /api/discussions/:id/dismiss-partial
 ///
 /// Force-recover a pending partial_response on demand. Used by the
@@ -1152,6 +1234,88 @@ mod tests {
             .await
             .expect("collect SSE body");
         String::from_utf8_lossy(&bytes).to_string()
+    }
+
+    #[tokio::test]
+    async fn retry_endpoint_targets_only_the_failed_agent_and_original_turn() {
+        let disc = "d-targeted-retry";
+        let state = make_state_with_disc(disc).await;
+        state
+            .db
+            .with_conn(move |conn| {
+                let user = DiscussionMessage {
+                    id: "u-targeted-retry".into(),
+                    role: MessageRole::User,
+                    channel: MessageChannel::Main,
+                    content: "@claude @codex @litellm compare".into(),
+                    agent_type: None,
+                    timestamp: Utc::now(),
+                    tokens_used: 0,
+                    auth_mode: None,
+                    model_tier: None,
+                    model: None,
+                    cost_usd: None,
+                    author_pseudo: None,
+                    author_avatar_email: None,
+                    source_msg_id: None,
+                    duration_ms: None,
+                    lint_report: None,
+                    target_agent: None,
+                    reply_to_message_id: None,
+                    author_cli_ordinal: None,
+                    session_tokens_at_message: None,
+                    recovered_partial: false,
+                };
+                let sort_order = crate::db::discussions::insert_message(conn, disc, &user)?;
+                let lite = crate::db::agent_dispatch::enqueue(
+                    conn,
+                    crate::db::agent_dispatch::NewAgentDispatchJob {
+                        id: "j-lite-failed",
+                        discussion_id: disc,
+                        trigger_message_id: &user.id,
+                        trigger_sort_order: sort_order,
+                        dedupe_key: "turn:lite",
+                        agent_override: Some(&AgentType::LiteLlm),
+                        chain_prompt_ids: &[],
+                        batch_item: None,
+                        group_id: None,
+                        group_concurrency_limit: None,
+                    },
+                )?;
+                crate::db::agent_dispatch::mark_failed(conn, &lite.id, "vpn")?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let response = retry_agent_dispatch(
+            State(state.clone()),
+            Path(disc.into()),
+            Json(RetryAgentDispatchRequest {
+                dispatch_id: "j-lite-failed".into(),
+                idempotency_key: "77777777-7777-4777-8777-777777777777".into(),
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let jobs = state
+            .db
+            .with_conn(move |conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT agent_override_json, trigger_message_id FROM agent_dispatch_jobs
+                     WHERE dedupe_key LIKE 'retry:%'",
+                )?;
+                let rows = stmt.query_map([], |row| {
+                    Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?))
+                })?;
+                Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            jobs,
+            vec![(Some("\"LiteLlm\"".into()), "u-targeted-retry".into())]
+        );
     }
 
     #[tokio::test]

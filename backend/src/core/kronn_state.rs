@@ -20,6 +20,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use ts_rs::TS;
 
 /// Inline marker on every `.kronn.json` so a human opening the file
 /// understands its purpose without consulting external docs.
@@ -30,7 +31,22 @@ accurate audit status when this repo is cloned to another Kronn instance.";
 /// File name (always under `docs/` — resolved via `detect_docs_dir`).
 pub const KRONN_STATE_FILENAME: &str = ".kronn.json";
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum AuditProvenance {
+    /// Produced by Kronn's audit pipeline. This is the backward-compatible
+    /// default for state written before provenance became explicit.
+    #[default]
+    KronnAudit,
+    /// A human explicitly attested that the existing documentation is usable.
+    HumanAttestation,
+    /// Imported from pre-.kronn.json checksums or HTML markers.
+    LegacyEvidence,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[ts(export)]
 pub struct AuditEntry {
     /// ISO date `YYYY-MM-DD` — when the audit completed.
     pub date: String,
@@ -39,6 +55,8 @@ pub struct AuditEntry {
     /// Free-form discriminator: `"full"`, `"partial"`, `"legacy"`, ...
     #[serde(rename = "type")]
     pub audit_type: String,
+    #[serde(default)]
+    pub provenance: AuditProvenance,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
@@ -71,7 +89,7 @@ impl KronnState {
     }
 }
 
-fn state_path(project_path: &Path) -> std::path::PathBuf {
+pub fn state_path(project_path: &Path) -> std::path::PathBuf {
     crate::core::scanner::detect_docs_dir(project_path).join(KRONN_STATE_FILENAME)
 }
 
@@ -140,7 +158,28 @@ pub fn record_audit(project_path: &Path, audit_type: &str) -> Result<(), String>
         date: today_iso(),
         kronn_version: kronn_version(),
         audit_type: audit_type.to_string(),
+        provenance: AuditProvenance::KronnAudit,
     });
+    write(project_path, &mut state)
+}
+
+/// Record an explicit human attestation without pretending Kronn ran an audit.
+/// Repeated clicks are idempotent for the current day.
+pub fn attest_documentation(project_path: &Path) -> Result<(), String> {
+    let mut state = load_for_mutation(project_path)?;
+    let date = today_iso();
+    if !state
+        .audits
+        .iter()
+        .any(|entry| entry.provenance == AuditProvenance::HumanAttestation && entry.date == date)
+    {
+        state.audits.push(AuditEntry {
+            date,
+            kronn_version: kronn_version(),
+            audit_type: "attested".to_string(),
+            provenance: AuditProvenance::HumanAttestation,
+        });
+    }
     write(project_path, &mut state)
 }
 
@@ -246,6 +285,7 @@ pub fn backfill_from_legacy_state(project_path: &Path) -> Result<bool, String> {
         date: now.clone(),
         kronn_version: "legacy".to_string(),
         audit_type: "legacy".to_string(),
+        provenance: AuditProvenance::LegacyEvidence,
     });
 
     if has_validated {

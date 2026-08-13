@@ -2805,6 +2805,7 @@
   border-radius: var(--kr-r-sm);
   font-family: var(--kr-font-mono);
   font-size: var(--kr-fs-xs);
+  color: var(--kr-text-on-dark);
   overflow-x: auto;
   margin: 0;
   user-select: all;
@@ -3704,7 +3705,7 @@
   flex: 1;
   min-width: 0;
   font-size: var(--kr-fs-sm);
-  color: var(--kr-accent);
+  color: var(--kr-text-on-dark);
   background: var(--kr-bg-code);
   padding: var(--kr-sp-3) var(--kr-sp-5);
   border-radius: var(--kr-r-md);
@@ -4597,7 +4598,7 @@
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   font-size: var(--kr-fs-xs);
   line-height: 1.45;
-  color: var(--kr-text-secondary);
+  color: var(--kr-text-on-dark);
   white-space: pre;
   tab-size: 2;
 }

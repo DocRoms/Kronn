@@ -86,6 +86,8 @@ struct CollectedBatchResults {
     results: Vec<serde_json::Value>,
     measured_tokens: u64,
     tokens_status: &'static str,
+    dispatch_attempts: u64,
+    redispatches: u64,
 }
 
 /// Collect the durable output of every child discussion after the batch has
@@ -104,6 +106,8 @@ fn collect_batch_results(
     let mut results = Vec::with_capacity(discussion_ids.len());
     let mut measured_tokens = 0u64;
     let mut measured_children = 0usize;
+    let mut dispatch_attempts = 0u64;
+    let mut redispatches = 0u64;
 
     for (index, discussion_id) in discussion_ids.iter().enumerate() {
         let messages = crate::db::discussions::list_messages(conn, discussion_id)?;
@@ -125,22 +129,38 @@ fn collect_batch_results(
 
         let dispatch = conn
             .query_row(
-                "SELECT created_at, claimed_at, agent_started_at, completed_at, status
+                "SELECT created_at, claimed_at, agent_started_at, completed_at,
+                        status, attempts, turn_attempts, last_error
                  FROM agent_dispatch_jobs
                  WHERE discussion_id = ?1
                  ORDER BY created_at DESC LIMIT 1",
                 [discussion_id],
                 |row| {
-                    Ok(serde_json::json!({
-                        "queued_at": row.get::<_, String>(0)?,
-                        "claimed_at": row.get::<_, Option<String>>(1)?,
-                        "agent_started_at": row.get::<_, Option<String>>(2)?,
-                        "settled_at": row.get::<_, Option<String>>(3)?,
-                        "status": row.get::<_, String>(4)?,
-                    }))
+                    let attempts = row.get::<_, i64>(5)?.max(0) as u64;
+                    let turn_attempts = row.get::<_, i64>(6)?.max(0) as u64;
+                    Ok((
+                        serde_json::json!({
+                            "queued_at": row.get::<_, String>(0)?,
+                            "claimed_at": row.get::<_, Option<String>>(1)?,
+                            "agent_started_at": row.get::<_, Option<String>>(2)?,
+                            "settled_at": row.get::<_, Option<String>>(3)?,
+                            "status": row.get::<_, String>(4)?,
+                            "attempts": attempts,
+                            "turn_attempts": turn_attempts,
+                            "redispatches": attempts.saturating_sub(1),
+                            "last_error": row.get::<_, Option<String>>(7)?,
+                        }),
+                        attempts,
+                    ))
                 },
             )
             .optional()?;
+        let (dispatch, attempts) = match dispatch {
+            Some((dispatch, attempts)) => (Some(dispatch), attempts),
+            None => (None, 0),
+        };
+        dispatch_attempts = dispatch_attempts.saturating_add(attempts);
+        redispatches = redispatches.saturating_add(attempts.saturating_sub(1));
 
         results.push(serde_json::json!({
             "index": index,
@@ -168,7 +188,43 @@ fn collect_batch_results(
         results,
         measured_tokens,
         tokens_status,
+        dispatch_attempts,
+        redispatches,
     })
+}
+
+fn required_repo_path(item: &serde_json::Value) -> Option<&str> {
+    item.as_object()?
+        .get("repo_path")?
+        .as_str()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+}
+
+fn validate_item_repo_paths(items: &[serde_json::Value]) -> Result<(), String> {
+    for (index, item) in items.iter().enumerate() {
+        let Some(path) = required_repo_path(item) else {
+            continue;
+        };
+        let resolved = crate::core::scanner::resolve_host_path(path);
+        if !resolved.is_dir() {
+            return Err(format!(
+                "PACK PRECONDITION FAIL: item {index} repo_path `{path}` is absent or not a directory; no child discussion was created"
+            ));
+        }
+        let is_git_worktree = crate::core::cmd::sync_cmd("git")
+            .args(["rev-parse", "--is-inside-work-tree"])
+            .current_dir(&resolved)
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false);
+        if !is_git_worktree {
+            return Err(format!(
+                "PACK PRECONDITION FAIL: item {index} repo_path `{path}` is not a Git worktree; no child discussion was created"
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub async fn execute_batch_quick_prompt_step(
@@ -233,7 +289,7 @@ async fn execute_batch_quick_prompt_step_with_budget(
     // The expression can produce either a JSON array (preferred — from a
     // `StepOutputFormat::Structured` upstream step) or plain text with one
     // item per line. Both are accepted.
-    let rendered = match ctx.render(&items_from) {
+    let rendered = match ctx.render_strict(&items_from) {
         Ok(s) => s,
         Err(e) => {
             return fail(
@@ -261,6 +317,9 @@ async fn execute_batch_quick_prompt_step_with_budget(
             items.len(), max_items
         ),
         );
+    }
+    if let Err(error) = validate_item_repo_paths(&items) {
+        return fail(step, start, error);
     }
 
     // ── Load the Quick Prompt ───────────────────────────────────────────
@@ -346,22 +405,39 @@ async fn execute_batch_quick_prompt_step_with_budget(
                 // is the count (1-based). This is stable even if the user deletes
                 // older runs later — the number printed at batch-creation time
                 // reflects reality at that moment.
-                Ok(Some((workflow.map(|w| w.name), run_count)))
+                Ok(Some((
+                    workflow.map(|w| w.name),
+                    run_count,
+                    parent_run.workspace_path,
+                )))
             })
             .await
             .ok()
             .flatten()
     };
 
+    if !wait_for_completion
+        && parent_meta
+            .as_ref()
+            .and_then(|(_, _, workspace_path)| workspace_path.as_deref())
+            .is_some()
+    {
+        return fail(
+            step,
+            start,
+            "BatchQuickPrompt: fire-and-forget is unsafe from an isolated parent workspace; enable wait_for_completion so child ownership ends before cleanup",
+        );
+    }
+
     let now_stamp = chrono::Utc::now().format("%d %b %H:%M:%S");
     let batch_name = Some(match parent_meta.as_ref() {
-        Some((Some(wf_name), run_seq)) => format!(
+        Some((Some(wf_name), run_seq, _)) => format!(
             "{} · run #{} · {} · {}",
             wf_name, run_seq, qp.name, now_stamp
         ),
         // Parent run exists but workflow was deleted or placeholder → fall back
         // to run sequence only. Still useful to disambiguate from sibling batches.
-        Some((None, run_seq)) => format!("run #{} · {} · {}", run_seq, qp.name, now_stamp),
+        Some((None, run_seq, _)) => format!("run #{} · {} · {}", run_seq, qp.name, now_stamp),
         // Parent run not found (shouldn't happen in practice since we just
         // created it upstream). Keep the old format so we never crash.
         None => format!("{} · {}", qp.name, now_stamp),
@@ -450,6 +526,8 @@ async fn execute_batch_quick_prompt_step_with_budget(
             results: &[],
             tokens_used: None,
             tokens_status: "pending",
+            dispatch_attempts: 0,
+            redispatches: 0,
             timing: BatchTiming::measure(start, wall_started_at),
         });
         return StepOutcome {
@@ -472,6 +550,7 @@ async fn execute_batch_quick_prompt_step_with_budget(
                 step_api_endpoint_path: None,
                 is_rollback: false,
                 child_run_id: None,
+                native_tool_calls: Box::default(),
             },
             condition_action: None,
         };
@@ -621,6 +700,8 @@ async fn execute_batch_quick_prompt_step_with_budget(
         tokens_used: (collected.tokens_status != "unavailable_children_not_measured")
             .then_some(collected.measured_tokens),
         tokens_status: collected.tokens_status,
+        dispatch_attempts: collected.dispatch_attempts,
+        redispatches: collected.redispatches,
         timing: BatchTiming::measure(start, wall_started_at),
     });
 
@@ -654,6 +735,7 @@ async fn execute_batch_quick_prompt_step_with_budget(
             step_api_endpoint_path: None,
             is_rollback: false,
             child_run_id: None,
+            native_tool_calls: Box::default(),
         },
         condition_action,
     }
@@ -692,6 +774,7 @@ fn fail(step: &WorkflowStep, start: Instant, msg: impl Into<String>) -> StepOutc
             step_api_endpoint_path: None,
             is_rollback: false,
             child_run_id: None,
+            native_tool_calls: Box::default(),
         },
         condition_action,
     }
@@ -1000,6 +1083,8 @@ struct BatchStructuredOutput<'a> {
     results: &'a [serde_json::Value],
     tokens_used: Option<u64>,
     tokens_status: &'a str,
+    dispatch_attempts: u64,
+    redispatches: u64,
     timing: BatchTiming,
 }
 
@@ -1014,6 +1099,8 @@ fn build_structured_output(input: BatchStructuredOutput<'_>) -> String {
         results,
         tokens_used,
         tokens_status,
+        dispatch_attempts,
+        redispatches,
         timing,
     } = input;
     let status = if completed {
@@ -1063,6 +1150,14 @@ fn build_structured_output(input: BatchStructuredOutput<'_>) -> String {
     data.insert(
         "tokens_status",
         serde_json::Value::String(tokens_status.to_string()),
+    );
+    data.insert(
+        "dispatch_attempts",
+        serde_json::Value::Number(dispatch_attempts.into()),
+    );
+    data.insert(
+        "redispatches",
+        serde_json::Value::Number(redispatches.into()),
     );
     data.insert(
         "timing",
@@ -1318,6 +1413,41 @@ mod tests {
     use super::super::step_output_format::parse_envelope_for_test;
 
     #[test]
+    fn pack_repo_path_precondition_fails_closed_before_child_creation() {
+        let missing = std::env::temp_dir().join(format!(
+            "kronn-missing-pack-worktree-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let items = vec![serde_json::json!({
+            "pack": "p1",
+            "repo_path": missing,
+            "context_digest": "model-controlled-and-insufficient"
+        })];
+
+        let error = validate_item_repo_paths(&items).unwrap_err();
+
+        assert!(error.starts_with("PACK PRECONDITION FAIL:"));
+        assert!(error.contains("no child discussion was created"));
+    }
+
+    #[test]
+    fn pack_repo_path_precondition_accepts_a_real_git_worktree_and_ignores_unrelated_items() {
+        let fixture = tempfile::tempdir().unwrap();
+        let output = crate::core::cmd::sync_cmd("git")
+            .args(["init"])
+            .current_dir(fixture.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let items = vec![
+            serde_json::json!({"repo_path": fixture.path()}),
+            serde_json::json!({"ordinary": "batch item"}),
+        ];
+
+        validate_item_repo_paths(&items).unwrap();
+    }
+
+    #[test]
     fn build_structured_output_ok() {
         let discussion_ids = ["d1".into(), "d2".into(), "d3".into()];
         let out = build_structured_output(BatchStructuredOutput {
@@ -1330,6 +1460,8 @@ mod tests {
             results: &[],
             tokens_used: Some(42),
             tokens_status: "measured",
+            dispatch_attempts: 3,
+            redispatches: 0,
             timing: BatchTiming::zero(),
         });
         let v = parse_envelope_for_test(&out);
@@ -1341,6 +1473,8 @@ mod tests {
         assert_eq!(v["data"]["discussion_ids"].as_array().unwrap().len(), 3);
         assert_eq!(v["data"]["tokens_used"], 42);
         assert_eq!(v["data"]["tokens_status"], "measured");
+        assert_eq!(v["data"]["dispatch_attempts"], 3);
+        assert_eq!(v["data"]["redispatches"], 0);
         // Canonical envelope must also carry the matching SIGNAL line so
         // `on_result.contains` rules can branch on status.
         assert!(out.contains("[SIGNAL: OK]"));
@@ -1358,6 +1492,8 @@ mod tests {
             results: &[],
             tokens_used: None,
             tokens_status: "unavailable_children_not_measured",
+            dispatch_attempts: 7,
+            redispatches: 2,
             timing: BatchTiming::zero(),
         });
         let v = parse_envelope_for_test(&out);
@@ -1377,6 +1513,8 @@ mod tests {
             results: &[],
             tokens_used: None,
             tokens_status: "unavailable_children_not_measured",
+            dispatch_attempts: 5,
+            redispatches: 0,
             timing: BatchTiming::zero(),
         });
         let v = parse_envelope_for_test(&out);
@@ -1396,6 +1534,8 @@ mod tests {
             results: &[],
             tokens_used: None,
             tokens_status: "pending",
+            dispatch_attempts: 0,
+            redispatches: 0,
             timing: BatchTiming::zero(),
         });
         let v = parse_envelope_for_test(&out);
@@ -1446,6 +1586,8 @@ mod tests {
             results: &collected.results,
             tokens_used: Some(collected.measured_tokens),
             tokens_status: collected.tokens_status,
+            dispatch_attempts: collected.dispatch_attempts,
+            redispatches: collected.redispatches,
             timing: BatchTiming::zero(),
         });
         let envelope = parse_envelope_for_test(&output);
@@ -1473,6 +1615,40 @@ mod tests {
             assert!(output.starts_with(&format!("pack-{index}:")));
             assert_eq!(result["tokens_used"], ((index + 1) * 10) as u64);
         }
+    }
+
+    #[test]
+    fn collection_exposes_every_paid_dispatch_attempt_and_redispatch() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        conn.execute_batch(
+            "INSERT INTO discussions (id, title, created_at, updated_at)
+             VALUES ('d-cost', 'Cost', 'now', 'now');
+             INSERT INTO messages (
+                 id, discussion_id, role, content, timestamp, sort_order, tokens_used
+             ) VALUES
+                 ('u-cost', 'd-cost', 'User', 'go', 'now', 0, 0),
+                 ('a-cost', 'd-cost', 'Agent', 'done', 'now', 1, 42);
+             INSERT INTO agent_dispatch_jobs (
+                 id, discussion_id, trigger_message_id, trigger_sort_order,
+                 dedupe_key, status, attempts, turn_attempts, available_at,
+                 created_at, updated_at, completed_at
+             ) VALUES (
+                 'job-cost', 'd-cost', 'u-cost', 0, 'cost', 'Completed', 3, 2,
+                 'now', 'now', 'now', 'now'
+             );",
+        )
+        .unwrap();
+
+        let collected =
+            collect_batch_results(&conn, &["d-cost".into()], &[serde_json::json!({"pack": 1})])
+                .unwrap();
+
+        assert_eq!(collected.dispatch_attempts, 3);
+        assert_eq!(collected.redispatches, 2);
+        assert_eq!(collected.results[0]["dispatch"]["attempts"], 3);
+        assert_eq!(collected.results[0]["dispatch"]["turn_attempts"], 2);
+        assert_eq!(collected.results[0]["dispatch"]["redispatches"], 2);
     }
 
     // ─── E2E tests for `execute_batch_quick_prompt_step` ─────────────────────
@@ -1604,6 +1780,22 @@ mod tests {
         run_id
     }
 
+    async fn seed_parent_workspace(state: &AppState, run_id: &str, path: &str) {
+        let run_id = run_id.to_string();
+        let path = path.to_string();
+        state
+            .db
+            .with_conn(move |conn| {
+                conn.execute(
+                    "UPDATE workflow_runs SET workspace_path = ?2 WHERE id = ?1",
+                    rusqlite::params![run_id, path],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
     /// Build a minimal `BatchQuickPrompt` step pointing at the seeded QP.
     fn batch_step(qp_id: &str, wait_for_completion: bool) -> WorkflowStep {
         WorkflowStep {
@@ -1722,6 +1914,44 @@ mod tests {
             .expect("DB readback");
         assert_eq!(child_run.1, 3, "child batch_total = number of items");
         assert_eq!(disc_count, 3, "one discussion row per batch item");
+    }
+
+    #[tokio::test]
+    async fn fire_and_forget_from_isolated_parent_fails_before_creating_children() {
+        let state = e2e_state();
+        let qp = seed_qp(&state).await;
+        let parent_run_id = seed_parent_run(&state).await;
+        seed_parent_workspace(
+            &state,
+            &parent_run_id,
+            "/repo/.kronn/worktrees/parent-owned",
+        )
+        .await;
+        let step = batch_step(&qp.id, false);
+
+        let outcome = execute_batch_quick_prompt_step(
+            &step,
+            &parent_run_id,
+            state.clone(),
+            &TemplateContext::new(),
+        )
+        .await;
+
+        assert_eq!(outcome.result.status, RunStatus::Failed);
+        assert!(outcome.result.output.contains("fire-and-forget is unsafe"));
+        let parent = parent_run_id.clone();
+        let child_count: i64 = state
+            .db
+            .with_conn(move |conn| {
+                Ok(conn.query_row(
+                    "SELECT COUNT(*) FROM workflow_runs WHERE parent_run_id = ?1",
+                    [parent],
+                    |row| row.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(child_count, 0);
     }
 
     #[tokio::test]

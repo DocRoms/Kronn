@@ -264,6 +264,97 @@ pub fn enqueue_for_latest_user(
     )
 }
 
+/// Enqueue an explicit human retry of one failed target. The original trigger
+/// and agent override are copied verbatim, so a three-agent turn retries only
+/// the provider named by its error card. The caller-scoped dedupe key makes a
+/// double-click or transport replay harmless.
+pub fn enqueue_retry(
+    conn: &Connection,
+    discussion_id: &str,
+    failed_dispatch_id: &str,
+    idempotency_key: &str,
+    new_id: &str,
+) -> Result<(AgentDispatchJob, bool)> {
+    let failed = get(conn, failed_dispatch_id)?.context("failed dispatch not found")?;
+    anyhow::ensure!(
+        failed.discussion_id == discussion_id,
+        "failed dispatch belongs to another discussion"
+    );
+    anyhow::ensure!(
+        failed.status == DispatchStatus::Failed,
+        "dispatch is not failed"
+    );
+    anyhow::ensure!(
+        failed.group_id.is_none(),
+        "workflow dispatch retry is not supported here"
+    );
+    // A primary-agent dispatch stores no override because it normally follows
+    // `Discussion.agent`. The attributed System error freezes who actually
+    // failed; use it so changing the discussion agent before clicking Retry
+    // cannot silently redirect the retry to a different provider.
+    let failed_agent = match failed.agent_override.clone() {
+        Some(agent) => Some(agent),
+        None => conn
+            .query_row(
+                "SELECT agent_type FROM messages
+                 WHERE agent_dispatch_job_id = ?1 AND role = 'System'
+                 ORDER BY sort_order DESC LIMIT 1",
+                [failed_dispatch_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten()
+            .map(|value| super::discussions::parse_agent_type(&value)),
+    };
+    let dedupe_key = format!("retry:{failed_dispatch_id}:{idempotency_key}");
+    let existed = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM agent_dispatch_jobs WHERE dedupe_key = ?1)",
+        [&dedupe_key],
+        |row| row.get::<_, bool>(0),
+    )?;
+    let job = enqueue(
+        conn,
+        NewAgentDispatchJob {
+            id: new_id,
+            discussion_id,
+            trigger_message_id: &failed.trigger_message_id,
+            trigger_sort_order: failed.trigger_sort_order,
+            dedupe_key: &dedupe_key,
+            agent_override: failed_agent.as_ref(),
+            chain_prompt_ids: &failed.chain_prompt_ids,
+            batch_item: failed.batch_item.as_deref(),
+            group_id: None,
+            group_concurrency_limit: None,
+        },
+    )?;
+    Ok((job, existed))
+}
+
+pub fn mark_error_retried(conn: &Connection, failed_dispatch_id: &str) -> Result<()> {
+    let row = conn
+        .query_row(
+            "SELECT id, content FROM messages
+             WHERE agent_dispatch_job_id = ?1 AND role = 'System'
+             ORDER BY sort_order DESC LIMIT 1",
+            [failed_dispatch_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()?;
+    let Some((message_id, content)) = row else {
+        return Ok(());
+    };
+    let Some(payload) = content.strip_prefix("[kronn:agent-error]\n") else {
+        return Ok(());
+    };
+    let mut value: serde_json::Value = serde_json::from_str(payload)?;
+    value["retried"] = serde_json::Value::Bool(true);
+    conn.execute(
+        "UPDATE messages SET content = ?2 WHERE id = ?1",
+        params![message_id, format!("[kronn:agent-error]\n{value}")],
+    )?;
+    Ok(())
+}
+
 pub fn list_runnable_ids(conn: &Connection, limit: usize) -> Result<Vec<String>> {
     let mut statement = conn.prepare(
         "SELECT candidate.id
@@ -377,17 +468,97 @@ pub fn claim(conn: &Connection, id: &str) -> Result<Option<AgentDispatchJob>> {
     })
 }
 
-pub fn reset_running_after_restart(conn: &Connection) -> Result<u64> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AgentDispatchRestartRecovery {
+    pub requeued: u64,
+    pub cancelled_workflow_children: u64,
+}
+
+pub fn recover_after_restart(conn: &Connection) -> Result<AgentDispatchRestartRecovery> {
     let now = Utc::now().to_rfc3339();
-    let changed = conn.execute(
+    let tx = conn.unchecked_transaction()?;
+    // Workflow-owned batch groups have just been moved to Interrupted by the
+    // boot reconcile. Replaying their child prompts would run outside the dead
+    // parent's lifecycle (and may point at a worktree that no longer exists),
+    // so retire BOTH Running and merely queued children fail-closed. Ordinary
+    // discussion turns keep the historical restart retry semantics below.
+    tx.execute(
+        "UPDATE workflow_runs AS batch
+            SET state = json_set(
+                COALESCE(batch.state, '{}'),
+                '$.dispatch_attempts', COALESCE((
+                    SELECT SUM(dispatch.attempts)
+                      FROM agent_dispatch_jobs dispatch
+                     WHERE dispatch.group_id = batch.id
+                ), 0),
+                '$.redispatches', COALESCE((
+                    SELECT SUM(MAX(dispatch.attempts - 1, 0))
+                      FROM agent_dispatch_jobs dispatch
+                     WHERE dispatch.group_id = batch.id
+                ), 0),
+                '$.restart_cancelled_children', COALESCE((
+                    SELECT COUNT(*)
+                      FROM agent_dispatch_jobs dispatch
+                     WHERE dispatch.group_id = batch.id
+                       AND dispatch.status IN ('Pending', 'Running')
+                ), 0)
+            )
+          WHERE batch.run_type = 'batch'
+            AND batch.status = 'Interrupted'
+            AND EXISTS (
+                SELECT 1 FROM workflow_runs parent
+                 WHERE parent.id = batch.parent_run_id
+                   AND parent.status = 'Interrupted'
+            )",
+        [],
+    )?;
+    let cancelled = tx.execute(
+        "UPDATE agent_dispatch_jobs
+         SET status = 'Cancelled', completed_at = ?1, updated_at = ?1,
+             claimed_at = NULL, agent_started_at = NULL,
+             last_error = 'parent_workflow_interrupted'
+         WHERE status IN ('Pending', 'Running')
+           AND group_id IN (
+               SELECT child.id
+               FROM workflow_runs child
+               JOIN workflow_runs parent ON parent.id = child.parent_run_id
+               WHERE child.run_type = 'batch'
+                 AND (child.status = 'Interrupted' OR parent.status = 'Interrupted')
+           )",
+        [&now],
+    )?;
+    tx.execute(
+        "UPDATE discussions
+            SET awaiting_agent = 0
+          WHERE awaiting_agent = 1
+            AND workflow_run_id IN (
+                SELECT child.id
+                FROM workflow_runs child
+                JOIN workflow_runs parent ON parent.id = child.parent_run_id
+                WHERE child.run_type = 'batch'
+                  AND (child.status = 'Interrupted' OR parent.status = 'Interrupted')
+            )",
+        [],
+    )?;
+    let requeued = tx.execute(
         "UPDATE agent_dispatch_jobs
          SET status = 'Pending', claimed_at = NULL, agent_started_at = NULL,
              available_at = ?1, updated_at = ?1,
              last_error = 'backend_restarted'
          WHERE status = 'Running'",
-        [now],
+        [&now],
     )?;
-    Ok(changed as u64)
+    tx.commit()?;
+    Ok(AgentDispatchRestartRecovery {
+        requeued: requeued as u64,
+        cancelled_workflow_children: cancelled as u64,
+    })
+}
+
+/// Compatibility wrapper for callers/tests interested only in ordinary
+/// discussion jobs that remain retryable across a restart.
+pub fn reset_running_after_restart(conn: &Connection) -> Result<u64> {
+    Ok(recover_after_restart(conn)?.requeued)
 }
 
 /// Persist the boundary between queueing and real agent execution.
@@ -667,6 +838,130 @@ mod tests {
     }
 
     #[test]
+    fn explicit_retry_copies_only_the_failed_target_and_is_idempotent() {
+        let connection = connection();
+        let failed = enqueue(
+            &connection,
+            NewAgentDispatchJob {
+                id: "j-lite-failed",
+                discussion_id: "d1",
+                trigger_message_id: "u1",
+                trigger_sort_order: 1,
+                dedupe_key: "turn-1-lite",
+                agent_override: Some(&AgentType::LiteLlm),
+                chain_prompt_ids: &[],
+                batch_item: None,
+                group_id: None,
+                group_concurrency_limit: None,
+            },
+        )
+        .unwrap();
+        mark_failed(&connection, &failed.id, "vpn unavailable").unwrap();
+
+        let (retry, duplicate) = enqueue_retry(
+            &connection,
+            "d1",
+            "j-lite-failed",
+            "click-1",
+            "j-lite-retry",
+        )
+        .unwrap();
+        assert!(!duplicate);
+        assert_eq!(retry.trigger_message_id, "u1");
+        assert_eq!(retry.agent_override, Some(AgentType::LiteLlm));
+
+        let (same, duplicate) = enqueue_retry(
+            &connection,
+            "d1",
+            "j-lite-failed",
+            "click-1",
+            "must-not-be-inserted",
+        )
+        .unwrap();
+        assert!(duplicate);
+        assert_eq!(same.id, "j-lite-retry");
+        let count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM agent_dispatch_jobs WHERE trigger_message_id = 'u1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 2, "failed LiteLLM + its one retry only");
+    }
+
+    #[test]
+    fn retry_marks_the_linked_agent_error_without_touching_its_diagnostics() {
+        let connection = connection();
+        let now = Utc::now().to_rfc3339();
+        let content = concat!(
+            "[kronn:agent-error]\n",
+            r#"{"kind":"agent_error","summary":"LiteLLM indisponible","detail":"VPN requis","retry_dispatch_id":"j-lite-failed","retried":false}"#
+        );
+        connection
+            .execute(
+                "INSERT INTO messages
+                 (id, discussion_id, role, content, timestamp, sort_order, received_at,
+                  agent_dispatch_job_id)
+                 VALUES ('m-lite-error', 'd1', 'System', ?1, ?2, 2, ?2, 'j-lite-failed')",
+                params![content, now],
+            )
+            .unwrap();
+
+        mark_error_retried(&connection, "j-lite-failed").unwrap();
+
+        let updated: String = connection
+            .query_row(
+                "SELECT content FROM messages WHERE id = 'm-lite-error'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_str(
+            updated
+                .strip_prefix("[kronn:agent-error]\n")
+                .expect("structured agent error marker"),
+        )
+        .unwrap();
+        assert_eq!(payload["retried"], true);
+        assert_eq!(payload["detail"], "VPN requis");
+        assert_eq!(payload["retry_dispatch_id"], "j-lite-failed");
+    }
+
+    #[test]
+    fn retry_freezes_the_failed_primary_agent_from_the_error_message() {
+        let connection = connection();
+        let failed = enqueue_default(&connection, "j-primary-failed", "turn-primary");
+        mark_failed(&connection, &failed.id, "vpn unavailable").unwrap();
+        let now = Utc::now().to_rfc3339();
+        connection
+            .execute(
+                "INSERT INTO messages
+                 (id, discussion_id, role, content, agent_type, timestamp, sort_order,
+                  received_at, agent_dispatch_job_id)
+                 VALUES ('m-primary-error', 'd1', 'System', '[kronn:agent-error]',
+                         'LiteLlm', ?1, 2, ?1, 'j-primary-failed')",
+                [&now],
+            )
+            .unwrap();
+        connection
+            .execute("UPDATE discussions SET agent = 'Codex' WHERE id = 'd1'", [])
+            .unwrap();
+
+        let (retry, duplicate) = enqueue_retry(
+            &connection,
+            "d1",
+            "j-primary-failed",
+            "click-primary",
+            "j-primary-retry",
+        )
+        .unwrap();
+
+        assert!(!duplicate);
+        assert_eq!(retry.agent_override, Some(AgentType::LiteLlm));
+    }
+
+    #[test]
     fn enqueue_is_idempotent_and_claim_is_exclusive() {
         let connection = connection();
         let first = enqueue_default(&connection, "j1", "message:u1");
@@ -895,6 +1190,116 @@ mod tests {
         assert_eq!(recovered.attempts, 1);
         assert_eq!(recovered.last_error.as_deref(), Some("backend_restarted"));
         assert!(claim(&connection, "j1").unwrap().is_some());
+    }
+
+    #[test]
+    fn restart_never_redispatches_children_of_an_interrupted_workflow() {
+        let connection = connection();
+        connection
+            .execute_batch(
+                "INSERT INTO workflows (
+                     id, name, trigger_json, steps_json, actions_json,
+                     safety_json, enabled, created_at, updated_at
+                 ) VALUES (
+                     'wf-parent', 'Parent', '\"Manual\"', '[]', '[]', '{}', 1, 'now', 'now'
+                 );
+                 INSERT INTO workflows (
+                     id, name, trigger_json, steps_json, actions_json,
+                     safety_json, enabled, created_at, updated_at
+                 ) VALUES (
+                     'wf-batch', 'Batch', '\"Manual\"', '[]', '[]', '{}', 1, 'now', 'now'
+                 );
+                 INSERT INTO workflow_runs (
+                     id, workflow_id, status, step_results_json, tokens_used,
+                     started_at, finished_at, run_type, batch_total,
+                     batch_completed, batch_failed
+                 ) VALUES (
+                     'parent-run', 'wf-parent', 'Interrupted', '[]', 0,
+                     'now', 'now', 'linear', 0, 0, 0
+                 );
+                 INSERT INTO workflow_runs (
+                     id, workflow_id, status, step_results_json, tokens_used,
+                     started_at, finished_at, run_type, batch_total,
+                     batch_completed, batch_failed, parent_run_id
+                 ) VALUES (
+                     'batch-run', 'wf-batch', 'Interrupted', '[]', 0,
+                     'now', 'now', 'batch', 2, 0, 0, 'parent-run'
+                 );
+                 UPDATE discussions
+                    SET workflow_run_id = 'batch-run', awaiting_agent = 1
+                  WHERE id = 'd1';",
+            )
+            .unwrap();
+        enqueue(
+            &connection,
+            NewAgentDispatchJob {
+                id: "running-child",
+                discussion_id: "d1",
+                trigger_message_id: "u1",
+                trigger_sort_order: 1,
+                dedupe_key: "batch-child-running",
+                agent_override: None,
+                chain_prompt_ids: &[],
+                batch_item: None,
+                group_id: Some("batch-run"),
+                group_concurrency_limit: Some(2),
+            },
+        )
+        .unwrap();
+        claim(&connection, "running-child").unwrap().unwrap();
+        enqueue(
+            &connection,
+            NewAgentDispatchJob {
+                id: "queued-child",
+                discussion_id: "d1",
+                trigger_message_id: "u1",
+                trigger_sort_order: 1,
+                dedupe_key: "batch-child-queued",
+                agent_override: None,
+                chain_prompt_ids: &[],
+                batch_item: None,
+                group_id: Some("batch-run"),
+                group_concurrency_limit: Some(2),
+            },
+        )
+        .unwrap();
+
+        let recovery = recover_after_restart(&connection).unwrap();
+
+        assert_eq!(recovery.requeued, 0);
+        assert_eq!(recovery.cancelled_workflow_children, 2);
+        let child = get(&connection, "running-child").unwrap().unwrap();
+        assert_eq!(child.status, DispatchStatus::Cancelled);
+        assert_eq!(
+            child.last_error.as_deref(),
+            Some("parent_workflow_interrupted")
+        );
+        assert_eq!(child.attempts, 1, "the spent attempt remains observable");
+        let queued = get(&connection, "queued-child").unwrap().unwrap();
+        assert_eq!(queued.status, DispatchStatus::Cancelled);
+        assert_eq!(queued.attempts, 0, "queued work never spent an attempt");
+        let metrics: String = connection
+            .query_row(
+                "SELECT state FROM workflow_runs WHERE id = 'batch-run'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let metrics: serde_json::Value = serde_json::from_str(&metrics).unwrap();
+        assert_eq!(metrics["dispatch_attempts"], 1);
+        assert_eq!(metrics["redispatches"], 0);
+        assert_eq!(metrics["restart_cancelled_children"], 2);
+        assert!(list_runnable_ids(&connection, 10).unwrap().is_empty());
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT awaiting_agent FROM discussions WHERE id = 'd1'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
     }
 
     #[test]

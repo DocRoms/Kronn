@@ -26,6 +26,13 @@ pub struct KronnToolExecutor {
     /// broker can resolve project-scoped credentials the same way it does for
     /// CLI agents.
     disc_id: Option<String>,
+    /// Explicit workflow project scope. Discussions derive the project from
+    /// `disc_id`; workflow runs have no discussion and must never fall back to
+    /// an arbitrary plugin configuration from another project.
+    project_id: Option<String>,
+    /// Present for workflow steps. Used for durable Planning attribution and
+    /// to expose only the workflow-safe subset of the native catalogue.
+    workflow_run_id: Option<String>,
     /// Durable attribution written to Planning's event log. The model cannot
     /// override this value in tool arguments.
     actor_id: String,
@@ -38,6 +45,8 @@ impl KronnToolExecutor {
         Self {
             state,
             disc_id,
+            project_id: None,
+            workflow_run_id: None,
             actor_id: "Kronn HTTP agent".into(),
             source_message_id: None,
         }
@@ -53,8 +62,29 @@ impl KronnToolExecutor {
         std::sync::Arc::new(Self {
             state,
             disc_id,
+            project_id: None,
+            workflow_run_id: None,
             actor_id,
             source_message_id,
+        })
+    }
+
+    /// Native tools for an HTTP Agent step. The workflow-safe catalogue has
+    /// no discussion-bound plan mutations and carries explicit project/run
+    /// attribution into API and Planning reads.
+    pub fn workflow_arc(
+        state: AppState,
+        project_id: Option<String>,
+        workflow_run_id: String,
+        step_name: String,
+    ) -> std::sync::Arc<dyn ToolExecutor> {
+        std::sync::Arc::new(Self {
+            state,
+            disc_id: None,
+            project_id,
+            actor_id: format!("Workflow {workflow_run_id} · {step_name}"),
+            workflow_run_id: Some(workflow_run_id),
+            source_message_id: None,
         })
     }
 }
@@ -305,13 +335,47 @@ pub fn tool_catalogue() -> Vec<Value> {
     ]
 }
 
+fn workflow_tool_catalogue(has_project: bool) -> Vec<Value> {
+    const WORKFLOW_TOOLS: &[&str] = &["mcp_list", "api_endpoints", "qa_list", "qa_run", "api_call"];
+    tool_catalogue()
+        .into_iter()
+        .filter(|tool| {
+            tool["function"]["name"].as_str().is_some_and(|name| {
+                WORKFLOW_TOOLS.contains(&name)
+                    || (has_project && matches!(name, "task_list" | "task_get"))
+            })
+        })
+        .collect()
+}
+
 #[async_trait::async_trait]
 impl ToolExecutor for KronnToolExecutor {
     fn catalogue(&self) -> Vec<Value> {
-        tool_catalogue()
+        let catalogue = tool_catalogue();
+        if self.workflow_run_id.is_none() {
+            return catalogue;
+        }
+        workflow_tool_catalogue(self.project_id.is_some())
     }
 
     async fn execute(&self, call: &ToolCall) -> ToolOutcome {
+        if self.workflow_run_id.is_some()
+            && !workflow_tool_catalogue(self.project_id.is_some())
+                .iter()
+                .any(|tool| {
+                    tool["function"]["name"]
+                        .as_str()
+                        .is_some_and(|name| name == call.name)
+                })
+        {
+            return fail(
+                call,
+                format!(
+                    "tool `{}` is not allowed in workflow Agent steps; use only the bounded catalogue declared on this request",
+                    call.name
+                ),
+            );
+        }
         use axum::extract::{Path, State};
         use axum::Json;
 
@@ -322,7 +386,10 @@ impl ToolExecutor for KronnToolExecutor {
                 let Json(res) = crate::api::mcps::overview(State(self.state.clone())).await;
                 match (res.success, res.data) {
                     (true, Some(d)) => match serde_json::to_value(d) {
-                        Ok(v) => ok(call, compact_plugin_list(&v)),
+                        Ok(v) => {
+                            let project_id = self.effective_project_id().await;
+                            ok(call, compact_plugin_list(&v, project_id.as_deref()))
+                        }
                         Err(e) => fail(call, format!("could not serialise result: {e}")),
                     },
                     _ => fail(call, res.error.unwrap_or_else(|| "call failed".into())),
@@ -334,16 +401,23 @@ impl ToolExecutor for KronnToolExecutor {
                 };
                 let Json(res) = crate::api::mcps::overview(State(self.state.clone())).await;
                 match (res.success, res.data) {
-                    (true, Some(d)) => match serde_json::to_value(d)
-                        .ok()
-                        .and_then(|v| compact_endpoints(&v, slug))
-                    {
-                        Some(v) => ok(call, v),
-                        None => fail(
-                            call,
-                            format!("no plugin `{slug}` with an API spec — call mcp_list first"),
-                        ),
-                    },
+                    (true, Some(d)) => {
+                        let project_id = self.effective_project_id().await;
+                        match serde_json::to_value(d).ok().and_then(|v| {
+                            let listed = compact_plugin_list(&v, project_id.as_deref());
+                            listed["plugins"]
+                                .as_array()
+                                .is_some_and(|plugins| plugins.iter().any(|p| p["slug"] == slug))
+                                .then(|| compact_endpoints(&v, slug))
+                                .flatten()
+                        }) {
+                            Some(v) => ok(call, v),
+                            None => fail(
+                                call,
+                                format!("no in-scope plugin `{slug}` with an API spec — call mcp_list first"),
+                            ),
+                        }
+                    }
                     _ => fail(call, res.error.unwrap_or_else(|| "call failed".into())),
                 }
             }
@@ -351,7 +425,10 @@ impl ToolExecutor for KronnToolExecutor {
                 let Json(res) = crate::api::quick_apis::list(State(self.state.clone())).await;
                 match (res.success, res.data) {
                     (true, Some(d)) => match serde_json::to_value(d) {
-                        Ok(v) => ok(call, compact_quick_apis(&v)),
+                        Ok(v) => {
+                            let project_id = self.effective_project_id().await;
+                            ok(call, compact_quick_apis(&v, project_id.as_deref()))
+                        }
                         Err(e) => fail(call, format!("could not serialise result: {e}")),
                     },
                     _ => fail(call, res.error.unwrap_or_else(|| "call failed".into())),
@@ -360,6 +437,19 @@ impl ToolExecutor for KronnToolExecutor {
             "qa_run" => {
                 let Some(id) = call.arguments["quick_api_id"].as_str() else {
                     return fail(call, "missing required field `quick_api_id`");
+                };
+                let project_id = self.effective_project_id().await;
+                let qa_id = id.to_string();
+                let qa = self
+                    .state
+                    .db
+                    .with_conn(move |conn| crate::db::quick_apis::get_quick_api(conn, &qa_id))
+                    .await
+                    .ok()
+                    .flatten();
+                let Some(qa) = qa.filter(|qa| quick_api_is_in_scope(qa, project_id.as_deref()))
+                else {
+                    return fail(call, "Quick API is not available in this workflow/discussion scope — call qa_list again");
                 };
                 let variables = call.arguments["variables"]
                     .as_object()
@@ -371,8 +461,12 @@ impl ToolExecutor for KronnToolExecutor {
                     .unwrap_or_default();
                 let Json(res) = crate::api::quick_apis::run_qa(
                     State(self.state.clone()),
-                    Path(id.to_string()),
-                    Json(crate::models::RunQuickApiRequest { variables }),
+                    Path(qa.id),
+                    Json(crate::models::RunQuickApiRequest {
+                        variables,
+                        workflow_run_id: self.workflow_run_id.clone(),
+                        agent: Some(self.actor_id.clone()),
+                    }),
                 )
                 .await;
                 unwrap_api(call, res.success, res.data, res.error)
@@ -393,7 +487,10 @@ impl ToolExecutor for KronnToolExecutor {
                 // resolve it here and treat an explicit value as a
                 // disambiguation hint, not a requirement.
                 let config_id = match call.arguments["api_config_id"].as_str() {
-                    Some(explicit) if !explicit.trim().is_empty() => Some(explicit.to_string()),
+                    Some(explicit) if !explicit.trim().is_empty() => self
+                        .config_id_in_scope(slug, explicit)
+                        .await
+                        .then(|| explicit.to_string()),
                     _ => self.resolve_config_id(slug).await,
                 };
                 if config_id.is_none() {
@@ -404,7 +501,7 @@ impl ToolExecutor for KronnToolExecutor {
                 }
                 let req = crate::api::agent_api::AgentApiCallRequest {
                     disc_id: self.disc_id.clone(),
-                    project_id: None,
+                    project_id: self.project_id.clone(),
                     api_plugin_slug: Some(slug.to_string()),
                     api_config_id: config_id,
                     quick_api_id: None,
@@ -419,6 +516,8 @@ impl ToolExecutor for KronnToolExecutor {
                     body: call.arguments.get("body").cloned(),
                     headers: None,
                     extract: None,
+                    workflow_run_id: self.workflow_run_id.clone(),
+                    agent: Some(self.actor_id.clone()),
                 };
                 let Json(res) =
                     crate::api::agent_api::agent_api_call(State(self.state.clone()), Json(req))
@@ -448,6 +547,8 @@ impl ToolExecutor for KronnToolExecutor {
                 // filter silently widen native Planning reads to another room.
                 if let Some(discussion_id) = &self.disc_id {
                     query.discussion_id = Some(discussion_id.clone());
+                } else if let Some(project_id) = &self.project_id {
+                    query.project_id = Some(project_id.clone());
                 }
                 let Json(res) = crate::api::planning::list_tasks(
                     State(self.state.clone()),
@@ -460,8 +561,18 @@ impl ToolExecutor for KronnToolExecutor {
                 let Some(task_id) = required_string(call, "task_id") else {
                     return fail(call, "missing required field `task_id`");
                 };
-                let Json(res) =
+                let Json(mut res) =
                     crate::api::planning::get_task(State(self.state.clone()), Path(task_id)).await;
+                let effective_project_id = self.effective_project_id().await;
+                if let (Some(project_id), Some(task)) = (effective_project_id, res.data.as_ref()) {
+                    if !task.summary.project_ids.iter().any(|id| id == &project_id) {
+                        res.success = false;
+                        res.data = None;
+                        res.error = Some(format!(
+                            "task is outside workflow project `{project_id}` — call task_list again"
+                        ));
+                    }
+                }
                 unwrap_api(call, res.success, res.data, res.error)
             }
             "task_create" => {
@@ -636,6 +747,23 @@ fn as_plain_string(v: &Value) -> String {
 }
 
 impl KronnToolExecutor {
+    async fn effective_project_id(&self) -> Option<String> {
+        if self.project_id.is_some() {
+            return self.project_id.clone();
+        }
+        let disc_id = self.disc_id.clone()?.trim().to_string();
+        if disc_id.is_empty() {
+            return None;
+        }
+        self.state
+            .db
+            .with_conn(move |conn| crate::db::discussions::get_discussion(conn, &disc_id))
+            .await
+            .ok()
+            .flatten()
+            .and_then(|discussion| discussion.project_id)
+    }
+
     fn discussion_id(&self, call: &ToolCall) -> Option<String> {
         self.disc_id
             .as_deref()
@@ -670,11 +798,28 @@ impl KronnToolExecutor {
         use axum::Json;
         let Json(res) = crate::api::mcps::overview(State(self.state.clone())).await;
         let v = serde_json::to_value(res.data?).ok()?;
+        let project_id = self.effective_project_id().await;
         v["configs"]
             .as_array()?
             .iter()
-            .find(|c| c["server_id"] == slug)
+            .find(|c| c["server_id"] == slug && config_is_in_scope(c, project_id.as_deref()))
             .and_then(|c| c["id"].as_str().map(str::to_string))
+    }
+
+    async fn config_id_in_scope(&self, slug: &str, config_id: &str) -> bool {
+        use axum::extract::State;
+        let axum::Json(res) = crate::api::mcps::overview(State(self.state.clone())).await;
+        let Some(v) = res.data.and_then(|data| serde_json::to_value(data).ok()) else {
+            return false;
+        };
+        let project_id = self.effective_project_id().await;
+        v["configs"].as_array().is_some_and(|configs| {
+            configs.iter().any(|config| {
+                config["id"] == config_id
+                    && config["server_id"] == slug
+                    && config_is_in_scope(config, project_id.as_deref())
+            })
+        })
     }
 }
 
@@ -709,7 +854,19 @@ fn brief(v: &Value, max: usize) -> String {
 /// specs — the raw overview is ~52 KB (~13k tokens), which would swallow a
 /// local model's whole context window on the first tool call. Specs are
 /// fetched one plugin at a time via `api_endpoints`.
-fn compact_plugin_list(overview: &Value) -> Value {
+fn config_is_in_scope(config: &Value, project_id: Option<&str>) -> bool {
+    if config["is_global"].as_bool().unwrap_or(false) {
+        return true;
+    }
+    match project_id {
+        Some(project_id) => config["project_ids"]
+            .as_array()
+            .is_some_and(|ids| ids.iter().any(|id| id == project_id)),
+        None => config["include_general"].as_bool().unwrap_or(false),
+    }
+}
+
+fn compact_plugin_list(overview: &Value, project_id: Option<&str>) -> Value {
     let configs = overview["configs"].as_array();
     // `api_call` needs the CONFIG id, not just the plugin slug — a plugin can
     // be wired more than once (different accounts/projects) and the broker
@@ -719,7 +876,7 @@ fn compact_plugin_list(overview: &Value) -> Value {
     let config_for = |slug: &Value| -> Option<Value> {
         configs?
             .iter()
-            .find(|c| c["server_id"] == *slug)
+            .find(|c| c["server_id"] == *slug && config_is_in_scope(c, project_id))
             .map(|c| c["id"].clone())
     };
     let plugins: Vec<Value> = overview["servers"]
@@ -775,11 +932,25 @@ fn compact_endpoints(overview: &Value, slug: &str) -> Option<Value> {
 
 /// Quick APIs, minus the machinery. `variables`, extraction specs and
 /// timestamps account for most of the raw payload and none of the decision.
-fn compact_quick_apis(items: &Value) -> Value {
+fn quick_api_is_in_scope(quick_api: &crate::models::QuickApi, project_id: Option<&str>) -> bool {
+    match project_id {
+        Some(project_id) => quick_api
+            .project_id
+            .as_deref()
+            .is_none_or(|id| id == project_id),
+        None => quick_api.project_id.is_none(),
+    }
+}
+
+fn compact_quick_apis(items: &Value, project_id: Option<&str>) -> Value {
     let list: Vec<Value> = items
         .as_array()
         .map(|qs| {
             qs.iter()
+                .filter(|q| match project_id {
+                    Some(project_id) => q["project_id"].is_null() || q["project_id"] == project_id,
+                    None => q["project_id"].is_null(),
+                })
                 .map(|q| {
                     json!({
                         "id": q["id"],
@@ -889,6 +1060,40 @@ mod tests {
     }
 
     #[test]
+    fn workflow_catalogue_is_bounded_and_contains_no_planning_mutation() {
+        let catalogue = workflow_tool_catalogue(true);
+        let names: Vec<&str> = catalogue
+            .iter()
+            .filter_map(|tool| tool["function"]["name"].as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "mcp_list",
+                "api_endpoints",
+                "qa_list",
+                "qa_run",
+                "api_call",
+                "task_list",
+                "task_get"
+            ]
+        );
+        assert!(!names.iter().any(|name| {
+            name.contains("create")
+                || name.contains("update")
+                || name.contains("remove")
+                || name.contains("link")
+        }));
+        let projectless_names: Vec<String> = workflow_tool_catalogue(false)
+            .iter()
+            .filter_map(|tool| tool["function"]["name"].as_str().map(str::to_string))
+            .collect();
+        assert!(!projectless_names
+            .iter()
+            .any(|name| name.starts_with("task_")));
+    }
+
+    #[test]
     fn plugin_list_drops_the_api_specs_that_would_swallow_the_context() {
         // Measured on the real instance: the raw overview is ~52 KB (~13k
         // tokens), almost all of it `api_spec`. A local model's window cannot
@@ -902,9 +1107,9 @@ mod tests {
                 { "id": "orphan", "name": "Unconfigured", "description": "no credentials",
                   "api_spec": { "endpoints": [] } },
             ],
-            "configs": [{ "id": "cfg-1", "server_id": "mcp-resend", "label": "Resend" }],
+            "configs": [{ "id": "cfg-1", "server_id": "mcp-resend", "label": "Resend", "include_general": true, "is_global": false, "project_ids": [] }],
         });
-        let out = compact_plugin_list(&overview);
+        let out = compact_plugin_list(&overview, None);
         let plugins = out["plugins"].as_array().unwrap();
         assert_eq!(
             plugins.len(),
@@ -922,6 +1127,48 @@ mod tests {
             !rendered.contains("/emails"),
             "endpoints belong to api_endpoints"
         );
+    }
+
+    #[test]
+    fn native_api_and_quick_api_discovery_never_cross_project_scope() {
+        let overview = json!({
+            "servers": [{
+                "id": "api-adobe", "name": "Adobe", "description": "Analytics",
+                "api_spec": { "endpoints": [] }
+            }],
+            "configs": [
+                { "id": "cfg-a", "server_id": "api-adobe", "is_global": false,
+                  "include_general": false, "project_ids": ["project-a"] },
+                { "id": "cfg-b", "server_id": "api-adobe", "is_global": false,
+                  "include_general": true, "project_ids": ["project-b"] }
+            ]
+        });
+        let project = compact_plugin_list(&overview, Some("project-a"));
+        assert_eq!(project["plugins"][0]["api_config_id"], "cfg-a");
+        let general = compact_plugin_list(&overview, None);
+        assert_eq!(general["plugins"][0]["api_config_id"], "cfg-b");
+
+        let quick_apis = json!([
+            { "id": "global", "name": "Global", "description": "", "project_id": null, "variables": [] },
+            { "id": "a", "name": "A", "description": "", "project_id": "project-a", "variables": [] },
+            { "id": "b", "name": "B", "description": "", "project_id": "project-b", "variables": [] }
+        ]);
+        let scoped = compact_quick_apis(&quick_apis, Some("project-a"));
+        let ids: Vec<&str> = scoped["quick_apis"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|qa| qa["id"].as_str())
+            .collect();
+        assert_eq!(ids, vec!["global", "a"]);
+        let general = compact_quick_apis(&quick_apis, None);
+        let general_ids: Vec<&str> = general["quick_apis"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|qa| qa["id"].as_str())
+            .collect();
+        assert_eq!(general_ids, vec!["global"]);
     }
 
     #[test]
@@ -954,7 +1201,7 @@ mod tests {
                 { "name": "format", "required": false },
             ],
         }]);
-        let out = compact_quick_apis(&items);
+        let out = compact_quick_apis(&items, None);
         let qa = &out["quick_apis"][0];
         assert_eq!(qa["id"], "qa-1");
         assert_eq!(

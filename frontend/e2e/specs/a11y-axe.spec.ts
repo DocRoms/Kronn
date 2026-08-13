@@ -113,6 +113,10 @@ test.describe('a11y — axe-core scans main pages, fails on serious/critical', (
         // eslint-disable-next-line no-console
         console.log(`  ✗ ${v.id} (${v.impact}) — ${v.nodes} node(s): ${v.targets.join(', ')}`);
       }
+      await test.info().attach(`${route.name.toLowerCase()}-axe-serious-critical`, {
+        body: JSON.stringify(seriousOrCritical, null, 2),
+        contentType: 'application/json',
+      });
       for (const v of moderate) {
         // eslint-disable-next-line no-console
         console.log(`  ⚠ ${v.id} (${v.impact}) — ${v.nodes} node(s)`);
