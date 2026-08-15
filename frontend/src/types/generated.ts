@@ -950,6 +950,61 @@ export type CloneProjectRequest = { url: string, name?: string | null, agent: Ag
 
 export type CloneProjectResponse = { project_id: string, discussion_id: string | null, };
 
+export type CollectApiDataConfig = { sources: Array<CollectApiDataSource>,
+/**
+ * Nombre maximal d'appels simultanés. Défaut 5, maximum 20.
+ */
+concurrent_limit?: number | null, };
+
+export type CollectApiDataSource = {
+/**
+ * Clé stable dans `data.sources`.
+ */
+alias: string,
+/**
+ * Quick API enregistrée à exécuter. Vide lorsque la source est une
+ * commande CLI déterministe (`quick_exec`).
+ */
+quick_api_id: string,
+/**
+ * Quick Exec enregistré. Vide pour les anciennes sources CLI inline.
+ */
+quick_exec_id: string,
+/**
+ * Commande CLI directe, sans shell, utile lorsque le plugin ne fournit
+ * pas de spec REST mais expose un client local (AWS CLI, Fastly CLI…).
+ */
+quick_exec?: CollectQuickExecSource | null,
+/**
+ * Une erreur sur cette source fait échouer le step. Défaut : true.
+ */
+required: boolean,
+/**
+ * Variables locales injectées avant le rendu de cette Quick API. Les
+ * valeurs peuvent elles-mêmes référencer le contexte du workflow.
+ */
+variables?: { [key in string]: string }, };
+
+export type CollectQuickExecOutputFormat = "json" | "text" | "lines" | "csv";
+
+export type CollectQuickExecSource = {
+/**
+ * Nom nu du binaire. Il doit aussi figurer dans `exec_allowlist` du WF.
+ */
+command: string,
+/**
+ * Arguments littéraux, rendus séparément par le moteur de templates.
+ */
+args: Array<string>,
+/**
+ * Timeout borné entre 1 et 1 800 secondes.
+ */
+timeout_secs?: number | null,
+/**
+ * Interprétation du stdout avant insertion dans `data.sources.<alias>`.
+ */
+output_format: CollectQuickExecOutputFormat, };
+
 export type ConditionAction = { "type": "Stop" } | { "type": "Skip" } | { "type": "Goto", step_name: string, max_iterations?: number | null, };
 
 export type Contact = { id: string, pseudo: string, avatar_email: string | null, kronn_url: string, invite_code: string, status: string, created_at: string, updated_at: string, };
@@ -1024,6 +1079,20 @@ originating_qp_id?: string | null,
  */
 no_agent?: boolean, };
 
+export type CreateLivePageDataset = { name: string, kind: LivePageDatasetKind,
+/**
+ * Optional mock/seed value used by Page Studio previews. For a
+ * time-series dataset this may be an array of point payloads.
+ */
+initial?: any, schema?: any, max_points?: number | null, max_age_days?: number | null, };
+
+export type CreateLivePageRequest = { title: string, slug?: string | null, project_id?: string | null, html: string, created_by_agent?: string | null,
+/**
+ * Optional discussion that originated this Page. Agents set this to the
+ * current room so the artifact remains discoverable from both places.
+ */
+discussion_id?: string | null, datasets?: Array<CreateLivePageDataset>, };
+
 export type CreateMcpConfigRequest = { server_id: string, label: string, env: Record<string, string>, args_override?: Array<string> | null, is_global: boolean, project_ids: Array<string>,
 /**
  * Custom API plugin payload. Only honoured when `server_id == "api-custom"`.
@@ -1052,6 +1121,8 @@ idempotency_key?: string | null, description?: string, status?: PlanningTaskStat
 export type CreateProfileRequest = { name: string, persona_name?: string, role: string, avatar: string, color: string, category: ProfileCategory, persona_prompt: string, default_engine?: string | null, };
 
 export type CreateQuickApiRequest = { name: string, icon?: string | null, description?: string, project_id?: string | null, api_plugin_slug: string, api_config_id: string, api_endpoint_path: string, api_method?: string | null, api_query?: { [key in string]: string } | null, api_path_params?: { [key in string]: string } | null, api_headers?: { [key in string]: string } | null, api_body?: JsonValue | null, api_extract?: ExtractSpec | null, api_pagination?: PaginationSpec | null, api_timeout_ms?: number | null, api_max_retries?: number | null, variables?: Array<PromptVariable>, profile_ids?: Array<string>, directive_ids?: Array<string>, };
+
+export type CreateQuickExecRequest = { name: string, icon?: string | null, description?: string, project_id?: string | null, command: string, args?: Array<string>, timeout_secs?: number | null, output_format?: CollectQuickExecOutputFormat, variables?: Array<PromptVariable>, };
 
 export type CreateQuickPromptRequest = { name: string, icon?: string | null, prompt_template: string, variables?: Array<PromptVariable>, agent?: AgentType | null, project_id?: string | null, skill_ids?: Array<string>, profile_ids?: Array<string>, directive_ids?: Array<string>, tier?: ModelTier, agent_settings?: AgentSettings | null, description?: string, };
 
@@ -1132,6 +1203,11 @@ export type DbExport = { version: number, exported_at: string, projects: Array<P
  * v3 exports (which had no `quick_apis` field) importable.
  */
 quick_apis: Array<QuickApi>,
+/**
+ * v6 — reusable shell-free CLI collectors. Older exports leave the local
+ * Quick Exec library untouched because this field deserializes empty.
+ */
+quick_execs: Array<QuickExec>,
 /**
  * 0.8.9 — Continual-learning candidates (the agent-proposed durable
  * facts/preferences). Same back-compat default as `quick_apis`.
@@ -1266,6 +1342,12 @@ lint?: AppendLintSummary,
  * the caller's last read and this append. `None` when nothing was appended.
  */
 last_sort_order?: number,
+/**
+ * Durable id of the last message addressed by this append, including an
+ * idempotent duplicate retry. Follow-up operations such as MCP attachment
+ * uploads must target the message id, never guess from its sort order.
+ */
+last_message_id?: string,
 /**
  * Number of main-channel messages written by somebody other than this
  * exact CLI session since its consumed read cursor. Content stays on the
@@ -2193,6 +2275,8 @@ export type ImportPluginBundleRequest = { content: string, passphrase?: string |
  */
 export type ImportQuickApiRequest = { content: string, project_id?: string | null, };
 
+export type ImportQuickExecRequest = { content: string, project_id?: string | null, };
+
 /**
  * 0.7.0 UX pass — payload for `POST /api/quick-prompts/import`.
  */
@@ -2364,6 +2448,8 @@ description?: string, };
  */
 export type LinkedRepoCandidate = { id: string, name: string, path: string, proximity_hint: string, };
 
+export type LinkLivePageDiscussionRequest = { discussion_id: string, relation?: LivePageDiscussionRelation | null, };
+
 export type LinkMcpConfigRequest = { project_ids: Array<string>, };
 
 export type LinkPlanningDiscussionRequest = { discussion_id: string, placement?: PlanningPlacement, is_primary?: boolean, position?: number | null, actor?: PlanningActor, };
@@ -2447,6 +2533,65 @@ api_key?: string | null, };
  * move on to model selection — a probe that failed persists nothing.
  */
 export type LiteLlmTestResponse = { ok: boolean, saved: boolean, status: string, endpoint: string, models: Array<LiteLlmModel>, hint: string | null, };
+
+export type LivePage = { id: string, project_id: string | null, title: string, slug: string, current_revision_id: string, data_revision: number, created_at: string, updated_at: string, last_published_at: string | null,
+/**
+ * User-pinned / favorite Page — favorites surface first in the library.
+ */
+pinned: boolean,
+/**
+ * Archived Pages remain addressable by workflows and can be restored.
+ */
+archived: boolean, };
+
+export type LivePageDataset = { id: string, page_id: string, name: string, kind: LivePageDatasetKind, current: any, schema: any, max_points: number, max_age_days: number | null, updated_at: string, };
+
+export type LivePageDatasetKind = "snapshot" | "time_series" | "collection";
+
+export type LivePageDatasetPoint = { id: string, dataset_id: string, observed_at: string, payload: any, workflow_run_id: string | null, };
+
+export type LivePageDatasetView = { points: Array<LivePageDatasetPoint>,
+/**
+ * Compact UTF-8 JSON bytes currently retained for this dataset. This
+ * includes the snapshot/collection value and retained time-series point
+ * payloads, but excludes SQLite row metadata and the optional schema.
+ */
+data_size_bytes: number, id: string, page_id: string, name: string, kind: LivePageDatasetKind, current: any, schema: any, max_points: number, max_age_days: number | null, updated_at: string, };
+
+export type LivePageDetail = { revision: LivePageRevision, datasets: Array<LivePageDatasetView>, id: string, project_id: string | null, title: string, slug: string, current_revision_id: string, data_revision: number, created_at: string, updated_at: string, last_published_at: string | null,
+/**
+ * User-pinned / favorite Page — favorites surface first in the library.
+ */
+pinned: boolean,
+/**
+ * Archived Pages remain addressable by workflows and can be restored.
+ */
+archived: boolean, };
+
+export type LivePageDiscussionLink = { discussion_id: string, title: string, relation: LivePageDiscussionRelation, archived: boolean, };
+
+export type LivePageDiscussionRelation = "created_from" | "attached";
+
+/**
+ * One successful data refresh recorded in the Page publication ledger.
+ * Workflow fields remain optional because Pages may also be published
+ * directly and workflow deletion preserves the historical publication.
+ */
+export type LivePagePublication = { id: string, page_id: string, data_revision: number, workflow_id: string | null, workflow_name: string | null, workflow_run_id: string | null, datasets_updated: Array<string>, content_changed: boolean, changed_datasets: Array<string>, unchanged_datasets: Array<string>, points_added: number, points_removed: number, published_at: string, };
+
+export type LivePageRevision = { id: string, page_id: string, revision: number, html: string, created_by_agent: string | null, created_at: string, };
+
+export type LivePagesCapability = { activated: boolean, activated_at: string | null, };
+
+/**
+ * Live workflow configurations that publish into this Page. A Page is not
+ * owned by one workflow: several workflows may feed the same destination.
+ */
+export type LivePageWorkflowLink = { id: string, name: string, enabled: boolean, step_names: Array<string>, };
+
+export type LivePageWrite = { dataset: string, operation: LivePageWriteOperation, value: any, observed_at: string | null, dedupe_key: string | null, key_field: string | null, };
+
+export type LivePageWriteOperation = "replace" | "append" | "upsert";
 
 /**
  * A configured instance of an MCP server — with label, env secrets, etc.
@@ -3246,6 +3391,10 @@ export type PortablePluginConfig = { source_config_id: string, server: McpServer
  */
 export type PresenceState = "running" | "listening" | "dormant" | "offline";
 
+export type PreviewTransformDataRequest = { sample: JsonValue, fields: Array<TransformDataField>, };
+
+export type PreviewTransformDataResponse = { value: JsonValue | null, error: string | null, };
+
 /**
  * One preserved branch on a workflow run. Mirrors `workspace::PreservedBranch`
  * but lives on the model side so it can serialize to JSON for storage and
@@ -3383,6 +3532,32 @@ export type ProposeResult = { accepted: boolean, reason: string | null, warnings
 
 export type ProviderUsage = { provider: string, tokens_used: number, tokens_limit: number | null, cost_usd: number | null, };
 
+export type PublishLivePageRequest = { workflow_id?: string | null, workflow_run_id?: string | null, writes: Array<LivePageWrite>, };
+
+export type PublishLivePageResult = { page_id: string, data_revision: number, datasets_updated: Array<string>, content_changed: boolean, changed_datasets: Array<string>, unchanged_datasets: Array<string>, points_added: number, points_removed: number, published_at: string, };
+
+export type PublishPageDataConfig = {
+/**
+ * Id ou slug stable de la Page. Peut être un template runtime.
+ */
+page_id: string, writes: Array<PublishPageDataWrite>, };
+
+export type PublishPageDataWrite = { dataset: string, operation: LivePageWriteOperation,
+/**
+ * Chemin typé du contexte, avec ou sans doubles accolades.
+ * Exemple : `steps.fetch_metrics.data.series`.
+ */
+value_from: string,
+/**
+ * Date RFC3339 optionnelle, template runtime autorisé.
+ */
+observed_at?: string | null,
+/**
+ * Clé d'idempotence optionnelle. En append, Kronn utilise par défaut
+ * `<run_id>:<write_index>` afin qu'une reprise ne duplique pas les points.
+ */
+dedupe_key?: string | null, key_field?: string | null, };
+
 export type QuickApi = { id: string, name: string, icon: string,
 /**
  * Optional human description — shown in the BatchApiCall picker.
@@ -3422,6 +3597,10 @@ export type QuickApiExportEnvelope = { kind: string, version: number, exported_a
  * wire but reset at import — fresh values are minted by the importer.
  */
 quick_api: QuickApi, };
+
+export type QuickExec = { id: string, name: string, icon: string, description: string, project_id: string | null, command: string, args: Array<string>, timeout_secs: number, output_format: CollectQuickExecOutputFormat, variables: Array<PromptVariable>, created_at: string, updated_at: string, };
+
+export type QuickExecExportEnvelope = { kind: string, version: number, exported_at: string, quick_exec: QuickExec, };
 
 export type QuickExecResult = { status: QuickExecStatus,
 /**
@@ -3874,6 +4053,10 @@ envelope: JsonValue | null,
  */
 error: string | null, };
 
+export type RunQuickExecRequest = { variables?: Record<string, string>, };
+
+export type RunQuickExecResponse = { success: boolean, duration_ms: number, data: any, stdout: string | null, stderr: string | null, error: string | null, };
+
 export type RunStatus = "Pending" | "Running" | "Success" | "Failed" | "Cancelled" | "WaitingApproval" | "StoppedByGuard" | "Interrupted";
 
 export type SaveApiKeyRequest = { id?: string | null, name: string, provider: string, value: string, };
@@ -3951,6 +4134,12 @@ max_concurrent_agents: number,
  * Agent stall timeout in minutes — abort if no output for this long (default: 5)
  */
 agent_stall_timeout_min: number,
+/**
+ * Absolute wall-clock limit for one agent execution, even while it keeps
+ * producing output (default: 30). This is distinct from the inactivity
+ * watchdog above and is read when each new run starts.
+ */
+agent_global_timeout_min: number,
 /**
  * User identity — displayed in messages and used for future multi-user
  */
@@ -4065,7 +4254,7 @@ agent_handoff_paid_unlimited: boolean,
  */
 agent_handoff_blocked_agents: Array<AgentType>, };
 
-export type ServerConfigPublic = { host: string, port: number, domain: string | null, max_concurrent_agents: number, agent_stall_timeout_min: number, auth_enabled: boolean, pseudo: string | null, avatar_email: string | null, bio: string | null, debug_mode: boolean,
+export type ServerConfigPublic = { host: string, port: number, domain: string | null, max_concurrent_agents: number, agent_stall_timeout_min: number, agent_global_timeout_min: number, auth_enabled: boolean, pseudo: string | null, avatar_email: string | null, bio: string | null, debug_mode: boolean,
 /**
  * Whether discussion composers expose the out-of-context note control.
  */
@@ -4357,7 +4546,7 @@ child_run_id?: string | null,
  */
 native_tool_calls?: Array<NativeToolCallLog>, };
 
-export type StepType = { "type": "Agent" } | { "type": "ApiCall" } | { "type": "BatchQuickPrompt" } | { "type": "Notify" } | { "type": "Gate" } | { "type": "Exec" } | { "type": "BatchApiCall" } | { "type": "JsonData" } | { "type": "SubWorkflow" };
+export type StepType = { "type": "Agent" } | { "type": "ApiCall" } | { "type": "BatchQuickPrompt" } | { "type": "Notify" } | { "type": "Gate" } | { "type": "Exec" } | { "type": "BatchApiCall" } | { "type": "JsonData" } | { "type": "CollectApiData" } | { "type": "TransformData" } | { "type": "PublishPageData" } | { "type": "SubWorkflow" };
 
 /**
  * A stored run, as a later reader gets it back.
@@ -4451,7 +4640,8 @@ success: boolean,
 duration_ms: number,
 /**
  * `{data, status, summary}` envelope (parsed from the step output).
- * On failure this is `null` and `error` holds the message.
+ * Collector tests preserve this envelope on failure when partial source
+ * data is available; plain failures still return `null`.
  */
 envelope: JsonValue | null,
 /**
@@ -4459,6 +4649,22 @@ envelope: JsonValue | null,
  * land in the step's output column if this were a real run.
  */
 error: string | null, };
+
+export type TestCollectApiDataRequest = {
+/**
+ * The collector step currently edited in the Workflow wizard.
+ */
+step: WorkflowStep,
+/**
+ * Optional workflow project scope. Without one, every saved Quick API
+ * resolves its global config or first linked project, like runtime.
+ */
+project_id?: string | null,
+/**
+ * Same binary allowlist as the workflow currently being edited. Required
+ * only by Quick Exec sources and enforced by the production executor.
+ */
+exec_allowlist?: Array<string>, };
 
 export type TestExtractRequest = {
 /**
@@ -4559,6 +4765,35 @@ prompt: string, };
 
 export type TrackerSourceConfig = { "type": "GitHub", owner: string, repo: string, };
 
+export type TransformDataConfig = {
+/**
+ * Chemin typé du contexte, par exemple `steps.collect.data`.
+ */
+input_from: string, fields: Array<TransformDataField>, };
+
+export type TransformDataField = {
+/**
+ * Chemin pointé dans le nouvel objet, par exemple `summary.requests`.
+ */
+target: string,
+/**
+ * JSONPath RFC 9535 relatif à `input_from`, par exemple
+ * `$.sources.adobe.total` ou `$.items[*].count`.
+ */
+source: string, operation: TransformDataOperation,
+/**
+ * Valeur utilisée lorsque le JSONPath ne retourne rien.
+ */
+fallback?: JsonValue | null,
+/**
+ * Conversion explicite appliquée après sélection/agrégation.
+ */
+value_type?: TransformDataValueType | null, };
+
+export type TransformDataOperation = "copy" | "count" | "sum" | "average" | "min" | "max" | "first" | "last";
+
+export type TransformDataValueType = "string" | "number" | "boolean";
+
 /**
  * 0.6.0 UX pass — optional payload for `POST /api/workflows/:id/trigger`.
  * `variables` carries user-entered values matching `Workflow.variables`
@@ -4643,6 +4878,10 @@ agent_handoffs_disabled?: boolean | null,
  * switch, per-agent blocks and structural loop guards still apply.
  */
 agent_handoffs_unlimited?: boolean | null, };
+
+export type UpdateLivePageHtmlRequest = { html: string, created_by_agent?: string | null, };
+
+export type UpdateLivePageRequest = { title?: string | null, pinned?: boolean | null, archived?: boolean | null, };
 
 export type UpdateMcpConfigRequest = { label?: string | null, env?: Record<string, string> | null, args_override?: Array<string> | null, is_global?: boolean | null, include_general?: boolean | null, host_sync?: HostSyncMode | null, preferred_interface?: PluginInterface | null, };
 
@@ -4949,7 +5188,7 @@ export type WorkflowAction = { "type": "CreatePr", title_template: string, body_
 /**
  * Self-contained envelope produced by `GET /api/workflows/:id/export`.
  * Designed to be saved to disk, mailed, attached to a Github issue, etc.
- * `version: 1` is the current shape; future incompatible changes bump
+ * `version: 3` is the current shape; future incompatible changes bump
  * the version and add a migration path at import time.
  */
 export type WorkflowExportEnvelope = {
@@ -4973,11 +5212,23 @@ exported_at: string,
  */
 workflow: Workflow,
 /**
- * QPs referenced by `BatchQuickPrompt` steps. Bundled so the
- * importer doesn't need to fetch them separately. Empty when no
- * step references a QP.
+ * QPs referenced by Agent, BatchQuickPrompt or chained batch steps.
+ * Bundled so the importer doesn't need to fetch them separately.
  */
 referenced_quick_prompts?: Array<QuickPrompt>,
+/**
+ * Quick APIs referenced directly or through CollectApiData sources.
+ */
+referenced_quick_apis?: Array<QuickApi>,
+/**
+ * Saved Quick Execs referenced by CollectApiData sources.
+ */
+referenced_quick_execs?: Array<QuickExec>,
+/**
+ * Page templates and dataset contracts targeted by PublishPageData steps.
+ * Retained production payloads and publication/run history are excluded.
+ */
+referenced_pages?: Array<WorkflowExportPage>,
 /**
  * #10 — sub-workflows referenced (transitively) by `SubWorkflow` steps,
  * bundled so a clone/import recreates the whole parent+child graph in one
@@ -4985,6 +5236,10 @@ referenced_quick_prompts?: Array<QuickPrompt>,
  * Empty when the workflow has no SubWorkflow steps. Excludes the root.
  */
 referenced_workflows?: Array<Workflow>, };
+
+export type WorkflowExportPage = { id: string, slug: string, title: string, html: string, created_by_agent: string | null, datasets: Array<WorkflowExportPageDataset>, };
+
+export type WorkflowExportPageDataset = { name: string, kind: LivePageDatasetKind, schema: any, max_points: number, max_age_days: number | null, };
 
 /**
  * Per-workflow execution limits enforced by the runner. Each field is
@@ -5358,6 +5613,21 @@ exec_stdin?: string | null,
  */
 json_data_payload?: JsonValue | null,
 /**
+ * Plusieurs Quick APIs indépendantes exécutées comme une seule source
+ * logique. Les réponses extraites restent intactes sous leur alias.
+ */
+collect_api_data?: CollectApiDataConfig | null,
+/**
+ * Recette déclarative et déterministe appliquée à une valeur JSON typée.
+ */
+transform_data?: TransformDataConfig | null,
+/**
+ * Configuration atomique du sink Page. Le step résout chaque
+ * `value_from` comme une valeur JSON typée depuis le contexte du run,
+ * puis publie toutes les écritures dans une seule transaction SQLite.
+ */
+page_publish?: PublishPageDataConfig | null,
+/**
  * 2026-06-11 (Phase 1) — for `StepType::SubWorkflow`: the id of the
  * workflow to run as a nested child. Required for that step type
  * (enforced at save). `None` for every other step type. Mirrors the
@@ -5470,7 +5740,7 @@ from_invite_code: string,
  * cross-wire announcement carries `false` (default); only the receiver's
  * own local emits use it. `#[serde(default)]` for old-peer compat.
  */
-pending: boolean, } | { "type": "batch_run_finished", run_id: string,
+pending: boolean, } | { "type": "context_files_changed", discussion_id: string, message_id: string, } | { "type": "batch_run_finished", run_id: string,
 /**
  * Id of the child discussion whose completion triggered the final tick.
  * The frontend uses it to clear its per-disc `sendingMap` spinner, since

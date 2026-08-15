@@ -87,6 +87,7 @@ vi.mock('../../lib/api', () => ({
   workflows: {
     list: vi.fn().mockResolvedValue([]),
   },
+  pages: { capability: vi.fn().mockResolvedValue({ activated: false, activated_at: null }) },
 }));
 
 import { discussions as discussionsApi, projects as projectsApi } from '../../lib/api';

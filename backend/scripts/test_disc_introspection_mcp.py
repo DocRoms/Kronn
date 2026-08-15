@@ -1417,6 +1417,222 @@ class DiscAppendSimpleModeTests(unittest.TestCase):
         self.assertTrue(msg["source_msg_id"].startswith("live-"))
         self.assertEqual(result["appended"], 1)
 
+    def test_simple_mode_uploads_and_pins_an_image_to_the_appended_message(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            image_path = Path(tmp) / "preview.png"
+            image_path.write_bytes(b"\x89PNG\r\n\x1a\npreview")
+
+            def http(method, path, body=None, **_kwargs):
+                if path == "/api/disc/append":
+                    return {
+                        "success": True,
+                        "data": {
+                            "appended": 1,
+                            "skipped_as_duplicates": 0,
+                            "last_message_id": "msg-image",
+                        },
+                    }
+                if path.endswith("/context-files/link-pending"):
+                    return {"success": True, "data": 1}
+                raise AssertionError(f"unexpected request: {method} {path}")
+
+            with mock.patch.object(self.mod, "_http", side_effect=http) as mock_http, \
+                 mock.patch.object(
+                     self.mod,
+                     "_http_upload_context_file",
+                     return_value={"file": {"id": "file-image"}},
+                 ) as upload:
+                result = self.mod.call_disc_append({
+                    "content": "Voici le rendu.",
+                    "attachments": [str(image_path)],
+                    "wait_for_reply": False,
+                })
+
+        upload.assert_called_once_with("disc-chat", str(image_path.resolve()))
+        link_call = next(
+            call for call in mock_http.call_args_list
+            if call.args[1].endswith("/context-files/link-pending")
+        )
+        self.assertEqual(link_call.kwargs["body"], {
+            "message_id": "msg-image",
+            "file_ids": ["file-image"],
+        })
+        self.assertEqual(result["attachments"]["linked"], 1)
+        self.assertEqual(result["attachments"]["files"][0]["filename"], "preview.png")
+
+    def test_duplicate_retry_does_not_upload_an_already_attached_image_again(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            image_path = Path(tmp) / "preview.png"
+            image_path.write_bytes(b"\x89PNGretry")
+
+            def http(method, path, body=None, **_kwargs):
+                if path == "/api/disc/append":
+                    return {
+                        "success": True,
+                        "data": {
+                            "appended": 0,
+                            "skipped_as_duplicates": 1,
+                            "last_message_id": "msg-existing",
+                        },
+                    }
+                if "/message/msg-existing" in path:
+                    return {
+                        "success": True,
+                        "data": {
+                            "attachments": [{"id": "file-existing", "filename": "preview.png"}],
+                        },
+                    }
+                raise AssertionError(f"unexpected request: {method} {path} {body}")
+
+            with mock.patch.object(self.mod, "_http", side_effect=http), \
+                 mock.patch.object(self.mod, "_http_upload_context_file") as upload:
+                result = self.mod.call_disc_append({
+                    "content": "Voici le rendu.",
+                    "attachments": [str(image_path)],
+                    "wait_for_reply": False,
+                })
+
+        upload.assert_not_called()
+        self.assertEqual(result["attachments"]["already_attached"], 1)
+        self.assertEqual(result["attachments"]["uploaded"], 0)
+
+    def test_partial_attachment_batch_rolls_back_earlier_uploads(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            first_path = Path(tmp) / "first.png"
+            second_path = Path(tmp) / "second.png"
+            first_path.write_bytes(b"first")
+            second_path.write_bytes(b"second")
+
+            def http(method, path, body=None, **_kwargs):
+                if path == "/api/disc/append":
+                    return {
+                        "success": True,
+                        "data": {
+                            "appended": 1,
+                            "skipped_as_duplicates": 0,
+                            "last_message_id": "msg-partial",
+                        },
+                    }
+                if method == "DELETE" and path.endswith("/context-files/file-first"):
+                    return {"success": True, "data": True}
+                raise AssertionError(f"unexpected request: {method} {path} {body}")
+
+            with mock.patch.object(self.mod, "_http", side_effect=http) as mock_http, \
+                 mock.patch.object(
+                     self.mod,
+                     "_http_upload_context_file",
+                     side_effect=[
+                         {"file": {"id": "file-first"}},
+                         RuntimeError("Maximum 20 pending context files reached"),
+                     ],
+                 ):
+                result = self.mod.call_disc_append({
+                    "content": "Voici le lot.",
+                    "attachments": [str(first_path), str(second_path)],
+                    "wait_for_reply": False,
+                })
+
+        delete_calls = [
+            call for call in mock_http.call_args_list
+            if call.args[0] == "DELETE"
+        ]
+        self.assertEqual(len(delete_calls), 1)
+        self.assertTrue(delete_calls[0].args[1].endswith("/context-files/file-first"))
+        self.assertIn("rolled back 1 uploaded attachment", result["attachment_error"])
+        self.assertIn("failed attachment batch was rolled back", result["attachment_retry"])
+        self.assertFalse(any(
+            call.args[1].endswith("/context-files/link-pending")
+            for call in mock_http.call_args_list
+        ))
+
+    def test_incomplete_exact_link_rolls_back_the_entire_new_batch(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            first_path = Path(tmp) / "first.png"
+            second_path = Path(tmp) / "second.png"
+            first_path.write_bytes(b"first")
+            second_path.write_bytes(b"second")
+            deleted = []
+
+            def http(method, path, body=None, **_kwargs):
+                if path == "/api/disc/append":
+                    return {
+                        "success": True,
+                        "data": {
+                            "appended": 1,
+                            "skipped_as_duplicates": 0,
+                            "last_message_id": "msg-incomplete-link",
+                        },
+                    }
+                if path.endswith("/context-files/link-pending"):
+                    return {"success": True, "data": 1}
+                if method == "DELETE" and "/context-files/" in path:
+                    deleted.append(path.rsplit("/", 1)[-1])
+                    return {"success": True, "data": True}
+                raise AssertionError(f"unexpected request: {method} {path} {body}")
+
+            with mock.patch.object(self.mod, "_http", side_effect=http), \
+                 mock.patch.object(
+                     self.mod,
+                     "_http_upload_context_file",
+                     side_effect=[
+                         {"file": {"id": "file-first"}},
+                         {"file": {"id": "file-second"}},
+                     ],
+                 ):
+                result = self.mod.call_disc_append({
+                    "content": "Voici le lot incomplet.",
+                    "attachments": [str(first_path), str(second_path)],
+                    "wait_for_reply": False,
+                })
+
+        self.assertEqual(deleted, ["file-second", "file-first"])
+        self.assertIn("linked only 1/2", result["attachment_error"])
+        self.assertIn("rolled back 2 uploaded attachment", result["attachment_error"])
+
+    def test_attachments_are_refused_for_bulk_imports(self):
+        with mock.patch.object(self.mod, "_disc_append_attachment_paths", return_value=["/x.png"]), \
+             mock.patch.object(self.mod, "_http") as http:
+            with self.assertRaisesRegex(RuntimeError, "simple content form"):
+                self.mod.call_disc_append({
+                    "messages": [
+                        {"source_msg_id": "m1", "role": "Agent", "content": "historical"},
+                    ],
+                    "attachments": ["/x.png"],
+                })
+        http.assert_not_called()
+
+    def test_attachment_upload_is_binary_multipart_and_authenticated(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            image_path = Path(tmp) / "vue.png"
+            raw = b"\x89PNG\x00binary\xff"
+            image_path.write_bytes(raw)
+            response = mock.MagicMock()
+            response.__enter__.return_value = io.BytesIO(
+                b'{"success":true,"data":{"file":{"id":"f-1"}}}'
+            )
+            response.__exit__.return_value = False
+            with mock.patch.dict(os.environ, {"KRONN_AUTH_TOKEN": "secret"}), \
+                 mock.patch("urllib.request.urlopen", return_value=response) as urlopen:
+                result = self.mod._http_upload_context_file("disc/one", str(image_path))
+
+        request = urlopen.call_args.args[0]
+        self.assertIn("disc%2Fone", request.full_url)
+        self.assertIn("multipart/form-data", request.get_header("Content-type"))
+        self.assertEqual(request.get_header("Authorization"), "Bearer secret")
+        self.assertIn(raw, request.data)
+        self.assertIn(b'filename="vue.png"', request.data)
+        self.assertEqual(result["file"]["id"], "f-1")
+
     def test_simple_mode_role_and_agent_type_overrides_propagate(self):
         with mock.patch.object(self.mod, "_http") as mock_http:
             mock_http.return_value = {"success": True, "data": {}}
@@ -3111,6 +3327,86 @@ class QaListEnrichedOutputTests(unittest.TestCase):
             self.assertIn(field, first)
 
 
+class QuickExecMcpTests(unittest.TestCase):
+    """Saved Quick Execs are discoverable, authorable and runnable by agents."""
+
+    def setUp(self):
+        self.mod = _load_module()
+        self.existing = {
+            "id": "qe-aws",
+            "name": "AWS errors",
+            "icon": "⌘",
+            "description": "Collect CloudWatch errors",
+            "project_id": "proj-1",
+            "command": "aws",
+            "args": ["logs", "filter-log-events", "--output", "json"],
+            "timeout_secs": 90,
+            "output_format": "json",
+            "variables": [{"name": "region", "label": "Region", "required": True}],
+        }
+
+    def test_catalogue_and_dispatch_are_symmetric(self):
+        names = {tool["name"] for tool in self.mod.TOOLS}
+        for name in ("qe_list", "qe_create_draft", "qe_update", "qe_run"):
+            self.assertIn(name, names)
+            self.assertIn(name, self.mod.DISPATCH)
+        self.assertEqual(
+            next(t for t in self.mod.TOOLS if t["name"] == "qe_run")["inputSchema"]["required"],
+            ["qe_id"],
+        )
+
+    def test_list_returns_compact_variables_and_csv_contract(self):
+        with mock.patch.object(
+            self.mod, "_http", return_value={"success": True, "data": [self.existing]}
+        ) as http:
+            out = self.mod.call_qe_list({})
+        http.assert_called_once_with("GET", "/api/quick-execs")
+        self.assertEqual(out[0]["command"], "aws")
+        self.assertEqual(out[0]["variables"][0]["name"], "region")
+        description = next(t for t in self.mod.TOOLS if t["name"] == "qe_run")["description"]
+        self.assertIn("CSV as an array of objects", description)
+
+    def test_create_inherits_project_and_applies_safe_defaults(self):
+        self.mod._CURRENT_DISC_META_CACHE.update({
+            "checked": True,
+            "value": {"id": "disc-1", "project_id": "proj-inherited"},
+        })
+        with mock.patch.object(
+            self.mod, "_http", return_value={"success": True, "data": self.existing}
+        ) as http:
+            self.mod.call_qe_create_draft({"name": "AWS errors", "command": "aws"})
+        method, path, body = http.call_args.args
+        self.assertEqual((method, path), ("POST", "/api/quick-execs"))
+        self.assertEqual(body["project_id"], "proj-inherited")
+        self.assertEqual(body["args"], [])
+        self.assertEqual(body["output_format"], "json")
+        self.assertEqual(body["timeout_secs"], 60)
+
+    def test_update_merges_existing_and_run_coerces_variables(self):
+        updated = dict(self.existing, output_format="csv")
+        with mock.patch.object(
+            self.mod,
+            "_http",
+            side_effect=[
+                {"success": True, "data": [self.existing]},
+                {"success": True, "data": updated},
+            ],
+        ) as http:
+            self.mod.call_qe_update({"qe_id": "qe-aws", "output_format": "csv"})
+        method, path, body = http.call_args_list[1].args
+        self.assertEqual((method, path), ("PUT", "/api/quick-execs/qe-aws"))
+        self.assertEqual(body["command"], "aws")
+        self.assertEqual(body["output_format"], "csv")
+
+        with mock.patch.object(
+            self.mod, "_http", return_value={"success": True, "data": {"success": True}}
+        ) as http:
+            self.mod.call_qe_run({"qe_id": "qe-aws", "vars": {"limit": 12}})
+        http.assert_called_once_with(
+            "POST", "/api/quick-execs/qe-aws/run", {"variables": {"limit": "12"}}
+        )
+
+
 class QaCreateDraftTests(unittest.TestCase):
     """`qa_create_draft` MCP wrapper closes the symmetry gap with
     `workflow_create_draft` + `qp_create_draft`. Pin the contract :
@@ -4164,12 +4460,13 @@ class StepSchemaAndBindingListTests(unittest.TestCase):
         return {"success": True, "data": data}
 
     # ── workflow_step_schema ─────────────────────────────────────────
-    def test_step_schema_lists_the_closed_nine_set(self):
+    def test_step_schema_lists_the_closed_twelve_set(self):
         out = self.mod.call_workflow_step_schema({})
         self.assertEqual(
             set(out["step_types_closed_set"]),
             {"Agent", "ApiCall", "BatchApiCall", "BatchQuickPrompt", "Exec",
-             "Gate", "Notify", "JsonData", "SubWorkflow"},
+             "Gate", "Notify", "JsonData", "CollectApiData", "TransformData",
+             "PublishPageData", "SubWorkflow"},
         )
         # every type has a field spec
         for st in out["step_types_closed_set"]:
@@ -4227,6 +4524,39 @@ class StepSchemaAndBindingListTests(unittest.TestCase):
         # api_body typed injection must be documented (the inline-array footgun)
         self.assertIn("typed JSON", ns["steps.<name>.data"])
         self.assertIn("alias", ns["steps.<name>.data_json"])
+
+    def test_step_schema_documents_run_anchored_vendor_neutral_time(self):
+        out = self.mod.call_workflow_step_schema({})
+        time_spec = out["template_vars"]["time_expressions"]
+        self.assertIn("time.now", time_spec["canonical"])
+        self.assertIn("Europe/Paris", time_spec["canonical"])
+        self.assertIn("local_iso_ms", time_spec["filters"]["fmt"])
+        self.assertIn("Do not use plugin/vendor names", time_spec["vendor_neutrality"])
+        self.assertIn("time.now / now", out["template_vars"]["namespaces"])
+        self.assertIn("same anchor", out["fields_by_type"]["CollectApiData"]["note"])
+
+    def test_step_schema_documents_complete_page_pipeline(self):
+        out = self.mod.call_workflow_step_schema({})
+        contract = out["data_pipeline_contract"]
+        self.assertEqual(
+            contract["normal_path"],
+            "CollectApiData -> TransformData -> PublishPageData",
+        )
+        self.assertIn("qa_list", " ".join(contract["discovery_order"]))
+        self.assertIn("qe_list", " ".join(contract["discovery_order"]))
+        self.assertIn("page_list", " ".join(contract["discovery_order"]))
+        for step_type in ["CollectApiData", "TransformData", "PublishPageData"]:
+            self.assertIn("example", out["fields_by_type"][step_type])
+
+    def test_step_schema_documents_collect_quick_exec_sources(self):
+        out = self.mod.call_workflow_step_schema({})
+        collect = out["fields_by_type"]["CollectApiData"]
+        self.assertIn("quick_exec", collect["note"])
+        self.assertIn("exec_allowlist", collect["note"])
+        self.assertIn("csv", collect["note"])
+        sources = collect["example"]["collect_api_data"]["sources"]
+        cli = next(source for source in sources if "quick_exec_id" in source)
+        self.assertIn("qe_list", cli["quick_exec_id"])
 
     # ── skills_list / profiles_list / directives_list ────────────────
     def test_skills_list_is_lean_and_drops_content(self):
@@ -4291,6 +4621,135 @@ class StepSchemaAndBindingListTests(unittest.TestCase):
         self.assertIn("current_task.number", contract)
         # explicitly rules OUT the wrong guesses
         self.assertIn("item.*", contract)
+
+
+class LivePageToolTests(unittest.TestCase):
+    def setUp(self):
+        self.mod = _load_module()
+
+    @staticmethod
+    def _env(data):
+        return {"success": True, "data": data}
+
+    def test_page_tools_are_registered_and_advertised(self):
+        names = [tool["name"] for tool in self.mod.TOOLS]
+        for name in ["page_list", "page_get", "page_create", "page_update_html"]:
+            self.assertIn(name, names)
+            self.assertIn(name, self.mod.DISPATCH)
+        response = self.mod._handle({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {},
+        })
+        instructions = response["result"]["instructions"]
+        self.assertIn("Live Pages", instructions)
+        self.assertIn("page_list", instructions)
+        self.assertIn("closed 12", instructions)
+        self.assertNotIn("closed 9", instructions)
+
+    def test_page_list_returns_compact_discovery_shape(self):
+        page = {
+            "id": "page-1", "title": "Adobe", "slug": "adobe",
+            "project_id": "project-1", "data_revision": 4,
+            "updated_at": "now", "last_published_at": "then",
+            "current_revision_id": "revision-1", "large": "drop",
+        }
+        with mock.patch.object(self.mod, "_http", return_value=self._env([page])) as http:
+            result = self.mod.call_page_list({})
+        http.assert_called_once_with("GET", "/api/pages")
+        self.assertEqual(result[0]["id"], "page-1")
+        self.assertNotIn("current_revision_id", result[0])
+        self.assertNotIn("large", result[0])
+
+    def test_page_get_returns_detail_and_workflow_links(self):
+        responses = [
+            self._env({"id": "page/one", "revision": {"html": "<h1>A</h1>"}}),
+            self._env([{"id": "wf-1", "step_names": ["publish"]}]),
+            self._env([{"discussion_id": "disc-1", "relation": "created_from"}]),
+        ]
+        with mock.patch.object(self.mod, "_http", side_effect=responses) as http:
+            result = self.mod.call_page_get({"page_id": "page/one"})
+        self.assertEqual(result["workflows"][0]["id"], "wf-1")
+        self.assertEqual(result["discussions"][0]["discussion_id"], "disc-1")
+        self.assertEqual(
+            http.call_args_list,
+            [
+                mock.call("GET", "/api/pages/page%2Fone"),
+                mock.call("GET", "/api/pages/page%2Fone/workflows"),
+                mock.call("GET", "/api/pages/page%2Fone/discussions"),
+            ],
+        )
+
+    def test_page_create_inherits_project_and_stamps_agent(self):
+        args = {
+            "title": "Adobe report",
+            "html": "<!doctype html><h1>Adobe</h1>",
+            "datasets": [{"name": "summary", "kind": "snapshot"}],
+        }
+        with mock.patch.object(self.mod, "_current_project_id", return_value="project-1"), \
+             mock.patch.object(self.mod, "_disc_id", return_value="disc-1"), \
+             mock.patch.object(self.mod, "_agent_type_for_session", return_value="Codex"), \
+             mock.patch.object(self.mod, "_http", return_value=self._env({"id": "page-1"})) as http:
+            result = self.mod.call_page_create(args)
+        self.assertEqual(result["id"], "page-1")
+        body = http.call_args.args[2]
+        self.assertEqual(body["project_id"], "project-1")
+        self.assertEqual(body["created_by_agent"], "Codex")
+        self.assertEqual(body["datasets"], args["datasets"])
+        self.assertEqual(body["discussion_id"], "disc-1")
+
+    def test_page_create_without_bound_discussion_creates_standalone_page(self):
+        args = {
+            "title": "Standalone report",
+            "html": "<!doctype html><h1>Standalone</h1>",
+            "datasets": [],
+        }
+        with mock.patch.object(self.mod, "_current_project_id", return_value=None), \
+             mock.patch.object(self.mod, "_disc_id", side_effect=RuntimeError("no disc bound")), \
+             mock.patch.object(self.mod, "_agent_type_for_session", return_value="ClaudeCode"), \
+             mock.patch.object(self.mod, "_http", return_value=self._env({"id": "page-standalone"})) as http:
+            result = self.mod.call_page_create(args)
+        self.assertEqual(result["id"], "page-standalone")
+        body = http.call_args.args[2]
+        self.assertNotIn("discussion_id", body)
+        self.assertNotIn("project_id", body)
+
+    def test_page_create_accepts_explicit_discussion_without_runtime_binding(self):
+        args = {
+            "title": "Explicitly linked report",
+            "html": "<!doctype html><h1>Linked</h1>",
+            "datasets": [],
+            "discussion_id": "disc-explicit",
+        }
+        with mock.patch.object(self.mod, "_current_project_id", return_value=None), \
+             mock.patch.object(self.mod, "_disc_id") as disc_id, \
+             mock.patch.object(self.mod, "_agent_type_for_session", return_value="Codex"), \
+             mock.patch.object(self.mod, "_http", return_value=self._env({"id": "page-linked"})) as http:
+            self.mod.call_page_create(args)
+        disc_id.assert_not_called()
+        self.assertEqual(http.call_args.args[2]["discussion_id"], "disc-explicit")
+
+    def test_page_create_rejects_missing_dataset_array(self):
+        with self.assertRaisesRegex(RuntimeError, "datasets.*array"):
+            self.mod.call_page_create({"title": "Report", "html": "<h1>x</h1>"})
+
+    def test_page_update_html_creates_agent_revision(self):
+        with mock.patch.object(self.mod, "_agent_type_for_session", return_value="ClaudeCode"), \
+             mock.patch.object(self.mod, "_http", return_value=self._env({"revision": 2})) as http:
+            result = self.mod.call_page_update_html({
+                "page_id": "page/one",
+                "html": "<!doctype html><h1>Revision 2</h1>",
+            })
+        self.assertEqual(result["revision"], 2)
+        http.assert_called_once_with(
+            "PUT",
+            "/api/pages/page%2Fone/html",
+            {
+                "html": "<!doctype html><h1>Revision 2</h1>",
+                "created_by_agent": "ClaudeCode",
+            },
+        )
 
 
 class WorkflowRunHistoryTests(unittest.TestCase):
@@ -7628,6 +8087,13 @@ class ToolManualTests(unittest.TestCase):
         # The probe-then-persist method is the reason this manual exists.
         self.assertIn("Probe", result["manual"])
         self.assertIn("api_extract", result["manual"])
+
+    def test_api_manual_documents_time_alongside_env_substitution(self):
+        manual = self.mod.call_tool_manual({"tool": "api_call"})["manual"]
+        self.assertIn("${ENV.KEY}", manual)
+        self.assertIn("time.now", manual)
+        self.assertIn("local_iso_ms", manual)
+        self.assertIn("never write `fmt:adobe`", manual)
 
     def test_no_argument_lists_what_exists(self):
         result = self.mod.call_tool_manual({})

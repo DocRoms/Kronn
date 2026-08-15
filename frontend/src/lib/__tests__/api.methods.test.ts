@@ -453,7 +453,11 @@ describe('api.workflows (rest)', () => {
 describe('api.quickPrompts (rest)', () => {
   it('batchRun', async () => { await exec(quickPrompts.batchRun('qp-1', { items: [], batch_name: 'b' }), 'POST', '/quick-prompts/qp-1/batch'); });
   it('compareAgents', async () => {
-    await exec(quickPrompts.compareAgents('qp-1', { prompt: 'p', batch_name: 'b', agents: ['ClaudeCode'] }), 'POST', '/quick-prompts/qp-1/compare-agents');
+    await exec(quickPrompts.compareAgents('qp-1', {
+      prompt: 'p',
+      batch_name: 'b',
+      targets: [{ agent: 'ClaudeCode', tier: 'default' }],
+    }), 'POST', '/quick-prompts/qp-1/compare-agents');
   });
   it('exportQp → GET (relative), filename fallback', async () => {
     const out = await quickPrompts.exportQp('qp-1');

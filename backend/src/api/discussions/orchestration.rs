@@ -23,7 +23,7 @@ use crate::models::*;
 use crate::AppState;
 
 use super::streaming::{run_agent_collect, run_agent_streaming, AgentStreamMeta};
-use super::{AgentStreamEvent, SseStream};
+use super::{configured_agent_global_timeout, AgentStreamEvent, SseStream};
 use crate::api::disc_helpers::{
     agent_display_name, auth_mode_for, summary_cooldown, summary_msg_threshold,
 };
@@ -241,7 +241,7 @@ pub async fn orchestrate(
         None
     };
 
-    let (tokens, agent_access, model_tiers_config, lite_llm_base_url) = {
+    let (tokens, agent_access, model_tiers_config, lite_llm_base_url, global_timeout) = {
         let config = state.config.read().await;
         let access_map: std::collections::HashMap<String, bool> = agents
             .iter()
@@ -252,6 +252,7 @@ pub async fn orchestrate(
             access_map,
             config.agents.model_tiers.clone(),
             config.agents.lite_llm.base_url.clone(),
+            configured_agent_global_timeout(config.server.agent_global_timeout_min),
         )
     };
 
@@ -412,7 +413,7 @@ pub async fn orchestrate(
             .await
             {
                 Ok(process) => {
-                    let summary = run_agent_collect(process).await;
+                    let summary = run_agent_collect(process, global_timeout).await;
                     if summary.is_empty() {
                         String::new()
                     } else {
@@ -497,7 +498,9 @@ pub async fn orchestrate(
                             agent_type: agent_type.clone(),
                             round_label: serde_json::json!(round),
                         };
-                        let result = run_agent_streaming(process, &tx, &meta, agent_type).await;
+                        let result =
+                            run_agent_streaming(process, &tx, &meta, agent_type, global_timeout)
+                                .await;
 
                         // Empty-response detection — when a CLI exits cleanly but
                         // produces no output, `run_agent_streaming` substitutes
@@ -655,8 +658,14 @@ pub async fn orchestrate(
                         agent_type: primary_agent_type.clone(),
                         round_label: serde_json::json!("synthesis"),
                     };
-                    let result =
-                        run_agent_streaming(process, &tx, &meta, &primary_agent_type).await;
+                    let result = run_agent_streaming(
+                        process,
+                        &tx,
+                        &meta,
+                        &primary_agent_type,
+                        global_timeout,
+                    )
+                    .await;
 
                     // Save synthesis to DB — always runs even if client is gone
                     {

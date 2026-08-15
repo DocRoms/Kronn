@@ -295,6 +295,7 @@ export function SettingsPage({
   const [serverDomain, setServerDomain] = useState('');
   const [serverMaxAgents, setServerMaxAgents] = useState(5);
   const [serverStallTimeout, setServerStallTimeout] = useState(5);
+  const [serverGlobalTimeout, setServerGlobalTimeout] = useState(30);
   const [serverDebugMode, setServerDebugMode] = useState(false);
   const [discussionNotesEnabled, setDiscussionNotesEnabled] = useState(true);
   // True after the user just toggled debug_mode. Shows a "restart required"
@@ -318,6 +319,7 @@ export function SettingsPage({
       setServerDomain(cfg.domain ?? '');
       setServerMaxAgents(cfg.max_concurrent_agents);
       setServerStallTimeout(cfg.agent_stall_timeout_min ?? 5);
+      setServerGlobalTimeout(cfg.agent_global_timeout_min ?? 30);
       setServerDebugMode(cfg.debug_mode ?? false);
       setDiscussionNotesEnabled(cfg.discussion_notes_enabled ?? true);
     }
@@ -476,6 +478,103 @@ export function SettingsPage({
             <span className="set-accordion-count">{agents.length}</span>
           </div>
           <p className="set-hint">{t('config.agentsHint')}</p>
+          <div className="set-agent-runtime-settings mb-8">
+            <div>
+              <div className="flex-row gap-3 mb-3">
+                <Cpu size={12} className="text-tertiary" />
+                <span className="label" style={{ marginBottom: 0 }}>{t('config.maxAgents')}</span>
+              </div>
+              <div className="flex-row gap-6">
+                <input
+                  type="range"
+                  min={1}
+                  max={20}
+                  value={serverMaxAgents}
+                  aria-label={t('config.maxAgents')}
+                  onChange={async e => {
+                    const v = Number(e.target.value);
+                    const prev = serverMaxAgents;
+                    setServerMaxAgents(v);
+                    try { await configApi.setServerConfig({ max_concurrent_agents: v }); }
+                    catch (err) { setServerMaxAgents(prev); toastActionFailed(err); }
+                  }}
+                  className="set-range"
+                />
+                <span className="text-base font-semibold text-accent" style={{ minWidth: 24, textAlign: 'center' }}>{serverMaxAgents}</span>
+              </div>
+              <div className="set-hint-xs">{t('config.maxAgentsHint')}</div>
+            </div>
+
+            <div className="mt-8">
+              <div className="flex-row gap-4 mb-4">
+                <span className="label" style={{ marginBottom: 0 }}>{t('settings.globalTimeout')}</span>
+              </div>
+              <div className="flex-row gap-6">
+                <input
+                  type="range" min={1} max={120} step={1}
+                  value={serverGlobalTimeout}
+                  aria-label={t('settings.globalTimeout')}
+                  onChange={async (e) => {
+                    const v = Number(e.target.value);
+                    const prev = serverGlobalTimeout;
+                    setServerGlobalTimeout(v);
+                    try { await configApi.setServerConfig({ agent_global_timeout_min: v }); }
+                    catch (err) { setServerGlobalTimeout(prev); toastActionFailed(err); }
+                  }}
+                  className="set-range"
+                />
+                <span className="text-base font-semibold text-accent" style={{ minWidth: 48, textAlign: 'center' }}>{serverGlobalTimeout} min</span>
+              </div>
+              <div className="set-hint-xs">{t('settings.globalTimeoutHint')}</div>
+              {serverGlobalTimeout > 30 && (
+                <div className="set-warning-callout">
+                  <AlertTriangle size={12} className="text-warning flex-shrink-0" />
+                  <span className="text-xs" style={{ color: 'rgba(var(--kr-warning-amber-rgb), 0.8)', lineHeight: 1.4 }}>
+                    {t('settings.globalTimeoutWarning')}
+                  </span>
+                </div>
+              )}
+            </div>
+
+            <div className="mt-8">
+              <div className="flex-row gap-4 mb-4">
+                <span className="label" style={{ marginBottom: 0 }}>{t('settings.stallTimeout')}</span>
+              </div>
+              <div className="flex-row gap-6">
+                <input
+                  type="range" min={1} max={120} step={1}
+                  value={serverStallTimeout}
+                  aria-label={t('settings.stallTimeout')}
+                  onChange={async (e) => {
+                    const v = Number(e.target.value);
+                    const prev = serverStallTimeout;
+                    setServerStallTimeout(v);
+                    try { await configApi.setServerConfig({ agent_stall_timeout_min: v }); }
+                    catch (err) { setServerStallTimeout(prev); toastActionFailed(err); }
+                  }}
+                  className="set-range"
+                />
+                <span className="text-base font-semibold text-accent" style={{ minWidth: 48, textAlign: 'center' }}>{serverStallTimeout} min</span>
+              </div>
+              <div className="set-hint-xs">{t('settings.stallTimeoutHint')}</div>
+              {serverStallTimeout > serverGlobalTimeout && (
+                <div className="set-warning-callout">
+                  <AlertTriangle size={12} className="text-warning flex-shrink-0" />
+                  <span className="text-xs" style={{ color: 'rgba(var(--kr-warning-amber-rgb), 0.8)', lineHeight: 1.4 }}>
+                    {t('settings.timeoutMismatchWarning')}
+                  </span>
+                </div>
+              )}
+              {serverStallTimeout > 10 && (
+                <div className="set-warning-callout">
+                  <AlertTriangle size={12} className="text-warning flex-shrink-0" />
+                  <span className="text-xs" style={{ color: 'rgba(var(--kr-warning-amber-rgb), 0.8)', lineHeight: 1.4 }}>
+                    {t('settings.stallTimeoutWarning')}
+                  </span>
+                </div>
+              )}
+            </div>
+          </div>
           <AgentsSection
             agents={agents}
             agentAccess={agentAccess}
@@ -1641,72 +1740,6 @@ export function SettingsPage({
             </div>
           </div>
 
-          {/* Max concurrent agents */}
-          <div>
-            <div className="flex-row gap-3 mb-3">
-              <Cpu size={12} className="text-tertiary" />
-              <span className="label" style={{ marginBottom: 0 }}>{t('config.maxAgents')}</span>
-            </div>
-            <div className="flex-row gap-6">
-              <input
-                type="range"
-                min={1}
-                max={20}
-                value={serverMaxAgents}
-                aria-label={t('config.maxAgents')}
-                onChange={async e => {
-                  const v = Number(e.target.value);
-                  const prev = serverMaxAgents;
-                  setServerMaxAgents(v);
-                  // There is no refetch on this page — without an explicit
-                  // revert the slider would stick at a value the backend
-                  // never persisted.
-                  try { await configApi.setServerConfig({ max_concurrent_agents: v }); }
-                  catch (err) { setServerMaxAgents(prev); toastActionFailed(err); }
-                }}
-                className="set-range"
-              />
-              <span className="text-base font-semibold text-accent" style={{ minWidth: 24, textAlign: 'center' }}>{serverMaxAgents}</span>
-            </div>
-            <div className="set-hint-xs">
-              {t('config.maxAgentsHint')}
-            </div>
-          </div>
-
-          {/* Stall timeout */}
-          <div className="mt-8">
-            <div className="flex-row gap-4 mb-4">
-              <span className="label" style={{ marginBottom: 0 }}>{t('settings.stallTimeout')}</span>
-            </div>
-            <div className="flex-row gap-6">
-              <input
-                type="range" min={1} max={120} step={1}
-                value={serverStallTimeout}
-                aria-label={t('settings.stallTimeout')}
-                onChange={async (e) => {
-                  const v = Number(e.target.value);
-                  const prev = serverStallTimeout;
-                  setServerStallTimeout(v);
-                  // Same as max-agents above: no refetch, so revert explicitly.
-                  try { await configApi.setServerConfig({ agent_stall_timeout_min: v }); }
-                  catch (err) { setServerStallTimeout(prev); toastActionFailed(err); }
-                }}
-                className="set-range"
-              />
-              <span className="text-base font-semibold text-accent" style={{ minWidth: 36, textAlign: 'center' }}>{serverStallTimeout} min</span>
-            </div>
-            <div className="set-hint-xs">
-              {t('settings.stallTimeoutHint')}
-            </div>
-            {serverStallTimeout > 10 && (
-              <div className="set-warning-callout">
-                <AlertTriangle size={12} className="text-warning flex-shrink-0" />
-                <span className="text-xs" style={{ color: 'rgba(var(--kr-warning-amber-rgb), 0.8)', lineHeight: 1.4 }}>
-                  {t('settings.stallTimeoutWarning')}
-                </span>
-              </div>
-            )}
-          </div>
         </div>
       </div>
 

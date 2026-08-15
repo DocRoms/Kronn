@@ -45,20 +45,23 @@ pub async fn upload_context_file(
         }
     };
 
-    // Check file count limit
+    // Bound the current staging area, not the discussion's attachment history.
+    // Once a file is pinned to a durable message it must remain viewable without
+    // permanently consuming one of the composer's upload slots.
     let did = discussion_id.clone();
     let count = state
         .db
         .with_conn(move |conn| {
-            crate::db::discussions::count_context_files(conn, &did).map_err(|e| anyhow::anyhow!(e))
+            crate::db::discussions::count_pending_context_files(conn, &did)
+                .map_err(|e| anyhow::anyhow!(e))
         })
         .await
         .unwrap_or(0);
 
-    if count >= crate::core::context_files::MAX_FILES_PER_DISCUSSION {
+    if count >= crate::core::context_files::MAX_PENDING_FILES_PER_DISCUSSION {
         return Json(ApiResponse::err(format!(
-            "Maximum {} context files per discussion reached",
-            crate::core::context_files::MAX_FILES_PER_DISCUSSION
+            "Maximum {} pending context files per discussion reached",
+            crate::core::context_files::MAX_PENDING_FILES_PER_DISCUSSION
         )));
     }
 
@@ -239,6 +242,12 @@ pub async fn list_context_files(
 #[derive(serde::Deserialize)]
 pub struct LinkPendingRequest {
     pub message_id: String,
+    /// When present, pin only these uploads. The composer omits this field and
+    /// keeps its historical "all pending" behaviour; MCP agents always send
+    /// the exact ids returned by their own uploads so concurrent drafts cannot
+    /// steal each other's files.
+    #[serde(default)]
+    pub file_ids: Option<Vec<String>>,
 }
 
 /// POST /api/discussions/:id/context-files/link-pending
@@ -255,20 +264,55 @@ pub async fn link_pending_context_files(
     Path(discussion_id): Path<String>,
     Json(req): Json<LinkPendingRequest>,
 ) -> Json<ApiResponse<usize>> {
+    if req
+        .file_ids
+        .as_ref()
+        .is_some_and(|ids| ids.len() > crate::core::context_files::MAX_PENDING_FILES_PER_DISCUSSION)
+    {
+        return Json(ApiResponse::err(format!(
+            "Cannot link more than {} context files at once",
+            crate::core::context_files::MAX_PENDING_FILES_PER_DISCUSSION
+        )));
+    }
     let did = discussion_id.clone();
+    let message_id = req.message_id.clone();
     match state
         .db
         .with_conn(move |conn| {
-            crate::db::discussions::link_pending_context_files_to_message(
-                conn,
-                &did,
-                &req.message_id,
-            )
+            match req.file_ids {
+                Some(file_ids) => crate::db::discussions::link_selected_context_files_to_message(
+                    conn,
+                    &did,
+                    &req.message_id,
+                    &file_ids,
+                ),
+                None => crate::db::discussions::link_pending_context_files_to_message(
+                    conn,
+                    &did,
+                    &req.message_id,
+                ),
+            }
             .map_err(|e| anyhow::anyhow!(e))
         })
         .await
     {
-        Ok(n) => Json(ApiResponse::ok(n)),
+        Ok(n) => {
+            if n > 0 {
+                let _ = state
+                    .ws_broadcast
+                    .send(crate::models::WsMessage::ContextFilesChanged {
+                        discussion_id: discussion_id.clone(),
+                        message_id: message_id.clone(),
+                    });
+                crate::api::federation::federate_attachments_for_message(
+                    &state,
+                    &discussion_id,
+                    &message_id,
+                )
+                .await;
+            }
+            Json(ApiResponse::ok(n))
+        }
         Err(e) => Json(ApiResponse::err(format!("DB error: {e}"))),
     }
 }

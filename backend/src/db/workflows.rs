@@ -385,15 +385,22 @@ pub fn delete_batch_run_with_discussions(
 
 // ─── Batch run creation (pure, reusable from HTTP + workflow runner) ───────
 
+/// Per-item execution target used by Compare mode. Keeping the tier next to
+/// the agent is important: two rows may intentionally run the same agent at
+/// different model tiers.
+pub struct BatchAgentOverride {
+    pub agent: crate::models::AgentType,
+    pub tier: crate::models::ModelTier,
+}
+
 /// One row of the batch input — title, fully-rendered prompt, and an
-/// optional per-item agent override. The override lets the caller
-/// fan out the SAME prompt across MULTIPLE agents (Compare-agents
-/// mode) — when `None`, the QP's default `agent` is used (the
-/// classic "vary input" mode).
+/// optional per-item agent+tier override. The override lets the caller fan
+/// out the SAME prompt across MULTIPLE execution targets (Compare mode) —
+/// when `None`, the QP's default agent and tier are used.
 pub struct BatchItemInput {
     pub title: String,
     pub prompt: String,
-    pub agent_override: Option<crate::models::AgentType>,
+    pub agent_override: Option<BatchAgentOverride>,
 }
 
 /// Input for [`create_batch_run`]. Everything needed to build a batch
@@ -532,12 +539,18 @@ pub fn create_batch_run(
                 target_agent: None,
                 reply_to_message_id: None,
             };
-            // Per-item agent override (Compare-agents mode) falls back
-            // to the QP's default agent when None.
+            // Per-item execution target (Compare mode) falls back to the
+            // QP's default agent+tier for classic vary-the-input batches.
             let effective_agent = item
                 .agent_override
-                .clone()
+                .as_ref()
+                .map(|target| target.agent.clone())
                 .unwrap_or_else(|| qp.agent.clone());
+            let effective_tier = item
+                .agent_override
+                .as_ref()
+                .map(|target| target.tier)
+                .unwrap_or(qp.tier);
             let discussion = Discussion {
                 awaiting_agent: false,
                 id: disc_id,
@@ -561,11 +574,15 @@ pub fn create_batch_run(
                 workspace_mode: workspace_mode.clone(),
                 workspace_path: None,
                 worktree_branch: None,
-                tier: qp.tier,
-                // 0.8.10 — a QP-launched batch discussion inherits the QP's explicit
-                // model (consumed via disc.model → model_override once the batch
-                // agent-run path reads it in 2b-2).
-                model: qp.agent_settings.as_ref().and_then(|s| s.model.clone()),
+                tier: effective_tier,
+                // Classic batches inherit the QP's provider-specific model.
+                // Compare targets must resolve from their own agent+tier pair:
+                // copying e.g. a Claude model override onto Codex is invalid.
+                model: if item.agent_override.is_none() {
+                    qp.agent_settings.as_ref().and_then(|s| s.model.clone())
+                } else {
+                    None
+                },
                 pin_first_message: false,
                 summary_cache: None,
                 summary_up_to_msg_idx: None,

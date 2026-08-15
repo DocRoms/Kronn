@@ -8,7 +8,7 @@ use rusqlite::{params, Connection};
 use std::collections::HashMap;
 
 use super::parse_dt;
-use crate::models::{ExtractSpec, PaginationSpec, QuickApi};
+use crate::models::{normalize_quick_api_body, ExtractSpec, PaginationSpec, QuickApi};
 
 /// Decode an optional JSON string column into a typed value. Empty strings
 /// and SQL NULLs both resolve to `None` so the model surfaces a clean
@@ -36,7 +36,9 @@ fn row_to_quick_api(row: &rusqlite::Row) -> QuickApi {
         api_path_params: parse_json_opt::<HashMap<String, String>>(row.get(10).unwrap_or(None)),
         api_headers: parse_json_opt::<HashMap<String, String>>(row.get(11).unwrap_or(None)),
         // api_body stored as TEXT but typed Value — same trick as Workflow.
-        api_body: parse_json_opt::<serde_json::Value>(row.get(12).unwrap_or(None)),
+        api_body: normalize_quick_api_body(parse_json_opt::<serde_json::Value>(
+            row.get(12).unwrap_or(None),
+        )),
         api_extract: parse_json_opt::<ExtractSpec>(row.get(13).unwrap_or(None)),
         api_pagination: parse_json_opt::<PaginationSpec>(row.get(14).unwrap_or(None)),
         // rusqlite 0.39 dropped u64; SQLite stores as i64, cast back at the boundary.
@@ -293,6 +295,22 @@ mod tests {
         let fetched = get_quick_api(&conn, &qa.id).unwrap().unwrap();
         assert_eq!(fetched.name, "Updated name");
         assert_eq!(fetched.api_body, Some(serde_json::json!({})));
+    }
+
+    #[test]
+    fn legacy_stringified_object_body_is_loaded_as_typed_json() {
+        let conn = open_test_db();
+        let mut qa = mk_quick_api();
+        qa.api_body = Some(serde_json::Value::String(
+            r#"{"events":[{"name":"page_view"}]}"#.into(),
+        ));
+        insert_quick_api(&conn, &qa).unwrap();
+
+        let fetched = get_quick_api(&conn, &qa.id).unwrap().unwrap();
+        assert_eq!(
+            fetched.api_body,
+            Some(serde_json::json!({"events": [{"name": "page_view"}]}))
+        );
     }
 
     #[test]

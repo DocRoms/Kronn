@@ -71,6 +71,45 @@ const mixedSteps = [
   mkStep({ id: '55555555-5555-4555-8555-555555555555', name: 'notify_done', step_type: { type: 'Notify' } }),
 ];
 
+// Regression fixtures from workflow 90b8d76d-d226-4c51-acb0-bab4a08ef63e.
+// These newer deterministic types used to fall through to the legacy Agent
+// presentation in WorkflowDetail even though the runner handled them correctly.
+const pagePipelineSteps = [
+  mkStep({
+    id: '9d8446d2-1216-484f-bb7d-8aac8f854426',
+    name: 'collect-sources',
+    step_type: { type: 'CollectApiData' },
+    collect_api_data: {
+      concurrent_limit: 5,
+      sources: [
+        { alias: 'adobe', quick_api_id: 'qa-adobe', quick_exec_id: '', required: true },
+        { alias: 'releases', quick_api_id: 'qa-releases', quick_exec_id: '', required: true },
+      ],
+    },
+  }),
+  mkStep({
+    id: '711bf7e5-9038-4cdc-8699-e7d8dc052f9f',
+    name: 'shape',
+    step_type: { type: 'TransformData' },
+    transform_data: {
+      input_from: 'steps.collect-sources.data',
+      fields: [
+        { target: 'rows', source: '$.sources.adobe.rows', operation: 'first' },
+        { target: 'release', source: '$.sources.releases', operation: 'first' },
+      ],
+    },
+  }),
+  mkStep({
+    id: 'a17746b5-a959-4a8f-b573-e41f93dcc5db',
+    name: 'publish-page',
+    step_type: { type: 'PublishPageData' },
+    page_publish: {
+      page_id: '8faf5138-8d45-4548-8f12-e0ac21e22cc5',
+      writes: [{ dataset: 'daily', operation: 'replace', value_from: 'steps.shape.data' }],
+    },
+  }),
+];
+
 type DetailProps = React.ComponentProps<typeof WorkflowDetail>;
 
 const renderDetail = (steps: WorkflowStep[], overrides: Partial<DetailProps> = {}) =>
@@ -140,6 +179,35 @@ describe('WorkflowDetail — focused steps pipeline', () => {
       'wiz.stepTypeExec',
       'wiz.stepTypeNotify',
     ]);
+  });
+
+  it('presents collect and transform steps as named deterministic operations', () => {
+    const { container } = renderDetail(pagePipelineSteps);
+    const types = Array.from(container.querySelectorAll('.wf-pipe-chip-type'));
+
+    expect(types.map(type => type.textContent)).toEqual([
+      'wiz.stepTypeCollectApiData',
+      'wiz.stepTypeTransformData',
+      'wiz.stepTypePublishPage',
+    ]);
+    expect(container.querySelectorAll('.wf-pipe-chip[data-class="determ"]')).toHaveLength(3);
+    expect(container.querySelectorAll('.wf-pipe-chip[data-kind="agent"]')).toHaveLength(0);
+    expect(container.querySelector('.wf-step-card')).toHaveAttribute('data-step-type', 'collect-data');
+    expect(container.querySelector('.wf-step-card')).toHaveTextContent('wiz.stepTypeCollectApiData');
+
+    fireEvent.click(container.querySelectorAll('.wf-pipe-chip-open')[1] as HTMLElement);
+    expect(container.querySelector('.wf-step-card')).toHaveAttribute('data-step-type', 'transform-data');
+    expect(container.querySelector('.wf-step-card')).toHaveTextContent('wiz.stepTypeTransformData');
+  });
+
+  it('opens the target Page from the Publish Page preview', () => {
+    const onNavigatePage = vi.fn();
+    const { container } = renderDetail(pagePipelineSteps, { onNavigatePage });
+    fireEvent.click(container.querySelectorAll('.wf-pipe-chip-open')[2] as HTMLElement);
+
+    expect(container.querySelector('.wf-step-card')).toHaveAttribute('data-step-type', 'page-data');
+    fireEvent.click(screen.getByRole('button', { name: 'wiz.publishPageOpen' }));
+    expect(onNavigatePage).toHaveBeenCalledWith('8faf5138-8d45-4548-8f12-e0ac21e22cc5');
   });
 
   it('shows a copyable canonical ID on every step', async () => {

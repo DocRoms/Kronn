@@ -951,6 +951,18 @@ body"#;
             c.contains("BatchQuickPrompt"),
             "skill must mention BatchQuickPrompt step type"
         );
+        for step_type in ["CollectApiData", "TransformData", "PublishPageData"] {
+            assert!(
+                c.contains(step_type),
+                "skill must mention the {step_type} data-pipeline step type"
+            );
+        }
+        for discovery_tool in ["qa_list()", "page_list()", "page_create()"] {
+            assert!(
+                c.contains(discovery_tool),
+                "skill must teach the {discovery_tool} Page-pipeline discovery flow"
+            );
+        }
         // The cost-decision narrative must be explicit.
         assert!(c.contains("désagentification") || c.contains("Désagentification"),
             "skill must spell out 'désagentification' so the agent treats it as a first-class concept");
@@ -1064,14 +1076,9 @@ body"#;
         );
     }
 
-    /// 2026-06-11 guard: the architect counts step types correctly.
-    /// Kronn ships **9** step types (Agent, ApiCall, BatchApiCall,
-    /// BatchQuickPrompt, Exec, Gate, JsonData, Notify, SubWorkflow). A
-    /// skill that still says "eight step types" leaves an LLM consuming
-    /// it unable to enumerate the catalog correctly. This test fires the
-    /// moment the count drifts.
+    /// The architect must enumerate the same twelve types as `StepType`.
     #[test]
-    fn workflow_architect_skill_counts_nine_step_types() {
+    fn workflow_architect_skill_counts_twelve_step_types() {
         let skills = list_all_skills();
         let arch = skills
             .iter()
@@ -1079,30 +1086,40 @@ body"#;
             .expect("workflow-architect skill must exist");
         let c = &arch.content;
         assert!(
-            c.contains("nine step types") || c.contains("9 step types"),
-            "skill must say 'nine step types' — the catalog has grown to include SubWorkflow"
+            c.contains("twelve step types") || c.contains("12 step types"),
+            "skill must say 'twelve step types'"
         );
-        assert!(
-            c.contains("SubWorkflow"),
-            "skill must teach the SubWorkflow step type by name"
-        );
-        // The old wrong counts must NOT linger anywhere as authoritative.
-        assert!(
-            !c.contains("six step types"),
-            "skill still says 'six step types' — stale count, must be 'nine'"
-        );
-        assert!(
-            !c.contains("seven step types"),
-            "skill still says 'seven step types' — stale count, must be 'nine'"
-        );
-        assert!(
-            !c.contains("eight step types"),
-            "skill still says 'eight step types' — stale count, must be 'nine'"
-        );
-        assert!(
-            !c.contains("The 7 step types") && !c.contains("The 8 step types"),
-            "skill still says 'The 7/8 step types cover every case' — stale count"
-        );
+        for step_type in [
+            "Agent",
+            "ApiCall",
+            "BatchApiCall",
+            "BatchQuickPrompt",
+            "Exec",
+            "Gate",
+            "Notify",
+            "JsonData",
+            "CollectApiData",
+            "TransformData",
+            "PublishPageData",
+            "SubWorkflow",
+        ] {
+            assert!(c.contains(step_type), "skill must teach {step_type}");
+        }
+        for stale_count in [
+            "six step types",
+            "seven step types",
+            "eight step types",
+            "nine step types",
+            "6 step types",
+            "7 step types",
+            "8 step types",
+            "9 step types",
+        ] {
+            assert!(
+                !c.contains(stale_count),
+                "skill still contains stale authoritative count: {stale_count}"
+            );
+        }
     }
 
     /// 0.8.3 guard: the architect must surface the **reuse-first**
@@ -1489,8 +1506,14 @@ body"#;
             qpc.contains("qp_list()") && qpc.to_lowercase().contains("list before"),
             "qp-improver must teach 'always list before you create' via `qp_list()`"
         );
-        assert!(c.contains("workflow_list()") && c.contains("qp_list()") && c.contains("qa_list()") && c.contains("mcp_list()"),
-            "workflow-architect must enumerate ALL four listing tools (workflow_list / qp_list / qa_list / mcp_list) so the agent knows the read surface");
+        assert!(
+            c.contains("workflow_list()")
+                && c.contains("qp_list()")
+                && c.contains("qa_list()")
+                && c.contains("page_list()")
+                && c.contains("mcp_list()"),
+            "workflow-architect must enumerate every workflow dependency listing tool"
+        );
     }
 
     /// 0.8.5 guard: the workflow-architect skill MUST document the
@@ -1555,5 +1578,21 @@ body"#;
                     || c.contains("No envelope produced")),
             "skill must keep flagging Agent FreeText as envelope-less"
         );
+    }
+
+    #[test]
+    fn workflow_architect_skill_teaches_run_anchored_vendor_neutral_time() {
+        let skills = list_all_skills();
+        let content = &skills
+            .iter()
+            .find(|skill| skill.id == "workflow-architect")
+            .expect("workflow-architect skill must exist")
+            .content;
+
+        assert!(content.contains("time.now|shift:-24h|tz:Europe/Paris"));
+        assert!(content.contains("local_iso_ms"));
+        assert!(content.contains("Never invent plugin formats"));
+        let normalized = content.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(normalized.contains("single anchor"));
     }
 }

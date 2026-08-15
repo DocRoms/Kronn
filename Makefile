@@ -434,6 +434,8 @@ endif
 		-e 's|^> \*\*Statut :.*|> **Statut : $(V) (version actuelle).** Fonctionnel mais pré-1.0. Les versions mineures peuvent introduire des breaking changes ; les patch versions sont safe.|' \
 		-e 's|(git clone --branch )[0-9]+\.[0-9]+\.[0-9]+|\1$(V)|g' \
 		-e 's|Kronn v[0-9]+\.[0-9]+\.[0-9]+|Kronn v$(V)|g' README.fr.md
+	@sed $(SEDI) -E 's|^## Current release: [0-9]+\.[0-9]+\.[0-9]+|## Current release: $(V)|' docs/index.md
+	@sed $(SEDI) -E 's|(git clone --branch )[0-9]+\.[0-9]+\.[0-9]+|\1$(V)|g' docs/install.md
 	@# 0.8.6 — also bump the hardcoded version in the public site (FR/EN/ES).
 	@# Pre-fix `make bump` skipped these and we shipped 0.8.6 with the site
 	@# still claiming v0.8.5 on the early-access disclaimer + credits line.
@@ -453,6 +455,7 @@ endif
 	@echo "  Files updated: VERSION, backend/Cargo.toml, desktop/src-tauri/Cargo.toml,"
 	@echo "  frontend/package.json, desktop/package.json, desktop/src-tauri/tauri.conf.json,"
 	@echo "  README.md, README.fr.md,"
+	@echo "  docs/index.md, docs/install.md,"
 	@echo "  site/index.html, site/en.html, site/es.html (v-prefixed mentions only — historical (0.8.x) refs preserved)"
 	@echo "  + Cargo.lock (backend, desktop/src-tauri) synced via cargo update --workspace"
 	@$(MAKE) --no-print-directory check-version

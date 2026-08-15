@@ -77,6 +77,11 @@ vi.mock('../../lib/I18nContext', () => ({
   }),
 }));
 vi.mock('../../hooks/useMediaQuery', () => ({ useIsMobile: () => false }));
+vi.mock('../ProjectCodePanel', () => ({
+  ProjectCodePanel: ({ projectId }: { projectId: string }) => (
+    <div data-testid="project-code-panel">{projectId}</div>
+  ),
+}));
 
 import { ProjectCard } from '../ProjectCard';
 import { planning as planningApi, projects as projectsApi } from '../../lib/api';
@@ -103,6 +108,50 @@ const PROJECT: Project = {
 describe('ProjectCard — repository overview', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    localStorage.removeItem('kronn:projectDetailView');
+  });
+
+  it('keeps the active detail tab when switching projects and rejects stale values', () => {
+    const renderCard = (project: Project) => render(
+      <ProjectCard
+        project={project}
+        detailMode
+        isOpen
+        onToggleOpen={noop}
+        discussions={[]}
+        driftStatus={undefined}
+        agents={[]}
+        allSkills={[]}
+        mcpConfigs={[]}
+        workflows={[]}
+        configLanguage="fr"
+        toast={vi.fn()}
+        onNavigate={noop}
+        onSetDiscPrefill={noop}
+        onAutoRunDiscussion={noop}
+        onOpenDiscussion={noop}
+        onRefetch={noop}
+        onRefetchDiscussions={noop}
+        onRefetchSkills={noop}
+        onRefetchDrift={noop}
+      />,
+    );
+
+    const first = renderCard(PROJECT);
+    fireEvent.click(screen.getByRole('button', { name: 'projects.master.tab.code' }));
+    expect(screen.getByRole('button', { name: 'projects.master.tab.code' }))
+      .toHaveAttribute('data-active', 'true');
+    first.unmount();
+
+    const second = renderCard({ ...PROJECT, id: 'p-second', name: 'Second project' });
+    expect(screen.getByRole('button', { name: 'projects.master.tab.code' }))
+      .toHaveAttribute('data-active', 'true');
+    second.unmount();
+
+    localStorage.setItem('kronn:projectDetailView', 'removed-tab');
+    renderCard({ ...PROJECT, id: 'p-third', name: 'Third project' });
+    expect(screen.getByRole('button', { name: 'projects.master.tab.overview' }))
+      .toHaveAttribute('data-active', 'true');
   });
 
   it('explains audit provenance, paid drift and records an explicit human attestation', async () => {

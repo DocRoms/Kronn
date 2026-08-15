@@ -122,10 +122,13 @@ fn uncertain_side_effect_type(step_type: &StepType) -> Option<&'static str> {
         StepType::BatchApiCall => Some("BatchApiCall"),
         StepType::Notify => Some("Notify"),
         StepType::Exec => Some("Exec"),
+        StepType::PublishPageData => Some("PublishPageData"),
+        StepType::CollectApiData => Some("CollectApiData"),
         StepType::Agent
         | StepType::BatchQuickPrompt
         | StepType::Gate
         | StepType::JsonData
+        | StepType::TransformData
         | StepType::SubWorkflow => None,
     }
 }
@@ -626,7 +629,7 @@ async fn execute_run_with_notify_policy(
     });
 
     // Build template context from trigger context
-    let mut ctx = TemplateContext::new();
+    let mut ctx = TemplateContext::with_time_anchor(run.started_at);
     if let Some(ref trigger_ctx) = run.trigger_context {
         inject_trigger_context(&mut ctx, trigger_ctx);
     }
@@ -1382,6 +1385,33 @@ async fn execute_run_with_notify_policy(
                     // token, zéro réseau. Cf. json_data_step.rs.
                     super::json_data_step::execute_json_data_step(step).await
                 }
+                StepType::CollectApiData => {
+                    super::collect_api_data_step::execute_collect_api_data_step(
+                        step,
+                        workflow.project_id.as_deref(),
+                        &state,
+                        &ctx,
+                        super::api_call_executor::ApiCallLogContext::workflow_for_run(
+                            run.id.clone(),
+                        ),
+                        &workflow.exec_allowlist,
+                        &work_dir,
+                    )
+                    .await
+                }
+                StepType::TransformData => {
+                    super::transform_data_step::execute_transform_data_step(step, &ctx).await
+                }
+                StepType::PublishPageData => {
+                    super::publish_page_step::execute_publish_page_data_step(
+                        step,
+                        &workflow.id,
+                        &run.id,
+                        &state,
+                        &ctx,
+                    )
+                    .await
+                }
                 StepType::SubWorkflow => {
                     // Phase 1b-i — re-entrant: runs the target workflow as a
                     // child run (Box::pin recursion inside the executor),
@@ -1573,7 +1603,10 @@ async fn execute_run_with_notify_policy(
             | StepType::Gate
             | StepType::Exec
             | StepType::BatchApiCall
-            | StepType::JsonData => {}
+            | StepType::JsonData
+            | StepType::CollectApiData
+            | StepType::TransformData
+            | StepType::PublishPageData => {}
             // SubWorkflow itself spawns no LLM directly; its child run's
             // Agent steps consume LLM calls. Phase 1b aggregates the child's
             // count into the SHARED budget so the parent quota isn't bypassed
@@ -2230,6 +2263,33 @@ async fn execute_run_with_notify_policy(
                     // JSON littéral comme step de compensation), mais on
                     // l'accepte pour rester cohérent avec le linear path.
                     super::json_data_step::execute_json_data_step(rb_step).await
+                }
+                StepType::CollectApiData => {
+                    super::collect_api_data_step::execute_collect_api_data_step(
+                        rb_step,
+                        workflow.project_id.as_deref(),
+                        &state,
+                        &ctx,
+                        super::api_call_executor::ApiCallLogContext::workflow_for_run(
+                            run.id.clone(),
+                        ),
+                        &workflow.exec_allowlist,
+                        &work_dir,
+                    )
+                    .await
+                }
+                StepType::TransformData => {
+                    super::transform_data_step::execute_transform_data_step(rb_step, &ctx).await
+                }
+                StepType::PublishPageData => {
+                    super::publish_page_step::execute_publish_page_data_step(
+                        rb_step,
+                        &workflow.id,
+                        &run.id,
+                        &state,
+                        &ctx,
+                    )
+                    .await
                 }
                 StepType::SubWorkflow => {
                     // FORBIDDEN in on_failure (save-validated). Defence-in-depth
@@ -2957,6 +3017,9 @@ pub(crate) fn apply_step_snapshot(
         StepType::Exec => "Exec",
         StepType::BatchApiCall => "BatchApiCall",
         StepType::JsonData => "JsonData",
+        StepType::CollectApiData => "CollectApiData",
+        StepType::TransformData => "TransformData",
+        StepType::PublishPageData => "PublishPageData",
         StepType::SubWorkflow => "SubWorkflow",
     };
     result.step_kind = Some(kind.into());
@@ -3147,6 +3210,9 @@ mod tests {
             exec_stdin: None,
             quick_prompt_id: None,
             json_data_payload: None,
+            collect_api_data: None,
+            transform_data: None,
+            page_publish: None,
             sub_workflow_id: None,
             sub_workflow_foreach_file: None,
             multi_agent_review: None,
@@ -3480,6 +3546,9 @@ mod tests {
             exec_stdin: None,
             quick_prompt_id: None,
             json_data_payload: None,
+            collect_api_data: None,
+            transform_data: None,
+            page_publish: None,
             sub_workflow_id: None,
             sub_workflow_foreach_file: None,
             multi_agent_review: None,

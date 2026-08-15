@@ -280,9 +280,13 @@ async fn probe_cli(
     required: bool,
 ) -> McpProbeCheck {
     let result = match server.id.as_str() {
-        "mcp-fastly" => run_probe_command("fastly", &["auth", "token"], env)
-            .await
-            .map(|_| ()),
+        "mcp-fastly" => run_probe_command(
+            "fastly",
+            &["auth", "token", "--quiet", "--non-interactive"],
+            env,
+        )
+        .await
+        .map(|_| ()),
         "mcp-gitlab" => run_probe_command("glab", &["auth", "status"], env)
             .await
             .map(|_| ()),

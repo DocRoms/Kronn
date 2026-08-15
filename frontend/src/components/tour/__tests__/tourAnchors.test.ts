@@ -83,4 +83,20 @@ describe('tour anchors exist in the app', () => {
       .map(step => step.id);
     expect(conditional, 'anchor on the container, not on a list row').toEqual([]);
   });
+
+  it('teaches every Automation category in the same order as the sidebar', () => {
+    const automationSteps = TOUR_STEPS
+      .filter(step => step.id.startsWith('automation-'))
+      .map(step => step.id);
+
+    expect(automationSteps).toEqual([
+      'automation-library',
+      'automation-workflow',
+      'automation-quick-api',
+      'automation-quick-prompt',
+      'automation-quick-exec',
+      'automation-actions',
+      'automation-ai',
+    ]);
+  });
 });

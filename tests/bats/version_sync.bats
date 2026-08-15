@@ -7,6 +7,7 @@ setup() {
     mkdir -p \
         "$TEST_TMPDIR/backend" \
         "$TEST_TMPDIR/desktop/src-tauri" \
+        "$TEST_TMPDIR/docs" \
         "$TEST_TMPDIR/frontend" \
         "$TEST_TMPDIR/site"
 
@@ -23,13 +24,15 @@ setup() {
     printf '{\n  "version": "1.2.3"\n}\n' > "$TEST_TMPDIR/desktop/package.json"
     printf '{\n  "version": "1.2.3"\n}\n' > "$TEST_TMPDIR/desktop/src-tauri/tauri.conf.json"
     printf '## [1.2.3]\n' > "$TEST_TMPDIR/CHANGELOG.md"
-    printf '> **Status: 1.2.3 (current release).**\ngit clone --branch 1.2.3 repo\n' \
+    printf '> **Status: 1.2.3 (current release).**\n## What\x27s new in 1.2.3\ngit clone --branch 1.2.3 repo\n' \
         > "$TEST_TMPDIR/README.md"
-    printf '> **Statut : 1.2.3 (version actuelle).**\ngit clone --branch 1.2.3 repo\n' \
+    printf '> **Statut : 1.2.3 (version actuelle).**\n## Nouveautés de la 1.2.3\ngit clone --branch 1.2.3 repo\n' \
         > "$TEST_TMPDIR/README.fr.md"
-    printf 'current v1.2.3\n' > "$TEST_TMPDIR/site/index.html"
-    printf 'current v1.2.3\n' > "$TEST_TMPDIR/site/en.html"
-    printf 'current v1.2.3\n' > "$TEST_TMPDIR/site/es.html"
+    printf '## Current release: 1.2.3\n' > "$TEST_TMPDIR/docs/index.md"
+    printf 'git clone --branch 1.2.3 repo\n' > "$TEST_TMPDIR/docs/install.md"
+    printf 'current v1.2.3\n<div aria-label="Nouveautés de Kronn 1.2.3"><strong>1.2.3</strong></div>\n' > "$TEST_TMPDIR/site/index.html"
+    printf 'current v1.2.3\n<div aria-label="What is new in Kronn 1.2.3"><strong>1.2.3</strong></div>\n' > "$TEST_TMPDIR/site/en.html"
+    printf 'current v1.2.3\n<div aria-label="Novedades de Kronn 1.2.3"><strong>1.2.3</strong></div>\n' > "$TEST_TMPDIR/site/es.html"
 }
 
 teardown() {
@@ -85,4 +88,27 @@ teardown() {
 
     assert_failure
     assert_output --partial "frontend/package.json is '1.2.2' (expected '1.2.3')"
+}
+
+@test "version sync rejects stale documentation clone instructions" {
+    printf 'git clone --branch 1.2.2 repo\n' > "$TEST_TMPDIR/docs/install.md"
+
+    run env KRONN_VERSION_ROOT="$TEST_TMPDIR" \
+        "$PROJECT_ROOT/scripts/check-version-sync.sh"
+
+    assert_failure
+    assert_output --partial "docs/install.md clone instructions do not use 1.2.3"
+    assert_output --partial "docs/install.md still contains stale clone version(s): 1.2.2"
+}
+
+@test "version sync rejects a stale public release-note badge" {
+    printf 'current v1.2.3\n<div aria-label="What is new in Kronn 1.2.2"><strong>1.2.2</strong></div>\n' \
+        > "$TEST_TMPDIR/site/en.html"
+
+    run env KRONN_VERSION_ROOT="$TEST_TMPDIR" \
+        "$PROJECT_ROOT/scripts/check-version-sync.sh"
+
+    assert_failure
+    assert_output --partial "site/en.html release-note label is not 1.2.3"
+    assert_output --partial "site/en.html release-note badge is not 1.2.3"
 }

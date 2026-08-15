@@ -166,7 +166,7 @@ test.describe('Compare-agents — fan-out the same prompt across N agents', () =
     const dashboard = new DashboardPage(page);
     await dashboard.goto();
     await dashboard.openWorkflows();
-    await page.locator('button.dash-tab', { hasText: /Quick Prompts/i }).click();
+    await page.locator('[data-tour-id="automation-kind-quick-prompt"]').click();
 
     // The QP we created should appear in the list. Find its compare
     // button via the testid we wired in WorkflowsPage.tsx.

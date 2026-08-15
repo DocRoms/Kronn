@@ -874,6 +874,21 @@
   margin-top: var(--kr-sp-2);
 }
 
+.set-agent-runtime-settings {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: var(--kr-sp-4);
+}
+
+.set-agent-runtime-settings > div {
+  min-width: 0;
+  margin-top: 0;
+  padding: var(--kr-sp-5);
+  border: 1px solid var(--kr-border-light);
+  border-radius: var(--kr-r-lg);
+  background: var(--kr-bg-subtle);
+}
+
 /* ── Language / choice button (toggle pill) ────────────── */
 .set-choice-btn {
   padding: var(--kr-sp-4) var(--kr-sp-8);

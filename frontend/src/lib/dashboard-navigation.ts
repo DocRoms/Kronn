@@ -10,6 +10,7 @@ export type DashboardPage =
   | 'projects'
   | 'mcps'
   | 'workflows'
+  | 'pages'
   | 'discussions'
   | 'planning'
   | 'settings';
@@ -22,6 +23,7 @@ const PAGES = new Set<DashboardPage>([
   'projects',
   'mcps',
   'workflows',
+  'pages',
   'discussions',
   'planning',
   'settings',

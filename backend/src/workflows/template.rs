@@ -1,24 +1,39 @@
 //! Small, purpose-built template engine for workflow values.
 //!
 //! Supports `{{variable}}` syntax with nested access via dots. This is not a
-//! Liquid implementation and filters are deliberately unsupported. Preview
-//! rendering keeps unresolved placeholders visible to the author; execution
-//! rendering is strict so a typo can never be sent to an agent or an external
-//! command/API.
+//! Liquid implementation. The only filter pipeline is the closed,
+//! vendor-neutral `time.now` grammar; arbitrary Liquid filters remain
+//! unsupported. Preview rendering keeps unresolved placeholders visible to the
+//! author; execution rendering is strict so a typo can never be sent to an
+//! agent or an external command/API.
 
 use anyhow::Result;
+use chrono::{DateTime, Datelike, Duration, SecondsFormat, TimeZone, Timelike, Utc};
+use chrono_tz::Tz;
 use std::collections::HashMap;
 
 /// Template context holding all available variables.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct TemplateContext {
     values: HashMap<String, String>,
+    time_anchor: DateTime<Utc>,
+}
+
+impl Default for TemplateContext {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TemplateContext {
     pub fn new() -> Self {
+        Self::with_time_anchor(Utc::now())
+    }
+
+    pub fn with_time_anchor(time_anchor: DateTime<Utc>) -> Self {
         Self {
             values: HashMap::new(),
+            time_anchor,
         }
     }
 
@@ -163,6 +178,12 @@ impl TemplateContext {
         self.values
             .get(key)
             .map(|v| serde_json::Value::String(v.clone()))
+            .or_else(|| {
+                self.resolve_time_expression(key)
+                    .ok()
+                    .flatten()
+                    .map(serde_json::Value::String)
+            })
     }
 
     /// Render a template for an editor/preview surface.
@@ -176,8 +197,9 @@ impl TemplateContext {
     /// Render a template for execution.
     ///
     /// Unknown variables, unsupported filters and incomplete placeholders are
-    /// errors. Callers therefore fail before starting an agent, command or HTTP
-    /// request instead of spending tokens or performing a malformed action.
+    /// errors. `time.now` expressions use their own closed filter set. Callers
+    /// therefore fail before starting an agent, command or HTTP request instead
+    /// of spending tokens or performing a malformed action.
     pub fn render_strict(&self, template: &str) -> Result<String> {
         self.render_with_mode(template, true)
     }
@@ -214,7 +236,17 @@ impl TemplateContext {
                 }
 
                 let key = var_name.trim();
-                if strict && key.contains('|') {
+                if let Some(value) = self.values.get(key) {
+                    result.push_str(value);
+                } else if let Some(value) = resolve_nested_path(&self.values, key) {
+                    result.push_str(&value);
+                } else if let Some(value) = match self.resolve_time_expression(key) {
+                    Ok(value) => value,
+                    Err(error) if strict => return Err(error),
+                    Err(_) => None,
+                } {
+                    result.push_str(&value);
+                } else if strict && key.contains('|') {
                     let filter = key
                         .split_once('|')
                         .map(|(_, filter)| filter.trim())
@@ -222,11 +254,6 @@ impl TemplateContext {
                     anyhow::bail!(
                         "Unsupported workflow template filter `{filter}` in `{{{{{key}}}}}`; Kronn templates support variables and dotted paths, not Liquid filters"
                     );
-                }
-                if let Some(value) = self.values.get(key) {
-                    result.push_str(value);
-                } else if let Some(value) = resolve_nested_path(&self.values, key) {
-                    result.push_str(&value);
                 } else if strict {
                     anyhow::bail!("Unknown workflow template variable `{key}`");
                 } else {
@@ -242,6 +269,189 @@ impl TemplateContext {
 
         Ok(result)
     }
+
+    fn resolve_time_expression(&self, expression: &str) -> Result<Option<String>> {
+        let Some(parsed) = TimeExpression::parse(expression)? else {
+            return Ok(None);
+        };
+        parsed.render(self.time_anchor).map(Some)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TimeFloor {
+    Minute,
+    Hour,
+    Day,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TimeFormat {
+    Rfc3339,
+    LocalIsoMillis,
+    Date,
+    Unix,
+    UnixMillis,
+}
+
+#[derive(Debug, Clone)]
+struct TimeExpression {
+    shift: Duration,
+    timezone: Tz,
+    floor: Option<TimeFloor>,
+    format: TimeFormat,
+}
+
+impl TimeExpression {
+    fn parse(expression: &str) -> Result<Option<Self>> {
+        let mut parts = expression.split('|').map(str::trim);
+        let base = parts.next().unwrap_or_default();
+        let Some(base_suffix) = base
+            .strip_prefix("time.now")
+            .or_else(|| base.strip_prefix("now"))
+        else {
+            return Ok(None);
+        };
+        if !base_suffix.is_empty() && !base_suffix.starts_with(['+', '-']) {
+            return Ok(None);
+        }
+
+        let mut parsed = Self {
+            shift: Duration::zero(),
+            timezone: chrono_tz::UTC,
+            floor: None,
+            format: TimeFormat::Rfc3339,
+        };
+        if !base_suffix.is_empty() {
+            parsed.shift = parse_time_shift(base_suffix)?;
+        }
+
+        for filter in parts {
+            let (name, value) = filter.split_once(':').ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Invalid time filter `{filter}` in `{{{{{expression}}}}}`; expected `name:value`"
+                )
+            })?;
+            match name.trim() {
+                "shift" => {
+                    parsed.shift = parsed
+                        .shift
+                        .checked_add(&parse_time_shift(value.trim())?)
+                        .ok_or_else(|| anyhow::anyhow!("Time shift is out of range"))?;
+                }
+                "tz" | "timezone" => {
+                    parsed.timezone = value.trim().parse::<Tz>().map_err(|_| {
+                        anyhow::anyhow!(
+                            "Unknown IANA timezone `{}` in `{{{{{expression}}}}}`",
+                            value.trim()
+                        )
+                    })?;
+                }
+                "floor" => {
+                    parsed.floor = Some(match value.trim() {
+                        "minute" => TimeFloor::Minute,
+                        "hour" => TimeFloor::Hour,
+                        "day" => TimeFloor::Day,
+                        other => anyhow::bail!(
+                            "Unknown time floor `{other}`; supported values: minute, hour, day"
+                        ),
+                    });
+                }
+                "fmt" | "format" => {
+                    parsed.format = match value.trim() {
+                        "rfc3339" | "iso" => TimeFormat::Rfc3339,
+                        "local_iso_ms" => TimeFormat::LocalIsoMillis,
+                        "date" => TimeFormat::Date,
+                        "unix" => TimeFormat::Unix,
+                        "unix_ms" => TimeFormat::UnixMillis,
+                        other => anyhow::bail!(
+                            "Unknown time format `{other}`; supported values: rfc3339, local_iso_ms, date, unix, unix_ms"
+                        ),
+                    };
+                }
+                other => anyhow::bail!(
+                    "Unsupported time filter `{other}`; supported filters: shift, tz, floor, fmt"
+                ),
+            }
+        }
+        Ok(Some(parsed))
+    }
+
+    fn render(&self, anchor: DateTime<Utc>) -> Result<String> {
+        let shifted = anchor
+            .checked_add_signed(self.shift)
+            .ok_or_else(|| anyhow::anyhow!("Time expression is out of range"))?;
+        let zoned = shifted.with_timezone(&self.timezone);
+        let floored = match self.floor {
+            None => zoned,
+            Some(TimeFloor::Minute) => {
+                zoned
+                    - Duration::seconds(i64::from(zoned.second()))
+                    - Duration::nanoseconds(i64::from(zoned.nanosecond()))
+            }
+            Some(TimeFloor::Hour) => {
+                zoned
+                    - Duration::minutes(i64::from(zoned.minute()))
+                    - Duration::seconds(i64::from(zoned.second()))
+                    - Duration::nanoseconds(i64::from(zoned.nanosecond()))
+            }
+            Some(TimeFloor::Day) => self
+                .timezone
+                .with_ymd_and_hms(zoned.year(), zoned.month(), zoned.day(), 0, 0, 0)
+                .earliest()
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Local midnight does not exist in timezone `{}` on {}",
+                        self.timezone,
+                        zoned.date_naive()
+                    )
+                })?,
+        };
+
+        Ok(match self.format {
+            TimeFormat::Rfc3339 => floored.to_rfc3339_opts(SecondsFormat::Millis, true),
+            TimeFormat::LocalIsoMillis => floored.format("%Y-%m-%dT%H:%M:%S%.3f").to_string(),
+            TimeFormat::Date => floored.format("%Y-%m-%d").to_string(),
+            TimeFormat::Unix => floored.timestamp().to_string(),
+            TimeFormat::UnixMillis => floored.timestamp_millis().to_string(),
+        })
+    }
+}
+
+fn parse_time_shift(raw: &str) -> Result<Duration> {
+    let value = raw.trim();
+    let (sign, unsigned) = match value.as_bytes().first() {
+        Some(b'+') => (1_i64, &value[1..]),
+        Some(b'-') => (-1_i64, &value[1..]),
+        _ => anyhow::bail!("Time shift `{value}` must start with `+` or `-`"),
+    };
+    let split = unsigned
+        .find(|character: char| !character.is_ascii_digit())
+        .ok_or_else(|| anyhow::anyhow!("Time shift `{value}` is missing a unit"))?;
+    let amount = unsigned[..split]
+        .parse::<i64>()
+        .map_err(|_| anyhow::anyhow!("Invalid time shift `{value}`"))?;
+    let unit = &unsigned[split..];
+    if amount == 0 {
+        anyhow::bail!("Time shift `{value}` must be greater than zero");
+    }
+    let seconds_per_unit = match unit {
+        "s" => 1,
+        "m" => 60,
+        "h" => 60 * 60,
+        "d" => 24 * 60 * 60,
+        "w" => 7 * 24 * 60 * 60,
+        _ => anyhow::bail!("Unknown time shift unit `{unit}`; supported units: s, m, h, d, w"),
+    };
+    let seconds = sign
+        .checked_mul(amount)
+        .and_then(|number| number.checked_mul(seconds_per_unit))
+        .ok_or_else(|| anyhow::anyhow!("Time shift `{value}` is out of range"))?;
+    const MAX_SHIFT_SECONDS: i64 = 10 * 366 * 24 * 60 * 60;
+    if seconds.unsigned_abs() > MAX_SHIFT_SECONDS as u64 {
+        anyhow::bail!("Time shift `{value}` exceeds the 10-year safety limit");
+    }
+    Ok(Duration::seconds(seconds))
 }
 
 /// Resolve a dotted path like `steps.X.data.subtasks.0.title` against a flat
@@ -390,6 +600,9 @@ pub fn validate_step_references(steps: &[crate::models::WorkflowStep]) -> Result
             | StepType::BatchApiCall
             | StepType::BatchQuickPrompt
             | StepType::JsonData
+            | StepType::CollectApiData
+            | StepType::TransformData
+            | StepType::PublishPageData
             // SubWorkflow's output is the child run's final envelope
             // (standardised) → `{{steps.<subwf>.data}}` is valid.
             | StepType::SubWorkflow => true,
@@ -1158,6 +1371,94 @@ mod tests {
         );
     }
 
+    fn utc_anchor(year: i32, month: u32, day: u32, hour: u32, minute: u32) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(year, month, day, hour, minute, 0)
+            .single()
+            .unwrap()
+    }
+
+    #[test]
+    fn time_window_uses_one_anchor_and_moves_only_at_the_floored_boundary() {
+        let template = "{{time.now|shift:-24h|tz:Europe/Paris|floor:hour|fmt:local_iso_ms}}/{{time.now|tz:Europe/Paris|floor:hour|fmt:local_iso_ms}}";
+        let at_1005 = TemplateContext::with_time_anchor(utc_anchor(2026, 8, 14, 8, 5))
+            .render_strict(template)
+            .unwrap();
+        let at_1059 = TemplateContext::with_time_anchor(utc_anchor(2026, 8, 14, 8, 59))
+            .render_strict(template)
+            .unwrap();
+        let at_1101 = TemplateContext::with_time_anchor(utc_anchor(2026, 8, 14, 9, 1))
+            .render_strict(template)
+            .unwrap();
+
+        assert_eq!(at_1005, "2026-08-13T10:00:00.000/2026-08-14T10:00:00.000");
+        assert_eq!(at_1059, at_1005);
+        assert_eq!(at_1101, "2026-08-13T11:00:00.000/2026-08-14T11:00:00.000");
+    }
+
+    #[test]
+    fn cloned_contexts_share_the_exact_time_anchor() {
+        let original = TemplateContext::with_time_anchor(utc_anchor(2026, 8, 14, 8, 59));
+        let first_source = original.clone();
+        let second_source = original.clone();
+        let expression = "{{time.now|tz:Europe/Paris|floor:hour|fmt:local_iso_ms}}";
+
+        assert_eq!(
+            first_source.render_strict(expression).unwrap(),
+            second_source.render_strict(expression).unwrap()
+        );
+    }
+
+    #[test]
+    fn time_expression_supports_shorthand_offsets_and_generic_formats() {
+        let ctx = TemplateContext::with_time_anchor(utc_anchor(2026, 8, 14, 8, 5));
+        assert_eq!(
+            ctx.render_strict("{{now-24h|floor:hour|fmt:rfc3339}}")
+                .unwrap(),
+            "2026-08-13T08:00:00.000Z"
+        );
+        assert_eq!(
+            ctx.render_strict("{{time.now+1d|fmt:date}}").unwrap(),
+            "2026-08-15"
+        );
+        assert_eq!(
+            ctx.render_strict("{{time.now|fmt:unix}}").unwrap(),
+            "1786694700"
+        );
+        assert_eq!(
+            ctx.render_strict("{{time.now|fmt:unix_ms}}").unwrap(),
+            "1786694700000"
+        );
+    }
+
+    #[test]
+    fn floor_day_uses_the_requested_timezone_across_dst() {
+        let before_transition = TemplateContext::with_time_anchor(utc_anchor(2026, 3, 29, 10, 0));
+        let after_transition = TemplateContext::with_time_anchor(utc_anchor(2026, 3, 30, 10, 0));
+        let template = "{{time.now|tz:Europe/Paris|floor:day|fmt:rfc3339}}";
+
+        assert_eq!(
+            before_transition.render_strict(template).unwrap(),
+            "2026-03-29T00:00:00.000+01:00"
+        );
+        assert_eq!(
+            after_transition.render_strict(template).unwrap(),
+            "2026-03-30T00:00:00.000+02:00"
+        );
+    }
+
+    #[test]
+    fn time_formats_remain_vendor_neutral_and_static_now_variables_keep_precedence() {
+        let mut ctx = TemplateContext::with_time_anchor(utc_anchor(2026, 8, 14, 8, 5));
+        ctx.set("now", "legacy-static-value");
+        assert_eq!(ctx.render_strict("{{now}}").unwrap(), "legacy-static-value");
+
+        let error = ctx
+            .render_strict("{{time.now|fmt:adobe}}")
+            .expect_err("vendor-specific formats must not enter the core grammar");
+        assert!(error.to_string().contains("local_iso_ms"));
+        assert!(error.to_string().contains("adobe"));
+    }
+
     #[test]
     fn strict_render_rejects_an_unclosed_placeholder() {
         let ctx = TemplateContext::new();
@@ -1693,6 +1994,9 @@ mod tests {
             exec_stdin: None,
             quick_prompt_id: None,
             json_data_payload: None,
+            collect_api_data: None,
+            transform_data: None,
+            page_publish: None,
             sub_workflow_id: None,
             sub_workflow_foreach_file: None,
             multi_agent_review: None,

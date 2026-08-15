@@ -474,6 +474,25 @@ pub fn message_exists_for_source_id(
     Ok(exists)
 }
 
+/// Resolve the durable Kronn message id for one imported/live source message.
+/// Used by idempotent callers that need to perform a follow-up action (for
+/// example pinning an uploaded attachment) even when the append itself was a
+/// duplicate retry.
+pub fn message_id_for_source_id(
+    conn: &Connection,
+    disc_id: &str,
+    source_msg_id: &str,
+) -> Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT id FROM messages
+             WHERE discussion_id = ?1 AND source_msg_id = ?2",
+            params![disc_id, source_msg_id],
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
 /// LIKE-based full-text search across disc titles + message content.
 /// Cheap-and-cheerful (no FTS5 wiring): finds the N most recent discs
 /// where title OR any message content matches `%q%` (case-insensitive

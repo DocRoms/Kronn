@@ -769,6 +769,7 @@ pub async fn get_server_config(
         domain: config.server.domain.clone(),
         max_concurrent_agents: config.server.max_concurrent_agents,
         agent_stall_timeout_min: config.server.agent_stall_timeout_min,
+        agent_global_timeout_min: config.server.agent_global_timeout_min,
         auth_enabled: config.server.auth_enabled && config.server.auth_token.is_some(),
         pseudo: config.server.pseudo.clone(),
         avatar_email: config.server.avatar_email.clone(),
@@ -802,6 +803,10 @@ pub async fn set_server_config(
     }
     if let Some(timeout) = req.agent_stall_timeout_min {
         config.server.agent_stall_timeout_min = clamp_stall_timeout_min(timeout);
+    }
+    if let Some(timeout) = req.agent_global_timeout_min {
+        config.server.agent_global_timeout_min =
+            crate::models::clamp_agent_global_timeout_min(timeout);
     }
     if let Some(pseudo) = req.pseudo {
         config.server.pseudo = if pseudo.is_empty() {
@@ -1351,6 +1356,11 @@ async fn build_export(state: &AppState) -> Result<DbExport, String> {
         .with_read_conn(crate::db::quick_apis::list_quick_apis)
         .await
         .map_err(|e| format!("DB error: {}", e))?;
+    let quick_execs = state
+        .db
+        .with_read_conn(crate::db::quick_execs::list_quick_execs)
+        .await
+        .map_err(|e| format!("DB error: {}", e))?;
     // All learnings, every status — pending candidates and promoted facts both
     // matter on a migrated box (None filters = no status / no project narrowing).
     let learnings = state
@@ -1397,6 +1407,7 @@ async fn build_export(state: &AppState) -> Result<DbExport, String> {
         contacts,
         quick_prompts,
         quick_apis,
+        quick_execs,
         learnings,
         quick_prompt_versions,
         learning_rejections,
@@ -1588,6 +1599,9 @@ fn import_clear_statements(data: &DbExport) -> Vec<&'static str> {
     }
     if !data.quick_apis.is_empty() {
         stmts.push("DELETE FROM quick_apis");
+    }
+    if !data.quick_execs.is_empty() {
+        stmts.push("DELETE FROM quick_execs");
     }
     if !data.learnings.is_empty() {
         stmts.push("DELETE FROM learnings");
@@ -1790,6 +1804,19 @@ async fn do_import_db(state: &AppState, data: &DbExport) -> Result<ImportResult,
             .await
         {
             tracing::warn!("Import quick API error: {}", e);
+        }
+    }
+
+    // Import saved Quick Execs after projects so project-scoped working
+    // directories keep their foreign-key bindings.
+    for qe in &data.quick_execs {
+        let e = qe.clone();
+        if let Err(error) = state
+            .db
+            .with_conn(move |conn| crate::db::quick_execs::insert_quick_exec(conn, &e))
+            .await
+        {
+            tracing::warn!("Import quick exec error: {}", error);
         }
     }
 
@@ -2229,10 +2256,10 @@ mod tests {
         );
     }
 
-    // ─── export v5 round-trip (passe D: QP versions + rejection counters) ────
+    // ─── export round-trip (v5 fields: QP versions + rejection counters) ─────
 
     #[tokio::test]
-    async fn export_v5_round_trips_qp_versions_and_rejection_counters() {
+    async fn current_export_round_trips_qp_versions_and_rejection_counters() {
         let mk_state = || async {
             let db = std::sync::Arc::new(crate::db::Database::open_in_memory().unwrap());
             let cfg = std::sync::Arc::new(tokio::sync::RwLock::new(
@@ -2267,7 +2294,11 @@ mod tests {
             .unwrap();
 
         let export = build_export(&source).await.expect("export");
-        assert_eq!(export.version, 5);
+        assert_eq!(
+            export.version,
+            crate::models::db::CURRENT_EXPORT_VERSION,
+            "the current exporter must advertise the current bundle schema"
+        );
         assert_eq!(
             export.quick_prompt_versions.len(),
             2,
@@ -2380,6 +2411,7 @@ mod tests {
             contacts: vec![],
             quick_prompts: vec![],
             quick_apis: vec![],
+            quick_execs: vec![],
             learnings: vec![],
             quick_prompt_versions: vec![],
             learning_rejections: vec![],
@@ -2415,6 +2447,7 @@ mod tests {
         // Crucially, tables ABSENT from the payload are NOT cleared (the
         // 2026-06-29 quick_apis/learnings silent wipe).
         assert!(!stmts.iter().any(|s| s.contains("quick_apis")));
+        assert!(!stmts.iter().any(|s| s.contains("quick_execs")));
         assert!(!stmts.iter().any(|s| s.contains("learnings")));
         assert!(!stmts.iter().any(|s| s.contains("projects")));
     }
@@ -2477,6 +2510,14 @@ mod tests {
     }
 
     #[test]
+    fn global_agent_timeout_supports_long_runs_and_clamps_invalid_values() {
+        assert_eq!(crate::models::clamp_agent_global_timeout_min(0), 1);
+        assert_eq!(crate::models::clamp_agent_global_timeout_min(30), 30);
+        assert_eq!(crate::models::clamp_agent_global_timeout_min(120), 120);
+        assert_eq!(crate::models::clamp_agent_global_timeout_min(121), 120);
+    }
+
+    #[test]
     fn build_export_config_strips_secrets() {
         let mut cfg = config::default_config();
         cfg.server.auth_token = Some("secret-token".into());
@@ -2527,6 +2568,7 @@ mod tests {
             contacts: vec![],
             quick_prompts: vec![],
             quick_apis: vec![],
+            quick_execs: vec![],
             learnings: vec![],
         };
         let data_json = serde_json::to_string(&data).unwrap();
@@ -2636,9 +2678,8 @@ mod tests {
         }
     }
 
-    /// The whole point of 0.8.9: a Quick API and a continual-learning row must
-    /// survive a full export → import cycle. Before the fix, `build_export`
-    /// never collected them, so they vanished silently on migration.
+    /// Saved automation resources and learning rows survive a full export →
+    /// import cycle. This also pins v6's Quick Exec table in global backups.
     #[tokio::test]
     async fn export_import_roundtrips_quick_apis_and_learnings() {
         let state = test_state();
@@ -2647,6 +2688,26 @@ mod tests {
         state
             .db
             .with_conn(move |conn| crate::db::quick_apis::insert_quick_api(conn, &qa))
+            .await
+            .unwrap();
+        let now = Utc::now();
+        let qe = crate::models::QuickExec {
+            id: "qe-1".into(),
+            name: "AWS inventory".into(),
+            icon: "⌘".into(),
+            description: "Portable CLI collector".into(),
+            project_id: None,
+            command: "aws".into(),
+            args: vec!["ec2".into(), "describe-instances".into()],
+            timeout_secs: 60,
+            output_format: crate::models::CollectQuickExecOutputFormat::Json,
+            variables: vec![],
+            created_at: now,
+            updated_at: now,
+        };
+        state
+            .db
+            .with_conn(move |conn| crate::db::quick_execs::insert_quick_exec(conn, &qe))
             .await
             .unwrap();
         let l = sample_learning("l-1");
@@ -2663,6 +2724,7 @@ mod tests {
             "payload bumped to the current export version"
         );
         assert_eq!(export.quick_apis.len(), 1, "quick_apis must be exported");
+        assert_eq!(export.quick_execs.len(), 1, "quick_execs must be exported");
         assert_eq!(export.learnings.len(), 1, "learnings must be exported");
 
         // Re-importing the same export clears then re-inserts — neither entity
@@ -2678,8 +2740,15 @@ mod tests {
             .with_conn(|conn| crate::db::learnings::list(conn, None, None))
             .await
             .unwrap();
+        let qes = state
+            .db
+            .with_conn(crate::db::quick_execs::list_quick_execs)
+            .await
+            .unwrap();
         assert_eq!(qas.len(), 1, "quick_api survives import (no dup, no drop)");
         assert_eq!(qas[0].name, "Daily Top Articles");
+        assert_eq!(qes.len(), 1, "quick_exec survives import (no dup, no drop)");
+        assert_eq!(qes[0].command, "aws");
         assert_eq!(ls.len(), 1, "learning survives import");
         assert_eq!(
             ls[0].claim,
@@ -2759,6 +2828,7 @@ mod tests {
             contacts: vec![],
             quick_prompts: vec![],
             quick_apis: vec![],
+            quick_execs: vec![],
             learnings: vec![],
         };
         let data_json = serde_json::to_string(&data).unwrap();

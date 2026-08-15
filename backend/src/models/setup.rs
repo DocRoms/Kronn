@@ -115,6 +115,11 @@ pub struct ServerConfig {
     /// Agent stall timeout in minutes — abort if no output for this long (default: 5)
     #[serde(default = "default_agent_stall_timeout")]
     pub agent_stall_timeout_min: u32,
+    /// Absolute wall-clock limit for one agent execution, even while it keeps
+    /// producing output (default: 30). This is distinct from the inactivity
+    /// watchdog above and is read when each new run starts.
+    #[serde(default = "default_agent_global_timeout")]
+    pub agent_global_timeout_min: u32,
     /// User identity — displayed in messages and used for future multi-user
     #[serde(default)]
     pub pseudo: Option<String>,
@@ -237,6 +242,15 @@ fn default_max_agents() -> usize {
 }
 fn default_agent_stall_timeout() -> u32 {
     5
+}
+pub(crate) const MAX_AGENT_GLOBAL_TIMEOUT_MIN: u32 = 120;
+pub(crate) const DEFAULT_AGENT_GLOBAL_TIMEOUT_MIN: u32 = 30;
+fn default_agent_global_timeout() -> u32 {
+    DEFAULT_AGENT_GLOBAL_TIMEOUT_MIN
+}
+
+pub(crate) fn clamp_agent_global_timeout_min(input: u64) -> u32 {
+    input.clamp(1, u64::from(MAX_AGENT_GLOBAL_TIMEOUT_MIN)) as u32
 }
 
 /// Default output language. Used by `AppConfig.language` AND by API
@@ -635,6 +649,7 @@ pub struct ServerConfigPublic {
     pub domain: Option<String>,
     pub max_concurrent_agents: usize,
     pub agent_stall_timeout_min: u32,
+    pub agent_global_timeout_min: u32,
     pub auth_enabled: bool,
     pub pseudo: Option<String>,
     pub avatar_email: Option<String>,
@@ -663,6 +678,7 @@ pub struct UpdateServerConfigRequest {
     pub domain: Option<String>,
     pub max_concurrent_agents: Option<usize>,
     pub agent_stall_timeout_min: Option<u64>,
+    pub agent_global_timeout_min: Option<u64>,
     pub pseudo: Option<String>,
     pub avatar_email: Option<String>,
     pub bio: Option<String>,

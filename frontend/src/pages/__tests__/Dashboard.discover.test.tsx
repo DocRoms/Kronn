@@ -76,6 +76,7 @@ vi.mock('../../lib/api', () => ({
   skills: { list: vi.fn().mockResolvedValue([]) },
   profiles: { list: vi.fn().mockResolvedValue([]) },
   workflows: { list: vi.fn().mockResolvedValue([]) },
+  pages: { capability: vi.fn().mockResolvedValue({ activated: false, activated_at: null }) },
 }));
 
 import { Dashboard } from '../Dashboard';

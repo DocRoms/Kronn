@@ -523,6 +523,173 @@ fn validate_step_required_fields(s: &WorkflowStep) -> Result<(), String> {
                     ));
             }
         }
+        StepType::PublishPageData => {
+            let Some(config) = s.page_publish.as_ref() else {
+                return Err(format!(
+                    "Step PublishPageData « {} » : `page_publish` est obligatoire.",
+                    s.name
+                ));
+            };
+            if config.page_id.trim().is_empty() {
+                return Err(format!(
+                    "Step PublishPageData « {} » : `page_publish.page_id` est obligatoire.",
+                    s.name
+                ));
+            }
+            if config.writes.is_empty() {
+                return Err(format!(
+                    "Step PublishPageData « {} » : configure au moins une écriture de dataset.",
+                    s.name
+                ));
+            }
+            for write in &config.writes {
+                if write.dataset.trim().is_empty() || write.value_from.trim().is_empty() {
+                    return Err(format!(
+                        "Step PublishPageData « {} » : chaque écriture requiert `dataset` et `value_from`.",
+                        s.name
+                    ));
+                }
+                if write.operation == crate::models::LivePageWriteOperation::Upsert
+                    && write
+                        .key_field
+                        .as_deref()
+                        .map(str::trim)
+                        .unwrap_or("")
+                        .is_empty()
+                {
+                    return Err(format!(
+                        "Step PublishPageData « {} » : une écriture upsert requiert `key_field`.",
+                        s.name
+                    ));
+                }
+            }
+        }
+        StepType::CollectApiData => {
+            let Some(config) = s.collect_api_data.as_ref() else {
+                return Err(format!(
+                    "Step CollectApiData « {} » : `collect_api_data` est obligatoire.",
+                    s.name
+                ));
+            };
+            if config.sources.is_empty() {
+                return Err(format!(
+                    "Step CollectApiData « {} » : configure au moins une source Quick API ou Quick Exec.",
+                    s.name
+                ));
+            }
+            if config.sources.len() > 50 {
+                return Err(format!(
+                    "Step CollectApiData « {} » : 50 sources maximum.",
+                    s.name
+                ));
+            }
+            if matches!(config.concurrent_limit, Some(0 | 21..)) {
+                return Err(format!(
+                    "Step CollectApiData « {} » : la concurrence doit être comprise entre 1 et 20.",
+                    s.name
+                ));
+            }
+            let mut aliases = std::collections::HashSet::new();
+            for source in &config.sources {
+                let alias = source.alias.trim();
+                if alias.is_empty()
+                    || !alias.chars().all(|character| {
+                        character.is_ascii_alphanumeric() || matches!(character, '_' | '-')
+                    })
+                {
+                    return Err(format!(
+                        "Step CollectApiData « {} » : alias source invalide `{}`.",
+                        s.name, source.alias
+                    ));
+                }
+                if !aliases.insert(alias) {
+                    return Err(format!(
+                        "Step CollectApiData « {} » : alias source dupliqué `{alias}`.",
+                        s.name
+                    ));
+                }
+                let has_quick_api = !source.quick_api_id.trim().is_empty();
+                let has_saved_quick_exec = !source.quick_exec_id.trim().is_empty();
+                let has_inline_quick_exec = source.quick_exec.is_some();
+                if usize::from(has_quick_api)
+                    + usize::from(has_saved_quick_exec)
+                    + usize::from(has_inline_quick_exec)
+                    != 1
+                {
+                    return Err(format!(
+                        "Step CollectApiData « {} » : chaque source requiert exactement une Quick API ou un Quick Exec.",
+                        s.name
+                    ));
+                }
+                if let Some(exec) = &source.quick_exec {
+                    if exec.command.trim().is_empty() {
+                        return Err(format!(
+                            "Step CollectApiData « {} » : la source `{alias}` requiert une commande Quick Exec.",
+                            s.name
+                        ));
+                    }
+                    if exec.args.len() > 64 || matches!(exec.timeout_secs, Some(0 | 1801..)) {
+                        return Err(format!(
+                            "Step CollectApiData « {} » : configuration Quick Exec invalide pour `{alias}`.",
+                            s.name
+                        ));
+                    }
+                }
+            }
+        }
+        StepType::TransformData => {
+            let Some(config) = s.transform_data.as_ref() else {
+                return Err(format!(
+                    "Step TransformData « {} » : `transform_data` est obligatoire.",
+                    s.name
+                ));
+            };
+            if config.input_from.trim().is_empty() || config.fields.is_empty() {
+                return Err(format!(
+                    "Step TransformData « {} » : configure une entrée et au moins un champ de sortie.",
+                    s.name
+                ));
+            }
+            if config.fields.len() > 200 {
+                return Err(format!(
+                    "Step TransformData « {} » : 200 champs de sortie maximum.",
+                    s.name
+                ));
+            }
+            let mut targets = std::collections::HashSet::new();
+            for field in &config.fields {
+                let target = field.target.trim();
+                if target.is_empty() || field.source.trim().is_empty() {
+                    return Err(format!(
+                        "Step TransformData « {} » : chaque règle requiert `target` et `source`.",
+                        s.name
+                    ));
+                }
+                if target.split('.').any(|segment| {
+                    segment.is_empty()
+                        || !segment.chars().all(|character| {
+                            character.is_ascii_alphanumeric() || matches!(character, '_' | '-')
+                        })
+                }) {
+                    return Err(format!(
+                        "Step TransformData « {} » : cible invalide `{target}`.",
+                        s.name
+                    ));
+                }
+                if !targets.insert(target) {
+                    return Err(format!(
+                        "Step TransformData « {} » : cible dupliquée `{target}`.",
+                        s.name
+                    ));
+                }
+                if let Err(error) = serde_json_path::JsonPath::parse(field.source.trim()) {
+                    return Err(format!(
+                        "Step TransformData « {} » : JSONPath invalide `{}` ({error}).",
+                        s.name, field.source
+                    ));
+                }
+            }
+        }
         // Other variants have their own dedicated validators:
         //   Exec       → validate_exec_steps
         //   JsonData   → validate_json_data_steps
@@ -643,6 +810,51 @@ fn validate_exec_steps(steps: &[WorkflowStep], allowlist: &[String]) -> Result<(
     const MAX_ARGS: usize = 64;
     const MAX_TIMEOUT_SECS: u32 = 1800;
     for s in steps {
+        if matches!(s.step_type, StepType::CollectApiData) {
+            if let Some(config) = &s.collect_api_data {
+                for source in &config.sources {
+                    let Some(exec) = &source.quick_exec else {
+                        continue;
+                    };
+                    let cmd = exec.command.trim();
+                    if let Err(error) = validate_exec_allowlist(&[cmd.to_string()]) {
+                        return Err(format!(
+                            "Step CollectApiData « {} », source « {} » : {}",
+                            s.name, source.alias, error
+                        ));
+                    }
+                    let normalized = cmd.to_ascii_lowercase();
+                    if crate::core::quick_exec::DENIED_BINARIES.contains(&normalized.as_str()) {
+                        return Err(format!(
+                            "Step CollectApiData « {} », source « {} » : `{}` ne peut pas être utilisé comme Quick Exec ; sélectionne directement le binaire CLI.",
+                            s.name, source.alias, cmd
+                        ));
+                    }
+                    if !allowlist.iter().any(|allowed| allowed == cmd) {
+                        return Err(format!(
+                            "Step CollectApiData « {} », source « {} » : binaire `{}` absent de l'allowlist du workflow.",
+                            s.name, source.alias, cmd
+                        ));
+                    }
+                    if exec.args.len() > MAX_ARGS {
+                        return Err(format!(
+                            "Step CollectApiData « {} », source « {} » : trop d'arguments ({}, max {}).",
+                            s.name,
+                            source.alias,
+                            exec.args.len(),
+                            MAX_ARGS
+                        ));
+                    }
+                    if matches!(exec.timeout_secs, Some(0 | 1801..)) {
+                        return Err(format!(
+                            "Step CollectApiData « {} », source « {} » : timeout hors limites (1-{} s).",
+                            s.name, source.alias, MAX_TIMEOUT_SECS
+                        ));
+                    }
+                }
+            }
+            continue;
+        }
         if !matches!(s.step_type, StepType::Exec) {
             continue;
         }
@@ -755,6 +967,70 @@ fn validate_exec_steps(steps: &[WorkflowStep], allowlist: &[String]) -> Result<(
                     s.name, MAX_TIMEOUT_SECS, t
                 ));
             }
+        }
+    }
+    Ok(())
+}
+
+/// Saved Quick Exec references carry their command outside the workflow JSON.
+/// Resolve them at save time so a typo cannot remain hidden until the next cron
+/// and so the same allowlist invariant applies to saved and inline collectors.
+async fn validate_saved_quick_exec_refs(
+    state: &AppState,
+    steps: &[WorkflowStep],
+    allowlist: &[String],
+    workflow_project_id: Option<&str>,
+) -> Result<(), String> {
+    let references = steps
+        .iter()
+        .filter_map(|step| step.collect_api_data.as_ref().map(|config| (step, config)))
+        .flat_map(|(step, config)| {
+            config.sources.iter().filter_map(move |source| {
+                let id = source.quick_exec_id.trim();
+                (!id.is_empty()).then(|| (step.name.clone(), source.alias.clone(), id.to_string()))
+            })
+        })
+        .collect::<Vec<_>>();
+    if references.is_empty() {
+        return Ok(());
+    }
+    let resolved = state
+        .db
+        .with_read_conn(move |conn| {
+            references
+                .into_iter()
+                .map(|(step_name, alias, id)| {
+                    Ok((
+                        step_name,
+                        alias,
+                        id.clone(),
+                        crate::db::quick_execs::get_quick_exec(conn, &id)?,
+                    ))
+                })
+                .collect::<anyhow::Result<Vec<_>>>()
+        })
+        .await
+        .map_err(|error| format!("Impossible de valider les Quick Execs : {error}"))?;
+    for (step_name, alias, id, item) in resolved {
+        let Some(item) = item else {
+            return Err(format!(
+                "Step CollectApiData « {step_name} », source « {alias} » : Quick Exec `{id}` introuvable."
+            ));
+        };
+        if item
+            .project_id
+            .as_deref()
+            .is_some_and(|quick_exec_project| Some(quick_exec_project) != workflow_project_id)
+        {
+            return Err(format!(
+                "Step CollectApiData « {step_name} », source « {alias} » : le Quick Exec `{id}` appartient à un autre projet."
+            ));
+        }
+        if !allowlist.iter().any(|allowed| allowed == &item.command) {
+            return Err(format!(
+                "Step CollectApiData « {step_name} », source « {alias} » : binaire `{}` du Quick Exec `{id}` absent de l'allowlist du workflow.",
+                item.command
+            ));
         }
     }
     Ok(())
@@ -883,6 +1159,26 @@ pub async fn create(
         return Json(ApiResponse::err(e));
     }
     if let Err(e) = validate_exec_steps(&req.on_failure, &req.exec_allowlist) {
+        return Json(ApiResponse::err(e));
+    }
+    if let Err(e) = validate_saved_quick_exec_refs(
+        &state,
+        &req.steps,
+        &req.exec_allowlist,
+        req.project_id.as_deref(),
+    )
+    .await
+    {
+        return Json(ApiResponse::err(e));
+    }
+    if let Err(e) = validate_saved_quick_exec_refs(
+        &state,
+        &req.on_failure,
+        &req.exec_allowlist,
+        req.project_id.as_deref(),
+    )
+    .await
+    {
         return Json(ApiResponse::err(e));
     }
 
@@ -1198,6 +1494,26 @@ pub async fn update(
     {
         return Json(ApiResponse::err(e));
     }
+    if let Err(e) = validate_saved_quick_exec_refs(
+        &state,
+        &updated.steps,
+        &updated.exec_allowlist,
+        updated.project_id.as_deref(),
+    )
+    .await
+    {
+        return Json(ApiResponse::err(e));
+    }
+    if let Err(e) = validate_saved_quick_exec_refs(
+        &state,
+        &updated.on_failure,
+        &updated.exec_allowlist,
+        updated.project_id.as_deref(),
+    )
+    .await
+    {
+        return Json(ApiResponse::err(e));
+    }
 
     let w = updated.clone();
     match state
@@ -1265,15 +1581,15 @@ pub async fn delete(
 /// 0.7.0 UX pass — current export envelope schema version. Bumped on
 /// incompatible changes; the importer reads this to decide whether to
 /// run a migration or refuse the file.
-const EXPORT_VERSION: u32 = 1;
+const EXPORT_VERSION: u32 = 3;
 const WORKFLOW_EXPORT_KIND: &str = "kronn.workflow";
 
 /// GET /api/workflows/:id/export
 ///
-/// Returns a self-contained `WorkflowExportEnvelope` JSON. Bundles every
-/// QP referenced by a `BatchQuickPrompt` step so the importer doesn't
-/// need to find them separately. The frontend triggers a file download
-/// from this response (filename suggested via `Content-Disposition`).
+/// Returns a self-contained `WorkflowExportEnvelope` JSON. Bundle v2 carries
+/// every referenced Quick Prompt, Quick API, static Page contract and
+/// transitive sub-workflow. The frontend triggers a file download from this
+/// response (filename suggested via `Content-Disposition`).
 /// #10 — the non-empty `sub_workflow_id`s referenced by a step list's
 /// SubWorkflow steps. Used to bundle (export) and remap (import) the child
 /// workflow graph. Pure + unit-tested.
@@ -1284,6 +1600,90 @@ pub(crate) fn sub_workflow_child_ids(steps: &[WorkflowStep]) -> Vec<String> {
         .filter_map(|s| s.sub_workflow_id.clone())
         .filter(|id| !id.trim().is_empty())
         .collect()
+}
+
+fn workflow_sub_workflow_child_ids(workflow: &Workflow) -> Vec<String> {
+    sub_workflow_child_ids(&workflow.steps)
+        .into_iter()
+        .chain(sub_workflow_child_ids(&workflow.on_failure))
+        .collect()
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct WorkflowDependencyIds {
+    quick_prompts: std::collections::BTreeSet<String>,
+    quick_apis: std::collections::BTreeSet<String>,
+    quick_execs: std::collections::BTreeSet<String>,
+    pages: std::collections::BTreeSet<String>,
+}
+
+/// Collect every saved resource referenced by the complete workflow graph.
+/// Dynamic Page ids cannot be bundled because their destination only exists at
+/// run time; static ids/slugs are included and remapped during import.
+fn workflow_dependency_ids<'a>(
+    workflows: impl IntoIterator<Item = &'a Workflow>,
+) -> WorkflowDependencyIds {
+    let mut dependencies = WorkflowDependencyIds::default();
+    for workflow in workflows {
+        for step in workflow.steps.iter().chain(workflow.on_failure.iter()) {
+            if let Some(id) = step
+                .quick_prompt_id
+                .as_deref()
+                .filter(|id| !id.trim().is_empty())
+            {
+                dependencies.quick_prompts.insert(id.to_string());
+            }
+            if let Some(id) = step
+                .batch_quick_prompt_id
+                .as_deref()
+                .filter(|id| !id.trim().is_empty())
+            {
+                dependencies.quick_prompts.insert(id.to_string());
+            }
+            dependencies.quick_prompts.extend(
+                step.batch_chain_prompt_ids
+                    .iter()
+                    .filter(|id| !id.trim().is_empty())
+                    .cloned(),
+            );
+
+            if let Some(id) = step
+                .quick_api_id
+                .as_deref()
+                .filter(|id| !id.trim().is_empty())
+            {
+                dependencies.quick_apis.insert(id.to_string());
+            }
+            if let Some(config) = &step.collect_api_data {
+                dependencies.quick_apis.extend(
+                    config
+                        .sources
+                        .iter()
+                        .map(|source| source.quick_api_id.trim())
+                        .filter(|id| !id.is_empty())
+                        .map(str::to_string),
+                );
+                dependencies.quick_execs.extend(
+                    config
+                        .sources
+                        .iter()
+                        .map(|source| source.quick_exec_id.trim())
+                        .filter(|id| !id.is_empty())
+                        .map(str::to_string),
+                );
+            }
+
+            if let Some(page_id) = step
+                .page_publish
+                .as_ref()
+                .map(|config| config.page_id.trim())
+                .filter(|id| !id.is_empty() && !id.contains("{{"))
+            {
+                dependencies.pages.insert(page_id.to_string());
+            }
+        }
+    }
+    dependencies
 }
 
 pub async fn export_workflow(
@@ -1314,7 +1714,13 @@ pub async fn export_workflow(
     // by a BatchQuickPrompt step across the whole graph, in ONE DB round-trip.
     // Load all workflows once and BFS in memory (cheap; N_workflows is small).
     let root = wf.clone();
-    let (referenced_workflows, referenced_quick_prompts) = match state
+    let (
+        referenced_workflows,
+        referenced_quick_prompts,
+        referenced_quick_apis,
+        referenced_quick_execs,
+        referenced_pages,
+    ) = match state
         .db
         .with_conn(move |conn| {
             let all = crate::db::workflows::list_workflows(conn)?;
@@ -1326,13 +1732,13 @@ pub async fn export_workflow(
             let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
             seen.insert(root.id.clone());
             let mut queue: std::collections::VecDeque<String> =
-                sub_workflow_child_ids(&root.steps).into_iter().collect();
+                workflow_sub_workflow_child_ids(&root).into_iter().collect();
             while let Some(cid) = queue.pop_front() {
                 if !seen.insert(cid.clone()) {
                     continue;
                 }
                 if let Some(child) = by_id.get(&cid) {
-                    for gc in sub_workflow_child_ids(&child.steps) {
+                    for gc in workflow_sub_workflow_child_ids(child) {
                         if !seen.contains(&gc) {
                             queue.push_back(gc);
                         }
@@ -1341,22 +1747,50 @@ pub async fn export_workflow(
                 }
             }
 
-            // QPs referenced anywhere in the bundle (root + children).
-            let mut qp_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
-            for w in std::iter::once(&root).chain(bundled.iter()) {
-                for s in w.steps.iter().chain(w.on_failure.iter()) {
-                    if let Some(q) = &s.batch_quick_prompt_id {
-                        qp_ids.insert(q.clone());
-                    }
-                }
-            }
-            let mut qps = Vec::with_capacity(qp_ids.len());
-            for q in &qp_ids {
-                if let Some(qp) = crate::db::quick_prompts::get_quick_prompt(conn, q)? {
+            let dependencies =
+                workflow_dependency_ids(std::iter::once(&root).chain(bundled.iter()));
+            let mut qps = Vec::with_capacity(dependencies.quick_prompts.len());
+            for id in &dependencies.quick_prompts {
+                if let Some(qp) = crate::db::quick_prompts::get_quick_prompt(conn, id)? {
                     qps.push(qp);
                 }
             }
-            Ok((bundled, qps))
+            let mut qas = Vec::with_capacity(dependencies.quick_apis.len());
+            for id in &dependencies.quick_apis {
+                if let Some(qa) = crate::db::quick_apis::get_quick_api(conn, id)? {
+                    qas.push(qa);
+                }
+            }
+            let mut qes = Vec::with_capacity(dependencies.quick_execs.len());
+            for id in &dependencies.quick_execs {
+                if let Some(qe) = crate::db::quick_execs::get_quick_exec(conn, id)? {
+                    qes.push(qe);
+                }
+            }
+            let mut pages = Vec::with_capacity(dependencies.pages.len());
+            for id in &dependencies.pages {
+                if let Some(page) = crate::db::live_pages::get_live_page(conn, id)? {
+                    pages.push(WorkflowExportPage {
+                        id: page.page.id,
+                        slug: page.page.slug,
+                        title: page.page.title,
+                        html: page.revision.html,
+                        created_by_agent: page.revision.created_by_agent,
+                        datasets: page
+                            .datasets
+                            .into_iter()
+                            .map(|view| WorkflowExportPageDataset {
+                                name: view.dataset.name,
+                                kind: view.dataset.kind,
+                                schema: view.dataset.schema,
+                                max_points: view.dataset.max_points,
+                                max_age_days: view.dataset.max_age_days,
+                            })
+                            .collect(),
+                    });
+                }
+            }
+            Ok((bundled, qps, qas, qes, pages))
         })
         .await
     {
@@ -1376,6 +1810,9 @@ pub async fn export_workflow(
         exported_at: Utc::now(),
         workflow: wf.clone(),
         referenced_quick_prompts,
+        referenced_quick_apis,
+        referenced_quick_execs,
+        referenced_pages,
         referenced_workflows,
     };
 
@@ -1479,22 +1916,103 @@ fn rebind_api_configs(
     }
 }
 
+fn rebind_quick_api_config(
+    conn: &rusqlite::Connection,
+    quick_api: &mut QuickApi,
+    project_id: Option<&str>,
+) {
+    let keep = crate::db::mcps::get_config(conn, &quick_api.api_config_id)
+        .ok()
+        .flatten()
+        .map(|config| config.server_id == quick_api.api_plugin_slug)
+        .unwrap_or(false);
+    if keep {
+        return;
+    }
+    if let Ok(Some(new_id)) =
+        crate::db::mcps::find_config_for_server(conn, &quick_api.api_plugin_slug, project_id)
+    {
+        quick_api.api_config_id = new_id;
+    }
+}
+
+fn remap_workflow_step_dependencies(
+    step: &mut WorkflowStep,
+    quick_prompts: &std::collections::HashMap<String, String>,
+    quick_apis: &std::collections::HashMap<String, String>,
+    quick_execs: &std::collections::HashMap<String, String>,
+    pages: &std::collections::HashMap<String, String>,
+    require_complete_bundle: bool,
+) -> Result<(), String> {
+    let remap_required = |kind: &str,
+                          step_name: &str,
+                          id: &mut String,
+                          remap: &std::collections::HashMap<String, String>|
+     -> Result<(), String> {
+        if let Some(new_id) = remap.get(id) {
+            *id = new_id.clone();
+            Ok(())
+        } else if require_complete_bundle {
+            Err(format!(
+                "Step `{step_name}` référence {kind} `{id}` absent du bundle. Ré-exporte le workflow source avec Kronn 0.10.0 ou plus récent."
+            ))
+        } else {
+            Ok(())
+        }
+    };
+
+    if let Some(id) = &mut step.quick_prompt_id {
+        remap_required("le Quick Prompt", &step.name, id, quick_prompts)?;
+    }
+    if let Some(id) = &mut step.batch_quick_prompt_id {
+        remap_required("le Quick Prompt", &step.name, id, quick_prompts)?;
+    }
+    for id in &mut step.batch_chain_prompt_ids {
+        remap_required("le Quick Prompt", &step.name, id, quick_prompts)?;
+    }
+    if let Some(id) = &mut step.quick_api_id {
+        remap_required("la Quick API", &step.name, id, quick_apis)?;
+    }
+    if let Some(config) = &mut step.collect_api_data {
+        for source in &mut config.sources {
+            if !source.quick_api_id.trim().is_empty() {
+                remap_required(
+                    "la Quick API",
+                    &step.name,
+                    &mut source.quick_api_id,
+                    quick_apis,
+                )?;
+            }
+            if !source.quick_exec_id.trim().is_empty() {
+                remap_required(
+                    "le Quick Exec",
+                    &step.name,
+                    &mut source.quick_exec_id,
+                    quick_execs,
+                )?;
+            }
+        }
+    }
+    if let Some(config) = &mut step.page_publish {
+        if !config.page_id.contains("{{") {
+            remap_required("la Page", &step.name, &mut config.page_id, pages)?;
+        }
+    }
+    Ok(())
+}
+
 /// POST /api/workflows/import
 ///
 /// Body: `ImportWorkflowRequest { content, project_id }`. `content` is the raw
 /// JSON string of a `WorkflowExportEnvelope`. Validates the envelope, mints
 /// fresh ids/timestamps, attaches to `project_id` (or leaves null), strips
 /// `gate_notify_url` (URLs are per-user — not portable), and inserts the
-/// workflow, any bundled QPs, and any bundled sub-workflows (#10).
+/// workflow and its bundled QPs, QAs, Page contracts and sub-workflows.
 ///
-/// Behaviour with referenced QPs / sub-workflows:
-/// - Each bundled QP + sub-workflow gets a fresh id (no collision with the
-///   importer's existing rows).
-/// - `BatchQuickPrompt` steps' `batch_quick_prompt_id` and `SubWorkflow` steps'
-///   `sub_workflow_id` are remapped to the new ids.
-/// - If a step references a QP that wasn't bundled, or a sub-workflow that is
-///   neither bundled nor present on this instance, the import fails loudly
-///   (no silent half-import).
+/// Every bundled dependency gets a fresh id and all static references are
+/// remapped. A v2 bundle with a missing dependency fails loudly rather than
+/// persisting a half-portable workflow. Legacy v1 imports retain their original
+/// best-effort behaviour.
 pub async fn import_workflow(
     State(state): State<AppState>,
     Json(req): Json<ImportWorkflowRequest>,
@@ -1516,6 +2034,7 @@ pub async fn import_workflow(
             envelope.version, EXPORT_VERSION
         )));
     }
+    let source_version = envelope.version;
 
     // #10 — the import BUNDLE = the root workflow + its (transitive) sub-workflow
     // children (`referenced_workflows`, empty on legacy single-workflow exports).
@@ -1550,6 +2069,78 @@ pub async fn import_workflow(
         qps_to_insert.push(qp);
     }
 
+    let mut qa_id_remap: std::collections::HashMap<String, String> = Default::default();
+    let mut qas_to_insert: Vec<QuickApi> = Vec::with_capacity(envelope.referenced_quick_apis.len());
+    for mut qa in envelope.referenced_quick_apis {
+        let old_id = qa.id.clone();
+        let new_id = Uuid::new_v4().to_string();
+        qa_id_remap.insert(old_id, new_id.clone());
+        qa.id = new_id;
+        qa.project_id = req.project_id.clone();
+        qa.created_at = now;
+        qa.updated_at = now;
+        qas_to_insert.push(qa);
+    }
+
+    let mut qe_id_remap: std::collections::HashMap<String, String> = Default::default();
+    let mut qes_to_insert: Vec<QuickExec> =
+        Vec::with_capacity(envelope.referenced_quick_execs.len());
+    for mut qe in envelope.referenced_quick_execs {
+        let old_id = qe.id.clone();
+        let new_id = Uuid::new_v4().to_string();
+        qe_id_remap.insert(old_id, new_id.clone());
+        qe.id = new_id;
+        qe.project_id = req.project_id.clone();
+        qe.created_at = now;
+        qe.updated_at = now;
+        qes_to_insert.push(qe);
+    }
+
+    let mut page_id_remap: std::collections::HashMap<String, String> = Default::default();
+    let mut pages_to_insert = Vec::with_capacity(envelope.referenced_pages.len());
+    for exported_page in envelope.referenced_pages {
+        let old_id = exported_page.id.clone();
+        let old_slug = exported_page.slug.clone();
+        let page_id = Uuid::new_v4().to_string();
+        let revision_id = Uuid::new_v4().to_string();
+        page_id_remap.insert(old_id, page_id.clone());
+        page_id_remap.insert(old_slug.clone(), page_id.clone());
+        let datasets = exported_page
+            .datasets
+            .into_iter()
+            .map(|dataset| CreateLivePageDataset {
+                name: dataset.name,
+                kind: dataset.kind,
+                initial: None,
+                schema: dataset.schema,
+                max_points: Some(dataset.max_points),
+                max_age_days: dataset.max_age_days,
+            })
+            .collect::<Vec<_>>();
+        let page = LivePage {
+            id: page_id.clone(),
+            project_id: req.project_id.clone(),
+            title: exported_page.title,
+            slug: old_slug,
+            current_revision_id: revision_id.clone(),
+            data_revision: 0,
+            created_at: now,
+            updated_at: now,
+            last_published_at: None,
+            pinned: false,
+            archived: false,
+        };
+        let revision = LivePageRevision {
+            id: revision_id,
+            page_id,
+            revision: 1,
+            html: exported_page.html,
+            created_by_agent: exported_page.created_by_agent,
+            created_at: now,
+        };
+        pages_to_insert.push((page, revision, datasets));
+    }
+
     // Workflow id remap: a fresh id for every workflow in the bundle.
     let mut wf_id_remap: std::collections::HashMap<String, String> = Default::default();
     for w in &all_wfs {
@@ -1574,14 +2165,15 @@ pub async fn import_workflow(
                         s.sub_workflow_id = Some(nid.clone());
                     }
                 }
-                if let Some(qp_id) = s.batch_quick_prompt_id.as_ref() {
-                    match qp_id_remap.get(qp_id) {
-                        Some(new) => s.batch_quick_prompt_id = Some(new.clone()),
-                        None => return Json(ApiResponse::err(format!(
-                            "Step `{}` référence le Quick Prompt `{}` qui n'est pas inclus dans le fichier d'import. Ré-exporte le workflow source pour qu'il bundle ses QPs.",
-                            s.name, qp_id
-                        ))),
-                    }
+                if let Err(error) = remap_workflow_step_dependencies(
+                    s,
+                    &qp_id_remap,
+                    &qa_id_remap,
+                    &qe_id_remap,
+                    &page_id_remap,
+                    source_version >= 3,
+                ) {
+                    return Json(ApiResponse::err(error));
                 }
                 s.gate_notify_url = None;
             }
@@ -1611,7 +2203,7 @@ pub async fn import_workflow(
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
     for w in &prepared {
-        for cid in sub_workflow_child_ids(&w.steps) {
+        for cid in workflow_sub_workflow_child_ids(w) {
             if !new_ids.contains(&cid) && !db_ids.contains(&cid) {
                 return Json(ApiResponse::err(format!(
                     "Le workflow « {} » référence un sous-workflow introuvable (ni bundlé, ni présent sur cette instance). Ré-exporte le workflow source pour bundler ses enfants.",
@@ -1621,15 +2213,31 @@ pub async fn import_workflow(
         }
     }
 
-    // Atomic insert: QPs, then every workflow in the bundle. Return the root.
+    // Insert every bundled dependency before the workflows that reference it.
     let qps = qps_to_insert;
+    let qas = qas_to_insert;
+    let qes = qes_to_insert;
+    let imported_pages = pages_to_insert;
     let rebind_project = req.project_id.clone();
     let root_id_for_return = root_new_id;
     match state
         .db
         .with_conn(move |conn| {
+            for (mut page, revision, datasets) in imported_pages {
+                if crate::db::live_pages::get_live_page(conn, &page.slug)?.is_some() {
+                    page.slug = format!("{}-{}", page.slug, &page.id[..8]);
+                }
+                crate::db::live_pages::create_live_page(conn, &page, &revision, &datasets, None)?;
+            }
             for qp in &qps {
                 crate::db::quick_prompts::insert_quick_prompt(conn, qp)?;
+            }
+            for mut qa in qas {
+                rebind_quick_api_config(conn, &mut qa, rebind_project.as_deref());
+                crate::db::quick_apis::insert_quick_api(conn, &qa)?;
+            }
+            for qe in &qes {
+                crate::db::quick_execs::insert_quick_exec(conn, qe)?;
             }
             let mut root_out: Option<Workflow> = None;
             for mut w in prepared {
@@ -3481,6 +4089,9 @@ pub async fn suggestions(
                     exec_stdin: None,
                     quick_prompt_id: None,
                     json_data_payload: None,
+                    collect_api_data: None,
+                    transform_data: None,
+                    page_publish: None,
                     sub_workflow_id: None,
                     sub_workflow_foreach_file: None,
                     multi_agent_review: None,
@@ -3594,6 +4205,39 @@ pub async fn test_extract(
     }
 }
 
+#[derive(Debug, Deserialize, ts_rs::TS)]
+#[ts(export)]
+pub struct PreviewTransformDataRequest {
+    pub sample: serde_json::Value,
+    pub fields: Vec<crate::models::TransformDataField>,
+}
+
+#[derive(Debug, Serialize, ts_rs::TS)]
+#[ts(export)]
+pub struct PreviewTransformDataResponse {
+    pub value: Option<serde_json::Value>,
+    pub error: Option<String>,
+}
+
+/// POST /api/workflow-steps/preview-transform-data
+/// Pure deterministic preview over a user-provided sample. It shares the
+/// exact runtime implementation, so the Wizard cannot approve a recipe that
+/// behaves differently once scheduled.
+pub async fn preview_transform_data(
+    Json(req): Json<PreviewTransformDataRequest>,
+) -> Json<ApiResponse<PreviewTransformDataResponse>> {
+    match crate::workflows::transform_data_step::transform_value(&req.fields, &req.sample) {
+        Ok(value) => Json(ApiResponse::ok(PreviewTransformDataResponse {
+            value: Some(value),
+            error: None,
+        })),
+        Err(error) => Json(ApiResponse::ok(PreviewTransformDataResponse {
+            value: None,
+            error: Some(format!("{error:#}")),
+        })),
+    }
+}
+
 fn value_type_tag(v: &serde_json::Value) -> String {
     match v {
         serde_json::Value::Null => "null".into(),
@@ -3627,11 +4271,97 @@ pub struct TestApiCallResponse {
     /// Milliseconds elapsed end-to-end.
     pub duration_ms: u64,
     /// `{data, status, summary}` envelope (parsed from the step output).
-    /// On failure this is `null` and `error` holds the message.
+    /// Collector tests preserve this envelope on failure when partial source
+    /// data is available; plain failures still return `null`.
     pub envelope: Option<serde_json::Value>,
     /// Error message when `success == false`. Same string that would
     /// land in the step's output column if this were a real run.
     pub error: Option<String>,
+}
+
+#[derive(Debug, Deserialize, ts_rs::TS)]
+#[ts(export)]
+pub struct TestCollectApiDataRequest {
+    /// The collector step currently edited in the Workflow wizard.
+    pub step: WorkflowStep,
+    /// Optional workflow project scope. Without one, every saved Quick API
+    /// resolves its global config or first linked project, like runtime.
+    pub project_id: Option<String>,
+    /// Same binary allowlist as the workflow currently being edited. Required
+    /// only by Quick Exec sources and enforced by the production executor.
+    #[serde(default)]
+    pub exec_allowlist: Vec<String>,
+}
+
+/// POST /api/workflow-steps/test-collect-api-data
+/// Runs the collector with the production Quick API executor but without
+/// creating a WorkflowRun. The complete typed envelope is returned even when
+/// a required source fails, so successful sources remain inspectable.
+pub async fn test_collect_api_data(
+    State(state): State<AppState>,
+    Json(req): Json<TestCollectApiDataRequest>,
+) -> Json<ApiResponse<TestApiCallResponse>> {
+    use crate::workflows::api_call_executor::ApiCallLogContext;
+    use crate::workflows::template::TemplateContext;
+
+    let work_dir = if let Some(project_id) = req.project_id.as_deref() {
+        let lookup_id = project_id.to_string();
+        state
+            .db
+            .with_conn(move |conn| crate::db::projects::get_project(conn, &lookup_id))
+            .await
+            .ok()
+            .flatten()
+            .map(|project| project.path)
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let outcome = crate::workflows::collect_api_data_step::execute_collect_api_data_step(
+        &req.step,
+        req.project_id.as_deref(),
+        &state,
+        &TemplateContext::new(),
+        ApiCallLogContext::manual_test(),
+        &req.exec_allowlist,
+        &work_dir,
+    )
+    .await;
+    let success = outcome.result.status == RunStatus::Success;
+    let envelope = parsed_step_envelope(&outcome.result.output);
+    let error = if success {
+        None
+    } else {
+        envelope
+            .as_ref()
+            .and_then(|value| value.get("summary"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+            .or_else(|| Some(outcome.result.output.clone()))
+    };
+
+    Json(ApiResponse::ok(TestApiCallResponse {
+        success,
+        duration_ms: outcome.result.duration_ms,
+        envelope,
+        error,
+    }))
+}
+
+fn parsed_step_envelope(output: &str) -> Option<serde_json::Value> {
+    crate::workflows::template::extract_step_envelope(output)
+        .map(|envelope| {
+            let data = serde_json::from_str(&envelope.data_json).unwrap_or(serde_json::Value::Null);
+            serde_json::json!({
+                "data": data,
+                "status": envelope.status,
+                "summary": envelope.summary,
+            })
+        })
+        .or_else(|| {
+            let json = output.split("\n[SIGNAL:").next().unwrap_or(output);
+            serde_json::from_str(json).ok()
+        })
 }
 
 /// POST /api/workflow-steps/test-api-call
@@ -3670,26 +4400,7 @@ pub async fn test_api_call(
     // marker block instead of the JSON, and `serde_json::from_str`
     // came back None → UI rendered "Failure" despite a 200 OK upstream.
     let envelope: Option<serde_json::Value> = if success {
-        crate::workflows::template::extract_step_envelope(&outcome.result.output)
-            .map(|e| {
-                let data_value: serde_json::Value =
-                    serde_json::from_str(&e.data_json).unwrap_or(serde_json::Value::Null);
-                serde_json::json!({
-                    "data": data_value,
-                    "status": e.status,
-                    "summary": e.summary,
-                })
-            })
-            // Last-resort fallback: pre-0.8.5 bare-JSON envelopes.
-            .or_else(|| {
-                let json_part = outcome
-                    .result
-                    .output
-                    .split("\n[SIGNAL:")
-                    .next()
-                    .unwrap_or(&outcome.result.output);
-                serde_json::from_str(json_part).ok()
-            })
+        parsed_step_envelope(&outcome.result.output)
     } else {
         None
     };
@@ -4222,6 +4933,9 @@ mod tests {
             exec_stdin: None,
             quick_prompt_id: None,
             json_data_payload: None,
+            collect_api_data: None,
+            transform_data: None,
+            page_publish: None,
             sub_workflow_id: None,
             sub_workflow_foreach_file: None,
             multi_agent_review: None,
@@ -4410,6 +5124,43 @@ mod tests {
             Some(120),
         )];
         assert!(validate_exec_steps(&chain, &["cargo".into()]).is_ok());
+    }
+
+    #[test]
+    fn validate_collect_quick_exec_uses_the_workflow_allowlist() {
+        let mut collect = mk_step("collect_cloudwatch", StepType::CollectApiData);
+        collect.collect_api_data = Some(crate::models::CollectApiDataConfig {
+            sources: vec![crate::models::CollectApiDataSource {
+                alias: "cloudwatch".into(),
+                quick_api_id: String::new(),
+                quick_exec_id: String::new(),
+                quick_exec: Some(crate::models::CollectQuickExecSource {
+                    command: "aws".into(),
+                    args: vec!["cloudwatch".into(), "list-metrics".into()],
+                    timeout_secs: Some(60),
+                    output_format: crate::models::CollectQuickExecOutputFormat::Json,
+                }),
+                required: true,
+                variables: Default::default(),
+            }],
+            concurrent_limit: Some(2),
+        });
+
+        assert!(validate_exec_steps(&[collect.clone()], &["aws".into()]).is_ok());
+        let mut shell = collect.clone();
+        shell.collect_api_data.as_mut().unwrap().sources[0]
+            .quick_exec
+            .as_mut()
+            .unwrap()
+            .command = "bash".into();
+        let error = validate_exec_steps(&[shell], &["bash".into()])
+            .expect_err("shell binaries must fail at save time");
+        assert!(error.contains("ne peut pas être utilisé"), "got: {error}");
+        let error = validate_exec_steps(&[collect], &[]).expect_err("missing allowlist must fail");
+        assert!(
+            error.contains("aws") && error.contains("allowlist"),
+            "got: {error}"
+        );
     }
 
     #[test]
@@ -4611,6 +5362,142 @@ mod tests {
     }
 
     #[test]
+    fn workflow_sub_workflow_child_ids_includes_failure_chain() {
+        let mut main_child = mk_step("main-child", StepType::SubWorkflow);
+        main_child.sub_workflow_id = Some("wf-main".into());
+        let mut failure_child = mk_step("failure-child", StepType::SubWorkflow);
+        failure_child.sub_workflow_id = Some("wf-failure".into());
+        let mut workflow = mk_workflow_for_export("portable");
+        workflow.steps = vec![main_child];
+        workflow.on_failure = vec![failure_child];
+
+        assert_eq!(
+            workflow_sub_workflow_child_ids(&workflow),
+            vec!["wf-main".to_string(), "wf-failure".to_string()]
+        );
+    }
+
+    #[test]
+    fn workflow_dependency_ids_cover_every_saved_resource_reference() {
+        let mut agent = mk_step("agent", StepType::Agent);
+        agent.quick_prompt_id = Some("qp-agent".into());
+        let mut batch = mk_step("batch", StepType::BatchQuickPrompt);
+        batch.batch_quick_prompt_id = Some("qp-batch".into());
+        batch.batch_chain_prompt_ids = vec!["qp-review".into(), "qp-agent".into()];
+        let mut api = mk_step("api", StepType::ApiCall);
+        api.quick_api_id = Some("qa-single".into());
+        let mut collect = mk_step("collect", StepType::CollectApiData);
+        collect.collect_api_data = Some(CollectApiDataConfig {
+            sources: vec![CollectApiDataSource {
+                alias: "jira".into(),
+                quick_api_id: "qa-collect".into(),
+                quick_exec_id: String::new(),
+                quick_exec: None,
+                required: true,
+                variables: Default::default(),
+            }],
+            concurrent_limit: Some(3),
+        });
+        let mut page = mk_step("publish", StepType::PublishPageData);
+        page.page_publish = Some(PublishPageDataConfig {
+            page_id: "page-adobe".into(),
+            writes: vec![],
+        });
+        let mut dynamic_page = mk_step("dynamic", StepType::PublishPageData);
+        dynamic_page.page_publish = Some(PublishPageDataConfig {
+            page_id: "{{target_page}}".into(),
+            writes: vec![],
+        });
+        let mut workflow = mk_workflow_for_export("portable");
+        workflow.steps = vec![agent, batch, api, collect, page, dynamic_page];
+
+        let dependencies = workflow_dependency_ids([&workflow]);
+        assert_eq!(
+            dependencies.quick_prompts,
+            ["qp-agent", "qp-batch", "qp-review"]
+                .into_iter()
+                .map(str::to_string)
+                .collect()
+        );
+        assert_eq!(
+            dependencies.quick_apis,
+            ["qa-collect", "qa-single"]
+                .into_iter()
+                .map(str::to_string)
+                .collect()
+        );
+        assert_eq!(
+            dependencies.pages,
+            ["page-adobe"].into_iter().map(str::to_string).collect()
+        );
+    }
+
+    #[test]
+    fn import_remaps_qp_qa_collect_and_page_dependencies_together() {
+        let mut step = mk_step("portable", StepType::PublishPageData);
+        step.quick_prompt_id = Some("qp-old".into());
+        step.batch_quick_prompt_id = Some("qp-old".into());
+        step.batch_chain_prompt_ids = vec!["qp-chain-old".into()];
+        step.quick_api_id = Some("qa-old".into());
+        step.collect_api_data = Some(CollectApiDataConfig {
+            sources: vec![
+                CollectApiDataSource {
+                    alias: "source".into(),
+                    quick_api_id: "qa-collect-old".into(),
+                    quick_exec_id: String::new(),
+                    quick_exec: None,
+                    required: true,
+                    variables: Default::default(),
+                },
+                CollectApiDataSource {
+                    alias: "cloudwatch".into(),
+                    quick_api_id: String::new(),
+                    quick_exec_id: String::new(),
+                    quick_exec: Some(crate::models::CollectQuickExecSource {
+                        command: "aws".into(),
+                        args: vec!["cloudwatch".into(), "list-metrics".into()],
+                        timeout_secs: Some(60),
+                        output_format: crate::models::CollectQuickExecOutputFormat::Json,
+                    }),
+                    required: false,
+                    variables: Default::default(),
+                },
+            ],
+            concurrent_limit: None,
+        });
+        step.page_publish = Some(PublishPageDataConfig {
+            page_id: "page-old".into(),
+            writes: vec![],
+        });
+        let qp = std::collections::HashMap::from([
+            ("qp-old".into(), "qp-new".into()),
+            ("qp-chain-old".into(), "qp-chain-new".into()),
+        ]);
+        let qa = std::collections::HashMap::from([
+            ("qa-old".into(), "qa-new".into()),
+            ("qa-collect-old".into(), "qa-collect-new".into()),
+        ]);
+        let qe = std::collections::HashMap::new();
+        let pages = std::collections::HashMap::from([("page-old".into(), "page-new".into())]);
+
+        remap_workflow_step_dependencies(&mut step, &qp, &qa, &qe, &pages, true).unwrap();
+        assert_eq!(step.quick_prompt_id.as_deref(), Some("qp-new"));
+        assert_eq!(step.batch_quick_prompt_id.as_deref(), Some("qp-new"));
+        assert_eq!(step.batch_chain_prompt_ids, vec!["qp-chain-new"]);
+        assert_eq!(step.quick_api_id.as_deref(), Some("qa-new"));
+        let sources = step.collect_api_data.unwrap().sources;
+        assert_eq!(sources[0].quick_api_id, "qa-collect-new");
+        assert_eq!(
+            sources[1]
+                .quick_exec
+                .as_ref()
+                .map(|exec| exec.command.as_str()),
+            Some("aws")
+        );
+        assert_eq!(step.page_publish.unwrap().page_id, "page-new");
+    }
+
+    #[test]
     fn export_envelope_roundtrips_referenced_workflows() {
         let mut child = mk_workflow_for_export("child");
         child.id = "child-id".into();
@@ -4620,6 +5507,9 @@ mod tests {
             exported_at: chrono::Utc::now(),
             workflow: mk_workflow_for_export("parent"),
             referenced_quick_prompts: vec![],
+            referenced_quick_apis: vec![],
+            referenced_quick_execs: vec![],
+            referenced_pages: vec![],
             referenced_workflows: vec![child],
         };
         let json = serde_json::to_string(&env).unwrap();
@@ -4637,6 +5527,9 @@ mod tests {
             exported_at: chrono::Utc::now(),
             workflow: mk_workflow_for_export("solo"),
             referenced_quick_prompts: vec![],
+            referenced_quick_apis: vec![],
+            referenced_quick_execs: vec![],
+            referenced_pages: vec![],
             referenced_workflows: vec![],
         };
         let json = serde_json::to_string(&env).unwrap();
@@ -4654,11 +5547,14 @@ mod tests {
             exported_at: chrono::Utc::now(),
             workflow: mk_workflow_for_export("audit"),
             referenced_quick_prompts: vec![],
+            referenced_quick_apis: vec![],
+            referenced_quick_execs: vec![],
+            referenced_pages: vec![],
             referenced_workflows: vec![],
         };
         let json = serde_json::to_string(&env).unwrap();
         assert!(json.contains("\"kind\":\"kronn.workflow\""));
-        assert!(json.contains("\"version\":1"));
+        assert!(json.contains("\"version\":3"));
         // Roundtrip: parse back, fields preserved.
         let parsed: WorkflowExportEnvelope = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.kind, WORKFLOW_EXPORT_KIND);
@@ -4676,6 +5572,9 @@ mod tests {
             exported_at: chrono::Utc::now(),
             workflow: mk_workflow_for_export("no-qps"),
             referenced_quick_prompts: vec![],
+            referenced_quick_apis: vec![],
+            referenced_quick_execs: vec![],
+            referenced_pages: vec![],
             referenced_workflows: vec![],
         };
         let json = serde_json::to_string(&env).unwrap();
@@ -4709,6 +5608,9 @@ mod tests {
             exported_at: chrono::Utc::now(),
             workflow: mk_workflow_for_export("future"),
             referenced_quick_prompts: vec![],
+            referenced_quick_apis: vec![],
+            referenced_quick_execs: vec![],
+            referenced_pages: vec![],
             referenced_workflows: vec![],
         };
         let json = serde_json::to_string(&env).unwrap();
@@ -5272,6 +6174,68 @@ mod tests {
         s2.batch_quick_prompt_id = Some("qp-review".into());
         let err = validate_required_fields_per_type(&[s2]).expect_err("must reject still");
         assert!(err.contains("batch_items_from"));
+    }
+
+    #[test]
+    fn required_fields_collect_api_rejects_duplicate_aliases() {
+        let mut step = mk_step("collect", StepType::CollectApiData);
+        step.collect_api_data = Some(crate::models::CollectApiDataConfig {
+            sources: vec![
+                crate::models::CollectApiDataSource {
+                    alias: "adobe".into(),
+                    quick_api_id: "qa-1".into(),
+                    quick_exec_id: String::new(),
+                    quick_exec: None,
+                    required: true,
+                    variables: Default::default(),
+                },
+                crate::models::CollectApiDataSource {
+                    alias: "adobe".into(),
+                    quick_api_id: "qa-2".into(),
+                    quick_exec_id: String::new(),
+                    quick_exec: None,
+                    required: false,
+                    variables: Default::default(),
+                },
+            ],
+            concurrent_limit: Some(5),
+        });
+        let error = validate_required_fields_per_type(&[step]).expect_err("must reject");
+        assert!(error.contains("dupliqué"), "got: {error}");
+    }
+
+    #[test]
+    fn required_fields_transform_requires_input_and_mapping() {
+        let mut step = mk_step("shape", StepType::TransformData);
+        step.transform_data = Some(crate::models::TransformDataConfig::default());
+        let error = validate_required_fields_per_type(&[step]).expect_err("must reject");
+        assert!(error.contains("entrée"), "got: {error}");
+    }
+
+    #[test]
+    fn required_fields_transform_rejects_invalid_jsonpath_and_duplicate_target() {
+        let mapping = |target: &str, source: &str| crate::models::TransformDataField {
+            target: target.into(),
+            source: source.into(),
+            operation: crate::models::TransformDataOperation::Copy,
+            fallback: None,
+            value_type: None,
+        };
+        let mut step = mk_step("shape", StepType::TransformData);
+        step.transform_data = Some(crate::models::TransformDataConfig {
+            input_from: "steps.collect.data".into(),
+            fields: vec![mapping("summary.total", "$.broken[")],
+        });
+        let error = validate_required_fields_per_type(std::slice::from_ref(&step))
+            .expect_err("must reject invalid JSONPath");
+        assert!(error.contains("JSONPath invalide"), "got: {error}");
+
+        step.transform_data.as_mut().expect("config").fields = vec![
+            mapping("summary.total", "$.one"),
+            mapping("summary.total", "$.two"),
+        ];
+        let error = validate_required_fields_per_type(&[step]).expect_err("must reject duplicate");
+        assert!(error.contains("cible dupliquée"), "got: {error}");
     }
 
     #[test]

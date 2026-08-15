@@ -102,6 +102,16 @@ pub fn resolve_id(conn: &Connection, id: &str) -> Result<Option<ResolvedId>> {
             FROM quick_apis q
             LEFT JOIN projects p ON p.id = q.project_id
             WHERE q.id = :id
+
+            UNION ALL
+            SELECT
+                'quick_exec', q.id, NULL, q.name,
+                q.command || ' · ' || q.output_format,
+                CASE WHEN p.id IS NULL THEN NULL ELSE 'project' END,
+                p.id, p.name, 'qe_list'
+            FROM quick_execs q
+            LEFT JOIN projects p ON p.id = q.project_id
+            WHERE q.id = :id
         )
         SELECT
             kind, id, reference, title, summary,
@@ -227,6 +237,24 @@ mod tests {
     #[test]
     fn returns_none_for_unknown_id() {
         assert_eq!(resolve_id(&connection(), "missing").unwrap(), None);
+    }
+
+    #[test]
+    fn resolves_saved_quick_exec() {
+        let connection = connection();
+        connection
+            .execute(
+                "INSERT INTO quick_execs
+                 (id, name, command, args_json, timeout_secs, output_format,
+                  variables_json, created_at, updated_at)
+                 VALUES ('qe-1', 'AWS errors', 'aws', '[]', 60, 'json', '[]', 'now', 'now')",
+                [],
+            )
+            .unwrap();
+        let resolved = resolve_id(&connection, "qe-1").unwrap().unwrap();
+        assert_eq!(resolved.kind, "quick_exec");
+        assert_eq!(resolved.summary.as_deref(), Some("aws · json"));
+        assert_eq!(resolved.suggested_tool.as_deref(), Some("qe_list"));
     }
 
     #[test]

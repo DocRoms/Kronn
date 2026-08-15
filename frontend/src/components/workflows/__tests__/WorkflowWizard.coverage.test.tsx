@@ -27,14 +27,18 @@ import type {
 } from '../../../types/generated';
 
 const {
-  createMock, updateMock, qpListMock, qaListMock,
+  createMock, updateMock, previewTransformMock, testCollectMock, qpListMock, qaListMock,
+  pageListMock,
   skillsListMock, profilesListMock, directivesListMock,
   suggestionsMock, overviewMock,
 } = vi.hoisted(() => ({
   createMock: vi.fn(),
   updateMock: vi.fn(),
+  previewTransformMock: vi.fn(),
+  testCollectMock: vi.fn(),
   qpListMock: vi.fn(),
   qaListMock: vi.fn(),
+  pageListMock: vi.fn(),
   skillsListMock: vi.fn(),
   profilesListMock: vi.fn(),
   directivesListMock: vi.fn(),
@@ -46,10 +50,13 @@ vi.mock('../../../lib/api', () => buildApiMock({
   workflows: {
     create: createMock as never,
     update: updateMock as never,
+    previewTransformData: previewTransformMock as never,
+    testCollectApiData: testCollectMock as never,
     suggestions: suggestionsMock as never,
   },
   quickPrompts: { list: qpListMock as never },
   quickApis: { list: qaListMock as never },
+  pages: { list: pageListMock as never },
   skills: { list: skillsListMock as never },
   profiles: { list: profilesListMock as never },
   directives: { list: directivesListMock as never },
@@ -120,8 +127,11 @@ const renderWizard = (over: Partial<ComponentProps<typeof WorkflowWizard>> = {})
 beforeEach(() => {
   createMock.mockReset();
   updateMock.mockReset();
+  previewTransformMock.mockReset();
+  testCollectMock.mockReset();
   qpListMock.mockReset();
   qaListMock.mockReset();
+  pageListMock.mockReset();
   skillsListMock.mockReset();
   profilesListMock.mockReset();
   directivesListMock.mockReset();
@@ -129,8 +139,28 @@ beforeEach(() => {
   overviewMock.mockReset();
   createMock.mockResolvedValue({});
   updateMock.mockResolvedValue({});
+  previewTransformMock.mockResolvedValue({ value: { summary: { requests: 1240 } }, error: null });
+  testCollectMock.mockResolvedValue({
+    success: true,
+    duration_ms: 42,
+    envelope: {
+      data: {
+        sources: { usage: { total: 1240, errors: 3 } },
+        meta: {
+          total: 1,
+          succeeded: 1,
+          failed: 0,
+          sources: [{ alias: 'usage', required: true, status: 'OK', summary: 'Usage loaded', error: null, duration_ms: 31 }],
+        },
+      },
+      status: 'OK',
+      summary: 'Collected 1/1 Quick API source(s)',
+    },
+    error: null,
+  });
   qpListMock.mockResolvedValue([]);
   qaListMock.mockResolvedValue([]);
+  pageListMock.mockResolvedValue([]);
   skillsListMock.mockResolvedValue([]);
   profilesListMock.mockResolvedValue([]);
   directivesListMock.mockResolvedValue([]);
@@ -369,6 +399,8 @@ describe('WorkflowWizard — full summary recap', () => {
     mkStep({ name: 'execStep', step_type: { type: 'Exec' }, exec_command: 'ls', exec_args: ['-la'] }),
     mkStep({ name: 'batchApiStep', step_type: { type: 'BatchApiCall' }, api_plugin_slug: 'mcp-github', api_config_id: 'cfg-gh', api_endpoint_path: '/x', batch_items_from: '{{steps.apiStep.data}}' }),
     mkStep({ name: 'jsonStep', step_type: { type: 'JsonData' }, json_data_payload: { a: 1, b: 2 } }),
+    mkStep({ name: 'collectStep', step_type: { type: 'CollectApiData' }, collect_api_data: { sources: [{ alias: 'usage', quick_api_id: 'qa-usage', quick_exec_id: '', required: true, variables: {} }], concurrent_limit: 5 } }),
+    mkStep({ name: 'transformStep', step_type: { type: 'TransformData' }, transform_data: { input_from: 'steps.collectStep.data', fields: [{ target: 'summary.total', source: '$.sources.usage.total', operation: 'copy', fallback: null, value_type: 'number' }] } }),
   ];
 
   it('renders the type chip, subtitle and badges for each step on the summary', () => {
@@ -387,6 +419,8 @@ describe('WorkflowWizard — full summary recap', () => {
     expect(screen.getByText('EXEC')).toBeInTheDocument();
     expect(screen.getByText('BATCH API')).toBeInTheDocument();
     expect(screen.getByText('JSON')).toBeInTheDocument();
+    expect(screen.getByText('COLLECT')).toBeInTheDocument();
+    expect(screen.getByText('TRANSFORM')).toBeInTheDocument();
     // Notify host parsed from the webhook URL.
     expect(screen.getByText(/hooks\.slack\.com/)).toBeInTheDocument();
     // Agent step badges: condition count, retry, timeout, delay.
@@ -499,6 +533,221 @@ describe('WorkflowWizard — BatchApiCall form', () => {
     const maxItems = screen.getByPlaceholderText('50') as HTMLInputElement;
     fireEvent.change(maxItems, { target: { value: '25' } });
     expect(maxItems.value).toBe('25');
+  });
+});
+
+// ── Deterministic data pipeline forms ──────────────────────────────
+
+describe('WorkflowWizard — data pipeline forms', () => {
+  it('adds a saved Quick API source with a generated stable alias', async () => {
+    qaListMock.mockResolvedValue([
+      { id: 'qa-adobe', name: 'Adobe Usage', icon: '📊', api_method: 'GET', api_endpoint_path: '/usage' } as QuickApi,
+    ]);
+    toSteps([
+      mkStep({
+        name: 'collect',
+        step_type: { type: 'CollectApiData' },
+        collect_api_data: { sources: [], concurrent_limit: 5 },
+      }),
+      mkStep({ name: 'next' }),
+    ]);
+
+    fireEvent.click(screen.getByText('wiz.collectApiAdd'));
+    let quickApiPicker: HTMLSelectElement | undefined;
+    await waitFor(() => {
+      const selectors = screen.getAllByRole('combobox') as HTMLSelectElement[];
+      quickApiPicker = selectors.find(select => Array.from(select.options).some(option => option.value === 'qa-adobe'));
+      expect(quickApiPicker).toBeDefined();
+    });
+    expect(quickApiPicker).toBeDefined();
+    fireEvent.change(quickApiPicker!, { target: { value: 'qa-adobe' } });
+    expect(screen.getByDisplayValue('adobe_usage')).toBeInTheDocument();
+  });
+
+  it('collects a shell-free CLI command and adds its binary to the workflow allowlist', async () => {
+    toSteps([
+      mkStep({
+        name: 'collect',
+        step_type: { type: 'CollectApiData' },
+        collect_api_data: { sources: [], concurrent_limit: 5 },
+      }),
+      mkStep({ name: 'next' }),
+    ]);
+
+    fireEvent.click(screen.getByText('wiz.collectApiAdd'));
+    fireEvent.change(screen.getByLabelText('wiz.collectSourceType'), { target: { value: 'quick_exec_inline' } });
+    fireEvent.change(screen.getByLabelText('wiz.collectApiAlias'), { target: { value: 'cloudwatch' } });
+    fireEvent.change(screen.getByLabelText('wiz.collectQuickExecCommand'), { target: { value: 'aws' } });
+    fireEvent.change(screen.getByLabelText('wiz.collectQuickExecArgs'), {
+      target: { value: 'cloudwatch\nlist-metrics\n--output\njson' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'wiz.collectApiTest' }));
+
+    await waitFor(() => expect(testCollectMock).toHaveBeenCalledWith(expect.objectContaining({
+      exec_allowlist: expect.arrayContaining(['aws']),
+      step: expect.objectContaining({
+        collect_api_data: expect.objectContaining({
+          sources: [expect.objectContaining({
+            alias: 'cloudwatch',
+            quick_api_id: '',
+            quick_exec: expect.objectContaining({
+              command: 'aws',
+              args: ['cloudwatch', 'list-metrics', '--output', 'json'],
+              output_format: 'json',
+            }),
+          })],
+        }),
+      }),
+    })));
+  });
+
+  it('tests a collector, passes its sample to TransformData and maps a clicked JSON field', async () => {
+    qaListMock.mockResolvedValue([
+      { id: 'qa-usage', name: 'Usage', icon: '📊', api_method: 'GET', api_endpoint_path: '/usage' } as QuickApi,
+    ]);
+    toSteps([
+      mkStep({
+        name: 'collect',
+        step_type: { type: 'CollectApiData' },
+        collect_api_data: { sources: [{ alias: 'usage', quick_api_id: 'qa-usage', quick_exec_id: '', required: true, variables: {} }], concurrent_limit: 5 },
+      }),
+      mkStep({
+        name: 'shape',
+        step_type: { type: 'TransformData' },
+        transform_data: { input_from: 'steps.collect.data', fields: [] },
+      }),
+    ]);
+
+    fireEvent.click(screen.getByRole('button', { name: 'wiz.collectApiTest' }));
+    await waitFor(() => expect(testCollectMock).toHaveBeenCalledWith(expect.objectContaining({
+      project_id: 'proj-1',
+      step: expect.objectContaining({ name: 'collect' }),
+    })));
+    expect(await screen.findByText('Collected 1/1 Quick API source(s)')).toBeInTheDocument();
+    expect(await screen.findByText('wiz.transformDataMappingsActive:0')).toBeInTheDocument();
+    const [totalLeaf] = await screen.findAllByTitle('$.usage.total');
+    fireEvent.click(totalLeaf);
+    expect(screen.getByDisplayValue('usage.total')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('$.sources.usage.total')).toBeInTheDocument();
+    expect(screen.getByText('wiz.transformDataMappingsActive:1')).toBeInTheDocument();
+    await waitFor(() => expect(previewTransformMock).toHaveBeenCalledWith(expect.objectContaining({
+      sample: expect.objectContaining({ sources: { usage: { total: 1240, errors: 3 } } }),
+      fields: [expect.objectContaining({ target: 'usage.total', source: '$.sources.usage.total' })],
+    })));
+
+    // The bulk action is intentionally a reset to the two-level business
+    // contract: it replaces old/deep mappings and never includes `meta`.
+    fireEvent.click(screen.getByText('wiz.transformDataAddAllSources'));
+    expect(screen.getByLabelText('wiz.transformDataTarget')).toHaveValue('usage');
+    expect(screen.getByDisplayValue('$.sources.usage')).toBeInTheDocument();
+    expect(screen.queryByDisplayValue('$.meta')).not.toBeInTheDocument();
+  });
+
+  it('inserts a linked Transform or Page step directly after a collector', async () => {
+    pageListMock.mockResolvedValue([{
+      id: 'page-1', project_id: null, title: 'Adobe Signals', slug: 'adobe-signals',
+      current_revision_id: 'rev-1', data_revision: 0,
+      created_at: '2026-08-13T10:00:00Z', updated_at: '2026-08-13T10:00:00Z', last_published_at: null,
+    }]);
+    toSteps([
+      mkStep({
+        name: 'collect',
+        step_type: { type: 'CollectApiData' },
+        collect_api_data: { sources: [], concurrent_limit: 5 },
+      }),
+      mkStep({ name: 'later' }),
+    ]);
+
+    expect(screen.getAllByLabelText('wiz.collectApiQuickApiInfo')).not.toHaveLength(0);
+    expect(screen.getByLabelText('wiz.collectApiAddTransformInfo')).toBeInTheDocument();
+    expect(screen.getByLabelText('wiz.collectApiAddPageInfo')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText('wiz.collectApiAddTransform'));
+    expect(screen.getByTestId('transform-data-form')).toBeInTheDocument();
+    expect(screen.getByLabelText('wiz.transformDataInput')).toHaveValue('steps.collect.data');
+
+    fireEvent.click(screen.getByTitle('1. collect'));
+    fireEvent.click(screen.getByText('wiz.collectApiAddPage'));
+    expect(screen.getByTestId('publish-page-form')).toBeInTheDocument();
+    expect(screen.getAllByLabelText('wiz.publishPagePickerInfo')).not.toHaveLength(0);
+    const pagePicker = screen.getByLabelText('wiz.publishPagePicker');
+    await waitFor(() => expect(pagePicker).toContainHTML('Adobe Signals'));
+    fireEvent.change(pagePicker, { target: { value: 'page-1' } });
+    expect(screen.getByLabelText('value_from')).toHaveValue('steps.collect.data');
+  });
+
+  it('exposes the selected Page ID and opens its editor', async () => {
+    const onNavigatePage = vi.fn();
+    pageListMock.mockResolvedValue([{
+      id: 'page-1', project_id: null, title: 'Adobe Signals', slug: 'adobe-signals',
+      current_revision_id: 'rev-1', data_revision: 0,
+      created_at: '2026-08-13T10:00:00Z', updated_at: '2026-08-13T10:00:00Z', last_published_at: null,
+    }]);
+    renderWizard({
+      onNavigatePage,
+      editWorkflow: mkWorkflow({ steps: [
+        mkStep({ name: 'collect' }),
+        mkStep({
+          name: 'publish',
+          step_type: { type: 'PublishPageData' },
+          page_publish: { page_id: 'page-1', writes: [{
+            dataset: 'summary', operation: 'replace', value_from: 'steps.collect.data',
+            observed_at: null, dedupe_key: null, key_field: null,
+          }] },
+        }),
+      ] }),
+    });
+    fireEvent.click(screen.getByText('wiz.next'));
+    fireEvent.click(screen.getByText('wiz.next'));
+
+    expect(await screen.findByText('#page-1')).toBeInTheDocument();
+    fireEvent.click(screen.getByText('wiz.publishPageOpen'));
+    expect(onNavigatePage).toHaveBeenCalledWith('page-1');
+  });
+
+  it('explains where reusable Quick Prompts are created', () => {
+    toSteps([mkStep({ name: 'agent' }), mkStep({ name: 'later' })]);
+    expect(screen.getAllByLabelText('wiz.agentQpPickerInfo')).toHaveLength(2);
+    expect(screen.getAllByText('wiz.agentQpPickerNone')).toHaveLength(2);
+  });
+
+  it('edits and previews a TransformData mapping without arbitrary code', async () => {
+    toSteps([
+      mkStep({ name: 'collect' }),
+      mkStep({
+        name: 'shape',
+        step_type: { type: 'TransformData' },
+        transform_data: { input_from: 'steps.collect.data', fields: [] },
+      }),
+    ]);
+
+    fireEvent.click(screen.getByText('wiz.transformDataAdd'));
+    const target = screen.getByLabelText('wiz.transformDataTarget') as HTMLInputElement;
+    const source = screen.getByLabelText('wiz.transformDataSource') as HTMLInputElement;
+    fireEvent.change(target, { target: { value: 'summary.requests' } });
+    fireEvent.change(source, { target: { value: '$.sources.adobe.total' } });
+    fireEvent.change(screen.getByLabelText('wiz.transformDataOperation'), { target: { value: 'sum' } });
+    fireEvent.change(screen.getByLabelText('wiz.transformDataType'), { target: { value: 'number' } });
+
+    expect(target.value).toBe('summary.requests');
+    expect(source.value).toBe('$.sources.adobe.total');
+    expect(screen.getByDisplayValue('sum')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('number')).toBeInTheDocument();
+
+    fireEvent.change(screen.getByPlaceholderText('{"sources":{"adobe":{"total":1240}}}'), {
+      target: { value: '{"sources":{"adobe":{"total":1240}}}' },
+    });
+    fireEvent.click(screen.getByText('wiz.transformDataPreviewRun'));
+    await waitFor(() => expect(previewTransformMock).toHaveBeenCalledWith({
+      sample: { sources: { adobe: { total: 1240 } } },
+      fields: [expect.objectContaining({
+        target: 'summary.requests',
+        source: '$.sources.adobe.total',
+        operation: 'sum',
+        value_type: 'number',
+      })],
+    }));
+    expect(await screen.findByText(/"requests": 1240/)).toBeInTheDocument();
   });
 });
 

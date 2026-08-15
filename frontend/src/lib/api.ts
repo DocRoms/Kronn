@@ -76,6 +76,10 @@ import type {
   StepResult,
   CreateWorkflowRequest,
   UpdateWorkflowRequest,
+  PreviewTransformDataRequest,
+  PreviewTransformDataResponse,
+  TestCollectApiDataRequest,
+  TestApiCallResponse,
   BundleResponse,
   AgentUsageSummary,
   Skill,
@@ -119,6 +123,11 @@ import type {
   ImportQuickApiRequest,
   BatchRunQuickApiRequest,
   BatchRunQuickApiResponse,
+  QuickExec,
+  CreateQuickExecRequest,
+  RunQuickExecRequest,
+  RunQuickExecResponse,
+  ImportQuickExecRequest,
   OllamaHealthResponse,
   OllamaModelsResponse,
   LiteLlmHealthResponse,
@@ -156,6 +165,19 @@ import type {
   UpdatePlanningTaskRequest,
   TelemetryCoverage,
   DiscussionTokenCost,
+  CreateLivePageRequest,
+  LivePage,
+  LivePageDetail,
+  LivePageDiscussionLink,
+  LivePagePublication,
+  LivePageRevision,
+  LivePageWorkflowLink,
+  LivePagesCapability,
+  PublishLivePageRequest,
+  PublishLivePageResult,
+  UpdateLivePageHtmlRequest,
+  UpdateLivePageRequest,
+  LinkLivePageDiscussionRequest,
 } from '../types/generated';
 import type { DiscoverKeysResponse, TestModeEnterResult, TestModeExitResponse } from '../types/extensions';
 
@@ -662,7 +684,7 @@ export const config = {
   restoreRecovery: (passphrase: string, recoveryCode?: string) =>
     api<void>('POST', '/config/recovery/restore', { passphrase, recovery_code: recoveryCode || null }),
   getServerConfig: () => api<ServerConfigPublic>('GET', '/config/server'),
-  setServerConfig: (req: { domain?: string; max_concurrent_agents?: number; agent_stall_timeout_min?: number; pseudo?: string; avatar_email?: string; bio?: string; debug_mode?: boolean; discussion_notes_enabled?: boolean; default_model_tier?: 'economy' | 'default' | 'reasoning'; default_summary_strategy?: 'Auto' | 'OnDemand' | 'Off'; agent_handoffs_enabled?: boolean; agent_handoff_paid_limit?: number; agent_handoff_paid_unlimited?: boolean; agent_handoff_blocked_agents?: AgentType[] }) => api<void>('POST', '/config/server', req),
+  setServerConfig: (req: { domain?: string; max_concurrent_agents?: number; agent_stall_timeout_min?: number; agent_global_timeout_min?: number; pseudo?: string; avatar_email?: string; bio?: string; debug_mode?: boolean; discussion_notes_enabled?: boolean; default_model_tier?: 'economy' | 'default' | 'reasoning'; default_summary_strategy?: 'Auto' | 'OnDemand' | 'Off'; agent_handoffs_enabled?: boolean; agent_handoff_paid_limit?: number; agent_handoff_paid_unlimited?: boolean; agent_handoff_blocked_agents?: AgentType[] }) => api<void>('POST', '/config/server', req),
   regenerateAuthToken: () => api<string>('POST', '/config/auth-token/regenerate'),
 };
 
@@ -2035,8 +2057,20 @@ export const workflows = {
   /** Run an ApiCall step end-to-end (real HTTP, real auth) and return the
    *  structured envelope. Drives the wizard's "Tester" button. */
   testApiCall: (req: { step: WorkflowStep; project_id: string }) =>
-    api<{ success: boolean; duration_ms: number; envelope: { data: unknown; status: string; summary: string } | null; error: string | null }>(
+    api<TestApiCallResponse>(
       'POST', '/workflow-steps/test-api-call', req,
+    ),
+  /** Execute every saved Quick API of a CollectApiData step and return the
+   *  exact aggregate envelope. The sample only lives in wizard memory. */
+  testCollectApiData: (req: TestCollectApiDataRequest) =>
+    api<TestApiCallResponse>(
+      'POST', '/workflow-steps/test-collect-api-data', req,
+    ),
+  /** Preview the exact deterministic TransformData runtime against pasted
+   *  mock/real JSON. No DB, network, agent or workflow run is involved. */
+  previewTransformData: (req: PreviewTransformDataRequest) =>
+    api<PreviewTransformDataResponse>(
+      'POST', '/workflow-steps/preview-transform-data', req,
     ),
   suggestions: (projectId: string) => api<WorkflowSuggestion[]>('GET', `/projects/${projectId}/workflow-suggestions`),
   /** Batch runs with parent workflow meta (name + run sequence) — feeds the
@@ -2081,6 +2115,30 @@ export const workflows = {
       onError,
     });
   },
+};
+
+// ─── Pages vivantes (0.10.0) ──────────────────────────────────────────────
+
+export const pages = {
+  capability: () => api<LivePagesCapability>('GET', '/pages/capability'),
+  list: () => api<LivePage[]>('GET', '/pages'),
+  get: (id: string) => api<LivePageDetail>('GET', `/pages/${encodeURIComponent(id)}`),
+  revisions: (id: string) => api<LivePageRevision[]>('GET', `/pages/${encodeURIComponent(id)}/revisions`),
+  workflows: (id: string) => api<LivePageWorkflowLink[]>('GET', `/pages/${encodeURIComponent(id)}/workflows`),
+  publications: (id: string) => api<LivePagePublication[]>('GET', `/pages/${encodeURIComponent(id)}/publications`),
+  discussions: (id: string) => api<LivePageDiscussionLink[]>('GET', `/pages/${encodeURIComponent(id)}/discussions`),
+  create: (request: CreateLivePageRequest) => api<LivePageDetail>('POST', '/pages', request),
+  update: (id: string, request: UpdateLivePageRequest) =>
+    api<LivePageDetail>('PATCH', `/pages/${encodeURIComponent(id)}`, request),
+  delete: (id: string) => api<void>('DELETE', `/pages/${encodeURIComponent(id)}`),
+  linkDiscussion: (id: string, request: LinkLivePageDiscussionRequest) =>
+    api<LivePageDiscussionLink[]>('POST', `/pages/${encodeURIComponent(id)}/discussions`, request),
+  unlinkDiscussion: (id: string, discussionId: string) =>
+    api<void>('DELETE', `/pages/${encodeURIComponent(id)}/discussions/${encodeURIComponent(discussionId)}`),
+  updateHtml: (id: string, request: UpdateLivePageHtmlRequest) =>
+    api<LivePageRevision>('PUT', `/pages/${encodeURIComponent(id)}/html`, request),
+  publish: (id: string, request: PublishLivePageRequest) =>
+    api<PublishLivePageResult>('POST', `/pages/${encodeURIComponent(id)}/publish`, request),
 };
 
 // ─── Quick Prompts ─────────────────────────────────────────────────────────
@@ -2149,7 +2207,12 @@ export const quickPrompts = {
    */
   compareAgents: (
     qpId: string,
-    req: { prompt: string; batch_name: string; agents: AgentType[]; tier?: ModelTier; project_id?: string },
+    req: {
+      prompt: string;
+      batch_name: string;
+      targets: Array<{ agent: AgentType; tier: ModelTier }>;
+      project_id?: string;
+    },
   ) => api<BatchRunResponse>('POST', `/quick-prompts/${qpId}/compare-agents`, req),
   /** 0.7.0 UX pass — export a single QP as JSON file download. */
   exportQp: async (id: string): Promise<{ filename: string; blob: Blob }> => {
@@ -2200,6 +2263,30 @@ export const quickApis = {
   },
   importQa: (payload: ImportQuickApiRequest) =>
     api<QuickApi>('POST', '/quick-apis/import', payload),
+};
+
+// ─── Quick Execs (0.10.0) ───────────────────────────────────────────────────
+
+export const quickExecs = {
+  list: () => api<QuickExec[]>('GET', '/quick-execs'),
+  create: (req: CreateQuickExecRequest) => api<QuickExec>('POST', '/quick-execs', req),
+  update: (id: string, req: CreateQuickExecRequest) =>
+    api<QuickExec>('PUT', `/quick-execs/${id}`, req),
+  delete: (id: string) => api<void>('DELETE', `/quick-execs/${id}`),
+  run: (id: string, req: RunQuickExecRequest) =>
+    api<RunQuickExecResponse>('POST', `/quick-execs/${id}/run`, req),
+  export: async (id: string): Promise<{ filename: string; blob: Blob }> => {
+    const response = await fetch(`/api/quick-execs/${id}/export`, { credentials: 'same-origin' });
+    if (!response.ok) throw new Error(`Export failed (${response.status})`);
+    const disposition = response.headers.get('content-disposition') || '';
+    const match = disposition.match(/filename="([^"]+)"/);
+    return {
+      filename: match?.[1] || `quick-exec-${id}.kronn-quick-exec.json`,
+      blob: await response.blob(),
+    };
+  },
+  import: (payload: ImportQuickExecRequest) =>
+    api<QuickExec>('POST', '/quick-execs/import', payload),
 };
 
 // ─── Skills ─────────────────────────────────────────────────────────────────
@@ -2440,12 +2527,14 @@ export const themes = {
 export interface GeneratePdfRequest {
   discussion_id: string;
   html: string;
+  page_images?: string[];
   filename?: string;
   page_size?: string;
 }
 export interface GenerateDocxRequest {
   discussion_id: string;
   html: string;
+  page_images?: string[];
   filename?: string;
 }
 export interface GenerateXlsxRequest {

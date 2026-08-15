@@ -617,6 +617,95 @@ mod tests {
         assert_eq!(count_body["data"], 4);
     }
 
+    #[tokio::test]
+    async fn page_publications_endpoint_returns_only_three_newest_refreshes() {
+        let state = test_state();
+        state
+            .db
+            .with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO workflows
+                     (id, name, trigger_json, steps_json, actions_json, safety_json,
+                      enabled, created_at, updated_at)
+                     VALUES ('wf-refresh', 'Adobe refresh', '{\"type\":\"Manual\"}', '[]', '[]',
+                             '{}', 1, '2026-08-14T08:00:00Z', '2026-08-14T08:00:00Z')",
+                    [],
+                )?;
+                conn.execute(
+                    "INSERT INTO live_pages
+                     (id, title, slug, data_revision, created_at, updated_at, last_published_at)
+                     VALUES ('page-refresh', 'Adobe signals', 'adobe-signals', 4,
+                             '2026-08-14T08:00:00Z', '2026-08-14T08:04:00Z',
+                             '2026-08-14T08:04:00Z')",
+                    [],
+                )?;
+                for revision in 1..=4 {
+                    conn.execute(
+                        "INSERT INTO live_page_publications
+                         (id, page_id, data_revision, workflow_id, datasets_json,
+                          changed_datasets_json, unchanged_datasets_json,
+                          points_added, points_removed, published_at)
+                         VALUES (?1, 'page-refresh', ?2, 'wf-refresh', '[\"summary\"]',
+                                 ?3, ?4, 0, 0, ?5)",
+                        rusqlite::params![
+                            format!("publication-{revision}"),
+                            revision,
+                            if revision % 2 == 0 {
+                                "[\"summary\"]"
+                            } else {
+                                "[]"
+                            },
+                            if revision % 2 == 0 {
+                                "[]"
+                            } else {
+                                "[\"summary\"]"
+                            },
+                            format!("2026-08-14T08:0{revision}:00Z"),
+                        ],
+                    )?;
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let request = Request::builder()
+            .uri("/api/pages/adobe-signals/publications")
+            .body(Body::empty())
+            .unwrap();
+        let (status, json) = send(state.clone(), false, request).await;
+
+        assert_eq!(status, StatusCode::OK);
+        let publications = json["data"].as_array().unwrap();
+        assert_eq!(publications.len(), 3);
+        assert_eq!(publications[0]["data_revision"], 4);
+        assert_eq!(publications[2]["data_revision"], 2);
+        assert_eq!(publications[0]["workflow_id"], "wf-refresh");
+        assert_eq!(publications[0]["workflow_name"], "Adobe refresh");
+        assert_eq!(
+            publications[0]["datasets_updated"],
+            serde_json::json!(["summary"])
+        );
+        assert_eq!(publications[0]["content_changed"], true);
+        assert_eq!(
+            publications[0]["changed_datasets"],
+            serde_json::json!(["summary"])
+        );
+        assert_eq!(publications[1]["content_changed"], false);
+        assert_eq!(
+            publications[1]["unchanged_datasets"],
+            serde_json::json!(["summary"])
+        );
+
+        let missing_request = Request::builder()
+            .uri("/api/pages/missing/publications")
+            .body(Body::empty())
+            .unwrap();
+        let (_, missing_json) = send(state, false, missing_request).await;
+        assert_eq!(missing_json["success"], false);
+        assert_eq!(missing_json["error_code"], "not_found");
+    }
+
     // ─── Q2: Auth middleware tests ────────────────────────────────────────────
 
     /// Health endpoint bypasses auth even when auth is enabled.
@@ -3605,6 +3694,40 @@ mod tests {
             !err.contains("make docs-setup"),
             "must not expose a developer command"
         );
+    }
+
+    /// Browser-rendered Live Page images commonly exceed axum's default 2 MiB
+    /// JSON limit. They must reach the docs handler instead of failing with 413.
+    #[tokio::test]
+    async fn docs_pdf_accepts_materialized_page_over_default_body_limit() {
+        let state = test_state();
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/docs/pdf")
+            .header("Content-Type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "discussion_id": "page-1",
+                    "html": "<html><body>report</body></html>",
+                    "page_images": [format!("data:image/png;base64,{}", "A".repeat(2_200_000))],
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let (status, body) = send(state, false, req).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "request must pass the route body limit"
+        );
+        assert_eq!(
+            body["success"], false,
+            "test state has no docs sidecar: {body}"
+        );
+        assert!(body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Update or reinstall Kronn"));
     }
 
     /// Reject requests with traversal payloads in `discussion_id` before

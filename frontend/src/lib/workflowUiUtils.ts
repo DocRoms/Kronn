@@ -25,6 +25,23 @@ export function buildBlankStep(
   return step;
 }
 
+/** Produce a useful output key from a picked JSONPath. The collector wrapper
+ * (`sources`) is transport metadata, so it is intentionally omitted. */
+export function jsonPathToTarget(path: string): string {
+  const segments: string[] = [];
+  const matcher = /\.([A-Za-z_][A-Za-z0-9_-]*)|\[['"]((?:\\.|[^'"\\])*)['"]\]|\[(?:\d+|\*)\]/g;
+  let match: RegExpExecArray | null;
+  while ((match = matcher.exec(path)) !== null) {
+    const value = (match[1] ?? match[2] ?? '').replace(/\\(['"\\])/g, '$1');
+    if (value) segments.push(value);
+  }
+  if (segments[0] === 'sources') segments.shift();
+  return segments
+    .map(segment => segment.replace(/[^A-Za-z0-9_]/g, '_').replace(/^([0-9])/, '_$1'))
+    .filter(Boolean)
+    .join('.') || 'value';
+}
+
 export function liveStepWaitingKey(step: Pick<WorkflowStep, 'step_type'>): string {
   const isAgentLike = !step.step_type || step.step_type.type === 'Agent';
   return isAgentLike ? 'wf.live.stepStreamingWaiting' : 'wf.live.stepRunningNoStream';

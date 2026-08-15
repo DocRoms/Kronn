@@ -684,6 +684,24 @@ describe('DiscussionSidebar — batch groups', () => {
     expect(onReviewBatch).toHaveBeenCalledWith(runId, 'Analyse tickets', ['b1', 'b2']);
   });
 
+  it('compare-batch button opens the side-by-side workspace for any existing batch', async () => {
+    const onCompareBatch = vi.fn();
+    render(
+      <DiscussionSidebar
+        {...baseProps}
+        projects={projects}
+        discussions={batchDiscs}
+        batchSummaries={[mkBatchSummary({ run_id: runId, quick_prompt_name: 'Compare agents' })]}
+        onCompareBatch={onCompareBatch}
+      />
+    );
+    await waitFor(() => expect(projectsApi.discSources).toHaveBeenCalled());
+
+    openBatchMenu();
+    fireEvent.click(screen.getByRole('button', { name: 'disc.compare.action' }));
+    expect(onCompareBatch).toHaveBeenCalledWith(runId, 'Compare agents', ['b1', 'b2']);
+  });
+
   it('moves focus into the action disclosure and restores it on Escape', async () => {
     render(
       <DiscussionSidebar

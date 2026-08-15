@@ -1,6 +1,6 @@
 import './Dashboard.css';
 import { useState, useCallback, useRef, useEffect, useMemo, lazy, Suspense } from 'react';
-import { projects as projectsApi, mcps as mcpsApi, agents as agentsApi, discussions as discussionsApi, workflows as workflowsApi, config as configApi, skills as skillsApi } from '../lib/api';
+import { projects as projectsApi, mcps as mcpsApi, agents as agentsApi, discussions as discussionsApi, workflows as workflowsApi, pages as pagesApi, config as configApi, skills as skillsApi } from '../lib/api';
 import { useApi } from '../hooks/useApi';
 import { useToast } from '../hooks/useToast';
 import type { RemoteRepo, RepoSource, DiscoverSourceError, DriftCheckResponse, AuditProgress } from '../types/generated';
@@ -33,6 +33,7 @@ const WorkflowsPage = lazy(() => import('./WorkflowsPage').then(m => ({ default:
 const PlanningPage = lazy(() => import('./PlanningPage').then(m => ({ default: m.PlanningPage })));
 const SettingsPage = lazy(() => import('./SettingsPage').then(m => ({ default: m.SettingsPage })));
 const DiscussionsPage = lazy(() => import('./DiscussionsPage').then(m => ({ default: m.DiscussionsPage })));
+const PagesPage = lazy(() => import('./PagesPage').then(m => ({ default: m.PagesPage })));
 import { ActiveRunsPopover } from '../components/workflows/ActiveRunsPopover';
 import { ActiveAuditsPopover } from '../components/ActiveAuditsPopover';
 import { ProjectList } from '../components/ProjectList';
@@ -87,11 +88,13 @@ export function Dashboard({ onReset }: DashboardProps) {
   // WorkflowsPage via this prop. It's cleared right after consumption so the
   // navigation only fires once per click.
   const [openWorkflowId, setOpenWorkflowId] = useState<string | null>(null);
+  const [openWorkflowRunId, setOpenWorkflowRunId] = useState<string | null>(null);
   const [activeRunsPopoverOpen, setActiveRunsPopoverOpen] = useState(false);
   // Reverse direction: when a "📋 View N discussions" chip on a workflow run
   // is clicked, we hand the batch run id to DiscussionsPage so the sidebar
   // expands the matching batch group + scrolls to it.
   const [focusBatchId, setFocusBatchId] = useState<string | null>(null);
+  const [focusBatchMode, setFocusBatchMode] = useState<'batch' | 'compare'>('batch');
   // 0.8.2 — Deep-link from the validation-discussion CTA: opens the
   // workflow wizard pre-loaded with a preset (e.g. `ticket-to-pr` for
   // AutoPilot) bound to the project of the audit that just completed.
@@ -188,6 +191,8 @@ export function Dashboard({ onReset }: DashboardProps) {
   const { data: configLanguage, refetch: refetchLanguage } = useApi(() => configApi.getLanguage(), []);
   const { data: agentAccess, refetch: refetchAgentAccess } = useApi(() => configApi.getAgentAccess(), []);
   const { data: workflowList, refetch: refetchWorkflows } = useApi(() => workflowsApi.list(), []);
+  const { data: pagesCapability, refetch: refetchPagesCapability } = useApi(() => pagesApi.capability(), []);
+  const [openPageId, setOpenPageId] = useState<string | null>(null);
   const { data: skillList, refetch: refetchSkills } = useApi(() => skillsApi.list(), []);
 
   // KT-77 — a Vite full reload/HMR must not throw the user back to Projects.
@@ -196,6 +201,17 @@ export function Dashboard({ onReset }: DashboardProps) {
   useEffect(() => {
     writeDashboardPage(page);
   }, [page]);
+
+  useEffect(() => {
+    if (pagesCapability && !pagesCapability.activated && page === 'pages') {
+      setPage('projects');
+    }
+  }, [page, pagesCapability]);
+  useEffect(() => {
+    const activated = () => refetchPagesCapability();
+    window.addEventListener('kronn:pages-activated', activated);
+    return () => window.removeEventListener('kronn:pages-activated', activated);
+  }, [refetchPagesCapability]);
 
   useEffect(() => {
     writeActiveDiscussionId(activeDiscussionId);
@@ -702,8 +718,9 @@ export function Dashboard({ onReset }: DashboardProps) {
           ['projects', Folder, t('nav.projects')],
           ['discussions', MessageSquare, t('nav.discussions')],
           ['planning', ListTodo, t('nav.planning')],
-          ['mcps', Puzzle, t('nav.mcps')],
           ['workflows', Workflow, t('nav.workflows')],
+          ...(pagesCapability?.activated ? [['pages', FileText, t('nav.pages')]] : []),
+          ['mcps', Puzzle, t('nav.mcps')],
           // 0.8.6 (#61 follow-up 2026-05-21) — API call logs moved from a
           // top-level tab to a Settings sub-section (`#settings-api-audit`).
           // It's a debug/audit surface, not a daily-use tab — clutters the
@@ -857,6 +874,7 @@ export function Dashboard({ onReset }: DashboardProps) {
                     onClose={() => setActiveRunsPopoverOpen(false)}
                     onNavigateToWorkflow={(wfId) => {
                       setOpenWorkflowId(wfId);
+                      setOpenWorkflowRunId(null);
                       setPage('workflows');
                       setActiveRunsPopoverOpen(false);
                     }}
@@ -1383,15 +1401,21 @@ export function Dashboard({ onReset }: DashboardProps) {
               configLanguage={configLanguage ?? undefined}
               toast={toast}
               initialSelectedWorkflowId={openWorkflowId}
-              onInitialSelectionConsumed={() => setOpenWorkflowId(null)}
+              initialSelectedWorkflowRunId={openWorkflowRunId}
+              onInitialSelectionConsumed={() => {
+                setOpenWorkflowId(null);
+                setOpenWorkflowRunId(null);
+              }}
               pendingPreset={pendingWorkflowPreset}
               onPendingPresetConsumed={() => setPendingWorkflowPreset(null)}
               onNavigateToBatch={(batchRunId) => {
+                setFocusBatchMode('batch');
                 setFocusBatchId(batchRunId);
                 setPage('discussions');
               }}
               onNavigateDiscussion={(discId) => { setAutoRunDiscussionId(discId); setPage('discussions'); }}
-              onBatchLaunched={(discIds, batchRunId) => {
+              onNavigatePage={(pageId) => { setOpenPageId(pageId); setPage('pages'); }}
+              onBatchLaunched={(discIds, batchRunId, mode = 'batch') => {
                 // Mark every batch-child disc as sending so the sidebar
                 // spinner lights up for all of them in parallel, not just
                 // the one we navigate to. The parent (Dashboard) owns
@@ -1414,6 +1438,7 @@ export function Dashboard({ onReset }: DashboardProps) {
                 // + scroll after the refetch settles.
                 if (discIds.length > 0) {
                   setOpenDiscussionId(discIds[0]);
+                  setFocusBatchMode(mode);
                   setFocusBatchId(batchRunId);
                   setPage('discussions');
                 }
@@ -1422,6 +1447,24 @@ export function Dashboard({ onReset }: DashboardProps) {
                 refetchDiscussions?.();
               }}
             />
+            </Suspense>
+          </ErrorBoundary>
+        )}
+
+        {/* ════════ PAGES VIVANTES — progressive disclosure ════════ */}
+        {page === 'pages' && pagesCapability?.activated && (
+          <ErrorBoundary mode="zone" label="Pages">
+            <Suspense fallback={<PageFallback />}>
+              <PagesPage
+                initialSelectedPageId={openPageId}
+                onInitialSelectionConsumed={() => setOpenPageId(null)}
+                onNavigateWorkflow={(workflowId, runId) => {
+                  setOpenWorkflowId(workflowId);
+                  setOpenWorkflowRunId(runId ?? null);
+                  setPage('workflows');
+                }}
+                onNavigateDiscussion={(discussionId) => { setOpenDiscussionId(discussionId); setPage('discussions'); }}
+              />
             </Suspense>
           </ErrorBoundary>
         )}
@@ -1455,6 +1498,7 @@ export function Dashboard({ onReset }: DashboardProps) {
               // Sidebar batch pastille → workflows tab + pre-open the parent workflow's detail.
               if (opts?.workflowId) {
                 setOpenWorkflowId(opts.workflowId);
+                setOpenWorkflowRunId(null);
               }
             }}
             prefill={discPrefill}
@@ -1469,7 +1513,11 @@ export function Dashboard({ onReset }: DashboardProps) {
             openDiscussionId={openDiscussionId}
             onOpenDiscConsumed={handleOpenDiscConsumed}
             focusBatchId={focusBatchId}
-            onFocusBatchConsumed={() => setFocusBatchId(null)}
+            focusBatchMode={focusBatchMode}
+            onFocusBatchConsumed={() => {
+              setFocusBatchId(null);
+              setFocusBatchMode('batch');
+            }}
             toast={toast}
             sendingMap={sendingMap}
             setSendingMap={setSendingMap}

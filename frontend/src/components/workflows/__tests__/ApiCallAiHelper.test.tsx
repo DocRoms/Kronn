@@ -216,7 +216,7 @@ describe('applyToStep — KRONN:APPLY field allowlist', () => {
     expect(updates.api_method).toBe('GET');
     expect(updates.api_query).toEqual({ host: 'www.euronews.com', limit: '5' });
     expect(updates.api_headers).toEqual({ 'X-Test': 'yes' });
-    expect(updates.api_body).toBe('{"foo":"bar"}');
+    expect(updates.api_body).toEqual({ foo: 'bar' });
     expect(updates.api_extract?.path).toBe('$.pages[*].path');
   });
 

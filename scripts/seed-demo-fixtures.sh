@@ -2,7 +2,7 @@
 # scripts/seed-demo-fixtures.sh
 #
 # Spawn a sandboxed Kronn instance with curated demo data (projects,
-# Quick Prompts, MCP configs) for README screenshots, marketing GIFs,
+# Quick Prompts, showcase workflow) for README screenshots, marketing GIFs,
 # or onboarding tutorials. Reproducible, no real user data ever touched.
 #
 # # Why this script exists
@@ -10,9 +10,10 @@
 # Screenshots in the README/website should NOT show the maintainer's
 # real project names, real Jira tickets, or real MCP secrets. This
 # script materializes a parallel "demo universe" :
-#   - `acme-blog`, `demo-monorepo`, `sample-rust-cli` projects
+#   - `acme-blog`, `demo-monorepo`, `sample-rust-cli` projects with
+#     public-safe source, manifests and agent documentation
 #   - 4 Quick Prompts with marketing-friendly names + descriptions
-#   - 1 active batch run (for the batch-running screenshot)
+#   - 1 showcase workflow with deterministic + agent steps
 #   - Setup wizard already completed
 # in a tmpdir + a non-default port, so it CO-EXISTS with the
 # maintainer's prod Kronn on the standard port.
@@ -44,9 +45,11 @@
 set -euo pipefail
 
 # ── Defaults ───────────────────────────────────────────────────────────
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PORT="${KRONN_SANDBOX_PORT:-3145}"
 DATA_DIR="${KRONN_SANDBOX_DATA:-$(mktemp -d -t kronn-demo-data.XXXXXX)}"
 REPOS_DIR="${KRONN_SANDBOX_REPOS:-$(mktemp -d -t kronn-demo-repos.XXXXXX)}"
+HOST_HOME_DIR="${DATA_DIR}/host-home"
 # 0.8.3 — the shared `.cargo/config.toml` at repo root sets
 # `target-dir = "target"`, so the binary now lives at `target/release/kronn`
 # (NOT `backend/target/...`). Keep a fallback to the old path for
@@ -67,6 +70,11 @@ API="http://localhost:${PORT}/api"
 # ── Pre-flight ─────────────────────────────────────────────────────────
 command -v curl >/dev/null || { echo "✗ curl is required"; exit 1; }
 command -v git  >/dev/null || { echo "✗ git is required"; exit 1; }
+[ -r "${SCRIPT_DIR}/seed-demo-repo-content.sh" ] || {
+  echo "✗ Missing demo repository content helper"; exit 1;
+}
+# shellcheck source=seed-demo-repo-content.sh
+. "${SCRIPT_DIR}/seed-demo-repo-content.sh"
 # Zero external JSON tooling Bash + curl only. Demo data is small,
 # hand-typed JSON literals are easier to audit than jq pipelines.
 if [ ! -x "$BINARY" ]; then
@@ -84,8 +92,14 @@ echo "▸ Sandbox config:"
 echo "    PORT      = $PORT"
 echo "    DATA_DIR  = $DATA_DIR"
 echo "    REPOS_DIR = $REPOS_DIR"
+echo "    HOST_HOME = $HOST_HOME_DIR"
 echo "    BINARY    = $BINARY"
 echo
+
+# MCP host sync is part of normal Kronn startup. Point it at an empty home
+# inside the sandbox so screenshot generation can never read or rewrite the
+# maintainer's real Claude/Codex/Gemini/Copilot configuration.
+mkdir -p "$HOST_HOME_DIR"
 
 # ── Pre-seed config.toml so the backend boots on $PORT ──────────────
 # The backend reads port from `config.toml[server].port` only -
@@ -124,6 +138,7 @@ EOF
 # ── Spawn backend in background ───────────────────────────────────────
 echo "▸ Starting backend…"
 KRONN_DATA_DIR="$DATA_DIR" \
+KRONN_HOST_HOME="$HOST_HOME_DIR" \
   "$BINARY" > /tmp/kronn-demo-backend.log 2>&1 &
 BACKEND_PID=$!
 echo "$BACKEND_PID" > /tmp/kronn-demo-backend.pid
@@ -154,21 +169,19 @@ echo "▸ Finalizing setup…"
 curl -fsS -X POST "$API/setup/complete" >/dev/null
 
 # ── Create 3 demo projects ─────────────────────────────────────────────
-echo "▸ Creating 3 demo project repos under $REPOS_DIR…"
+echo "▸ Creating 3 demo project repos under ${REPOS_DIR}…"
 DEMO_PROJECTS=(
-  "acme-blog|A fictional company's blog backend (Node.js + Postgres)"
-  "demo-monorepo|Polyglot monorepo: Rust backend + React frontend"
-  "sample-rust-cli|Small command-line tool written in Rust"
+  "acme-blog"
+  "demo-monorepo"
+  "sample-rust-cli"
 )
-for entry in "${DEMO_PROJECTS[@]}"; do
-  name="${entry%%|*}"
-  desc="${entry##*|}"
+for name in "${DEMO_PROJECTS[@]}"; do
   path="$REPOS_DIR/$name"
   mkdir -p "$path"
+  seed_demo_repo_content "$path" "$name"
   ( cd "$path" && git init -q . && \
     git config user.email "demo@kronn.local" && \
     git config user.name "Kronn Demo" && \
-    echo "# $name" > README.md && echo "$desc" >> README.md && \
     git add . && git commit -q -m "init" )
   # Inline JSON `path` is a /tmp/* absolute path we control, no
   # special characters to escape; same for `name` (kebab-case slug).
@@ -228,6 +241,67 @@ post_qp "Refactor for testability" '{
   "agent":"ClaudeCode","tier":"default","skill_ids":[],
   "description":"Split a tangled function into testable bits."
 }'
+
+# ── Seed 1 showcase workflow (the "vedette" Automation capture) ─────────
+# A neutral, project-less multi-step pipeline that exercises every badge
+# the Automation detail view can render: Exec (deterministic), ApiCall
+# (blue API), Agent (the one-click model-tier picker), Gate (human-in-
+# the-loop) and Notify (webhook). `on_result` Gotos draw the coloured
+# branch map — including one backward loop (rendered dashed). No step is
+# ever RUN here, so ApiCall slugs/paths only need to be well-formed for
+# the create-time validators — no real credential or MCP config needed.
+echo
+echo "▸ Seeding 1 showcase workflow…"
+WF_BODY='{
+  "name":"Auto-review a pull request",
+  "trigger":{"type":"Manual"},
+  "concurrency_limit":1,
+  "exec_allowlist":["bash"],
+  "steps":[
+    {"name":"preflight","step_type":{"type":"Exec"},
+     "description":"0/9 — Network guard: retry until GitHub is reachable. Deterministic, zero tokens.",
+     "exec_command":"bash","exec_args":["-c","curl -sf -m 10 -o /dev/null https://api.github.com/zen && echo READY"],
+     "exec_timeout_secs":60},
+    {"name":"fetch_pr","step_type":{"type":"ApiCall"},
+     "description":"1/9 — GitHub API: load the pull request metadata (title, base, author).",
+     "api_plugin_slug":"mcp-github","api_endpoint_path":"/repos/{{owner}}/{{repo}}/pulls/{{pr}}","api_method":"GET"},
+    {"name":"fetch_diff","step_type":{"type":"ApiCall"},
+     "description":"2/9 — GitHub API: fetch the changed files + patch to review.",
+     "api_plugin_slug":"mcp-github","api_endpoint_path":"/repos/{{owner}}/{{repo}}/pulls/{{pr}}/files","api_method":"GET",
+     "api_query":{"per_page":"100"}},
+    {"name":"size_guard","step_type":{"type":"Exec"},
+     "description":"3/9 — Deterministic gate: skip oversized PRs (> 800 lines) so no agent tokens are spent on noise.",
+     "exec_command":"bash","exec_args":["-c","lines=$(wc -l 2>/dev/null || echo 0); if [ \"$lines\" -gt 800 ]; then echo TOO_BIG; else echo OK; fi"],
+     "exec_timeout_secs":60,
+     "on_result":[{"contains":"TOO_BIG","action":{"type":"Goto","step_name":"notify_skipped"}}]},
+    {"name":"review","step_type":{"type":"Agent"},
+     "description":"4/9 — The only agent step: reads the diff and writes a structured review. Pick the model tier in one click below.",
+     "agent":"ClaudeCode","agent_settings":{"tier":"reasoning"},
+     "prompt_template":"Review the pull request diff. List blockers, risks and nits as a numbered list with severity. End with APPROVE or NEEDS_HUMAN.",
+     "on_result":[{"contains":"NEEDS_HUMAN","action":{"type":"Goto","step_name":"human_gate"}}]},
+    {"name":"human_gate","step_type":{"type":"Gate"},
+     "description":"5/9 — Human-in-the-loop: an operator approves before anything is posted. Zero tokens.",
+     "gate_message":"Approve posting this review on the pull request?"},
+    {"name":"post_review","step_type":{"type":"ApiCall"},
+     "description":"6/9 — GitHub API: publish the review as inline comments on the PR.",
+     "api_plugin_slug":"mcp-github","api_endpoint_path":"/repos/{{owner}}/{{repo}}/pulls/{{pr}}/reviews","api_method":"POST",
+     "on_result":[{"contains":"RATE_LIMITED","action":{"type":"Goto","step_name":"fetch_pr","max_iterations":3}}]},
+    {"name":"apply_labels","step_type":{"type":"ApiCall"},
+     "description":"7/9 — GitHub API: label the PR (reviewed / needs-changes) deterministically.",
+     "api_plugin_slug":"mcp-github","api_endpoint_path":"/repos/{{owner}}/{{repo}}/issues/{{pr}}/labels","api_method":"POST"},
+    {"name":"notify_done","step_type":{"type":"Notify"},
+     "description":"8/9 — Webhook: ping the team channel that the review shipped. Zero tokens.",
+     "notify_config":{"url":"https://hooks.example.com/kronn/review-done","method":"POST","body_template":"{\"pr\":\"{{pr}}\",\"status\":\"reviewed\"}"}},
+    {"name":"notify_skipped","step_type":{"type":"Notify"},
+     "description":"9/9 — Webhook: report the PR was skipped (too large) so nothing is silently dropped.",
+     "notify_config":{"url":"https://hooks.example.com/kronn/review-skipped","method":"POST","body_template":"{\"pr\":\"{{pr}}\",\"status\":\"skipped\"}"}}
+  ]
+}'
+WF_RESP=$(curl -fsS -X POST -H "Content-Type: application/json" -d "$WF_BODY" "$API/workflows" 2>&1 || true)
+case "$WF_RESP" in
+  *'"success":true'*) echo "  ✓ Auto-review a pull request (10 steps, 1 agent)";;
+  *)                  echo "  ✗ workflow seed FAILED: $WF_RESP";;
+esac
 
 # ── Print next steps ───────────────────────────────────────────────────
 cat <<EOF

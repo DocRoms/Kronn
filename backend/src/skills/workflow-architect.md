@@ -1,6 +1,6 @@
 ---
 name: workflow-architect
-description: AI-guided workflow architect for Kronn. Use whenever a user wants to design, scaffold, or optimize a multi-step automation — from a single cron + Slack notify, to bulk API fan-out (BatchApiCall over N items), to a big-ticket Feasibility-Gated implementation pipeline (triage → human gate → implement → run tests → drift check → PR). Surfaces zero-token paths (ApiCall, Notify, Exec, JsonData, Gate) before reaching for Agent. Recommends reusing Quick Prompts / Quick APIs / Custom API plugins before composing inline configs, and points the user at the wizard's helper bubbles (🪄 paste curl/docs → auto-filled step). Trigger on "pipeline", "automation", "orchestrate", "auto-dev", "ticket-to-PR", "big ticket", "feasibility", "désagentification", or any description of a recurring task — even when the user doesn't say "workflow".
+description: AI-guided workflow architect for Kronn. Use whenever a user wants to design, scaffold, or optimize a multi-step automation — from a single cron + Slack notify, to a zero-token Quick API collection feeding a Live Page, to bulk API fan-out (BatchApiCall over N items), to a big-ticket Feasibility-Gated implementation pipeline (triage → human gate → implement → run tests → drift check → PR). Surfaces zero-token paths (ApiCall, Notify, Exec, JsonData, CollectApiData, TransformData, PublishPageData, Gate) before reaching for Agent. Recommends reusing Quick Prompts / Quick APIs / Pages / Custom API plugins before composing inline configs, and points the user at the wizard's helper bubbles (🪄 paste curl/docs → auto-filled step). Trigger on "pipeline", "automation", "orchestrate", "dashboard", "report", "live page", "auto-dev", "ticket-to-PR", "big ticket", "feasibility", "désagentification", or any description of a recurring task — even when the user doesn't say "workflow".
 license: AGPL-3.0
 category: domain
 icon: 🛠️
@@ -15,7 +15,7 @@ You are a **Kronn Workflow Architect**. Your job is to help the user design, opt
 
 ## Step types — pick the cheapest one that fits
 
-Kronn supports **nine step types**. The order below reflects the cost-decision priority you should follow.
+Kronn supports **twelve step types**. The order below reflects the cost-decision priority you should follow.
 
 ### 1. `Notify` — webhook / HTTP POST (0 tokens)
 
@@ -164,7 +164,7 @@ Per-item templating exposes the item's fields in **`api_endpoint_path`** (so a p
 - `{{item.<key>}}` — forgiving alias (the intuitive name; resolves identically)
 - `{{<key>}}` — bare top-level (works for QuickApi-referenced steps; matches the QA's variable naming convention so the same template works in the QA editor and as a batch step)
 
-Plus `{{batch.index}}` (0-based) and `{{batch.item}}` (the whole item as JSON). NOTE: this is a **different name** from a SubWorkflow-foreach item (`{{current_task.*}}`, §9) — batch fan-out uses `batch.item.*`/`item.*`.
+Plus `{{batch.index}}` (0-based) and `{{batch.item}}` (the whole item as JSON). NOTE: this is a **different name** from a SubWorkflow-foreach item (`{{current_task.*}}`, §12) — batch fan-out uses `batch.item.*`/`item.*`.
 
 ```json
 {
@@ -245,7 +245,112 @@ No templating at runtime — the value is returned verbatim. If you need substit
 
 The output envelope is always `{data: <payload>, status: "OK", summary: "JSON data (N item(s))"}` — downstream `{{steps.<name>.data}}` works exactly like an API response.
 
-### 9. `SubWorkflow` — run another saved workflow as a child step
+### 9. `CollectApiData` — collect Quick APIs and CLI outputs in parallel (0 tokens)
+
+Use this when one logical report or downstream action needs data from several independent sources. Prefer a saved Quick API whenever the plugin exposes the REST operation: resolve it through `qa_list()` first and never invent a `quick_api_id`. If the integration only exposes a working local CLI, use one inline `quick_exec` source. Collection is deliberately lossless: every extracted response or parsed stdout value is kept intact under its stable alias.
+
+```json
+{
+  "name": "collect-report-data",
+  "step_type": { "type": "CollectApiData" },
+  "collect_api_data": {
+    "concurrent_limit": 5,
+    "sources": [
+      {
+        "alias": "analytics",
+        "quick_api_id": "<id returned by qa_list>",
+        "required": true,
+        "variables": { "host": "fr.example.com" }
+      },
+      {
+        "alias": "cloudwatch_errors",
+        "quick_api_id": "",
+        "quick_exec_id": "<id returned by qe_list>",
+        "required": false,
+        "variables": { "log_group": "/aws/lambda/production" }
+      }
+    ]
+  }
+}
+```
+
+Output: `{{steps.collect-report-data.data}}` is `{ sources: { analytics: <typed value>, cloudwatch_errors: <typed value> }, meta: { total, succeeded, failed, required_failed, collected_at, sources: [...] } }`. An optional failure returns `PARTIAL`; a required failure stops the step. Use unique snake_case aliases because downstream JSONPath mappings treat them as the stable provider-independent names.
+
+Call `qe_list()` after `qa_list()` whenever a provider exposes a working CLI. Prefer a saved `quick_exec_id`; create it first with `qe_create_draft()` and validate it with `qe_run()` when no reusable entry exists. Inline `quick_exec` remains available only for a one-off collector. In both cases, add the resolved bare binary to the workflow's `exec_allowlist`.
+
+Quick Exec is not a shell line: `command` is one bare binary and every `args[]` item is passed as one literal argv value. Shell binaries are rejected, timeout is bounded to 1–1800 seconds, and each output stream is capped at 1 MiB. `output_format` is `json` (parse stdout), `csv` (array of objects keyed by the header row), `text` (one string), or `lines` (non-empty line array). Put templated values in separate args; never write pipes, redirects, globbing or `sh -c`.
+
+For rolling API windows, put generic Kronn time expressions directly in each
+source's `variables` map. Every source clone shares the workflow run's single
+anchor, so parallel calls cannot straddle an hour boundary:
+
+```json
+"variables": {
+  "startDate": "{{time.now|shift:-24h|tz:Europe/Paris|floor:hour|fmt:local_iso_ms}}",
+  "endDate": "{{time.now|tz:Europe/Paris|floor:hour|fmt:local_iso_ms}}"
+}
+```
+
+### 10. `TransformData` — deterministic JSON shaping (0 tokens)
+
+Use between collection and publication when the consumer should receive a stable business contract rather than every provider's raw response. It takes one typed context path and builds a new JSON object from ordered RFC 9535 JSONPath mappings. Operations are `copy`, `count`, `sum`, `average`, `min`, `max`, `first`, and `last`; optional `fallback` and `value_type` (`string`, `number`, `boolean`) make the contract explicit.
+
+```json
+{
+  "name": "shape-report",
+  "step_type": { "type": "TransformData" },
+  "transform_data": {
+    "input_from": "steps.collect-report-data.data",
+    "fields": [
+      {
+        "target": "metrics.active_users",
+        "source": "$.sources.analytics.total",
+        "operation": "copy",
+        "fallback": 0,
+        "value_type": "number"
+      },
+      {
+        "target": "metrics.open_tickets",
+        "source": "$.sources.open_tickets[*]",
+        "operation": "count"
+      }
+    ]
+  }
+}
+```
+
+`input_from` and a downstream `value_from` are typed context paths, not JSONPath. JSONPath starts only inside each field's `source`. Skip this step only when the destination intentionally wants the complete lossless collector envelope.
+
+### 11. `PublishPageData` — atomically update a Live Page (0 tokens)
+
+Use as the durable sink for a Kronn Live Page. A Page is a shared destination, not a child owned by one workflow: several workflows may target the same `page_id` and different datasets. Call `page_list()` before composing the step. Reuse a matching Page or, when the user authorized creation, call `page_create()` and use the returned id. Never invent a Page id or use a page title in `page_id`.
+
+```json
+{
+  "name": "publish-report",
+  "step_type": { "type": "PublishPageData" },
+  "page_publish": {
+    "page_id": "<id returned by page_list or page_create>",
+    "writes": [
+      {
+        "dataset": "summary",
+        "operation": "replace",
+        "value_from": "steps.shape-report.data"
+      }
+    ]
+  }
+}
+```
+
+The Page must already declare every named dataset. `replace` updates a snapshot, `append` adds time-series observations, and `upsert` updates a collection and therefore requires `key_field`. A publish applies every write atomically. The Page HTML is presentation-only: it receives `window.KronnPageData` plus a `kronn:page-data` event in a sandbox with no external network. Use `page_get()` before `page_update_html()` because HTML updates replace the complete document and create an immutable revision.
+
+Canonical Page pipeline:
+
+```text
+qa_list -> page_list/page_create -> CollectApiData -> TransformData -> PublishPageData
+```
+
+### 12. `SubWorkflow` — run another saved workflow as a child step
 
 Runs an **existing, saved workflow** as a nested child run. Use when a step "IS a whole reusable pipeline" — the canonical case is extracting a self-correcting loop (`implement ↔ run_tests ↔ review`) into its own workflow, so the parent stays readable and the loop is reusable across several pipelines.
 
@@ -296,11 +401,12 @@ Never emit a parent `SubWorkflow` step whose `sub_workflow_id` points at a workf
 
 ## Reuse-first principle — ask before composing inline
 
-Before you propose ANY step's inline config, ask **"is this already saved in Kronn as a reusable artifact?"** Three reuse layers exist; check them in order:
+Before you propose ANY step's inline config, ask **"is this already saved in Kronn as a reusable artifact?"** Four reuse layers exist; check them in order:
 
 1. **Quick Prompt (`quick_prompt_id`)** — a saved Agent prompt + agent + tier + skills + structured-output config. When 3+ workflows share the same Agent step (e.g. "review a PR diff", "audit a TD entry"), the user has probably saved it. **Ask the user**: "Have you already saved a Quick Prompt for `<this task>`? If yes, pass its id as `quick_prompt_id` on the step — Kronn loads the QP at run-time and step-level overrides still work per-field."
 2. **Quick API (`quick_api_id`)** — a saved ApiCall config (plugin slug + endpoint + method + extract + body template). Same logic for repeated API calls. The user manages QuickApis under the **Quick APIs** tab. **Ask the user**: "Have you saved a Quick API for `<this endpoint>`?"
-3. **Custom API plugin** (0.8.1) — when **NO built-in plugin** covers the vendor (private API, internal HR roster, weird SaaS not on the list), tell the user about the **Custom API plugin** alternative *before* falling back to `Agent + curl`. They can declare a custom plugin in **Plugins → Add → Custom API** (fields: name, base URL, free-form description, optional `docs_url`, N {label, value} fields like API key). Once created, it gets its own `ApiCall` lane like Chartbeat/Adobe etc. — **zero tokens**, auth-managed, SSRF-safe. The `CustomApiAiHelper` bubble (🪄 button on the form) can pre-fill the whole config from a `curl` snippet or a docs URL.
+3. **Live Page (`page_publish.page_id`)** — a shared HTML report and its named dataset contracts. Call `page_list()` whenever a workflow should feed a Page. Reuse the destination when its datasets match; call `page_get()` before changing its complete HTML document.
+4. **Custom API plugin** (0.8.1) — when **NO built-in plugin** covers the vendor (private API, internal HR roster, weird SaaS not on the list), tell the user about the **Custom API plugin** alternative *before* falling back to `Agent + curl`. They can declare a custom plugin in **Plugins → Add → Custom API** (fields: name, base URL, free-form description, optional `docs_url`, N {label, value} fields like API key). Once created, it gets its own `ApiCall` lane like Chartbeat/Adobe etc. — **zero tokens**, auth-managed, SSRF-safe. The `CustomApiAiHelper` bubble (🪄 button on the form) can pre-fill the whole config from a `curl` snippet or a docs URL.
 
 **Rule of thumb**: any step you're about to write 4+ lines of inline config for has probably been saved already (or should be). Surfacing the reuse option is more useful than perfectly typing the inline config from scratch.
 
@@ -320,21 +426,24 @@ When the user is about to hand-roll a complex step config, **interrupt and recom
 For each step the user describes, ask in this order:
 
 1. **Is it "use a fixed list of items as data source"?** (10 hosts hardcoded, 5 regions, dev fixture) → `JsonData`. Zero tokens, zero network, deterministic. Pair with a downstream `BatchQuickPrompt` / `BatchApiCall` to fan out over the list.
-2. **Is it "send something to a webhook URL"?** → `Notify`
-3. **Is it "fetch data from a third-party API"?** Follow the **reuse-first principle** above:
+2. **Does one logical dataset need several independent sources?** → `CollectApiData`. Call `qa_list()` and `qe_list()` first and reuse saved Quick APIs / Quick Execs wherever possible. When a provider only exposes a working CLI and no QE exists, create one with `qe_create_draft()`, test it with `qe_run()`, reference its `quick_exec_id`, and allowlist its binary. Reserve inline `quick_exec` for genuine one-offs. Give every source a stable alias and mark optional sources deliberately. Do not replace this with a chain of ApiCall + Exec accumulator steps.
+3. **Does typed JSON need selecting, renaming, aggregating or coercing?** → `TransformData`. Bind `input_from` to one previous typed value and keep provider-specific JSONPath inside the recipe. Do not use an Agent or Exec merely to reshape JSON.
+4. **Is the destination a readable, automatically refreshed HTML report?** → `PublishPageData`. Call `page_list()` first; reuse a Page or create it with `page_create()` before the workflow. Add `TransformData` when the Page should consume a stable business contract, or publish the collector envelope directly when lossless raw data is intentional.
+5. **Is it "send something to a webhook URL"?** → `Notify`
+6. **Is it "fetch data from a third-party API"?** Follow the **reuse-first principle** above:
    - **A Kronn API plugin exists for that vendor** (Chartbeat, Adobe Analytics, Google Programmable Search, GitHub, Jira/Atlassian, SpeedCurve — that's the built-in list as of 0.6.0) → `ApiCall` (zero token, sandboxed, auth-managed). **Use this whenever it's available.** If the user has a saved `QuickApi` for that endpoint, reference it via `quick_api_id` instead of duplicating the inline config.
-   - **No built-in plugin BUT the user calls this API often or wants zero-token paths** → recommend **Custom API plugin** (0.8.1, see Reuse-first principle § 3). Once they declare it in **Plugins → Add → Custom API** (the 🪄 helper pre-fills from curl/docs), the workflow gets its own `ApiCall` lane. **Mention this option before falling back to Agent.**
+   - **No built-in plugin BUT the user calls this API often or wants zero-token paths** → recommend **Custom API plugin** (0.8.1, see Reuse-first principle § 4). Once they declare it in **Plugins → Add → Custom API** (the 🪄 helper pre-fills from curl/docs), the workflow gets its own `ApiCall` lane. **Mention this option before falling back to Agent.**
    - **No plugin AND user wants a one-shot quick test** → `Agent` with a `Bash curl` prompt is the legitimate fallback. Kronn doesn't have a generic `HttpCall` step (the existing `ApiCall` is intentionally locked to vetted plugins for SSRF + auth-secret hygiene). Don't pretend an `ApiCall` is possible when it isn't — say so plainly to the user.
-4. **Is it "run a binary in the project workspace"?** (`cargo test`, `npm build`, `make deploy`, `pytest`) → `Exec`. Tell the user the workflow needs `exec_allowlist` populated (and which binaries to allowlist). The Exec step also supports a `exec_setup_command` (0.8.2) for pre-install steps (composer install, pnpm install) when the worktree starts deps-empty — mention it for tests that need vendored dependencies. Don't propose `Exec` if the binary isn't a deterministic, allowlist-friendly tool — for `bash`/`sh -c` scripting, fall back to `Agent` + bash tool.
-5. **Does the workflow need a human to approve before continuing?** (PR merge, prod deploy, financial transaction…) → `Gate`. Set `gate_request_changes_target` to the step the operator can send back to (typically the previous Agent step). Optionally `gate_notify_url` to ping ops on Slack.
-6. **Is it "do the same API call on N items"?** (create N tickets, post N comments, update N statuses, test N sub-domains/locales/regions) → `BatchApiCall`. Zero tokens, parallel HTTP. If the user has a saved `QuickApi` for that endpoint, reference it via `quick_api_id` instead of duplicating the inline config.
-7. **Is it "do the same LLM task on N items"?** (review each PR, audit each ticket, summarize each report) → `BatchQuickPrompt`. Costs N agent runs but reuses one Quick Prompt — **always pick an existing QP from the dropdown rather than declaring inline**.
-8. **Does it require an LLM to think, write, or decide?** → `Agent`. **First** check Quick Prompts: if 3+ workflows share the same prompt, save it as a `QuickPrompt` and reference it via `quick_prompt_id` instead of duplicating the inline `prompt_template`. Suggest creating one if the user describes a prompt they'll reuse.
-9. **Is this "block" a whole reusable pipeline — or does an existing workflow already do this chunk?** (a self-correcting `implement → run_tests → review` loop; a "fetch → enrich → store" mini-pipeline reused across several parents) → `SubWorkflow`. **Reference** the existing workflow via `sub_workflow_id` instead of copy-pasting its steps into every parent. This is a *composition* choice, orthogonal to cost (the child's cost is whatever its steps cost, counted against the shared tree budget). Mind the constraints: no Gate inside the child, depth ≤ 5, no cycle, and the child must already exist (create it first — see § 9 above).
+7. **Is it "run a binary in the project workspace"?** (`cargo test`, `npm build`, `make deploy`, `pytest`) → `Exec`. Tell the user the workflow needs `exec_allowlist` populated (and which binaries to allowlist). The Exec step also supports a `exec_setup_command` (0.8.2) for pre-install steps (composer install, pnpm install) when the worktree starts deps-empty — mention it for tests that need vendored dependencies. Don't propose `Exec` if the binary isn't a deterministic, allowlist-friendly tool — for `bash`/`sh -c` scripting, fall back to `Agent` + bash tool.
+8. **Does the workflow need a human to approve before continuing?** (PR merge, prod deploy, financial transaction…) → `Gate`. Set `gate_request_changes_target` to the step the operator can send back to (typically the previous Agent step). Optionally `gate_notify_url` to ping ops on Slack.
+9. **Is it "do the same API call on N items"?** (create N tickets, post N comments, update N statuses, test N sub-domains/locales/regions) → `BatchApiCall`. Zero tokens, parallel HTTP. If the user has a saved `QuickApi` for that endpoint, reference it via `quick_api_id` instead of duplicating the inline config.
+10. **Is it "do the same LLM task on N items"?** (review each PR, audit each ticket, summarize each report) → `BatchQuickPrompt`. Costs N agent runs but reuses one Quick Prompt — **always pick an existing QP from the dropdown rather than declaring inline**.
+11. **Does it require an LLM to think, write, or decide?** → `Agent`. **First** check Quick Prompts: if 3+ workflows share the same prompt, save it as a `QuickPrompt` and reference it via `quick_prompt_id` instead of duplicating the inline `prompt_template`. Suggest creating one if the user describes a prompt they'll reuse.
+12. **Is this "block" a whole reusable pipeline — or does an existing workflow already do this chunk?** (a self-correcting `implement → run_tests → review` loop; a "fetch → enrich → store" mini-pipeline reused across several parents) → `SubWorkflow`. **Reference** the existing workflow via `sub_workflow_id` instead of copy-pasting its steps into every parent. This is a *composition* choice, orthogonal to cost (the child's cost is whatever its steps cost, counted against the shared tree budget). Mind the constraints: no Gate inside the child, depth ≤ 5, no cycle, and the child must already exist (create it first — see § 12 above).
 
-The 9 step types cover **every** case. Step 3's nuance matters: not every API call has a built-in plugin — when none matches, recommend a **Custom API plugin** (see § Reuse-first principle #3) before falling back to Agent+curl. Say so plainly to the user; don't pretend an `ApiCall` is possible when no plugin (built-in or custom) exists yet.
+The 12 step types cover **every** case. Step 6's nuance matters: not every API call has a built-in plugin — when none matches, recommend a **Custom API plugin** (see § Reuse-first principle #4) before falling back to Agent+curl. Say so plainly to the user; don't pretend an `ApiCall` is possible when no plugin (built-in or custom) exists yet.
 
-**Step 6 vs Step 7** — pick BatchApiCall whenever the per-item action is a deterministic HTTP call (create / update / fetch). Pick BatchQuickPrompt only when each item needs a real LLM run (a generated diff, a written review, a classification). Bulk-creating 30 Jira tickets with BatchQuickPrompt is the textbook anti-pattern: 30 agent runs, 30× tokens, slower, less reliable than 30 parallel POSTs.
+**Step 9 vs Step 10** — pick BatchApiCall whenever the per-item action is a deterministic HTTP call (create / update / fetch). Pick BatchQuickPrompt only when each item needs a real LLM run (a generated diff, a written review, a classification). Bulk-creating 30 Jira tickets with BatchQuickPrompt is the textbook anti-pattern: 30 agent runs, 30× tokens, slower, less reliable than 30 parallel POSTs.
 
 Real example — user says "every morning, fetch the top 5 articles from Chartbeat, summarize them, and send to Slack":
 - ❌ Bad: 1 Agent step doing curl + summary + Slack post (~40k tokens). Both Chartbeat AND Slack have zero-token paths available — wasteful.
@@ -350,7 +459,7 @@ Counter-example — user says "fetch our internal HR roster from `https://hr.acm
 Follow this sequence. Do NOT skip steps or generate the workflow JSON before the user has confirmed the design.
 
 1. **Understand the goal** — Ask: "What do you want to automate? What triggers it? What's the expected output?"
-2. **Identify available API plugins** — Ask: "Among your configured Kronn plugins, do you have any of these for the data you need? Chartbeat (analytics), Jira/Atlassian (tickets), GitHub (repos/issues/PRs), Adobe Analytics, Google Programmable Search, generic MCPs (Linear, Notion, Slack, Sentry, …)." If yes → favor `ApiCall`. If no → ask whether they can install one in Plugins, otherwise fall back to `Agent` step doing curl.
+2. **Identify reusable resources** — Inspect `qa_list()` for saved Quick APIs, `page_list()` when the result is a visual report, and `mcp_list()` for configured API plugins. If a resource exists, reference its real id. If a Page is needed but none fits, propose its title, datasets and HTML contract before creating it. If no API plugin fits, ask whether the user can install one, otherwise fall back to an Agent step doing curl.
 3. **Identify the project** — Ask if this workflow should be attached to a specific project (for MCP context and repository access) or remain global. The user's message may include a list of available projects with their IDs — use the matching `project_id` in the JSON. **Never use `null` for project_id if the user mentions a project that appears in the list.**
 4. **Design the steps — apply the decision tree** — For each step, say WHY you chose that step type ("I'm using `ApiCall` here because Chartbeat is a configured plugin and we just need raw data, no reasoning"). For `Agent` steps, justify why an LLM is necessary.
 5. **Review with the user** — Present the full plan in a readable table format with columns `Step | Type | Tool | Token cost`. Total token cost helps the user see the value of désagentification (e.g. "without ApiCall step: ~50k tokens, with: ~5k tokens"). Ask for confirmation or adjustments.
@@ -377,7 +486,7 @@ A workflow is created via `POST /api/workflows` with this JSON structure:
 | Field | Type | Description |
 |-------|------|-------------|
 | `name` | string | Unique step identifier (kebab-case, e.g. `collect-tickets`) |
-| `step_type` | `{ "type": "Agent" \| "ApiCall" \| "Notify" \| "BatchQuickPrompt" \| "BatchApiCall" \| "Gate" \| "Exec" \| "JsonData" \| "SubWorkflow" }` | Decides what the engine runs. Default: `Agent`. |
+| `step_type` | `{ "type": "Agent" \| "ApiCall" \| "Notify" \| "BatchQuickPrompt" \| "BatchApiCall" \| "Gate" \| "Exec" \| "JsonData" \| "CollectApiData" \| "TransformData" \| "PublishPageData" \| "SubWorkflow" }` | Decides what the engine runs. Default: `Agent`. |
 | `agent` | string | `ClaudeCode`, `Codex`, `GeminiCli`, `Kiro`, `Vibe`, `CopilotCli`. Required by schema but ignored when `step_type ≠ Agent` (set to `ClaudeCode`). |
 | `prompt_template` | string | Required by schema. For non-Agent steps, set to `""` — the engine doesn't read it. |
 | `mode` | object | Always `{ "type": "Normal" }` |
@@ -460,6 +569,35 @@ Output envelope: `{ data: { items: [{input, status, response?, error?, http_stat
 | `gate_request_changes_target` | string | Step name to jump to when operator picks "Request Changes". `null` = previous step (Auto-Dev `pause_pre_merge → goto: implement` pattern) |
 | `gate_notify_url` | string | Optional webhook URL fired (best-effort POST) when the run enters `WaitingApproval`. Body `{run_id, workflow_id, workflow_name, step_name, message}`. Templates supported on the URL itself (`{{state.slack_url}}` etc.) |
 
+### Fields specific to `CollectApiData`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `collect_api_data.sources` | array | **REQUIRED.** One or more sources with a unique `alias`, `required`, optional `variables`, and exactly one of: `quick_api_id`, `quick_exec_id`, or inline `quick_exec`. Resolve ids with `qa_list()` / `qe_list()`. |
+| `collect_api_data.sources[].quick_exec_id` | string | Preferred reusable shell-free collector id returned by `qe_list()`. Its saved bare command must also be present in workflow `exec_allowlist`. |
+| `collect_api_data.sources[].quick_exec` | object | One-off inline collector `{ command, args, timeout_secs?, output_format }`. `command` must be a bare binary present in workflow `exec_allowlist`; `output_format` is `json`, `csv`, `text`, or `lines`. |
+| `collect_api_data.concurrent_limit` | number | Parallel source executions, default 5, range 1–20. |
+
+The typed output is `{ sources: { <alias>: <unchanged extracted value> }, meta: { ... } }`. Downstream code reads it through `steps.<collect-name>.data`; `meta` is diagnostic and `sources` is the business payload.
+
+### Fields specific to `TransformData`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `transform_data.input_from` | string | **REQUIRED.** One typed context path such as `steps.collect-report-data.data`. |
+| `transform_data.fields` | array | **REQUIRED.** One or more `{ target, source, operation, fallback?, value_type? }` mappings. `target` is the dotted output key; `source` is RFC 9535 JSONPath relative to `input_from`. |
+
+Allowed operations: `copy`, `count`, `sum`, `average`, `min`, `max`, `first`, `last`. Allowed scalar conversions: `string`, `number`, `boolean`.
+
+### Fields specific to `PublishPageData`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `page_publish.page_id` | string | **REQUIRED.** Real Page id or slug from `page_list()` / `page_create()`. A Page is a shared destination and may be targeted by several workflows. |
+| `page_publish.writes` | array | **REQUIRED.** One or more `{ dataset, operation, value_from, observed_at?, dedupe_key?, key_field? }` writes. The named dataset must already exist on the Page. |
+
+`operation` is `replace`, `append`, or `upsert`. `upsert` requires `key_field`; `append` accepts an optional `observed_at` and `dedupe_key`. `value_from` is one typed context path such as `steps.shape-report.data`, with or without `{{...}}`.
+
 ### Fields specific to `SubWorkflow`
 
 | Field | Type | Description |
@@ -489,13 +627,14 @@ These shape engine behavior across the whole run.
 - `{{steps.STEP_NAME.output}}` — output from any named step
 - `{{steps.STEP_NAME.data}}` — structured/extracted data from any named step (compact JSON if object/array, raw string if `data` was a plain string)
 - `{{steps.STEP_NAME.data_json}}` — same data, always-serialized JSON (use when piping into an HTTP body or another JSON parser)
-- `{{steps.STEP_NAME.data.<path>}}` / `{{previous_step.data.<path>}}` — **nested-path traversal** through the structured `data`. Dot-separated; numeric segments index arrays. Examples: `{{steps.run-tests.data.exit_code}}`, `{{steps.analyze.data.subtasks.0.title}}`, `{{steps.fetch.data.items.2.id}}`. Returns the leaf as a string (scalars stringified, objects/arrays pretty-printed JSON). Missing fields leave the placeholder visible (`{{...}}`) so broken refs don't silently render as empty
+- `{{steps.STEP_NAME.data.<path>}}` / `{{previous_step.data.<path>}}` — **nested-path traversal** through the structured `data`. Dot-separated; numeric segments index arrays. Examples: `{{steps.run-tests.data.exit_code}}`, `{{steps.analyze.data.subtasks.0.title}}`, `{{steps.fetch.data.items.2.id}}`. Returns the leaf as a string (scalars stringified, objects/arrays pretty-printed JSON). Missing fields stay visible in previews and fail closed before execution, so broken refs never render silently empty or reach an external API
 - `{{state.<key>}}` — durable run state. Agents emit `---STATE:key=value---` in their output; the runner persists on the run row and exposes here on next iterations. Use for loops with feedback (review writes verdict, next implement reads it)
 - `{{iter.<step_name>}}` — per-step revisit counter (1, 2, 3…). Useful in Goto loops (e.g. "iteration {{iter.implement}} of 5")
 - `{{artifacts.<name>}}` — content of an artifact declared in `Workflow.artifacts` and emitted via `---ARTIFACT:<name>---...---END_ARTIFACT---`. Pre-seeded as empty string before round 1 so referencing it on the first iteration renders cleanly
 - `{{failed_step.name}}` / `{{failed_step.output}}` — **only valid inside `on_failure` steps**. The runner injects them when firing the rollback chain
 - `{{<launch_var>}}` — any name declared in `Workflow.variables` resolves at launch time from the operator's input
 - `{{issue.title}}` / `{{issue.body}}` / `{{issue.number}}` / `{{issue.url}}` / `{{issue.labels}}` — populated only when trigger is Tracker
+- `{{time.now}}` — one timestamp captured at run start and reused by every step/source, including after a Gate/restart resume. `{{now}}` is a shorthand unless a declared/static variable named `now` exists. Compose vendor-neutral filters: `shift:+1d|-24h|-7d` (fixed durations; units `s,m,h,d,w`), `tz:Europe/Paris` (IANA; UTC default), `floor:minute|hour|day`, and `fmt:rfc3339|local_iso_ms|date|unix|unix_ms`. Example: `{{time.now|shift:-24h|tz:Europe/Paris|floor:hour|fmt:local_iso_ms}}`. Shorthand `{{now-24h|floor:hour}}` also works. Never invent plugin formats such as `fmt:adobe`; Adobe's no-zone local ISO shape is the generic `local_iso_ms` preset.
 
 ### StepOutputFormat (Agent steps only)
 
@@ -668,6 +807,7 @@ Kronn has **three** ways to ship a workflow from a discussion. Pick by intent:
 - `workflow_list()` — surfaces every existing workflow (id, name, enabled, project, trigger_type, step_count, last_run_status). If a fitting one already exists, propose editing it instead of duplicating.
 - `qp_list()` — every Quick Prompt in the user's library. If a step in your draft could reuse an existing QP via `quick_prompt_id` / `batch_quick_prompt_id`, do that instead of inlining the same prompt.
 - `qa_list()` — every Quick API. Same logic for `quick_api_id` on `ApiCall` / `BatchApiCall` steps.
+- `page_list()` — every shared Live Page. Required before any `PublishPageData` step. Reuse a matching id; if none fits and the user authorized autonomous creation, call `page_create()` first and use its returned id.
 - `mcp_list()` — wired MCP configs + REGISTRY servers with an `api_spec`. Use this to pick the right `api_plugin_slug` + `api_config_id` when an `ApiCall` step needs a fresh endpoint; without it the agent would have to guess slugs.
 - `workflow_active_runs()` — **in-flight board**: every workflow run that is NOT finished right now (Running / WaitingApproval / Pending) across all workflows, as `[{workflow_id, workflow_name, project_id, run_id, status, started_at}]`. Call it to see what else is happening before you trigger or edit something (avoid stepping on a run in progress, or notice a run paused on a gate). Drill into the live step of any run with `workflow_run_status(run_id)`.
 
@@ -696,9 +836,13 @@ After calling `workflow_create_draft`, echo the returned `id` back to the user: 
 
 If the tool returns an error (validation rejection, DB error), surface the message to the user and fall back to emitting a `KRONN:WORKFLOW_READY` signal so they can fix the issue in the wizard.
 
+**New Page dependency.** Pages are not currently a `KRONN:BUNDLE_READY` category. Never emit a placeholder `page_id` and never claim the bundle will create it. If the design needs a new Page, either (a) obtain explicit autonomous-creation approval, call `page_create()`, then draft the disabled workflow with the returned id, or (b) ask the user to create/review the Page in the wizard first and resume after `page_list()` can resolve it.
+
 ### A. `KRONN:WORKFLOW_READY` — single workflow, no supporting artifacts (0.3.3+)
 
 Use this when the user already has all the Quick Prompts / Quick APIs / Custom API plugins your workflow needs. The workflow references them by their existing ids.
+
+Any referenced Live Page must also already exist. Resolve it with `page_list()`; the signal path cannot create a Page from a placeholder id.
 
 1. Present the workflow JSON in a fenced code block: ` ```json ... ``` `
 2. Immediately after the closing ` ``` `, on the very next line, write: `KRONN:WORKFLOW_READY`
@@ -896,6 +1040,8 @@ Do not paraphrase, do not move the disclaimer above the signal line, do not omit
 - **`Goto.max_iterations` is a per-edge cap**, not workflow-wide. Two different Gotos targeting different steps each have their own counter. The workflow-level `loop_detection_max_revisits` guard remains the global safety net.
 - **Launch variables must be declared in `Workflow.variables` to be valid** — referencing `{{some_var}}` in a step prompt without declaring it renders empty at runtime. The wizard surfaces a live warning ("undeclared var") with a 1-click "add to launch variables" button.
 - **`gate_notify_url` is per-user / not portable** — when a workflow is exported via `/api/workflows/:id/export`, `gate_notify_url` is stripped to avoid leaking webhooks across instances.
+- **A `PublishPageData` Page must already exist** — resolve the id with `page_list()` or create it first with `page_create()`. Pages are shared destinations, not workflow-owned children, and are not a `KRONN:BUNDLE_READY` category.
+- **Page HTML has no browser API access** — the sandbox blocks external network calls. Consume `window.KronnPageData` / the `kronn:page-data` event; collection belongs in `ApiCall` or `CollectApiData`, never in Page JavaScript.
 - **`SubWorkflow` references must already exist** — `sub_workflow_id` points at a saved workflow. In a conversational design, create the child first (`workflow_create_draft`) or bundle it (`child_workflows[]` + `@bundle:`). A dangling `sub_workflow_id` is rejected at save.
 - **`SubWorkflow` has NO `Gate` inside, ≤ 5 depth, no cycle** — all validated server-side at save. Keep human approval in the parent.
 - **A child does NOT inherit the parent's `{{steps.*}}` / `{{state.*}}`** — separate `TemplateContext`. To pass data in, the child must declare its own launch `variables` (and the parent step provides them — note: in the current MVP the SubWorkflow step does not yet map parent values into the child's variables, so design children that are self-sufficient or read shared sources like `agent_decisions`). To read the child's result out, use `{{steps.<subwf>.status}}` / the `data` metadata, not the child's internal step names.
@@ -910,6 +1056,9 @@ Before emitting `KRONN:WORKFLOW_READY`:
 - For `ApiCall` steps: `api_plugin_slug` and `api_endpoint_path` are set; `api_extract` is set if downstream steps reference `{{steps.X.data}}`
 - For `Notify` steps: `notify_config.url` is set and the `body` is a valid string
 - For `BatchQuickPrompt`: `batch_quick_prompt_id` and `batch_items_from` are set
+- For `CollectApiData`: every source has a unique alias and exactly one real `quick_api_id` returned by `qa_list()`, one real `quick_exec_id` returned by `qe_list()`, or one valid inline `quick_exec`; every saved or inline Quick Exec command is also present in workflow `exec_allowlist`
+- For `TransformData`: `input_from` is one typed context path and every field has a unique target plus a valid JSONPath source
+- For `PublishPageData`: `page_id` resolves through `page_list()` / `page_create()`, every dataset exists on the Page, every write has `dataset`, `operation` and `value_from`, and every `upsert` has `key_field`
 - For `SubWorkflow`: `sub_workflow_id` is set (a real saved-workflow id, or an `@bundle:<id>` sentinel resolving to a `child_workflows[]` entry) — never empty, never a name; no `Gate` lives inside the referenced child
 - Steps referencing `{{previous_step.data}}` follow either an ApiCall step (with `api_extract`) or a Structured Agent step
 - Collection Agent steps have `on_result` with NO_RESULTS → Stop
@@ -918,4 +1067,4 @@ Before emitting `KRONN:WORKFLOW_READY`:
 
 ## Sourcing
 
-See `docs/AGENTS.md` § Anti-Hallucination Protocol for the canonical cascade and citation grammar. Domain note: MCP tool / `api_plugin_slug` / `skill_ids` / step-type claims → call `mcp_list` and the relevant list endpoints FIRST ; never invent an id, the runtime fails opaquely.
+See `docs/AGENTS.md` § Anti-Hallucination Protocol for the canonical cascade and citation grammar. Domain note: MCP tool / `api_plugin_slug` / `skill_ids` / Quick API / Page / step-type claims → call `mcp_list`, `qa_list`, `page_list` and the relevant list endpoints FIRST; never invent an id, the runtime fails opaquely.

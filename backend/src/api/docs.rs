@@ -43,6 +43,10 @@ pub struct PdfRequest {
     pub discussion_id: String,
     /// Full HTML document as produced by the agent (including `<style>`).
     pub html: String,
+    /// Optional browser-rendered PNG pages. Live Pages use these to preserve
+    /// WebView-only CSS while discussion documents keep the HTML path.
+    #[serde(default)]
+    pub page_images: Vec<String>,
     /// Optional filename hint — sanitized before use. When absent we
     /// generate `kronn-doc-<timestamp>.pdf`.
     #[serde(default)]
@@ -78,6 +82,7 @@ pub async fn generate_pdf(
         "pdf",
         serde_json::json!({
             "html": req.html,
+            "page_images": req.page_images,
             "page_size": req.page_size,
         }),
     )
@@ -90,6 +95,8 @@ pub async fn generate_pdf(
 pub struct DocxRequest {
     pub discussion_id: String,
     pub html: String,
+    #[serde(default)]
+    pub page_images: Vec<String>,
     #[serde(default)]
     pub filename: Option<String>,
 }
@@ -107,7 +114,7 @@ pub async fn generate_docx(
         req.filename.as_deref(),
         "docx",
         "docx",
-        serde_json::json!({ "html": req.html }),
+        serde_json::json!({ "html": req.html, "page_images": req.page_images }),
     )
     .await
 }

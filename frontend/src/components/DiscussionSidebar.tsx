@@ -11,7 +11,7 @@ import { formatRelativeTime } from '../lib/relativeTime';
 import type { ToastFn } from '../hooks/useToast';
 import {
   Folder, ChevronLeft, ChevronRight, Plus, X, MessageSquare, Archive, Search,
-  SlidersHorizontal, Users2, Trash2, Star, CheckCheck, ListChecks, LogIn,
+  SlidersHorizontal, Users2, Trash2, Star, CheckCheck, Columns3, ListChecks, LogIn,
   Loader2, Upload, CircleDot, Clock3, MoreHorizontal,
 } from 'lucide-react';
 
@@ -79,6 +79,9 @@ export interface DiscussionSidebarProps {
   /** Opens the batch review cockpit. Parent loads the child messages on
    *  demand so the sidebar list stays cheap. */
   onReviewBatch?: (runId: string, label: string, discIds: string[]) => void;
+  /** Opens the generic side-by-side result workspace. Unlike triage review,
+   * this preserves and renders each answer as rich Markdown. */
+  onCompareBatch?: (runId: string, label: string, discIds: string[]) => void;
   /** Ref-setter so parent can expand groups when navigating to a discussion */
   collapsedGroups: Set<string>;
   onToggleGroup: (key: string) => void;
@@ -158,6 +161,7 @@ export function DiscussionSidebar({
   onDeleteBatch,
   onRetryBatch,
   onReviewBatch,
+  onCompareBatch,
   collapsedGroups,
   onToggleGroup,
   openBatchRuns = EMPTY_BATCH_RUNS,
@@ -1395,6 +1399,7 @@ export function DiscussionSidebar({
                               const parentWorkflowId = summary?.parent_workflow_id ?? null;
                               const hasBatchMenu = Boolean(
                                 onReviewBatch
+                                || onCompareBatch
                                 || (onRetryBatch && summaryForLabel?.quick_prompt_id)
                                 || (parentLabel && parentWorkflowId && onNavigateWorkflow)
                                 || onDeleteBatch,
@@ -1474,6 +1479,17 @@ export function DiscussionSidebar({
                                                 }}
                                               >
                                                 <ListChecks size={12} /> <span>{t('disc.batchReviewAction')}</span>
+                                              </button>
+                                            )}
+                                            {onCompareBatch && (
+                                              <button
+                                                type="button"
+                                                onClick={() => {
+                                                  setOpenBatchMenuRunId(null);
+                                                  onCompareBatch(bg.runId, campaign.label, bg.discs.map(d => d.id));
+                                                }}
+                                              >
+                                                <Columns3 size={12} /> <span>{t('disc.compare.action')}</span>
                                               </button>
                                             )}
                                             {onRetryBatch && summaryForLabel?.quick_prompt_id && (

@@ -494,8 +494,15 @@ pub async fn batch_run(
 // without rewriting the QP per agent.
 //
 // vs. the regular `batch_run`: regular = N inputs × 1 agent (vary
-// input). Compare = 1 input × N agents (vary agent). Both reuse
-// `create_batch_run` with the new `agent_override` per item.
+// input). Compare = 1 input × N agent/model targets. Both reuse
+// `create_batch_run` with a per-item execution override.
+
+#[derive(Debug, Deserialize)]
+pub struct CompareAgentTarget {
+    pub agent: AgentType,
+    #[serde(default)]
+    pub tier: ModelTier,
+}
 
 #[derive(Debug, Deserialize)]
 pub struct CompareAgentsRequest {
@@ -510,14 +517,41 @@ pub struct CompareAgentsRequest {
     /// back to the QP's default tier when None.
     #[serde(default)]
     pub tier: Option<ModelTier>,
-    /// Subset of agents to compare. Frontend usually sends every
-    /// installed+enabled agent, but a power user could pick e.g.
-    /// `["ClaudeCode", "Codex"]` to skip the heavier ones.
+    /// Explicit execution targets. Unlike the legacy `agents` field this can
+    /// compare the same agent at multiple model tiers.
+    #[serde(default)]
+    pub targets: Vec<CompareAgentTarget>,
+    /// Legacy agent-only shape, retained for API/MCP clients during the
+    /// transition. `tier` below applies to every legacy entry.
+    #[serde(default)]
     pub agents: Vec<AgentType>,
     /// Optional project to attach all child discussions to.
     /// Overrides the QP's default project when set.
     #[serde(default)]
     pub project_id: Option<String>,
+}
+
+fn normalize_compare_targets(
+    targets: Vec<CompareAgentTarget>,
+    legacy_agents: Vec<AgentType>,
+    fallback_tier: ModelTier,
+) -> Vec<CompareAgentTarget> {
+    let requested = if targets.is_empty() {
+        legacy_agents
+            .into_iter()
+            .map(|agent| CompareAgentTarget {
+                agent,
+                tier: fallback_tier,
+            })
+            .collect()
+    } else {
+        targets
+    };
+    let mut seen = std::collections::HashSet::new();
+    requested
+        .into_iter()
+        .filter(|target| seen.insert(format!("{:?}:{:?}", target.agent, target.tier)))
+        .collect()
 }
 
 /// `POST /api/quick-prompts/:id/compare-agents` — Compare-agents
@@ -530,16 +564,20 @@ pub async fn compare_agents(
     // Hard cap mirrors `batch_run`'s — keeps a runaway "compare 50
     // agents" from blowing up the agent semaphore.
     const MAX_BATCH_SIZE: usize = 50;
-    if req.agents.is_empty() {
+    let target_count = if req.targets.is_empty() {
+        req.agents.len()
+    } else {
+        req.targets.len()
+    };
+    if target_count == 0 {
         return Json(ApiResponse::err(
-            "Compare-agents needs at least 1 agent in the list",
+            "Compare needs at least 1 agent/model target",
         ));
     }
-    if req.agents.len() > MAX_BATCH_SIZE {
+    if target_count > MAX_BATCH_SIZE {
         return Json(ApiResponse::err(format!(
-            "Compare-agents too large: {} agents (max {})",
-            req.agents.len(),
-            MAX_BATCH_SIZE
+            "Compare too large: {} targets (max {})",
+            target_count, MAX_BATCH_SIZE
         )));
     }
     if req.prompt.trim().is_empty() {
@@ -548,15 +586,6 @@ pub async fn compare_agents(
     if req.batch_name.trim().is_empty() {
         return Json(ApiResponse::err("batch_name is required"));
     }
-
-    // De-dupe agents — the frontend usually filters but a paranoid
-    // guard avoids 2 disc on the same agent.
-    let mut seen = std::collections::HashSet::new();
-    let agents: Vec<AgentType> = req
-        .agents
-        .into_iter()
-        .filter(|a| seen.insert(format!("{:?}", a)))
-        .collect();
 
     // Load the QP for skill_ids + tier defaults + (optional)
     // project_id fallback.
@@ -571,13 +600,10 @@ pub async fn compare_agents(
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
 
-    // If the request specified a tier, write it onto a cloned QP
-    // so each child discussion picks it up via `qp.tier`. The DB
-    // QP isn't mutated.
-    let mut qp_for_run = qp.clone();
-    if let Some(t) = req.tier {
-        qp_for_run.tier = t;
-    }
+    // Normalize old agent-only callers into the new target shape, then de-dupe
+    // exact agent+tier pairs. Same-agent/different-tier comparisons remain.
+    let fallback_tier = req.tier.unwrap_or(qp.tier);
+    let targets = normalize_compare_targets(req.targets, req.agents, fallback_tier);
 
     let (author_pseudo, author_avatar_email) = {
         let config = state.config.read().await;
@@ -587,31 +613,35 @@ pub async fn compare_agents(
         )
     };
 
-    // Build one item per agent — same prompt, same title prefix,
-    // agent suffix so the user can tell siblings apart in the
-    // sidebar.
+    // Build one item per execution target — same prompt, with agent and tier
+    // suffixes so same-provider model comparisons remain distinguishable.
     let prompt = req.prompt.clone();
     let qp_display_name = qp.name.clone();
-    let items: Vec<crate::db::workflows::BatchItemInput> = agents
+    let items: Vec<crate::db::workflows::BatchItemInput> = targets
         .into_iter()
-        .map(|agent| {
-            let agent_label = format!("{:?}", agent); // ClaudeCode, Codex, …
+        .map(|target| {
+            let agent_label = format!("{:?}", target.agent); // ClaudeCode, Codex, …
+            let tier_label = format!("{:?}", target.tier).to_lowercase();
             crate::db::workflows::BatchItemInput {
-                title: format!("{} · {}", qp_display_name, agent_label),
+                title: format!("{} · {} · {}", qp_display_name, agent_label, tier_label),
                 prompt: prompt.clone(),
-                agent_override: Some(agent),
+                agent_override: Some(crate::db::workflows::BatchAgentOverride {
+                    agent: target.agent,
+                    tier: target.tier,
+                }),
             }
         })
         .collect();
 
     let batch_total = items.len() as u32;
+    let qp_name_for_log = qp.name.clone();
     let outcome = match state
         .db
         .with_conn(move |conn| {
             crate::db::workflows::create_batch_run(
                 conn,
                 crate::db::workflows::CreateBatchRunInput {
-                    quick_prompt: &qp_for_run,
+                    quick_prompt: &qp,
                     items,
                     batch_name: Some(req.batch_name.clone()),
                     project_id: req.project_id,
@@ -641,7 +671,7 @@ pub async fn compare_agents(
         "Created compare-agents batch {} with {} discussions (QP: {})",
         outcome.run_id,
         batch_total,
-        qp.name,
+        qp_name_for_log,
     );
 
     Json(ApiResponse::ok(BatchRunResponse {
@@ -649,4 +679,55 @@ pub async fn compare_agents(
         discussion_ids: outcome.discussion_ids,
         batch_total: outcome.batch_total,
     }))
+}
+
+#[cfg(test)]
+mod compare_tests {
+    use super::*;
+
+    #[test]
+    fn compare_targets_keep_same_agent_at_distinct_model_tiers() {
+        let targets = normalize_compare_targets(
+            vec![
+                CompareAgentTarget {
+                    agent: AgentType::Codex,
+                    tier: ModelTier::Default,
+                },
+                CompareAgentTarget {
+                    agent: AgentType::Codex,
+                    tier: ModelTier::Reasoning,
+                },
+                CompareAgentTarget {
+                    agent: AgentType::Codex,
+                    tier: ModelTier::Default,
+                },
+            ],
+            vec![],
+            ModelTier::Economy,
+        );
+
+        assert_eq!(
+            targets.len(),
+            2,
+            "only exact agent+tier duplicates are removed"
+        );
+        assert_eq!(targets[0].agent, AgentType::Codex);
+        assert_eq!(targets[0].tier, ModelTier::Default);
+        assert_eq!(targets[1].agent, AgentType::Codex);
+        assert_eq!(targets[1].tier, ModelTier::Reasoning);
+    }
+
+    #[test]
+    fn legacy_agent_targets_inherit_the_requested_tier() {
+        let targets = normalize_compare_targets(
+            vec![],
+            vec![AgentType::ClaudeCode, AgentType::Codex],
+            ModelTier::Reasoning,
+        );
+
+        assert_eq!(targets.len(), 2);
+        assert!(targets
+            .iter()
+            .all(|target| target.tier == ModelTier::Reasoning));
+    }
 }

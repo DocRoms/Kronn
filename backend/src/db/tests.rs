@@ -1785,6 +1785,9 @@ fn sample_workflow(id: &str) -> Workflow {
             exec_stdin: None,
             quick_prompt_id: None,
             json_data_payload: None,
+            collect_api_data: None,
+            transform_data: None,
+            page_publish: None,
             sub_workflow_id: None,
             sub_workflow_foreach_file: None,
             multi_agent_review: None,
@@ -3248,6 +3251,82 @@ fn create_batch_run_pure_fn_roundtrip_toplevel() {
 }
 
 #[test]
+fn create_batch_run_persists_each_compare_target_tier() {
+    let conn = test_db();
+    let mut qp = sample_qp_for_batch("qp-compare-tier");
+    qp.agent_settings = Some(crate::models::AgentSettings {
+        model: Some("claude-provider-only-model".into()),
+        tier: Some(crate::models::ModelTier::Default),
+        reasoning_effort: None,
+        max_tokens: None,
+    });
+    crate::db::quick_prompts::insert_quick_prompt(&conn, &qp).unwrap();
+    let target = |tier| crate::db::workflows::BatchAgentOverride {
+        agent: crate::models::AgentType::Codex,
+        tier,
+    };
+
+    let outcome = crate::db::workflows::create_batch_run(
+        &conn,
+        crate::db::workflows::CreateBatchRunInput {
+            quick_prompt: &qp,
+            items: vec![
+                crate::db::workflows::BatchItemInput {
+                    title: "Codex default".into(),
+                    prompt: "same prompt".into(),
+                    agent_override: Some(target(crate::models::ModelTier::Default)),
+                },
+                crate::db::workflows::BatchItemInput {
+                    title: "Codex reasoning".into(),
+                    prompt: "same prompt".into(),
+                    agent_override: Some(target(crate::models::ModelTier::Reasoning)),
+                },
+                crate::db::workflows::BatchItemInput {
+                    title: "Classic QP batch".into(),
+                    prompt: "classic prompt".into(),
+                    agent_override: None,
+                },
+            ],
+            batch_name: Some("Model comparison".into()),
+            project_id: None,
+            parent_run_id: None,
+            author_pseudo: None,
+            author_avatar_email: None,
+            language: "fr".into(),
+            workspace_mode: "Direct".into(),
+            chain_prompt_ids: Vec::new(),
+            chain_batch_items: Vec::new(),
+            group_concurrency_limit: None,
+        },
+    )
+    .unwrap();
+
+    let default_disc = crate::db::discussions::get_discussion(&conn, &outcome.discussion_ids[0])
+        .unwrap()
+        .unwrap();
+    let reasoning_disc = crate::db::discussions::get_discussion(&conn, &outcome.discussion_ids[1])
+        .unwrap()
+        .unwrap();
+    let classic_disc = crate::db::discussions::get_discussion(&conn, &outcome.discussion_ids[2])
+        .unwrap()
+        .unwrap();
+    assert_eq!(default_disc.agent, crate::models::AgentType::Codex);
+    assert_eq!(default_disc.tier, crate::models::ModelTier::Default);
+    assert_eq!(
+        default_disc.model, None,
+        "provider-specific QP model must not leak into a Compare target"
+    );
+    assert_eq!(reasoning_disc.agent, crate::models::AgentType::Codex);
+    assert_eq!(reasoning_disc.tier, crate::models::ModelTier::Reasoning);
+    assert_eq!(reasoning_disc.model, None);
+    assert_eq!(classic_disc.agent, crate::models::AgentType::ClaudeCode);
+    assert_eq!(
+        classic_disc.model.as_deref(),
+        Some("claude-provider-only-model")
+    );
+}
+
+#[test]
 fn create_batch_run_chained_from_linear_parent() {
     let conn = test_db();
 
@@ -3999,6 +4078,9 @@ fn workflow_multi_step_roundtrip() {
                 exec_stdin: None,
                 quick_prompt_id: None,
                 json_data_payload: None,
+                collect_api_data: None,
+                transform_data: None,
+                page_publish: None,
                 sub_workflow_id: None,
                 sub_workflow_foreach_file: None,
                 multi_agent_review: None,
@@ -4060,6 +4142,9 @@ fn workflow_multi_step_roundtrip() {
                 exec_stdin: None,
                 quick_prompt_id: None,
                 json_data_payload: None,
+                collect_api_data: None,
+                transform_data: None,
+                page_publish: None,
                 sub_workflow_id: None,
                 sub_workflow_foreach_file: None,
                 multi_agent_review: None,
@@ -4118,6 +4203,9 @@ fn workflow_multi_step_roundtrip() {
                 exec_stdin: None,
                 quick_prompt_id: None,
                 json_data_payload: None,
+                collect_api_data: None,
+                transform_data: None,
+                page_publish: None,
                 sub_workflow_id: None,
                 sub_workflow_foreach_file: None,
                 multi_agent_review: None,
@@ -4230,6 +4318,9 @@ fn workflow_update_steps_count() {
         exec_stdin: None,
         quick_prompt_id: None,
         json_data_payload: None,
+        collect_api_data: None,
+        transform_data: None,
+        page_publish: None,
         sub_workflow_id: None,
         sub_workflow_foreach_file: None,
         multi_agent_review: None,

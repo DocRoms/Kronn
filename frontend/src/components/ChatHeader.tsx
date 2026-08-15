@@ -23,6 +23,7 @@ import {
   Power,
   PowerOff,
   Search,
+  Images,
 } from 'lucide-react';
 import { MatrixText } from './MatrixText';
 import { LearningsBadge } from './LearningsBadge';
@@ -42,6 +43,8 @@ export interface ChatHeaderProps {
   showPlanPanel?: boolean;
   showSettingsPanel?: boolean;
   showMessageSearch?: boolean;
+  showAssetsPanel?: boolean;
+  assetCount?: number;
   planCompleted?: number;
   planTotal?: number;
   planLater?: number;
@@ -60,6 +63,7 @@ export interface ChatHeaderProps {
   onTogglePlanPanel?: () => void;
   onToggleSettingsPanel?: () => void;
   onToggleMessageSearch?: () => void;
+  onToggleAssetsPanel?: () => void;
   onToggleSidebar: () => void;
   onDelete: (discId: string) => void;
   onDiscussionUpdated: () => void;
@@ -77,6 +81,8 @@ export function ChatHeader({
   showPlanPanel = false,
   showSettingsPanel = false,
   showMessageSearch = false,
+  showAssetsPanel = false,
+  assetCount = 0,
   planCompleted = 0,
   planTotal = 0,
   planLater = 0,
@@ -90,6 +96,7 @@ export function ChatHeader({
   onTogglePlanPanel,
   onToggleSettingsPanel,
   onToggleMessageSearch,
+  onToggleAssetsPanel,
   onToggleSidebar,
   onDelete,
   onDiscussionUpdated,
@@ -517,6 +524,22 @@ export function ChatHeader({
             <Search size={13} />
           </button>
         )}
+        {onToggleAssetsPanel && assetCount > 0 && (
+          <button
+            type="button"
+            className="disc-icon-btn disc-assets-header-btn"
+            data-active={showAssetsPanel}
+            onClick={onToggleAssetsPanel}
+            title={t('disc.assets.open', assetCount)}
+            aria-label={t('disc.assets.open', assetCount)}
+            aria-expanded={showAssetsPanel}
+          >
+            <Images size={13} />
+            <span className="disc-icon-btn-badge" aria-hidden="true">
+              {assetCount > 99 ? '99+' : assetCount}
+            </span>
+          </button>
+        )}
         <button
           type="button"
           className="disc-icon-btn"
@@ -581,23 +604,19 @@ export function ChatHeader({
           )}
         </button>
 
-        {discussion.project_id && (
+        {discussion.project_id && pendingFilesCount > 0 && (
           <button
             className="disc-icon-btn"
             data-active={showGitPanel}
             onClick={onToggleGitPanel}
-            title={pendingFilesCount > 0
-              ? t('git.pendingFilesTooltip', pendingFilesCount)
-              : t('git.filesBtn')}
+            title={t('git.pendingFilesTooltip', pendingFilesCount)}
             aria-label={t('git.filesBtn')}
             aria-expanded={showGitPanel}
           >
             <GitBranch size={13} />
-            {pendingFilesCount > 0 && (
-              <span className="disc-icon-btn-badge" aria-label={t('git.pendingFilesTooltip', pendingFilesCount)}>
-                {pendingFilesCount > 9 ? '9+' : pendingFilesCount}
-              </span>
-            )}
+            <span className="disc-icon-btn-badge" aria-label={t('git.pendingFilesTooltip', pendingFilesCount)}>
+              {pendingFilesCount > 9 ? '9+' : pendingFilesCount}
+            </span>
           </button>
         )}
         <button

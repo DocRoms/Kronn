@@ -163,6 +163,14 @@ pub enum WsMessage {
         #[serde(default)]
         pending: bool,
     },
+    /// Local UI invalidation emitted when context files are pinned to a
+    /// message after that message was created (for example by `disc_append`).
+    /// It deliberately carries local discussion ids and is never relayed to a
+    /// peer; shared-disc binaries use `FileAttached` above.
+    ContextFilesChanged {
+        discussion_id: String,
+        message_id: String,
+    },
     /// A batch WorkflowRun finished (all child discussions are done).
     /// Sent by the backend to the frontend so the sidebar badge and any
     /// open batch monitors update live.
@@ -348,6 +356,11 @@ mod tests {
         assert!(!WsMessage::BatchRunChildStarted {
             run_id: "r".into(),
             discussion_id: "d".into(),
+        }
+        .is_peer_relayable());
+        assert!(!WsMessage::ContextFilesChanged {
+            discussion_id: "local-d".into(),
+            message_id: "m".into(),
         }
         .is_peer_relayable());
         // Shared-discussion traffic is the only thing relayed.

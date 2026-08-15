@@ -11,6 +11,135 @@ Release notes for 0.9.3 and earlier are available in the
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-08-14
+
+Kronn can now turn scheduled API collection into a readable, continuously
+updated HTML report without sending mechanical data work through an agent.
+
+### Added
+
+- **Live Pages** provide versioned HTML reports backed by named JSON datasets.
+  Pages render in a credential-free sandboxed iframe, retain data and HTML
+  history independently, and can be linked to workflows or discussions. MCP
+  agents may also create standalone Pages without first joining a Discussion;
+  the current or an explicit Discussion remains an optional provenance link.
+- The Pages library reuses the Discussion navigation model with search,
+  favorites, multi-selection, archive and explicit deletion. Its navigation
+  entry appears only after the capability has been activated. Each Page also
+  exposes a compact header dropdown for its three latest successful workflow
+  refreshes, with publication time, data revision and dataset-level `modified`
+  / `unchanged` deltas, per-dataset retained JSON size, and direct navigation
+  to the exact originating run. A linked workflow can also be relaunched from
+  this dropdown without leaving the Page. The HTML studio adds line numbers, syntax
+  highlighting, revision history, side-by-side comparison and restore-to-draft.
+- Three deterministic workflow steps cover the complete data path:
+  `CollectApiData` runs saved Quick APIs and saved shell-free, allowlisted CLI
+  collectors concurrently under stable aliases, `TransformData` selects and aggregates typed JSON with bounded
+  JSONPath recipes, and `PublishPageData` atomically updates one or more Page
+  datasets. All three consume zero model tokens.
+- **Quick Execs** are now reusable Automation resources with create/edit/test,
+  project binding, declared variables, safe literal argv, bounded execution and
+  JSON/CSV/text/lines normalization. Agents receive symmetric `qe_list`,
+  `qe_create_draft`, `qe_update` and `qe_run` MCP tools, and Workflow Architect
+  composes them through `CollectApiData.sources[].quick_exec_id`.
+- Workflow authors can test a complete collection, reuse the previous step's
+  real sample, map fields from an interactive JSON tree, preview the transformed
+  result, and add a Transform or Page step directly from the collector.
+- Page headers export a browser-rendered capture of the materialized report
+  (runtime dataset content, authored CSS, SVG and canvas charts) to PDF or
+  fixed-layout DOCX, preserving CSS that the document sidecar cannot interpret. Dataset totals
+  open an inline viewer with a dataset selector, tabular preview, retained size,
+  and CSV/JSON export; the refresh dropdown remains a second entry point.
+- Workflow export bundle v3 now carries and remaps referenced Quick Prompts,
+  Quick APIs, Quick Execs, Page templates/contracts and transitive sub-workflows. Credentials
+  and retained Page observations remain local by design.
+- Quick APIs and workflow API steps support vendor-neutral, run-anchored time
+  expressions with signed offsets, IANA timezones, minute/hour/day flooring and
+  RFC 3339, local ISO, date or Unix formats. Parallel collectors and resumed
+  runs reuse one durable timestamp, so rolling cron windows cannot split across
+  an hour boundary.
+- The Kronn MCP and Workflow Architect expose Page discovery/authoring and the
+  full data-pipeline schema, allowing an agent to create standalone or
+  mock-backed Pages and then wire them to real workflow data.
+- **Continual Learning** ships as an explicit, default-off beta. Once enabled,
+  agents may propose durable facts, preferences or pitfalls through a typed MCP
+  tool, but evidence checks and a human decision are required before Kronn
+  writes to the dedicated user or project learning document. Pending candidates
+  remain visible from a global badge and stale evidence is rechecked on a
+  bounded background sweep.
+- Every Discussion header now opens a searchable **Assets** inventory for all
+  shared or agent-generated files in that room. Images keep the in-app
+  carousel, filters separate images/files/pending uploads, large histories load
+  forty cards at a time, disk-backed files can be downloaded, and each attached
+  asset links back to its source message. The Assets and modified-files header
+  actions stay hidden while their respective counts are zero.
+
+### Changed
+
+- Quick Prompt Compare now selects explicit agent + model-tier targets with
+  the same picker used across Kronn, including comparisons of two tiers of the
+  same agent. A launch opens a dedicated in-app comparison workspace with rich
+  Markdown columns, live run states and links to each durable child discussion;
+  any existing batch can reopen the workspace from its actions menu.
+- The public-site screenshot gallery now opens in an accessible in-page
+  carousel with keyboard navigation while preserving modified-click new-tab
+  behavior. Its reproducible demo seed includes public-safe repository content
+  plus an Automation showcase and isolates MCP sync from the real user home.
+- The Automation library now follows the same sidebar + detail interaction as
+  Discussions and Pages. Workflows, Quick APIs, Quick Prompts and Quick Execs
+  share one ordered, searchable, project-filterable navigation surface instead
+  of four unrelated tab layouts. Selecting a Quick API, Prompt or Exec opens its
+  editor immediately in the detail pane; launch, compare, batch, history, ID,
+  export and delete controls remain available in a compact command header. Long
+  Quick Exec invocations stay on one ellipsized, inspectable line so AWS queries
+  and structured arguments cannot make that header consume the viewport. The
+  library labels them as `Quick Execs (CLI)` and their Test action now uses the
+  same primary CTA treatment as Quick Prompt launches. The guided tour now
+  introduces the unified library, follows the sidebar order and includes Quick
+  Execs instead of describing the former tab layout.
+- The primary navigation now follows the product flow: Projects, Discussions,
+  Planning, Automation, Pages, Plugins, then Config. Pages therefore sits next
+  to the workflows that publish it, while infrastructure remains grouped last.
+- `CollectApiData` now surfaces a failed Quick Exec's stderr in its summary,
+  gives expired AWS SSO sessions an actionable `aws sso login --profile …`
+  diagnostic, and fails an entirely empty collection even when every source is
+  optional. Optional failures remain `PARTIAL` only when another source
+  actually produced data.
+- Page destinations are shared resources rather than workflow-owned children:
+  several workflows can publish different datasets to the same Page, while
+  both Workflow and Discussion links remain visible from the Page library.
+- Workflow previews now label data steps with their human-readable type and
+  useful source/field counts. A `PublishPageData` preview links directly to its
+  target Page.
+- Disabling Continual Learning stops capture and removes its injected project
+  pointer without deleting previously validated learnings; existing pending
+  candidates can still be reviewed so the queue can be drained safely.
+
+### Fixed
+
+- Discussion runs now distinguish the configurable inactivity watchdog from a
+  separately configurable absolute execution duration (1–120 minutes). The
+  former hidden 30-minute constant no longer terminates healthy, actively
+  streaming agents after operators explicitly allow longer runs.
+- Joined CLI agents can publish local images and files with `disc_append`.
+  Kronn uploads them through the authenticated context-file path, pins only
+  those files to the exact message, and refreshes the open discussion live.
+  Clicking a thumbnail opens an in-app gallery with previous/next navigation,
+  keyboard controls, an image counter, and an explicit new-tab action.
+- Historical message attachments no longer consume the 20-file composer
+  staging limit, returning to an already-open Discussion refreshes a stale
+  attachment cache, and a failed multi-file MCP append compensates every upload
+  from that batch instead of leaving hidden pending files behind.
+- Time-series retention preserves append order when several points share the
+  same observation timestamp instead of using random UUID order as a tie-breaker.
+- Quick API POST bodies are sent as their typed JSON value instead of being
+  serialized twice. Manual Quick API calls and workflow `ApiCall` steps now use
+  the same body contract, including audit-log attribution.
+- Global Quick APIs can be tested from a collector even when the workflow has
+  no project, while project-scoped APIs still fail closed without their project.
+- Transform previews now preserve the selected JSONPath result instead of
+  presenting a misleading nested projection.
+
 ## [0.9.7] - 2026-08-13
 
 This release is a reliability sweep across discussions, workflows, project

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from io import BytesIO
 import tempfile
 import unittest
@@ -12,7 +13,7 @@ from PIL import Image, ImageChops
 from weasyprint import CSS, HTML
 
 from kronn_docs.html_to_docx import render_html_to_docx
-from kronn_docs.server import _pdf_page_stylesheet
+from kronn_docs.server import _materialized_pages_html, _pdf_page_stylesheet
 
 
 STYLED_HTML = """<!doctype html>
@@ -52,6 +53,46 @@ class PdfPageStylesheetTests(unittest.TestCase):
         css = _pdf_page_stylesheet(html, "A4 landscape")
         self.assertIn("size: A4 landscape", css)
         self.assertNotIn("margin: 0", css)
+
+    def test_browser_rendered_pages_replace_html_css_interpretation(self) -> None:
+        rendered = _materialized_pages_html(
+            "<main>This browser-only layout is not sent to WeasyPrint</main>",
+            ["data:image/png;base64,cGFnZTE=", "data:image/png;base64,cGFnZTI="],
+        )
+        self.assertNotIn("browser-only layout", rendered)
+        self.assertEqual(rendered.count("kronn-rendered-page\""), 2)
+        self.assertIn("data:image/png;base64,cGFnZTE=", rendered)
+        self.assertIn("break-after: page", rendered)
+
+    def test_browser_rendered_pages_reject_non_png_payloads(self) -> None:
+        with self.assertRaisesRegex(ValueError, "PNG data URLs"):
+            _materialized_pages_html("<p>x</p>", ["data:text/html;base64,eA=="])
+
+    def test_browser_capture_pixels_reach_the_pdf_renderer(self) -> None:
+        source = Image.new("RGB", (100, 141), (124, 58, 237))
+        encoded = BytesIO()
+        source.save(encoded, format="PNG")
+        data_url = "data:image/png;base64," + base64.b64encode(
+            encoded.getvalue()
+        ).decode("ascii")
+        rendered = _materialized_pages_html("<p>ignored</p>", [data_url])
+        pdf_bytes = HTML(string=rendered).write_pdf(
+            stylesheets=[CSS(string="@page { size: A4; margin: 0; }")]
+        )
+        with pdfium.PdfDocument(pdf_bytes) as pdf:
+            page = pdf[0]
+            try:
+                bitmap = page.render(scale=1, fill_color=(255, 255, 255, 255))
+                try:
+                    rendered_page = bitmap.to_pil().convert("RGB")
+                finally:
+                    bitmap.close()
+            finally:
+                page.close()
+        red, green, blue = rendered_page.getpixel((20, 20))
+        self.assertGreater(red, 100)
+        self.assertLess(green, 100)
+        self.assertGreater(blue, 180)
 
 
 class StyledDocxTests(unittest.TestCase):

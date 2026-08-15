@@ -13,6 +13,7 @@ from __future__ import annotations
 import io
 import pathlib
 import sys
+import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 
@@ -87,6 +88,25 @@ class McpSurfaceBudgetTests(unittest.TestCase):
         self.assertGreater(payload, declarations, "the envelope was not counted")
         self.assertEqual(gate.CATALOGUE_MAX_BYTES, payload,
                          "the ceiling is not pinned to the payload it gates on")
+
+    def test_loader_resolves_prior_scalar_constants_without_importing_bridge(self):
+        # Regression: the attachment schema uses
+        # maxItems=MAX_DISC_APPEND_ATTACHMENTS. A raw ast.literal_eval(TOOLS)
+        # crashes on that Name even though the catalogue remains static data.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            bridge = root / gate.BRIDGE
+            bridge.parent.mkdir(parents=True)
+            bridge.write_text(
+                "LIMIT = 8\n"
+                "TOOLS = [{\"name\": \"append\", \"description\": \"x\", "
+                "\"inputSchema\": {\"maxItems\": LIMIT}}]\n"
+                "raise AssertionError('the bridge must never be imported')\n"
+            )
+
+            tools = gate.load_tools(root)
+
+        self.assertEqual(tools[0]["inputSchema"]["maxItems"], 8)
 
     def test_the_measurement_counts_the_escaping_the_wire_carries(self):
         # The bug this replaced: measuring with `ensure_ascii=False` under-reported

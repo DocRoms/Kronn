@@ -527,7 +527,15 @@ mod tests {
                 fallback_env_key,
             } => {
                 assert_eq!(command, "fastly");
-                assert_eq!(args, &["auth".to_string(), "token".to_string()]);
+                assert_eq!(
+                    args,
+                    &[
+                        "auth".to_string(),
+                        "token".to_string(),
+                        "--quiet".to_string(),
+                        "--non-interactive".to_string(),
+                    ]
+                );
                 assert_eq!(name, "Fastly-Key");
                 assert_eq!(fallback_env_key.as_deref(), Some("FASTLY_API_TOKEN"));
             }

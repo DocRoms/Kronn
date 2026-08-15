@@ -3215,9 +3215,47 @@ pub fn link_pending_context_files_to_message(
     Ok(n)
 }
 
+/// Pin only the selected pending files to a message from the same discussion.
+/// This is the race-free variant used by MCP agents: a concurrent composer may
+/// have its own pending uploads, which must not be stolen by another author.
+pub fn link_selected_context_files_to_message(
+    conn: &Connection,
+    discussion_id: &str,
+    message_id: &str,
+    file_ids: &[String],
+) -> rusqlite::Result<usize> {
+    let mut linked = 0;
+    for file_id in file_ids {
+        linked += conn.execute(
+            "UPDATE context_files
+                SET message_id = ?3
+              WHERE id = ?1
+                AND discussion_id = ?2
+                AND message_id IS NULL
+                AND EXISTS (
+                    SELECT 1 FROM messages
+                     WHERE id = ?3 AND discussion_id = ?2
+                )",
+            rusqlite::params![file_id, discussion_id, message_id],
+        )?;
+    }
+    Ok(linked)
+}
+
 pub fn count_context_files(conn: &Connection, discussion_id: &str) -> rusqlite::Result<usize> {
     conn.query_row(
         "SELECT COUNT(*) FROM context_files WHERE discussion_id = ?1",
+        rusqlite::params![discussion_id],
+        |row| row.get::<_, i64>(0).map(|n| n as usize),
+    )
+}
+
+pub fn count_pending_context_files(
+    conn: &Connection,
+    discussion_id: &str,
+) -> rusqlite::Result<usize> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM context_files WHERE discussion_id = ?1 AND message_id IS NULL",
         rusqlite::params![discussion_id],
         |row| row.get::<_, i64>(0).map(|n| n as usize),
     )

@@ -20,34 +20,39 @@
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/kronn-projects.en.png" alt="Kronn dashboard, sidebar with Projects/Discussions/Plugins/Workflows/Config tabs, three demo projects listed (acme-blog, demo-monorepo, sample-rust-cli) each with AI-context status and audit counters" />
+  <img src="docs/screenshots/kronn-projects.en.png" alt="Kronn dashboard, top nav (Projects, Discussions, Planning, Automation, Plugins, Config), and three public-safe demo projects. The selected project shows agent-context health, detected languages, dependency freshness and documentation status." />
 </p>
 
 **Run Claude Code, Codex, Gemini, Ollama (100% local), LiteLLM and 3 other AI coding agents from one self-hosted dashboard, with shared MCPs, secrets, and repeatable workflows.**
 
 **Smaller prompts, more code where code is enough: fewer hallucinations, lower token bill, eco-design by default.**
 
-> **Status: 0.9.7 (current release).** Functional but pre-1.0. Breaking changes happen between minor versions; patch versions are safe.
+> **Status: 0.10.0 (current release).** Functional but pre-1.0. Breaking changes happen between minor versions; patch versions are safe.
 > **License: AGPL-3.0.** Using Kronn locally to build *your own* product is fine; the copyleft only kicks in if you distribute a modified Kronn to others. See [License notes](#license-notes-agpl-3-0).
 
-## What's new in 0.9.7
+## What's new in 0.10.0
 
-- **Safer collaboration:** session resume is pinned to the expected room, peer
-  receipts are explicit and shared workflow worktrees survive only while their
-  durable children still need them.
-- **Native tools where agents run:** LiteLLM and Ollama workflow steps can call
-  project-scoped Kronn APIs, Quick APIs and read-only Planning tools without
-  receiving credentials. Imported API configurations get an explicit
-  Global/project assignment step.
-- **Release evidence, not hope:** project audit drift and attestation are
-  visible, serious/critical main-page accessibility debt is at zero, and every
-  desktop release requires four non-empty platform installers.
+- **Live Pages:** build a detailed sandboxed HTML report once, then let a manual
+  or cron workflow keep its JSON datasets up to date while Kronn retains the
+  data and presentation history.
+- **Zero-token data pipelines:** collect saved Quick APIs and reusable shell-free
+  Quick Execs concurrently, normalize JSON or CSV, reshape the typed result with a visual deterministic mapper, and publish the
+  result to a Page with `CollectApiData → TransformData → PublishPageData`.
+- **A real Page library:** search, favorite, select, archive or delete Pages;
+  link them to workflows and discussions; and let an agent create a standalone
+  or mock-backed Page through Kronn's MCP.
+- **One Automation library:** Workflows, Quick APIs, Quick Prompts and Quick
+  Execs now share the searchable sidebar + detail layout already used by
+  Discussions and Pages, with a common project filter.
+- **Continual Learning, opt-in beta:** agents can propose durable conventions,
+  preferences and pitfalls, but evidence checks and explicit human validation
+  gate every write to the dedicated learning document. It remains off by default.
 
-See the complete [0.9.7 and 0.9.6 release notes](CHANGELOG.md).
+See the complete [0.10.0 and 0.9.7 release notes](CHANGELOG.md).
 
 ## Contents
 
-- [What's new in 0.9.7](#whats-new-in-097)
+- [What's new in 0.10.0](#whats-new-in-0100)
 - [60-second pitch](#60-second-pitch)
 - [The Kronn way: engineering, not prompting](#the-kronn-way-engineering-not-prompting)
 - [Quick start](#quick-start)
@@ -108,7 +113,7 @@ Download the installer for your OS from [Releases](https://github.com/DocRoms/Kr
 ### From source: one command
 
 ```bash
-git clone --branch 0.9.7 --depth 1 https://github.com/DocRoms/Kronn.git   # latest stable release
+git clone --branch 0.10.0 --depth 1 https://github.com/DocRoms/Kronn.git   # latest stable release
 cd Kronn
 ./kronn start        # guided setup & launch (Docker)
 ```
@@ -139,7 +144,7 @@ app, Docker deployment and a bare `make run-backend` do not require it.
 Requires Docker + Docker Compose. On Windows, WSL2 (Docker Engine inside WSL works, Docker Desktop optional).
 
 ```bash
-git clone --branch 0.9.7 --depth 1 https://github.com/DocRoms/Kronn.git   # latest stable release
+git clone --branch 0.10.0 --depth 1 https://github.com/DocRoms/Kronn.git   # latest stable release
 cd Kronn
 ./kronn start
 # → http://localhost:3140
@@ -175,14 +180,14 @@ Save `Analyse {{ticket}} and draft a PR` as a Quick Prompt. Paste 30 Jira keys (
 
 ### 2. Validate small AI prompts via compare-agents 🤝
 
-Before you wire a prompt into a workflow, click *Compare across N installed agents* on any Quick Prompt. Kronn spawns one discussion per agent (Claude, Codex, Gemini, Vibe, Ollama…), same rendered prompt, results streaming live in parallel.
+Before you wire a prompt into a workflow, click *Compare* on any Quick Prompt. Every target uses Kronn's shared agent + model picker: compare Claude, Codex, Gemini, Vibe or Ollama, or two tiers of the same agent. The rendered prompt runs in parallel and rich Markdown answers appear side by side in a dedicated workspace. Each column keeps a durable discussion you can open to continue the work.
 
 If they all converge on the same answer → your prompt is solid, ship it into a Batch or a Workflow step. If they diverge → your prompt is ambiguous, fix it *before* it costs you 30× on a batch run.
 
 **Compare-agents = the QA gate of prompt engineering.** Cheap to run once, saves a fortune if it catches a bad prompt before it enters production.
 
 <p align="center">
-  <img src="docs/screenshots/kronn-qp-launch.en.png" alt="Compare-agents launch form, a Quick Prompt with a ticket variable, all 7 installed agents (Claude Code, Codex, Vibe, Gemini CLI, Kiro, GitHub Copilot, Ollama) selected as chips, and a 'Comparer (7)' CTA to fan the same prompt across them in parallel" />
+  <img src="docs/screenshots/kronn-qp-launch.en.png" alt="Quick Prompt compare launch form with execution targets and the parallel Compare action" />
 </p>
 
 ### 3. Keep one prioritized plan across projects and discussions
@@ -219,10 +224,15 @@ A real Auto-Dev workflow in Kronn looks like:
 
 You build this via the **wizard UI** (drag-drop step types, autocomplete on agent/API/QP references) and can export/import Kronn's versioned JSON bundle. The workflow model deliberately shares Symphony's four workspace-hook names, but Kronn does not currently import `WORKFLOW.md` files.
 
-Workflow engine supports **9 step types** total: `Agent`, `ApiCall`, `BatchApiCall`, `BatchQuickPrompt`, `JsonData`, `Notify`, `Gate` (human approval), `Exec` (allowlist-gated process execution), and `SubWorkflow` for composing reusable workflows. Full reference in [docs/architecture/overview.md](docs/architecture/overview.md#workflow-engine).
+Workflow engine supports **12 step types** total: `Agent`, `ApiCall`, `BatchApiCall`, `BatchQuickPrompt`, `JsonData`, `CollectApiData`, `TransformData`, `PublishPageData`, `Notify`, `Gate` (human approval), `Exec` (allowlist-gated process execution), and `SubWorkflow` for composing reusable workflows. The three data-pipeline steps collect, reshape and publish typed JSON without an agent. Full reference in [docs/architecture/overview.md](docs/architecture/overview.md#workflow-engine) and [Live Pages architecture](docs/architecture/live-pages.md).
+
+A **Live Page** is a shared, versioned HTML report—not a monitoring backend.
+Its sandboxed document can render Markdown, tables and charts while a workflow
+updates only its persisted JSON datasets. Pages can also start standalone or
+with mock data, then be linked to workflows and discussions later.
 
 <p align="center">
-  <img src="docs/screenshots/kronn-workflow-wizard.en.png" alt="Workflow wizard, Advanced mode, Infos/Task/Summary tabs, name + project picker. Drag-drop step types in next steps; no DSL to learn." />
+  <img src="docs/screenshots/kronn-workflow-wizard.en.png" alt="Advanced workflow builder, the 5-step wizard (Info, Trigger, Steps, Config, Summary) on the Steps tab; a typed Agent step with its per-step model picker and a reusable Quick Prompt link. Form-based, no DSL to learn." />
 </p>
 
 ### 6. Audit your codebase with an AI that doesn't forget
@@ -313,7 +323,10 @@ The full convention is an open spec (`backend/docs/conventions/agents-md-format-
 - **Discussion**: a chat thread bound (or not) to a project. Streams in real-time via SSE, persisted in SQLite, optionally isolated in a git worktree. Three flavours: **(a)** single agent (default), **(b)** multi-agent debate (configurable rounds), **(c)** **cross-agent room (0.8.6)** — invite N CLIs (Claude Code, Codex, Gemini, Kiro, Vibe…) into the same discussion via a one-click `[+ Inviter]` button, each agent talks via MCP tools (`disc_append`, `disc_wait_for_peer`), no human messenger needed. Validated live on a 3-agent roleplay session.
 - **Task / discussion plan**: one ranked task can be global or linked to several projects and discussions. It carries subtasks, Definition of Done, links, tags and blockers; the global Planning backlog, project Tasks view, discussion panel and MCP tools all edit the same record.
 - **Quick Prompt**: reusable prompt template with `{{variables}}` and conditional sections. One-shot, fan-out, or chained.
+- **Quick Exec**: reusable shell-free CLI collector with literal arguments,
+  declared variables, bounded execution and JSON/CSV/text/lines output.
 - **Workflow**: a multi-step pipeline. Triggered by cron, by a tracker (Jira / GitHub), or manually. See [docs/architecture/overview.md](docs/architecture/overview.md#workflow-engine) for the engine guarantees.
+- **Page**: a sandboxed, versioned HTML report backed by persisted JSON datasets. It can stand alone, start with mock data, or be refreshed by one or more workflows. See [docs/architecture/live-pages.md](docs/architecture/live-pages.md).
 
 ### How agents are shaped
 

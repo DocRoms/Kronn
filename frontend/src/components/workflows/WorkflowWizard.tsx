@@ -1,8 +1,8 @@
 import { useState, useRef, useEffect } from 'react';
-import { buildBlankStep } from '../../lib/workflowUiUtils';
+import { buildBlankStep, jsonPathToTarget } from '../../lib/workflowUiUtils';
 import { useT } from '../../lib/I18nContext';
-import { workflows as workflowsApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi, quickPrompts as quickPromptsApi, quickApis as quickApisApi, mcps as mcpsApi, config as configApi, ollama as ollamaApi } from '../../lib/api';
-import { ApiCallStepCard, type ApiPluginOption } from './ApiCallStepCard';
+import { workflows as workflowsApi, pages as pagesApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi, quickPrompts as quickPromptsApi, quickApis as quickApisApi, quickExecs as quickExecsApi, mcps as mcpsApi, config as configApi, ollama as ollamaApi } from '../../lib/api';
+import { ApiCallStepCard, JsonTreeViewer, type ApiPluginOption } from './ApiCallStepCard';
 import { STARTER_TEMPLATES, cloneTemplateSteps } from '../../lib/workflow-templates/chartbeat-top5';
 import { buildV07Presets, type ChildWorkflowPreset } from '../../lib/workflow-templates/v07-presets';
 import { WorkflowQuickStartPicker } from './WorkflowQuickStartPicker';
@@ -18,7 +18,8 @@ import type {
   WorkspaceConfig, StepConditionRule,
   CreateWorkflowRequest, Skill, AgentProfile, Directive,
   WorkflowSuggestion, QuickPrompt, QuickApi, WorkflowGuards,
-  PromptVariable, WorkflowSummary,
+  PromptVariable, WorkflowSummary, LivePage, JsonValue, TestApiCallResponse, QuickExec,
+  TransformDataField,
 } from '../../types/generated';
 import { ExecutionLimitsCard } from './ExecutionLimitsCard';
 import type { AgentsConfig } from '../../types/generated';
@@ -27,13 +28,36 @@ import {
   Plus, Loader2, Check, X, ChevronRight, ChevronDown, ChevronUp,
   Clock, GitBranch, Zap, HelpCircle, Settings, Shield,
   AlertTriangle, UserCircle, FileText, Layers, Send,
-  Info, Hand, RotateCcw, Terminal, Bot, Plug, Braces,
+  Info, Hand, RotateCcw, Terminal, Bot, Plug, Braces, Database, Shuffle, Play,
 } from 'lucide-react';
 import { scanUndeclaredVars } from '../../lib/scanUndeclaredVars';
 import { userError } from '../../lib/userError';
 import '../../pages/WorkflowsPage.css';
 
 const checkAgentRestricted = isAgentRestricted;
+
+function jsonPathForSource(alias: string): string {
+  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(alias)
+    ? `$.sources.${alias}`
+    : `$.sources['${alias.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}']`;
+}
+
+type CollectEnvelope = {
+  data: JsonValue;
+  status: string;
+  summary: string;
+};
+
+function readCollectEnvelope(result: TestApiCallResponse | undefined): CollectEnvelope | null {
+  if (!result?.envelope || typeof result.envelope !== 'object' || Array.isArray(result.envelope)) return null;
+  const envelope = result.envelope as Record<string, JsonValue>;
+  if (!('data' in envelope)) return null;
+  return {
+    data: envelope.data,
+    status: typeof envelope.status === 'string' ? envelope.status : (result.success ? 'OK' : 'ERROR'),
+    summary: typeof envelope.summary === 'string' ? envelope.summary : '',
+  };
+}
 
 /** Inline help indicator — a small (?) icon with a native tooltip on hover.
  * Used to explain jargon next to labels without cluttering the form layout. */
@@ -75,7 +99,10 @@ const STEP_TYPE_GROUPS: ReadonlyArray<{
     options: [
       { type: 'ApiCall', dataType: 'api', labelKey: 'wiz.stepTypeApiCall', hintKey: 'wiz.stepTypeApiCallHint' },
       { type: 'BatchApiCall', dataType: 'batch-api', labelKey: 'wiz.stepTypeBatchApi', hintKey: 'wiz.stepTypeBatchApiHint' },
+      { type: 'CollectApiData', dataType: 'collect-data', labelKey: 'wiz.stepTypeCollectApiData', hintKey: 'wiz.stepTypeCollectApiDataHint' },
+      { type: 'TransformData', dataType: 'transform-data', labelKey: 'wiz.stepTypeTransformData', hintKey: 'wiz.stepTypeTransformDataHint' },
       { type: 'JsonData', dataType: 'json-data', labelKey: 'wiz.stepTypeJsonData', hintKey: 'wiz.stepTypeJsonDataHint' },
+      { type: 'PublishPageData', dataType: 'page-data', labelKey: 'wiz.stepTypePublishPage', hintKey: 'wiz.stepTypePublishPageHint' },
     ],
   },
   {
@@ -90,6 +117,15 @@ const STEP_TYPE_GROUPS: ReadonlyArray<{
   },
 ];
 
+// Safe, dependency-free starter used by the quick Page flow. It consumes the
+// same postMessage contract as richer agent-generated templates, so replacing
+// this HTML later never changes the workflow/dataset wiring.
+const LIVE_PAGE_STARTER_HTML = `<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
+<style>body{margin:0;padding:24px;background:#0b1020;color:#e5e7eb;font:14px system-ui}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px}.card{background:#151c30;border:1px solid #29334d;border-radius:14px;padding:18px}h1{margin:0 0 18px}pre{white-space:pre-wrap;color:#9bd7ff}svg{width:100%;height:180px}.line{fill:none;stroke:#5eead4;stroke-width:3}</style></head>
+<body><h1 id="title">Live Page</h1><div class="grid"><section class="card"><h2>Résumé</h2><pre id="summary">En attente du workflow…</pre></section><section class="card"><h2>Série</h2><svg viewBox="0 0 600 180"><polyline class="line" id="line" points=""/></svg></section></div>
+<script>function draw(data){document.getElementById('title').textContent=data.page.title;document.getElementById('summary').textContent=JSON.stringify(data.datasets.summary?.current??{},null,2);const values=(data.datasets.series?.points??[]).map(p=>{const v=p.value;return typeof v==='number'?v:Object.values(v??{}).find(n=>typeof n==='number')??0});const max=Math.max(1,...values);document.getElementById('line').setAttribute('points',values.map((v,i)=>((i/Math.max(1,values.length-1))*600)+','+(170-(v/max)*160)).join(' '))}addEventListener('kronn:page-data',e=>draw(e.detail));if(window.KronnPageData)draw(window.KronnPageData);</script></body></html>`;
+
 function StepTypeGlyph({ type, size = 16 }: { type: string; size?: number }) {
   if (type === 'Agent') return <Bot size={size} />;
   if (type === 'ApiCall') return <Plug size={size} />;
@@ -98,6 +134,9 @@ function StepTypeGlyph({ type, size = 16 }: { type: string; size?: number }) {
   if (type === 'Gate') return <Hand size={size} />;
   if (type === 'Exec') return <Terminal size={size} />;
   if (type === 'JsonData') return <Braces size={size} />;
+  if (type === 'CollectApiData') return <Database size={size} />;
+  if (type === 'TransformData') return <Shuffle size={size} />;
+  if (type === 'PublishPageData') return <FileText size={size} />;
   return <GitBranch size={size} />;
 }
 
@@ -125,6 +164,23 @@ function isWorkflowStepIncomplete(step: WorkflowStep): boolean {
   }
   if (step.step_type?.type === 'JsonData') {
     return step.json_data_payload === null || step.json_data_payload === undefined;
+  }
+  if (step.step_type?.type === 'CollectApiData') {
+    const sources = step.collect_api_data?.sources ?? [];
+    const aliases = new Set(sources.map(source => source.alias.trim()).filter(Boolean));
+    return sources.length === 0
+      || aliases.size !== sources.length
+      || sources.some(source => !source.alias.trim() || (
+        source.quick_exec ? !source.quick_exec.command.trim() : !source.quick_api_id
+      ));
+  }
+  if (step.step_type?.type === 'TransformData') {
+    return !step.transform_data?.input_from.trim()
+      || !step.transform_data.fields.length
+      || step.transform_data.fields.some(field => !field.target.trim() || !field.source.trim());
+  }
+  if (step.step_type?.type === 'PublishPageData') {
+    return !step.page_publish?.page_id?.trim() || !step.page_publish.writes.length;
   }
   if (step.step_type?.type === 'SubWorkflow') return !step.sub_workflow_id?.trim();
   if (!step.prompt_template && !step.quick_prompt_id) return true;
@@ -187,9 +243,12 @@ export interface WorkflowWizardProps {
   /** Render only the requested step editor, without the workflow-wide wizard
    *  chrome. Used by WorkflowDetail's Preview/Edit inspector. */
   focusedStepOnly?: boolean;
+  /** Leave the wizard and open the selected Page. The Page id remains
+   * copyable when navigation is not provided (embedded/test contexts). */
+  onNavigatePage?: (pageId: string) => void;
 }
 
-export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, installedAgentTypes, agentAccess, configLanguage, initialPresetId, initialProjectId, initialStepId, focusedStepOnly = false }: WorkflowWizardProps) {
+export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, installedAgentTypes, agentAccess, configLanguage, initialPresetId, initialProjectId, initialStepId, focusedStepOnly = false, onNavigatePage }: WorkflowWizardProps) {
   const { t } = useT();
   const availableAgents = (installedAgentTypes && installedAgentTypes.length > 0
     ? installedAgentTypes
@@ -531,8 +590,20 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
   const [availableDirectives, setAvailableDirectives] = useState<Directive[]>([]);
   const [availableQuickPrompts, setAvailableQuickPrompts] = useState<QuickPrompt[]>([]);
   const [availableQuickApis, setAvailableQuickApis] = useState<QuickApi[]>([]);
+  const [availableQuickExecs, setAvailableQuickExecs] = useState<QuickExec[]>([]);
   // 2026-06-11 (Phase 1c) — other workflows, for the SubWorkflow step picker.
   const [availableWorkflows, setAvailableWorkflows] = useState<WorkflowSummary[]>([]);
+  const [availablePages, setAvailablePages] = useState<LivePage[]>([]);
+  const [pageDraftTitles, setPageDraftTitles] = useState<Record<number, string>>({});
+  const [pageCreatingIndex, setPageCreatingIndex] = useState<number | null>(null);
+  const [transformPreviewSamples, setTransformPreviewSamples] = useState<Record<number, string>>({});
+  const [transformPreviewResults, setTransformPreviewResults] = useState<Record<number, { value: unknown | null; error: string | null }>>({});
+  const [transformPreviewingIndex, setTransformPreviewingIndex] = useState<number | null>(null);
+  const [collectPreviewResults, setCollectPreviewResults] = useState<Record<number, TestApiCallResponse>>({});
+  const [collectPreviewingIndex, setCollectPreviewingIndex] = useState<number | null>(null);
+  const collectPreviewingRef = useRef<number | null>(null);
+  const transformPreviewTimersRef = useRef<Record<number, number>>({});
+  const transformPreviewRequestSeqRef = useRef<Record<number, number>>({});
   // API plugins available on the project — filtered to those with `api_spec != null`
   // and a matching config. Consumed by ApiCallStepCard's plugin picker.
   const [availableApiPlugins, setAvailableApiPlugins] = useState<ApiPluginOption[]>([]);
@@ -590,7 +661,9 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
     directivesApi.list().then(setAvailableDirectives).catch(e => console.warn('Failed to load directives:', e));
     quickPromptsApi.list().then(setAvailableQuickPrompts).catch(e => console.warn('Failed to load quick prompts:', e));
     quickApisApi.list().then(setAvailableQuickApis).catch(e => console.warn('Failed to load quick apis:', e));
+    quickExecsApi.list().then(setAvailableQuickExecs).catch(e => console.warn('Failed to load quick execs:', e));
     workflowsApi.list().then(setAvailableWorkflows).catch(e => console.warn('Failed to load workflows:', e));
+    pagesApi.list().then(setAvailablePages).catch(e => console.warn('Failed to load Pages:', e));
     // Load API plugins once at mount — the list is refreshed if the user
     // comes back to the wizard, cheap call + rare delta.
     mcpsApi.overview()
@@ -712,6 +785,42 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
     setSteps([...steps.slice(0, at), fresh, ...steps.slice(at)]);
   };
 
+  const insertDataPipelineStep = (sourceIndex: number, type: 'TransformData' | 'PublishPageData') => {
+    const source = steps[sourceIndex];
+    if (!source) return;
+    const next = steps[sourceIndex + 1];
+    if (next?.step_type?.type === type) {
+      setFocusedStepIndex(sourceIndex + 1);
+      requestAnimationFrame(() => document.querySelector<HTMLElement>(`[data-wizard-step-index="${sourceIndex + 1}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }));
+      return;
+    }
+    const baseName = type === 'TransformData' ? 'transform-data' : 'update-page';
+    const usedNames = new Set(steps.map(item => item.name));
+    let name = baseName;
+    let suffix = 2;
+    while (usedNames.has(name)) name = `${baseName}-${suffix++}`;
+    const typedSource = `steps.${source.name}.data`;
+    const inserted: WorkflowStep = type === 'TransformData'
+      ? {
+          ...buildBlankStep(steps.length, defaultModelTier),
+          name,
+          step_type: { type: 'TransformData' },
+          transform_data: { input_from: typedSource, fields: [] },
+        }
+      : {
+          ...buildBlankStep(steps.length, defaultModelTier),
+          name,
+          step_type: { type: 'PublishPageData' },
+          page_publish: {
+            page_id: '',
+            writes: [{ dataset: 'summary', operation: 'replace', value_from: typedSource, observed_at: null, dedupe_key: null, key_field: null }],
+          },
+        };
+    setSteps(current => [...current.slice(0, sourceIndex + 1), inserted, ...current.slice(sourceIndex + 1)]);
+    setFocusedStepIndex(sourceIndex + 1);
+    requestAnimationFrame(() => document.querySelector<HTMLElement>(`[data-wizard-step-index="${sourceIndex + 1}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }));
+  };
+
   /** 0.6.0 UX pass — move a step up or down by 1 position. No-op at the
    *  edges. Same `Goto`-by-name immunity as insertStep. */
   const moveStep = (idx: number, direction: -1 | 1) => {
@@ -726,6 +835,161 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
 
   const updateStep = (idx: number, patch: Partial<WorkflowStep>) => {
     setSteps(steps.map((s, i) => i === idx ? { ...s, ...patch } : s));
+  };
+
+  const createStarterPage = async (idx: number) => {
+    const title = (pageDraftTitles[idx] ?? '').trim();
+    if (!title || pageCreatingIndex !== null) return;
+    setPageCreatingIndex(idx);
+    try {
+      const created = await pagesApi.create({
+        title,
+        project_id: projectId || null,
+        html: LIVE_PAGE_STARTER_HTML,
+        created_by_agent: null,
+        datasets: [
+          { name: 'summary', kind: 'snapshot', initial: { status: 'mock', requests: 1240, errors: 3 }, max_points: null, max_age_days: null },
+          { name: 'series', kind: 'time_series', initial: [{ value: 36 }, { value: 52 }, { value: 44 }, { value: 71 }, { value: 63 }], max_points: 2_000, max_age_days: 90 },
+        ],
+      });
+      setAvailablePages(prev => [created, ...prev.filter(page => page.id !== created.id)]);
+      window.dispatchEvent(new Event('kronn:pages-activated'));
+      const source = idx > 0 ? `steps.${steps[idx - 1].name}.data` : 'trigger';
+      updateStep(idx, {
+        page_publish: {
+          page_id: created.id,
+          writes: [{
+            dataset: 'summary',
+            operation: 'replace',
+            value_from: source,
+            observed_at: null,
+            dedupe_key: null,
+            key_field: null,
+          }],
+        },
+      });
+      setPageDraftTitles(prev => ({ ...prev, [idx]: '' }));
+    } catch (cause) {
+      setSaveError(userError(cause));
+    } finally {
+      setPageCreatingIndex(null);
+    }
+  };
+
+  const previewTransformData = async (
+    idx: number,
+    sampleOverride?: JsonValue,
+    fieldsOverride?: TransformDataField[],
+  ) => {
+    const config = steps[idx]?.transform_data;
+    if (!config) return;
+    let sample: JsonValue;
+    if (sampleOverride !== undefined) {
+      sample = sampleOverride;
+    } else {
+      try {
+        sample = JSON.parse(transformPreviewSamples[idx] ?? '');
+      } catch (cause) {
+        setTransformPreviewResults(prev => ({ ...prev, [idx]: { value: null, error: userError(cause) } }));
+        return;
+      }
+    }
+    const requestSequence = (transformPreviewRequestSeqRef.current[idx] ?? 0) + 1;
+    transformPreviewRequestSeqRef.current[idx] = requestSequence;
+    setTransformPreviewingIndex(idx);
+    try {
+      const result = await workflowsApi.previewTransformData({ sample, fields: fieldsOverride ?? config.fields });
+      if (transformPreviewRequestSeqRef.current[idx] === requestSequence) {
+        setTransformPreviewResults(prev => ({ ...prev, [idx]: result }));
+      }
+    } catch (cause) {
+      if (transformPreviewRequestSeqRef.current[idx] === requestSequence) {
+        setTransformPreviewResults(prev => ({ ...prev, [idx]: { value: null, error: userError(cause) } }));
+      }
+    } finally {
+      if (transformPreviewRequestSeqRef.current[idx] === requestSequence) {
+        setTransformPreviewingIndex(null);
+      }
+    }
+  };
+
+  const scheduleTransformPreview = (idx: number, fields: TransformDataField[], sample?: JsonValue) => {
+    const raw = sample === undefined ? transformPreviewSamples[idx] : JSON.stringify(sample);
+    if (!raw?.trim() || fields.length === 0 || fields.some(field => !field.target.trim() || !field.source.trim())) return;
+    const previousTimer = transformPreviewTimersRef.current[idx];
+    if (previousTimer) window.clearTimeout(previousTimer);
+    transformPreviewTimersRef.current[idx] = window.setTimeout(() => {
+      delete transformPreviewTimersRef.current[idx];
+      void previewTransformData(idx, sample, fields);
+    }, 180);
+  };
+
+  const propagateCollectSample = (collectorIndex: number, data: JsonValue) => {
+    const collectorName = steps[collectorIndex]?.name;
+    if (!collectorName) return;
+    const inputRef = `steps.${collectorName}.data`;
+    const sample = JSON.stringify(data, null, 2);
+    steps.forEach((candidate, candidateIndex) => {
+      if (candidateIndex <= collectorIndex || candidate.step_type?.type !== 'TransformData') return;
+      if (candidate.transform_data?.input_from !== inputRef) return;
+      setTransformPreviewSamples(previous => ({ ...previous, [candidateIndex]: sample }));
+      setTransformPreviewResults(previous => {
+        const next = { ...previous };
+        delete next[candidateIndex];
+        return next;
+      });
+      if (candidate.transform_data.fields.length > 0) {
+        scheduleTransformPreview(candidateIndex, candidate.transform_data.fields, data);
+      }
+    });
+  };
+
+  const testCollectApiData = async (idx: number): Promise<JsonValue | null> => {
+    if (collectPreviewingRef.current !== null) return null;
+    const step = steps[idx];
+    if (!step) return null;
+    collectPreviewingRef.current = idx;
+    setCollectPreviewingIndex(idx);
+    try {
+      const result = await workflowsApi.testCollectApiData({
+        step,
+        project_id: projectId || null,
+        exec_allowlist: execAllowlist,
+      });
+      setCollectPreviewResults(previous => ({ ...previous, [idx]: result }));
+      const envelope = readCollectEnvelope(result);
+      if (envelope) propagateCollectSample(idx, envelope.data);
+      return envelope?.data ?? null;
+    } catch (cause) {
+      setCollectPreviewResults(previous => ({
+        ...previous,
+        [idx]: { success: false, duration_ms: 0, envelope: null, error: userError(cause) },
+      }));
+      return null;
+    } finally {
+      collectPreviewingRef.current = null;
+      setCollectPreviewingIndex(null);
+    }
+  };
+
+  const testPipelineToTransform = async (idx: number) => {
+    const config = steps[idx]?.transform_data;
+    if (!config) return;
+    const match = config.input_from.match(/^steps\.([^.]+)\.data$/);
+    const sourceIndex = match ? steps.findIndex(candidate => candidate.name === match[1]) : -1;
+    let sample: JsonValue | undefined;
+    if (sourceIndex >= 0 && steps[sourceIndex].step_type?.type === 'CollectApiData') {
+      sample = (await testCollectApiData(sourceIndex)) ?? undefined;
+    } else {
+      try {
+        sample = JSON.parse(transformPreviewSamples[idx] ?? '');
+      } catch {
+        sample = undefined;
+      }
+    }
+    if (sample !== undefined && config.fields.length > 0) {
+      await previewTransformData(idx, sample, config.fields);
+    }
   };
 
   /** Switch a step to a new step_type, clearing fields that don't apply
@@ -760,7 +1024,10 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
     // change as "always destructive" for those, but only prompt when
     // the variant has been customized — for now we conservatively prompt
     // whenever the user is leaving JsonData for a non-JsonData type.
-    const hasJsonContent = currentType === 'JsonData';
+    const hasJsonContent = currentType === 'JsonData'
+      || currentType === 'PublishPageData'
+      || currentType === 'CollectApiData'
+      || currentType === 'TransformData';
 
     if (hasAgentContent || hasApiContent || hasJsonContent) {
       // `confirm` may not exist in test environments (happy-dom doesn't
@@ -800,7 +1067,13 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
       // a defense-in-depth measure rather than the sole guard.
       const typeDefaults: Partial<WorkflowStep> = newType === 'Agent'
         ? { prompt_template: '' }
-        : {};
+        : newType === 'PublishPageData'
+          ? { page_publish: { page_id: '', writes: [] } }
+          : newType === 'CollectApiData'
+            ? { collect_api_data: { sources: [], concurrent_limit: 5 } }
+            : newType === 'TransformData'
+              ? { transform_data: { input_from: idx > 0 ? `steps.${steps[idx - 1]?.name}.data` : '', fields: [] } }
+          : {};
       return { ...universal, ...typeDefaults, agent: s.agent } as WorkflowStep;
     }));
     return true;
@@ -2514,7 +2787,603 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                       t={t}
                     />
                   </div>
-                ) : step.step_type?.type === 'JsonData' ? (() => {
+                ) : step.step_type?.type === 'CollectApiData' ? (() => {
+                  const config = step.collect_api_data ?? { sources: [], concurrent_limit: 5 };
+                  const setConfig = (collect_api_data: typeof config) => updateStep(i, { collect_api_data });
+                  const previewResult = collectPreviewResults[i];
+                  const previewEnvelope = readCollectEnvelope(previewResult);
+                  const previewData = previewEnvelope?.data;
+                  const previewObject = previewData && typeof previewData === 'object' && !Array.isArray(previewData)
+                    ? previewData as Record<string, JsonValue>
+                    : null;
+                  const previewMeta = previewObject?.meta && typeof previewObject.meta === 'object' && !Array.isArray(previewObject.meta)
+                    ? previewObject.meta as Record<string, JsonValue>
+                    : null;
+                  const sourceStatuses = Array.isArray(previewMeta?.sources)
+                    ? previewMeta.sources.filter((item): item is { [key: string]: JsonValue } => !!item && typeof item === 'object' && !Array.isArray(item))
+                    : [];
+                  return (
+                    <div className="wf-data-pipeline-form" data-testid="collect-api-data-form">
+                      <div className="wf-batch-intro">
+                        <Database size={14} />
+                        <div>
+                          <strong>{t('wiz.collectApiTitle')} <HelpTip hint={t('wiz.collectApiQuickApiInfo')} /></strong>
+                          <p className="text-xs text-muted">{t('wiz.collectApiHint')}</p>
+                        </div>
+                      </div>
+                      <div className="mb-3">
+                        <label className="text-xs text-muted mb-1">{t('wiz.collectApiConcurrency')}</label>
+                        <input
+                          type="number"
+                          min={1}
+                          max={20}
+                          className="wf-input text-sm"
+                          style={{ width: 90 }}
+                          value={config.concurrent_limit ?? 5}
+                          onChange={e => setConfig({ ...config, concurrent_limit: Math.max(1, Math.min(20, Number(e.target.value) || 1)) })}
+                          aria-label={t('wiz.collectApiConcurrency')}
+                        />
+                      </div>
+                      {config.sources.map((source, sourceIndex) => {
+                        const selectedQuickApi = availableQuickApis.find(api => api.id === source.quick_api_id);
+                        const selectedQuickExec = availableQuickExecs.find(exec => exec.id === source.quick_exec_id);
+                        const sourceKind = source.quick_exec
+                          ? 'quick_exec_inline'
+                          : source.quick_exec_id
+                            ? 'quick_exec'
+                            : 'quick_api';
+                        const quickExecDraft = source.quick_exec ?? {
+                          command: '', args: [], timeout_secs: 60, output_format: 'json' as const,
+                        };
+                        const sourceStatus = sourceStatuses.find(item => item.alias === source.alias);
+                        const updateSource = (patch: Partial<typeof source>) => setConfig({
+                          ...config,
+                          sources: config.sources.map((item, index) => index === sourceIndex ? { ...item, ...patch } : item),
+                        });
+                        return (
+                          <div className="wf-data-source-card" key={`${sourceIndex}-${source.quick_api_id}-${source.quick_exec_id}`}>
+                            {sourceStatus && (
+                              <div className="wf-data-source-status" data-status={String(sourceStatus.status ?? 'ERROR').toLowerCase()}>
+                                <span>{String(sourceStatus.status ?? 'ERROR')}</span>
+                                <span>{Number(sourceStatus.duration_ms ?? 0)} ms</span>
+                                {sourceStatus.error ? <span title={String(sourceStatus.error)}>{String(sourceStatus.summary ?? sourceStatus.error)}</span> : null}
+                              </div>
+                            )}
+                            <div className="wf-data-source-row">
+                              <div>
+                                <label className="text-2xs text-ghost">{t('wiz.collectSourceType')}</label>
+                                <select
+                                  className="wf-select text-sm"
+                                  value={sourceKind}
+                                  aria-label={t('wiz.collectSourceType')}
+                                  onChange={event => {
+                                    if (event.target.value === 'quick_exec') {
+                                      updateSource({ quick_api_id: '', quick_exec_id: '', quick_exec: null });
+                                    } else if (event.target.value === 'quick_exec_inline') {
+                                      updateSource({
+                                        quick_api_id: '',
+                                        quick_exec_id: '',
+                                        quick_exec: { command: '', args: [], timeout_secs: 60, output_format: 'json' },
+                                      });
+                                    } else {
+                                      updateSource({ quick_api_id: '', quick_exec_id: '', quick_exec: null });
+                                    }
+                                  }}
+                                >
+                                  <option value="quick_api">{t('wiz.collectSourceQuickApi')}</option>
+                                  <option value="quick_exec">{t('wiz.collectSourceQuickExec')}</option>
+                                  <option value="quick_exec_inline">{t('wiz.collectSourceQuickExecInline')}</option>
+                                </select>
+                              </div>
+                              <div>
+                                <label className="text-2xs text-ghost">{t('wiz.collectApiAlias')}</label>
+                                <input
+                                  className="wf-input text-sm"
+                                  value={source.alias}
+                                  onChange={e => updateSource({ alias: e.target.value.replace(/[^A-Za-z0-9_-]/g, '_') })}
+                                  placeholder="adobe_usage"
+                                  aria-label={t('wiz.collectApiAlias')}
+                                />
+                              </div>
+                              {sourceKind === 'quick_api' ? <div className="wf-data-source-picker">
+                                <label className="text-2xs text-ghost">
+                                  {t('wiz.collectApiQuickApi')} <HelpTip hint={t('wiz.collectApiQuickApiInfo')} />
+                                </label>
+                                <select
+                                  className="wf-select text-sm"
+                                  value={source.quick_api_id}
+                                  aria-label={t('wiz.collectApiQuickApi')}
+                                  onChange={e => {
+                                    const selected = availableQuickApis.find(api => api.id === e.target.value);
+                                    const generatedAlias = selected?.name
+                                      .toLowerCase()
+                                      .normalize('NFD')
+                                      .replace(/[\u0300-\u036f]/g, '')
+                                      .replace(/[^a-z0-9_-]+/g, '_')
+                                      .replace(/^_+|_+$/g, '');
+                                    updateSource({
+                                      quick_api_id: e.target.value,
+                                      alias: source.alias.trim() ? source.alias : (generatedAlias || `source_${sourceIndex + 1}`),
+                                    });
+                                  }}
+                                >
+                                  <option value="">{t('wiz.collectApiSelect')}</option>
+                                  {availableQuickApis.map(api => (
+                                    <option key={api.id} value={api.id}>{api.icon} {api.name}</option>
+                                  ))}
+                                </select>
+                              </div> : sourceKind === 'quick_exec' ? <div className="wf-data-source-picker">
+                                <label className="text-2xs text-ghost">
+                                  {t('wiz.collectQuickExecSaved')} <HelpTip hint={t('wiz.collectQuickExecInfo')} />
+                                </label>
+                                <select
+                                  className="wf-select text-sm"
+                                  value={source.quick_exec_id}
+                                  aria-label={t('wiz.collectQuickExecSaved')}
+                                  onChange={event => {
+                                    const selected = availableQuickExecs.find(exec => exec.id === event.target.value);
+                                    const generatedAlias = selected?.name
+                                      .toLowerCase()
+                                      .normalize('NFD')
+                                      .replace(/[\u0300-\u036f]/g, '')
+                                      .replace(/[^a-z0-9_-]+/g, '_')
+                                      .replace(/^_+|_+$/g, '');
+                                    updateSource({
+                                      quick_exec_id: event.target.value,
+                                      alias: source.alias.trim() ? source.alias : (generatedAlias || `source_${sourceIndex + 1}`),
+                                    });
+                                    if (selected?.command) {
+                                      setExecAllowlist(previous => previous.includes(selected.command)
+                                        ? previous
+                                        : [...previous, selected.command]);
+                                    }
+                                  }}
+                                >
+                                  <option value="">{t('wiz.collectQuickExecSelect')}</option>
+                                  {availableQuickExecs
+                                    .filter(exec => !exec.project_id || exec.project_id === projectId)
+                                    .map(exec => (
+                                    <option key={exec.id} value={exec.id}>{exec.icon} {exec.name}</option>
+                                    ))}
+                                </select>
+                              </div> : <div className="wf-data-source-picker">
+                                <label className="text-2xs text-ghost">
+                                  {t('wiz.collectQuickExecCommand')} <HelpTip hint={t('wiz.collectQuickExecInfo')} />
+                                </label>
+                                <input
+                                  className="wf-input text-sm"
+                                  value={quickExecDraft.command}
+                                  onChange={event => {
+                                    const command = event.target.value.replace(/[^A-Za-z0-9._-]/g, '');
+                                    updateSource({ quick_exec: { ...quickExecDraft, command } });
+                                    if (command) setExecAllowlist(previous => previous.includes(command) ? previous : [...previous, command]);
+                                  }}
+                                  placeholder="aws"
+                                  aria-label={t('wiz.collectQuickExecCommand')}
+                                />
+                              </div>}
+                              <label className="wf-data-required-toggle text-xs">
+                                <input
+                                  type="checkbox"
+                                  checked={source.required}
+                                  onChange={e => updateSource({ required: e.target.checked })}
+                                />
+                                {t('wiz.collectApiRequired')}
+                              </label>
+                              <button
+                                type="button"
+                                className="wf-icon-btn"
+                                onClick={() => setConfig({ ...config, sources: config.sources.filter((_, index) => index !== sourceIndex) })}
+                                aria-label={t('common.delete')}
+                              ><X size={13} /></button>
+                            </div>
+                            {sourceKind === 'quick_exec_inline' && source.quick_exec && (
+                              <div className="wf-data-quick-exec">
+                                <div>
+                                  <label className="text-2xs text-ghost">{t('wiz.collectQuickExecArgs')}</label>
+                                  <textarea
+                                    className="wf-textarea wf-data-quick-exec-args"
+                                    value={quickExecDraft.args.join('\n')}
+                                    onChange={event => updateSource({
+                                      quick_exec: {
+                                        ...quickExecDraft,
+                                        args: event.target.value.split('\n').filter(argument => argument.length > 0),
+                                      },
+                                    })}
+                                    placeholder={'cloudwatch\nget-metric-data\n--output\njson'}
+                                    aria-label={t('wiz.collectQuickExecArgs')}
+                                  />
+                                  <small>{t('wiz.collectQuickExecArgsHint')}</small>
+                                </div>
+                                <label>
+                                  <span className="text-2xs text-ghost">{t('wiz.collectQuickExecFormat')}</span>
+                                  <select
+                                    className="wf-select text-sm"
+                                    value={quickExecDraft.output_format}
+                                    onChange={event => updateSource({
+                                      quick_exec: { ...quickExecDraft, output_format: event.target.value as 'json' | 'text' | 'lines' | 'csv' },
+                                    })}
+                                    aria-label={t('wiz.collectQuickExecFormat')}
+                                  >
+                                    <option value="json">JSON</option>
+                                    <option value="text">{t('wiz.collectQuickExecText')}</option>
+                                    <option value="lines">{t('wiz.collectQuickExecLines')}</option>
+                                    <option value="csv">{t('wiz.collectQuickExecCsv')}</option>
+                                  </select>
+                                </label>
+                                <label>
+                                  <span className="text-2xs text-ghost">{t('wiz.collectQuickExecTimeout')}</span>
+                                  <input
+                                    type="number"
+                                    min={1}
+                                    max={1800}
+                                    className="wf-input text-sm"
+                                    value={quickExecDraft.timeout_secs ?? 60}
+                                    onChange={event => updateSource({
+                                      quick_exec: { ...quickExecDraft, timeout_secs: Math.max(1, Math.min(1800, Number(event.target.value) || 1)) },
+                                    })}
+                                    aria-label={t('wiz.collectQuickExecTimeout')}
+                                  />
+                                </label>
+                              </div>
+                            )}
+                            {sourceKind === 'quick_api' && (selectedQuickApi?.variables?.length ?? 0) > 0 && (
+                              <div className="wf-data-source-vars">
+                                {selectedQuickApi?.variables?.map(variable => (
+                                  <div key={variable.name}>
+                                    <label className="text-2xs text-ghost">
+                                      {variable.name}{variable.required ? ' *' : ''}
+                                    </label>
+                                    <input
+                                      className="wf-input text-sm"
+                                      value={(source.variables ?? {})[variable.name] ?? ''}
+                                      onChange={e => updateSource({
+                                        variables: { ...(source.variables ?? {}), [variable.name]: e.target.value },
+                                      })}
+                                      placeholder={i > 0 ? `{{steps.${steps[i - 1].name}.data}}` : variable.placeholder ?? ''}
+                                      aria-label={variable.name}
+                                    />
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                            {sourceKind === 'quick_exec' && (selectedQuickExec?.variables?.length ?? 0) > 0 && (
+                              <div className="wf-data-source-vars">
+                                {selectedQuickExec?.variables.map(variable => (
+                                  <div key={variable.name}>
+                                    <label className="text-2xs text-ghost">
+                                      {variable.name}{variable.required ? ' *' : ''}
+                                    </label>
+                                    <input
+                                      className="wf-input text-sm"
+                                      value={(source.variables ?? {})[variable.name] ?? ''}
+                                      onChange={event => updateSource({
+                                        variables: { ...(source.variables ?? {}), [variable.name]: event.target.value },
+                                      })}
+                                      placeholder={i > 0 ? `{{steps.${steps[i - 1].name}.data}}` : variable.placeholder ?? ''}
+                                      aria-label={variable.name}
+                                    />
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                      <button
+                        type="button"
+                        className="wf-btn-secondary mt-2"
+                        onClick={() => setConfig({
+                          ...config,
+                          sources: [...config.sources, {
+                            alias: '',
+                            quick_api_id: '',
+                            quick_exec_id: '',
+                            quick_exec: null,
+                            required: true,
+                            variables: {},
+                          }],
+                        })}
+                      ><Plus size={13} /> {t('wiz.collectApiAdd')}</button>
+                      <div className="wf-data-test-actions">
+                        <button
+                          type="button"
+                          className="wf-btn-primary"
+                          disabled={collectPreviewingIndex !== null || config.sources.length === 0 || config.sources.some(source => !source.alias.trim() || (
+                            source.quick_exec
+                              ? !source.quick_exec.command.trim()
+                              : !source.quick_api_id && !source.quick_exec_id
+                          ))}
+                          onClick={() => void testCollectApiData(i)}
+                          aria-label={t('wiz.collectApiTest')}
+                        >
+                          {collectPreviewingIndex === i ? <Loader2 size={13} className="spin" /> : <Play size={13} />}
+                          {collectPreviewingIndex === i ? t('wiz.collectApiTesting') : t('wiz.collectApiTest')}
+                        </button>
+                        <span className="text-xs text-ghost">{t('wiz.collectApiTestHint')}</span>
+                      </div>
+                      {previewResult && (
+                        <div className="wf-data-test-result" data-status={(previewEnvelope?.status ?? 'ERROR').toLowerCase()}>
+                          <div className="wf-data-test-result-head">
+                            <strong>{previewEnvelope?.summary || (previewResult.error ?? t('wiz.collectApiResult'))}</strong>
+                            <span>{previewResult.duration_ms} ms · {previewEnvelope?.status ?? 'ERROR'}</span>
+                          </div>
+                          {previewData !== undefined ? (
+                            <pre>{JSON.stringify(previewData, null, 2)}</pre>
+                          ) : (
+                            <p className="text-xs text-danger">{previewResult.error}</p>
+                          )}
+                        </div>
+                      )}
+                      {!focusedStepOnly && (
+                        <div className="wf-collect-next-steps">
+                          <strong>{t('wiz.collectApiNextTitle')}</strong>
+                          <p>{t('wiz.collectApiNextHint')}</p>
+                          <div>
+                            <button type="button" className="wf-collect-next-card" onClick={() => insertDataPipelineStep(i, 'TransformData')}>
+                              <Shuffle size={16} />
+                              <span><strong>{t('wiz.collectApiAddTransform')}</strong><small>{t('wiz.collectApiAddTransformHint')}</small></span>
+                              <HelpTip hint={t('wiz.collectApiAddTransformInfo')} />
+                            </button>
+                            <button type="button" className="wf-collect-next-card" onClick={() => insertDataPipelineStep(i, 'PublishPageData')}>
+                              <FileText size={16} />
+                              <span><strong>{t('wiz.collectApiAddPage')}</strong><small>{t('wiz.collectApiAddPageHint')}</small></span>
+                              <HelpTip hint={t('wiz.collectApiAddPageInfo')} />
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })() : step.step_type?.type === 'TransformData' ? (() => {
+                  const config = step.transform_data ?? {
+                    input_from: i > 0 ? `steps.${steps[i - 1].name}.data` : '',
+                    fields: [],
+                  };
+                  const setConfig = (transform_data: typeof config) => {
+                    updateStep(i, { transform_data });
+                    scheduleTransformPreview(i, transform_data.fields);
+                  };
+                  const operations = ['copy', 'count', 'sum', 'average', 'min', 'max', 'first', 'last'] as const;
+                  let sampleData: JsonValue | undefined;
+                  try {
+                    if (transformPreviewSamples[i]?.trim()) sampleData = JSON.parse(transformPreviewSamples[i]);
+                  } catch {
+                    sampleData = undefined;
+                  }
+                  const businessSources = sampleData && typeof sampleData === 'object' && !Array.isArray(sampleData)
+                    ? (sampleData as Record<string, JsonValue>).sources
+                    : undefined;
+                  const hasBusinessSources = !!businessSources && typeof businessSources === 'object' && !Array.isArray(businessSources);
+                  const sourceTreePath = (path: string) => path === '$' ? '$.sources' : `$.sources${path.slice(1)}`;
+                  const addMapping = (path: string) => {
+                    if (config.fields.some(field => field.source === path)) return;
+                    const baseTarget = jsonPathToTarget(path);
+                    let target = baseTarget;
+                    let suffix = 2;
+                    while (config.fields.some(field => field.target === target)) target = `${baseTarget}_${suffix++}`;
+                    const fields: TransformDataField[] = [...config.fields, {
+                      target,
+                      source: path,
+                      operation: 'copy',
+                      fallback: null,
+                      value_type: null,
+                    }];
+                    setConfig({ ...config, fields });
+                  };
+                  const useAllSources = () => {
+                    if (!sampleData || typeof sampleData !== 'object' || Array.isArray(sampleData)) return;
+                    const sources = (sampleData as Record<string, JsonValue>).sources;
+                    if (!sources || typeof sources !== 'object' || Array.isArray(sources)) return;
+                    const sourceFields = Object.keys(sources)
+                      .map(jsonPathForSource)
+                      .map(path => ({
+                        target: jsonPathToTarget(path),
+                        source: path,
+                        operation: 'copy' as const,
+                        fallback: null,
+                        value_type: null,
+                      }));
+                    if (sourceFields.length > 0) setConfig({ ...config, fields: sourceFields });
+                  };
+                  return (
+                    <div className="wf-data-pipeline-form" data-testid="transform-data-form">
+                      <div className="wf-batch-intro">
+                        <Shuffle size={14} />
+                        <div>
+                          <strong>{t('wiz.transformDataTitle')}</strong>
+                          <p className="text-xs text-muted">{t('wiz.transformDataHint')}</p>
+                        </div>
+                      </div>
+                      <label className="text-xs text-muted mb-1">{t('wiz.transformDataInput')} <span className="wf-required">*</span></label>
+                      <select
+                        className="wf-select text-sm"
+                        value={config.input_from}
+                        onChange={e => setConfig({ ...config, input_from: e.target.value })}
+                        aria-label={t('wiz.transformDataInput')}
+                      >
+                        <option value="">{t('wiz.transformDataInputSelect')}</option>
+                        {steps.slice(0, i).map(previous => (
+                          <option value={`steps.${previous.name}.data`} key={previous.name}>
+                            {previous.name} · {previous.step_type?.type ?? 'Agent'}
+                          </option>
+                        ))}
+                      </select>
+                      <div className="wf-data-test-actions">
+                        <button
+                          type="button"
+                          className="wf-btn-primary"
+                          disabled={!config.input_from || collectPreviewingIndex !== null || transformPreviewingIndex !== null}
+                          onClick={() => void testPipelineToTransform(i)}
+                          aria-label={t('wiz.transformDataTestPipeline')}
+                        >
+                          {(collectPreviewingIndex !== null || transformPreviewingIndex === i) ? <Loader2 size={13} className="spin" /> : <Play size={13} />}
+                          {t('wiz.transformDataTestPipeline')}
+                        </button>
+                        <span className="text-xs text-ghost">{t('wiz.transformDataTestHint')}</span>
+                      </div>
+                      {sampleData === undefined ? (
+                        <div className="wf-transform-empty-sample">
+                          <Database size={16} />
+                          <span>{t('wiz.transformDataNoSample')}</span>
+                        </div>
+                      ) : (
+                        <>
+                        <div className="wf-transform-selection-summary">
+                          <strong>{t('wiz.transformDataMappingsActive', config.fields.length)}</strong>
+                          <span>{t('wiz.transformDataMappingsExplain')}</span>
+                          {config.fields.length > 0 && (
+                            <>
+                              <div className="wf-transform-selection-list">
+                                {config.fields.map((field, fieldIndex) => (
+                                  <code key={`${field.target}-${fieldIndex}`}>{field.target || '…'} ← {field.source}</code>
+                                ))}
+                              </div>
+                              <button
+                                type="button"
+                                className="wf-btn-ghost wf-transform-clear-selection"
+                                onClick={() => setConfig({ ...config, fields: [] })}
+                              >
+                                <X size={12} /> {t('wiz.transformDataClearMappings')}
+                              </button>
+                            </>
+                          )}
+                        </div>
+                        <div className="wf-transform-mapper">
+                          <section className="wf-transform-mapper-panel">
+                            <div className="wf-transform-mapper-head">
+                              <div>
+                                <strong>{t('wiz.transformDataSourceTree')}</strong>
+                                <p className="text-2xs text-ghost">{t('wiz.transformDataPickHint')}</p>
+                              </div>
+                              <button type="button" className="wf-btn-ghost" onClick={useAllSources}>
+                                <Plus size={12} /> {t('wiz.transformDataAddAllSources')}
+                              </button>
+                            </div>
+                            {hasBusinessSources ? (
+                              <JsonTreeViewer data={businessSources} onPick={path => addMapping(sourceTreePath(path))} />
+                            ) : (
+                              <p className="text-xs text-ghost">{t('wiz.transformDataNoBusinessSources')}</p>
+                            )}
+                          </section>
+                          <section className="wf-transform-mapper-panel">
+                            <div className="wf-transform-output-head">
+                              <strong>{t('wiz.transformDataOutputTitle')}</strong>
+                              <span>{t('wiz.transformDataMappingCount', config.fields.length)}</span>
+                            </div>
+                            <p className="text-2xs text-ghost">{t('wiz.transformDataOutputExplain')}</p>
+                            {transformPreviewResults[i] ? (
+                              <pre data-error={!!transformPreviewResults[i].error}>
+                                {transformPreviewResults[i].error ?? JSON.stringify(transformPreviewResults[i].value, null, 2)}
+                              </pre>
+                            ) : (
+                              <p className="text-xs text-ghost">{t('wiz.transformDataOutputWaiting')}</p>
+                            )}
+                          </section>
+                        </div>
+                        </>
+                      )}
+                      {config.fields.map((field, fieldIndex) => {
+                        const updateField = (patch: Partial<typeof field>) => setConfig({
+                          ...config,
+                          fields: config.fields.map((item, index) => index === fieldIndex ? { ...item, ...patch } : item),
+                        });
+                        return (
+                          <div className="wf-transform-field" key={fieldIndex}>
+                            <input
+                              className="wf-input text-sm"
+                              value={field.target}
+                              onChange={e => updateField({ target: e.target.value })}
+                              placeholder={t('wiz.transformDataTarget')}
+                              aria-label={t('wiz.transformDataTarget')}
+                            />
+                            <input
+                              className="wf-input text-sm wf-transform-source"
+                              value={field.source}
+                              onChange={e => updateField({ source: e.target.value })}
+                              placeholder="$.sources.adobe.total"
+                              aria-label={t('wiz.transformDataSource')}
+                            />
+                            <select
+                              className="wf-select text-sm"
+                              value={field.operation}
+                              onChange={e => updateField({ operation: e.target.value as typeof field.operation })}
+                              aria-label={t('wiz.transformDataOperation')}
+                            >
+                              {operations.map(operation => <option key={operation} value={operation}>{operation}</option>)}
+                            </select>
+                            <select
+                              className="wf-select text-sm"
+                              value={field.value_type ?? ''}
+                              onChange={e => updateField({ value_type: (e.target.value || null) as typeof field.value_type })}
+                              aria-label={t('wiz.transformDataType')}
+                            >
+                              <option value="">{t('wiz.transformDataPreserve')}</option>
+                              <option value="string">string</option>
+                              <option value="number">number</option>
+                              <option value="boolean">boolean</option>
+                            </select>
+                            <button
+                              type="button"
+                              className="wf-icon-btn"
+                              onClick={() => setConfig({ ...config, fields: config.fields.filter((_, index) => index !== fieldIndex) })}
+                              aria-label={t('common.delete')}
+                            ><X size={13} /></button>
+                          </div>
+                        );
+                      })}
+                      <button
+                        type="button"
+                        className="wf-btn-secondary mt-2"
+                        onClick={() => setConfig({
+                          ...config,
+                          fields: [...config.fields, {
+                            target: '',
+                            source: '$',
+                            operation: 'copy',
+                            fallback: null,
+                            value_type: null,
+                          }],
+                        })}
+                      ><Plus size={13} /> {t('wiz.transformDataAdd')}</button>
+                      <details className="wf-transform-preview mt-3">
+                        <summary>{t('wiz.transformDataAdvancedSample')}</summary>
+                        <label className="text-xs text-muted mb-1">{t('wiz.transformDataPreviewSample')}</label>
+                        <textarea
+                          className="wf-textarea text-sm"
+                          rows={7}
+                          style={{ fontFamily: 'var(--kr-font-mono)' }}
+                          value={transformPreviewSamples[i] ?? ''}
+                          onChange={e => {
+                            const raw = e.target.value;
+                            setTransformPreviewSamples(prev => ({ ...prev, [i]: raw }));
+                            setTransformPreviewResults(prev => {
+                              const next = { ...prev };
+                              delete next[i];
+                              return next;
+                            });
+                            try {
+                              scheduleTransformPreview(i, config.fields, JSON.parse(raw));
+                            } catch {
+                              // Keep the editable draft visible; preview reports on explicit click.
+                            }
+                          }}
+                          placeholder={'{"sources":{"adobe":{"total":1240}}}'}
+                          aria-label={t('wiz.transformDataPreviewSample')}
+                        />
+                        <button
+                          type="button"
+                          className="wf-btn-secondary mt-2"
+                          disabled={!transformPreviewSamples[i]?.trim() || !config.fields.length || transformPreviewingIndex !== null}
+                          onClick={() => void previewTransformData(i)}
+                        >
+                          {transformPreviewingIndex === i ? <Loader2 size={13} className="spin" /> : <Zap size={13} />}
+                          {t('wiz.transformDataPreviewRun')}
+                        </button>
+                      </details>
+                    </div>
+                  );
+                })() : step.step_type?.type === 'JsonData' ? (() => {
                   // Source de données déterministe — payload littéral, 0 token,
                   // 0 réseau. Valide le JSON live pour signaler les erreurs avant
                   // le save. Pas de templating runtime : la valeur est retournée
@@ -2595,6 +3464,94 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                         <p className="text-2xs text-ghost mt-1">{summary}</p>
                       )}
                       <p className="text-2xs text-ghost mt-2">{t('wiz.jsonDataNoTemplating')}</p>
+                    </div>
+                  );
+                })() : step.step_type?.type === 'PublishPageData' ? (() => {
+                  const config = step.page_publish ?? { page_id: '', writes: [] };
+                  const selectedPage = availablePages.find(page => page.id === config.page_id);
+                  const setConfig = (page_publish: typeof config) => updateStep(i, { page_publish });
+                  return (
+                    <div className="wf-json-data-form" data-testid="publish-page-form">
+                      <div className="wf-batch-intro">
+                        <FileText size={14} />
+                        <div>
+                          <strong>{t('wiz.publishPageTitle')} <HelpTip hint={t('wiz.publishPagePickerInfo')} /></strong>
+                          <p className="text-xs text-muted">{t('wiz.publishPageHint')}</p>
+                        </div>
+                      </div>
+                      <label className="text-xs text-muted mb-1">
+                        {t('wiz.publishPagePicker')} <span className="wf-required">*</span>
+                        {' '}<HelpTip hint={t('wiz.publishPagePickerInfo')} />
+                      </label>
+                      <select
+                        className="wf-select text-sm"
+                        value={config.page_id}
+                        onChange={e => setConfig({ ...config, page_id: e.target.value })}
+                        aria-label={t('wiz.publishPagePicker')}
+                      >
+                        <option value="">{t('wiz.publishPagePickerEmpty')}</option>
+                        {availablePages.map(page => <option key={page.id} value={page.id}>{page.title}</option>)}
+                      </select>
+                      {selectedPage && (
+                        <div className="wf-page-selected-link">
+                          <div>
+                            <strong>{selectedPage.title}</strong>
+                            <span>{t('wiz.publishPageSharedHint')}</span>
+                          </div>
+                          <CopyIdPill id={selectedPage.id} title={t('wiz.publishPageCopyId', selectedPage.title)} />
+                          {onNavigatePage && (
+                            <button type="button" className="wf-btn-ghost" onClick={() => onNavigatePage(selectedPage.id)}>
+                              <FileText size={12} /> {t('wiz.publishPageOpen')}
+                            </button>
+                          )}
+                        </div>
+                      )}
+
+                      <div className="wf-batch-info mt-3">
+                        <Info size={12} />
+                        <span>{t('wiz.publishPageCreateHint')}</span>
+                      </div>
+                      <div className="flex-row gap-2 mt-2">
+                        <input
+                          className="wf-input flex-1 text-sm"
+                          value={pageDraftTitles[i] ?? ''}
+                          onChange={e => setPageDraftTitles(prev => ({ ...prev, [i]: e.target.value }))}
+                          placeholder={t('wiz.publishPageCreatePlaceholder')}
+                          aria-label={t('wiz.publishPageCreatePlaceholder')}
+                        />
+                        <button
+                          type="button"
+                          className="wf-btn-secondary"
+                          disabled={!pageDraftTitles[i]?.trim() || pageCreatingIndex !== null}
+                          onClick={() => void createStarterPage(i)}
+                        >
+                          {pageCreatingIndex === i ? <Loader2 size={13} className="spin" /> : <Plus size={13} />}
+                          {t('wiz.publishPageCreate')}
+                        </button>
+                      </div>
+
+                      {selectedPage && config.writes.map((write, writeIndex) => {
+                        const updateWrite = (patch: Partial<typeof write>) => setConfig({
+                          ...config,
+                          writes: config.writes.map((item, index) => index === writeIndex ? { ...item, ...patch } : item),
+                        });
+                        return (
+                          <div className="wf-page-write" key={writeIndex}>
+                            <input className="wf-input text-sm" value={write.dataset} onChange={e => updateWrite({ dataset: e.target.value })} placeholder="dataset" aria-label="dataset" />
+                            <select className="wf-select text-sm" value={write.operation} onChange={e => updateWrite({ operation: e.target.value as typeof write.operation })} aria-label="operation">
+                              <option value="replace">replace</option><option value="append">append</option><option value="upsert">upsert</option>
+                            </select>
+                            <input className="wf-input text-sm" value={write.value_from} onChange={e => updateWrite({ value_from: e.target.value })} placeholder={i > 0 ? `steps.${steps[i - 1].name}.data` : 'trigger'} aria-label="value_from" />
+                            <button type="button" className="wf-icon-btn" onClick={() => setConfig({ ...config, writes: config.writes.filter((_, index) => index !== writeIndex) })}><X size={13} /></button>
+                          </div>
+                        );
+                      })}
+                      {selectedPage && (
+                        <button type="button" className="wf-btn-secondary mt-2" onClick={() => setConfig({
+                          ...config,
+                          writes: [...config.writes, { dataset: 'summary', operation: 'replace', value_from: i > 0 ? `steps.${steps[i - 1].name}.data` : 'trigger', observed_at: null, dedupe_key: null, key_field: null }],
+                        })}><Plus size={13} /> {t('wiz.publishPageAddWrite')}</button>
+                      )}
                     </div>
                   );
                 })() : step.step_type?.type === 'SubWorkflow' ? (() => {
@@ -2683,10 +3640,10 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                       </div>
                     </header>
                     <div className="wf-agent-prompt-body">
-                    {availableQuickPrompts.length > 0 && (
+                    {(
                       <div className="wf-agent-prompt-source">
                         <label className="wf-selector-label">
-                          {t('wiz.agentQpPicker')}
+                          {t('wiz.agentQpPicker')} <HelpTip hint={t('wiz.agentQpPickerInfo')} />
                         </label>
                         <select
                           className="wf-select text-sm"
@@ -2701,6 +3658,9 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                             </option>
                           ))}
                         </select>
+                        {availableQuickPrompts.length === 0 && (
+                          <p className="text-2xs text-ghost mt-1">{t('wiz.agentQpPickerNone')}</p>
+                        )}
                         {selectedQp && (
                           <div className="wf-qref-banner">
                             <div className="wf-qref-banner-header">
@@ -3902,7 +4862,10 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
               : typeKind === 'Gate' ? 'GATE'
               : typeKind === 'Exec' ? 'EXEC'
               : typeKind === 'BatchApiCall' ? 'BATCH API'
+              : typeKind === 'CollectApiData' ? 'COLLECT'
+              : typeKind === 'TransformData' ? 'TRANSFORM'
               : typeKind === 'JsonData' ? 'JSON'
+              : typeKind === 'PublishPageData' ? 'PAGE'
               : typeKind === 'SubWorkflow' ? 'SOUS-WF'
               : 'AGENT';
             const typeData = typeKind === 'ApiCall' ? 'api'
@@ -3911,7 +4874,10 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
               : typeKind === 'Gate' ? 'gate'
               : typeKind === 'Exec' ? 'exec'
               : typeKind === 'BatchApiCall' ? 'batch-api'
+              : typeKind === 'CollectApiData' ? 'collect-data'
+              : typeKind === 'TransformData' ? 'transform-data'
               : typeKind === 'JsonData' ? 'json-data'
+              : typeKind === 'PublishPageData' ? 'page-data'
               : typeKind === 'SubWorkflow' ? 'subworkflow'
               : 'agent';
             const isBatch = typeKind === 'BatchQuickPrompt';
@@ -3921,6 +4887,9 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
             const isExec = typeKind === 'Exec';
             const isBatchApi = typeKind === 'BatchApiCall';
             const isJsonData = typeKind === 'JsonData';
+            const isCollectData = typeKind === 'CollectApiData';
+            const isTransformData = typeKind === 'TransformData';
+            const isPublishPage = typeKind === 'PublishPageData';
             const qpName = isBatch && s.batch_quick_prompt_id
               ? availableQuickPrompts.find(qp => qp.id === s.batch_quick_prompt_id)?.name
               : null;
@@ -3952,7 +4921,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                   catch { return s.notify_config.url; }
                 })()
               : null;
-            const nameColor = isBatch || isApi || isNotify || isGate || isExec || isBatchApi || isJsonData
+            const nameColor = isBatch || isApi || isNotify || isGate || isExec || isBatchApi || isJsonData || isCollectData || isTransformData || isPublishPage
               ? 'var(--kr-text-faint)'
               : (AGENT_COLORS[s.agent] ?? 'var(--kr-text-faint)');
             const execSubtitle = isExec && s.exec_command
@@ -3994,7 +4963,12 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                                 if (typeof p === 'object') return t('wiz.jsonDataSummaryObject', Object.keys(p as object).length);
                                 return t('wiz.jsonDataSummaryScalar');
                               })()})</span>
+                            : isCollectData
+                              ? <span className="text-dim text-xs"> ({t('wiz.collectApiSourcesCount', s.collect_api_data?.sources.length ?? 0)})</span>
+                              : isTransformData
+                                ? <span className="text-dim text-xs"> ({s.transform_data?.fields.length ?? 0} fields)</span>
                             : typeKind === 'Agent' ? <> ({AGENT_LABELS[s.agent] ?? s.agent})</>
+                            : isPublishPage ? <span className="text-dim text-xs"> ({availablePages.find(page => page.id === s.page_publish?.page_id)?.title ?? t('wiz.publishPagePickerEmpty')})</span>
                             : null
               }
               {s.description && <span className="text-faint text-xs" style={{ fontStyle: 'italic' }}> &mdash; {s.description}</span>}
@@ -4103,6 +5077,34 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
             // bypasser via copy-paste rapide).
             if (s.json_data_payload === null || s.json_data_payload === undefined) {
               errors.push(t('wiz.errorJsonDataNoPayload').replace('{0}', label));
+            }
+          } else if (s.step_type?.type === 'CollectApiData') {
+            const sources = s.collect_api_data?.sources ?? [];
+            const aliases = new Set(sources.map(source => source.alias.trim()).filter(Boolean));
+            if (
+              sources.length === 0
+              || aliases.size !== sources.length
+              || sources.some(source => !source.alias.trim() || (
+                source.quick_exec
+                  ? !source.quick_exec.command.trim() || !execAllowlist.includes(source.quick_exec.command)
+                  : source.quick_exec_id
+                    ? !execAllowlist.includes(availableQuickExecs.find(exec => exec.id === source.quick_exec_id)?.command ?? '')
+                    : !source.quick_api_id
+              ))
+            ) {
+              errors.push(t('wiz.errorCollectApiConfig').replace('{0}', label));
+            }
+          } else if (s.step_type?.type === 'TransformData') {
+            if (
+              !s.transform_data?.input_from.trim()
+              || !s.transform_data.fields.length
+              || s.transform_data.fields.some(field => !field.target.trim() || !field.source.trim())
+            ) {
+              errors.push(t('wiz.errorTransformDataConfig').replace('{0}', label));
+            }
+          } else if (s.step_type?.type === 'PublishPageData') {
+            if (!s.page_publish?.page_id?.trim() || !s.page_publish.writes.length) {
+              errors.push(t('wiz.errorPublishPageConfig').replace('{0}', label));
             }
           } else if (s.step_type?.type === 'SubWorkflow') {
             // SubWorkflow steps run a child workflow — no prompt. They need a
