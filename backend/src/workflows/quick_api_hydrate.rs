@@ -163,6 +163,9 @@ mod tests {
             exec_stdin: None,
             quick_prompt_id: None,
             json_data_payload: None,
+            collect_api_data: None,
+            transform_data: None,
+            page_publish: None,
             sub_workflow_id: None,
             sub_workflow_foreach_file: None,
             multi_agent_review: None,
@@ -223,6 +226,25 @@ mod tests {
         hydrate_step_from_quick_api(&mut step, &db).await.unwrap();
         assert_eq!(step.api_plugin_slug, before.api_plugin_slug);
         assert_eq!(step.api_endpoint_path, before.api_endpoint_path);
+    }
+
+    #[tokio::test]
+    async fn legacy_stringified_body_hydrates_as_json_object() {
+        let db = Database::open_in_memory().unwrap();
+        let mut qa = make_qa("qa-string-body");
+        qa.api_method = Some("POST".to_string());
+        qa.api_body = Some(serde_json::Value::String(
+            r#"{"events":[{"name":"page_view"}]}"#.into(),
+        ));
+        let qa_id = seed_qa(&db, qa).await;
+        let mut step = empty_step(Some(qa_id));
+
+        hydrate_step_from_quick_api(&mut step, &db).await.unwrap();
+
+        assert_eq!(
+            step.api_body,
+            Some(serde_json::json!({"events": [{"name": "page_view"}]}))
+        );
     }
 
     #[tokio::test]

@@ -61,6 +61,7 @@ vi.mock('../../../lib/I18nContext', () => ({
 }));
 
 import { WorkflowWizard } from '../WorkflowWizard';
+import { jsonPathToTarget } from '../../../lib/workflowUiUtils';
 import { buildBlankStep } from '../../../lib/workflowUiUtils';
 
 // ── Fixtures ────────────────────────────────────────────────────────
@@ -588,7 +589,7 @@ describe('WorkflowWizard — step-type swaps', () => {
     fireEvent.click(option);
   };
 
-  it('keeps the nine types collapsed and groups them by purpose when opened', () => {
+  it('keeps the twelve types collapsed and groups them by purpose when opened', () => {
     toSteps();
     expect(document.querySelector('.wf-step-type-catalog')).toBeNull();
 
@@ -598,7 +599,7 @@ describe('WorkflowWizard — step-type swaps', () => {
     expect(screen.getByText('wiz.stepTypeGroupAi')).toBeInTheDocument();
     expect(screen.getByText('wiz.stepTypeGroupData')).toBeInTheDocument();
     expect(screen.getByText('wiz.stepTypeGroupControl')).toBeInTheDocument();
-    expect(firstCard.querySelectorAll('.wf-step-type-option')).toHaveLength(9);
+    expect(firstCard.querySelectorAll('.wf-step-type-option')).toHaveLength(12);
   });
 
   it('keeps optional agent context compact and reveals each selector on demand', async () => {
@@ -962,6 +963,14 @@ describe('WorkflowWizard — summary', () => {
     expect(screen.getByText('SummaryWF')).toBeInTheDocument();
     // Step count row renders "1".
     expect(screen.getByText('Steps')).toBeInTheDocument();
+  });
+});
+
+describe('jsonPathToTarget', () => {
+  it('removes the collector wrapper and normalizes output keys', () => {
+    expect(jsonPathToTarget('$.sources.adobe.total')).toBe('adobe.total');
+    expect(jsonPathToTarget("$.sources['chartbeat-live'].rows[0].visits")).toBe('chartbeat_live.rows.visits');
+    expect(jsonPathToTarget('$')).toBe('value');
   });
 });
 

@@ -37,13 +37,16 @@ pub use runtime::*;
 pub(super) const MAX_TITLE_LEN: usize = 500;
 /// Maximum content/prompt length (bytes, ~100 KB).
 pub(super) const MAX_CONTENT_LEN: usize = 100_000;
-/// Global timeout for a single agent stream (30 minutes).
-pub(super) const AGENT_GLOBAL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+/// Resolve the configurable absolute timeout captured when each run starts.
+pub(super) fn configured_agent_global_timeout(minutes: u32) -> Duration {
+    let minutes = crate::models::clamp_agent_global_timeout_min(u64::from(minutes));
+    Duration::from_secs(u64::from(minutes) * 60)
+}
 /// Default stall timeout (5 minutes) — overridden by config.server.agent_stall_timeout_min
 pub(super) const DEFAULT_STALL_TIMEOUT_MIN: u32 = 5;
 /// Stall ceiling for NON-streaming agents (Codex `exec` etc.): they're silent
 /// on stdout until the very end, so the short streaming stall would kill a
-/// slow-but-healthy run (the 2026-06-23 fix). But the global deadline (30 min)
+/// slow-but-healthy run (the 2026-06-23 fix). But the global deadline
 /// is too long to hold a scarce concurrency slot for a genuinely-hung run —
 /// 5 such runs squat the whole `agent_semaphore` and everything else queues
 /// ("planted", 2026-06-24). 15 min is the middle ground: comfortably above a

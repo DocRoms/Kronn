@@ -19,6 +19,562 @@ use futures::{SinkExt, StreamExt};
 use kronn::models::WsMessage;
 use kronn::{build_router_with_auth, AppState, DEFAULT_MAX_CONCURRENT_AGENTS};
 
+#[tokio::test]
+async fn quick_exec_crud_and_csv_run_round_trip() {
+    let app = test_app();
+    let (create_status, created) = post_json(
+        app.clone(),
+        "/api/quick-execs",
+        serde_json::json!({
+            "name": "CSV inventory",
+            "description": "Portable CLI collector",
+            "project_id": null,
+            "command": "echo",
+            "args": ["name,total\nParis,12\nLondon,9"],
+            "timeout_secs": 10,
+            "output_format": "csv",
+            "variables": []
+        }),
+    )
+    .await;
+    assert_eq!(create_status, StatusCode::OK);
+    assert_eq!(created["success"], true, "{created}");
+    let id = created["data"]["id"].as_str().unwrap().to_string();
+
+    let (_, listed) = get_json(app.clone(), "/api/quick-execs").await;
+    assert_eq!(listed["data"][0]["id"], id);
+
+    let (_, run) = post_json(
+        app.clone(),
+        &format!("/api/quick-execs/{id}/run"),
+        serde_json::json!({"variables": {}}),
+    )
+    .await;
+    assert_eq!(run["success"], true, "{run}");
+    assert_eq!(run["data"]["success"], true, "{run}");
+    assert_eq!(run["data"]["data"][0]["name"], "Paris");
+    assert_eq!(run["data"]["data"][0]["total"], "12");
+    assert_eq!(run["data"]["data"][1]["name"], "London");
+
+    let (_, deleted) = delete_json(app.clone(), &format!("/api/quick-execs/{id}")).await;
+    assert_eq!(deleted["success"], true);
+    let (_, empty) = get_json(app, "/api/quick-execs").await;
+    assert!(empty["data"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn collect_api_data_test_returns_an_inspectable_error_envelope() {
+    let app = test_app();
+    let (status, body) = post_json(
+        app,
+        "/api/workflow-steps/test-collect-api-data",
+        serde_json::json!({
+            "step": {
+                "name": "collect",
+                "step_type": {"type": "CollectApiData"},
+                "collect_api_data": {"sources": [], "concurrent_limit": 5}
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["success"], true, "{body}");
+    assert_eq!(body["data"]["success"], false);
+    assert_eq!(body["data"]["envelope"]["status"], "ERROR");
+    assert!(body["data"]["envelope"]["data"]["meta"]["error"]
+        .as_str()
+        .is_some_and(|error| error.contains("at least one")));
+}
+
+#[tokio::test]
+async fn live_page_workflows_returns_configured_publishers() {
+    let state = test_state();
+    state
+        .db
+        .with_conn(|connection| {
+            let now = chrono::Utc::now().to_rfc3339();
+            connection.execute(
+                "INSERT INTO live_pages (id, project_id, title, slug, current_revision_id, data_revision, created_at, updated_at)
+                 VALUES ('page-linked', NULL, 'Linked Page', 'linked-page', 'rev-linked', 0, ?1, ?1)",
+                [&now],
+            )?;
+            connection.execute(
+                "INSERT INTO live_page_revisions (id, page_id, revision, html, created_at)
+                 VALUES ('rev-linked', 'page-linked', 1, '<h1>Linked</h1>', ?1)",
+                [&now],
+            )?;
+            let workflow = kronn::models::Workflow {
+                id: "wf-linked".into(),
+                name: "Page producer".into(),
+                project_id: None,
+                trigger: kronn::models::WorkflowTrigger::Manual,
+                steps: vec![kronn::models::WorkflowStep {
+                    name: "publish".into(),
+                    step_type: kronn::models::StepType::PublishPageData,
+                    page_publish: Some(kronn::models::PublishPageDataConfig {
+                        page_id: "page-linked".into(),
+                        writes: vec![],
+                    }),
+                    ..Default::default()
+                }],
+                actions: vec![],
+                safety: kronn::models::WorkflowSafety { sandbox: false, max_files: None, max_lines: None, require_approval: false },
+                workspace_config: None,
+                concurrency_limit: None,
+                guards: None,
+                artifacts: std::collections::HashMap::new(),
+                on_failure: vec![],
+                exec_allowlist: vec![],
+                variables: vec![],
+                enabled: true,
+                pinned: false,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            };
+            kronn::db::workflows::insert_workflow(connection, &workflow)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let app = build_router_with_auth(state.clone(), false);
+    let (_, body) = get_json(app.clone(), "/api/pages/page-linked/workflows").await;
+    assert_eq!(body["data"][0]["id"], "wf-linked");
+    assert_eq!(body["data"][0]["step_names"][0], "publish");
+    let (missing_status, missing) = get_json(app, "/api/pages/missing/workflows").await;
+    assert_eq!(missing_status, StatusCode::OK);
+    assert_eq!(missing["success"], false);
+    assert_eq!(missing["error_code"], "not_found");
+}
+
+#[tokio::test]
+async fn workflow_export_import_bundles_quick_prompt_quick_api_and_page() {
+    let state = test_state();
+    let now = chrono::Utc::now();
+    state
+        .db
+        .with_conn(move |connection| {
+            let quick_prompt = kronn::models::QuickPrompt {
+                id: "qp-portable".into(),
+                name: "Portable analysis".into(),
+                icon: "✨".into(),
+                prompt_template: "Analyse the collected data".into(),
+                variables: vec![],
+                agent: kronn::models::AgentType::ClaudeCode,
+                project_id: None,
+                skill_ids: vec![],
+                profile_ids: vec![],
+                directive_ids: vec![],
+                tier: kronn::models::ModelTier::Default,
+                agent_settings: None,
+                description: "Bundled prompt".into(),
+                created_at: now,
+                updated_at: now,
+            };
+            kronn::db::quick_prompts::insert_quick_prompt(connection, &quick_prompt)?;
+            let quick_api = kronn::models::QuickApi {
+                id: "qa-portable".into(),
+                name: "Portable API".into(),
+                icon: "🔌".into(),
+                description: "Bundled API".into(),
+                project_id: None,
+                api_plugin_slug: "chartbeat".into(),
+                api_config_id: "foreign-config".into(),
+                api_endpoint_path: "/live".into(),
+                api_method: Some("GET".into()),
+                api_query: None,
+                api_path_params: None,
+                api_headers: None,
+                api_body: None,
+                api_extract: None,
+                api_pagination: None,
+                api_timeout_ms: None,
+                api_max_retries: None,
+                variables: vec![],
+                profile_ids: vec![],
+                directive_ids: vec![],
+                created_at: now,
+                updated_at: now,
+            };
+            kronn::db::quick_apis::insert_quick_api(connection, &quick_api)?;
+            let quick_exec = kronn::models::QuickExec {
+                id: "qe-portable".into(),
+                name: "Portable CLI".into(),
+                icon: "⌘".into(),
+                description: "Bundled CLI".into(),
+                project_id: None,
+                command: "echo".into(),
+                args: vec!["name,total\nParis,12".into()],
+                timeout_secs: 10,
+                output_format: kronn::models::CollectQuickExecOutputFormat::Csv,
+                variables: vec![],
+                created_at: now,
+                updated_at: now,
+            };
+            kronn::db::quick_execs::insert_quick_exec(connection, &quick_exec)?;
+
+            let page = kronn::models::LivePage {
+                id: "page-portable".into(),
+                project_id: None,
+                title: "Portable Page".into(),
+                slug: "portable-page".into(),
+                current_revision_id: "revision-portable".into(),
+                data_revision: 0,
+                created_at: now,
+                updated_at: now,
+                last_published_at: None,
+                pinned: false,
+                archived: false,
+            };
+            let revision = kronn::models::LivePageRevision {
+                id: "revision-portable".into(),
+                page_id: page.id.clone(),
+                revision: 1,
+                html: "<h1>Portable</h1>".into(),
+                created_by_agent: Some("Codex".into()),
+                created_at: now,
+            };
+            kronn::db::live_pages::create_live_page(
+                connection,
+                &page,
+                &revision,
+                &[kronn::models::CreateLivePageDataset {
+                    name: "summary".into(),
+                    kind: kronn::models::LivePageDatasetKind::Snapshot,
+                    initial: Some(serde_json::json!({"seed": true})),
+                    schema: None,
+                    max_points: None,
+                    max_age_days: None,
+                }],
+                None,
+            )?;
+
+            let workflow = kronn::models::Workflow {
+                id: "workflow-portable".into(),
+                name: "Portable workflow".into(),
+                project_id: None,
+                trigger: kronn::models::WorkflowTrigger::Manual,
+                steps: vec![
+                    kronn::models::WorkflowStep {
+                        name: "analyse".into(),
+                        step_type: kronn::models::StepType::Agent,
+                        quick_prompt_id: Some("qp-portable".into()),
+                        prompt_template: "Fallback analysis".into(),
+                        ..Default::default()
+                    },
+                    kronn::models::WorkflowStep {
+                        name: "collect".into(),
+                        step_type: kronn::models::StepType::CollectApiData,
+                        collect_api_data: Some(kronn::models::CollectApiDataConfig {
+                            sources: vec![
+                                kronn::models::CollectApiDataSource {
+                                    alias: "metrics".into(),
+                                    quick_api_id: "qa-portable".into(),
+                                    quick_exec_id: String::new(),
+                                    quick_exec: None,
+                                    required: true,
+                                    variables: Default::default(),
+                                },
+                                kronn::models::CollectApiDataSource {
+                                    alias: "cli_inventory".into(),
+                                    quick_api_id: String::new(),
+                                    quick_exec_id: "qe-portable".into(),
+                                    quick_exec: None,
+                                    required: false,
+                                    variables: Default::default(),
+                                },
+                            ],
+                            concurrent_limit: Some(2),
+                        }),
+                        ..Default::default()
+                    },
+                    kronn::models::WorkflowStep {
+                        name: "publish".into(),
+                        step_type: kronn::models::StepType::PublishPageData,
+                        page_publish: Some(kronn::models::PublishPageDataConfig {
+                            page_id: "page-portable".into(),
+                            writes: vec![kronn::models::PublishPageDataWrite {
+                                dataset: "summary".into(),
+                                operation: kronn::models::LivePageWriteOperation::Replace,
+                                value_from: "steps.collect.data".into(),
+                                observed_at: None,
+                                dedupe_key: None,
+                                key_field: None,
+                            }],
+                        }),
+                        ..Default::default()
+                    },
+                ],
+                actions: vec![],
+                safety: kronn::models::WorkflowSafety {
+                    sandbox: false,
+                    max_files: None,
+                    max_lines: None,
+                    require_approval: false,
+                },
+                workspace_config: None,
+                concurrency_limit: None,
+                guards: None,
+                artifacts: Default::default(),
+                on_failure: vec![],
+                exec_allowlist: vec!["echo".into()],
+                variables: vec![],
+                enabled: true,
+                pinned: false,
+                created_at: now,
+                updated_at: now,
+            };
+            kronn::db::workflows::insert_workflow(connection, &workflow)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let app = build_router_with_auth(state.clone(), false);
+    let (export_status, exported) =
+        get_json(app.clone(), "/api/workflows/workflow-portable/export").await;
+    assert_eq!(export_status, StatusCode::OK);
+    assert_eq!(exported["version"], 3);
+    assert_eq!(exported["referenced_quick_prompts"][0]["id"], "qp-portable");
+    assert_eq!(exported["referenced_quick_apis"][0]["id"], "qa-portable");
+    assert_eq!(exported["referenced_quick_execs"][0]["id"], "qe-portable");
+    assert_eq!(exported["referenced_pages"][0]["id"], "page-portable");
+    assert!(exported["referenced_pages"][0]["datasets"][0]
+        .get("current")
+        .is_none());
+
+    let (import_status, imported) = post_json(
+        app.clone(),
+        "/api/workflows/import",
+        serde_json::json!({
+            "content": serde_json::to_string(&exported).unwrap(),
+            "project_id": null
+        }),
+    )
+    .await;
+    assert_eq!(import_status, StatusCode::OK);
+    assert_eq!(imported["success"], true, "{imported}");
+    let imported_steps = imported["data"]["steps"].as_array().unwrap();
+    let imported_qp = imported_steps[0]["quick_prompt_id"].as_str().unwrap();
+    let imported_qa = imported_steps[1]["collect_api_data"]["sources"][0]["quick_api_id"]
+        .as_str()
+        .unwrap();
+    let imported_qe = imported_steps[1]["collect_api_data"]["sources"][1]["quick_exec_id"]
+        .as_str()
+        .unwrap();
+    let imported_page = imported_steps[2]["page_publish"]["page_id"]
+        .as_str()
+        .unwrap();
+    assert_ne!(imported_qp, "qp-portable");
+    assert_ne!(imported_qa, "qa-portable");
+    assert_ne!(imported_qe, "qe-portable");
+    assert_ne!(imported_page, "page-portable");
+    let qp_lookup = imported_qp.to_string();
+    let qa_lookup = imported_qa.to_string();
+    let qe_lookup = imported_qe.to_string();
+    let (qp_exists, qa_exists, qe_exists) = state
+        .db
+        .with_read_conn(move |connection| {
+            Ok((
+                kronn::db::quick_prompts::get_quick_prompt(connection, &qp_lookup)?.is_some(),
+                kronn::db::quick_apis::get_quick_api(connection, &qa_lookup)?.is_some(),
+                kronn::db::quick_execs::get_quick_exec(connection, &qe_lookup)?.is_some(),
+            ))
+        })
+        .await
+        .unwrap();
+    assert!(qp_exists);
+    assert!(qa_exists);
+    assert!(qe_exists);
+    let (_, imported_page_body) = get_json(app, &format!("/api/pages/{imported_page}")).await;
+    assert_eq!(
+        imported_page_body["data"]["revision"]["html"],
+        "<h1>Portable</h1>"
+    );
+    assert_eq!(
+        imported_page_body["data"]["datasets"][0]["current"],
+        Value::Null
+    );
+}
+
+#[tokio::test]
+async fn transform_data_preview_uses_runtime_recipe() {
+    let app = test_app();
+    let (status, body) = post_json(
+        app,
+        "/api/workflow-steps/preview-transform-data",
+        serde_json::json!({
+            "sample": {
+                "sources": {
+                    "usage": {"total": "42"},
+                    "errors": {"items": [{"count": 2}, {"count": 3}]}
+                }
+            },
+            "fields": [
+                {
+                    "target": "summary.requests",
+                    "source": "$.sources.usage.total",
+                    "operation": "copy",
+                    "value_type": "number"
+                },
+                {
+                    "target": "summary.errors",
+                    "source": "$.sources.errors.items[*].count",
+                    "operation": "sum"
+                }
+            ]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["success"], true, "{body}");
+    assert_eq!(body["data"]["error"], Value::Null);
+    assert_eq!(body["data"]["value"]["summary"]["requests"], 42.0);
+    assert_eq!(body["data"]["value"]["summary"]["errors"], 5.0);
+}
+
+#[tokio::test]
+async fn live_page_create_publish_and_read_round_trip() {
+    let app = test_app();
+    let (_, capability_before) = get_json(app.clone(), "/api/pages/capability").await;
+    assert_eq!(capability_before["data"]["activated"], false);
+
+    let (_, created) = post_json(
+        app.clone(),
+        "/api/pages",
+        serde_json::json!({
+            "title": "Adobe signals",
+            "slug": "adobe-signals",
+            "html": "<!doctype html><h1>Adobe signals</h1>",
+            "datasets": [
+                {"name": "summary", "kind": "snapshot", "initial": {}},
+                {"name": "latency", "kind": "time_series", "max_points": 2}
+            ]
+        }),
+    )
+    .await;
+    assert_eq!(created["success"], true, "{created}");
+    let page_id = created["data"]["id"].as_str().expect("page id");
+
+    let (_, capability_after) = get_json(app.clone(), "/api/pages/capability").await;
+    assert_eq!(capability_after["data"]["activated"], true);
+
+    let (_, published) = post_json(
+        app.clone(),
+        &format!("/api/pages/{page_id}/publish"),
+        serde_json::json!({
+            "writes": [
+                {"dataset": "summary", "operation": "replace", "value": {"errors": 3}},
+                {"dataset": "latency", "operation": "append", "value": [
+                    {"ms": 120}, {"ms": 95}, {"ms": 87}
+                ], "dedupe_key": "run-1-latency"}
+            ]
+        }),
+    )
+    .await;
+    assert_eq!(published["success"], true, "{published}");
+    assert_eq!(published["data"]["data_revision"], 1);
+    assert_eq!(published["data"]["points_added"], 3);
+    assert_eq!(published["data"]["points_removed"], 1);
+
+    let (_, updated_html) = put_json_root(
+        app.clone(),
+        &format!("/api/pages/{page_id}/html"),
+        serde_json::json!({
+            "html": "<!doctype html><h1>Adobe signals v2</h1>",
+            "created_by_agent": "Codex"
+        }),
+    )
+    .await;
+    assert_eq!(updated_html["success"], true, "{updated_html}");
+    assert_eq!(updated_html["data"]["revision"], 2);
+
+    let (_, revisions) = get_json(app.clone(), &format!("/api/pages/{page_id}/revisions")).await;
+    assert_eq!(revisions["data"].as_array().unwrap().len(), 2);
+    assert_eq!(revisions["data"][0]["created_by_agent"], "Codex");
+
+    let (_, detail) = get_json(app, &format!("/api/pages/{page_id}")).await;
+    assert_eq!(detail["data"]["data_revision"], 1);
+    assert_eq!(detail["data"]["revision"]["revision"], 2);
+    let datasets = detail["data"]["datasets"].as_array().unwrap();
+    let summary = datasets.iter().find(|d| d["name"] == "summary").unwrap();
+    let latency = datasets.iter().find(|d| d["name"] == "latency").unwrap();
+    assert_eq!(summary["current"]["errors"], 3);
+    assert_eq!(
+        summary["data_size_bytes"].as_u64().unwrap(),
+        u64::try_from(
+            serde_json::to_vec(&serde_json::json!({"errors": 3}))
+                .unwrap()
+                .len()
+        )
+        .unwrap()
+    );
+    assert_eq!(latency["points"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        latency["data_size_bytes"].as_u64().unwrap(),
+        u64::try_from(
+            serde_json::to_vec(&serde_json::json!({"ms": 95}))
+                .unwrap()
+                .len()
+                + serde_json::to_vec(&serde_json::json!({"ms": 87}))
+                    .unwrap()
+                    .len()
+        )
+        .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn live_page_library_state_discussion_link_and_delete_round_trip() {
+    let state = test_state();
+    state
+        .db
+        .with_conn(|connection| {
+            let now = chrono::Utc::now().to_rfc3339();
+            connection.execute(
+                "INSERT INTO discussions (id, title, created_at, updated_at)
+                 VALUES ('disc-page-origin', 'Adobe monitoring room', ?1, ?1)",
+                [&now],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let app = build_router_with_auth(state, false);
+    let (_, created) = post_json(
+        app.clone(),
+        "/api/pages",
+        serde_json::json!({
+            "title": "Standalone investigation",
+            "html": "<!doctype html><h1>Investigation</h1>",
+            "discussion_id": "disc-page-origin",
+            "datasets": []
+        }),
+    )
+    .await;
+    assert_eq!(created["success"], true, "{created}");
+    assert_eq!(created["data"]["pinned"], false);
+    assert_eq!(created["data"]["archived"], false);
+    let page_id = created["data"]["id"].as_str().unwrap();
+
+    let (_, links) = get_json(app.clone(), &format!("/api/pages/{page_id}/discussions")).await;
+    assert_eq!(links["data"][0]["discussion_id"], "disc-page-origin");
+    assert_eq!(links["data"][0]["relation"], "created_from");
+
+    let (_, updated) = patch_json(
+        app.clone(),
+        &format!("/api/pages/{page_id}"),
+        serde_json::json!({"pinned": true, "archived": true}),
+    )
+    .await;
+    assert_eq!(updated["data"]["pinned"], true);
+    assert_eq!(updated["data"]["archived"], true);
+
+    let (_, deleted) = delete_json(app.clone(), &format!("/api/pages/{page_id}")).await;
+    assert_eq!(deleted["success"], true, "{deleted}");
+    let (_, missing) = get_json(app, &format!("/api/pages/{page_id}")).await;
+    assert_eq!(missing["error_code"], "not_found");
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // Test helpers
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -845,6 +1401,135 @@ async fn context_files_delete_nonexistent_returns_error() {
     assert_eq!(json["success"], false);
 }
 
+#[tokio::test]
+async fn context_file_upload_ignores_historical_attachment_count() {
+    let state = test_state();
+    let disc_id = create_test_discussion(&state).await;
+
+    state
+        .db
+        .with_conn({
+            let did = disc_id.clone();
+            move |conn| {
+                conn.execute(
+                    "INSERT INTO messages
+                        (id, discussion_id, role, content, agent_type, timestamp, tokens_used)
+                     VALUES ('m-history', ?1, 'Agent', 'assets', 'Codex', datetime('now'), 0)",
+                    rusqlite::params![did],
+                )?;
+                for index in 0..20 {
+                    let file_id = format!("cf-history-{index}");
+                    let filename = format!("history-{index}.png");
+                    kronn::db::discussions::insert_context_file(
+                        conn,
+                        &file_id,
+                        &did,
+                        &filename,
+                        "image/png",
+                        8,
+                        "[Image]",
+                        None,
+                    )?;
+                }
+                kronn::db::discussions::link_pending_context_files_to_message(
+                    conn,
+                    &did,
+                    "m-history",
+                )?;
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+
+    let app = kronn::build_router(state);
+    let boundary = "----HistoricalAssetsBoundary";
+    let body = format!(
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"new.txt\"\r\nContent-Type: text/plain\r\n\r\nnew asset\r\n--{boundary}--\r\n"
+    );
+    let mut req = Request::builder()
+        .method("POST")
+        .uri(format!("/api/discussions/{disc_id}/context-files"))
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body(Body::from(body))
+        .unwrap();
+    req.extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            45678,
+        ))));
+    let response = app.oneshot(req).await.unwrap();
+    let json: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+
+    assert_eq!(
+        json["success"], true,
+        "historical assets blocked upload: {json}"
+    );
+    let disk_path = json["data"]["file"]["disk_path"].as_str().unwrap();
+    let _ = std::fs::remove_file(disk_path);
+}
+
+#[tokio::test]
+async fn context_file_upload_still_caps_twenty_pending_files() {
+    let state = test_state();
+    let disc_id = create_test_discussion(&state).await;
+    state
+        .db
+        .with_conn({
+            let did = disc_id.clone();
+            move |conn| {
+                for index in 0..20 {
+                    kronn::db::discussions::insert_context_file(
+                        conn,
+                        &format!("cf-pending-{index}"),
+                        &did,
+                        &format!("pending-{index}.txt"),
+                        "text/plain",
+                        1,
+                        "x",
+                        None,
+                    )?;
+                }
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+
+    let app = kronn::build_router(state);
+    let boundary = "----PendingAssetsBoundary";
+    let body = format!(
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"blocked.txt\"\r\nContent-Type: text/plain\r\n\r\nblocked\r\n--{boundary}--\r\n"
+    );
+    let mut req = Request::builder()
+        .method("POST")
+        .uri(format!("/api/discussions/{disc_id}/context-files"))
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body(Body::from(body))
+        .unwrap();
+    req.extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            45678,
+        ))));
+    let response = app.oneshot(req).await.unwrap();
+    let json: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+
+    assert_eq!(json["success"], false);
+    assert!(json["error"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("Maximum 20 pending context files"));
+}
+
 // ── 0.8.8: per-message attachments — image content route + MCP exposure ──
 
 /// GET the raw bytes of an attachment; returns (status, content-type, body).
@@ -1045,6 +1730,90 @@ async fn link_pending_endpoint_pins_popup_files_to_first_message() {
         .unwrap();
     assert_eq!(files.len(), 1);
     assert_eq!(files[0].filename, "shot.png");
+}
+
+#[tokio::test]
+async fn link_pending_endpoint_can_pin_only_the_callers_uploaded_files() {
+    // MCP and the human composer may upload concurrently. An agent must link
+    // only the ids returned by its own uploads, leaving the user's draft file
+    // pending for the user's next message.
+    let state = test_state();
+    let disc_id = create_test_discussion(&state).await;
+    let did = disc_id.clone();
+    state
+        .db
+        .with_conn(move |conn| {
+            conn.execute(
+                "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, tokens_used)
+                 VALUES ('agent-msg', ?1, 'Agent', 'voici la capture', 'Codex', ?2, 0)",
+                rusqlite::params![did, chrono::Utc::now().to_rfc3339()],
+            )?;
+            kronn::db::discussions::insert_context_file(
+                conn,
+                "cf-agent",
+                &did,
+                "agent.png",
+                "image/png",
+                10,
+                "[Image]",
+                Some("/tmp/agent.png"),
+            )?;
+            kronn::db::discussions::insert_context_file(
+                conn,
+                "cf-human",
+                &did,
+                "human.png",
+                "image/png",
+                10,
+                "[Image]",
+                Some("/tmp/human.png"),
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let mut ws_rx = state.ws_broadcast.subscribe();
+    let app = kronn::build_router(state.clone());
+    let (status, json) = post_json(
+        app,
+        &format!("/api/discussions/{}/context-files/link-pending", disc_id),
+        serde_json::json!({
+            "message_id": "agent-msg",
+            "file_ids": ["cf-agent"]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], true);
+    assert_eq!(json["data"], 1);
+
+    let event = ws_rx.try_recv().expect("context-file invalidation event");
+    assert!(matches!(
+        event,
+        kronn::models::WsMessage::ContextFilesChanged {
+            discussion_id: ref event_discussion_id,
+            message_id: ref event_message_id,
+        } if event_discussion_id == &disc_id && event_message_id == "agent-msg"
+    ));
+
+    let (attached, pending) = state
+        .db
+        .with_conn(move |conn| {
+            let attached =
+                kronn::db::discussions::list_context_files_for_message(conn, "agent-msg")?;
+            let pending = kronn::db::discussions::list_context_files(conn, &disc_id)?
+                .into_iter()
+                .filter(|file| file.message_id.is_none())
+                .collect::<Vec<_>>();
+            Ok((attached, pending))
+        })
+        .await
+        .unwrap();
+    assert_eq!(attached.len(), 1);
+    assert_eq!(attached[0].id, "cf-agent");
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].id, "cf-human");
 }
 
 #[tokio::test]
@@ -3683,6 +4452,7 @@ async fn server_config_returns_defaults() {
     assert!(json["data"]["host"].is_string());
     assert!(json["data"]["port"].is_number());
     assert!(json["data"]["max_concurrent_agents"].is_number());
+    assert_eq!(json["data"]["agent_global_timeout_min"], 30);
     assert!(json["data"]["auth_enabled"].is_boolean());
     assert_eq!(json["data"]["agent_handoffs_enabled"], false);
     assert_eq!(json["data"]["agent_handoff_paid_limit"], 1);
@@ -3691,6 +4461,30 @@ async fn server_config_returns_defaults() {
         json["data"]["agent_handoff_blocked_agents"],
         serde_json::json!([])
     );
+}
+
+#[tokio::test]
+async fn server_config_persists_and_clamps_global_agent_timeout() {
+    let app = test_app();
+    let (_, updated) = post_json(
+        app.clone(),
+        "/api/config/server",
+        serde_json::json!({ "agent_global_timeout_min": 120 }),
+    )
+    .await;
+    assert_eq!(updated["success"], true);
+
+    let (_, persisted) = get_json(app.clone(), "/api/config/server").await;
+    assert_eq!(persisted["data"]["agent_global_timeout_min"], 120);
+
+    let _ = post_json(
+        app.clone(),
+        "/api/config/server",
+        serde_json::json!({ "agent_global_timeout_min": 999 }),
+    )
+    .await;
+    let (_, clamped) = get_json(app, "/api/config/server").await;
+    assert_eq!(clamped["data"]["agent_global_timeout_min"], 120);
 }
 
 #[tokio::test]

@@ -196,15 +196,27 @@ value-free audit event. See
 
 **Agent concurrency**: `Semaphore` in `AppState.agent_semaphore` limits concurrent agent processes. Configurable via `ServerConfig.max_concurrent_agents` (1–20, default 5). UI slider in Settings.
 
-**Agent timeouts**: `AGENT_GLOBAL_TIMEOUT` (30 min) + `AGENT_STALL_TIMEOUT` (5 min no output). Agent process killed on timeout or client disconnect. Partial responses saved with `⚠️ [Réponse partielle — agent interrompu]` marker.
+**Agent timeouts**: `server.agent_global_timeout_min` is the absolute wall-clock
+limit for one agent execution (30 min by default, configurable from 1 to 120),
+while `server.agent_stall_timeout_min` stops an agent that produces no output
+(5 min by default). Both values are captured when a new run starts and apply to
+regular discussion replies, orchestration rounds and silent orchestration
+summaries; changing them requires no backend restart. The agent process is also
+killed on client-requested cancellation. Partial responses retain an explicit
+timeout notice.
+[src: file: backend/src/models/setup.rs:113-122]
+[src: file: backend/src/api/discussions/streaming.rs:1609-1622]
+[src: file: backend/src/api/discussions/orchestration.rs:242-259]
 
 **Input validation**: title ≤ 500 chars, content ≤ 100KB, workflow ≤ 20 steps, workflow name ≤ 200 chars.
 
 **Graceful shutdown**: `axum::serve().with_graceful_shutdown()` handles SIGTERM (Unix) + Ctrl+C. In-flight requests finish before exit.
 
 **Server config API**:
-- `GET /api/config/server` → `ServerConfigPublic { host, port, domain, max_concurrent_agents, auth_enabled }`
-- `POST /api/config/server` → update domain, max_concurrent_agents
+- `GET /api/config/server` → public server, identity and agent-runtime settings,
+  including concurrency, inactivity timeout and absolute execution timeout.
+- `POST /api/config/server` → update the same mutable settings. Timeout changes
+  are picked up by new agent runs; concurrency changes require a restart.
 - `POST /api/config/auth-token/regenerate` → generate new token (sets `auth_enabled=true`)
 
 ### State management
@@ -309,6 +321,12 @@ Unified automation system: `Trigger → Steps`. Kronn and OpenAI Symphony overla
   only tool names and outcomes, never arguments or credentials.
 - Steps can use `mode: debate` for multi-agent discussion at any point.
 - Context flows between steps via Kronn's purpose-built `{{variable}}` syntax: `{{issue.title}}`, `{{issue.body}}`, `{{issue.number}}`, `{{issue.url}}`, `{{issue.labels}}`, `{{previous_step.output}}`, `{{steps.<name>.output}}`. It is not Liquid and supports no filters; runtime rendering rejects unknown variables, filters and unclosed placeholders before executing the step, while preview rendering keeps them visible.
+- Deterministic Page pipelines can fan out over saved Quick APIs and
+  shell-free, allowlisted CLI collectors with `CollectApiData`, reshape typed JSON with a bounded JSONPath recipe in
+  `TransformData`, then atomically publish datasets with `PublishPageData`.
+  Collection and transformation use zero model tokens; optional source
+  failures remain visible in a `PARTIAL` envelope. See
+  `docs/architecture/live-pages.md`.
 - **Conditional branching**: `on_result` rules per step — e.g. `{ contains: "NO_RESULTS", action: stop }`. Actions: `Stop`, `Skip`, `Goto(step_name)`.
 - **Per-step agent config**: optional `AgentSettings { model, reasoning_effort, max_tokens }` override.
 - **Stall detection**: configurable timeout — kill step if no agent output for N seconds.
@@ -352,7 +370,10 @@ Unified automation system: `Trigger → Steps`. Kronn and OpenAI Symphony overla
 - `StepType::Exec` (allowlisted binaries, argv literal, never `sh -c`).
 - `ConditionAction::Goto { max_iterations }` loops + `WorkflowRun.state` (`---STATE:k=v---`, `{{state.X}}`, `{{iter.X}}`).
 - `Workflow.on_failure` rollback steps (only on `Failed`, not on `Cancelled`/`StoppedByGuard`/Gate-reject).
-- Per-item Export/Import for Workflows + Quick Prompts (workflow export bundles referenced QPs).
+- Per-item Export/Import for Workflows + Quick Prompts. Workflow bundle v2
+  includes every referenced Quick Prompt, Quick API, static Page contract and
+  transitive sub-workflow, then remaps their ids on import. API credentials and
+  retained Page observations remain local.
 
 **0.8.2 engine extensions:**
 
@@ -402,6 +423,15 @@ Sync triggers: toggle project, toggle global, toggle host_sync, create/update/de
 **Secret editing** — Inline editing of encrypted env vars directly in the MCP page. Per-field visibility toggle (eye icon) to show/hide individual values. On save, secrets are re-encrypted, config hash recomputed, and `.mcp.json` re-synced to all linked projects. **0.8.6**: for Custom plugins, the legacy edit-secrets drawer is replaced by a unified "Modifier le plugin" form (spec + values in one place) ; the card still shows a read-only env view with eye reveal for visibility. Registry plugins keep the legacy editable drawer (their spec is immutable so secrets are the only thing to edit).
 
 **Agent API broker (0.8.6)** — `POST /api/agent-api/call` + `api_call` MCP tool let an agent invoke any Kronn-configured plugin (registry OR custom) **without ever seeing the credentials**. Reuses the workflow `ApiCall` executor byte-for-byte. Project scope resolved server-side from 3 fallback sources (in priority) : (1) explicit `project_id` arg, (2) `disc_id` → `disc.project_id` (Kronn-spawned agents), (3) `api_config_id` → `config.project_ids[0]` (host-CLI sessions outside Kronn). Auth happens server-side per `ApiSpec.auth` ; the agent provides plugin_slug + endpoint + (optional) query/headers/body/path_params. Non-secret identifiers (organization_id, account_id, workspace_slug) are referenceable via **`${ENV.KEY}` placeholders** that Kronn substitutes from the encrypted env at request build time — works in `endpoint_path`, `query`, `headers`, `body` (string leaves) and `path_params`. The substitution is case-insensitive on the `ENV.` prefix and normalises keys to UPPER_SNAKE for the lookup. The `mcp_list` MCP tool surfaces each plugin's `config_keys[]` with an `auth_managed: bool` flag so the agent distinguishes credentials (don't reference) from free-form identifiers (free to use as `${ENV.X}`). Deferred after 0.9.0: side_effect opt-in gate and per-disc rate limiting; the persistent audit log is already shipped (cf. `project_api_call_logs_0_8_6`).
+
+**Run-anchored time templates (0.10.0)** — the common `TemplateContext` resolves
+vendor-neutral `time.now` expressions before `${ENV.KEY}` substitution. A
+workflow context is anchored to its durable `started_at`, including Gate/restart
+resumes; standalone QA and broker calls capture once at invocation. Cloned
+contexts make every parallel `CollectApiData` source share the same instant.
+Offsets, IANA timezones, minute/hour/day flooring and the generic `rfc3339`,
+`local_iso_ms`, `date`, `unix` and `unix_ms` formats cover API date windows
+without plugin-specific variables or shell steps.
 
 **Built-in CLI credential providers (0.9.2)** — A trusted registry plugin may
 declare `ApiAuthKind::CliToken`, which executes one fixed binary with literal
@@ -503,6 +533,24 @@ NoTemplate → TemplateInstalled → Audited → Validated
 - GitHub Copilot: `#238636` (GitHub green)
 - Gemini CLI: `#4285f4` (Google blue)
 - Kiro: `#7B61FF` (Kiro purple)
+
+### Continual learning (0.10.0, opt-in beta)
+
+- Disabled by default because promotion writes durable truth into
+  `~/.kronn/user-context/learnings.md` or the project's `docs/learnings.md`.
+- When enabled, agents receive the typed `learning_propose` MCP tool. A
+  candidate carries its kind (`fact`, `preference`, `inference`) and explicit
+  evidence; it is never silently extracted from ordinary prose.
+- Evidence existence and optional faithfulness checks inform a mandatory human
+  validation modal. Only a validated candidate is promoted into a learning
+  document; reject and stale states remain auditable.
+- A global pending badge keeps the review queue visible. Manual discussion
+  archive can surface the validation flow, while automatic archive never opens
+  a modal in the middle of a pipeline.
+- Disabling stops new proposals and removes the injected project pointer without
+  deleting validated learnings. Pending candidates remain reviewable so the
+  queue can be drained. See
+  [`continual-learning-0.10.0-spec.md`](../research/continual-learning-0.10.0-spec.md).
 
 ## Separation of concerns
 

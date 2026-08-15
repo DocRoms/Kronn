@@ -1,0 +1,90 @@
+import { describe, expect, it, vi } from 'vitest';
+import {
+  buildSandboxDocument,
+  LIVE_PAGE_CSP,
+  requestRenderedPageHtml,
+  runtimeData,
+} from '../live-page-sandbox';
+import type { LivePageDetail } from '../../types/generated';
+
+const detail = {
+  id: 'page-1', project_id: null, title: 'Adobe', slug: 'adobe',
+  current_revision_id: 'rev-1', data_revision: 4,
+  created_at: '2026-08-13T10:00:00Z', updated_at: '2026-08-13T10:00:00Z',
+  last_published_at: '2026-08-13T10:00:00Z',
+  pinned: false, archived: false,
+  revision: { id: 'rev-1', page_id: 'page-1', revision: 2, html: '<h1>Adobe</h1>', created_by_agent: null, created_at: '2026-08-13T10:00:00Z' },
+  datasets: [{
+    id: 'data-1', page_id: 'page-1', name: 'latency', kind: 'time_series',
+    current: null, schema: null, max_points: 100, max_age_days: 30,
+    data_size_bytes: 9,
+    updated_at: '2026-08-13T10:00:00Z',
+    points: [{ id: 'pt-1', dataset_id: 'data-1', observed_at: '2026-08-13T10:00:00Z', payload: { ms: 87 }, workflow_run_id: null }],
+  }],
+} satisfies LivePageDetail;
+
+describe('Live Page sandbox', () => {
+  it('injects a network-denying CSP before authored head content', () => {
+    const output = buildSandboxDocument('<html><head><script>window.authored=true</script></head></html>', 'channel-1');
+    expect(output.indexOf('Content-Security-Policy')).toBeLessThan(output.indexOf('window.authored'));
+    expect(output).toContain("connect-src 'none'");
+    expect(output).toContain("object-src 'none'");
+    expect(LIVE_PAGE_CSP).not.toContain('same-origin');
+  });
+
+  it('exposes a rendered-DOM export bridge and rasterizes canvas charts', () => {
+    const output = buildSandboxDocument('<main>Report</main>', 'channel-1');
+    expect(output).toContain("message.type!=='kronn:page-export-request'");
+    expect(output).toContain("type:'kronn:page-export'");
+    expect(output).toContain("source.toDataURL('image/png')");
+    expect(output).toContain('viewport_width:width');
+    expect(output).toContain('content_height:totalHeight');
+    expect(output).toContain("root.querySelectorAll('script').forEach(script=>script.remove())");
+    const script = output.match(/<script>([\s\S]*?)<\/script>/)?.[1];
+    expect(script).toBeDefined();
+    expect(() => new Function(script!)).not.toThrow();
+  });
+
+  it('accepts only the matching rendered document from the opaque frame', async () => {
+    const frame = document.createElement('iframe');
+    document.body.append(frame);
+    const target = frame.contentWindow;
+    expect(target).not.toBeNull();
+    const postMessage = vi.spyOn(target!, 'postMessage').mockImplementation(() => undefined);
+
+    const capture = vi.fn().mockResolvedValue(['data:image/png;base64,cGFnZQ==']);
+    const result = requestRenderedPageHtml(frame, 'channel-1', 500, capture);
+    const request = postMessage.mock.calls[0][0] as Record<string, unknown>;
+    window.dispatchEvent(new MessageEvent('message', {
+      source: target,
+      data: { ...request, type: 'kronn:page-export', channel_id: 'forged', html: '<p>wrong</p>' },
+    }));
+    window.dispatchEvent(new MessageEvent('message', {
+      source: target,
+      data: {
+        ...request,
+        type: 'kronn:page-export',
+        html: '<html><body><p>Rendered 1240</p></body></html>',
+        viewport_width: 1000,
+        content_height: 760,
+      },
+    }));
+
+    await expect(result).resolves.toEqual({
+      html: '<html><body><p>Rendered 1240</p></body></html>',
+      pageImages: ['data:image/png;base64,cGFnZQ=='],
+    });
+    expect(capture).toHaveBeenCalledWith(
+      '<html><body><p>Rendered 1240</p></body></html>',
+      1000,
+      760,
+    );
+    frame.remove();
+  });
+
+  it('exposes time-series points without JSON stringification', () => {
+    const data = runtimeData(detail);
+    expect(data.datasets.latency.points[0].value).toEqual({ ms: 87 });
+    expect(data.page.data_revision).toBe(4);
+  });
+});

@@ -48,6 +48,8 @@ const KRONN_VERSION: &str = env!("CARGO_PKG_VERSION");
     ),
     paths(
         version_check_path,
+        live_page_workflows_path,
+        live_page_publications_path,
         // TODO: add disc_meta, disc_get_message, disc_summarize,
         // discussions_list, agents_detect when the underlying handlers
         // grow `#[utoipa::path]` attributes. The shapes below show the
@@ -61,6 +63,7 @@ const KRONN_VERSION: &str = env!("CARGO_PKG_VERSION");
         (name = "version", description = "Version & update-check endpoint feeding the in-app UpdateBanner."),
         (name = "discussions", description = "Discussion CRUD, messaging, and the kronn-internal introspection endpoints."),
         (name = "agents", description = "Agent detection, install / uninstall, runtime warnings."),
+        (name = "pages", description = "Versioned HTML Pages and their workflow publishers."),
     ),
 )]
 pub struct ApiDoc;
@@ -87,6 +90,32 @@ pub struct ApiResponseVersion {
 )]
 #[allow(dead_code)] // Marker function — utoipa reads the attribute, axum routes the real handler.
 fn version_check_path() {}
+
+/// `GET /api/pages/{id}/workflows` — saved workflow steps that target a Page.
+#[utoipa::path(
+    get,
+    path = "/api/pages/{id}/workflows",
+    tag = "pages",
+    params(("id" = String, Path, description = "Page UUID or slug")),
+    responses(
+        (status = 200, description = "Configured workflows targeting the Page"),
+    ),
+)]
+#[allow(dead_code)]
+fn live_page_workflows_path() {}
+
+/// `GET /api/pages/{id}/publications` — the three newest successful refreshes.
+#[utoipa::path(
+    get,
+    path = "/api/pages/{id}/publications",
+    tag = "pages",
+    params(("id" = String, Path, description = "Page UUID or slug")),
+    responses(
+        (status = 200, description = "Three newest Page publication-ledger entries"),
+    ),
+)]
+#[allow(dead_code)]
+fn live_page_publications_path() {}
 
 /// Build the spec with the running version stamped in.
 pub fn openapi_spec() -> utoipa::openapi::OpenApi {
@@ -115,6 +144,21 @@ mod tests {
             paths.paths.contains_key("/api/version/check"),
             "OpenAPI spec must document /api/version/check (regression sentinel)",
         );
+    }
+
+    #[test]
+    fn spec_documents_live_page_workflows_endpoint() {
+        let spec = openapi_spec();
+        assert!(spec.paths.paths.contains_key("/api/pages/{id}/workflows"));
+    }
+
+    #[test]
+    fn spec_documents_live_page_publications_endpoint() {
+        let spec = openapi_spec();
+        assert!(spec
+            .paths
+            .paths
+            .contains_key("/api/pages/{id}/publications"));
     }
 
     #[test]

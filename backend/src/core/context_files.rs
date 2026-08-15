@@ -22,8 +22,10 @@ const OFFICE_DOC_EXTENSIONS: &[&str] = &["xlsx", "xls", "docx", "pptx", "pdf"];
 /// remains useful defense in depth for parser CPU and memory consumption.
 /// 10 MB is comfortably above any legitimate context spreadsheet.
 const MAX_OFFICE_DOC_SIZE: usize = 10 * 1024 * 1024;
-/// Max context files per discussion
-pub const MAX_FILES_PER_DISCUSSION: usize = 20;
+/// Max files that may be staged in a discussion composer at once. Files
+/// already pinned to historical messages are durable attachments and must not
+/// consume the staging budget forever.
+pub const MAX_PENDING_FILES_PER_DISCUSSION: usize = 20;
 
 /// Image extensions (saved to disk, referenced by path in prompt)
 const IMAGE_EXTENSIONS: &[&str] = &[

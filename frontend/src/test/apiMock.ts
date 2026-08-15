@@ -41,8 +41,10 @@ export const API_NAMESPACES = [
   'discussions',
   'planning',
   'workflows',
+  'pages',
   'quickPrompts',
   'quickApis',
+  'quickExecs',
   'skills',
   'profiles',
   'directives',
@@ -92,8 +94,10 @@ interface DefaultMock {
   discussions: Record<string, AnyFn>;
   planning: Record<string, AnyFn>;
   workflows: Record<string, AnyFn>;
+  pages: Record<string, AnyFn>;
   quickPrompts: Record<string, AnyFn>;
   quickApis: Record<string, AnyFn>;
+  quickExecs: Record<string, AnyFn>;
   skills: Record<string, AnyFn>;
   profiles: Record<string, AnyFn>;
   directives: Record<string, AnyFn>;
@@ -333,7 +337,9 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
     discussions: {
       list: resolve([]),
       get: resolve(null),
+      revisions: resolve([]),
       create: resolve({}),
+      updateHtml: resolve({}),
       delete: resolve(undefined),
       update: resolve(undefined),
       nativeAgentMode: resolve({ disabled: false }),
@@ -416,7 +422,20 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       suggestions: resolve([]),
       listBatchRunSummaries: resolve([]),
       deleteBatchRun: resolve(undefined),
+      testApiCall: resolve({ success: true, duration_ms: 0, envelope: null, error: null }),
+      testCollectApiData: resolve({ success: true, duration_ms: 0, envelope: null, error: null }),
+      previewTransformData: resolve({ value: null, error: null }),
       testStepStream: vi.fn(),
+    },
+
+    pages: {
+      capability: resolve({ activated: false, activated_at: null }),
+      list: resolve([]),
+      get: resolve(null),
+      workflows: resolve([]),
+      create: resolve({}),
+      updateHtml: resolve({}),
+      publish: resolve({}),
     },
 
     quickPrompts: {
@@ -438,6 +457,16 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       runQa: resolve({ success: true, duration_ms: 0, envelope: null, error: null }),
       exportQa: vi.fn(),
       importQa: resolve({}),
+    },
+
+    quickExecs: {
+      list: resolve([]),
+      create: resolve({}),
+      update: resolve({}),
+      delete: resolve(undefined),
+      run: resolve({ success: true, duration_ms: 0, data: null, stdout: '', stderr: '', error: null }),
+      export: vi.fn(),
+      import: resolve({}),
     },
 
     rtk: {

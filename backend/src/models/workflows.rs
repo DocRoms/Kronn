@@ -9,7 +9,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use super::{AgentType, ModelTier, PromptVariable};
+use super::{AgentType, LivePageDatasetKind, LivePageWriteOperation, ModelTier, PromptVariable};
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -614,6 +614,23 @@ pub struct WorkflowStep {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub json_data_payload: Option<serde_json::Value>,
 
+    // ─── Data pipeline fields (0.10.0) ─────────────────────────────────
+    /// Plusieurs Quick APIs indépendantes exécutées comme une seule source
+    /// logique. Les réponses extraites restent intactes sous leur alias.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collect_api_data: Option<CollectApiDataConfig>,
+
+    /// Recette déclarative et déterministe appliquée à une valeur JSON typée.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transform_data: Option<TransformDataConfig>,
+
+    // ─── PublishPageData fields (0.10.0 — Pages vivantes) ───────────────
+    /// Configuration atomique du sink Page. Le step résout chaque
+    /// `value_from` comme une valeur JSON typée depuis le contexte du run,
+    /// puis publie toutes les écritures dans une seule transaction SQLite.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_publish: Option<PublishPageDataConfig>,
+
     /// 2026-06-11 (Phase 1) — for `StepType::SubWorkflow`: the id of the
     /// workflow to run as a nested child. Required for that step type
     /// (enforced at save). `None` for every other step type. Mirrors the
@@ -858,6 +875,17 @@ pub enum StepType {
     /// source est prête. Output toujours `Structured` : envelope
     /// `{data: payload, status: "OK", summary: "JSON data (N items)"}`.
     JsonData,
+    /// 0.10.0 — exécute plusieurs Quick APIs indépendantes en parallèle et
+    /// agrège leurs données extraites sous des aliases stables. Une source
+    /// optionnelle en échec produit PARTIAL ; une source requise bloque le run.
+    CollectApiData,
+    /// 0.10.0 — transforme une valeur JSON sans agent ni shell. Une recette
+    /// ordonnée construit un nouvel objet via JSONPath et des agrégations sûres.
+    TransformData,
+    /// 0.10.0 — publie une ou plusieurs valeurs JSON typées dans les
+    /// datasets d'une Page vivante. Zéro token, zéro réseau et transaction
+    /// atomique : aucune écriture partielle si un dataset est invalide.
+    PublishPageData,
     /// 2026-06-11 (Phase 1) — run ANOTHER workflow as a nested child run.
     /// The target is `WorkflowStep.sub_workflow_id`. The child run executes
     /// with its OWN steps, Goto/loops and conditions (the engine is
@@ -868,6 +896,147 @@ pub enum StepType {
     /// step's status (→ the parent's `on_result` can branch on it), and its
     /// run id is recorded on the `StepResult.child_run_id` for drill-down.
     SubWorkflow,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct CollectApiDataConfig {
+    #[serde(default)]
+    pub sources: Vec<CollectApiDataSource>,
+    /// Nombre maximal d'appels simultanés. Défaut 5, maximum 20.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub concurrent_limit: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct CollectApiDataSource {
+    /// Clé stable dans `data.sources`.
+    pub alias: String,
+    /// Quick API enregistrée à exécuter. Vide lorsque la source est une
+    /// commande CLI déterministe (`quick_exec`).
+    #[serde(default)]
+    pub quick_api_id: String,
+    /// Quick Exec enregistré. Vide pour les anciennes sources CLI inline.
+    #[serde(default)]
+    pub quick_exec_id: String,
+    /// Commande CLI directe, sans shell, utile lorsque le plugin ne fournit
+    /// pas de spec REST mais expose un client local (AWS CLI, Fastly CLI…).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quick_exec: Option<CollectQuickExecSource>,
+    /// Une erreur sur cette source fait échouer le step. Défaut : true.
+    #[serde(default = "default_true")]
+    pub required: bool,
+    /// Variables locales injectées avant le rendu de cette Quick API. Les
+    /// valeurs peuvent elles-mêmes référencer le contexte du workflow.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub variables: std::collections::HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct CollectQuickExecSource {
+    /// Nom nu du binaire. Il doit aussi figurer dans `exec_allowlist` du WF.
+    pub command: String,
+    /// Arguments littéraux, rendus séparément par le moteur de templates.
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Timeout borné entre 1 et 1 800 secondes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u32>,
+    /// Interprétation du stdout avant insertion dans `data.sources.<alias>`.
+    #[serde(default)]
+    pub output_format: CollectQuickExecOutputFormat,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum CollectQuickExecOutputFormat {
+    #[default]
+    Json,
+    Text,
+    Lines,
+    Csv,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TransformDataConfig {
+    /// Chemin typé du contexte, par exemple `steps.collect.data`.
+    pub input_from: String,
+    #[serde(default)]
+    pub fields: Vec<TransformDataField>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TransformDataField {
+    /// Chemin pointé dans le nouvel objet, par exemple `summary.requests`.
+    pub target: String,
+    /// JSONPath RFC 9535 relatif à `input_from`, par exemple
+    /// `$.sources.adobe.total` ou `$.items[*].count`.
+    pub source: String,
+    #[serde(default)]
+    pub operation: TransformDataOperation,
+    /// Valeur utilisée lorsque le JSONPath ne retourne rien.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback: Option<serde_json::Value>,
+    /// Conversion explicite appliquée après sélection/agrégation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_type: Option<TransformDataValueType>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum TransformDataOperation {
+    #[default]
+    Copy,
+    Count,
+    Sum,
+    Average,
+    Min,
+    Max,
+    First,
+    Last,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum TransformDataValueType {
+    String,
+    Number,
+    Boolean,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct PublishPageDataConfig {
+    /// Id ou slug stable de la Page. Peut être un template runtime.
+    pub page_id: String,
+    #[serde(default)]
+    pub writes: Vec<PublishPageDataWrite>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct PublishPageDataWrite {
+    pub dataset: String,
+    pub operation: LivePageWriteOperation,
+    /// Chemin typé du contexte, avec ou sans doubles accolades.
+    /// Exemple : `steps.fetch_metrics.data.series`.
+    pub value_from: String,
+    /// Date RFC3339 optionnelle, template runtime autorisé.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_at: Option<String>,
+    /// Clé d'idempotence optionnelle. En append, Kronn utilise par défaut
+    /// `<run_id>:<write_index>` afin qu'une reprise ne duplique pas les points.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dedupe_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_field: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -1398,7 +1567,7 @@ pub struct TriggerWorkflowRequest {
 
 /// Self-contained envelope produced by `GET /api/workflows/:id/export`.
 /// Designed to be saved to disk, mailed, attached to a Github issue, etc.
-/// `version: 1` is the current shape; future incompatible changes bump
+/// `version: 3` is the current shape; future incompatible changes bump
 /// the version and add a migration path at import time.
 #[derive(Debug, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -1414,17 +1583,48 @@ pub struct WorkflowExportEnvelope {
     /// roundtrip is lossless to inspect) but DROPPED at import — the
     /// importer mints fresh values for those fields.
     pub workflow: Workflow,
-    /// QPs referenced by `BatchQuickPrompt` steps. Bundled so the
-    /// importer doesn't need to fetch them separately. Empty when no
-    /// step references a QP.
+    /// QPs referenced by Agent, BatchQuickPrompt or chained batch steps.
+    /// Bundled so the importer doesn't need to fetch them separately.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub referenced_quick_prompts: Vec<super::QuickPrompt>,
+    /// Quick APIs referenced directly or through CollectApiData sources.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub referenced_quick_apis: Vec<super::QuickApi>,
+    /// Saved Quick Execs referenced by CollectApiData sources.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub referenced_quick_execs: Vec<super::QuickExec>,
+    /// Page templates and dataset contracts targeted by PublishPageData steps.
+    /// Retained production payloads and publication/run history are excluded.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub referenced_pages: Vec<WorkflowExportPage>,
     /// #10 — sub-workflows referenced (transitively) by `SubWorkflow` steps,
     /// bundled so a clone/import recreates the whole parent+child graph in one
     /// atomic operation and remaps `sub_workflow_id` to the fresh child ids.
     /// Empty when the workflow has no SubWorkflow steps. Excludes the root.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub referenced_workflows: Vec<Workflow>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct WorkflowExportPage {
+    pub id: String,
+    pub slug: String,
+    pub title: String,
+    pub html: String,
+    pub created_by_agent: Option<String>,
+    pub datasets: Vec<WorkflowExportPageDataset>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct WorkflowExportPageDataset {
+    pub name: String,
+    pub kind: LivePageDatasetKind,
+    #[ts(type = "any")]
+    pub schema: Option<serde_json::Value>,
+    pub max_points: u32,
+    pub max_age_days: Option<u32>,
 }
 
 #[derive(Debug, Deserialize, TS)]

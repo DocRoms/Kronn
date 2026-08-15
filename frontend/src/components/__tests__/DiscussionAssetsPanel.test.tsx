@@ -1,0 +1,157 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import type { ContextFile } from '../../types/generated';
+
+const { discussionsApi, triggerDownload } = vi.hoisted(() => ({
+  discussionsApi: { contextFileBlob: vi.fn() },
+  triggerDownload: vi.fn(),
+}));
+
+vi.mock('../../lib/api', () => ({ discussions: discussionsApi }));
+vi.mock('../../lib/downloadBlob', () => ({ triggerDownload }));
+
+import { DiscussionAssetsPanel } from '../DiscussionAssetsPanel';
+
+const t = (key: string, ...args: (string | number)[]) =>
+  args.length ? `${key}:${args.join(',')}` : key;
+
+function file(index: number, overrides: Partial<ContextFile> = {}): ContextFile {
+  return {
+    id: `file-${index}`,
+    discussion_id: 'disc-1',
+    filename: `asset-${index}.txt`,
+    mime_type: 'text/plain',
+    original_size: 512,
+    extracted_size: 512,
+    disk_path: null,
+    message_id: `message-${index}`,
+    created_at: `2026-08-${String((index % 28) + 1).padStart(2, '0')}T10:00:00Z`,
+    ...overrides,
+  };
+}
+
+describe('DiscussionAssetsPanel', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    globalThis.URL.createObjectURL = vi.fn(({ type }: Blob) => `blob:${type}`);
+    globalThis.URL.revokeObjectURL = vi.fn();
+    discussionsApi.contextFileBlob.mockResolvedValue(new Blob(['image'], { type: 'image/png' }));
+  });
+
+  it('searches and filters every discussion asset without scanning messages', async () => {
+    const files = [
+      file(1, { filename: 'dashboard.png', mime_type: 'image/png', disk_path: '/tmp/dashboard.png' }),
+      file(2, { filename: 'metrics.csv', mime_type: 'text/csv' }),
+      file(3, { filename: 'draft.pdf', mime_type: 'application/pdf', message_id: null }),
+    ];
+    render(
+      <DiscussionAssetsPanel
+        discussionId="disc-1"
+        files={files}
+        onClose={vi.fn()}
+        onNavigateMessage={vi.fn()}
+        t={t}
+      />,
+    );
+
+    expect(screen.getByRole('complementary', { name: 'disc.assets.title' })).toBeInTheDocument();
+    expect(screen.getAllByTestId('discussion-asset-card')).toHaveLength(3);
+
+    fireEvent.change(screen.getByRole('searchbox', { name: 'disc.assets.search' }), {
+      target: { value: 'metrics' },
+    });
+    expect(screen.getAllByTestId('discussion-asset-card')).toHaveLength(1);
+    expect(screen.getAllByText('metrics.csv')).toHaveLength(2);
+
+    fireEvent.change(screen.getByRole('searchbox', { name: 'disc.assets.search' }), {
+      target: { value: '' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /disc\.assets\.filterImages/ }));
+    await waitFor(() => expect(screen.getAllByTestId('discussion-asset-card')).toHaveLength(1));
+    expect(screen.getAllByText('dashboard.png')).toHaveLength(1);
+
+    fireEvent.click(screen.getByRole('button', { name: /disc\.assets\.filterPending/ }));
+    expect(screen.getAllByText('draft.pdf')).toHaveLength(2);
+    expect(screen.getByText('disc.assets.pending')).toBeInTheDocument();
+  });
+
+  it('jumps from an asset to its exact source message', () => {
+    const onNavigateMessage = vi.fn();
+    render(
+      <DiscussionAssetsPanel
+        discussionId="disc-1"
+        files={[file(7, { filename: 'evidence.txt', message_id: 'message-source' })]}
+        onClose={vi.fn()}
+        onNavigateMessage={onNavigateMessage}
+        t={t}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', {
+      name: 'disc.assets.goToMessageFor:evidence.txt',
+    }));
+    expect(onNavigateMessage).toHaveBeenCalledWith('message-source');
+  });
+
+  it('downloads a disk-backed asset on demand', async () => {
+    const blob = new Blob(['csv'], { type: 'text/csv' });
+    discussionsApi.contextFileBlob.mockResolvedValueOnce(blob);
+    render(
+      <DiscussionAssetsPanel
+        discussionId="disc-1"
+        files={[file(8, { filename: 'export.csv', mime_type: 'text/csv', disk_path: '/tmp/export.csv' })]}
+        onClose={vi.fn()}
+        onNavigateMessage={vi.fn()}
+        t={t}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'disc.assets.downloadFor:export.csv' }));
+    await waitFor(() => expect(triggerDownload).toHaveBeenCalledWith('export.csv', blob));
+    expect(discussionsApi.contextFileBlob).toHaveBeenCalledWith('disc-1', 'file-8');
+  });
+
+  it('loads large histories in bounded pages of forty assets', () => {
+    const files = Array.from({ length: 45 }, (_, index) => file(index));
+    render(
+      <DiscussionAssetsPanel
+        discussionId="disc-1"
+        files={files}
+        onClose={vi.fn()}
+        onNavigateMessage={vi.fn()}
+        t={t}
+      />,
+    );
+
+    expect(screen.getAllByTestId('discussion-asset-card')).toHaveLength(40);
+    const loadMore = screen.getByRole('button', { name: 'disc.assets.loadMore:5' });
+    fireEvent.click(loadMore);
+    expect(screen.getAllByTestId('discussion-asset-card')).toHaveLength(45);
+    expect(screen.queryByRole('button', { name: /disc\.assets\.loadMore/ })).toBeNull();
+  });
+
+  it('keeps the existing in-app carousel for images opened from the inventory', async () => {
+    render(
+      <DiscussionAssetsPanel
+        discussionId="disc-1"
+        files={[
+          file(1, { filename: 'one.png', mime_type: 'image/png', disk_path: '/tmp/one.png' }),
+          file(2, { filename: 'two.png', mime_type: 'image/png', disk_path: '/tmp/two.png' }),
+        ]}
+        onClose={vi.fn()}
+        onNavigateMessage={vi.fn()}
+        t={t}
+      />,
+    );
+
+    const first = await screen.findByRole('button', { name: 'disc.attachmentImage:one.png' });
+    await waitFor(() => expect(first).not.toBeDisabled());
+    fireEvent.click(first);
+    const dialog = screen.getByRole('dialog', { name: 'disc.attachmentGallery' });
+    expect(dialog).toHaveTextContent('2 / 2');
+    expect(within(dialog).getByRole('img', { name: 'one.png' })).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'disc.attachmentNext' }));
+    expect(dialog).toHaveTextContent('1 / 2');
+    expect(within(dialog).getByRole('img', { name: 'two.png' })).toBeInTheDocument();
+  });
+});

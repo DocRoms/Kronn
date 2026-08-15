@@ -88,3 +88,4 @@ backend/coverage/
 findings/
 /docroms-card-expanded.md
 /PLAYWRIGHT_AUDIT_REVIEW.md
+.kronn/context-files/

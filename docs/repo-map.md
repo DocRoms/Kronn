@@ -134,6 +134,8 @@ Kronn/
 │           ├── steps.rs        # Step execution: prompt rendering, stall detection, retry, on_result conditions
 │           ├── batch_step.rs   # BatchQuickPrompt fan-out (0.3.5): resolves batch_items_from (5 input shapes), creates parent_run + N child discussions, optional worktree isolation, aggregates child status via WsMessage::BatchRunProgress/BatchRunFinished
 │           ├── notify_step.rs  # StepType::Notify webhook execution (0.3.5): POST/PUT/GET via reqwest, template rendering in URL + body, zero tokens
+│           ├── collect_api_data_step.rs # StepType::CollectApiData: bounded concurrent saved Quick APIs + saved/inline shell-free Quick Exec sources, JSON/CSV/text/lines normalization
+│           ├── transform_data_step.rs # StepType::TransformData: deterministic JSONPath mapping, aggregation and scalar coercion
 │           ├── template.rs     # Purpose-built {{variable}} renderer: permissive preview, strict runtime, no Liquid filters
 │           ├── workspace.rs    # Git worktree create/cleanup with lifecycle hooks
 │           └── tracker/

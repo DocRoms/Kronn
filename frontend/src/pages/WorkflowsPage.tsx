@@ -2,13 +2,13 @@ import { Fragment, useState, useRef, useMemo, useEffect, useCallback } from 'rea
 import { appendLiveBuffer } from '../lib/workflowUiUtils';
 import { useIsMobile } from '../hooks/useMediaQuery';
 import { useT } from '../lib/I18nContext';
-import { workflows as workflowsApi, discussions as discussionsApi, quickPrompts as quickPromptsApi, quickApis as quickApisApi, mcps as mcpsApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi } from '../lib/api';
+import { workflows as workflowsApi, discussions as discussionsApi, quickPrompts as quickPromptsApi, quickApis as quickApisApi, quickExecs as quickExecsApi, mcps as mcpsApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi } from '../lib/api';
 import { userError } from '../lib/userError';
 import { useApi } from '../hooks/useApi';
 import type {
   Project, WorkflowSummary, Workflow, WorkflowRun,
   AgentType, AgentsConfig, ModelTier, StepResult, QuickPrompt, CreateQuickPromptRequest,
-  QuickApi, CreateQuickApiRequest,
+  QuickApi, CreateQuickApiRequest, QuickExec, CreateQuickExecRequest,
   JsonValue,
 } from '../types/generated';
 import type { ApiPluginOption } from '../components/workflows/ApiCallStepCard';
@@ -16,20 +16,22 @@ import {
   Plus, Trash2, Play, Loader2, ChevronLeft, ChevronRight, ChevronDown,
   Clock, GitBranch, Zap, Eye, Layers, X, Square,
   ToggleLeft, ToggleRight, Star,
-  Upload, Download, AlertTriangle,
+  Upload, Download, AlertTriangle, Search, Workflow as WorkflowIcon,
+  PlugZap, MessageSquareText, TerminalSquare,
 } from 'lucide-react';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { WorkflowDetail } from '../components/workflows/WorkflowDetail';
 import { WorkflowWizard } from '../components/workflows/WorkflowWizard';
 import { QuickPromptForm } from '../components/workflows/QuickPromptForm';
 import { QuickApiForm } from '../components/workflows/QuickApiForm';
+import { QuickExecForm } from '../components/workflows/QuickExecForm';
 import QPHistoryDrawer from '../components/QPHistoryDrawer';
 import QPCardMetricsChip from '../components/QPCardMetricsChip';
 import { parseBatchQAItems } from '../components/workflows/parseBatchQAItems';
 import { ImportDropzone } from '../components/workflows/ImportDropzone';
 import { triggerDownload } from '../lib/downloadBlob';
 import { mergeDeclaredAndDetected } from '../lib/workflowVariables';
-import { AGENT_LABELS, agentColor } from '../lib/constants';
+import { AGENT_LABELS, MODEL_TIER_ICONS, agentColor, modelForAgentTier } from '../lib/constants';
 import { MatrixText } from '../components/MatrixText';
 import { AgentSwitchPicker } from '../components/AgentSwitchPicker';
 import { ListControls } from '../components/ListControls';
@@ -41,7 +43,51 @@ import {
   type QuickApiSort,
   type QuickPromptSort,
 } from '../lib/automationSort';
+import './DiscussionsPage.css';
 import './WorkflowsPage.css';
+
+type AutomationTab = 'workflows' | 'quickPrompts' | 'quickApis' | 'quickExecs';
+
+const AUTOMATION_TABS: AutomationTab[] = ['workflows', 'quickPrompts', 'quickApis', 'quickExecs'];
+const AUTOMATION_NAVIGATION_STORAGE_KEY = 'kronn:automationNavigation';
+const AUTOMATION_COLLAPSED_STORAGE_KEY = 'kronn:automationCollapsedSections';
+
+interface AutomationNavigationState {
+  tab: AutomationTab;
+  resourceId: string | null;
+}
+
+function isAutomationTab(value: unknown): value is AutomationTab {
+  return typeof value === 'string' && AUTOMATION_TABS.includes(value as AutomationTab);
+}
+
+function readAutomationNavigation(): AutomationNavigationState {
+  try {
+    const raw = localStorage.getItem(AUTOMATION_NAVIGATION_STORAGE_KEY);
+    if (!raw) return { tab: 'workflows', resourceId: null };
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    return {
+      tab: isAutomationTab(parsed.tab) ? parsed.tab : 'workflows',
+      resourceId: typeof parsed.resourceId === 'string' && parsed.resourceId.trim()
+        ? parsed.resourceId
+        : null,
+    };
+  } catch {
+    return { tab: 'workflows', resourceId: null };
+  }
+}
+
+function readCollapsedAutomationSections(): Set<AutomationTab> {
+  try {
+    const parsed = JSON.parse(
+      localStorage.getItem(AUTOMATION_COLLAPSED_STORAGE_KEY) ?? '[]',
+    ) as unknown;
+    if (!Array.isArray(parsed)) return new Set();
+    return new Set(parsed.filter(isAutomationTab));
+  } catch {
+    return new Set();
+  }
+}
 
 interface WorkflowsPageProps {
   projects: Project[];
@@ -53,12 +99,15 @@ interface WorkflowsPageProps {
    * "sending" in the shared sendingMap so the sidebar spinner lights up for
    * all of them, not just the one we navigate to. Without this prop the
    * batch still works but only the navigated disc looks like it's running. */
-  onBatchLaunched?: (discIds: string[], batchRunId: string) => void;
+  onBatchLaunched?: (discIds: string[], batchRunId: string, mode?: 'batch' | 'compare') => void;
   /** When the user clicks a batch pastille in the discussion sidebar, the
    * Dashboard switches to this tab and sets this prop to the parent workflow
    * id. We auto-open its detail panel + switch to the 'workflows' sub-tab
    * so the user lands exactly on the run that spawned their batch. */
   initialSelectedWorkflowId?: string | null;
+  /** Optional run to focus when cross-page navigation targets a specific
+   * publication from the Page refresh timeline. */
+  initialSelectedWorkflowRunId?: string | null;
   /** Ack callback — Dashboard clears the id after we've consumed it so the
    * same click doesn't re-open on every render. */
   onInitialSelectionConsumed?: () => void;
@@ -71,6 +120,7 @@ interface WorkflowsPageProps {
    * and the project pre-selected. Ack via `onPendingPresetConsumed`. */
   pendingPreset?: { presetId: string; projectId: string } | null;
   onPendingPresetConsumed?: () => void;
+  onNavigatePage?: (pageId: string) => void;
 }
 
 const TRIGGER_LABELS: Record<string, string> = {
@@ -91,7 +141,7 @@ function readPostImprovedQuickPromptId(): string | null {
   }
 }
 
-export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, configLanguage, onNavigateDiscussion, onBatchLaunched, initialSelectedWorkflowId, onInitialSelectionConsumed, onNavigateToBatch, toast: toastProp, pendingPreset, onPendingPresetConsumed }: WorkflowsPageProps) {
+export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, configLanguage, onNavigateDiscussion, onBatchLaunched, initialSelectedWorkflowId, initialSelectedWorkflowRunId, onInitialSelectionConsumed, onNavigateToBatch, toast: toastProp, pendingPreset, onPendingPresetConsumed, onNavigatePage }: WorkflowsPageProps) {
   const { t } = useT();
   // The 380px workflow list plus the detail panel needs substantially more
   // room than a phone-only breakpoint. Switch to the existing single-pane
@@ -103,9 +153,26 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   const [postImprovedQpId, setPostImprovedQpId] = useState<string | null>(
     readPostImprovedQuickPromptId,
   );
-  const [tab, setTab] = useState<'workflows' | 'quickPrompts' | 'quickApis'>(
-    postImprovedQpId ? 'quickPrompts' : 'workflows',
+  const [initialAutomationNavigation] = useState(readAutomationNavigation);
+  const [tab, setTab] = useState<AutomationTab>(
+    postImprovedQpId ? 'quickPrompts' : initialAutomationNavigation.tab,
   );
+  const [automationQuery, setAutomationQuery] = useState('');
+  const automationSearchRef = useRef<HTMLInputElement>(null);
+  const [automationProjectFilter, setAutomationProjectFilter] = useState('all');
+  const [collapsedAutomationSections, setCollapsedAutomationSections] = useState<Set<AutomationTab>>(
+    readCollapsedAutomationSections,
+  );
+  useEffect(() => {
+    const focusSearch = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (event.key !== '/' || target?.matches('input, textarea, select, [contenteditable="true"]')) return;
+      event.preventDefault();
+      automationSearchRef.current?.focus();
+    };
+    window.addEventListener('keydown', focusSearch);
+    return () => window.removeEventListener('keydown', focusSearch);
+  }, []);
   const [quickPromptSort, setQuickPromptSort] = useState<QuickPromptSort>('name');
   const [quickPromptSortReversed, setQuickPromptSortReversed] = useState(false);
   const [quickPromptAgentFilter, setQuickPromptAgentFilter] = useState<string>('all');
@@ -119,6 +186,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   const { data: workflowList, refetch } = useApi(() => workflowsApi.list(), []);
   const { data: quickPromptList, refetch: refetchQP } = useApi(() => quickPromptsApi.list(), []);
   const { data: quickApiList, refetch: refetchQA } = useApi(() => quickApisApi.list(), []);
+  const { data: quickExecList, refetch: refetchQE } = useApi(() => quickExecsApi.list(), []);
   // 0.8.5 — catalogs for the QP form binding pickers (skills + profiles +
   // directives). Empty-array fallback keeps the form rendering during the
   // first paint before the API resolves.
@@ -132,7 +200,79 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   }, []);
   const quickPromptUsageReady = (quickPromptList ?? [])
     .every(qp => Object.hasOwn(quickPromptUsage, qp.id));
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(
+    initialAutomationNavigation.tab === 'workflows'
+      ? initialAutomationNavigation.resourceId
+      : null,
+  );
+  const [selectedQuickPromptId, setSelectedQuickPromptId] = useState<string | null>(
+    postImprovedQpId
+      ?? (initialAutomationNavigation.tab === 'quickPrompts'
+        ? initialAutomationNavigation.resourceId
+        : null),
+  );
+  const [selectedQuickApiId, setSelectedQuickApiId] = useState<string | null>(
+    initialAutomationNavigation.tab === 'quickApis'
+      ? initialAutomationNavigation.resourceId
+      : null,
+  );
+  const [selectedQuickExecId, setSelectedQuickExecId] = useState<string | null>(
+    initialAutomationNavigation.tab === 'quickExecs'
+      ? initialAutomationNavigation.resourceId
+      : null,
+  );
+  const invalidWorkflowSelection = Boolean(
+    workflowList && selectedId && !workflowList.some(item => item.id === selectedId),
+  );
+  const invalidQuickPromptSelection = Boolean(
+    quickPromptList && selectedQuickPromptId
+      && !quickPromptList.some(item => item.id === selectedQuickPromptId),
+  );
+  const invalidQuickApiSelection = Boolean(
+    quickApiList && selectedQuickApiId
+      && !quickApiList.some(item => item.id === selectedQuickApiId),
+  );
+  const invalidQuickExecSelection = Boolean(
+    quickExecList && selectedQuickExecId
+      && !quickExecList.some(item => item.id === selectedQuickExecId),
+  );
+  useEffect(() => {
+    const resourceId = tab === 'workflows'
+      ? (invalidWorkflowSelection ? null : selectedId)
+      : tab === 'quickPrompts'
+        ? (invalidQuickPromptSelection ? null : selectedQuickPromptId)
+        : tab === 'quickApis'
+          ? (invalidQuickApiSelection ? null : selectedQuickApiId)
+          : (invalidQuickExecSelection ? null : selectedQuickExecId);
+    try {
+      localStorage.setItem(
+        AUTOMATION_NAVIGATION_STORAGE_KEY,
+        JSON.stringify({ tab, resourceId }),
+      );
+    } catch {
+      // localStorage may be unavailable in private/restricted browser modes.
+    }
+  }, [
+    invalidQuickApiSelection,
+    invalidQuickExecSelection,
+    invalidQuickPromptSelection,
+    invalidWorkflowSelection,
+    selectedId,
+    selectedQuickApiId,
+    selectedQuickExecId,
+    selectedQuickPromptId,
+    tab,
+  ]);
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        AUTOMATION_COLLAPSED_STORAGE_KEY,
+        JSON.stringify([...collapsedAutomationSections]),
+      );
+    } catch {
+      // localStorage may be unavailable in private/restricted browser modes.
+    }
+  }, [collapsedAutomationSections]);
   // #11 — when a parent run's sub-run link is clicked, remember the target
   // child run so the opened WorkflowDetail auto-expands + scrolls to it.
   const [focusRunId, setFocusRunId] = useState<string | null>(null);
@@ -146,11 +286,10 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   // `discussions.create` calls before React re-renders the disabled state.
   // The ref reads/writes synchronously, so the second invocation bails out.
   const launchingRef = useRef(false);
-  // Compare-agents selection. `null` = "use all installed", any explicit
-  // array = subset chosen by the user via the chip selector. We start at
-  // `null` (default = all) and reset on every QP open so each launch
-  // begins with a clean slate.
-  const [compareAgents, setCompareAgents] = useState<AgentType[] | null>(null);
+  // Compare targets retain both axes that affect an answer. `null` means one
+  // target per installed agent at the QP's tier. Keeping an explicit tier per
+  // row also allows Codex/default vs Codex/reasoning comparisons.
+  const [compareTargets, setCompareTargets] = useState<Array<{ agent: AgentType; tier: ModelTier }> | null>(null);
   // Batch launch state — when the user clicks "Batch" on a QP, we show a
   // modal that asks for one value of the first variable per line, then
   // fans out N discussions via POST /api/quick-prompts/:id/batch.
@@ -182,6 +321,11 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   const [batchQARunning, setBatchQARunning] = useState(false);
   const batchQARunningRef = useRef(false); // Race-free guard, cf launchingRef.
   const [batchQAResult, setBatchQAResult] = useState<{ status: string; items: Array<{ input: unknown; status: string; response?: unknown; error?: string; http_status?: number }>; total: number; succeeded: number; failed: number } | null>(null);
+  const [showCreateQE, setShowCreateQE] = useState(false);
+  const [editingQE, setEditingQE] = useState<QuickExec | null>(null);
+  const [runningQE, setRunningQE] = useState<QuickExec | null>(null);
+  const [runVarsQE, setRunVarsQE] = useState<Record<string, string>>({});
+  const [runQEState, setRunQEState] = useState<{ busy: boolean; data: unknown | null; error: string | null }>({ busy: false, data: null, error: null });
   // Lignes du tableau de résultats batch dépliées (Set d'index). On garde
   // un Set plutôt qu'un single index pour permettre la comparaison de
   // plusieurs réponses côte-à-côte. Reset à chaque nouveau batch.
@@ -278,7 +422,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   // a small preview snapshot so the drawer can render "tu vas importer
   // X" before confirm.
   const [importing, setImporting] = useState<{
-    kind: 'workflow' | 'qp' | 'qa';
+    kind: 'workflow' | 'qp' | 'qa' | 'qe';
     content: string;
     preview: { name: string; stepCount?: number; qpVarsCount?: number };
     targetProjectId: string;
@@ -389,6 +533,96 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     return groups;
   }, [workflows, t]);
 
+  const matchesAutomationProject = useCallback((projectId: string | null | undefined) => (
+    automationProjectFilter === 'all'
+      || (automationProjectFilter === '__global__' ? !projectId : projectId === automationProjectFilter)
+  ), [automationProjectFilter]);
+  const automationNeedle = automationQuery.trim().toLocaleLowerCase();
+  const matchesAutomationQuery = useCallback((...values: Array<string | null | undefined>) => (
+    !automationNeedle
+      || values.some(value => value?.toLocaleLowerCase().includes(automationNeedle))
+  ), [automationNeedle]);
+  const sidebarWorkflows = useMemo(
+    () => workflows.filter(workflow => (
+      matchesAutomationProject(workflow.project_id)
+      && matchesAutomationQuery(workflow.name, workflow.project_name, workflow.trigger_type)
+    )),
+    [matchesAutomationProject, matchesAutomationQuery, workflows],
+  );
+  const sidebarQuickApis = useMemo(
+    () => (quickApiList ?? []).filter(quickApi => (
+      matchesAutomationProject(quickApi.project_id)
+      && matchesAutomationQuery(
+        quickApi.name,
+        quickApi.description,
+        quickApi.api_plugin_slug,
+        quickApi.api_endpoint_path,
+      )
+    )).sort((left, right) => left.name.localeCompare(right.name)),
+    [matchesAutomationProject, matchesAutomationQuery, quickApiList],
+  );
+  const sidebarQuickPrompts = useMemo(
+    () => (quickPromptList ?? []).filter(quickPrompt => (
+      matchesAutomationProject(quickPrompt.project_id)
+      && matchesAutomationQuery(
+        quickPrompt.name,
+        quickPrompt.description,
+        AGENT_LABELS[quickPrompt.agent] ?? quickPrompt.agent,
+      )
+    )).sort((left, right) => left.name.localeCompare(right.name)),
+    [matchesAutomationProject, matchesAutomationQuery, quickPromptList],
+  );
+  const sidebarQuickExecs = useMemo(
+    () => (quickExecList ?? []).filter(quickExec => (
+      matchesAutomationProject(quickExec.project_id)
+      && matchesAutomationQuery(
+        quickExec.name,
+        quickExec.description,
+        quickExec.command,
+        quickExec.output_format,
+      )
+    )).sort((left, right) => left.name.localeCompare(right.name)),
+    [matchesAutomationProject, matchesAutomationQuery, quickExecList],
+  );
+  const visibleQuickPrompts = selectedQuickPromptId
+    ? (quickPromptList ?? []).filter(item => item.id === selectedQuickPromptId)
+    : sortedQuickPrompts;
+  const visibleQuickApis = selectedQuickApiId
+    ? (quickApiList ?? []).filter(item => item.id === selectedQuickApiId)
+    : sortedQuickApis;
+  const visibleQuickExecs = selectedQuickExecId
+    ? (quickExecList ?? []).filter(item => item.id === selectedQuickExecId)
+    : (quickExecList ?? []);
+  const selectedQuickPrompt = selectedQuickPromptId
+    ? (quickPromptList ?? []).find(item => item.id === selectedQuickPromptId) ?? null
+    : null;
+  const selectedQuickApi = selectedQuickApiId
+    ? (quickApiList ?? []).find(item => item.id === selectedQuickApiId) ?? null
+    : null;
+  const selectedQuickExec = selectedQuickExecId
+    ? (quickExecList ?? []).find(item => item.id === selectedQuickExecId) ?? null
+    : null;
+
+  useEffect(() => {
+    if (!invalidWorkflowSelection && !invalidQuickPromptSelection
+      && !invalidQuickApiSelection && !invalidQuickExecSelection) return;
+    const timeoutId = window.setTimeout(() => {
+      if (invalidWorkflowSelection) {
+        setSelectedId(null);
+        setDetailWorkflow(null);
+      }
+      if (invalidQuickPromptSelection) setSelectedQuickPromptId(null);
+      if (invalidQuickApiSelection) setSelectedQuickApiId(null);
+      if (invalidQuickExecSelection) setSelectedQuickExecId(null);
+    }, 0);
+    return () => window.clearTimeout(timeoutId);
+  }, [
+    invalidQuickApiSelection,
+    invalidQuickExecSelection,
+    invalidQuickPromptSelection,
+    invalidWorkflowSelection,
+  ]);
+
   const toggleGroup = (key: string) => {
     setCollapsedGroups(prev => ({ ...prev, [key]: !prev[key] }));
   };
@@ -439,6 +673,22 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     }
   };
 
+  const restoredWorkflowSelection = useRef(false);
+  useEffect(() => {
+    if (restoredWorkflowSelection.current || !workflowList) return;
+    restoredWorkflowSelection.current = true;
+    if (postImprovedQpId || initialSelectedWorkflowId) return;
+    if (initialAutomationNavigation.tab !== 'workflows'
+      || !initialAutomationNavigation.resourceId
+      || !workflowList.some(item => item.id === initialAutomationNavigation.resourceId)) return;
+    const resourceId = initialAutomationNavigation.resourceId;
+    const timeoutId = window.setTimeout(() => { void openDetail(resourceId); }, 0);
+    // The restore target is an immutable mount snapshot; subsequent selections
+    // already call openDetail directly.
+    return () => window.clearTimeout(timeoutId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workflowList]);
+
   const changeStepAgent = async (stepIndex: number, agent: AgentType, tier: ModelTier) => {
     const workflow = detailWorkflow;
     const step = workflow?.steps[stepIndex];
@@ -480,14 +730,14 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     if (!initialSelectedWorkflowId) return;
     const timeoutId = window.setTimeout(() => {
       setTab('workflows');
-      void openDetail(initialSelectedWorkflowId);
+      void openDetail(initialSelectedWorkflowId, initialSelectedWorkflowRunId ?? undefined);
       onInitialSelectionConsumed?.();
     }, 0);
     return () => {
       window.clearTimeout(timeoutId);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [initialSelectedWorkflowId]);
+  }, [initialSelectedWorkflowId, initialSelectedWorkflowRunId]);
 
   // 0.8.2 — Live workflow-run updates. The SSE stream is tab-local: if the
   // user opens the workflow detail in a *different* tab while a run is in
@@ -796,13 +1046,13 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   };
 
   const handleSaveQP = async (req: CreateQuickPromptRequest) => {
-    if (editingQP) {
-      await quickPromptsApi.update(editingQP.id, req);
-    } else {
-      await quickPromptsApi.create(req);
-    }
+    const targetId = editingQP?.id ?? (!showCreateQP ? selectedQuickPromptId : null);
+    const saved = targetId
+      ? await quickPromptsApi.update(targetId, req)
+      : await quickPromptsApi.create(req);
     setShowCreateQP(false);
     setEditingQP(null);
+    if (saved?.id) setSelectedQuickPromptId(saved.id);
     refetchQP();
   };
 
@@ -840,14 +1090,40 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   };
 
   const handleSaveQA = async (req: CreateQuickApiRequest) => {
-    if (editingQA) {
-      await quickApisApi.update(editingQA.id, req);
-    } else {
-      await quickApisApi.create(req);
-    }
+    const targetId = editingQA?.id ?? (!showCreateQA ? selectedQuickApiId : null);
+    const saved = targetId
+      ? await quickApisApi.update(targetId, req)
+      : await quickApisApi.create(req);
     setShowCreateQA(false);
     setEditingQA(null);
+    if (saved?.id) setSelectedQuickApiId(saved.id);
     refetchQA();
+  };
+
+  const handleSaveQE = async (request: CreateQuickExecRequest) => {
+    const targetId = editingQE?.id ?? (!showCreateQE ? selectedQuickExecId : null);
+    const saved = targetId
+      ? await quickExecsApi.update(targetId, request)
+      : await quickExecsApi.create(request);
+    setShowCreateQE(false);
+    setEditingQE(null);
+    if (saved?.id) setSelectedQuickExecId(saved.id);
+    refetchQE();
+  };
+
+  const handleRunQE = async (quickExec: QuickExec) => {
+    if (runQEState.busy) return;
+    setRunQEState({ busy: true, data: null, error: null });
+    try {
+      const response = await quickExecsApi.run(quickExec.id, { variables: runVarsQE });
+      setRunQEState({
+        busy: false,
+        data: response.data ?? null,
+        error: response.success ? null : response.error ?? t('qe.runFailed'),
+      });
+    } catch (error) {
+      setRunQEState({ busy: false, data: null, error: userError(error) });
+    }
   };
 
   // Direct-run a saved Quick API. Variables are user-supplied via the
@@ -1096,15 +1372,13 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   };
 
   /**
-   * Compare-agents launch — fans the same rendered prompt across all
-   * installed RTK-applicable agents in parallel. Reuses
+   * Compare launch — fans the same rendered prompt across explicit
+   * agent+model-tier targets in parallel. Reuses
    * `quickPromptsApi.compareAgents` which delegates to the
    * backend's `create_batch_run` with per-item `agent_override`.
    *
-   * Side effect: the user lands on the FIRST child discussion (the
-   * sidebar batch group expands automatically). They can click
-   * between siblings to read the responses side-by-side as they
-   * stream in.
+   * Side effect: Dashboard opens the dedicated comparison workspace while
+   * the durable child discussions stream independently behind each column.
    */
   const handleCompareAgents = async (qp: QuickPrompt) => {
     if (launchingRef.current) return;
@@ -1116,12 +1390,14 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
       if (toastProp) toastProp(t('qp.launch.missingRequired', missing.join(', ')), 'error');
       return;
     }
-    // `compareAgents` is null when the user hasn't touched the chip
-    // selector yet — fall back to "all installed" in that case so the
-    // 🤝 button on a freshly opened form still does the right thing.
-    const targetAgents = compareAgents ?? installedAgentTypes ?? [];
-    if (targetAgents.length === 0) {
-      console.warn('Compare-agents needs at least 1 selected agent');
+    // A fresh form compares every installed agent at the QP's configured
+    // tier. Once edited, every row carries its own agent+tier selection.
+    const targets = compareTargets ?? (installedAgentTypes ?? []).map(agent => ({
+      agent,
+      tier: qp.tier ?? 'default',
+    }));
+    if (targets.length === 0) {
+      console.warn('Compare needs at least 1 selected agent/model target');
       return;
     }
     launchingRef.current = true;
@@ -1136,13 +1412,12 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
       const result = await quickPromptsApi.compareAgents(qp.id, {
         prompt: rendered,
         batch_name: batchName,
-        agents: targetAgents,
-        tier: qp.tier !== 'default' ? qp.tier : undefined,
+        targets,
         project_id: qp.project_id ?? undefined,
       });
       setLaunchingQP(null);
       setLaunchVars({});
-      setCompareAgents(null);
+      setCompareTargets(null);
       // Kick off each child discussion's agent run in parallel — same
       // pattern as `handleBatchLaunch` (cf. comments there for the
       // connection-pool + tokio detached-task gotchas). Without this
@@ -1161,7 +1436,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
       // Use `onBatchLaunched` (NOT `onNavigateDiscussion`) so the
       // sibling spinners light up in the sidebar AND we don't re-fire
       // a second `/run` on top of the fan-out we just dispatched.
-      onBatchLaunched?.(result.discussion_ids, result.run_id);
+      onBatchLaunched?.(result.discussion_ids, result.run_id, 'compare');
     } catch (e) {
       console.warn('Compare-agents launch failed:', e);
     } finally {
@@ -1304,11 +1579,17 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
           hint: t('qp.createWithAIHint'),
           skillIds: ['qp-improver'],
         }
-      : {
+      : tab === 'quickApis' ? {
           title: t('qa.aiArchitectTitle'),
           prompt: t('qa.aiArchitectPrompt'),
           hint: t('qa.createWithAIHint'),
           skillIds: [],
+        }
+      : {
+          title: t('qe.aiArchitectTitle'),
+          prompt: t('qe.aiArchitectPrompt'),
+          hint: t('qe.createWithAIHint'),
+          skillIds: ['workflow-architect'],
         };
 
   const handleCreateWithAI = async () => {
@@ -1338,24 +1619,294 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     }
   };
 
+  const clearAutomationEditors = () => {
+    setShowCreate(false);
+    setEditingWorkflow(null);
+    setShowCreateQP(false);
+    setEditingQP(null);
+    setShowCreateQA(false);
+    setEditingQA(null);
+    setShowCreateQE(false);
+    setEditingQE(null);
+  };
+
+  const selectAutomationKind = (kind: AutomationTab) => {
+    clearAutomationEditors();
+    setTab(kind);
+    setCollapsedAutomationSections(current => {
+      if (automationQuery.trim()) return current;
+      const next = new Set(current);
+      if (tab === kind) {
+        if (next.has(kind)) next.delete(kind);
+        else next.add(kind);
+      } else {
+        next.delete(kind);
+      }
+      return next;
+    });
+    if (kind === 'workflows') {
+      setSelectedId(null);
+      setDetailWorkflow(null);
+    } else if (kind === 'quickApis') {
+      setSelectedQuickApiId(null);
+    } else if (kind === 'quickPrompts') {
+      setSelectedQuickPromptId(null);
+    } else {
+      setSelectedQuickExecId(null);
+    }
+  };
+
+  const isAutomationSectionCollapsed = (kind: AutomationTab) => (
+    !automationQuery.trim() && collapsedAutomationSections.has(kind)
+  );
+
+  const openQuickPrompt = (quickPrompt: QuickPrompt) => {
+    clearAutomationEditors();
+    setTab('quickPrompts');
+    setSelectedQuickPromptId(quickPrompt.id);
+  };
+  const openQuickApi = (quickApi: QuickApi) => {
+    clearAutomationEditors();
+    setTab('quickApis');
+    setSelectedQuickApiId(quickApi.id);
+  };
+  const openQuickExec = (quickExec: QuickExec) => {
+    clearAutomationEditors();
+    setTab('quickExecs');
+    setSelectedQuickExecId(quickExec.id);
+  };
+
+  const renderAutomationRow = ({
+    id,
+    name,
+    meta,
+    icon,
+    active,
+    onOpen,
+  }: {
+    id: string;
+    name: string;
+    meta: string;
+    icon: string;
+    active: boolean;
+    onOpen: () => void;
+  }) => (
+    <div className="disc-swipe-wrap automation-resource-row" key={id}>
+      <div className="disc-item" data-active={active}>
+        <button
+          type="button"
+          className="disc-item-open"
+          onClick={onOpen}
+          aria-label={t('automation.openResource', name)}
+        >
+          <span className="automation-resource-icon" aria-hidden="true">{icon}</span>
+          <span className="disc-item-content">
+            <span className="disc-item-title">
+              <span className="disc-item-title-text">{name}</span>
+            </span>
+            <span className="disc-item-meta">
+              <span className="disc-item-meta-summary">{meta}</span>
+            </span>
+          </span>
+        </button>
+      </div>
+    </div>
+  );
+
+  const totalAutomationResources = workflows.length
+    + (quickApiList?.length ?? 0)
+    + (quickPromptList?.length ?? 0)
+    + (quickExecList?.length ?? 0);
+  const automationHasSelection = Boolean(
+    selectedId || selectedQuickApiId || selectedQuickPromptId || selectedQuickExecId
+      || showCreate || editingWorkflow || showCreateQA || editingQA
+      || showCreateQP || editingQP || showCreateQE || editingQE,
+  );
+  const currentResourceSelected = Boolean(
+    selectedId || selectedQuickApi || selectedQuickPrompt || selectedQuickExec,
+  );
+  const automationContentTitle = detailWorkflow?.name
+    ?? selectedQuickApi?.name
+    ?? selectedQuickPrompt?.name
+    ?? selectedQuickExec?.name
+    ?? (tab === 'workflows' ? t('wf.tabWorkflows')
+      : tab === 'quickApis' ? t('wf.tabQuickApis')
+        : tab === 'quickPrompts' ? t('wf.tabQuickPrompts')
+          : t('wf.tabQuickExecs'));
+
   return (
-    <div>
-      <div className="flex-between mb-4 automation-page-header">
-        <div>
-          <div className="kr-context-help-title-row">
-            <h1 className="wf-h1"><MatrixText text={t('wf.title')} /></h1>
-            <ContextHelp title={t('contextHelp.automation.title')}>
-              <p>{t('contextHelp.automation.intro')}</p>
-              <ul>
-                <li>{t('contextHelp.automation.qp')}</li>
-                <li>{t('contextHelp.automation.qa')}</li>
-                <li>{t('contextHelp.automation.wf')}</li>
-              </ul>
-              <p className="kr-context-help-agent-note">{t('contextHelp.automation.mcp')}</p>
-            </ContextHelp>
-          </div>
+    <div className="automation-page" data-has-selection={automationHasSelection}>
+      <aside
+        className="disc-sidebar automation-sidebar"
+        aria-label={t('wf.title')}
+        data-tour-id="automation-library"
+      >
+        <div className="disc-sidebar-header">
+          <span className="disc-sidebar-header-title">
+            {t('wf.title')}
+            <span className="disc-sidebar-header-count">{' · '}{totalAutomationResources}</span>
+          </span>
+          <ContextHelp title={t('contextHelp.automation.title')}>
+            <p>{t('contextHelp.automation.intro')}</p>
+            <ul>
+              <li>{t('contextHelp.automation.wf')}</li>
+              <li>{t('contextHelp.automation.qa')}</li>
+              <li>{t('contextHelp.automation.qp')}</li>
+              <li>{t('contextHelp.automation.qe')}</li>
+            </ul>
+            <p className="kr-context-help-agent-note">{t('contextHelp.automation.mcp')}</p>
+          </ContextHelp>
         </div>
-        {tab === 'workflows' ? (
+
+        <div className="disc-search-wrap automation-sidebar-search">
+          <div className="disc-search-controls">
+            <label className="disc-search-box">
+              <Search size={14} className="disc-search-icon" />
+              <input
+                ref={automationSearchRef}
+                className="disc-search-input"
+                value={automationQuery}
+                onChange={event => setAutomationQuery(event.target.value)}
+                placeholder={t('automation.search')}
+                aria-label={t('automation.search')}
+              />
+              {automationQuery && (
+                <button
+                  type="button"
+                  className="disc-search-clear"
+                  onClick={() => setAutomationQuery('')}
+                  aria-label={t('automation.clearSearch')}
+                >
+                  <X size={12} />
+                </button>
+              )}
+            </label>
+          </div>
+          <select
+            className="automation-project-filter"
+            value={automationProjectFilter}
+            onChange={event => setAutomationProjectFilter(event.target.value)}
+            aria-label={t('automation.projectFilter')}
+          >
+            <option value="all">{t('automation.allProjects')}</option>
+            <option value="__global__">{t('disc.general')}</option>
+            {projects.map(project => <option key={project.id} value={project.id}>{project.name}</option>)}
+          </select>
+        </div>
+
+        <div className="disc-sidebar-list automation-sidebar-items" data-tour-id="automation-kinds">
+          <div className="disc-sidebar-section automation-sidebar-section" data-expanded={!isAutomationSectionCollapsed('workflows')}>
+            <button
+              type="button"
+              className="disc-group-btn automation-kind-button"
+              data-active={tab === 'workflows'}
+              data-tour-id="automation-kind-workflow"
+              onClick={() => selectAutomationKind('workflows')}
+              aria-expanded={!isAutomationSectionCollapsed('workflows')}
+            >
+              <ChevronRight size={10} className="disc-chevron" data-expanded={!isAutomationSectionCollapsed('workflows')} />
+              <WorkflowIcon size={11} />
+              <span>{t('wf.tabWorkflows')}</span>
+              <span className="disc-group-count">({sidebarWorkflows.length})</span>
+            </button>
+            {!isAutomationSectionCollapsed('workflows') && sidebarWorkflows.map(workflow => renderAutomationRow({
+              id: workflow.id,
+              name: workflow.name,
+              meta: `${TRIGGER_LABELS[workflow.trigger_type] ?? workflow.trigger_type} · ${workflow.step_count} step${workflow.step_count > 1 ? 's' : ''}`,
+              icon: workflow.enabled ? '⚡' : '○',
+              active: tab === 'workflows' && selectedId === workflow.id,
+              onOpen: () => { clearAutomationEditors(); setTab('workflows'); void openDetail(workflow.id); },
+            }))}
+          </div>
+
+          <div className="disc-sidebar-section automation-sidebar-section" data-expanded={!isAutomationSectionCollapsed('quickApis')}>
+            <button
+              type="button"
+              className="disc-group-btn automation-kind-button"
+              data-active={tab === 'quickApis'}
+              data-tour-id="automation-kind-quick-api"
+              onClick={() => selectAutomationKind('quickApis')}
+              aria-expanded={!isAutomationSectionCollapsed('quickApis')}
+            >
+              <ChevronRight size={10} className="disc-chevron" data-expanded={!isAutomationSectionCollapsed('quickApis')} />
+              <PlugZap size={11} />
+              <span>{t('wf.tabQuickApis')}</span>
+              <span className="disc-group-count">({sidebarQuickApis.length})</span>
+            </button>
+            {!isAutomationSectionCollapsed('quickApis') && sidebarQuickApis.map(quickApi => renderAutomationRow({
+              id: quickApi.id,
+              name: quickApi.name,
+              meta: `${quickApi.api_method ?? 'GET'} · ${quickApi.api_endpoint_path}`,
+              icon: quickApi.icon,
+              active: tab === 'quickApis' && selectedQuickApiId === quickApi.id,
+              onOpen: () => openQuickApi(quickApi),
+            }))}
+          </div>
+
+          <div className="disc-sidebar-section automation-sidebar-section" data-expanded={!isAutomationSectionCollapsed('quickPrompts')}>
+            <button
+              type="button"
+              className="disc-group-btn automation-kind-button"
+              data-active={tab === 'quickPrompts'}
+              data-tour-id="automation-kind-quick-prompt"
+              onClick={() => selectAutomationKind('quickPrompts')}
+              aria-expanded={!isAutomationSectionCollapsed('quickPrompts')}
+            >
+              <ChevronRight size={10} className="disc-chevron" data-expanded={!isAutomationSectionCollapsed('quickPrompts')} />
+              <MessageSquareText size={11} />
+              <span>{t('wf.tabQuickPrompts')}</span>
+              <span className="disc-group-count">({sidebarQuickPrompts.length})</span>
+            </button>
+            {!isAutomationSectionCollapsed('quickPrompts') && sidebarQuickPrompts.map(quickPrompt => renderAutomationRow({
+              id: quickPrompt.id,
+              name: quickPrompt.name,
+              meta: AGENT_LABELS[quickPrompt.agent] ?? quickPrompt.agent,
+              icon: quickPrompt.icon,
+              active: tab === 'quickPrompts' && selectedQuickPromptId === quickPrompt.id,
+              onOpen: () => openQuickPrompt(quickPrompt),
+            }))}
+          </div>
+
+          <div className="disc-sidebar-section automation-sidebar-section" data-expanded={!isAutomationSectionCollapsed('quickExecs')}>
+            <button
+              type="button"
+              className="disc-group-btn automation-kind-button"
+              data-active={tab === 'quickExecs'}
+              data-tour-id="automation-kind-quick-exec"
+              onClick={() => selectAutomationKind('quickExecs')}
+              aria-expanded={!isAutomationSectionCollapsed('quickExecs')}
+            >
+              <ChevronRight size={10} className="disc-chevron" data-expanded={!isAutomationSectionCollapsed('quickExecs')} />
+              <TerminalSquare size={11} />
+              <span>{t('wf.tabQuickExecs')}</span>
+              <span className="disc-group-count">({sidebarQuickExecs.length})</span>
+            </button>
+            {!isAutomationSectionCollapsed('quickExecs') && sidebarQuickExecs.map(quickExec => renderAutomationRow({
+              id: quickExec.id,
+              name: quickExec.name,
+              meta: `${quickExec.command} · ${quickExec.output_format.toUpperCase()}`,
+              icon: quickExec.icon,
+              active: tab === 'quickExecs' && selectedQuickExecId === quickExec.id,
+              onOpen: () => openQuickExec(quickExec),
+            }))}
+          </div>
+
+          {sidebarWorkflows.length + sidebarQuickApis.length + sidebarQuickPrompts.length + sidebarQuickExecs.length === 0 && (
+            <div className="disc-empty">{t('automation.noSearchResults')}</div>
+          )}
+        </div>
+        <div className="disc-sidebar-footer">
+          <span>{t('automation.sidebarHint')}</span>
+          <span><kbd>/</kbd> {t('automation.sidebarSearchHint')}</span>
+        </div>
+      </aside>
+
+      <section className="automation-viewer">
+      <div className="flex-between mb-4 automation-page-header">
+        <div className="kr-context-help-title-row">
+          <h1 className="wf-h1"><MatrixText text={automationContentTitle} /></h1>
+        </div>
+        {!currentResourceSelected && (tab === 'workflows' ? (
         <div className="flex-row gap-3 automation-header-actions" data-tour-id="automation-actions">
           {onNavigateDiscussion && (
             <button className="wf-create-ai-btn" data-tour-id="automation-ai-btn" title={aiCreation.hint} onClick={handleCreateWithAI}>
@@ -1403,7 +1954,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
             <Plus size={14} /> {t('qp.new')}
           </button>
         </div>
-        ) : (
+        ) : tab === 'quickApis' ? (
         // Quick APIs mirror the other tabs. Manual creation still needs a
         // wired plugin; import and AI-assisted setup remain useful without one.
         <div className="flex-row gap-3 automation-header-actions" data-tour-id="automation-actions">
@@ -1430,35 +1981,30 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
             </button>
           )}
         </div>
-        )}
-      </div>
-
-      {/* Tab bar */}
-      <div className="dash-tab-bar mb-6" data-tour-id="automation-kinds">
-        <button
-          className="dash-tab"
-          data-tour-id="automation-kind-workflow"
-          data-active={tab === 'workflows'}
-          onClick={() => setTab('workflows')}
-        >
-          {t('wf.tabWorkflows')} {workflowList ? `(${workflowList.length})` : ''}
-        </button>
-        <button
-          className="dash-tab"
-          data-tour-id="automation-kind-quick-prompt"
-          data-active={tab === 'quickPrompts'}
-          onClick={() => setTab('quickPrompts')}
-        >
-          {t('wf.tabQuickPrompts')} {quickPromptList ? `(${quickPromptList.length})` : ''}
-        </button>
-        <button
-          className="dash-tab"
-          data-tour-id="automation-kind-quick-api"
-          data-active={tab === 'quickApis'}
-          onClick={() => setTab('quickApis')}
-        >
-          {t('wf.tabQuickApis')} {quickApiList ? `(${quickApiList.length})` : ''}
-        </button>
+        ) : (
+        <div className="flex-row gap-3 automation-header-actions" data-tour-id="automation-actions">
+          {onNavigateDiscussion && (
+            <button className="wf-create-ai-btn" data-tour-id="automation-ai-btn" title={aiCreation.hint} onClick={handleCreateWithAI}>
+              <Zap size={14} /> {t('wf.createWithAI')}
+            </button>
+          )}
+          <button
+            className="wf-create-btn wf-create-btn-secondary"
+            title={t('qe.importHint')}
+            onClick={() => setImporting({
+              kind: 'qe',
+              content: '',
+              preview: { name: '' },
+              targetProjectId: '',
+            })}
+          >
+            <Upload size={14} /> {t('qe.import')}
+          </button>
+          <button className="wf-create-btn" onClick={() => { setShowCreateQE(true); setEditingQE(null); }}>
+            <Plus size={14} /> {t('qe.new')}
+          </button>
+        </div>
+        ))}
       </div>
 
       {/* ═══ WORKFLOWS TAB ═══ */}
@@ -1473,6 +2019,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
           configLanguage={configLanguage}
           initialPresetId={pendingPresetLocal?.presetId}
           initialProjectId={pendingPresetLocal?.projectId}
+          onNavigatePage={onNavigatePage}
           onDone={() => { setShowCreate(false); setPendingPresetLocal(null); refetch(); }}
           onCancel={() => { setShowCreate(false); setPendingPresetLocal(null); }}
         />
@@ -1487,6 +2034,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
           agentAccess={agentAccess}
           configLanguage={configLanguage}
           editWorkflow={editingWorkflow}
+          onNavigatePage={onNavigatePage}
           onDone={() => { setEditingWorkflow(null); refetch(); if (editingWorkflow) openDetail(editingWorkflow.id); }}
           onCancel={() => setEditingWorkflow(null)}
         />
@@ -1504,9 +2052,9 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
       )}
 
       {!showCreate && !editingWorkflow && workflows.length > 0 && (
-        <div className="wf-workspace" data-mobile={isMobile}>
+        <div className="wf-workspace" data-mobile={isMobile} data-selected={Boolean(selectedId)}>
           {/* List — grouped by project */}
-          {!(isMobile && selectedId) && (
+          {!selectedId && (
           <div className="wf-workflow-list-pane" data-testid="workflow-list-pane">
             {groupedWorkflows.map(group => (
               <div key={group.key} className="mb-6">
@@ -1673,7 +2221,8 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
           </div>
           )}
 
-          {/* Detail panel */}
+          {/* Detail panel — the shared Automation sidebar owns navigation. */}
+          {selectedId && (
           <div
             ref={detailScrollRef}
             className="wf-workflow-detail-pane"
@@ -1714,6 +2263,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                 onEdit={() => setEditingWorkflow(detailWorkflow)}
                 projects={projects}
                 configLanguage={configLanguage}
+                onNavigatePage={onNavigatePage}
                 onDeleteRun={async (runId) => {
                   if (!confirm(t('wf.deleteRunConfirm'))) return;
                   await workflowsApi.deleteRun(detailWorkflow.id, runId);
@@ -1758,13 +2308,8 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
               />
             )}
 
-            {!selectedId && (
-              <div className="wf-empty">
-                <Eye size={24} className="text-ghost mb-4" />
-                <p>{t('wf.selectOne')}</p>
-              </div>
-            )}
           </div>
+          )}
         </div>
       )}
       </>)}
@@ -1795,7 +2340,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                 </div>
               ) : (
                 <>
-                  <div className="automation-list-toolbar">
+                  {!selectedQuickPromptId && <div className="automation-list-toolbar">
                     <ListControls
                       filterLabel={t('automation.filter.label')}
                       filterAriaLabel={t('automation.filter.qpAgentLabel')}
@@ -1829,13 +2374,19 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                         ? 'automation.sort.restoreDirection'
                         : 'automation.sort.reverseDirection')}
                     />
-                  </div>
+                  </div>}
                   <div className="qp-list">
-                  {sortedQuickPrompts.length === 0 && (
+                  {visibleQuickPrompts.length === 0 && (
                     <div className="automation-filter-empty">{t('automation.filter.empty')}</div>
                   )}
-                  {sortedQuickPrompts.map(qp => (
-                    <div key={qp.id} className="qp-card" data-kind="prompt" data-qp-id={qp.id}>
+                  {visibleQuickPrompts.map(qp => (
+                    <Fragment key={qp.id}>
+                    <div
+                      className="qp-card"
+                      data-kind="prompt"
+                      data-detail={selectedQuickPromptId === qp.id}
+                      data-qp-id={qp.id}
+                    >
                       <div className="qp-card-header">
                         <div className="qp-card-identity">
                           <span className="qp-card-icon">{qp.icon}</span>
@@ -1881,14 +2432,14 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
 
                       <div className="qp-card-footer">
                         <div className="qp-card-tools">
-                          <button
+                          {selectedQuickPromptId !== qp.id && <button
                             className="wf-icon-btn qp-card-tool-btn"
                             onClick={() => setEditingQP(qp)}
                             title={t('qp.edit')}
                             aria-label={`${t('qp.edit')} ${qp.name}`}
                           >
                             <Eye size={12} />
-                          </button>
+                          </button>}
                           {/* 0.8.5 — "Improve with AI" — opens a discussion
                               seeded with the QP body + the qp-improver
                               skill. The agent audits the prompt, emits a
@@ -1934,6 +2485,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                             onClick={async () => {
                               if (!confirm(t('qp.deleteConfirm'))) return;
                               await quickPromptsApi.delete(qp.id);
+                              if (selectedQuickPromptId === qp.id) setSelectedQuickPromptId(null);
                               refetchQP();
                             }}
                             title={t('qp.delete')}
@@ -1973,7 +2525,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                             onClick={() => {
                               setLaunchingQP(launchingQP?.id === qp.id ? null : qp);
                               setLaunchVars({});
-                              setCompareAgents(null);
+                              setCompareTargets(null);
                             }}
                             title={t('qp.compareAgents.button', installedAgentTypes?.length ?? 0)}
                             aria-label={`${t('qp.compareAgents.button', installedAgentTypes?.length ?? 0)} — ${qp.name}`}
@@ -2094,51 +2646,107 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                               />
                             </div>
                           ))}
-                          {/* Compare-agents chip selector. `compareAgents`
-                              null = "all installed" (default). Clicking a
-                              chip toggles it in/out of the explicit subset.
-                              All/None links flip the entire selection in
-                              one click. The shape is shared with the 🤝
-                              CTA below so the count stays in sync. */}
+                          {/* Compare targets use the shared agent+tier picker,
+                              so this launch surface speaks the same model
+                              language as discussions, QPs and workflow steps. */}
                           {installedAgentTypes && installedAgentTypes.length > 0 && (() => {
-                            const activeSet = new Set<AgentType>(compareAgents ?? installedAgentTypes);
-                            const toggle = (a: AgentType) => {
-                              const next = new Set(activeSet);
-                              if (next.has(a)) next.delete(a);
-                              else next.add(a);
-                              // Preserve the canonical agent order from
-                              // `installedAgentTypes` so chips don't reshuffle.
-                              setCompareAgents(installedAgentTypes.filter(x => next.has(x)));
-                            };
+                            const targets = compareTargets ?? installedAgentTypes.map(agent => ({
+                              agent,
+                              tier: qp.tier ?? 'default' as ModelTier,
+                            }));
+                            const representedAgents = new Set(targets.map(target => target.agent));
+                            const missingAgents = installedAgentTypes.filter(agent => !representedAgents.has(agent));
+                            const hasOneOfEveryAgent = targets.length === installedAgentTypes.length
+                              && missingAgents.length === 0;
                             return (
                               <div className="qp-compare-selector">
                                 <span className="qp-compare-selector-label">
                                   🤝 {t('qp.compareAgents.selectorLabel')}
                                 </span>
-                                {installedAgentTypes.map(a => {
-                                  const active = activeSet.has(a);
+                                {targets.map((target, targetIndex) => {
+                                  const duplicateIndex = targets
+                                    .slice(0, targetIndex)
+                                    .filter(row => row.agent === target.agent).length;
                                   return (
-                                    <button
-                                      key={a}
-                                      type="button"
-                                      data-testid={`qp-compare-chip-${a}`}
-                                      className={`qp-compare-chip ${active ? 'qp-compare-chip--active' : 'qp-compare-chip--inactive'}`}
-                                      style={active ? { color: agentColor(a), borderColor: agentColor(a) } : undefined}
-                                      onClick={() => toggle(a)}
-                                      aria-pressed={active}
+                                    <span
+                                      key={`${targetIndex}-${target.agent}-${target.tier}`}
+                                      className="qp-compare-target qp-compare-target--active"
+                                      style={{ borderColor: agentColor(target.agent) }}
                                     >
-                                      {AGENT_LABELS[a] ?? a}
-                                    </button>
+                                      <button
+                                        type="button"
+                                        data-testid={`qp-compare-chip-${target.agent}${duplicateIndex > 0 ? `-${duplicateIndex + 1}` : ''}`}
+                                        className="qp-compare-target-toggle"
+                                        onClick={() => setCompareTargets(targets.filter((_, index) => index !== targetIndex))}
+                                        aria-pressed="true"
+                                        aria-label={`${t('qp.compareAgents.removeTarget')} ${AGENT_LABELS[target.agent] ?? target.agent}`}
+                                      >
+                                        ✓
+                                      </button>
+                                      <AgentSwitchPicker
+                                        currentAgent={target.agent}
+                                        availableAgents={installedAgentTypes}
+                                        currentTier={target.tier}
+                                        onSelectionChange={async (agent, tier) => {
+                                          setCompareTargets(current => {
+                                            const rows = current ?? installedAgentTypes.map(installed => ({
+                                              agent: installed,
+                                              tier: qp.tier ?? 'default' as ModelTier,
+                                            }));
+                                            return rows.map((row, index) => index === targetIndex ? { agent, tier } : row);
+                                          });
+                                        }}
+                                        tierLabels={{
+                                          economy: t('disc.tier.economy'),
+                                          default: t('disc.tier.default'),
+                                          reasoning: t('disc.tier.reasoning'),
+                                        }}
+                                        modelTiers={agentAccess?.model_tiers}
+                                        defaultModelLabel={t('config.defaultModel')}
+                                        title={t('disc.switchAgentAndTier')}
+                                        ariaLabel={t('qp.compareAgents.targetLabel', AGENT_LABELS[target.agent] ?? target.agent)}
+                                        suffix={modelForAgentTier(target.agent, target.tier, agentAccess?.model_tiers, t('config.defaultModel'))}
+                                        compact
+                                      />
+                                    </span>
                                   );
                                 })}
+                                {missingAgents.map(agent => (
+                                  <span key={`missing-${agent}`} className="qp-compare-target qp-compare-target--inactive">
+                                    <button
+                                      type="button"
+                                      data-testid={`qp-compare-chip-${agent}`}
+                                      className="qp-compare-target-toggle"
+                                      onClick={() => setCompareTargets([...targets, { agent, tier: qp.tier ?? 'default' }])}
+                                      aria-pressed="false"
+                                      aria-label={`${t('qp.compareAgents.addTarget')} ${AGENT_LABELS[agent] ?? agent}`}
+                                    >
+                                      +
+                                    </button>
+                                    <span className="qp-compare-target-empty">
+                                      {AGENT_LABELS[agent] ?? agent}
+                                      <span aria-hidden="true">{MODEL_TIER_ICONS.default}</span>
+                                    </span>
+                                  </span>
+                                ))}
+                                <button
+                                  type="button"
+                                  className="qp-compare-add-model"
+                                  onClick={() => setCompareTargets([
+                                    ...targets,
+                                    { agent: qp.agent, tier: qp.tier ?? 'default' },
+                                  ])}
+                                >
+                                  <Plus size={11} /> {t('qp.compareAgents.addModel')}
+                                </button>
                                 <button
                                   type="button"
                                   className="qp-compare-toggle-all"
                                   onClick={() =>
-                                    setCompareAgents(activeSet.size === installedAgentTypes.length ? [] : null)
+                                    setCompareTargets(hasOneOfEveryAgent ? [] : null)
                                   }
                                 >
-                                  {activeSet.size === installedAgentTypes.length
+                                  {hasOneOfEveryAgent
                                     ? t('qp.compareAgents.selectNone')
                                     : t('qp.compareAgents.selectAll')}
                                 </button>
@@ -2162,7 +2770,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                              *  user actively chose nothing — fail loud
                              *  rather than silently fan-out across all). */}
                             {(() => {
-                              const selectedCount = (compareAgents ?? installedAgentTypes ?? []).length;
+                              const selectedCount = (compareTargets ?? installedAgentTypes ?? []).length;
                               return (
                                 <button
                                   className="qp-launch-compare-btn"
@@ -2179,6 +2787,20 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                         </div>
                       )}
                     </div>
+                    {selectedQuickPromptId === qp.id && (
+                      <div className="automation-direct-editor">
+                        <QuickPromptForm
+                          editPrompt={qp}
+                          projects={projects}
+                          skills={skillsCatalog ?? []}
+                          profiles={profilesCatalog ?? []}
+                          directives={directivesCatalog ?? []}
+                          onSave={handleSaveQP}
+                          onCancel={() => setSelectedQuickPromptId(null)}
+                        />
+                      </div>
+                    )}
+                    </Fragment>
                   ))}
                   </div>
                 </>
@@ -2236,7 +2858,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                 </div>
               ) : (
                 <>
-                  <div className="automation-list-toolbar">
+                  {!selectedQuickApiId && <div className="automation-list-toolbar">
                     <ListControls
                       filterLabel={t('automation.filter.label')}
                       filterAriaLabel={t('automation.filter.qaApiLabel')}
@@ -2264,14 +2886,14 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                         ? 'automation.sort.restoreDirection'
                         : 'automation.sort.reverseDirection')}
                     />
-                  </div>
+                  </div>}
                   <div className="qp-list">
-                  {sortedQuickApis.length === 0 && (
+                  {visibleQuickApis.length === 0 && (
                     <div className="automation-filter-empty">{t('automation.filter.empty')}</div>
                   )}
-                  {sortedQuickApis.map((qa, index) => {
+                  {visibleQuickApis.map((qa, index) => {
                     const startsApiGroup = quickApiSort === 'endpoint'
-                      && sortedQuickApis[index - 1]?.api_plugin_slug !== qa.api_plugin_slug;
+                      && visibleQuickApis[index - 1]?.api_plugin_slug !== qa.api_plugin_slug;
                     const apiLabel = availableApiPlugins.find(
                       option => option.server.id === qa.api_plugin_slug,
                     )?.server.name ?? qa.api_plugin_slug;
@@ -2283,7 +2905,12 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                         <span>{t('automation.sort.apiGroup')}</span>
                       </div>
                     )}
-                    <div className="qp-card" data-kind="api" data-qa-id={qa.id}>
+                    <div
+                      className="qp-card"
+                      data-kind="api"
+                      data-detail={selectedQuickApiId === qa.id}
+                      data-qa-id={qa.id}
+                    >
                       <div className="qp-card-header">
                         <div className="qp-card-identity">
                           <span className="qp-card-icon">{qa.icon}</span>
@@ -2313,14 +2940,14 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
 
                       <div className="qp-card-footer">
                         <div className="qp-card-tools">
-                          <button
+                          {selectedQuickApiId !== qa.id && <button
                             className="wf-icon-btn qp-card-tool-btn"
                             onClick={() => setEditingQA(qa)}
                             title={t('qa.edit')}
                             aria-label={`${t('qa.edit')} ${qa.name}`}
                           >
                             <Eye size={12} />
-                          </button>
+                          </button>}
                           <button
                             className="wf-icon-btn qp-card-tool-btn"
                             onClick={async () => {
@@ -2343,6 +2970,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                             onClick={async () => {
                               if (!confirm(t('qa.deleteConfirm').replace('{name}', qa.name))) return;
                               await quickApisApi.delete(qa.id);
+                              if (selectedQuickApiId === qa.id) setSelectedQuickApiId(null);
                               refetchQA();
                             }}
                             title={t('qa.delete')}
@@ -2627,6 +3255,19 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                         </div>
                       )}
                     </div>
+                    {selectedQuickApiId === qa.id && (
+                      <div className="automation-direct-editor">
+                        <QuickApiForm
+                          editApi={qa}
+                          projects={projects}
+                          availableApiPlugins={availableApiPlugins}
+                          installedAgents={installedAgentTypes ?? []}
+                          configLanguage={configLanguage}
+                          onSave={handleSaveQA}
+                          onCancel={() => setSelectedQuickApiId(null)}
+                        />
+                      </div>
+                    )}
                     </Fragment>
                     );
                   })}
@@ -2634,6 +3275,160 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                 </>
               )}
             </>
+          )}
+        </div>
+      )}
+
+      {/* ═══ QUICK EXECS TAB ═══ */}
+      {tab === 'quickExecs' && (
+        <div>
+          {(showCreateQE || editingQE) && (
+            <QuickExecForm
+              editExec={editingQE ?? undefined}
+              projects={projects}
+              onSave={handleSaveQE}
+              onCancel={() => { setShowCreateQE(false); setEditingQE(null); }}
+            />
+          )}
+          {!showCreateQE && !editingQE && (
+            !quickExecList || quickExecList.length === 0 ? (
+              <div className="wf-empty">
+                <p className="wf-empty-title">{t('qe.empty')}</p>
+                <p className="wf-empty-hint">{t('qe.emptyHint')}</p>
+              </div>
+            ) : (
+              <div className="qp-list">
+                {visibleQuickExecs.map(quickExec => {
+                  const project = projects.find(item => item.id === quickExec.project_id);
+                  const isOpen = runningQE?.id === quickExec.id;
+                  const commandPreview = [quickExec.command, ...quickExec.args].join(' ');
+                  return (
+                    <Fragment key={quickExec.id}>
+                    <div
+                      className="qp-card qe-card"
+                      data-kind="exec"
+                      data-detail={selectedQuickExecId === quickExec.id}
+                    >
+                      <div className="qp-card-header">
+                        <div className="qp-card-identity">
+                          <span className="qp-card-icon">{quickExec.icon}</span>
+                          <span className="qp-card-name">{quickExec.name}</span>
+                        </div>
+                        <CopyIdPill id={quickExec.id} title={t('automation.copyId', quickExec.name)} />
+                      </div>
+                      {quickExec.description && <p className="qp-card-desc">{quickExec.description}</p>}
+                      <div className="qe-command-preview">
+                        {selectedQuickExecId === quickExec.id ? (
+                          <code className="qe-command-line" title={commandPreview}>{commandPreview}</code>
+                        ) : (
+                          <>
+                            <code>{quickExec.command}</code>
+                            {quickExec.args.map((argument, index) => <code key={index}>{argument}</code>)}
+                          </>
+                        )}
+                      </div>
+                      <div className="qp-card-meta">
+                        <span>{quickExec.output_format.toUpperCase()}</span>
+                        <span>{quickExec.timeout_secs}s</span>
+                        {project && <span>{project.name}</span>}
+                        {quickExec.variables.length > 0 && <span>{t('qp.vars', quickExec.variables.length)}</span>}
+                      </div>
+                      <div className="qp-card-footer">
+                        <div className="qp-card-tools">
+                          {selectedQuickExecId !== quickExec.id && <button className="wf-icon-btn qp-card-tool-btn" onClick={() => setEditingQE(quickExec)} title={t('qe.edit')}>
+                            <Eye size={12} />
+                          </button>}
+                          <button
+                            className="wf-icon-btn qp-card-tool-btn"
+                            title={t('qe.export')}
+                            onClick={async () => {
+                              const result = await quickExecsApi.export(quickExec.id);
+                              triggerDownload(result.filename, result.blob);
+                            }}
+                          >
+                            <Download size={12} />
+                          </button>
+                          <button
+                            className="wf-icon-btn qp-card-tool-btn"
+                            title={t('qe.delete')}
+                            onClick={async () => {
+                              if (!confirm(t('qe.deleteConfirm', quickExec.name))) return;
+                              await quickExecsApi.delete(quickExec.id);
+                              if (runningQE?.id === quickExec.id) setRunningQE(null);
+                              if (selectedQuickExecId === quickExec.id) setSelectedQuickExecId(null);
+                              refetchQE();
+                            }}
+                          >
+                            <Trash2 size={12} />
+                          </button>
+                        </div>
+                        <button
+                          className="qp-launch-btn"
+                          onClick={() => {
+                            if (isOpen) {
+                              setRunningQE(null);
+                              setRunQEState({ busy: false, data: null, error: null });
+                            } else {
+                              setRunningQE(quickExec);
+                              setRunVarsQE({});
+                              setRunQEState({ busy: false, data: null, error: null });
+                              if (quickExec.variables.length === 0) void handleRunQE(quickExec);
+                            }
+                          }}
+                        >
+                          <Play size={12} /> {t('qe.run')}
+                        </button>
+                      </div>
+                      {isOpen && (
+                        <div className="qp-launch-form qe-run-form">
+                          {quickExec.variables.map(variable => (
+                            <div className="qp-launch-field" key={variable.name}>
+                              <label className="qp-launch-label">
+                                {variable.label || variable.name}{variable.required && ' *'}
+                              </label>
+                              <input
+                                className="wf-input flex-1"
+                                value={runVarsQE[variable.name] ?? ''}
+                                placeholder={variable.placeholder}
+                                onChange={event => setRunVarsQE(current => ({ ...current, [variable.name]: event.target.value }))}
+                              />
+                            </div>
+                          ))}
+                          {quickExec.variables.length > 0 && (
+                            <button
+                              className="qp-launch-go-btn"
+                              disabled={runQEState.busy || quickExec.variables.some(variable => variable.required && !(runVarsQE[variable.name] ?? '').trim())}
+                              onClick={() => void handleRunQE(quickExec)}
+                            >
+                              {runQEState.busy ? <Loader2 size={14} className="spin" /> : <Play size={14} />}
+                              {t('qe.run')}
+                            </button>
+                          )}
+                          {runQEState.error && <div className="wf-apicall-error">{runQEState.error}</div>}
+                          {runQEState.data !== null && (
+                            <div className="wf-apicall-success qe-run-result">
+                              <strong>{t('qe.result')}</strong>
+                              <pre>{JSON.stringify(runQEState.data, null, 2)}</pre>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                    {selectedQuickExecId === quickExec.id && (
+                      <div className="automation-direct-editor">
+                        <QuickExecForm
+                          editExec={quickExec}
+                          projects={projects}
+                          onSave={handleSaveQE}
+                          onCancel={() => setSelectedQuickExecId(null)}
+                        />
+                      </div>
+                    )}
+                    </Fragment>
+                  );
+                })}
+              </div>
+            )
           )}
         </div>
       )}
@@ -2770,7 +3565,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
         </div>
       )}
 
-      {/* Shared Import drawer (workflow, QP, or QA).
+      {/* Shared Import drawer (workflow, QP, QA, or QE).
           2-step flow : (1) drop / pick file → preview rendered + project
           dropdown ; (2) confirm → POST → refetch + close.
           Modal-style overlay so the user is focused on the operation. */}
@@ -2784,7 +3579,9 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                   ? t('imp.workflowTitle')
                   : importing.kind === 'qp'
                     ? t('imp.qpTitle')
-                    : t('imp.qaTitle')}
+                    : importing.kind === 'qa'
+                      ? t('imp.qaTitle')
+                      : t('imp.qeTitle')}
               </h3>
               <button className="wf-icon-btn" onClick={() => setImporting(null)} disabled={importingSubmit}>
                 <X size={12} />
@@ -2797,7 +3594,9 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                   ? 'kronn.workflow'
                   : importing.kind === 'qp'
                     ? 'kronn.quick_prompt'
-                    : 'kronn.quick_api'}
+                    : importing.kind === 'qa'
+                      ? 'kronn.quick_api'
+                      : 'kronn.quick_exec'}
                 embedded
                 onFile={(content, parsed) => {
                   if (importing.kind === 'workflow') {
@@ -2821,7 +3620,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                         qpVarsCount: env.quick_prompt?.variables?.length ?? 0,
                       },
                     });
-                  } else {
+                  } else if (importing.kind === 'qa') {
                     const env = parsed as { quick_api?: { name?: string; variables?: unknown[] } };
                     setImporting({
                       ...importing,
@@ -2829,6 +3628,16 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                       preview: {
                         name: env.quick_api?.name ?? '?',
                         qpVarsCount: env.quick_api?.variables?.length ?? 0,
+                      },
+                    });
+                  } else {
+                    const env = parsed as { quick_exec?: { name?: string; variables?: unknown[] } };
+                    setImporting({
+                      ...importing,
+                      content,
+                      preview: {
+                        name: env.quick_exec?.name ?? '?',
+                        qpVarsCount: env.quick_exec?.variables?.length ?? 0,
                       },
                     });
                   }
@@ -2855,7 +3664,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                       )}
                     </>
                   )}
-                  {(importing.kind === 'qp' || importing.kind === 'qa')
+                  {(importing.kind === 'qp' || importing.kind === 'qa' || importing.kind === 'qe')
                     && (importing.preview.qpVarsCount ?? 0) > 0 && (
                     <div className="text-sm">
                       <span className="text-muted">{t('imp.previewVars')}:</span>{' '}
@@ -2901,17 +3710,29 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                       try {
                         const projectId = importing.targetProjectId || null;
                         if (importing.kind === 'workflow') {
-                          await workflowsApi.importWorkflow({ content: importing.content, project_id: projectId });
+                          const imported = await workflowsApi.importWorkflow({ content: importing.content, project_id: projectId });
                           if (toastProp) toastProp(t('imp.workflowDone').replace('{name}', importing.preview.name), 'success');
                           refetch();
+                          setTab('workflows');
+                          void openDetail(imported.id);
                         } else if (importing.kind === 'qp') {
-                          await quickPromptsApi.importQp({ content: importing.content, project_id: projectId });
+                          const imported = await quickPromptsApi.importQp({ content: importing.content, project_id: projectId });
                           if (toastProp) toastProp(t('imp.qpDone').replace('{name}', importing.preview.name), 'success');
                           refetchQP();
-                        } else {
-                          await quickApisApi.importQa({ content: importing.content, project_id: projectId });
+                          setTab('quickPrompts');
+                          setSelectedQuickPromptId(imported.id);
+                        } else if (importing.kind === 'qa') {
+                          const imported = await quickApisApi.importQa({ content: importing.content, project_id: projectId });
                           if (toastProp) toastProp(t('imp.qaDone').replace('{name}', importing.preview.name), 'success');
                           refetchQA();
+                          setTab('quickApis');
+                          setSelectedQuickApiId(imported.id);
+                        } else {
+                          const imported = await quickExecsApi.import({ content: importing.content, project_id: projectId });
+                          if (toastProp) toastProp(t('imp.qeDone').replace('{name}', importing.preview.name), 'success');
+                          refetchQE();
+                          setTab('quickExecs');
+                          setSelectedQuickExecId(imported.id);
                         }
                         setImporting(null);
                       } catch (e) {
@@ -2930,6 +3751,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
           </div>
         </div>
       )}
+      </section>
     </div>
   );
 }

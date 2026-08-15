@@ -48,6 +48,9 @@ const DEFAULT_TIMEOUT_SECS: u64 = 300;
 /// past that, agents and humans alike stop reading. Truncation marker
 /// is appended so the operator knows output was clipped.
 const MAX_OUTPUT_BYTES: usize = 100 * 1024;
+/// Collectors may legitimately return a larger typed document than a test log.
+/// Still bounded so one CLI cannot inflate a workflow run without limit.
+pub const MAX_COLLECT_OUTPUT_BYTES: usize = 1024 * 1024;
 
 /// Truncation suffix appended when stdout / stderr exceeds [`MAX_OUTPUT_BYTES`].
 const TRUNCATION_MARKER: &str = "\n\n[... output tronqué — limite 100 KB ...]";
@@ -58,7 +61,19 @@ pub async fn execute_exec_step(
     work_dir: &str,
     ctx: &TemplateContext,
 ) -> StepOutcome {
+    execute_exec_step_with_output_limit(step, workflow_allowlist, work_dir, ctx, MAX_OUTPUT_BYTES)
+        .await
+}
+
+pub async fn execute_exec_step_with_output_limit(
+    step: &WorkflowStep,
+    workflow_allowlist: &[String],
+    work_dir: &str,
+    ctx: &TemplateContext,
+    output_limit_bytes: usize,
+) -> StepOutcome {
     let start = Instant::now();
+    let output_limit_bytes = output_limit_bytes.clamp(1, MAX_COLLECT_OUTPUT_BYTES);
 
     // ── Validate config (also enforced at save time, but stale workflows happen) ──
     let raw_command = match step.exec_command.as_deref().map(str::trim) {
@@ -433,8 +448,14 @@ pub async fn execute_exec_step(
     };
 
     let exit_code = output.status.code();
-    let stdout = truncate_to_limit(String::from_utf8_lossy(&output.stdout).into_owned());
-    let stderr = truncate_to_limit(String::from_utf8_lossy(&output.stderr).into_owned());
+    let stdout = truncate_to_limit_at(
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        output_limit_bytes,
+    );
+    let stderr = truncate_to_limit_at(
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+        output_limit_bytes,
+    );
     let duration_ms = start.elapsed().as_millis() as u64;
 
     let success = output.status.success();
@@ -558,17 +579,26 @@ fn fail(step: &WorkflowStep, start: Instant, msg: impl Into<String>) -> StepOutc
 /// truncation marker. UTF-8 boundary care matters: cutting a multibyte
 /// sequence yields invalid UTF-8 and crashes downstream JSON encoding.
 fn truncate_to_limit(s: String) -> String {
-    if s.len() <= MAX_OUTPUT_BYTES {
+    truncate_to_limit_at(s, MAX_OUTPUT_BYTES)
+}
+
+fn truncate_to_limit_at(s: String, limit: usize) -> String {
+    if s.len() <= limit {
         return s;
     }
-    // Walk back from MAX_OUTPUT_BYTES to the nearest char boundary.
-    let mut cut = MAX_OUTPUT_BYTES;
+    // Walk back from the configured bound to the nearest char boundary.
+    let mut cut = limit;
     while cut > 0 && !s.is_char_boundary(cut) {
         cut -= 1;
     }
-    let mut truncated = String::with_capacity(cut + TRUNCATION_MARKER.len());
+    let marker = if limit == MAX_OUTPUT_BYTES {
+        TRUNCATION_MARKER.to_string()
+    } else {
+        format!("\n\n[... output tronqué — limite {} KB ...]", limit / 1024)
+    };
+    let mut truncated = String::with_capacity(cut + marker.len());
     truncated.push_str(&s[..cut]);
-    truncated.push_str(TRUNCATION_MARKER);
+    truncated.push_str(&marker);
     truncated
 }
 
@@ -705,6 +735,9 @@ mod tests {
             exec_stdin: None,
             quick_prompt_id: None,
             json_data_payload: None,
+            collect_api_data: None,
+            transform_data: None,
+            page_publish: None,
             sub_workflow_id: None,
             sub_workflow_foreach_file: None,
             multi_agent_review: None,
@@ -883,6 +916,16 @@ mod tests {
         // No panic = boundary check did its job. Verify the output is
         // still valid UTF-8 (intrinsic to String, but explicit assert).
         assert!(truncated.is_char_boundary(truncated.len()));
+    }
+
+    #[test]
+    fn collector_limit_keeps_medium_json_that_normal_exec_truncates() {
+        let medium = "x".repeat(MAX_OUTPUT_BYTES + 1024);
+        assert!(truncate_to_limit(medium.clone()).ends_with(TRUNCATION_MARKER));
+        assert_eq!(
+            truncate_to_limit_at(medium.clone(), MAX_COLLECT_OUTPUT_BYTES),
+            medium
+        );
     }
 
     // ─── on_result + SIGNAL emission tests ────────────────────────────

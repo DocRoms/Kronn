@@ -1490,6 +1490,7 @@ mod tests {
         insert_discussion(&conn, &make_discussion("d-count")).unwrap();
 
         assert_eq!(count_context_files(&conn, "d-count").unwrap(), 0);
+        assert_eq!(count_pending_context_files(&conn, "d-count").unwrap(), 0);
 
         insert_context_file(
             &conn,
@@ -1503,6 +1504,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(count_context_files(&conn, "d-count").unwrap(), 1);
+        assert_eq!(count_pending_context_files(&conn, "d-count").unwrap(), 1);
 
         insert_context_file(
             &conn,
@@ -1516,6 +1518,23 @@ mod tests {
         )
         .unwrap();
         assert_eq!(count_context_files(&conn, "d-count").unwrap(), 2);
+        assert_eq!(count_pending_context_files(&conn, "d-count").unwrap(), 2);
+
+        insert_message(
+            &conn,
+            "d-count",
+            &make_message("m-count", MessageRole::Agent, Some(AgentType::Codex)),
+        )
+        .unwrap();
+        assert_eq!(
+            link_pending_context_files_to_message(&conn, "d-count", "m-count").unwrap(),
+            2
+        );
+
+        // Historical message attachments remain durable and count toward the
+        // discussion inventory, but no longer occupy the composer staging cap.
+        assert_eq!(count_context_files(&conn, "d-count").unwrap(), 2);
+        assert_eq!(count_pending_context_files(&conn, "d-count").unwrap(), 0);
     }
 
     #[test]

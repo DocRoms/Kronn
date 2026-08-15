@@ -10,7 +10,7 @@ Bidirectional gateway between a CLI agent (Claude Code, Codex, Gemini, Kiro, Vib
 
 1. **Discussion introspection** (0.8.3+) — `disc_meta`, `disc_get_message`, `disc_note_list`, `disc_summarize`. Cheap reads of the current Kronn discussion.
 2. **Cross-agent memory** (0.8.4) — `disc_create`, `disc_append`, `disc_link`, `disc_transfer_session`, `disc_unlink`, `disc_find_by_session`, `disc_search`, `disc_load_other`. Push transcripts in / out of Kronn so the same thread can be picked up by a different agent later.
-3. **Catalog + actions** (0.8.5–0.8.6) — `mcp_list`, `workflow_list`, `qp_list`, `qa_list`, `workflow_create_draft`, `qp_create_draft`, `api_call` (broker that invokes Kronn-configured APIs without credentials in the prompt).
+3. **Catalog + actions** (0.8.5–0.10.0) — `mcp_list`, `workflow_list`, `qp_list`, `qa_list`, `qe_list`, `workflow_create_draft`, `qp_create_draft`, `qa_create_draft`, `qe_create_draft`, `qe_update`, `qe_run`, `api_call` (broker that invokes Kronn-configured APIs without credentials in the prompt).
 4. **Multi-agent collab** (0.8.6) — `disc_join` (consume invite token), `disc_wait_for_peer` (long-poll), `disc_leave`. Lets N CLI agents share one Kronn discussion in real time.
    **0.9.2 (KT-76) — surviving an MCP reload without a new token.** `disc_join`
    now links the room to the agent's **durable** CLI session and reports the
@@ -101,7 +101,7 @@ Bidirectional gateway between a CLI agent (Claude Code, Codex, Gemini, Kiro, Vib
 
 Call `resolve_id({id})` first when the user pastes an ID without naming its
 object type. It supports messages, discussions, projects, workflows, Planning
-tasks, Quick Prompts and Quick APIs, and returns only compact routing context:
+tasks, Quick Prompts, Quick APIs and Quick Execs, and returns only compact routing context:
 
 ```json
 {
@@ -195,6 +195,21 @@ contract:
   exposes PDF/DOCX actions. A normal `html` fence remains source code.
 - A fenced `kronn-doc-data` JSON payload exposes CSV, XLSX or PPTX export when
   its `format` and payload shape match the Kronn Docs skill.
+- In simple mode, `disc_append` accepts up to eight local paths through its
+  `attachments` field. The bridge reads and uploads each regular file (10 MB
+  maximum), then pins only those upload ids to the durable message returned by
+  the append receipt. The operation is compensating-atomic: if one upload or
+  the exact-message link fails, every file uploaded by that call is removed so
+  retrying the same `source_msg_id` starts from a clean attachment batch.
+  Historical message attachments do not consume the separate 20-file pending
+  composer limit. Images use the ordinary authenticated attachment renderer:
+  they appear as thumbnails below the message and open in Kronn's full-size
+  gallery, with previous/next navigation and a separate new-tab action.
+  The Discussion header's Assets panel indexes the full room history with
+  search, type/pending filters, direct download for disk-backed files and a link
+  back to each file's source message. Its header action is contextual and stays
+  hidden while the room has no assets.
+  Bulk transcript imports deliberately remain text-only.
 
 The MCP `initialize` instructions expose this contract before any room tool is
 called, and `disc_join` repeats it in the room protocol. The full document and
@@ -204,6 +219,11 @@ catalogue does not pay for a long manual.
 `[src: file: frontend/src/components/MermaidDiagram.tsx:97-108]`
 `[src: file: backend/src/api/disc_prompts.rs:390-398]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:8214-8224]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:634-643]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:4101-4174]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:4871-4893]`
+`[src: file: frontend/src/components/MessageAttachments.tsx:80-287]`
+`[src: file: frontend/src/components/DiscussionAssetsPanel.tsx:16-146]`
 
 Agent-library catalogs deliberately stay compact:
 `skills_list` / `profiles_list` / `directives_list` omit their potentially long
@@ -389,7 +409,8 @@ cursor still advances past those hidden turns.
 - **Default to the simple mode** for any conversational `disc_append`. The bulk mode is for cross-agent-memory transcript replay only.
 - **Never block waiting for confirmation** to call a `disc_*` tool — the protocol is in-band (each tool's `description` field carries enough context). This file is supplementary.
 - **`api_call`** : invoke a configured API plugin without ever needing the credentials. The `mcp_list` tool returns the available endpoints with `${ENV.X}` placeholder support — the broker substitutes server-side.
-- **Mutating tools** (`disc_create`, `qp_create_draft`, `workflow_create_draft`) default to safe states (workflows created as `enabled: false`). Safe to call ; the user reviews before activation.
+- **Rolling API windows**: call `workflow_step_schema` for the canonical `time.now` grammar. Time expressions are vendor-neutral, anchored once per run/call and work in Quick APIs, `ApiCall`, `BatchApiCall` and `CollectApiData` source variables.
+- **Mutating tools** (`disc_create`, `qp_create_draft`, `qa_create_draft`, `qe_create_draft`, `workflow_create_draft`) default to safe states (workflows created as `enabled: false`). Safe to call ; the user reviews before activation.
 
 ## Common use cases in Kronn
 
@@ -397,6 +418,19 @@ cursor still advances past those hidden turns.
 - Participate in a live multi-agent discussion (e.g. 2 agents debugging together, one agent acting as reviewer).
 - Surface the user's Kronn-configured plugins (`mcp_list`) without re-asking for credentials.
 - Draft a workflow / QP from the agent side, then let the user review + enable in the Kronn UI.
+- Discover and author shared Live Pages with `page_list`, `page_get`,
+  `page_create` and `page_update_html`. Before drafting a
+  `PublishPageData` step, resolve a real Page id; for a multi-source report,
+  resolve every Quick API through `qa_list` and every reusable CLI collector
+  through `qe_list`. If no QE exists, create it with `qe_create_draft`, test it
+  with `qe_run`, reference its `quick_exec_id`, and include its bare command in
+  the workflow `exec_allowlist`. Follow the canonical
+  `CollectApiData -> TransformData -> PublishPageData` contract returned by
+  `workflow_step_schema`. `page_create` links the artifact to the current
+  Discussion when one is bound, accepts an explicit optional `discussion_id`,
+  and also works from an unbound host CLI for a standalone Page. Pass
+  `datasets: []` for standalone HTML or seed `initial` values for a mock-backed
+  Page. `page_get` returns both Workflow and Discussion links.
 
 ## Related
 

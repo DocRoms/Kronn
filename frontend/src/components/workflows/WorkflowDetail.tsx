@@ -10,7 +10,7 @@ import {
   Settings, RefreshCw, AlertTriangle, FlaskConical,
   Layers, GitBranch, MessageSquare, Plug, Send,
   Download, Square, Hand, Terminal, Braces, Sparkles, Zap, Search,
-  Eye, Pencil,
+  Eye, Pencil, FileText, Database, Shuffle,
 } from 'lucide-react';
 import { filterRuns, groupRunsByParent, RUN_PAGE_SIZE, type RunStatusFilter } from '../../lib/runFilters';
 import { formatDurationCompact } from '../../lib/kronnToolParser';
@@ -171,6 +171,7 @@ export interface WorkflowDetailProps {
   /** #11 — jump to a SPECIFIC child run (workflow + run id): opens that
    *  workflow's detail and focuses the exact run. */
   onNavigateToRun?: (workflowId: string, runId: string) => void;
+  onNavigatePage?: (pageId: string) => void;
   /** 0.8.11 UX — one-click enable/disable from the detail header (a disabled
    *  workflow's launch button is inert; this is the visible way out). */
   onToggleEnabled?: (enabled: boolean) => void;
@@ -328,13 +329,14 @@ export function BatchItemsList({
   );
 }
 
-function StepCard({ step, index, agentAccess, projectId, t, quickPromptsById, workflowId, allSteps, availableAgentTypes, onChangeAgent, onSelectStep, nested = false }: {
+function StepCard({ step, index, agentAccess, projectId, t, quickPromptsById, workflowId, allSteps, availableAgentTypes, onChangeAgent, onSelectStep, onNavigatePage, nested = false }: {
   step: WorkflowStep; index: number; agentAccess?: AgentsConfig | null;
   projectId?: string | null; t: (key: string, ...args: (string | number)[]) => string;
   quickPromptsById?: Map<string, QuickPrompt>;
   availableAgentTypes?: AgentType[];
   onChangeAgent?: (stepIndex: number, agent: AgentType, tier: ModelTier) => Promise<void>;
   onSelectStep?: (stepIndex: number) => void;
+  onNavigatePage?: (pageId: string) => void;
   /** Workflow id is needed to key the dry-run test state cache (see module
    *  comment on `stepTestCache`) so the panel survives navigation. */
   workflowId: string;
@@ -354,7 +356,11 @@ function StepCard({ step, index, agentAccess, projectId, t, quickPromptsById, wo
   const isExec = step.step_type?.type === 'Exec';
   const isBatchApi = step.step_type?.type === 'BatchApiCall';
   const isJsonData = step.step_type?.type === 'JsonData';
+  const isCollectData = step.step_type?.type === 'CollectApiData';
+  const isTransformData = step.step_type?.type === 'TransformData';
+  const isPublishPage = step.step_type?.type === 'PublishPageData';
   const isSubWorkflow = step.step_type?.type === 'SubWorkflow';
+  const publishPageId = step.page_publish?.page_id;
   // Only the Agent step type actually consumes the `agent` field; every
   // other type delegates: Batch → QP, ApiCall / BatchApiCall → HTTP, Notify
   // → webhook, Gate → human pause, Exec → shell binary, JsonData → static
@@ -591,9 +597,15 @@ function StepCard({ step, index, agentAccess, projectId, t, quickPromptsById, wo
               ? 'exec'
               : isJsonData
                 ? 'json-data'
-                : isSubWorkflow
-                  ? 'subworkflow'
-                  : 'agent';
+                : isCollectData
+                  ? 'collect-data'
+                  : isTransformData
+                    ? 'transform-data'
+                    : isPublishPage
+                      ? 'page-data'
+                      : isSubWorkflow
+                        ? 'subworkflow'
+                        : 'agent';
   return (
     <div className="wf-step-card" data-step-type={cardKind}>
       <div className="flex-row gap-4">
@@ -677,6 +689,41 @@ function StepCard({ step, index, agentAccess, projectId, t, quickPromptsById, wo
             })()}
           </span>
         )}
+        {isCollectData && (
+          <span className="wf-step-kind-badge" data-kind="collect-data" title={t('wiz.stepTypeCollectApiDataHint')}>
+            <Database size={10} /> {t('wiz.stepTypeCollectApiData')}
+            <span className="text-xs text-ghost" style={{ fontWeight: 400, marginLeft: 6 }}>
+              {t('wiz.collectApiSourcesCount', step.collect_api_data?.sources.length ?? 0)}
+            </span>
+          </span>
+        )}
+        {isTransformData && (
+          <span className="wf-step-kind-badge" data-kind="transform-data" title={t('wiz.stepTypeTransformDataHint')}>
+            <Shuffle size={10} /> {t('wiz.stepTypeTransformData')}
+            <span className="text-xs text-ghost" style={{ fontWeight: 400, marginLeft: 6 }}>
+              {t('wiz.transformDataFieldsCount', step.transform_data?.fields.length ?? 0)}
+            </span>
+          </span>
+        )}
+        {isPublishPage && (
+          <>
+            <span className="wf-step-kind-badge" data-kind="page-data" title={t('wiz.stepTypePublishPageHint')}>
+              <FileText size={10} /> {t('wiz.stepTypePublishPage')}
+              <span className="text-xs text-ghost" style={{ fontWeight: 400, marginLeft: 6 }}>
+                {publishPageId || '?'} · {t('pages.datasetCount', step.page_publish?.writes.length ?? 0)}
+              </span>
+            </span>
+            {publishPageId && onNavigatePage && (
+              <button
+                type="button"
+                className="wf-step-page-link"
+                onClick={() => onNavigatePage(publishPageId)}
+              >
+                <Eye size={11} /> {t('wiz.publishPageOpen')}
+              </button>
+            )}
+          </>
+        )}
         {isSubWorkflow && (
           <span className="wf-step-kind-badge" data-kind="subworkflow" title={t('wiz.subWorkflowHint')}>
             <GitBranch size={10} /> {t('wiz.stepTypeSubWorkflow')}
@@ -713,7 +760,7 @@ function StepCard({ step, index, agentAccess, projectId, t, quickPromptsById, wo
                 actually exec the binary — UX feedback 2026-04-29),
               - Gate (a human-pause step has nothing to test).
             Hiding it on those types keeps the row clean. */}
-        {!isApi && !isNotify && !isExec && !isGate && !isBatchApi && !isJsonData && !isSubWorkflow && !nested && (
+        {!isApi && !isNotify && !isExec && !isGate && !isBatchApi && !isJsonData && !isPublishPage && !isSubWorkflow && !nested && (
           <button
             className="wf-test-btn"
             onClick={() => { if (!testRunning) setTestOpen(!testOpen); }}
@@ -806,6 +853,15 @@ function StepCard({ step, index, agentAccess, projectId, t, quickPromptsById, wo
               </div>
             </div>
           )}
+        </div>
+      ) : isPublishPage ? (
+        <div className="wf-batch-step-config" style={{ marginTop: 6 }}>
+          {(step.page_publish?.writes ?? []).map((write, writeIndex) => (
+            <div className="wf-batch-step-row" key={`${write.dataset}-${writeIndex}`}>
+              <span className="text-xs text-muted">{write.dataset}</span>
+              <code className="text-xs">{write.operation} ← {write.value_from}</code>
+            </div>
+          ))}
         </div>
       ) : isSubWorkflow ? (
         <div className="wf-subworkflow-steps" style={{ marginTop: 6 }}>
@@ -1225,6 +1281,9 @@ function compactStepMeta(step: WorkflowStep): {
     case 'Gate': return { kind: 'gate', Icon: Hand, usesTokens: false, labelKey: 'wiz.stepTypeGate' };
     case 'Exec': return { kind: 'exec', Icon: Terminal, usesTokens: false, labelKey: 'wiz.stepTypeExec' };
     case 'JsonData': return { kind: 'json-data', Icon: Braces, usesTokens: false, labelKey: 'wiz.stepTypeJsonData' };
+    case 'CollectApiData': return { kind: 'collect-data', Icon: Database, usesTokens: false, labelKey: 'wiz.stepTypeCollectApiData' };
+    case 'TransformData': return { kind: 'transform-data', Icon: Shuffle, usesTokens: false, labelKey: 'wiz.stepTypeTransformData' };
+    case 'PublishPageData': return { kind: 'page-data', Icon: FileText, usesTokens: false, labelKey: 'wiz.stepTypePublishPage' };
     case 'SubWorkflow': return { kind: 'subworkflow', Icon: GitBranch, usesTokens: false, labelKey: 'wiz.stepTypeSubWorkflow' };
     case 'BatchQuickPrompt': return { kind: 'batch-qp', Icon: Layers, usesTokens: true, labelKey: 'wiz.stepTypeBatchQP' };
     default: return { kind: 'agent', Icon: Sparkles, usesTokens: true, labelKey: 'wiz.stepTypeAgent' }; // Agent (or legacy undefined)
@@ -1425,7 +1484,7 @@ function SubWorkflowOverview({
   );
 }
 
-export function WorkflowDetail({ workflow, runs, availableAgentTypes, onChangeStepAgent, totalRuns, hasMoreRuns = false, loadingMoreRuns = false, onLoadMoreRuns, liveRun, onTrigger, onRefresh, onEdit, onDeleteRun, onDeleteAllRuns, triggering, agentAccess, onNavigateToBatch, onNavigateToWorkflow, onNavigateToRun, focusRunId, onExport, onGateDecided, onToggleEnabled, toast, projects = [], configLanguage }: WorkflowDetailProps) {
+export function WorkflowDetail({ workflow, runs, availableAgentTypes, onChangeStepAgent, totalRuns, hasMoreRuns = false, loadingMoreRuns = false, onLoadMoreRuns, liveRun, onTrigger, onRefresh, onEdit, onDeleteRun, onDeleteAllRuns, triggering, agentAccess, onNavigateToBatch, onNavigateToWorkflow, onNavigateToRun, onNavigatePage, focusRunId, onExport, onGateDecided, onToggleEnabled, toast, projects = [], configLanguage }: WorkflowDetailProps) {
   const { t } = useT();
   const [showRuns, setShowRuns] = useState(true);
   const [isWorkflowIdCopied, setIsWorkflowIdCopied] = useState(false);
@@ -1957,6 +2016,7 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, onChangeSt
                     availableAgentTypes={availableAgentTypes}
                     onChangeAgent={onChangeStepAgent}
                     onSelectStep={index => selectStep(index)}
+                    onNavigatePage={onNavigatePage}
                   />
                 </div> : (
                   <div
@@ -1974,6 +2034,7 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, onChangeSt
                       installedAgentTypes={availableAgentTypes}
                       agentAccess={agentAccess}
                       configLanguage={configLanguage}
+                      onNavigatePage={onNavigatePage}
                       onDone={() => {
                         setStepInspectorMode('preview');
                         onRefresh();

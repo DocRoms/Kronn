@@ -124,6 +124,8 @@ const wrap = async (ui: React.ReactElement) => {
 
 afterEach(() => {
   cleanup();
+  localStorage.removeItem('kronn:automationNavigation');
+  localStorage.removeItem('kronn:automationCollapsedSections');
   createResolvers.reset();
   mockDiscussionsApi.create.mockReset();
   mockQuickPromptsApi.list.mockReset();
@@ -294,7 +296,7 @@ describe('WorkflowsPage — QP launch double-click race', () => {
 
     // Deselect Codex.
     await act(async () => { fireEvent.click(codexChip); });
-    expect(codexChip.getAttribute('aria-pressed')).toBe('false');
+    expect(screen.getByTestId('qp-compare-chip-Codex').getAttribute('aria-pressed')).toBe('false');
 
     // CTA's count should now read "(2)" — assert via the data-testid
     // launch button.
@@ -306,7 +308,10 @@ describe('WorkflowsPage — QP launch double-click race', () => {
     expect(mockQuickPromptsApi.compareAgents).toHaveBeenCalledTimes(1);
     const call = mockQuickPromptsApi.compareAgents.mock.calls[0];
     expect(call[0]).toBe(sampleQpNoVar.id);
-    expect(call[1].agents).toEqual(['ClaudeCode', 'GeminiCli']);
+    expect(call[1].targets).toEqual([
+      { agent: 'ClaudeCode', tier: 'default' },
+      { agent: 'GeminiCli', tier: 'default' },
+    ]);
   });
 
   it('compare-agents fans out POST /run for every child disc (otherwise only the navigated agent works)', async () => {
@@ -372,8 +377,48 @@ describe('WorkflowsPage — QP launch double-click race', () => {
     expect(onBatchLaunched).toHaveBeenCalledTimes(1);
     expect(onBatchLaunched.mock.calls[0][0]).toEqual(['d-c1', 'd-c2', 'd-c3']);
     expect(onBatchLaunched.mock.calls[0][1]).toBe('run-fanout-1');
+    expect(onBatchLaunched.mock.calls[0][2]).toBe('compare');
 
     fetchSpy.mockRestore();
+  });
+
+  it('compare targets can switch model tier before launch', async () => {
+    mockQuickPromptsApi.list.mockResolvedValue([sampleQpNoVar]);
+    mockQuickPromptsApi.compareAgents.mockResolvedValue({
+      run_id: 'run-tier',
+      batch_total: 2,
+      discussion_ids: ['d1', 'd2'],
+    });
+
+    await wrap(
+      <WorkflowsPage
+        projects={[]}
+        installedAgentTypes={['ClaudeCode', 'Codex']}
+        agentAccess={fullConfig}
+      />,
+    );
+    await act(async () => { fireEvent.click(await screen.findByText(/Quick Prompts/)); });
+    await act(async () => { fireEvent.click(await screen.findByTestId('qp-compare-agents-btn')); });
+
+    const claudeTarget = screen.getByTestId('qp-compare-chip-ClaudeCode').closest('.qp-compare-target');
+    const picker = claudeTarget?.querySelector<HTMLButtonElement>('.kr-agent-switch-btn');
+    expect(picker).not.toBeNull();
+    await act(async () => { fireEvent.click(picker!); });
+    const reasoning = document.querySelector<HTMLButtonElement>(
+      '.kr-agent-switch-tier-row[aria-label="Claude Code"] .kr-agent-switch-tier-option[data-tier="reasoning"]',
+    );
+    expect(reasoning).not.toBeNull();
+    await act(async () => { fireEvent.click(reasoning!); });
+
+    // Add a second Claude row: Compare must support one provider at two
+    // model tiers instead of collapsing both rows by agent name.
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /Ajouter un modèle|Add a model/ })); });
+    expect(screen.getByTestId('qp-compare-chip-ClaudeCode-2')).toBeInTheDocument();
+
+    await act(async () => { fireEvent.click(screen.getByTestId('qp-compare-agents-launch')); });
+    const payload = mockQuickPromptsApi.compareAgents.mock.calls[0][1];
+    expect(payload.targets).toContainEqual({ agent: 'ClaudeCode', tier: 'reasoning' });
+    expect(payload.targets).toContainEqual({ agent: 'ClaudeCode', tier: 'default' });
   });
 
   it('compare-agents — selecting "None" then clicking Compare bails out (CTA disabled)', async () => {
@@ -430,7 +475,7 @@ describe('WorkflowsPage — QP launch double-click race', () => {
     // The Batch button is rendered for QPs with at least 1 var. Click it to
     // open the batch form, then assert the label calls out the first var only.
     await waitFor(() => {
-      expect(screen.getByText('Analyse ticket')).toBeDefined();
+      expect(screen.getAllByText('Analyse ticket')).toHaveLength(2);
     });
     // Find the batch icon button — it has title `qp.batch.launch` ("Batch").
     const batchBtn = document.querySelector('button[title*="Batch"], button[title*="atch"]');

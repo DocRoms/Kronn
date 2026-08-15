@@ -11,11 +11,13 @@ pub mod batch_apicall_step;
 pub mod batch_step;
 pub mod big_ticket_template;
 pub mod cancellation;
+pub mod collect_api_data_step;
 pub mod exec_step;
 pub mod gate_checkpoint;
 pub mod gate_step;
 pub mod json_data_step;
 pub mod notify_step;
+pub mod publish_page_step;
 pub mod quick_api_hydrate;
 pub mod quick_prompt_hydrate;
 pub mod runner;
@@ -24,6 +26,7 @@ pub mod steps;
 pub mod sub_workflow_step;
 pub mod template;
 pub mod tracker;
+pub mod transform_data_step;
 pub mod triage;
 pub mod trigger;
 pub mod workspace;
@@ -406,6 +409,9 @@ mod tests {
                 StepType::Exec => "Exec",
                 StepType::BatchApiCall => "BatchApiCall",
                 StepType::JsonData => "JsonData",
+                StepType::CollectApiData => "CollectApiData",
+                StepType::TransformData => "TransformData",
+                StepType::PublishPageData => "PublishPageData",
                 StepType::SubWorkflow => "SubWorkflow",
             }
         }
@@ -418,6 +424,9 @@ mod tests {
             StepType::Exec,
             StepType::BatchApiCall,
             StepType::JsonData,
+            StepType::CollectApiData,
+            StepType::TransformData,
+            StepType::PublishPageData,
             StepType::SubWorkflow,
         ]
         .iter()
@@ -509,6 +518,9 @@ mod tests {
             exec_stdin: None,
             quick_prompt_id: None,
             json_data_payload: None,
+            collect_api_data: None,
+            transform_data: None,
+            page_publish: None,
             sub_workflow_id: None,
             sub_workflow_foreach_file: None,
             multi_agent_review: None,

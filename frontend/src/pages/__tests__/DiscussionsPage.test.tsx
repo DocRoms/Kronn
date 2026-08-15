@@ -42,6 +42,7 @@ vi.mock('../../lib/api', () => ({
     delete: vi.fn(),
     update: vi.fn(),
     nativeAgentMode: vi.fn().mockResolvedValue({ disabled: false }),
+    meta: vi.fn().mockResolvedValue({ poll_policy: { max_delay_seconds: 120 } }),
     sendMessage: vi.fn(),
     sendMessageStream: vi.fn().mockResolvedValue(undefined),
     run: vi.fn(),
@@ -53,6 +54,8 @@ vi.mock('../../lib/api', () => ({
     worktreeUnlock: vi.fn().mockResolvedValue('ok'),
     worktreeLock: vi.fn().mockResolvedValue('ok'),
     dismissPartial: vi.fn().mockResolvedValue({ recovered: false }),
+    listContextFiles: vi.fn().mockResolvedValue([]),
+    contextFileBlob: vi.fn(),
     // 0.9.2 — the composer lists joined CLI sessions to offer their `-cli` aliases.
     participants: vi.fn().mockResolvedValue([]),
   },
@@ -152,7 +155,7 @@ import {
 } from '../../lib/api';
 import { DiscussionsPage } from '../DiscussionsPage';
 import { findRenderedTextRanges } from '../../lib/discussionMessageSearch';
-import type { AgentDetection, AgentType, AiAuditStatus, Discussion, Project } from '../../types/generated';
+import type { AgentDetection, AgentType, AiAuditStatus, ContextFile, Discussion, Project } from '../../types/generated';
 import type { ToastFn } from '../../hooks/useToast';
 
 const noop = () => {};
@@ -162,6 +165,8 @@ beforeEach(() => {
   vi.mocked(discussionsApi.get).mockReset();
   vi.mocked(discussionsApi.searchMessages).mockReset();
   vi.mocked(discussionsApi.searchMessages).mockResolvedValue([]);
+  vi.mocked(discussionsApi.listContextFiles).mockReset();
+  vi.mocked(discussionsApi.listContextFiles).mockResolvedValue([]);
   vi.mocked(planningApi.proposals).mockReset();
   vi.mocked(planningApi.proposals).mockResolvedValue({
     proposals: [],
@@ -617,8 +622,177 @@ describe('DiscussionsPage', () => {
     // disc was reloaded by id.
     expect(refetch).toHaveBeenCalled();
     expect(vi.mocked(discussionsApi.get)).toHaveBeenCalledWith('d1');
+    expect(vi.mocked(discussionsApi.listContextFiles)).toHaveBeenCalledWith('d1');
 
     vi.mocked(useWebSocket).mockImplementation(() => ({ connected: false, connectionState: 'connecting' }));
+  });
+
+  it('shows files pinned by an MCP agent as soon as the context event arrives', async () => {
+    const discussion: Discussion = {
+      ...makeListDiscussion('d1', 1),
+      messages: [
+        { id: 'm-agent', role: 'Agent', channel: 'main', content: 'Voici le rapport', agent_type: 'Codex', timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
+      ],
+    };
+    vi.mocked(discussionsApi.get).mockResolvedValue(discussion);
+    vi.mocked(discussionsApi.listContextFiles)
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([{
+        id: 'cf-report',
+        discussion_id: 'd1',
+        filename: 'rapport.csv',
+        mime_type: 'text/csv',
+        original_size: 128,
+        extracted_size: 128,
+        disk_path: null,
+        message_id: 'm-agent',
+        created_at: '2026-01-01T00:00:01Z',
+      }]);
+
+    const { useWebSocket } = await import('../../hooks/useWebSocket');
+    let fireContextChanged: (() => void) | undefined;
+    vi.mocked(useWebSocket).mockImplementation((onMessage) => {
+      fireContextChanged = () => onMessage({
+        type: 'context_files_changed',
+        discussion_id: 'd1',
+        message_id: 'm-agent',
+      });
+      return { connected: true, connectionState: 'connected' };
+    });
+
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[discussion]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        initialActiveDiscussionId="d1"
+        {...liftedProps()}
+      />
+    );
+
+    await act(async () => { fireContextChanged?.(); });
+
+    await waitFor(() => expect(screen.getByText('rapport.csv')).toBeInTheDocument());
+    expect(vi.mocked(discussionsApi.listContextFiles)).toHaveBeenLastCalledWith('d1');
+    vi.mocked(useWebSocket).mockImplementation(() => ({ connected: false, connectionState: 'connecting' }));
+  });
+
+  it('refreshes a previously cached empty asset list when returning to a discussion', async () => {
+    const first: Discussion = {
+      ...makeListDiscussion('d1', 1),
+      messages: [
+        { id: 'm-first', role: 'Agent', channel: 'main', content: 'Asset source', agent_type: 'Codex', timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
+      ],
+    };
+    const second: Discussion = {
+      ...makeListDiscussion('d2', 1),
+      messages: [
+        { id: 'm-second', role: 'User', channel: 'main', content: 'Other room', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
+      ],
+    };
+    const lateAsset: ContextFile = {
+      id: 'cf-late',
+      discussion_id: 'd1',
+      filename: 'late-report.csv',
+      mime_type: 'text/csv',
+      original_size: 256,
+      extracted_size: 256,
+      disk_path: null,
+      message_id: 'm-first',
+      created_at: '2026-01-01T00:01:00Z',
+    };
+    vi.mocked(discussionsApi.get).mockImplementation(async id => id === 'd1' ? first : second);
+    vi.mocked(discussionsApi.listContextFiles).mockImplementation(async id => {
+      const callsForFirst = vi.mocked(discussionsApi.listContextFiles).mock.calls
+        .filter(call => call[0] === 'd1').length;
+      if (id === 'd1' && callsForFirst > 1) return [lateAsset];
+      return [];
+    });
+
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[first, second]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        initialActiveDiscussionId="d1"
+        {...liftedProps()}
+      />
+    );
+
+    await waitFor(() => expect(discussionsApi.listContextFiles).toHaveBeenCalledWith('d1'));
+    expect(screen.queryByRole('button', { name: /Parcourir tous les assets/ })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: /Discussion d2 —/ }));
+    await waitFor(() => expect(discussionsApi.listContextFiles).toHaveBeenCalledWith('d2'));
+    fireEvent.click(screen.getByRole('button', { name: /Discussion d1 —/ }));
+
+    await waitFor(() => {
+      expect(vi.mocked(discussionsApi.listContextFiles).mock.calls
+        .filter(call => call[0] === 'd1')).toHaveLength(2);
+    });
+    fireEvent.click(await screen.findByRole('button', { name: /Parcourir tous les assets.*1/ }));
+    expect((await screen.findAllByText('late-report.csv')).length).toBeGreaterThan(0);
+  });
+
+  it('opens the discussion asset inventory and jumps back to the source message', async () => {
+    const discussion: Discussion = {
+      ...makeListDiscussion('d1', 1),
+      messages: [
+        { id: 'm-asset', role: 'Agent', channel: 'main', content: 'Here is the file', agent_type: 'Codex', timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
+      ],
+    };
+    vi.mocked(discussionsApi.get).mockResolvedValue(discussion);
+    vi.mocked(discussionsApi.listContextFiles).mockResolvedValue([{
+      id: 'cf-source',
+      discussion_id: 'd1',
+      filename: 'source.csv',
+      mime_type: 'text/csv',
+      original_size: 128,
+      extracted_size: 128,
+      disk_path: null,
+      message_id: 'm-asset',
+      created_at: '2026-01-01T00:01:00Z',
+    }]);
+    const scrollIntoView = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
+      configurable: true,
+      value: scrollIntoView,
+    });
+
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[discussion]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        initialActiveDiscussionId="d1"
+        {...liftedProps()}
+      />
+    );
+
+    const assetsButton = await screen.findByRole('button', { name: /Parcourir tous les assets.*1/ });
+    fireEvent.click(assetsButton);
+    expect(screen.getByRole('complementary', { name: 'Assets' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /Aller au message contenant source\.csv/ }));
+
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalled());
+    expect(screen.queryByRole('complementary', { name: 'Assets' })).toBeNull();
   });
 
   it('explains that real-time data will resync while the socket reconnects', async () => {

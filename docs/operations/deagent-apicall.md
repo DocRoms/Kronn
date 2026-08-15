@@ -130,6 +130,30 @@ with typed extraction.
    `ResolutionFailed` instead of `PrivateOrLoopback`. Fixed with an
    IP-literal parse fast path (stripping the brackets) before DNS.
 
+## Run-anchored time templates
+
+Quick APIs and every workflow string field use the same server-side time
+grammar. `time.now` is captured once for a standalone call, or read from the
+durable workflow `started_at`; a resumed run and all parallel collector sources
+therefore keep the same instant.
+
+```text
+{{time.now|shift:-24h|tz:Europe/Paris|floor:hour|fmt:local_iso_ms}}
+```
+
+- `shift:+1d|-24h|-7d` uses fixed durations with `s`, `m`, `h`, `d` or `w`.
+- `tz:` accepts an IANA timezone and defaults to UTC.
+- `floor:` accepts `minute`, `hour` or `day`; daily flooring is local-time aware.
+- `fmt:` accepts `rfc3339`, `local_iso_ms`, `date`, `unix` or `unix_ms`.
+- `{{now-24h|floor:hour}}` is the compact alias. A declared variable named
+  `now` keeps precedence over the bare alias; `time.now` is unambiguous.
+
+Formats stay vendor-neutral: Adobe's local ISO shape without `Z` uses
+`local_iso_ms`, GitHub uses `rfc3339`, Jira day parameters use `date`, and epoch
+APIs use `unix`/`unix_ms`. `${ENV.KEY}` substitution still happens afterwards
+in the common API executor, so time expressions and encrypted configuration
+references can coexist in one request.
+
 ## Plugins landed
 
 - **Chartbeat** (`api-chartbeat`): `apikey` query, flat response, no

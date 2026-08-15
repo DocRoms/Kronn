@@ -17,9 +17,13 @@
 //! See `docs/operations/deagent-apicall.md` for scope + decisions.
 
 use std::collections::HashMap;
+use std::error::Error as _;
 use std::time::{Duration, Instant};
 
-use reqwest::{Method, StatusCode, Url};
+use reqwest::{
+    header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION},
+    Method, StatusCode, Url,
+};
 use serde_json::Value;
 
 use crate::db::api_call_logs::{self, ApiCallSource, ApiCallStatus, NewApiCallLog};
@@ -1629,6 +1633,7 @@ async fn send_with_retry(
         .user_agent(concat!("Kronn/", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|e| format!("HTTP client build failed: {e}"))?;
+    let headers = build_request_headers(auth, extra_headers)?;
 
     // 2026-06-10 audit P1 — automatic retries are only safe on idempotent
     // verbs. A network timeout can land AFTER the server processed a POST:
@@ -1645,16 +1650,9 @@ async fn send_with_retry(
     };
     let mut attempt: u8 = 0;
     loop {
-        let mut req = client.request(method.clone(), url.clone());
-        if let Some(bearer) = &auth.bearer {
-            req = req.header("Authorization", format!("Bearer {bearer}"));
-        }
-        for (k, v) in &auth.headers {
-            req = req.header(k, v);
-        }
-        for (k, v) in extra_headers {
-            req = req.header(k, v);
-        }
+        let mut req = client
+            .request(method.clone(), url.clone())
+            .headers(headers.clone());
         if let Some(b) = body {
             req = req.json(b);
         }
@@ -1662,10 +1660,14 @@ async fn send_with_retry(
         let response = match req.send().await {
             Ok(r) => r,
             Err(e) => {
+                let detail = e
+                    .source()
+                    .map(|source| format!("{e}: {source}"))
+                    .unwrap_or_else(|| e.to_string());
                 // Network error — retryable within limits.
                 if attempt >= max_retries {
                     return Err(format!(
-                        "HTTP request failed after {max_retries} retries: {e}"
+                        "HTTP request failed after {max_retries} retries: {detail}"
                     ));
                 }
                 sleep_backoff(attempt).await;
@@ -1704,6 +1706,40 @@ async fn send_with_retry(
         sleep_backoff(attempt).await;
         attempt += 1;
     }
+}
+
+/// Parse every header before constructing the request. Besides producing a
+/// useful error (instead of reqwest's opaque `builder error`), this keeps
+/// CLI-resolved credentials on the same validated path as stored API keys.
+/// Auth values are marked sensitive so future request diagnostics cannot
+/// accidentally render them.
+fn build_request_headers(
+    auth: &ResolvedAuth,
+    extra_headers: &HashMap<String, String>,
+) -> Result<HeaderMap, String> {
+    let mut headers = HeaderMap::new();
+    if let Some(bearer) = &auth.bearer {
+        let mut value = HeaderValue::from_str(&format!("Bearer {bearer}"))
+            .map_err(|_| "Invalid value resolved for auth header `Authorization`".to_string())?;
+        value.set_sensitive(true);
+        headers.append(AUTHORIZATION, value);
+    }
+    for (name, value) in &auth.headers {
+        let name = HeaderName::from_bytes(name.as_bytes())
+            .map_err(|_| format!("Invalid auth header name `{name}`"))?;
+        let mut value = HeaderValue::from_str(value)
+            .map_err(|_| format!("Invalid value resolved for auth header `{name}`"))?;
+        value.set_sensitive(true);
+        headers.append(name, value);
+    }
+    for (name, value) in extra_headers {
+        let name = HeaderName::from_bytes(name.as_bytes())
+            .map_err(|_| format!("Invalid request header name `{name}`"))?;
+        let value = HeaderValue::from_str(value)
+            .map_err(|_| format!("Invalid value for request header `{name}`"))?;
+        headers.append(name, value);
+    }
+    Ok(headers)
 }
 
 async fn sleep_backoff(attempt: u8) {
@@ -1963,6 +1999,9 @@ mod tests {
             exec_stdin: None,
             quick_prompt_id: None,
             json_data_payload: None,
+            collect_api_data: None,
+            transform_data: None,
+            page_publish: None,
             sub_workflow_id: None,
             sub_workflow_foreach_file: None,
             multi_agent_review: None,
@@ -2077,6 +2116,31 @@ mod tests {
             Some(&"fastly-secret".to_string())
         );
         assert!(out.bearer.is_none());
+    }
+
+    #[test]
+    fn cli_token_fastly_header_builds_as_sensitive_http_header() {
+        let auth = ResolvedAuth {
+            bearer: None,
+            headers: HashMap::from([("Fastly-Key".into(), "token-123".into())]),
+            query: HashMap::new(),
+        };
+        let headers = build_request_headers(&auth, &HashMap::new()).unwrap();
+        let value = headers.get("fastly-key").expect("Fastly header");
+        assert_eq!(value, "token-123");
+        assert!(value.is_sensitive());
+    }
+
+    #[test]
+    fn invalid_cli_token_header_is_actionable_before_reqwest_send() {
+        let auth = ResolvedAuth {
+            bearer: None,
+            headers: HashMap::from([("Fastly-Key".into(), "bad\nvalue".into())]),
+            query: HashMap::new(),
+        };
+        let error = build_request_headers(&auth, &HashMap::new()).unwrap_err();
+        assert_eq!(error, "Invalid value resolved for auth header `fastly-key`");
+        assert!(!error.contains("bad"));
     }
 
     #[test]
@@ -2289,6 +2353,34 @@ mod tests {
         )
         .unwrap();
         assert_eq!(url.path(), "/search");
+    }
+
+    #[test]
+    fn api_query_renders_a_floored_time_window_before_building_the_url() {
+        let anchor = chrono::DateTime::parse_from_rfc3339("2026-08-14T08:59:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let ctx = TemplateContext::with_time_anchor(anchor);
+        let query = Some(HashMap::from([(
+            "dateRange".to_string(),
+            "{{time.now|shift:-24h|tz:Europe/Paris|floor:hour|fmt:local_iso_ms}}/{{time.now|tz:Europe/Paris|floor:hour|fmt:local_iso_ms}}".to_string(),
+        )]));
+
+        let rendered = render_map(&query, &ctx).unwrap();
+        let url = build_url(
+            "https://analytics.example",
+            "/reports",
+            &rendered,
+            &HashMap::new(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            url.query_pairs()
+                .find(|(key, _)| key == "dateRange")
+                .map(|(_, value)| value.into_owned()),
+            Some("2026-08-13T10:00:00.000/2026-08-14T10:00:00.000".to_string())
+        );
     }
 
     // ─── resolve_path_params ────────────────────────────────────────

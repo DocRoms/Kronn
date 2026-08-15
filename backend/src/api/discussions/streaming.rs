@@ -25,8 +25,8 @@ use crate::AppState;
 
 use super::orchestration::detect_agent_error_hint;
 use super::{
-    detect_terminal_signal, truncate_after_signal, AgentStreamEvent, SseStream,
-    AGENT_GLOBAL_TIMEOUT, DEFAULT_STALL_TIMEOUT_MIN, MAX_AGENT_RESPONSE_BYTES,
+    configured_agent_global_timeout, detect_terminal_signal, truncate_after_signal,
+    AgentStreamEvent, SseStream, DEFAULT_STALL_TIMEOUT_MIN, MAX_AGENT_RESPONSE_BYTES,
     NON_STREAMING_STALL_TIMEOUT,
 };
 use crate::api::disc_helpers::{
@@ -1607,7 +1607,18 @@ async fn make_agent_stream_inner(
                 // disappears when the stream ends, leaving no trace for
                 // post-hoc debug. Persisting them keeps the audit trail.
                 let mut native_tool_calls: Vec<String> = Vec::new();
-                let global_deadline = tokio::time::Instant::now() + AGENT_GLOBAL_TIMEOUT;
+                let (global_timeout, stall_timeout_min) = {
+                    let cfg = state.config.read().await;
+                    (
+                        configured_agent_global_timeout(cfg.server.agent_global_timeout_min),
+                        if cfg.server.agent_stall_timeout_min > 0 {
+                            cfg.server.agent_stall_timeout_min
+                        } else {
+                            DEFAULT_STALL_TIMEOUT_MIN
+                        },
+                    )
+                };
+                let global_deadline = tokio::time::Instant::now() + global_timeout;
 
                 // Periodic checkpoint of full_response → discussions.partial_response
                 // so a backend crash/restart doesn't lose what the agent has thought.
@@ -1678,15 +1689,6 @@ async fn make_agent_stream_inner(
                         }
                     }
                 });
-                let stall_timeout_min = {
-                    let cfg = state.config.read().await;
-                    let t = cfg.server.agent_stall_timeout_min;
-                    if t > 0 {
-                        t
-                    } else {
-                        DEFAULT_STALL_TIMEOUT_MIN
-                    }
-                };
                 // Streaming agents use the configured stall; non-streaming
                 // (Text) agents are silent until the end and rely on the global
                 // deadline instead. See `effective_stall_timeout`.
@@ -1740,9 +1742,9 @@ async fn make_agent_stream_inner(
                         None
                     }
                     _ = tokio::time::sleep_until(global_deadline) => {
-                        tracing::warn!("Agent stream global timeout ({:?}) exceeded", AGENT_GLOBAL_TIMEOUT);
+                        tracing::warn!("Agent stream global timeout ({:?}) exceeded", global_timeout);
                         was_interrupted = true;
-                        timeout_reason = Some(AgentTimeoutReason::Global(AGENT_GLOBAL_TIMEOUT));
+                        timeout_reason = Some(AgentTimeoutReason::Global(global_timeout));
                         None
                     }
                     _ = async {
@@ -2872,6 +2874,7 @@ pub(super) async fn run_agent_streaming(
     tx: &tokio::sync::mpsc::Sender<AgentStreamEvent>,
     meta: &AgentStreamMeta,
     agent_type: &AgentType,
+    global_timeout: Duration,
 ) -> AgentRunResult {
     let mut full_response = String::new();
     let mut stream_tokens: u64 = 0;
@@ -2879,7 +2882,7 @@ pub(super) async fn run_agent_streaming(
     let mut tool_input = String::new();
     let is_stream_json = process.output_mode() == runner::OutputMode::StreamJson;
     let raw_stream = process.raw_token_stream();
-    let deadline = tokio::time::Instant::now() + AGENT_GLOBAL_TIMEOUT;
+    let deadline = tokio::time::Instant::now() + global_timeout;
 
     let mut signal_stop = false;
     // KT-80 — an orchestration round killed at its deadline must say so too.
@@ -2968,7 +2971,7 @@ pub(super) async fn run_agent_streaming(
             }
             _ = tokio::time::sleep_until(deadline) => {
                 tracing::warn!("Agent {:?} timed out (round: {})", agent_type, meta.round_label);
-                timeout_reason = Some(AgentTimeoutReason::Global(AGENT_GLOBAL_TIMEOUT));
+                timeout_reason = Some(AgentTimeoutReason::Global(global_timeout));
                 process.kill().await;
                 break;
             }
@@ -3052,10 +3055,13 @@ pub(super) async fn run_agent_streaming(
 /// accumulation + stream-json-vs-raw + teardown logic is unit-testable with
 /// a `ScriptedProcess`, without spawning a real CLI. Production passes a real
 /// `AgentProcess`; both impl `AgentIo`.
-pub(super) async fn run_agent_collect(mut process: impl runner::AgentIo) -> String {
+pub(super) async fn run_agent_collect(
+    mut process: impl runner::AgentIo,
+    global_timeout: Duration,
+) -> String {
     let mut output = String::new();
     let is_json = process.output_mode() == runner::OutputMode::StreamJson;
-    let deadline = tokio::time::Instant::now() + AGENT_GLOBAL_TIMEOUT;
+    let deadline = tokio::time::Instant::now() + global_timeout;
     loop {
         tokio::select! {
             line = process.next_line() => {
@@ -3225,8 +3231,8 @@ mod pretty_kronn_args_tests {
 mod agent_lifecycle_tests {
     use super::{
         agent_start_error_content, agent_start_failure_outcome, auth_required_system_message,
-        cap_agent_response, child_run_counts_as_success, effective_stall_timeout,
-        AgentExecutionOutcome, AGENT_GLOBAL_TIMEOUT, NON_STREAMING_STALL_TIMEOUT,
+        cap_agent_response, child_run_counts_as_success, configured_agent_global_timeout,
+        effective_stall_timeout, AgentExecutionOutcome, NON_STREAMING_STALL_TIMEOUT,
     };
     use crate::models::{AgentType, MessageRole};
     use std::time::Duration;
@@ -3249,7 +3255,7 @@ mod agent_lifecycle_tests {
     fn streaming_agent_keeps_configured_stall() {
         let configured = Duration::from_secs(5 * 60);
         assert_eq!(
-            effective_stall_timeout(true, configured, AGENT_GLOBAL_TIMEOUT),
+            effective_stall_timeout(true, configured, configured_agent_global_timeout(30),),
             configured,
             "Claude (stream-json) must KEEP its short stall — don't regress streaming",
         );
@@ -3271,8 +3277,21 @@ mod agent_lifecycle_tests {
             "must outlast the short streaming stall (else slow non-streamers die early)"
         );
         assert!(
-            NON_STREAMING_STALL_TIMEOUT < AGENT_GLOBAL_TIMEOUT,
+            NON_STREAMING_STALL_TIMEOUT < configured_agent_global_timeout(30),
             "must be SHORTER than the global, else a hung run squats its slot too long"
+        );
+    }
+
+    #[test]
+    fn configured_global_timeout_accepts_the_full_ui_range() {
+        assert_eq!(
+            configured_agent_global_timeout(120),
+            Duration::from_secs(120 * 60),
+        );
+        assert_eq!(
+            configured_agent_global_timeout(0),
+            Duration::from_secs(60),
+            "manually edited zero values must still retain a safety deadline",
         );
     }
 
@@ -3485,6 +3504,9 @@ mod run_agent_collect_tests {
     //! that was previously untestable because it required spawning a CLI.
     use super::run_agent_collect;
     use crate::agents::runner::ScriptedProcess;
+    use std::time::Duration;
+
+    const TEST_GLOBAL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
     /// Helper: a claude `--output-format stream-json` text-delta line.
     fn text_delta(s: &str) -> String {
@@ -3497,14 +3519,14 @@ mod run_agent_collect_tests {
     #[tokio::test]
     async fn raw_mode_joins_lines_with_newline_and_trims() {
         let proc = ScriptedProcess::raw(["  first", "second", "third  "]);
-        let out = run_agent_collect(proc).await;
+        let out = run_agent_collect(proc, TEST_GLOBAL_TIMEOUT).await;
         assert_eq!(out, "first\nsecond\nthird");
     }
 
     #[tokio::test]
     async fn empty_stream_yields_empty_string() {
         let proc = ScriptedProcess::raw(Vec::<String>::new());
-        let out = run_agent_collect(proc).await;
+        let out = run_agent_collect(proc, TEST_GLOBAL_TIMEOUT).await;
         assert_eq!(out, "");
     }
 
@@ -3518,7 +3540,7 @@ mod run_agent_collect_tests {
             r#"{"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"x","name":"Read","input":{}}}}"#.to_string(),
             text_delta("world"),
         ]);
-        let out = run_agent_collect(proc).await;
+        let out = run_agent_collect(proc, TEST_GLOBAL_TIMEOUT).await;
         assert_eq!(out, "Hello world");
     }
 
@@ -3534,14 +3556,14 @@ mod run_agent_collect_tests {
             text_delta("real"),            // text_delta → kept
             "{}".to_string(),              // typeless JSON → skipped
         ]);
-        let out = run_agent_collect(proc).await;
+        let out = run_agent_collect(proc, TEST_GLOBAL_TIMEOUT).await;
         assert_eq!(out, "plain log noisereal");
     }
 
     #[tokio::test]
     async fn raw_mode_single_line_no_leading_newline() {
         let proc = ScriptedProcess::raw(["only"]);
-        assert_eq!(run_agent_collect(proc).await, "only");
+        assert_eq!(run_agent_collect(proc, TEST_GLOBAL_TIMEOUT).await, "only");
     }
 }
 
@@ -3556,6 +3578,9 @@ mod run_agent_streaming_tests {
     use crate::agents::runner::ScriptedProcess;
     use crate::api::discussions::AgentStreamEvent;
     use crate::models::AgentType;
+    use std::time::Duration;
+
+    const TEST_GLOBAL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
     fn text_delta(s: &str) -> String {
         format!(
@@ -3597,17 +3622,18 @@ mod run_agent_streaming_tests {
     }
 
     /// KT-80 — the orchestration loop had the same hole as the send path: a
-    /// round killed at the 30-minute global deadline produced
+    /// round killed at the configured global deadline produced
     /// `[Agent exited with error] (exit code: None)`, which describes the signal
     /// and hides the cause. Paused clock so the deadline is reached instantly.
     #[tokio::test(start_paused = true)]
     async fn an_orchestration_round_killed_at_the_deadline_says_so() {
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         let proc = ScriptedProcess::hanging();
-        let res = run_agent_streaming(proc, &tx, &meta(), &AgentType::ClaudeCode).await;
+        let timeout = Duration::from_secs(120 * 60);
+        let res = run_agent_streaming(proc, &tx, &meta(), &AgentType::ClaudeCode, timeout).await;
 
         assert!(
-            res.response.contains("30-minute global execution limit"),
+            res.response.contains("120-minute global execution limit"),
             "the round must name the deadline it hit, got {:?}",
             res.response
         );
@@ -3622,7 +3648,14 @@ mod run_agent_streaming_tests {
     async fn raw_accumulates_and_sends_chunks() {
         let (tx, rx) = tokio::sync::mpsc::channel(100);
         let proc = ScriptedProcess::raw(["line one", "line two"]);
-        let res = run_agent_streaming(proc, &tx, &meta(), &AgentType::ClaudeCode).await;
+        let res = run_agent_streaming(
+            proc,
+            &tx,
+            &meta(),
+            &AgentType::ClaudeCode,
+            TEST_GLOBAL_TIMEOUT,
+        )
+        .await;
         drop(tx);
         assert_eq!(res.response, "line one\nline two");
         let chunks = drain(rx)
@@ -3636,7 +3669,14 @@ mod run_agent_streaming_tests {
     async fn stream_json_text_accumulates() {
         let (tx, rx) = tokio::sync::mpsc::channel(100);
         let proc = ScriptedProcess::stream_json([text_delta("Hello "), text_delta("world")]);
-        let res = run_agent_streaming(proc, &tx, &meta(), &AgentType::ClaudeCode).await;
+        let res = run_agent_streaming(
+            proc,
+            &tx,
+            &meta(),
+            &AgentType::ClaudeCode,
+            TEST_GLOBAL_TIMEOUT,
+        )
+        .await;
         drop(tx);
         assert_eq!(res.response, "Hello world");
         assert!(drain(rx)
@@ -3657,7 +3697,14 @@ mod run_agent_streaming_tests {
             tool_end(),
             text_delta("Done."),
         ]);
-        let res = run_agent_streaming(proc, &tx, &meta(), &AgentType::ClaudeCode).await;
+        let res = run_agent_streaming(
+            proc,
+            &tx,
+            &meta(),
+            &AgentType::ClaudeCode,
+            TEST_GLOBAL_TIMEOUT,
+        )
+        .await;
         drop(tx);
         // Tool JSON must NOT leak into the prose response.
         assert_eq!(res.response, "Reading file. Done.");
@@ -3686,7 +3733,14 @@ mod run_agent_streaming_tests {
             "KRONN:ARCHITECTURE_READY",
             "this trailing line must never be reached",
         ]);
-        let res = run_agent_streaming(proc, &tx, &meta(), &AgentType::ClaudeCode).await;
+        let res = run_agent_streaming(
+            proc,
+            &tx,
+            &meta(),
+            &AgentType::ClaudeCode,
+            TEST_GLOBAL_TIMEOUT,
+        )
+        .await;
         drop(tx);
         assert!(res.response.contains("Architecture proposed."));
         assert!(
@@ -3708,7 +3762,14 @@ mod run_agent_streaming_tests {
         }
         let (tx, rx) = tokio::sync::mpsc::channel(500);
         let proc = ScriptedProcess::stream_json(lines);
-        let res = run_agent_streaming(proc, &tx, &meta(), &AgentType::ClaudeCode).await;
+        let res = run_agent_streaming(
+            proc,
+            &tx,
+            &meta(),
+            &AgentType::ClaudeCode,
+            TEST_GLOBAL_TIMEOUT,
+        )
+        .await;
         drop(tx);
         assert!(
             res.response.contains("Decoder loop detected"),
@@ -3726,7 +3787,14 @@ mod run_agent_streaming_tests {
         let proc = ScriptedProcess::stream_json(Vec::<String>::new())
             .with_exit(false, Some(1))
             .with_stderr(["boom: something failed"]);
-        let res = run_agent_streaming(proc, &tx, &meta(), &AgentType::ClaudeCode).await;
+        let res = run_agent_streaming(
+            proc,
+            &tx,
+            &meta(),
+            &AgentType::ClaudeCode,
+            TEST_GLOBAL_TIMEOUT,
+        )
+        .await;
         drop(tx);
         assert!(
             res.response.contains("[Agent exited with error]"),
@@ -3745,7 +3813,14 @@ mod run_agent_streaming_tests {
     async fn empty_response_clean_exit_is_no_response() {
         let (tx, rx) = tokio::sync::mpsc::channel(10);
         let proc = ScriptedProcess::stream_json(Vec::<String>::new()); // success, no output
-        let res = run_agent_streaming(proc, &tx, &meta(), &AgentType::ClaudeCode).await;
+        let res = run_agent_streaming(
+            proc,
+            &tx,
+            &meta(),
+            &AgentType::ClaudeCode,
+            TEST_GLOBAL_TIMEOUT,
+        )
+        .await;
         drop(tx);
         assert_eq!(res.response, "[No response]");
         let _ = drain(rx);

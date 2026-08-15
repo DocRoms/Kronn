@@ -465,6 +465,16 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "122_context_audit_snapshots",
         include_str!("sql/122_context_audit_snapshots.sql"),
     ),
+    ("123_live_pages", include_str!("sql/123_live_pages.sql")),
+    (
+        "124_live_page_library",
+        include_str!("sql/124_live_page_library.sql"),
+    ),
+    (
+        "125_live_page_publication_changes",
+        include_str!("sql/125_live_page_publication_changes.sql"),
+    ),
+    ("126_quick_execs", include_str!("sql/126_quick_execs.sql")),
 ];
 
 // These migrations shipped on the 0.9.6 development branch before its rebase
@@ -705,6 +715,41 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         run_with_backup(&conn, None).expect("run_with_backup with None path should succeed");
         // No assertion on files — just ensure it doesn't panic
+    }
+
+    #[test]
+    fn live_page_publication_changes_backfill_existing_ledger_rows() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_through(&conn, "124_live_page_library").unwrap();
+        conn.execute(
+            "INSERT INTO live_pages
+             (id, title, slug, data_revision, created_at, updated_at)
+             VALUES ('page-old', 'Old Page', 'old-page', 1, '2026-08-14T08:00:00Z',
+                     '2026-08-14T08:01:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO live_page_publications
+             (id, page_id, data_revision, datasets_json, published_at)
+             VALUES ('publication-old', 'page-old', 1, '[\"summary\",\"traffic\"]',
+                     '2026-08-14T08:01:00Z')",
+            [],
+        )
+        .unwrap();
+
+        run(&conn).unwrap();
+
+        let (changed, unchanged): (String, String) = conn
+            .query_row(
+                "SELECT changed_datasets_json, unchanged_datasets_json
+                   FROM live_page_publications WHERE id = 'publication-old'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(changed, "[\"summary\",\"traffic\"]");
+        assert_eq!(unchanged, "[]");
     }
 
     #[test]

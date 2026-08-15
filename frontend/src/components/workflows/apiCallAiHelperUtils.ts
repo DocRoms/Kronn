@@ -1,4 +1,4 @@
-import type { McpServer, WorkflowStep } from '../../types/generated';
+import type { JsonValue, McpServer, WorkflowStep } from '../../types/generated';
 import {
   managedHeaderNames,
   managedQueryNames,
@@ -55,7 +55,10 @@ export function applyToStep(
     updates.api_headers = stripManagedHeaders(raw, managedHeaders);
   }
   if (parsed.body !== undefined && parsed.body !== null) {
-    updates.api_body = typeof parsed.body === 'string' ? parsed.body : JSON.stringify(parsed.body);
+    // Keep the typed JSON tree. Stringifying here made Quick APIs persist an
+    // object as a top-level string; reqwest then encoded it again and vendors
+    // rejected the request with `cannot deserialize from String value`.
+    updates.api_body = parsed.body as JsonValue;
   }
   if (typeof parsed.extract === 'string') {
     updates.api_extract = {

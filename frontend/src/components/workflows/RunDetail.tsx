@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { useT } from '../../lib/I18nContext';
 import { workflows as workflowsApi } from '../../lib/api';
 import type { WorkflowRun, WorkflowStep, DecideRunRequest, ProducedBranch } from '../../types/generated';
-import { Trash2, ChevronRight, Square, Loader2, Plug, Send, Layers, Shield, Hand, Check, X, RotateCcw, Terminal, GitBranch, Copy, FlaskConical, AlertTriangle, CornerDownRight } from 'lucide-react';
+import { Trash2, ChevronRight, Square, Loader2, Plug, Send, Layers, Shield, Hand, Check, X, RotateCcw, Terminal, GitBranch, Copy, FlaskConical, AlertTriangle, CornerDownRight, Database, Shuffle } from 'lucide-react';
 import { AGENT_LABELS, AGENT_COLORS } from '../../lib/constants';
 import { parseForeachEnvelope, isZeroTokenItem } from '../../lib/foreach-envelope';
 import { CopyIdPill } from '../CopyIdPill';
@@ -850,6 +850,9 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, on
                       : ws_step.step_type.type === 'Gate' ? 'gate'
                       : ws_step.step_type.type === 'Exec' ? 'exec'
                       : ws_step.step_type.type === 'JsonData' ? 'data'
+                      : ws_step.step_type.type === 'CollectApiData' ? 'data'
+                      : ws_step.step_type.type === 'TransformData' ? 'data'
+                      : ws_step.step_type.type === 'PublishPageData' ? 'page'
                       : ws_step.step_type.type === 'SubWorkflow' ? 'subwf'
                       : 'agent'
                   }>
@@ -860,6 +863,9 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, on
                       : ws_step.step_type.type === 'Gate' ? 'GATE'
                       : ws_step.step_type.type === 'Exec' ? 'EXEC'
                       : ws_step.step_type.type === 'JsonData' ? 'DATA'
+                      : ws_step.step_type.type === 'CollectApiData' ? 'COLLECT'
+                      : ws_step.step_type.type === 'TransformData' ? 'TRANSFORM'
+                      : ws_step.step_type.type === 'PublishPageData' ? 'PAGE'
                       : ws_step.step_type.type === 'SubWorkflow' ? 'SUB-WF'
                       : 'AGENT'}
                   </span>
@@ -999,6 +1005,16 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, on
                   {sr.step_kind === 'Exec' && (
                     <span className="wf-step-kind-badge" data-kind="exec">
                       <Terminal size={9} /> EXEC
+                    </span>
+                  )}
+                  {sr.step_kind === 'CollectApiData' && (
+                    <span className="wf-step-kind-badge" data-kind="data">
+                      <Database size={9} /> COLLECT
+                    </span>
+                  )}
+                  {sr.step_kind === 'TransformData' && (
+                    <span className="wf-step-kind-badge" data-kind="data">
+                      <Shuffle size={9} /> TRANSFORM
                     </span>
                   )}
                   {sr.step_kind === 'SubWorkflow' && (

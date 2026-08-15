@@ -259,6 +259,12 @@ pub struct DiscAppendResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub last_sort_order: Option<i64>,
+    /// Durable id of the last message addressed by this append, including an
+    /// idempotent duplicate retry. Follow-up operations such as MCP attachment
+    /// uploads must target the message id, never guess from its sort order.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub last_message_id: Option<String>,
     /// Number of main-channel messages written by somebody other than this
     /// exact CLI session since its consumed read cursor. Content stays on the
     /// explicit wait/read path.
@@ -547,6 +553,7 @@ pub async fn disc_append(
     let mut appended = 0u32;
     let mut skipped = 0u32;
     let mut last_sort_order: Option<i64> = None;
+    let mut last_message_id: Option<String> = None;
     // Freshly-inserted messages, federated to peers after the loop IF this is a
     // single-message (live-turn) append on a shared disc — see the F3 gate below.
     let mut inserted_msgs: Vec<DiscussionMessage> = Vec::new();
@@ -555,19 +562,16 @@ pub async fn disc_append(
     for incoming in req.messages.iter() {
         let did_check = did_for_loop.clone();
         let src_id_check = incoming.source_msg_id.clone();
-        let already = state
+        let existing_message_id = state
             .db
             .with_conn(move |conn| {
-                crate::db::disc_source::message_exists_for_source_id(
-                    conn,
-                    &did_check,
-                    &src_id_check,
-                )
+                crate::db::disc_source::message_id_for_source_id(conn, &did_check, &src_id_check)
             })
             .await
-            .unwrap_or(false);
-        if already {
+            .unwrap_or(None);
+        if let Some(message_id) = existing_message_id {
             skipped += 1;
+            last_message_id = Some(message_id);
             continue;
         }
 
@@ -654,6 +658,7 @@ pub async fn disc_append(
                 )))
             }
         }
+        last_message_id = Some(msg.id.clone());
         inserted_msgs.push(msg);
         appended += 1;
     }
@@ -804,6 +809,7 @@ pub async fn disc_append(
         appended,
         skipped_as_duplicates: skipped,
         last_sort_order,
+        last_message_id,
         peer_messages_since_cursor,
         latest_peer_role,
         diverged,
@@ -2816,6 +2822,10 @@ mod tests {
 
         let first = append(&state, vec![agent_msg("s1", "un")]).await;
         let a = first.last_sort_order.expect("appended → position present");
+        let first_message_id = first
+            .last_message_id
+            .clone()
+            .expect("appended → durable message id present");
 
         let second = append(
             &state,
@@ -2832,6 +2842,15 @@ mod tests {
         let dup = append(&state, vec![agent_msg("s3", "trois")]).await;
         assert_eq!(dup.skipped_as_duplicates, 1);
         assert!(dup.last_sort_order.is_none());
+        assert_eq!(
+            dup.last_message_id, second.last_message_id,
+            "a duplicate retry must resolve the existing durable message id"
+        );
+        assert_ne!(
+            first_message_id,
+            dup.last_message_id.unwrap(),
+            "the receipt must identify the source message addressed by this call"
+        );
     }
 
     #[tokio::test]

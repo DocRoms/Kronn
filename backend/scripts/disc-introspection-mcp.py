@@ -47,6 +47,10 @@ import urllib.request
 import uuid
 
 
+MAX_DISC_APPEND_ATTACHMENTS = 8
+MAX_DISC_APPEND_ATTACHMENT_BYTES = 10 * 1024 * 1024
+
+
 # ─── Tool catalogue ────────────────────────────────────────────────────────
 
 # Loaded-vs-on-disk staleness capture: the MCP client spawns this script at
@@ -557,60 +561,31 @@ TOOLS = [
     {
         "name": "disc_append",
         "description": (
-            "Post a message in the currently-bound Kronn discussion. "
-            "⚠ THIS IS HOW YOU TALK TO OTHER AGENTS IN A MULTI-AGENT "
-            "ROOM (after `disc_join`). Replying only in your own "
-            "terminal is INVISIBLE to peers. \n\n"
-            "⚠ `content` is a MESSAGE for your peers — NEVER pass a tool "
-            "name as content (e.g. posting the literal text "
-            "'disc_wait_for_peer' instead of CALLING that tool: to wait, "
-            "invoke disc_wait_for_peer; to speak, append prose).\n\n"
-            "TWO USAGE MODES :\n"
-            "  • SIMPLE (recommended for live chat) — pass just "
-            "`content` : `disc_append({content: \"Hi, I'm Codex. "
-            "Ready to play.\"})`. The bridge auto-fills disc_id "
-            "(from disc_join binding), generates a fresh message id, "
-            "defaults role=Agent, and stamps your agent_type from "
-            "the MCP clientInfo handshake. Structured mentions outside code "
-            "are carried as ordered typed `targets`: canonical `@codex` / "
-            "`@claude` identities invoke the native discussion or punctual "
-            "agent, while `@codex-cli`, `@codex-cli-2`, … select one exact "
-            "joined CLI session. Multiple mentions fan out once per identity.\n"
-            "  To answer one specific message, also pass its durable "
-            "`reply_to_message_id` (available from `disc_get_message`). "
-            "Kronn validates that the target belongs to this discussion.\n"
-            "  ⚠ POSTING ALSO LISTENS: SIMPLE mode returns a chained long-poll "
-            "under `waited`; use `wait_for_reply: false` only before another "
-            "immediate post.\n"
-            "  ⚠ MENTIONS — NEVER invent a pseudo; use what Kronn exposes. "
-            "Native agents: `@claude`, `@codex`, `@vibe`, `@gemini`, `@kiro`, "
-            "`@copilot`, `@ollama`. Joined CLIs use the `-cli` alias shown in "
-            "the discussion (`@codex-cli`, `@codex-cli-2`); `@codex` NEVER "
-            "means `@codex-cli`. The human of this instance : `@user` — that "
-            "exact trigger, not their name, not `@romu`. An invented mention "
-            "renders as dead text and its target never learns they were "
-            "addressed.\n"
-            "  • BULK — import a whole transcript at once via `messages: [...]`, "
-            "idempotently. Rare; see `tool_manual({tool: \"disc_append\"})`.\n\n"
+            "Post to the bound discussion after `disc_join`; terminal-only replies "
+            "are invisible to peers. `content` is prose, never a tool name. SIMPLE "
+            "mode auto-fills identity and disc_id. Natural mentions become typed "
+            "targets; NEVER invent a pseudo. Native: `@claude`, `@codex`, `@vibe`, "
+            "`@gemini`, `@kiro`, `@copilot`, `@ollama`; the human is exactly `@user`; "
+            "joined CLIs use the shown `-cli` alias. Use `reply_to_message_id` for a "
+            "durable reply and `attachments` for local files (max 8 × 10 MB). "
+            "⚠ POSTING ALSO LISTENS unless `wait_for_reply:false`. BULK transcript "
+            "import uses `messages`; see `tool_manual({tool: \"disc_append\"})`. "
             "Returns `{appended, skipped_as_duplicates, diverged, "
-            "last_sort_order, peer_messages_since_cursor, latest_peer_role}`. "
-            "A non-zero peer count means: read/listen before continuing "
-            "(`User` role first). It contains no message body. "
-            "`last_sort_order` is only the WRITE receipt "
-            "for the post — NEVER a read cursor. The bridge uses its distinct "
-            "durable read cursor for the chained wait."
+            "last_sort_order, peer_messages_since_cursor, latest_peer_role}`; a "
+            "non-zero peer count means read/listen first. `last_sort_order` is a "
+            "write receipt, NEVER a read cursor."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "content": {"type": "string", "description": "Live message text."},
-                "role": {"type": "string", "description": "Default Agent; use User only when importing user text."},
-                "channel": {"type": "string", "enum": ["main", "note"], "description": "Default main; notes never wake agents."},
-                "agent_type": {"type": "string", "description": "Author override; normally inferred."},
-                "target_agent": {"type": "string", "description": "Legacy one-shot responder override."},
+                "role": {"type": "string", "description": "Default Agent; User is for imports."},
+                "channel": {"type": "string", "enum": ["main", "note"], "description": "Default main; notes do not wake."},
+                "agent_type": {"type": "string", "description": "Normally inferred."},
+                "target_agent": {"type": "string", "description": "Legacy responder override."},
                 "targets": {
                     "type": "array",
-                    "description": "Ordered exact responders; prefer natural mentions.",
+                    "description": "Exact responders; prefer mentions.",
                     "items": {
                         "type": "object",
                         "properties": {
@@ -621,26 +596,32 @@ TOOLS = [
                         "required": ["kind", "agent_type"],
                     },
                 },
-                "reply_to_message_id": {"type": "string", "description": "Durable replied-message id from disc_get_message."},
-                "wait_for_reply": {"type": "boolean", "description": "Default true; false only before another immediate post."},
-                "source_msg_id": {"type": "string", "description": "Optional explicit dedup key."},
-                "wait_timeout_secs": {"type": "integer", "description": "Chained-wait seconds; default 60."},
+                "reply_to_message_id": {"type": "string", "description": "Message id from disc_get_message."},
+                "attachments": {
+                    "type": "array",
+                    "maxItems": MAX_DISC_APPEND_ATTACHMENTS,
+                    "items": {"type": "string"},
+                    "description": "Unique local files; atomic upload, max 8 × 10 MB.",
+                },
+                "wait_for_reply": {"type": "boolean", "description": "Default true."},
+                "source_msg_id": {"type": "string", "description": "Explicit dedup key."},
+                "wait_timeout_secs": {"type": "integer", "description": "Wait seconds; default 60."},
                 "disc_id": {"type": "string", "description": "Defaults to the bound discussion."},
                 "messages": {
                     "type": "array",
-                    "description": "Bulk mode : explicit array of messages (used for transcript import).",
+                    "description": "Bulk transcript messages.",
                     "items": {
                         "type": "object",
                         "properties": {
                             "source_msg_id": {"type": "string"},
-                            "role": {"type": "string", "description": "User | Agent | System"},
-                            "channel": {"type": "string", "enum": ["main", "note"], "description": "Defaults to main."},
+                            "role": {"type": "string", "description": "User | Agent | System."},
+                            "channel": {"type": "string", "enum": ["main", "note"]},
                             "content": {"type": "string"},
                             "agent_type": {"type": "string"},
-                            "target_agent": {"type": "string", "description": "Optional explicit responder for this live message. Ignored as a dispatch signal by bulk historical imports."},
+                            "target_agent": {"type": "string", "description": "Legacy live responder."},
                             "targets": {
                                 "type": "array",
-                                "description": "Typed responder identities for a live single-message append.",
+                                "description": "Live typed responders.",
                                 "items": {
                                     "type": "object",
                                     "properties": {
@@ -651,7 +632,7 @@ TOOLS = [
                                     "required": ["kind", "agent_type"],
                                 },
                             },
-                            "reply_to_message_id": {"type": "string", "description": "Optional durable id of an existing message in this discussion being answered."},
+                            "reply_to_message_id": {"type": "string", "description": "Existing replied-message id."},
                         },
                         "required": ["source_msg_id", "role", "content"],
                     },
@@ -1240,57 +1221,111 @@ TOOLS = [
             "values matching those names to `qa_run`. Use this to (a) "
             "discover the right QA for an action via `qa_run`, (b) "
             "reuse a matching QA via `quick_api_id` in a workflow "
-            "`ApiCall` / `BatchApiCall` step instead of re-specifying "
-            "the endpoint inline."
+            "`ApiCall` / `BatchApiCall` step, or as a source in "
+            "`CollectApiData`, instead of re-specifying the endpoint inline."
         ),
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
+        "name": "qe_list",
+        "description": (
+            "List saved Quick Execs — compact view (id, name, command, argv, "
+            "output_format, timeout_secs, project_id, variables). Reuse one through "
+            "CollectApiData.sources[].quick_exec_id instead of duplicating a CLI command."
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "page_list",
+        "description": (
+            "List every Live Page in Kronn as a compact discovery view: id, "
+            "title, slug, project_id, data_revision, updated_at and "
+            "last_published_at. Call this before authoring a PublishPageData "
+            "step: Pages are shared destinations and several workflows may "
+            "publish into the same Page. Reuse a matching page_id instead of "
+            "creating a duplicate."
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "page_get",
+        "description": (
+            "Fetch one Live Page by id or slug, including its current HTML "
+            "revision, declared datasets, retained points and every saved "
+            "workflow step that targets it. Read this before changing the HTML "
+            "or wiring another workflow into the Page."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "page_id": {"type": "string", "description": "Page id or slug from page_list."},
+            },
+            "required": ["page_id"],
+        },
+    },
+    {
+        "name": "page_create",
+        "description": (
+            "Create a sandboxed Live Page and its first immutable HTML revision. "
+            "Call `page_list` first. Data arrives through `window.KronnPageData` "
+            "and `kronn:page-data`; use the returned id in PublishPageData. Scope "
+            "inherits from a bound discussion, while host CLIs may create standalone "
+            "Pages. See `tool_manual({tool: \"page_create\"})`."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "Title, 1-200 chars."},
+                "slug": {"type": "string", "description": "Optional ASCII slug."},
+                "project_id": {"type": "string", "description": "Optional project binding."},
+                "discussion_id": {"type": "string", "description": "Optional origin discussion."},
+                "html": {"type": "string", "description": "Self-contained HTML, max 1 MB."},
+                "datasets": {
+                    "type": "array",
+                    "description": "Named PublishPageData contracts; may be empty.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "kind": {"type": "string", "enum": ["snapshot", "time_series", "collection"]},
+                            "initial": {},
+                            "schema": {},
+                            "max_points": {"type": "integer"},
+                            "max_age_days": {"type": "integer"},
+                        },
+                        "required": ["name", "kind"],
+                    },
+                },
+            },
+            "required": ["title", "html", "datasets"],
+        },
+    },
+    {
+        "name": "page_update_html",
+        "description": (
+            "Replace a Live Page's presentation by creating a new immutable "
+            "HTML revision. Dataset values and publication history are kept. "
+            "Call page_get first, then send the complete self-contained HTML; "
+            "this is a full replacement, not a patch."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "page_id": {"type": "string", "description": "Page id or slug from page_list."},
+                "html": {"type": "string", "description": "Complete replacement HTML document (1 MB max)."},
+            },
+            "required": ["page_id", "html"],
+        },
+    },
+    {
         "name": "mcp_list",
         "description": (
-            "List every MCP / API plugin wired in the user's Kronn "
-            "instance. Returns `{captured_at, configs, servers_with_api, "
-            "api_call_contract}` where `captured_at` timestamps this exact "
-            "snapshot, "
-            "`configs` lists the user's instances (id + server_id + "
-            "project scoping) and `servers_with_api` lists every "
-            "plugin that exposes a REST API spec, with: `description`, "
-            "`docs_url`, `is_custom`, `config_keys[]` (env keys + auth-"
-            "managed flag), `endpoints[]` (path/method/description/"
-            "side_effect), and a `hint` field.\n\n"
-            "**⚠ CALL THIS BEFORE every `workflow_create_draft`, "
-            "`qp_create_draft`, `qa_create_draft`, `qa_update`, and "
-            "`api_call` whose plugin/config you have NOT just listed "
-            "this session.** Plugin slugs (`api_plugin_slug`), config "
-            "ids (`api_config_id`), endpoint paths, and env keys are "
-            "NOT memorizable across sessions — Kronn's allowlist "
-            "refuses any value not declared, and a fabricated slug "
-            "surfaces only at execution time (then fails opaquely). "
-            "This tool is the only source of truth for those ids; "
-            "guessing from a prior session's memory is the #1 failure "
-            "mode for downstream MCP calls.\n\n"
-            "**`config_keys[]`** — each entry is `{env_key, label, "
-            "auth_managed}`. The `env_key` (UPPER_SNAKE) is the slug "
-            "you can reference in `api_call` arguments via the "
-            "`${ENV.<env_key>}` placeholder syntax (works in "
-            "`endpoint_path`, `path_params`, `query`, `headers`, "
-            "`body`). Kronn substitutes server-side from the encrypted "
-            "config — you never see the actual value. When "
-            "`auth_managed: true`, Kronn handles that key for you via "
-            "the plugin's auth scheme (Bearer/OAuth/etc.) — DO NOT "
-            "reference it via `${ENV.X}` (it would either be redundant "
-            "or leak a secret to the prompt). Free-form identifiers "
-            "(account_id, organization_id, workspace_slug) typically "
-            "show `auth_managed: false` — that's your `${ENV.X}` "
-            "playground.\n\n"
-            "**Always read `hint` before acting** — it tells you "
-            "whether the plugin is ready for ApiCall, or whether you "
-            "need to fetch the docs first (when endpoints are empty "
-            "but `docs_url` is set), or whether to ask the user (when "
-            "neither is set). Use this to pick the right "
-            "`api_plugin_slug` + `api_config_id` when drafting an "
-            "`ApiCall` step — without it the agent would have to "
-            "guess plugin slugs."
+            "List the current MCP/API configs, REST endpoints, `config_keys` and "
+            "readiness hints. Call this in the current session before authoring any "
+            "workflow, QA or `api_call` that references a plugin: slugs, config ids "
+            "and paths must never be guessed. `${ENV.KEY}` may reference only "
+            "non-secret keys where `auth_managed:false`; always obey each returned "
+            "`hint`. See `tool_manual({tool: \"mcp_list\"})`."
         ),
         "inputSchema": {"type": "object", "properties": {}},
     },
@@ -1341,48 +1376,16 @@ TOOLS = [
     {
         "name": "workflow_create_draft",
         "description": (
-            "Create a Kronn workflow in DRAFT state (`enabled: false`). "
-            "The workflow appears in the user's Workflows page and can "
-            "be reviewed + enabled with one click — no cron fires until "
-            "the user explicitly enables it. Use this when the design "
-            "has converged in the conversation and the user signaled "
-            "they want autonomous creation; otherwise emit a "
-            "`KRONN:WORKFLOW_READY` block and let the user one-click "
-            "deploy via the existing UI CTA.\n\n"
-            "**⚠ Discovery first — DO NOT INVENT.** A fabricated step "
-            "fails at run time, not at draft time. Verify every reference "
-            "AT CALL TIME: each `step_type` is in the closed 9-set below; "
-            "each ApiCall's `api_plugin_slug`+`api_config_id` exists in "
-            "`mcp_list`; each Agent's `skill_ids`/`profile_ids`/"
-            "`directive_ids` exists (enumerate them with `skills_list` / "
-            "`profiles_list` / `directives_list`). If you can't enumerate a "
-            "binding, ASK — never guess (hallucinated ids pass schema "
-            "validation and fail opaquely at the first run).\n\n"
-            "Payload mirrors `CreateWorkflowRequest`: name (required), "
-            "trigger (required, e.g. `{ \"type\": \"Manual\" }`), steps "
-            "(required, ≥ 1 ≤ 20 items). Optional: project_id, "
-            "actions, safety, workspace_config, concurrency_limit, "
-            "guards, artifacts, on_failure, exec_allowlist, variables.\n\n"
-            "**WorkflowStep shape:** the type-specific fields sit at the TOP "
-            "LEVEL (never nested under a sub-object), BUT `step_type` itself is a "
-            "TAGGED OBJECT `{\"type\": \"Agent\"}` — NOT a bare string (serde "
-            "`#[serde(tag=\"type\")]`). Same for `output_format` "
-            "(`{\"type\":\"Structured\"}`) and the workflow `trigger` "
-            "(`{\"type\":\"Manual\"}`). A bare string is also accepted and wrapped, "
-            "but the tagged object is canonical. `step_type.type` is "
-            "a CLOSED set — one of: **Agent · ApiCall · BatchApiCall · "
-            "BatchQuickPrompt · Exec · Gate · Notify · JsonData · SubWorkflow**. "
-            "(Don't infer the available types from one workflow you happened to "
-            "open — it may use only Agent steps. This list is the whole taxonomy.)\n"
-            "**Call `workflow_step_schema` BEFORE composing steps.** It returns the "
-            "required/optional fields, a copy-ready example per type, the output-piping "
-            "rules and every template-var namespace. Two traps it "
-            "documents that are worth naming up front because they fail at RUN time: a "
-            "SubWorkflow foreach item is reached as `{{current_task.<field>}}` (fixed "
-            "name, NOT `{{item.*}}`, NOT the foreach file's name), while a Batch fan-out "
-            "item is `{{batch.item.<field>}}` — different namespaces, easy to swap.\n"
-            "Better than hand-authoring: `workflow_get`/`workflow_clone` a RICH workflow "
-            "(e.g. AutoPilot) and adapt. Returns the created workflow JSON (id + all fields)."
+            "Create a disabled draft for explicit user review. Discovery first: "
+            "resolve plugin/config ids with `mcp_list`, bindings with their list "
+            "tools, Quick APIs with `qa_list`, Quick Execs with `qe_list`, and Pages "
+            "with `page_list`; never guess. `step_type` is a tagged object and its "
+            "closed set is: **Agent · ApiCall · BatchApiCall · "
+            "BatchQuickPrompt · Exec · Gate · Notify · JsonData · "
+            "CollectApiData · TransformData · PublishPageData · SubWorkflow**. "
+            "Call `workflow_step_schema` before composing steps. Prefer adapting a real "
+            "workflow via `workflow_get`/`workflow_clone`. Full authoring contract: "
+            "`tool_manual({tool: \"workflow_create_draft\"})`. Returns the created JSON."
         ),
         "inputSchema": {
             "type": "object",
@@ -1390,34 +1393,22 @@ TOOLS = [
                 "name": {"type": "string", "description": "Workflow name (1-200 chars)."},
                 "trigger": {
                     "type": "object",
-                    "description": "Workflow trigger spec (Manual / Cron / Tracker). E.g. `{ \"type\": \"Manual\" }` or `{ \"type\": \"Cron\", \"schedule\": \"0 9 * * 1-5\" }`. For Cron/Tracker, `concurrency_limit` auto-defaults to 1 (no self-overlap) unless you set it — see that field.",
+                    "description": "Tagged Manual/Cron/Tracker trigger; scheduled runs default to concurrency 1.",
                 },
                 "steps": {
                     "type": "array",
-                    "description": (
-                        "Workflow steps (1-20). Type-specific fields at top level, but "
-                        "`step_type` is a TAGGED OBJECT `{\"type\":\"Agent\"}` (not a bare "
-                        "string; bare string is tolerated + wrapped). `step_type.type` ∈ "
-                        "closed 9-set: Agent · ApiCall · BatchApiCall · BatchQuickPrompt · "
-                        "Exec · Gate · Notify · JsonData · SubWorkflow. SubWorkflow foreach runtime contract: "
-                        "`sub_workflow_foreach_file` is your SOURCE list; the engine exposes "
-                        "each item to the child as `{{current_task.<field>}}` template vars "
-                        "(e.g. `{{current_task.number}}`) AND as the FIXED file "
-                        "`.kronn/current_task.json`. Accessor is `current_task.*` (fixed — not "
-                        "`{{item.*}}`, not the source-file name). Call `workflow_step_schema` "
-                        "for the full per-type schema + examples."
-                    ),
+                    "description": "1-20 top-level typed steps. Call workflow_step_schema for fields and examples.",
                 },
                 "project_id": {"type": "string", "description": "Optional Kronn project id to bind the workflow to."},
-                "variables": {"type": "array", "description": "Optional manual-launch variables (each `{ name, label?, placeholder?, required?, description? }`)."},
-                "guards": {"type": "object", "description": "Optional execution guards (timeout, max_llm_calls, loop_revisits)."},
-                "on_failure": {"type": "array", "description": "Optional rollback step chain (Notify / Agent / ApiCall steps)."},
-                "exec_allowlist": {"type": "array", "items": {"type": "string"}, "description": "Whitelisted binaries for any Exec steps."},
-                "artifacts": {"type": "object", "description": "Optional artifact declarations (name → spec)."},
-                "concurrency_limit": {"type": "integer", "description": "Max concurrent runs of THIS workflow. When active runs ≥ limit, the scheduler SKIPS the tick (not queued). For a Cron/Tracker trigger, leave unset → it defaults to 1 (no self-overlap); set explicitly higher only if you truly want overlapping runs. Overlap on a state-mutating cron = double work + duplicate side-effects."},
+                "variables": {"type": "array", "description": "Manual-launch variable definitions."},
+                "guards": {"type": "object", "description": "Execution limits."},
+                "on_failure": {"type": "array", "description": "Rollback steps."},
+                "exec_allowlist": {"type": "array", "items": {"type": "string"}, "description": "Allowed Exec binaries."},
+                "artifacts": {"type": "object", "description": "Artifact declarations."},
+                "concurrency_limit": {"type": "integer", "description": "Max concurrent runs; scheduled default is 1."},
                 "safety": {"type": "object", "description": "Optional WorkflowSafety overrides."},
                 "actions": {"type": "array", "description": "Optional actions (legacy slot)."},
-                "workspace_config": {"type": "object", "description": "Optional workspace mode (Direct / Isolated)."},
+                "workspace_config": {"type": "object", "description": "Direct or Isolated workspace."},
             },
             "required": ["name", "trigger", "steps"],
         },
@@ -1855,11 +1846,12 @@ TOOLS = [
         "name": "workflow_step_schema",
         "description": (
             "Return the CANONICAL WorkflowStep schema as a tool RESULT (never "
-            "truncated, unlike a tool description): the closed 9-set of "
+            "truncated, unlike a tool description): the closed 12-set of "
             "`step_type`s, the flat shape, the required + optional fields PER "
             "type, and the RUNTIME CONTRACTS that break a workflow at run time "
             "if missed (e.g. SubWorkflow foreach → the engine writes each item "
-            "to the fixed path `.kronn/current_task.json`). Zero args. Call this "
+            "to the fixed path `.kronn/current_task.json`), plus the complete "
+            "run-anchored `time.now` grammar. Zero args. Call this "
             "BEFORE authoring or editing a workflow instead of inferring the "
             "schema from one `workflow_get` sample or from the (possibly "
             "client-truncated) `workflow_create_draft` description."
@@ -1872,7 +1864,9 @@ TOOLS = [
             "Save a Quick API for later `qa_run` calls. "
             "Discover `api_plugin_slug`/`api_config_id` with `mcp_list`; the "
             "endpoint remains allow-listed and Kronn owns credentials. String "
-            "leaves may use declared `{{var_name}}` values. Call "
+            "leaves may use declared `{{var_name}}` values or the generic "
+            "run-anchored `{{time.now|...}}` grammar documented by "
+            "`workflow_step_schema`. Call "
             "`tool_manual({tool: \"qa_create_draft\"})` first for the required "
             "probe/extract method and variable contract; iterate with `qa_update`."
         ),
@@ -1884,7 +1878,7 @@ TOOLS = [
                 "api_config_id": {"type": "string", "description": "Plugin config id from `mcp_list.configs[].config_id`. Pin the QA to a specific config (per-project or global)."},
                 "api_endpoint_path": {"type": "string", "description": "Endpoint path matching one of the plugin's declared endpoints (e.g. `/rest/api/3/issue/{ticket_id}`). May contain `{{var}}` placeholders OR `{path_param}` segments."},
                 "api_method": {"type": "string", "description": "HTTP method override : `GET | POST | PUT | PATCH | DELETE`. Defaults to the plugin endpoint's declared method when omitted."},
-                "api_query": {"type": "object", "description": "Query-string parameters as key→value map. Values may contain `{{var}}` placeholders."},
+                "api_query": {"type": "object", "description": "Query-string parameters as key→value map. Values may contain `{{var}}` placeholders or vendor-neutral `{{time.now|...}}` expressions."},
                 "api_path_params": {"type": "object", "description": "Path-segment substitutions for `{name}` segments in the endpoint path."},
                 "api_headers": {"type": "object", "description": "Extra request headers. NEVER pass auth — Kronn injects per the plugin spec."},
                 "api_body": {"description": "JSON body for POST/PUT/PATCH (object/array). String leaves can contain `{{var}}` placeholders."},
@@ -1903,6 +1897,49 @@ TOOLS = [
                 "directive_ids": {"type": "array", "items": {"type": "string"}, "description": "Optional directive bindings."},
             },
             "required": ["name", "api_plugin_slug", "api_config_id", "api_endpoint_path"],
+        },
+    },
+    {
+        "name": "qe_create_draft",
+        "description": (
+            "Save a reusable shell-free CLI collector. Use one bare binary plus a literal "
+            "argv array; shells, paths and command wrappers are rejected. Test with qe_run, "
+            "then reference its id from CollectApiData. Call tool_manual first."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "command": {"type": "string", "description": "Bare binary name, e.g. aws or fastly."},
+                "args": {"type": "array", "items": {"type": "string"}, "description": "Literal argv values; {{variables}} are allowed."},
+                "output_format": {"type": "string", "enum": ["json", "csv", "text", "lines"]},
+                "timeout_secs": {"type": "integer", "minimum": 1, "maximum": 1800},
+                "variables": {"type": "array", "description": "Definitions {name,label?,placeholder?,required?,description?}."},
+                "description": {"type": "string"},
+                "icon": {"type": "string"},
+                "project_id": {"type": "string"},
+            },
+            "required": ["name", "command"],
+        },
+    },
+    {
+        "name": "qe_update",
+        "description": "Patch a saved Quick Exec field-by-field. Omitted fields are preserved.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "qe_id": {"type": "string"},
+                "name": {"type": "string"}, "command": {"type": "string"},
+                "args": {"type": "array", "items": {"type": "string"}},
+                "output_format": {"type": "string", "enum": ["json", "csv", "text", "lines"]},
+                "timeout_secs": {"type": "integer"}, "variables": {"type": "array"},
+                "description": {"type": "string"}, "icon": {"type": "string"},
+                "project_id": {
+                    "type": "string",
+                    "description": "New project id. Omit to preserve the current binding; pass an empty string to make it global.",
+                },
+            },
+            "required": ["qe_id"],
         },
     },
     {
@@ -2301,7 +2338,11 @@ TOOLS = [
             "**Discovery** : call `qa_list` to find the right `qa_id` "
             "+ see required variable names. Pass values matching those "
             "names via `vars`. Required variables that are missing or "
-            "empty → 400 with a clear error.\n\n"
+            "empty → 400 with a clear error. A QA request template may use "
+            "the same vendor-neutral, server-side time grammar as workflows "
+            "(`{{time.now|shift:-24h|floor:hour|fmt:rfc3339}}`); one anchor "
+            "is captured for the complete QA call. Call `workflow_step_schema` "
+            "for the canonical filters/formats.\n\n"
             "**vs `api_call`** : `api_call` is the low-level broker "
             "for one-shot calls where no saved QA fits. `qa_run` is "
             "the high-level wrapper for recurring patterns. Always "
@@ -2319,6 +2360,22 @@ TOOLS = [
                 },
             },
             "required": ["qa_id"],
+        },
+    },
+    {
+        "name": "qe_run",
+        "description": (
+            "Execute one saved Quick Exec synchronously. Returns normalized data: JSON as-is, "
+            "CSV as an array of objects, text as a string, or lines as an array. The command "
+            "runs directly without a shell and is bounded to its saved project cwd or a temp cwd."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "qe_id": {"type": "string", "description": "Quick Exec id from qe_list."},
+                "vars": {"type": "object", "description": "Values for declared {{variables}}."},
+            },
+            "required": ["qe_id"],
         },
     },
     {
@@ -3761,7 +3818,8 @@ def _http(method, path, body=None, timeout=180):
 
 
 def _http_transport_retry(
-    method, path, attempts=6, delays=(2, 4, 8, 12, 16), timeout=180, deadline=None
+    method, path, attempts=6, delays=(2, 4, 8, 12, 16), timeout=180,
+    deadline=None, body=None,
 ):
     """`_http` with a BOUNDED retry on TRANSPORT failures only (connection
     refused/reset, remote disconnect, socket timeout) — the signature of a
@@ -3782,7 +3840,7 @@ def _http_transport_retry(
                 break
             attempt_timeout = max(2, min(timeout, int(remaining) + 1))
         try:
-            return _http(method, path, timeout=attempt_timeout)
+            return _http(method, path, body=body, timeout=attempt_timeout)
         except RuntimeError:
             raise  # HTTPError path from _http — application error, no retry
         except (urllib.error.URLError, ConnectionError, TimeoutError, OSError) as e:
@@ -3824,6 +3882,173 @@ def _unwrap(envelope):
     if not envelope.get("success", False):
         raise RuntimeError(envelope.get("error") or "backend reported success=false")
     return envelope.get("data")
+
+
+def _disc_append_attachment_paths(raw_paths):
+    """Validate and resolve local files an agent wants to publish in a room.
+
+    The bridge reads regular files only and keeps the same 10 MB ceiling as
+    Kronn's image/document extractor. Paths are resolved here, in the CLI host
+    process, so Docker-backed Kronn never has to understand a host path.
+    """
+    if raw_paths is None:
+        return []
+    if not isinstance(raw_paths, list) or not raw_paths:
+        raise RuntimeError(
+            "disc_append: attachments must be a non-empty array of local file paths"
+        )
+    if len(raw_paths) > MAX_DISC_APPEND_ATTACHMENTS:
+        raise RuntimeError(
+            f"disc_append: at most {MAX_DISC_APPEND_ATTACHMENTS} attachments "
+            "can be published with one message"
+        )
+
+    resolved = []
+    names = set()
+    for raw_path in raw_paths:
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            raise RuntimeError(
+                "disc_append: every attachment must be a non-empty local file path"
+            )
+        path = os.path.realpath(os.path.abspath(os.path.expanduser(raw_path.strip())))
+        if not os.path.isfile(path):
+            raise RuntimeError(
+                f"disc_append: attachment is not a readable regular file: {raw_path}"
+            )
+        size = os.path.getsize(path)
+        if size == 0:
+            raise RuntimeError(f"disc_append: attachment is empty: {raw_path}")
+        if size > MAX_DISC_APPEND_ATTACHMENT_BYTES:
+            raise RuntimeError(
+                f"disc_append: attachment exceeds the 10 MB limit: {raw_path}"
+            )
+        filename = os.path.basename(path)
+        folded = filename.casefold()
+        if folded in names:
+            raise RuntimeError(
+                "disc_append: attachment filenames must be unique within one "
+                f"message (duplicate: {filename})"
+            )
+        names.add(folded)
+        resolved.append(path)
+    return resolved
+
+
+def _http_upload_context_file(disc_id, file_path):
+    """Upload one local file through the existing authenticated context route."""
+    boundary = f"----kronn-mcp-{secrets.token_hex(16)}"
+    filename = os.path.basename(file_path)
+    safe_filename = "".join(
+        char for char in filename if char not in {'"', '\r', '\n'}
+    ) or "attachment"
+    with open(file_path, "rb") as handle:
+        file_bytes = handle.read()
+    prefix = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="file"; filename="{safe_filename}"\r\n'
+        "Content-Type: application/octet-stream\r\n\r\n"
+    ).encode("utf-8")
+    payload = prefix + file_bytes + f"\r\n--{boundary}--\r\n".encode("ascii")
+    disc_segment = urllib.parse.quote(disc_id, safe="")
+    req = urllib.request.Request(
+        f"{_backend_url()}/api/discussions/{disc_segment}/context-files",
+        method="POST",
+        data=payload,
+    )
+    req.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
+    token = os.environ.get("KRONN_AUTH_TOKEN")
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    try:
+        with urllib.request.urlopen(req, timeout=180) as resp:
+            return _unwrap(json.load(resp))
+    except urllib.error.HTTPError as exc:
+        response_body = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"HTTP {exc.code}: {response_body[:500]}")
+
+
+def _rollback_uploaded_context_files(disc_id, uploaded):
+    """Compensate a failed attachment batch so retry starts from a clean slate."""
+    failures = []
+    disc_segment = urllib.parse.quote(disc_id, safe="")
+    for item in reversed(uploaded):
+        file_id = item.get("id")
+        if not file_id:
+            continue
+        try:
+            _unwrap(_http(
+                "DELETE",
+                f"/api/discussions/{disc_segment}/context-files/"
+                f"{urllib.parse.quote(file_id, safe='')}",
+            ))
+        except Exception as exc:  # noqa: BLE001 — report every cleanup failure
+            failures.append(f"{file_id}: {type(exc).__name__}: {exc}")
+    return failures
+
+
+def _attach_files_to_appended_message(disc_id, message_id, paths, duplicate):
+    """Upload files and atomically pin this batch to the appended message."""
+    already_attached = set()
+    if duplicate:
+        selector = urllib.parse.quote(message_id, safe="")
+        existing = _unwrap(_http(
+            "GET",
+            f"/api/discussions/{urllib.parse.quote(disc_id, safe='')}/message/"
+            f"{selector}?before=0&after=0",
+        ))
+        already_attached = {
+            item.get("filename", "").casefold()
+            for item in (existing.get("attachments") or [])
+            if isinstance(item, dict)
+        }
+
+    uploaded = []
+    skipped = []
+    linked = 0
+    try:
+        for path in paths:
+            filename = os.path.basename(path)
+            if filename.casefold() in already_attached:
+                skipped.append(filename)
+                continue
+            response = _http_upload_context_file(disc_id, path)
+            file_data = response.get("file") if isinstance(response, dict) else None
+            file_id = file_data.get("id") if isinstance(file_data, dict) else None
+            if not file_id:
+                raise RuntimeError(
+                    f"disc_append: upload returned no file id for {filename}"
+                )
+            uploaded.append({"id": file_id, "filename": filename})
+
+        if uploaded:
+            linked = _unwrap(_http_transport_retry(
+                "POST",
+                f"/api/discussions/{urllib.parse.quote(disc_id, safe='')}/"
+                "context-files/link-pending",
+                body={
+                    "message_id": message_id,
+                    "file_ids": [item["id"] for item in uploaded],
+                },
+            ))
+            if linked != len(uploaded):
+                raise RuntimeError(
+                    "disc_append: the message was posted but Kronn linked only "
+                    f"{linked}/{len(uploaded)} uploaded attachments"
+                )
+    except Exception as exc:  # noqa: BLE001 — compensate the whole new batch
+        cleanup_failures = _rollback_uploaded_context_files(disc_id, uploaded)
+        cleanup = f"; rolled back {len(uploaded)} uploaded attachment(s)"
+        if cleanup_failures:
+            cleanup += "; cleanup failed for " + ", ".join(cleanup_failures)
+        raise RuntimeError(f"{exc}{cleanup}") from exc
+
+    return {
+        "requested": len(paths),
+        "uploaded": len(uploaded),
+        "already_attached": len(skipped),
+        "linked": linked,
+        "files": uploaded,
+    }
 
 
 # ─── Tool dispatch ─────────────────────────────────────────────────────────
@@ -4445,6 +4670,12 @@ def call_disc_append(args):
     """
     disc_id = args.get("disc_id") or _disc_id()
     messages = args.get("messages")
+    attachment_paths = _disc_append_attachment_paths(args.get("attachments"))
+    if attachment_paths and messages:
+        raise RuntimeError(
+            "disc_append: attachments are supported only with the simple "
+            "content form, not bulk transcript imports"
+        )
 
     # Light shorthand : an agent passed `content` directly.
     if not messages and args.get("content"):
@@ -4490,6 +4721,7 @@ def call_disc_append(args):
             "easiest for multi-agent chat) OR `messages: [{source_msg_id, "
             "role, content}, …]` (bulk transcript import)"
         )
+    is_live_single = bool(args.get("content")) and len(messages) == 1
     # 0.9.0 — carry the caller's session id so the backend scopes the
     # append heartbeat + activity-clear to THIS (possibly resumed) row only,
     # never to every session of the same agent_type (multi-machine / sibling
@@ -4505,6 +4737,30 @@ def call_disc_append(args):
         append_body["since_sort_order"] = consumed_cursor
     appended = _unwrap(_http("POST", "/api/disc/append", append_body))
 
+    if attachment_paths:
+        message_id = appended.get("last_message_id") if isinstance(appended, dict) else None
+        if not message_id:
+            appended["attachment_error"] = (
+                "The message was posted, but this backend did not return its "
+                "durable message id. Reload Kronn after updating it, then retry "
+                "the same disc_append call to publish the attachments."
+            )
+        else:
+            try:
+                appended["attachments"] = _attach_files_to_appended_message(
+                    disc_id,
+                    message_id,
+                    attachment_paths,
+                    bool(appended.get("skipped_as_duplicates")),
+                )
+            except Exception as exc:  # noqa: BLE001 — the message already exists
+                appended["attachment_error"] = f"{type(exc).__name__}: {exc}"
+                appended["attachment_retry"] = (
+                    "The text message was posted. Retry the SAME disc_append "
+                    "arguments/source_msg_id; the failed attachment batch was "
+                    "rolled back so only missing files will be uploaded."
+                )
+
     # KT-43 — post AND listen in ONE tool call.
     #
     # Every append used to hand the turn back, leaving the next wait to the
@@ -4519,7 +4775,6 @@ def call_disc_append(args):
     #
     # Never for a bulk transcript import (nobody is waiting on a backfill),
     # and `wait_for_reply: false` opts out for an agent posting twice in a row.
-    is_live_single = bool(args.get("content")) and len(messages) == 1
     if not is_live_single or args.get("wait_for_reply") is False:
         return appended
 
@@ -5754,6 +6009,122 @@ def call_qa_list(_args):
     return out
 
 
+def call_qe_list(_args):
+    """Compact saved Quick Exec discovery."""
+    data = _unwrap(_http("GET", "/api/quick-execs")) or []
+    return [
+        {
+            "id": item.get("id"),
+            "name": item.get("name"),
+            "description": item.get("description"),
+            "command": item.get("command"),
+            "args": item.get("args") or [],
+            "output_format": item.get("output_format"),
+            "timeout_secs": item.get("timeout_secs"),
+            "project_id": item.get("project_id"),
+            "variables": [
+                {
+                    "name": variable.get("name"),
+                    "label": variable.get("label"),
+                    "required": bool(variable.get("required", True)),
+                    "description": variable.get("description") or None,
+                }
+                for variable in (item.get("variables") or [])
+            ],
+        }
+        for item in data
+    ]
+
+
+def call_page_list(_args):
+    """Compact Page discovery for workflow composition."""
+    data = _unwrap(_http("GET", "/api/pages")) or []
+    return [
+        {
+            "id": page.get("id"),
+            "title": page.get("title"),
+            "slug": page.get("slug"),
+            "project_id": page.get("project_id"),
+            "data_revision": page.get("data_revision"),
+            "updated_at": page.get("updated_at"),
+            "last_published_at": page.get("last_published_at"),
+            "pinned": page.get("pinned", False),
+            "archived": page.get("archived", False),
+        }
+        for page in data
+    ]
+
+
+def _page_selector(args, tool_name):
+    selector = args.get("page_id") or args.get("id")
+    if not isinstance(selector, str) or not selector.strip():
+        raise RuntimeError(f"{tool_name}: missing required 'page_id'")
+    return urllib.parse.quote(selector.strip(), safe="")
+
+
+def call_page_get(args):
+    """Full Page definition plus its workflow and discussion links."""
+    encoded = _page_selector(args, "page_get")
+    detail = _unwrap(_http("GET", f"/api/pages/{encoded}"))
+    workflows = _unwrap(_http("GET", f"/api/pages/{encoded}/workflows")) or []
+    discussions = _unwrap(_http("GET", f"/api/pages/{encoded}/discussions")) or []
+    result = dict(detail or {})
+    result["workflows"] = workflows
+    result["discussions"] = discussions
+    return result
+
+
+def call_page_create(args):
+    """Create the Page destination before a PublishPageData workflow step."""
+    title = args.get("title")
+    html = args.get("html")
+    datasets = args.get("datasets")
+    if not isinstance(title, str) or not title.strip():
+        raise RuntimeError("page_create: missing required 'title'")
+    if not isinstance(html, str) or not html.strip():
+        raise RuntimeError("page_create: missing required 'html'")
+    if not isinstance(datasets, list):
+        raise RuntimeError("page_create: 'datasets' must be an array")
+
+    body = {
+        "title": title,
+        "html": html,
+        "datasets": datasets,
+    }
+    for field in ("slug", "project_id", "discussion_id"):
+        if field in args:
+            body[field] = args[field]
+    if not body.get("discussion_id"):
+        try:
+            body["discussion_id"] = _disc_id()
+        except RuntimeError:
+            # A Page is a shared destination, not a discussion child. Host
+            # CLIs must be able to create standalone/mock Pages before they
+            # have joined any room.
+            body.pop("discussion_id", None)
+    if body.get("project_id") is None:
+        inherited = _current_project_id()
+        if inherited:
+            body["project_id"] = inherited
+    actor = _agent_type_for_session()
+    body["created_by_agent"] = None if actor == "Unknown" else actor
+    return _unwrap(_http("POST", "/api/pages", body))
+
+
+def call_page_update_html(args):
+    """Create an immutable replacement HTML revision for a Page."""
+    encoded = _page_selector(args, "page_update_html")
+    html = args.get("html")
+    if not isinstance(html, str) or not html.strip():
+        raise RuntimeError("page_update_html: missing required 'html'")
+    actor = _agent_type_for_session()
+    body = {
+        "html": html,
+        "created_by_agent": None if actor == "Unknown" else actor,
+    }
+    return _unwrap(_http("PUT", f"/api/pages/{encoded}/html", body))
+
+
 def call_mcp_list(_args):
     # 0.8.5 — wired MCP configs (the API plugin slug + config id the
     # workflow ApiCall steps need). Drops env values (secrets) and
@@ -6423,6 +6794,41 @@ def call_qa_create_draft(args):
     return _unwrap(_http("POST", "/api/quick-apis", body))
 
 
+def call_qe_create_draft(args):
+    for field in ("name", "command"):
+        if not args.get(field):
+            raise RuntimeError(f"qe_create_draft: missing required '{field}'")
+    body = dict(args)
+    if "project_id" not in body or body.get("project_id") is None:
+        inherited = _current_project_id()
+        if inherited:
+            body["project_id"] = inherited
+    body.setdefault("args", [])
+    body.setdefault("variables", [])
+    body.setdefault("output_format", "json")
+    body.setdefault("timeout_secs", 60)
+    return _unwrap(_http("POST", "/api/quick-execs", body))
+
+
+def call_qe_update(args):
+    qe_id = args.get("qe_id")
+    if not qe_id:
+        raise RuntimeError("qe_update: missing required 'qe_id'")
+    existing_list = _unwrap(_http("GET", "/api/quick-execs")) or []
+    existing = next((item for item in existing_list if item.get("id") == qe_id), None)
+    if not existing:
+        raise RuntimeError(f"qe_update: Quick Exec {qe_id!r} not found — call qe_list")
+    fields = (
+        "name", "icon", "description", "project_id", "command", "args",
+        "timeout_secs", "output_format", "variables",
+    )
+    body = {
+        field: args[field] if field in args else existing.get(field)
+        for field in fields
+    }
+    return _unwrap(_http("PUT", f"/api/quick-execs/{qe_id}", body))
+
+
 def call_api_call(args):
     """0.8.6 — Agent API broker.
 
@@ -6594,6 +7000,19 @@ def call_qa_run(args):
     else:
         body["variables"] = {}
     return _unwrap(_http("POST", f"/api/quick-apis/{qa_id}/run", body))
+
+
+def call_qe_run(args):
+    qe_id = args.get("qe_id")
+    if not qe_id:
+        raise RuntimeError("qe_run: missing required 'qe_id'")
+    vars_obj = args.get("vars")
+    variables = (
+        {str(key): str(value) for key, value in vars_obj.items()}
+        if isinstance(vars_obj, dict)
+        else {}
+    )
+    return _unwrap(_http("POST", f"/api/quick-execs/{qe_id}/run", {"variables": variables}))
 
 
 def call_qp_run(args):
@@ -6996,6 +7415,9 @@ def call_workflow_step_schema(_args):
             "Gate",
             "Notify",
             "JsonData",
+            "CollectApiData",
+            "TransformData",
+            "PublishPageData",
             "SubWorkflow",
         ],
         "fields_by_type": {
@@ -7032,6 +7454,94 @@ def call_workflow_step_schema(_args):
                     "agent": "ClaudeCode",
                     "prompt_template": "Analyse {{previous_step.output}}",
                     "output_format": {"type": "Structured"},
+                },
+            },
+            "PublishPageData": {
+                "required": ["page_publish.page_id", "page_publish.writes"],
+                "optional": [],
+                "note": (
+                    "Typed, zero-token sink for Kronn Live Pages. Each write requires "
+                    "dataset, operation (replace|append|upsert), and value_from as one "
+                    "typed context path such as steps.fetch.data.series. Upsert also "
+                    "requires key_field; append is idempotent per workflow run by default."
+                ),
+                "example": {
+                    "name": "publish-report",
+                    "step_type": {"type": "PublishPageData"},
+                    "page_publish": {
+                        "page_id": "<id from page_list or page_create>",
+                        "writes": [{
+                            "dataset": "summary",
+                            "operation": "replace",
+                            "value_from": "steps.shape-report.data",
+                        }],
+                    },
+                },
+            },
+            "CollectApiData": {
+                "required": ["collect_api_data.sources"],
+                "optional": ["collect_api_data.concurrent_limit (default 5, max 20)"],
+                "note": (
+                    "Runs independent Quick APIs and shell-free CLI commands concurrently. Every "
+                    "source requires a unique alias, optional required flag/variables map, and "
+                    "exactly one of quick_api_id, quick_exec_id or inline quick_exec. Prefer a "
+                    "saved quick_exec_id from qe_list. Inline quick_exec is "
+                    "{command,args,timeout_secs?,output_format}; command must be a bare binary in "
+                    "workflow exec_allowlist, shell binaries are rejected, args stay literal, and "
+                    "output_format is json|csv|text|lines; CSV becomes an array of objects and "
+                    "each stream is capped at 1 MiB. Output "
+                    "is {sources:{alias:<typed extracted data>},meta:{...}}. Source variables "
+                    "may use run-anchored time expressions such as "
+                    "{{time.now|shift:-24h|floor:hour|fmt:rfc3339}}; every parallel source "
+                    "shares the same anchor. Optional failures yield PARTIAL; required failures "
+                    "stop the workflow."
+                ),
+                "example": {
+                    "name": "collect-sources",
+                    "step_type": {"type": "CollectApiData"},
+                    "collect_api_data": {
+                        "concurrent_limit": 5,
+                        "sources": [
+                            {
+                                "alias": "analytics",
+                                "quick_api_id": "<id from qa_list>",
+                                "required": True,
+                                "variables": {"host": "fr.example.com"},
+                            },
+                            {
+                                "alias": "cloudwatch",
+                                "quick_api_id": "",
+                                "quick_exec_id": "<id from qe_list>",
+                                "required": False,
+                            },
+                        ],
+                    },
+                },
+            },
+            "TransformData": {
+                "required": ["transform_data.input_from", "transform_data.fields"],
+                "optional": [],
+                "note": (
+                    "Deterministic zero-token JSON shaping. input_from is one typed context path; "
+                    "each field has target, RFC 9535 JSONPath source, operation "
+                    "(copy|count|sum|average|min|max|first|last), optional fallback and optional "
+                    "value_type (string|number|boolean)."
+                ),
+                "example": {
+                    "name": "shape-report",
+                    "step_type": {"type": "TransformData"},
+                    "transform_data": {
+                        "input_from": "steps.collect-sources.data",
+                        "fields": [
+                            {
+                                "target": "metrics.total",
+                                "source": "$.sources.analytics.total",
+                                "operation": "copy",
+                                "fallback": 0,
+                                "value_type": "number",
+                            }
+                        ],
+                    },
                 },
             },
             "ApiCall": {
@@ -7178,7 +7688,7 @@ def call_workflow_step_schema(_args):
         },
         "discovery_rule": (
             "Do NOT infer the available step types from one workflow you opened — "
-            "it may use only Agent steps. This 9-set IS the whole taxonomy. For a "
+            "it may use only Agent steps. This 12-set IS the whole taxonomy. For a "
             "rich real example to adapt, workflow_get/workflow_clone the AutoPilot "
             "workflow (multi-step), not a single-Agent one."
         ),
@@ -7188,8 +7698,8 @@ def call_workflow_step_schema(_args):
                 "api_endpoint_path, api_query/api_body values, exec_args/exec_stdin, "
                 "gate_message, notify_config, …). Dotted nested access works incl. "
                 "array index: `{{steps.plan.data.subtasks.0.title}}`. An UNKNOWN ref "
-                "is left VERBATIM (not blanked) so a typo is visible at run time "
-                "rather than silently empty."
+                "is left VERBATIM in previews and rejected before execution, so a typo "
+                "never reaches an agent, command or external API."
             ),
             "namespaces": {
                 "steps.<name>.output": "raw text the step produced (FreeText).",
@@ -7202,12 +7712,43 @@ def call_workflow_step_schema(_args):
                 "state.<key>": "run state written by a step via a `---STATE:<k>=<v>---` line; persists across Gate pauses + Goto loops.",
                 "artifacts.<name>": "content a step emitted via a `---ARTIFACT:<name>---` block.",
                 "issue.{title,body,number,url,labels}": "tracker-trigger fields (Cron/Tracker workflows).",
+                "time.now / now": "one timestamp captured at run start and reused by all steps and parallel CollectApiData sources, including after resume. `now` is shorthand unless a static/launch variable named `now` exists.",
                 "<launch_var>": "any manual-launch `variables[].name` is referenced bare as `{{name}}`.",
+            },
+            "time_expressions": {
+                "canonical": "{{time.now|shift:-24h|tz:Europe/Paris|floor:hour|fmt:local_iso_ms}}",
+                "shorthand": "{{now-24h|floor:hour}} (UTC + rfc3339 defaults)",
+                "filters": {
+                    "shift": "+/- fixed duration; units s, m, h, d, w; 10-year safety limit",
+                    "tz": "IANA timezone such as Europe/Paris; UTC by default",
+                    "floor": "minute | hour | day; day boundaries use the selected timezone",
+                    "fmt": "rfc3339 | local_iso_ms | date | unix | unix_ms",
+                },
+                "vendor_neutrality": "Do not use plugin/vendor names such as fmt:adobe. Adobe's YYYY-MM-DDTHH:mm:ss.SSS without Z is fmt:local_iso_ms; GitHub uses rfc3339; Jira day parameters use date; epoch APIs use unix or unix_ms.",
+                "ordering": "Filter order is declarative: Kronn applies the shift to the run anchor, converts to the requested timezone, floors there, then formats.",
             },
             "batch_quick_prompt_results": (
                 "`steps.<name>.data.results` is the ordered, complete BatchQuickPrompt "
                 "payload list after completion; use `data.results` / `data_json.results` "
                 "for deterministic downstream piping."
+            ),
+        },
+        "data_pipeline_contract": {
+            "normal_path": "CollectApiData -> TransformData -> PublishPageData",
+            "discovery_order": [
+                "qa_list/qe_list: prefer and resolve saved Quick APIs or Quick Execs; keep inline quick_exec for one-offs and add each CLI binary to exec_allowlist",
+                "page_list: reuse a matching shared Page; otherwise page_create",
+                "workflow_step_schema: compose the three typed configs",
+                "workflow_create_draft: save disabled for human review",
+            ],
+            "direct_publish": (
+                "TransformData is optional when the Page intentionally consumes the complete "
+                "lossless collector envelope. Then bind value_from directly to "
+                "steps.<collect-name>.data."
+            ),
+            "page_contract": (
+                "A Page is shared and is not owned by one workflow. page_publish.page_id "
+                "stores the configured link; several workflows may target the same Page."
             ),
         },
     }
@@ -7562,8 +8103,13 @@ def call_kronn_intro(_args):
             "## 🔀 Workflows — des pipelines multi-étapes que tu crées en discutant\n"
             "Agents, appels API, conditions, boucles, gates d'approbation humaine, batchs — jusqu'à 20 steps.\n"
             "→ 'Crée un workflow : récupère les PRs ouvertes, review chacune, poste un résumé' "
-            "(workflow_create_draft — je connais le schéma canonique des 9 types de steps)\n"
+            "(workflow_create_draft — je connais le schéma canonique des 12 types de steps)\n"
             "→ 'Lance le PR-review sur la 123' (workflow_trigger) · 'Qu'est-ce qui tourne ?' (workflow_active_runs)\n\n"
+            "## 📄 Pages vivantes — des rapports HTML alimentés par les workflows\n"
+            "Je peux réutiliser ou créer une Page, puis composer CollectApiData → TransformData → "
+            "PublishPageData avec des Quick APIs déterministes.\n"
+            "→ 'Crée une Page qui suit mes métriques Adobe toutes les heures' "
+            "(qa_list + page_list/page_create + workflow_create_draft)\n\n"
             "## 🌐 APIs déclarées dans Kronn — sans exposer le secret au modèle\n"
             "mcp_list indique les plugins qui exposent une interface API et leurs endpoints autorisés. "
             "Le broker refuse les chemins non déclarés et applique l'authentification côté serveur. "
@@ -7571,7 +8117,8 @@ def call_kronn_intro(_args):
             "→ 'Combien de tickets ouverts sur le projet EW ?' (mcp_list → api_call, auth injectée)\n"
             "→ Un appel que tu referas ? Je le sauvegarde en Quick API rejouable (qa_create_draft).\n\n"
             "## 🧠 La désagentification (LE concept clé pour bien commencer)\n"
-            "Une étape mécanique ApiCall, Exec, JsonData ou Notify s'exécute sans lancer de modèle. "
+            "Une étape mécanique ApiCall, Exec, JsonData, CollectApiData, TransformData, "
+            "PublishPageData ou Notify s'exécute sans lancer de modèle. "
             "Si un agent déclenche cette étape ou consomme son résultat, sa conversation conserve "
             "toutefois son coût normal. Kronn réserve les agents aux étapes qui demandent du raisonnement. "
             "Même pipeline, ~5x moins cher, débogable step par step. Le réflexe à prendre : "
@@ -7646,6 +8193,43 @@ TOOL_MANUALS = {
         "`target_agents` / `target_agent` remain compatibility projections of "
         "`targets`; do not reason from them."
     ),
+    "mcp_list": (
+        "The result is a timestamped discovery snapshot: `configs` carries instance "
+        "ids and project scope; `servers_with_api` carries descriptions, docs URLs, "
+        "endpoints, side-effect flags, readiness `hint`s and `config_keys`. Re-list in "
+        "the current session before creating or updating a workflow, QA or direct API "
+        "call. Kronn allow-lists the returned slugs, ids and paths, so remembered or "
+        "fabricated values fail only when executed.\n\n"
+        "A config key is `{env_key,label,auth_managed}`. `${ENV.<env_key>}` works in "
+        "endpoint paths, path params, query, headers and body only for non-secret "
+        "identifiers where `auth_managed:false`. Authentication keys remain server-side; "
+        "never reference or request their values. Read `hint` before acting: it states "
+        "whether ApiCall is ready, documentation must be fetched, or user configuration "
+        "is still required."
+    ),
+    "page_create": (
+        "Live Page HTML is a complete, self-contained document rendered without network "
+        "access. Declare named datasets as snapshot, time_series or collection contracts; "
+        "an empty array creates standalone HTML, while `initial` values support mock design "
+        "validation. Retention may be bounded with max_points or max_age_days.\n\n"
+        "A bound discussion supplies project scope and is linked as the origin. A host CLI "
+        "may omit discussion_id and create a standalone Page. The returned id is the exact "
+        "PublishPageData.page_publish.page_id. HTML reads the initial value from "
+        "window.KronnPageData and listens for the `kronn:page-data` CustomEvent."
+    ),
+    "workflow_create_draft": (
+        "The workflow always lands with `enabled:false`; no cron fires until the user "
+        "reviews and enables it. Use autonomous creation only after the conversation has "
+        "converged. The payload mirrors CreateWorkflowRequest: required name, tagged trigger "
+        "and 1-20 steps; optional project, variables, guards, failure chain, allowlist, "
+        "artifacts, concurrency, safety, actions and workspace config.\n\n"
+        "Type-specific step fields live at the top level. `step_type`, trigger and output "
+        "format use tagged objects. `workflow_step_schema` is the canonical on-demand source "
+        "for every field, example, output-piping rule and template namespace. In particular, "
+        "SubWorkflow foreach uses `current_task.*` while batch fan-out uses `batch.item.*`. "
+        "Every referenced plugin, binding, Quick API, Quick Exec and Page must come from its "
+        "current list tool; unresolved bindings require asking the user, never guessing."
+    ),
     "api_call": (
         "**Project scope** — resolved server-side from three sources, in "
         "priority order: (1) an explicit `project_id` argument, (2) the disc "
@@ -7663,6 +8247,14 @@ TOOL_MANUALS = {
         "substitutes it server-side, so you never see the value. Accepted in "
         "`endpoint_path`, `path_params`, `query`, `headers` and `body` — string "
         "leaves only.\n\n"
+        "**Run-anchored time** — the same fields accept vendor-neutral "
+        "`{{time.now|...}}` expressions before `${ENV.KEY}` substitution. "
+        "One timestamp is captured for the complete call. Use `shift:+1d|-24h`, "
+        "`tz:Europe/Paris`, `floor:minute|hour|day`, and "
+        "`fmt:rfc3339|local_iso_ms|date|unix|unix_ms`; the compact "
+        "`{{now-24h|floor:hour}}` alias defaults to UTC/RFC 3339. "
+        "Formats are generic: never write `fmt:adobe`; its no-zone ISO shape "
+        "is `fmt:local_iso_ms`. `workflow_step_schema` is the canonical spec.\n\n"
         "This is NOT the mechanism for credentials. Secrets are injected by the "
         "plugin's auth spec and never appear in a call you compose."
     ),
@@ -7685,6 +8277,11 @@ TOOL_MANUALS = {
         "**Variables**: each entry is `{name, label?, placeholder?, required?, "
         "description?}`; `required` defaults to true. `name` must be a snake_case "
         "or UPPER_SNAKE_CASE identifier matching the `{{var_name}}` placeholders.\n\n"
+        "**Rolling windows**: endpoint/query/header/body string leaves may also "
+        "embed the server-side `{{time.now|...}}` grammar documented by "
+        "`workflow_step_schema`. For an existing variable-based QA used by "
+        "`CollectApiData`, put those expressions in the source `variables` map; "
+        "parallel sources then share one workflow-run anchor.\n\n"
         "**Safety**: a QA has no `enabled` flag and cannot auto-fire — every QA is "
         "launched on demand, and the user reviews it in the Quick APIs page first. "
         "Same profile as `qp_create_draft`.\n\n"
@@ -7692,6 +8289,21 @@ TOOL_MANUALS = {
         "so specify only what changed. Heavier payload than expected, missing query "
         "param, wrong extract path — all fixable without sending the user through "
         "the UI."
+    ),
+    "qe_create_draft": (
+        "**DISCOVER → TEST → PERSIST.** Call `qe_list` first. A Quick Exec is a "
+        "saved CLI data collector, not a shell script: `command` is one bare binary "
+        "and every `args[]` entry is one literal argv value. Never use `sh -c`, pipes, "
+        "redirections, globs or command substitution. Shells and executable paths are "
+        "rejected server-side.\n\n"
+        "Declare every `{{variable}}` used in argv. `output_format` is `json`, `csv`, "
+        "`text` or `lines`; CSV is normalized into an array of objects using its header "
+        "row so TransformData and Pages receive ordinary JSON. Test the saved resource "
+        "with `qe_run`. In a workflow, use `CollectApiData.sources[].quick_exec_id` and "
+        "add the saved binary to the workflow `exec_allowlist`. Keep inline `quick_exec` "
+        "only for a truly one-off command.\n\n"
+        "A project-bound Quick Exec uses that project as cwd when tested standalone. A "
+        "workflow uses its own run/worktree cwd, which makes the saved command portable."
     ),
 }
 
@@ -7973,6 +8585,11 @@ DISPATCH = {
     "workflow_resume_run": call_workflow_resume_run,
     "qp_list": call_qp_list,
     "qa_list": call_qa_list,
+    "qe_list": call_qe_list,
+    "page_list": call_page_list,
+    "page_get": call_page_get,
+    "page_create": call_page_create,
+    "page_update_html": call_page_update_html,
     "mcp_list": call_mcp_list,
     # 0.8.7 — fetch a Kronn doc convention spec on demand (cheap if not
     # called; lets agents about to author AGENTS.md sections pull the
@@ -8025,10 +8642,12 @@ DISPATCH = {
     # 0.8.6 phase 4 — symmetry fix : QA drafting was missing from the
     # *_create_draft cluster. QAs have no enabled flag — drafting = creation.
     "qa_create_draft": call_qa_create_draft,
+    "qe_create_draft": call_qe_create_draft,
     # 0.8.6 phase 4 — partial-update for QAs (load-merge-write).
     # Closes the post-test iteration loop : agent probes, persists,
     # tests, then patches `api_extract` / `api_query` without UI clicks.
     "qa_update": call_qa_update,
+    "qe_update": call_qe_update,
     # 0.8.6 — Agent API broker. Lets the agent invoke a configured
     # plugin without ever seeing the credentials (cf.
     # [[project_agent_api_broker_0_8_6]]).
@@ -8048,6 +8667,7 @@ DISPATCH = {
     # of `api_call`: same end-result without starting another model for
     # the HTTP call. Always prefer when a matching QA exists.
     "qa_run": call_qa_run,
+    "qe_run": call_qe_run,
     # 0.10.0 — Continual Learning. Propose a durable learning (typed, evidence
     # mandatory). Server gates it (existence + faithfulness) + a human validates
     # before it's ever written to a truth file. Free-form fences are NOT used.
@@ -8222,9 +8842,10 @@ def _handle(req):
                     "• Discussions (multi-agent threads): `disc_meta`/`disc_get_message`/`disc_search`/`disc_load_other`/`disc_create`/`disc_append`/`disc_join`/`disc_invite_peer`…\n"
                     "• Rich room output: messages are Markdown. A `mermaid` fence renders a diagram; `kronn-doc-preview` renders sandboxed HTML with PDF/DOCX actions (a plain `html` fence is only code); `kronn-doc-data` exposes CSV/XLSX/PPTX export. Use visual output only when it materially helps.\n"
                     "• Planning: a discussion may have a shared plan made of prioritized, editable tasks. The user may refer to it naturally as “the plan”, “the tasks”, “what remains”, “the priority”, and similar wording. Use `plan_get` (compact current objective/plan) · `task_list` (compact filtered backlog) · `task_get` (FULL task) · `task_changes` (deltas) · `proposal_list`/`proposal_get` (durable proposals, read-only) · narrow writes `task_create`/`task_update`/`task_update_dod`/`task_link_discussion`/`task_add_blocker`/`task_remove_blocker`. Read the relevant plan first. Immediately before any direct `task_create`, call `plan_get` again so a peer's recent write is visible. Apply unambiguous intent directly; otherwise propose a human-gated `kronn-plan-action` fence (`create`, `create_many`, `status`, `complete`, `unblock`, `open`). You may read and propose, but only a human accepts, rejects or decides a durable proposal. Never replace a requested plan update with a prose-only summary. Whenever tracked work starts or materially changes, keep its status, DoD and priority honest in the plan. Write only on a real change: never reload or rewrite an unchanged task merely to report progress. If the announced Planning tools are missing from your MCP surface, use the read-only `plan_snapshot` from `disc_join`, ask @user to reconnect the Kronn MCP, and never fabricate an update.\n"
-                    "• Workflows (multi-step pipelines): `workflow_list` (compact) · `workflow_get` (FULL, every step) · `workflow_step_schema` (CANONICAL step schema as an untruncatable result — the closed 9 `step_type`s, per-type fields, runtime contracts; call before authoring) · `workflow_create_draft` · `workflow_clone`/`workflow_update`/`workflow_set_enabled` · `workflow_trigger`/`workflow_run_status` · run history `workflow_runs`/`workflow_run_get` · `workflow_active_runs`/`workflow_cancel_run`. Agent-step bindings (full CRUD): `skills_list`/`profiles_list`/`directives_list` enumerate valid ids; `skill_get`/`profile_get`/`directive_get` read FULL bodies; `skill_create`/`skill_update`/`skill_delete` (+ `profile_*`/`directive_*`) author & edit custom ones.\n"
+                    "• Workflows (multi-step pipelines): `workflow_list` (compact) · `workflow_get` (FULL, every step) · `workflow_step_schema` (CANONICAL step schema as an untruncatable result — the closed 12 `step_type`s, per-type fields, runtime contracts; call before authoring) · `workflow_create_draft` · `workflow_clone`/`workflow_update`/`workflow_set_enabled` · `workflow_trigger`/`workflow_run_status` · run history `workflow_runs`/`workflow_run_get` · `workflow_active_runs`/`workflow_cancel_run`. Agent-step bindings (full CRUD): `skills_list`/`profiles_list`/`directives_list` enumerate valid ids; `skill_get`/`profile_get`/`directive_get` read FULL bodies; `skill_create`/`skill_update`/`skill_delete` (+ `profile_*`/`directive_*`) author & edit custom ones.\n"
                     "• Quick Prompts (reusable prompt templates): `qp_list` (no body) · `qp_get` (FULL incl `prompt_template` — read this to know what a QP does, or to run it yourself) · `qp_create_draft`/`qp_update`/`qp_delete` · `qp_run`/`qp_batch_run`.\n"
-                    "• Quick APIs + API broker: `qa_list`/`qa_run`/`qa_create_draft`/`qa_update` · `mcp_list` → `api_call` (configured plugins, auth injected).\n"
+                    "• Quick APIs + API broker: `qa_list`/`qa_run`/`qa_create_draft`/`qa_update` · `mcp_list` → `api_call` (configured plugins, auth injected). Quick Execs: `qe_list`/`qe_run`/`qe_create_draft`/`qe_update` for saved shell-free CLI collectors.\n"
+                    "• Live Pages (shared HTML reports): `page_list` · `page_get` · `page_create` · `page_update_html`. Resolve or create the Page before authoring a `PublishPageData` step.\n"
                     "• Docs/conventions: `convention_get`. Continual learning: `learning_propose`.\n"
                     "**Navigation rule:** to understand a CAPABILITY, read the relevant tool's description AND `*_get` a REAL, rich example — never infer what the system can do from a single workflow/QP you happened to open.\n\n"
                     "**API actions — order to avoid burning tokens:** "

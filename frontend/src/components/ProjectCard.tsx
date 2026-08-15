@@ -37,6 +37,24 @@ const STATUS_COLORS: Record<string, string> = {
   Failed: 'var(--kr-error)', Cancelled: 'var(--kr-cancelled)', WaitingApproval: 'var(--kr-accent-ink)',
 };
 
+type ProjectDetailView = 'overview' | 'discussions' | 'tasks' | 'docs' | 'code' | 'git' | 'resources';
+
+const PROJECT_DETAIL_VIEWS: ProjectDetailView[] = [
+  'overview', 'discussions', 'tasks', 'docs', 'code', 'git', 'resources',
+];
+const PROJECT_DETAIL_VIEW_STORAGE_KEY = 'kronn:projectDetailView';
+
+function readProjectDetailView(): ProjectDetailView {
+  try {
+    const saved = localStorage.getItem(PROJECT_DETAIL_VIEW_STORAGE_KEY);
+    return PROJECT_DETAIL_VIEWS.includes(saved as ProjectDetailView)
+      ? saved as ProjectDetailView
+      : 'overview';
+  } catch {
+    return 'overview';
+  }
+}
+
 const LANGUAGE_COLORS: Record<string, string> = {
   TypeScript: '#3178c6',
   JavaScript: '#f1e05a',
@@ -114,7 +132,15 @@ export function ProjectCard({
 }: ProjectCardProps) {
   const { t, locale } = useT();
   const isMobile = useIsMobile();
-  const [detailView, setDetailView] = useState<'overview' | 'discussions' | 'tasks' | 'docs' | 'code' | 'git' | 'resources'>('overview');
+  const [detailView, setDetailView] = useState<ProjectDetailView>(readProjectDetailView);
+  const selectDetailView = useCallback((view: ProjectDetailView) => {
+    setDetailView(view);
+    try {
+      localStorage.setItem(PROJECT_DETAIL_VIEW_STORAGE_KEY, view);
+    } catch {
+      // localStorage may be unavailable in private/restricted browser modes.
+    }
+  }, []);
   const [gitRevision, setGitRevision] = useState(0);
   const [projectTaskCount, setProjectTaskCount] = useState<number | null>(null);
   const [visibleDiscussionCount, setVisibleDiscussionCount] = useState(10);
@@ -391,11 +417,11 @@ export function ProjectCard({
       if (target) sessionStorage.removeItem(`kronn:postValidation:${proj.id}`);
     } catch { /* private mode / quota — no deep-link */ }
     if (target) {
-      setDetailView('docs');
+      selectDetailView('docs');
       setExpandedTab('docAi');
       setDocDeepLink(target);
     }
-  }, [isOpen, proj.id]);
+  }, [isOpen, proj.id, selectDetailView]);
 
   // ── Audit state ──
   const [auditActive, setAuditActive] = useState(false);
@@ -1320,7 +1346,7 @@ export function ProjectCard({
                 key={view}
                 type="button"
                 data-active={detailView === view}
-                onClick={() => setDetailView(view)}
+                onClick={() => selectDetailView(view)}
               >
                 <Icon size={13} /> {label}
                 {count !== undefined && (
@@ -1995,17 +2021,17 @@ export function ProjectCard({
                 )}
               </div>
               <div className="project-overview-grid">
-                <button type="button" onClick={() => setDetailView('discussions')}>
+                <button type="button" onClick={() => selectDetailView('discussions')}>
                   <MessageSquare size={16} />
                   <strong>{projDiscussions.length}</strong>
                   <span>{t('projects.master.tab.discussions')}</span>
                 </button>
-                <button type="button" onClick={() => setDetailView('tasks')}>
+                <button type="button" onClick={() => selectDetailView('tasks')}>
                   <ListTodo size={16} />
                   <strong>{t('projects.master.overview.browse')}</strong>
                   <span>{t('projects.master.tab.tasks')}</span>
                 </button>
-                <button type="button" onClick={() => setDetailView('docs')}>
+                <button type="button" onClick={() => selectDetailView('docs')}>
                   <BookOpen size={16} />
                   <strong>
                     {proj.audit_status === 'Validated'
@@ -2020,13 +2046,13 @@ export function ProjectCard({
                   </strong>
                   <span>{t('projects.master.tab.docs')}</span>
                 </button>
-                <button type="button" onClick={() => setDetailView('code')}>
+                <button type="button" onClick={() => selectDetailView('code')}>
                   <Code2 size={16} />
                   <strong>{t('projects.master.overview.browse')}</strong>
                   <span>{t('projects.master.tab.code')}</span>
                 </button>
                 <button type="button" onClick={() => {
-                  setDetailView('resources');
+                  selectDetailView('resources');
                   setExpandedTab('mcps');
                 }}>
                   <Puzzle size={16} />
@@ -2034,7 +2060,7 @@ export function ProjectCard({
                   <span>Plugins</span>
                 </button>
                 <button type="button" onClick={() => {
-                  setDetailView('resources');
+                  selectDetailView('resources');
                   setExpandedTab('workflows');
                 }}>
                   <Workflow size={16} />
@@ -2042,7 +2068,7 @@ export function ProjectCard({
                   <span>{t('projects.workflows')}</span>
                 </button>
                 <button type="button" onClick={() => {
-                  setDetailView('resources');
+                  selectDetailView('resources');
                   setExpandedTab('skills');
                 }}>
                   <Zap size={16} />
@@ -2053,7 +2079,7 @@ export function ProjectCard({
                   type="button"
                   data-tone={(proj.tech_debt_count ?? 0) > 0 ? 'warning' : 'success'}
                   onClick={() => {
-                    setDetailView('docs');
+                    selectDetailView('docs');
                     setExpandedTab('docAi');
                     if ((proj.tech_debt_count ?? 0) > 0) setDocDeepLink('docs/tech-debt');
                   }}
@@ -2062,12 +2088,12 @@ export function ProjectCard({
                   <strong>{proj.tech_debt_count ?? 0}</strong>
                   <span>{t('projects.master.sort.techDebt')}</span>
                 </button>
-                <button type="button" onClick={() => setDetailView('docs')}>
+                <button type="button" onClick={() => selectDetailView('docs')}>
                   <RefreshCw size={16} />
                   <strong>{driftStatus?.stale_sections.length ?? 0}</strong>
                   <span>{t('projects.master.overview.stale')}</span>
                 </button>
-                <button type="button" onClick={() => setDetailView('resources')}>
+                <button type="button" onClick={() => selectDetailView('resources')}>
                   <FolderInput size={16} />
                   <strong>{(proj.linked_repos ?? []).length}</strong>
                   <span>{t('linkedRepos.title')}</span>

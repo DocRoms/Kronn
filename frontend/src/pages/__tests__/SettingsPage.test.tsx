@@ -26,7 +26,7 @@ vi.mock('../../lib/api', () => ({
     getScanDepth: vi.fn().mockResolvedValue(4),
     getScanPaths: vi.fn().mockResolvedValue(['/home/user/repos']),
     getScanIgnore: vi.fn().mockResolvedValue(['node_modules', '.git']),
-    getServerConfig: vi.fn().mockResolvedValue({ host: '127.0.0.1', port: 3140, domain: null, max_concurrent_agents: 5, auth_enabled: true, discussion_notes_enabled: true }),
+    getServerConfig: vi.fn().mockResolvedValue({ host: '127.0.0.1', port: 3140, domain: null, max_concurrent_agents: 5, agent_stall_timeout_min: 5, agent_global_timeout_min: 30, auth_enabled: true, discussion_notes_enabled: true }),
     setServerConfig: vi.fn().mockResolvedValue(undefined),
     getNetworkExposure: vi.fn().mockResolvedValue({ exposed: false, restart_required: false, port: 3140, reachable_ips: [] }),
     setNetworkExposure: vi.fn().mockResolvedValue({ exposed: false, restart_required: false, port: 3140, reachable_ips: [] }),
@@ -626,5 +626,47 @@ describe('SettingsPage', () => {
 
     expect(slider.value).toBe('5'); // reverted, not stuck at 9
     expect(toastFn).toHaveBeenCalledWith(expect.stringContaining('boom'), 'error');
+  });
+
+  it('loads and persists the absolute agent execution timeout independently', async () => {
+    await wrap(<SettingsPage {...defaultProps} />);
+
+    const globalSlider = screen.getByLabelText("Durée maximale d'une exécution agent") as HTMLInputElement;
+    const stallSlider = screen.getByLabelText("Timeout d'inactivité agent") as HTMLInputElement;
+    const concurrencySlider = screen.getByLabelText('Agents simultanés max') as HTMLInputElement;
+    const agentsCard = document.getElementById('settings-agent-config');
+    const serverCard = document.getElementById('settings-server');
+    expect(agentsCard).toContainElement(concurrencySlider);
+    expect(agentsCard).toContainElement(globalSlider);
+    expect(agentsCard).toContainElement(stallSlider);
+    expect(serverCard).not.toContainElement(globalSlider);
+    expect(globalSlider.value).toBe('30');
+    expect(stallSlider.value).toBe('5');
+
+    await act(async () => { fireEvent.change(globalSlider, { target: { value: '120' } }); });
+
+    await waitFor(() => expect(configApi.setServerConfig).toHaveBeenCalledWith({
+      agent_global_timeout_min: 120,
+    }));
+    expect(globalSlider.value).toBe('120');
+    expect(stallSlider.value).toBe('5');
+  });
+
+  it('warns when inactivity can never outlast the absolute execution limit', async () => {
+    (configApi.getServerConfig as ReturnType<typeof vi.fn>).mockResolvedValue({
+      host: '127.0.0.1',
+      port: 3140,
+      domain: null,
+      max_concurrent_agents: 5,
+      agent_stall_timeout_min: 120,
+      agent_global_timeout_min: 30,
+      auth_enabled: true,
+      discussion_notes_enabled: true,
+    });
+    await wrap(<SettingsPage {...defaultProps} />);
+
+    expect(document.body.textContent).toContain(
+      "le plafond global interrompra l'agent avant le timeout d'inactivité",
+    );
   });
 });

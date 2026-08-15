@@ -4213,6 +4213,272 @@ button.disc-contact-open {
   margin-top: 6px;
 }
 
+/* Discussion-wide asset inventory. It shares the utility-panel column used by
+   Git, Plan and Settings so opening it never covers or resizes the header. */
+.disc-assets-panel {
+  width: min(430px, 42vw);
+  min-width: 340px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border-left: 1px solid var(--kr-border);
+  background: var(--kr-bg-surface);
+}
+
+.disc-assets-panel-header {
+  min-height: 66px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 13px 14px;
+  border-bottom: 1px solid var(--kr-border-light);
+}
+
+.disc-assets-panel-header h2 {
+  margin: 0;
+  color: var(--kr-text-primary);
+  font-size: 14px;
+}
+
+.disc-assets-panel-header p {
+  margin: 3px 0 0;
+  color: var(--kr-text-muted);
+  font-size: 11px;
+}
+
+.disc-assets-panel-tools {
+  display: grid;
+  gap: 9px;
+  padding: 11px 12px;
+  border-bottom: 1px solid var(--kr-border-light);
+}
+
+.disc-assets-search {
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px;
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-sm);
+  color: var(--kr-text-muted);
+  background: var(--kr-bg-raised);
+}
+
+.disc-assets-search:focus-within {
+  border-color: rgba(var(--kr-accent-rgb), 0.52);
+  box-shadow: 0 0 0 2px rgba(var(--kr-accent-rgb), 0.1);
+}
+
+.disc-assets-search input {
+  min-width: 0;
+  width: 100%;
+  border: 0;
+  outline: 0;
+  color: var(--kr-text-primary);
+  background: transparent;
+  font: inherit;
+  font-size: 12px;
+}
+
+.disc-assets-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.disc-assets-filters button {
+  min-height: 27px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 7px;
+  border: 1px solid var(--kr-border-light);
+  border-radius: 999px;
+  color: var(--kr-text-secondary);
+  background: var(--kr-bg-raised);
+  font: inherit;
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.disc-assets-filters button:hover,
+.disc-assets-filters button[data-active="true"] {
+  border-color: rgba(var(--kr-accent-rgb), 0.42);
+  color: var(--kr-accent-ink);
+  background: rgba(var(--kr-accent-rgb), 0.09);
+}
+
+.disc-assets-filter-count {
+  color: var(--kr-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.disc-assets-panel-content {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 12px;
+}
+
+.disc-asset-library-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px;
+}
+
+.disc-asset-card {
+  min-width: 0;
+  position: relative;
+  display: grid;
+  grid-template-rows: 118px auto;
+  overflow: hidden;
+  border: 1px solid var(--kr-border-light);
+  border-radius: var(--kr-r-md);
+  background: var(--kr-bg-raised);
+}
+
+.disc-asset-card:hover {
+  border-color: rgba(var(--kr-accent-rgb), 0.34);
+}
+
+.disc-asset-card-preview {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  background: var(--kr-bg-hover-strong);
+}
+
+.disc-asset-card-preview .disc-attach-thumb {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  border-radius: 0;
+}
+
+.disc-asset-card-preview .disc-attach-chip {
+  max-width: calc(100% - 18px);
+}
+
+.disc-asset-card-body {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+  padding: 8px 68px 8px 9px;
+}
+
+.disc-asset-card-name {
+  overflow: hidden;
+  color: var(--kr-text-primary);
+  font-size: 11px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.disc-asset-card-meta {
+  color: var(--kr-text-muted);
+  font-size: 9px;
+}
+
+.disc-asset-card-actions {
+  position: absolute;
+  right: 7px;
+  bottom: 8px;
+  display: flex;
+  gap: 4px;
+}
+
+.disc-asset-card-action {
+  width: 25px;
+  height: 25px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid var(--kr-border-light);
+  border-radius: var(--kr-r-sm);
+  color: var(--kr-text-secondary);
+  background: var(--kr-bg-surface);
+  cursor: pointer;
+}
+
+.disc-asset-card-action:hover {
+  border-color: rgba(var(--kr-accent-rgb), 0.45);
+  color: var(--kr-accent-ink);
+}
+
+.disc-asset-card-action[data-error="true"] {
+  border-color: color-mix(in srgb, var(--kr-error) 48%, var(--kr-border));
+  color: var(--kr-error);
+}
+
+.disc-asset-pending {
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  padding: 2px 5px;
+  border-radius: 999px;
+  color: var(--kr-warning);
+  background: color-mix(in srgb, var(--kr-warning) 13%, var(--kr-bg-surface));
+  font-size: 8px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.disc-assets-empty {
+  min-height: 220px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  color: var(--kr-text-muted);
+  text-align: center;
+}
+
+.disc-assets-empty strong {
+  color: var(--kr-text-secondary);
+  font-size: 12px;
+}
+
+.disc-assets-empty span {
+  max-width: 240px;
+  font-size: 10px;
+}
+
+.disc-assets-load-more {
+  width: 100%;
+  margin-top: 12px;
+}
+
+.disc-message-asset-target {
+  animation: disc-asset-target-pulse 1.8s ease-out;
+}
+
+@keyframes disc-asset-target-pulse {
+  0%, 35% { background: rgba(var(--kr-accent-rgb), 0.18); }
+  100% { background: transparent; }
+}
+
+@media (max-width: 767px) {
+  .disc-assets-panel {
+    position: absolute;
+    inset: 0;
+    z-index: var(--kr-z-modal);
+    width: 100%;
+    min-width: 0;
+    border-left: 0;
+  }
+
+  .disc-asset-library-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
 .disc-attach-thumb {
   display: inline-flex;
   align-items: center;
@@ -4225,10 +4491,21 @@ button.disc-contact-open {
   overflow: hidden;
   cursor: pointer;
   transition: border-color 0.15s;
+  padding: 0;
+  font: inherit;
 }
 
 .disc-attach-thumb:hover {
   border-color: rgba(var(--kr-accent-rgb), 0.4);
+}
+
+.disc-attach-thumb:focus-visible {
+  outline: 2px solid var(--kr-accent);
+  outline-offset: 2px;
+}
+
+.disc-attach-thumb:disabled {
+  cursor: wait;
 }
 
 .disc-attach-thumb img {
@@ -4243,6 +4520,141 @@ button.disc-contact-open {
   display: flex;
   align-items: center;
   justify-content: center;
+}
+
+/* In-app image gallery. Kept in a body portal so message overflow and the
+   discussion viewport cannot crop it. */
+.disc-image-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: calc(var(--kr-z-modal) + 30);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(5, 8, 14, 0.88);
+  backdrop-filter: blur(8px);
+}
+
+.disc-image-lightbox-stage {
+  width: min(1180px, 100%);
+  height: min(860px, 100%);
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+  border: 1px solid var(--kr-border-light);
+  border-radius: var(--kr-r-lg);
+  background: var(--kr-bg-elevated);
+  box-shadow: var(--kr-shadow-modal);
+}
+
+.disc-image-lightbox-toolbar {
+  min-height: 52px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px 8px 16px;
+  border-bottom: 1px solid var(--kr-border-light);
+  background: var(--kr-bg-raised);
+}
+
+.disc-image-lightbox-name {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  color: var(--kr-text-primary);
+  font-size: 13px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.disc-image-lightbox-count {
+  flex: none;
+  color: var(--kr-text-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.disc-image-lightbox-action,
+.disc-image-lightbox-nav {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--kr-border-light);
+  color: var(--kr-text-secondary);
+  background: var(--kr-bg-hover-strong);
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+
+.disc-image-lightbox-action {
+  width: 34px;
+  height: 34px;
+  flex: none;
+  padding: 0;
+  border-radius: var(--kr-r-sm);
+}
+
+.disc-image-lightbox-action:hover,
+.disc-image-lightbox-nav:hover {
+  color: var(--kr-text-primary);
+  border-color: rgba(var(--kr-accent-rgb), 0.45);
+  background: rgba(var(--kr-accent-rgb), 0.12);
+}
+
+.disc-image-lightbox-action:focus-visible,
+.disc-image-lightbox-nav:focus-visible {
+  outline: 2px solid var(--kr-accent);
+  outline-offset: 2px;
+}
+
+.disc-image-lightbox-content {
+  position: relative;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px 72px;
+  background:
+    linear-gradient(45deg, rgba(127, 127, 127, 0.035) 25%, transparent 25%) 0 0 / 18px 18px,
+    linear-gradient(-45deg, rgba(127, 127, 127, 0.035) 25%, transparent 25%) 0 9px / 18px 18px,
+    var(--kr-bg-base);
+}
+
+.disc-image-lightbox-content > img {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: var(--kr-r-sm);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.28);
+}
+
+.disc-image-lightbox-nav {
+  position: absolute;
+  top: 50%;
+  width: 44px;
+  height: 58px;
+  padding: 0;
+  border-radius: var(--kr-r-md);
+  transform: translateY(-50%);
+}
+
+.disc-image-lightbox-nav.previous { left: 14px; }
+.disc-image-lightbox-nav.next { right: 14px; }
+
+@media (max-width: 640px) {
+  .disc-image-lightbox { padding: 0; }
+  .disc-image-lightbox-stage {
+    width: 100%;
+    height: 100%;
+    border: 0;
+    border-radius: 0;
+  }
+  .disc-image-lightbox-content { padding: 16px 50px; }
+  .disc-image-lightbox-nav.previous { left: 4px; }
+  .disc-image-lightbox-nav.next { right: 4px; }
 }
 
 .disc-attach-chip {

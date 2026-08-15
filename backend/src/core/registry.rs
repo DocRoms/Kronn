@@ -1705,7 +1705,17 @@ the final report so the user can judge for themselves.
                 base_url: "https://api.fastly.com".into(),
                 auth: ApiAuthKind::CliToken {
                     command: "fastly".into(),
-                    args: vec!["auth".into(), "token".into()],
+                    // Force the machine-readable contract. Recent Fastly CLI
+                    // builds may emit terminal/status decorations when they
+                    // inherit a desktop process environment; those bytes are
+                    // invalid in `Fastly-Key` and used to surface only as an
+                    // opaque reqwest `builder error`.
+                    args: vec![
+                        "auth".into(),
+                        "token".into(),
+                        "--quiet".into(),
+                        "--non-interactive".into(),
+                    ],
                     inject: TokenInjection::CustomHeader {
                         name: "Fastly-Key".into(),
                     },

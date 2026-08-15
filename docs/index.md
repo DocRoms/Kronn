@@ -7,17 +7,21 @@ This folder is the project's living knowledge base, shared by humans and AI agen
 - **[AGENTS.md](AGENTS.md)** — Tiered context loader read by Claude Code, Codex, Gemini, Vibe, Copilot, Kiro and any agent that follows the `AGENTS.md` convention. Start here if you're an LLM.
 - **This file (`index.md`)** — Plain landing page for humans browsing the folder. Extend it with whatever helps onboarding.
 
-## Current release: 0.9.7
+## Current release: 0.10.0
 
-- Session resume and shared-worktree ownership now fail closed instead of
-  silently binding or replaying work in stale contexts.
-- LiteLLM and Ollama workflow steps receive bounded, project-scoped native API,
-  Quick API and read-only Planning tools with secret-free execution receipts.
-- Plugin imports explicitly assign Global/project scope, while project cards
-  expose Context Audit drift and honest human-attestation provenance.
-- Desktop releases smoke-test document generation and require a complete
-  Windows, macOS Intel, macOS ARM and Linux installer matrix.
-- See the concise [`CHANGELOG.md`](../CHANGELOG.md) for 0.9.7 and 0.9.6, and
+- Live Pages are sandboxed, versioned HTML reports backed by persisted named
+  JSON datasets and linked to workflows or discussions.
+- `CollectApiData`, `TransformData` and `PublishPageData` form a deterministic,
+  zero-token path from saved Quick APIs or reusable shell-free Quick Execs (including CSV normalization) to an automatically refreshed
+  Page.
+- The Pages library supports search, favorites, multi-selection, archive and
+  explicit deletion using the same interaction model as Discussions.
+- Workflow and MCP authoring expose real data previews, visual mapping and Page
+  creation for standalone, mock-backed or scheduled reports.
+- Continual Learning is a default-off beta: typed agent proposals remain gated
+  by evidence checks and explicit human validation before entering user or
+  project learning documents.
+- See the concise [`CHANGELOG.md`](../CHANGELOG.md) for 0.10.0 and 0.9.7, and
   [`releases/`](releases/) for older release history.
 
 ## Layout

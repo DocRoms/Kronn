@@ -455,6 +455,51 @@
     .gallery-card figcaption { padding: 10px 14px; font-size: 13px; line-height: 1.45; color: var(--text-dim); }
     .gallery-card figcaption strong { color: var(--lila); }
     @media (max-width: 760px) { .gallery-grid { grid-template-columns: 1fr; } }
+
+    /* LIGHTBOX — native gallery carousel */
+    .lb-overlay {
+      position: fixed; inset: 0; z-index: 1000;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      gap: 6px; padding: 3vh 2vw;
+      background: rgba(6, 8, 4, 0.93);
+      -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px);
+      opacity: 0; visibility: hidden; transition: opacity 0.2s ease;
+    }
+    .lb-overlay.open { opacity: 1; visibility: visible; }
+    .lb-stage { position: relative; display: flex; align-items: center; justify-content: center; max-width: 100%; }
+    .lb-img {
+      max-width: 90vw; max-height: 80vh; width: auto; height: auto;
+      border: 1.5px solid var(--lila); background: var(--bg-deep);
+      box-shadow: 0 0 40px rgba(0, 0, 0, 0.6);
+    }
+    .lb-cap { margin-top: 14px; max-width: 820px; text-align: center; font-family: var(--body); font-size: 14px; line-height: 1.5; color: var(--text-dim); }
+    .lb-cap strong { color: var(--lila); }
+    .lb-count { font-family: var(--terminal); font-size: 13px; color: var(--kronn); letter-spacing: 0.08em; margin-top: 4px; }
+    .lb-btn {
+      position: absolute; top: 50%; transform: translateY(-50%);
+      width: 52px; height: 52px; border-radius: 50%;
+      border: 1.5px solid var(--lila); background: rgba(10, 12, 8, 0.75);
+      color: var(--text); font-size: 30px; line-height: 1;
+      display: flex; align-items: center; justify-content: center;
+      cursor: pointer; user-select: none; transition: background 0.15s, color 0.15s;
+    }
+    .lb-btn:hover { background: var(--lila); color: var(--bg-deep); }
+    .lb-prev { left: -70px; } .lb-next { right: -70px; }
+    .lb-close {
+      position: fixed; top: 22px; right: 26px;
+      width: 44px; height: 44px; border-radius: 50%;
+      border: 1.5px solid var(--text-dim); background: rgba(10, 12, 8, 0.7);
+      color: var(--text); font-size: 26px; cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      transition: background 0.15s, color 0.15s, border-color 0.15s;
+    }
+    .lb-close:hover { background: var(--kronn); color: var(--bg-deep); border-color: var(--kronn); }
+    body.lb-lock { overflow: hidden; }
+    @media (max-width: 900px) {
+      .lb-prev { left: 8px; } .lb-next { right: 8px; }
+      .lb-btn { width: 44px; height: 44px; font-size: 24px; background: rgba(10, 12, 8, 0.88); }
+      .lb-img { max-width: 96vw; }
+    }
     /* SYSTEM MAP — boucle asymétrique : COMMANDE (Kronn → CLI, électrique) vs
        MCP (agent → Kronn, lila). Deux arêtes étiquetées en sens inverse. */
     .schema-loop {
@@ -1301,10 +1346,10 @@
       <a class="btn btn-pink" href="#level-1">▼ How to play</a>
       <a class="btn btn-electric" href="https://github.com/DocRoms/Kronn" target="_blank" rel="noopener">↓ Install</a>
     </div>
-    <div class="ea-disclaimer">v0.9.7 · <span class="ea-tag">early access</span> · la API y los step types pueden cambiar antes de la v1.0</div>
-    <div class="release-note" aria-label="Novedades de Kronn 0.9.7">
-      <strong>0.9.7</strong>
-      <span>Sesiones y worktrees seguros · herramientas nativas en workflows · matriz desktop verificada</span>
+    <div class="ea-disclaimer">v0.10.0 · <span class="ea-tag">early access</span> · la API y los step types pueden cambiar antes de la v1.0</div>
+    <div class="release-note" aria-label="Novedades de Kronn 0.10.0">
+      <strong>0.10.0</strong>
+      <span>Live Pages · pipelines de datos a cero tokens · aprendizaje continuo opt-in</span>
       <a href="https://github.com/DocRoms/Kronn/blob/main/CHANGELOG.md" target="_blank" rel="noopener">Notas de versión →</a>
     </div>
   </section>
@@ -1339,7 +1384,7 @@
         </div>
         <div class="loop-edge loop-mcp">
           <span class="loop-glyph">▼</span>
-          <span class="loop-tag"><span class="sk-pk">MCP · 77 herramientas</span> · un agente pilota Kronn (workflow, room, planificación, API) sin abrir la UI.</span>
+          <span class="loop-tag"><span class="sk-pk">MCP · 91 herramientas</span> · un agente pilota Kronn (workflow, room, planificación, API y Pages) sin abrir la UI.</span>
         </div>
       </div>
 
@@ -1370,7 +1415,7 @@
         </div>
         <div class="leaf">
           <div class="title">Workflows desagentificados</div>
-          <p class="body"><strong>Desagentificar</strong> es sustituir los pasos mecánicos por steps deterministas (<code>Exec</code> · <code>Gate</code> · <code>Notify</code> · <code>ApiCall</code>…) a <span class="sk-pk">0 tokens</span>. <strong>9 tipos de pasos</strong>, incluido <code>SubWorkflow</code>, + batch fan-out; el agente solo interviene cuando es verdaderamente necesario.</p>
+          <p class="body"><strong>Desagentificar</strong> es sustituir los pasos mecánicos por steps deterministas (<code>Exec</code> · <code>Gate</code> · <code>Notify</code> · <code>ApiCall</code>…) a <span class="sk-pk">0 tokens</span>. <strong>12 tipos de pasos</strong>, incluida la recopilación, transformación, publicación de Pages y <code>SubWorkflow</code>; el agente solo interviene cuando es necesario.</p>
         </div>
         <div class="leaf">
           <div class="title">Plugins MCP &amp; API</div>
@@ -1535,51 +1580,51 @@
     <div class="gallery-grid">
       <figure class="gallery-card">
         <a href="screenshots/kronn_dashboard.png" target="_blank" rel="noopener">
-          <img src="screenshots/kronn_dashboard.png" width="991" height="821" loading="lazy" alt="Dashboard de Kronn: lista de proyectos, estado de auditoría, acceso rápido" />
+          <img src="screenshots/kronn_dashboard.png" width="1440" height="960" loading="lazy" alt="Dashboard de Kronn: lista de proyectos, estado de auditoría, acceso rápido" />
         </a>
         <figcaption><strong>Dashboard</strong> · tus proyectos, estado de auditoría, acceso rápido</figcaption>
       </figure>
       <figure class="gallery-card">
         <a href="screenshots/kronn_multi-ai_discussion.png" target="_blank" rel="noopener">
-          <img src="screenshots/kronn_multi-ai_discussion.png" width="939" height="873" loading="lazy" alt="Discusión multiagente: varios CLIs en la misma room de Kronn" />
+          <img src="screenshots/kronn_multi-ai_discussion.png" width="1440" height="960" loading="lazy" alt="Discusión multiagente: varios CLIs en la misma room de Kronn" />
         </a>
         <figcaption><strong>Discusión multiagente</strong> · varios CLIs en la misma room</figcaption>
       </figure>
       <figure class="gallery-card">
         <a href="screenshots/kronn-quick-prompts.png" target="_blank" rel="noopener">
-          <img src="screenshots/kronn-quick-prompts.png" width="1440" height="385" loading="lazy" alt="Biblioteca de Quick Prompts reutilizables y versionados" />
+          <img src="screenshots/kronn-quick-prompts.png" width="1440" height="960" loading="lazy" alt="Biblioteca de Quick Prompts reutilizables y versionados" />
         </a>
         <figcaption><strong>Quick Prompts</strong> · reutilizables, versionados, medidos</figcaption>
       </figure>
       <figure class="gallery-card">
         <a href="screenshots/kronn-qp-launch.png" target="_blank" rel="noopener">
-          <img src="screenshots/kronn-qp-launch.png" width="1440" height="500" loading="lazy" alt="Compare-agents: el mismo prompt lanzado en varios CLIs en paralelo" />
+          <img src="screenshots/kronn-qp-launch.png" width="1440" height="960" loading="lazy" alt="Compare-agents: el mismo prompt lanzado en varios CLIs en paralelo" />
         </a>
         <figcaption><strong>Compare-agents</strong> · el mismo prompt en N CLIs</figcaption>
       </figure>
       <figure class="gallery-card">
         <a href="screenshots/KronnCaptureAutoPilot.png" target="_blank" rel="noopener">
-          <img src="screenshots/KronnCaptureAutoPilot.png" width="1919" height="922" loading="lazy" alt="Workflow AutoPilot en curso: pipeline de auditoría, implementación, tests, PR con el pipeline compacto de pasos" />
+          <img src="screenshots/KronnCaptureAutoPilot.png" width="1440" height="960" loading="lazy" alt="Automatización: selector de modelo en 1 clic — 7 agentes (Claude Code, Codex, Gemini CLI, Kiro, GitHub Copilot, Ollama, LiteLLM) × Eco / Estándar / Avanzado, por paso, con el branch map en color" />
         </a>
-        <figcaption><strong>Workflow AutoPilot</strong> · auditoría → implementa → tests → PR</figcaption>
+        <figcaption><strong>Selector de modelo en 1 clic</strong> · 7 agentes × Eco / Estándar / Avanzado, por paso</figcaption>
       </figure>
       <figure class="gallery-card">
         <a href="screenshots/mcps.png" target="_blank" rel="noopener">
-          <img src="screenshots/mcps.png" width="1230" height="521" loading="lazy" alt="Página de Plugins: 55+ plugins MCP y API, o Custom API" />
+          <img src="screenshots/mcps.png" width="1440" height="960" loading="lazy" alt="Página de Plugins: 20 plugins visibles, 19 configurados, 55+ en el registro (MCP y API), o cualquier API" />
         </a>
-        <figcaption><strong>Plugins MCP &amp; API</strong> · 55+ o cualquier API</figcaption>
+        <figcaption><strong>Plugins MCP &amp; API</strong> · 19 configurados · 55+ en el registro</figcaption>
       </figure>
       <figure class="gallery-card">
         <a href="screenshots/KronnDocumentationView.jpg" target="_blank" rel="noopener">
-          <img src="screenshots/KronnDocumentationView.jpg" width="1495" height="720" loading="lazy" alt="Vista de Documentación de Kronn: doc generada por la auditoría (arquitectura, deuda técnica) renderizada en el viewer" />
+          <img src="screenshots/KronnDocumentationView.jpg" width="1440" height="960" loading="lazy" alt="Vista de Documentación de Kronn: doc generada por la auditoría (arquitectura, deuda técnica) renderizada en el viewer" />
         </a>
         <figcaption><strong>Auditoría IA</strong> · toda la doc + deuda técnica generadas (Sí, Kronn mismo no carga mucha deuda técnica ;))</figcaption>
       </figure>
       <figure class="gallery-card">
         <a href="screenshots/workflows.png" target="_blank" rel="noopener">
-          <img src="screenshots/workflows.png" width="1214" height="819" loading="lazy" alt="Página de Workflows: orquestación basada en pasos" />
+          <img src="screenshots/workflows.png" width="1440" height="960" loading="lazy" alt="Página de Automatización: orquestación basada en pasos (workflows multi-paso)" />
         </a>
-        <figcaption><strong>Workflows</strong> · orquestación basada en pasos</figcaption>
+        <figcaption><strong>Automatización</strong> · orquestación basada en pasos</figcaption>
       </figure>
     </div>
   </section>
@@ -1616,6 +1661,8 @@
           <li>Planificación global + planes de discusión compartidos con los agentes</li>
           <li>Continuación cross-CLI: Claude exporta, Codex retoma (0.8.4)</li>
           <li><strong>Multi-CLI en vivo</strong>: N agentes en una misma discusión (0.8.6)</li>
+          <li>Inventario <strong>Assets</strong> por discusión: imágenes, archivos y uploads, búsqueda + descarga (0.10.0)</li>
+          <li>Adjuntos de mensaje + galería de imágenes a pantalla completa (agente o humano)</li>
           <li><code>docs/AGENTS.md</code> generado por auditoría</li>
           <li>Inyección user-context <code>~/.kronn/user-context/</code></li>
           <li>Linked repos: contexto multi-repo</li>
@@ -1640,8 +1687,11 @@
       <div class="inventory-col">
         <div class="inv-cat"><span class="num">03</span>Workflows</div>
         <ul class="inv-list">
-          <li>9 step types: Agent · ApiCall · BatchApiCall · BatchQuickPrompt · JsonData · Notify · Exec · Gate · SubWorkflow</li>
+          <li>12 step types, incluidos CollectApiData · TransformData · PublishPageData</li>
           <li>0 tokens en los pasos mecánicos (por definición)</li>
+          <li><strong>Quick Execs (CLI)</strong> reutilizables: tests · lint · recogida PR/CI, sin shell, salida acotada (0.10.0)</li>
+          <li>Live Pages: HTML aislado + datasets JSON persistentes + historial</li>
+          <li>Exportación <strong>PDF / DOCX</strong> de las Pages: CSS, SVG y canvas renderizados con fidelidad</li>
           <li>AI Workflow Architect: dry-run + 1 clic</li>
           <li>Batch workflows (fan-out · chaining · git worktree · diff integrado)</li>
           <li>Loops + state scratchpad + guards</li>
@@ -1657,7 +1707,8 @@
         <div class="inv-cat"><span class="num">04</span>Agentes · plugins · local</div>
         <ul class="inv-list">
           <li>8 agentes: Claude Code · Codex · Gemini · Ollama · LiteLLM · Vibe…</li>
-          <li>MCP <code>kronn-internal</code>: 77 herramientas para que el agente pilote Kronn</li>
+          <li>MCP <code>kronn-internal</code>: 91 herramientas para que el agente pilote Kronn</li>
+          <li>Aprendizaje continuo beta: pruebas + validación humana, desactivado por defecto</li>
           <li><strong>Eco mode</strong> vía <a href="https://github.com/rtk-ai/rtk" target="_blank" rel="noopener">RTK</a>: proxy token-killer en 1 clic en agentes soportados</li>
           <li>Ollama 100% local + proxy LiteLLM · UI en ES · EN · FR · 简体中文</li>
           <li>Plugins <strong>MCP</strong>: Atlassian · Linear · Notion · …</li>
@@ -1733,7 +1784,7 @@
       <div class="compound-item">
         <div class="compound-num">05</div>
         <div class="compound-title">Workflows</div>
-        <p class="compound-body">Orquestación step-based: paso <code>Agent</code> + pasos mecánicos (<code>Exec</code>, <code>Gate</code>, <code>Notify</code>, <code>ApiCall</code>…) a <em>0 tokens por definición</em>. <strong style="color:var(--lila);">CRON-schedulable</strong>. Patrón <strong>Feasibility-Gated</strong> para tickets grandes: triaje YAML → human Gate → código restringido.</p>
+        <p class="compound-body">Orquestación step-based: paso <code>Agent</code> + pasos mecánicos a <em>0 tokens por definición</em>. Recopila varias Quick APIs, transforma visualmente su JSON tipado y publícalo en una Live Page aislada. <strong style="color:var(--lila);">CRON-schedulable</strong>.</p>
       </div>
     </div>
   </section>
@@ -1762,8 +1813,8 @@
         <p class="body">Pilotas vía UI, no programas. Multi-CLI orquestado, no LangGraph en Python.</p>
       </div>
       <div class="anti-card">
-        <div class="ttl"><span class="x">×</span>No es un workflow tool general</div>
-        <p class="body">Para automatizar integraciones no-IA (Slack, ETL, CRM, lifecycle email), quédate con n8n o Zapier. Kronn apunta a la orquestación de <strong>agentes IA</strong> específicamente.</p>
+        <div class="ttl"><span class="x">×</span>No es una plataforma de integración no-code</div>
+        <p class="body">Los workflows de Kronn pueden ser <strong>agénticos o totalmente deterministas</strong>: Slack, correo (Resend), CLIs y cualquier API. Kronn simplemente no pretende ofrecer cientos de conectores no-code llave en mano; para ese catálogo, n8n o Zapier siguen siendo más especializados.</p>
       </div>
       <div class="anti-card">
         <div class="ttl"><span class="x">×</span>No es un CI/CD</div>
@@ -1842,7 +1893,7 @@
 
       <div class="concept-card">
         <div class="concept-term">StepType</div>
-        <p class="concept-def">Los 9 tipos de step de un workflow: 2 IA (<code>Agent</code>, <code>BatchQuickPrompt</code>), 6 <strong>mecánicos</strong> a 0 tokens (<code>ApiCall</code>, <code>BatchApiCall</code>, <code>JsonData</code>, <code>Notify</code>, <code>Exec</code>, <code>Gate</code>) y <code>SubWorkflow</code> para componer pipelines.</p>
+        <p class="concept-def">Los 12 tipos de step: 2 IA (<code>Agent</code>, <code>BatchQuickPrompt</code>), 9 <strong>mecánicos</strong> a 0 tokens (incluidos <code>CollectApiData</code>, <code>TransformData</code> y <code>PublishPageData</code>) y <code>SubWorkflow</code> para componer pipelines.</p>
       </div>
 
       <div class="concept-card">
@@ -1909,7 +1960,7 @@
       <div class="sec-panel warn">
         <div class="sec-title">Lo que no tenemos</div>
         <ul class="sec-list warn">
-          <li><strong>Aún no en v1.0 estable.</strong> Versión actual v0.9.7, early access. La API, los step types y los esquemas pueden evolucionar entre versiones.</li>
+          <li><strong>Aún no en v1.0 estable.</strong> Versión actual v0.10.0, early access. La API, los step types y los esquemas pueden evolucionar entre versiones.</li>
           <li>Sin certificación SOC2 ni GDPR a día de hoy</li>
           <li>Single-user · sin RBAC ni gestión de equipos</li>
           <li>Si usas Anthropic / OpenAI / Google, tus prompts van a ellos: su responsabilidad, no la nuestra</li>
@@ -1925,10 +1976,76 @@
   <footer>
     <div class="game-over">· Continue ? ·</div>
     <a href="https://github.com/DocRoms/Kronn" target="_blank" rel="noopener">github.com/DocRoms/Kronn</a>
-    <span class="credits">kronn v0.9.7 · agpl-3.0 · rust × typescript · made by <a href="https://www.docroms.com/" target="_blank" rel="noopener">d.r.</a></span>
+    <span class="credits">kronn v0.10.0 · agpl-3.0 · rust × typescript · made by <a href="https://www.docroms.com/" target="_blank" rel="noopener">d.r.</a></span>
   </footer>
 
 </div>
 
+  <script>
+  // Native gallery lightbox / carousel — progressive enhancement over the <a> links.
+  (function () {
+    var links = Array.prototype.slice.call(document.querySelectorAll('.gallery-card a'));
+    if (!links.length) return;
+    var L = {
+      fr: { gallery: 'Galerie de captures Kronn', close: 'Fermer', prev: 'Image précédente', next: 'Image suivante' },
+      en: { gallery: 'Kronn screenshot gallery', close: 'Close', prev: 'Previous image', next: 'Next image' },
+      es: { gallery: 'Galería de capturas de Kronn', close: 'Cerrar', prev: 'Imagen anterior', next: 'Imagen siguiente' }
+    };
+    var t = L[(document.documentElement.lang || 'en').slice(0, 2)] || L.en;
+    var items = links.map(function (a) {
+      var fig = a.closest('.gallery-card');
+      var cap = fig && fig.querySelector('figcaption');
+      var img = a.querySelector('img');
+      return { src: a.getAttribute('href'), caption: cap ? cap.innerHTML : '', alt: img ? (img.getAttribute('alt') || '') : '' };
+    });
+    var overlay = document.createElement('div');
+    overlay.className = 'lb-overlay';
+    overlay.setAttribute('role', 'dialog');
+    overlay.setAttribute('aria-modal', 'true');
+    overlay.setAttribute('aria-label', t.gallery);
+    overlay.setAttribute('aria-hidden', 'true');
+    overlay.innerHTML =
+      '<button class="lb-close" type="button" aria-label="' + t.close + '">×</button>' +
+      '<div class="lb-stage">' +
+        '<button class="lb-btn lb-prev" type="button" aria-label="' + t.prev + '">‹</button>' +
+        '<img class="lb-img" alt="" />' +
+        '<button class="lb-btn lb-next" type="button" aria-label="' + t.next + '">›</button>' +
+      '</div>' +
+      '<div class="lb-count" aria-live="polite"></div>' +
+      '<div class="lb-cap"></div>';
+    document.body.appendChild(overlay);
+    var imgEl = overlay.querySelector('.lb-img');
+    var capEl = overlay.querySelector('.lb-cap');
+    var countEl = overlay.querySelector('.lb-count');
+    var idx = 0, lastFocus = null;
+    function render() {
+      var it = items[idx];
+      imgEl.src = it.src; imgEl.alt = it.alt;
+      capEl.innerHTML = it.caption;
+      countEl.textContent = (idx + 1) + ' / ' + items.length;
+      [1, -1].forEach(function (d) { var p = new Image(); p.src = items[(idx + d + items.length) % items.length].src; });
+    }
+    function openAt(i) { idx = i; lastFocus = document.activeElement; render(); overlay.setAttribute('aria-hidden', 'false'); overlay.classList.add('open'); document.body.classList.add('lb-lock'); overlay.querySelector('.lb-close').focus(); }
+    function close() { overlay.classList.remove('open'); overlay.setAttribute('aria-hidden', 'true'); document.body.classList.remove('lb-lock'); imgEl.removeAttribute('src'); if (lastFocus && lastFocus.focus) lastFocus.focus(); }
+    function go(step) { idx = (idx + step + items.length) % items.length; render(); }
+    links.forEach(function (a, i) { a.addEventListener('click', function (e) { if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return; e.preventDefault(); openAt(i); }); });
+    overlay.querySelector('.lb-close').addEventListener('click', close);
+    overlay.querySelector('.lb-prev').addEventListener('click', function () { go(-1); });
+    overlay.querySelector('.lb-next').addEventListener('click', function () { go(1); });
+    overlay.addEventListener('click', function (e) { if (e.target === overlay) close(); });
+    document.addEventListener('keydown', function (e) {
+      if (!overlay.classList.contains('open')) return;
+      if (e.key === 'Escape') { e.preventDefault(); close(); }
+      else if (e.key === 'ArrowRight') { e.preventDefault(); go(1); }
+      else if (e.key === 'ArrowLeft') { e.preventDefault(); go(-1); }
+      else if (e.key === 'Tab') {
+        var buttons = overlay.querySelectorAll('button');
+        var first = buttons[0], last = buttons[buttons.length - 1];
+        if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+        else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+      }
+    });
+  })();
+  </script>
 </body>
 </html>

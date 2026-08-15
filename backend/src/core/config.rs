@@ -281,6 +281,7 @@ pub fn default_config() -> AppConfig {
             run_retention_days: 0,
             max_concurrent_agents: 5,
             agent_stall_timeout_min: 5,
+            agent_global_timeout_min: crate::models::DEFAULT_AGENT_GLOBAL_TIMEOUT_MIN,
             pseudo: None,
             avatar_email: None,
             bio: None,

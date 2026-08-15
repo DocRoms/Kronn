@@ -31,11 +31,11 @@ BRIDGE = "backend/scripts/disc-introspection-mcp.py"
 # The measurement serialises with `ensure_ascii=True`, exactly like the wire:
 # every accented character in a French description travels as a 6-byte
 # `\uXXXX` escape, not as its 2 bytes of UTF-8. The ceiling is pinned to this
-# tree's 87-tool payload after moving reference material to on-demand manuals
+# tree's 95-tool payload after moving reference material to on-demand manuals
 # and keeping field descriptions to the information needed at selection time.
 # It carries no slack: lower it whenever the catalogue shrinks, never raise it
 # to make a build pass.
-CATALOGUE_MAX_BYTES = 90_932
+CATALOGUE_MAX_BYTES = 89_588
 
 # Per-declaration ceiling. The five heaviest tools were 29% of the catalogue for
 # 6% of the tools; their descriptions had grown into manuals. A per-tool cap is
@@ -44,7 +44,7 @@ CATALOGUE_MAX_BYTES = 90_932
 # Also corrected: this used to add raw `description` bytes to a separately
 # serialised schema, which counted neither the JSON envelope nor the escaping. It
 # now measures the whole declaration exactly as sent.
-DECLARATION_MAX_BYTES = 5_368
+DECLARATION_MAX_BYTES = 4_392
 
 # Tools allowed above DECLARATION_MAX_BYTES, with the reason. An entry here is a
 # debt acknowledged in writing, not an exemption to forget: shrink the tool and
@@ -57,18 +57,47 @@ BYTES_PER_TOKEN = 3.7
 
 
 def load_tools(root: pathlib.Path) -> list[dict]:
-    """Read the TOOLS literal without importing the bridge.
+    """Read TOOLS without importing the bridge.
 
     Importing would run module-level setup and need the whole environment; the
-    catalogue is a plain literal, so parsing is both cheaper and safer.
+    catalogue is literal data, so parsing is both cheaper and safer. JSON Schema
+    bounds may reference scalar constants declared before ``TOOLS``; resolve
+    those names without executing the module.
     """
     source = (root / BRIDGE).read_text()
     tree = ast.parse(source)
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Assign) and any(
-            getattr(target, "id", None) == "TOOLS" for target in node.targets
-        ):
-            return ast.literal_eval(node.value)
+
+    class LiteralNameResolver(ast.NodeTransformer):
+        def __init__(self, values: dict[str, object]) -> None:
+            self.values = values
+
+        def visit_Name(self, node: ast.Name) -> ast.AST:
+            if isinstance(node.ctx, ast.Load) and node.id in self.values:
+                return ast.copy_location(ast.Constant(self.values[node.id]), node)
+            return node
+
+    literals: dict[str, object] = {}
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        names = [target.id for target in node.targets if isinstance(target, ast.Name)]
+        resolved = LiteralNameResolver(literals).visit(node.value)
+        if "TOOLS" in names:
+            try:
+                return ast.literal_eval(resolved)
+            except (ValueError, TypeError) as exc:
+                raise SystemExit(
+                    f"TOOLS in {BRIDGE} must contain only literals or references "
+                    f"to prior scalar constants: {exc}"
+                ) from exc
+        if len(names) != 1:
+            continue
+        try:
+            value = ast.literal_eval(resolved)
+        except (ValueError, TypeError):
+            continue
+        if isinstance(value, (str, int, float, bool, type(None))):
+            literals[names[0]] = value
     raise SystemExit(f"TOOLS literal not found in {BRIDGE}")
 
 

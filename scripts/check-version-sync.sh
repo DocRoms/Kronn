@@ -69,6 +69,16 @@ fi
 if ! grep -Fq "**Statut : $VERSION (version actuelle).**" "$ROOT/README.fr.md"; then
     fail "README.fr.md does not identify $VERSION as the current release"
 fi
+if ! grep -Fq "## What's new in $VERSION" "$ROOT/README.md"; then
+    fail "README.md release heading is not $VERSION"
+fi
+if ! grep -Fq "## Nouveautés de la $VERSION" "$ROOT/README.fr.md"; then
+    fail "README.fr.md release heading is not $VERSION"
+fi
+
+if ! grep -Fq "## Current release: $VERSION" "$ROOT/docs/index.md"; then
+    fail "docs/index.md does not identify $VERSION as the current release"
+fi
 
 for readme in README.md README.fr.md; do
     if ! grep -Fq "git clone --branch $VERSION " "$ROOT/$readme"; then
@@ -84,6 +94,18 @@ for readme in README.md README.fr.md; do
     fi
 done
 
+if ! grep -Fq "git clone --branch $VERSION " "$ROOT/docs/install.md"; then
+    fail "docs/install.md clone instructions do not use $VERSION"
+fi
+stale_install="$(
+    grep -Eo 'git clone --branch [0-9]+\.[0-9]+\.[0-9]+' "$ROOT/docs/install.md" |
+        sed 's/.*--branch //' |
+        grep -vx "$VERSION" || true
+)"
+if [ -n "$stale_install" ]; then
+    fail "docs/install.md still contains stale clone version(s): $stale_install"
+fi
+
 for site in site/index.html site/en.html site/es.html; do
     if ! grep -Fq "v$VERSION" "$ROOT/$site"; then
         fail "$site does not mention v$VERSION"
@@ -95,6 +117,12 @@ for site in site/index.html site/en.html site/es.html; do
     )"
     if [ -n "$stale_site" ]; then
         fail "$site still contains stale current-version marker(s): $stale_site"
+    fi
+    if ! grep -Eq "aria-label=\"[^\"]*Kronn $VERSION\"" "$ROOT/$site"; then
+        fail "$site release-note label is not $VERSION"
+    fi
+    if ! grep -Fq "<strong>$VERSION</strong>" "$ROOT/$site"; then
+        fail "$site release-note badge is not $VERSION"
     fi
 done
 

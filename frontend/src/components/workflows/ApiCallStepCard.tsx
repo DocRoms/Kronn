@@ -164,7 +164,7 @@ export function ApiCallStepCard({
         stepToSend = substitutePlaceholders(stepToSend, testVarsPrompt.values);
       }
       const res = await workflowsApi.testApiCall({ step: stepToSend, project_id: effectiveProjectId });
-      if (res.success && res.envelope) {
+      if (res.success && res.envelope && typeof res.envelope === 'object' && !Array.isArray(res.envelope) && 'data' in res.envelope) {
         setResponse(res.envelope.data);
       } else {
         setResponseError(res.error ?? t('wf.apicall.testFailed'));
@@ -983,7 +983,7 @@ function QueryParamsEditor({
 
 // ─── JsonTreeViewer ────────────────────────────────────────────────────────
 
-function JsonTreeViewer({ data, onPick }: { data: unknown; onPick: (path: string) => void }) {
+export function JsonTreeViewer({ data, onPick }: { data: unknown; onPick: (path: string) => void }) {
   return (
     <pre className="wf-apicall-json-tree" style={{ margin: 0 }}>
       <JsonNode value={data} pathSegments={[]} onPick={onPick} />

@@ -12,6 +12,8 @@ import { discussions as discussionsApi, projects as projectsApi, skills as skill
 import { GitPanel } from '../components/GitPanel';
 import { DiscussionPlanPanel } from '../components/DiscussionPlanPanel';
 import { DiscussionSettingsPanel } from '../components/DiscussionSettingsPanel';
+import { DiscussionAssetsPanel } from '../components/DiscussionAssetsPanel';
+import { BatchComparePanel } from '../components/BatchComparePanel';
 import { TestModeBanner } from '../components/TestModeBanner';
 import { TestModeModal } from '../components/TestModeModal';
 import type { TestModeBlocker } from '../types/extensions';
@@ -231,6 +233,9 @@ export interface DiscussionsPageProps {
    *  group in the sidebar and scroll to it, then ack via onFocusBatchConsumed
    *  so the same id doesn't re-trigger on every render. */
   focusBatchId?: string | null;
+  /** A freshly launched QP comparison opens directly in the dedicated
+   * comparison workspace instead of landing on only its first child. */
+  focusBatchMode?: 'batch' | 'compare';
   onFocusBatchConsumed?: () => void;
   toast: ToastFn;
   // Lifted streaming state (lives in Dashboard, survives page changes)
@@ -313,6 +318,7 @@ export function DiscussionsPage({
   openDiscussionId,
   onOpenDiscConsumed,
   focusBatchId,
+  focusBatchMode = 'batch',
   onFocusBatchConsumed,
   toast,
   sendingMap,
@@ -350,6 +356,7 @@ export function DiscussionsPage({
   const [gitPanelExpanded, setGitPanelExpanded] = useState(false);
   const [showPlanPanel, setShowPlanPanel] = useState(false);
   const [showSettingsPanel, setShowSettingsPanel] = useState(false);
+  const [showAssetsPanel, setShowAssetsPanel] = useState(false);
   const [showMessageSearch, setShowMessageSearch] = useState(false);
   const [showDiscussionNotes, setShowDiscussionNotes] = useState<boolean>(() => {
     try { return localStorage.getItem('kronn:showDiscussionNotes') !== 'false'; } catch { return true; }
@@ -382,16 +389,17 @@ export function DiscussionsPage({
   const [proposalInboxDiscussionId, setProposalInboxDiscussionId] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!showGitPanel && !showPlanPanel && !showSettingsPanel) return;
+    if (!showGitPanel && !showPlanPanel && !showSettingsPanel && !showAssetsPanel) return;
     const closePanel = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return;
       setShowGitPanel(false);
       setShowPlanPanel(false);
       setShowSettingsPanel(false);
+      setShowAssetsPanel(false);
     };
     window.addEventListener('keydown', closePanel);
     return () => window.removeEventListener('keydown', closePanel);
-  }, [showGitPanel, showPlanPanel, showSettingsPanel]);
+  }, [showGitPanel, showPlanPanel, showSettingsPanel, showAssetsPanel]);
 
   useEffect(() => {
     setInitialGitWorkspaceId(undefined);
@@ -401,6 +409,7 @@ export function DiscussionsPage({
     setInitialGitWorkspaceId(workspaceId);
     setShowPlanPanel(false);
     setShowSettingsPanel(false);
+    setShowAssetsPanel(false);
     setShowGitPanel(true);
   }, [activeDiscussionId]);
 
@@ -536,6 +545,12 @@ export function DiscussionsPage({
 
   const [contextFilesMap, setContextFilesMap] = useState<Record<string, ContextFile[]>>({});
   const [uploadingFiles, setUploadingFiles] = useState(false);
+  const loadContextFiles = useCallback(async (discId: string) => {
+    try {
+      const files = await discussionsApi.listContextFiles(discId);
+      setContextFilesMap(prev => ({ ...prev, [discId]: files }));
+    } catch { /* ignore */ }
+  }, []);
   const [contactsList, setContactsList] = useState<Contact[]>([]);
   const [contactsOnline, setContactsOnline] = useState<Record<string, boolean>>({});
   // message_ids whose federated attachment is announced but not yet
@@ -551,6 +566,10 @@ export function DiscussionsPage({
   const [batchReviewDiscs, setBatchReviewDiscs] = useState<Discussion[]>([]);
   const [batchReviewLoading, setBatchReviewLoading] = useState(false);
   const [batchReviewError, setBatchReviewError] = useState<string | null>(null);
+  const [batchCompare, setBatchCompare] = useState<{ runId: string; label: string; discIds: string[] } | null>(null);
+  const [batchCompareDiscs, setBatchCompareDiscs] = useState<Discussion[]>([]);
+  const [batchCompareLoading, setBatchCompareLoading] = useState(false);
+  const [batchCompareError, setBatchCompareError] = useState<string | null>(null);
   const refetchBatchSummaries = useCallback(() => {
     workflowsApi.listBatchRunSummaries()
       .then(setBatchSummaries)
@@ -579,6 +598,23 @@ export function DiscussionsPage({
       setBatchReviewLoading(false);
     }
   }, []);
+  const refreshBatchCompare = useCallback(async (discIds: string[], showLoading = false) => {
+    if (showLoading) setBatchCompareLoading(true);
+    setBatchCompareError(null);
+    try {
+      const loaded = await Promise.all(discIds.map(id => discussionsApi.get(id)));
+      setBatchCompareDiscs(loaded);
+    } catch (error) {
+      setBatchCompareError(userError(error));
+    } finally {
+      setBatchCompareLoading(false);
+    }
+  }, []);
+  const openBatchCompare = useCallback((runId: string, label: string, discIds: string[]) => {
+    setBatchCompare({ runId, label, discIds });
+    setBatchCompareDiscs([]);
+    void refreshBatchCompare(discIds, true);
+  }, [refreshBatchCompare]);
   const [copiedMsgId, setCopiedMsgId] = useState<string | null>(null);
   const [ttsEnabled, setTtsEnabled] = useState<boolean>(() => {
     try { return localStorage.getItem('kronn:ttsEnabled') === 'true'; } catch { return false; }
@@ -894,6 +930,7 @@ export function DiscussionsPage({
       if (discussionId !== activeDiscussionId) return;
       setShowGitPanel(false);
       setShowSettingsPanel(false);
+      setShowAssetsPanel(false);
       setShowPlanPanel(true);
     };
     window.addEventListener('kronn:plan-changed', refreshPlan);
@@ -1066,7 +1103,14 @@ export function DiscussionsPage({
       refetchDiscussions();
       if (activeDiscussionId) {
         reloadDiscussion(activeDiscussionId);
+        loadContextFiles(activeDiscussionId);
       }
+    }
+    // A local API/MCP caller pinned files after posting its message. Messages
+    // and context files are cached independently, so reloading only the chat
+    // leaves the new thumbnails invisible until the user changes discussion.
+    if (msg.type === 'context_files_changed' && activeDiscussionId === msg.discussion_id) {
+      loadContextFiles(msg.discussion_id);
     }
     // Remote peer shared a discussion with us → refresh list
     if (msg.type === 'discussion_invite') {
@@ -1176,6 +1220,7 @@ export function DiscussionsPage({
     abortControllers,
     activeDiscussionId,
     contactsList,
+    loadContextFiles,
     refetchBatchSummaries,
     refetchDiscussions,
     reloadDiscussion,
@@ -1208,7 +1253,10 @@ export function DiscussionsPage({
   // (see handleWsMessage above) doesn't apply to a deferred call.
   const { connected: wsConnected, connectionState: wsConnectionState } = useWebSocket(handleWsMessage, () => {
     refetchDiscussions();
-    if (activeDiscussionId) reloadDiscussion(activeDiscussionId);
+    if (activeDiscussionId) {
+      reloadDiscussion(activeDiscussionId);
+      loadContextFiles(activeDiscussionId);
+    }
     refreshContactsPresence();
   });
 
@@ -1671,6 +1719,15 @@ export function DiscussionsPage({
       next.add(focusBatchId);
       return next;
     });
+    if (focusBatchMode === 'compare') {
+      const children = allDiscussions.filter(discussion => discussion.workflow_run_id === focusBatchId);
+      const summary = batchSummaries.find(item => item.run_id === focusBatchId);
+      openBatchCompare(
+        focusBatchId,
+        summary?.batch_name || summary?.quick_prompt_name || t('disc.compare.title'),
+        children.map(discussion => discussion.id),
+      );
+    }
     // Defer the scroll one tick so the just-uncollapsed nodes have time to render.
     requestAnimationFrame(() => {
       const el = document.querySelector(`[data-batch-key="${batchKey}"]`);
@@ -1680,7 +1737,20 @@ export function DiscussionsPage({
     });
     onFocusBatchConsumed?.();
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [focusBatchId, allDiscussions.length, batchSummaries]);
+  }, [focusBatchId, focusBatchMode, allDiscussions.length, batchSummaries, openBatchCompare, t]);
+
+  // Child answers arrive independently. Refresh the open cockpit whenever a
+  // child's durable message count changes, without replacing it by N chats.
+  const batchCompareVersion = batchCompare
+    ? batchCompare.discIds.map(id => {
+      const disc = allDiscussions.find(item => item.id === id);
+      return `${id}:${disc?.message_count ?? 0}:${disc?.awaiting_agent ?? false}`;
+    }).join('|')
+    : '';
+  useEffect(() => {
+    if (!batchCompare || !batchCompareVersion) return;
+    void refreshBatchCompare(batchCompare.discIds);
+  }, [batchCompareVersion, batchCompare, refreshBatchCompare]);
 
   const handleCreateDiscussion = async (config: NewDiscConfig) => {
     let disc;
@@ -2212,20 +2282,14 @@ export function DiscussionsPage({
     await resendPartialPending(pending);
   };
 
-  // ── Context files ──────────────────────────────────────────────────────────
-  const loadContextFiles = useCallback(async (discId: string) => {
-    try {
-      const files = await discussionsApi.listContextFiles(discId);
-      setContextFilesMap(prev => ({ ...prev, [discId]: files }));
-    } catch { /* ignore */ }
-  }, []);
-
-  // Load context files when a discussion becomes active
+  // Always refresh when a discussion becomes active. A cached empty array may
+  // predate an MCP upload performed while this tab was open; treating it as a
+  // permanent cache hit hides historical attachments until a full page reload.
   useEffect(() => {
-    if (activeDiscussionId && !contextFilesMap[activeDiscussionId]) {
+    if (activeDiscussionId) {
       loadContextFiles(activeDiscussionId);
     }
-  }, [activeDiscussionId, contextFilesMap, loadContextFiles]);
+  }, [activeDiscussionId, loadContextFiles]);
 
   const handleUploadFiles = useCallback(async (files: File[]) => {
     if (!activeDiscussionId) return;
@@ -2262,6 +2326,10 @@ export function DiscussionsPage({
   // The composer shows only pending; each message bubble shows its own (0.8.8).
   const pendingContextFiles = useMemo(
     () => (contextFilesMap[activeDiscussionId ?? ''] ?? []).filter(f => !f.message_id),
+    [activeDiscussionId, contextFilesMap],
+  );
+  const activeContextFiles = useMemo(
+    () => contextFilesMap[activeDiscussionId ?? ''] ?? [],
     [activeDiscussionId, contextFilesMap],
   );
   const attachmentsByMessageId = useMemo(() => {
@@ -2365,6 +2433,7 @@ export function DiscussionsPage({
 
   // Stable sidebar callbacks (avoid breaking SwipeableDiscItem memo)
   const handleDiscSelect = useCallback((discId: string, msgCount: number) => {
+    setBatchCompare(null);
     setActiveDiscussionId(discId);
     markDiscussionSeen(discId, msgCount);
     if (isMobile) setSidebarOpen(false);
@@ -2898,6 +2967,7 @@ export function DiscussionsPage({
             }
           }}
           onReviewBatch={openBatchReview}
+          onCompareBatch={openBatchCompare}
           collapsedGroups={collapsedDiscGroups}
           onToggleGroup={handleToggleGroup}
           openBatchRuns={openBatchRuns}
@@ -2936,6 +3006,7 @@ export function DiscussionsPage({
               setTestModePendingDiscId(null);
               setShowPlanPanel(false);
               setShowSettingsPanel(false);
+              setShowAssetsPanel(false);
               setShowGitPanel(true);
             }}
             onCancel={() => { setTestModeBlocker(null); setTestModePendingDiscId(null); }}
@@ -3034,8 +3105,29 @@ export function DiscussionsPage({
           </div>
         )}
 
-        {/* Active discussion chat */}
-        {activeDiscussion && !showNewDiscussion ? (
+        {/* A Compare run owns the main content area; its child discussions
+            remain available from the sidebar and via each column CTA. */}
+        {batchCompare && !showNewDiscussion ? (
+          <BatchComparePanel
+            label={batchCompare.label}
+            discussions={batchCompareDiscs}
+            loading={batchCompareLoading}
+            error={batchCompareError}
+            modelTiers={agentAccess?.model_tiers}
+            runningIds={new Set([
+              ...Object.entries(sendingMap).filter(([, running]) => running).map(([id]) => id),
+              ...Object.entries(queuedMap).filter(([, queued]) => queued).map(([id]) => id),
+            ])}
+            onRefresh={() => { void refreshBatchCompare(batchCompare.discIds, true); }}
+            onOpenDiscussion={(discussionId) => {
+              setBatchCompare(null);
+              setActiveDiscussionId(discussionId);
+              ensureDiscussionVisible(discussionId);
+            }}
+            onClose={() => setBatchCompare(null)}
+            t={t}
+          />
+        ) : activeDiscussion && !showNewDiscussion ? (
           <>
             <ChatHeader
               discussion={activeDiscussion}
@@ -3045,6 +3137,8 @@ export function DiscussionsPage({
               showGitPanel={showGitPanel}
               showPlanPanel={showPlanPanel}
               showSettingsPanel={showSettingsPanel}
+              showAssetsPanel={showAssetsPanel}
+              assetCount={activeContextFiles.length}
               planCompleted={discussionPlan?.discussion_id === activeDiscussion.id ? discussionPlan.completed_active : 0}
               planTotal={discussionPlan?.discussion_id === activeDiscussion.id ? discussionPlan.total_active : 0}
               planLater={discussionPlan?.discussion_id === activeDiscussion.id ? discussionPlan.later.length : 0}
@@ -3062,17 +3156,26 @@ export function DiscussionsPage({
                 setInitialGitWorkspaceId(undefined);
                 setShowPlanPanel(false);
                 setShowSettingsPanel(false);
+                setShowAssetsPanel(false);
                 setShowGitPanel(prev => !prev);
               }}
               onTogglePlanPanel={() => {
                 setShowGitPanel(false);
                 setShowSettingsPanel(false);
+                setShowAssetsPanel(false);
                 setShowPlanPanel(prev => !prev);
               }}
               onToggleSettingsPanel={() => {
                 setShowGitPanel(false);
                 setShowPlanPanel(false);
+                setShowAssetsPanel(false);
                 setShowSettingsPanel(prev => !prev);
+              }}
+              onToggleAssetsPanel={() => {
+                setShowGitPanel(false);
+                setShowPlanPanel(false);
+                setShowSettingsPanel(false);
+                setShowAssetsPanel(prev => !prev);
               }}
               showMessageSearch={showMessageSearch}
               onToggleMessageSearch={() => {
@@ -4326,6 +4429,28 @@ export function DiscussionsPage({
                   }
                 }}
                 toast={toast}
+              />
+            )}
+
+            {showAssetsPanel && (
+              <DiscussionAssetsPanel
+                discussionId={activeDiscussion.id}
+                files={activeContextFiles}
+                onClose={() => setShowAssetsPanel(false)}
+                onNavigateMessage={(messageId) => {
+                  setShowAssetsPanel(false);
+                  setStickToBottom(false);
+                  requestAnimationFrame(() => {
+                    const row = [...(messagesContainerRef.current?.querySelectorAll<HTMLElement>(
+                      '[data-message-id]',
+                    ) ?? [])].find(item => item.dataset.messageId === messageId);
+                    if (!row) return;
+                    row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    row.classList.add('disc-message-asset-target');
+                    window.setTimeout(() => row.classList.remove('disc-message-asset-target'), 1800);
+                  });
+                }}
+                t={t}
               />
             )}
 

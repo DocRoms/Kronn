@@ -2,7 +2,7 @@
 """MCP catalogue census, per server and per tool — KT-192 DoD 0.
 
 `mcp_surface_budget.py` already ratchets ONE catalogue: Kronn's own bridge, at
-92 444 B. But an agent session receives the union of every configured server, and
+89 588 B. But an agent session receives the union of every configured server, and
 nothing was measuring that union. Kronn stores no tool catalogue of its own — a
 server's declarations only exist at runtime, in its `tools/list` reply — so the
 only honest way to size the real surface is to ask each server.

@@ -563,6 +563,34 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/version/check", get(api::version::check))
         // ── Agent CLI usage / cost (via ccusage) ──
         .route("/api/usage", get(api::usage::get_usage))
+        // ── Live Pages (v0.10.0) ──
+        .route("/api/pages/capability", get(api::live_pages::capability))
+        .route(
+            "/api/pages",
+            get(api::live_pages::list).post(api::live_pages::create),
+        )
+        .route(
+            "/api/pages/{id}",
+            get(api::live_pages::get)
+                .patch(api::live_pages::update)
+                .delete(api::live_pages::delete),
+        )
+        .route("/api/pages/{id}/revisions", get(api::live_pages::revisions))
+        .route("/api/pages/{id}/workflows", get(api::live_pages::workflows))
+        .route(
+            "/api/pages/{id}/publications",
+            get(api::live_pages::publications),
+        )
+        .route(
+            "/api/pages/{id}/discussions",
+            get(api::live_pages::discussions).post(api::live_pages::link_discussion),
+        )
+        .route(
+            "/api/pages/{id}/discussions/{discussion_id}",
+            delete(api::live_pages::unlink_discussion),
+        )
+        .route("/api/pages/{id}/html", put(api::live_pages::update_html))
+        .route("/api/pages/{id}/publish", post(api::live_pages::publish))
         // ── OpenAPI / Swagger UI ──
         // Spec served at `/api/openapi.json` by SwaggerUi (its `.url()`
         // mounts the spec route automatically). Interactive UI at
@@ -1025,8 +1053,16 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         // ── Secret themes (hidden palette unlock via code) ──
         .route("/api/themes/unlock", post(api::themes::unlock))
         // ── Document generation (5 formats through the Python sidecar) ──
-        .route("/api/docs/pdf", post(api::docs::generate_pdf))
-        .route("/api/docs/docx", post(api::docs::generate_docx))
+        .route(
+            "/api/docs/pdf",
+            post(api::docs::generate_pdf)
+                .layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024)),
+        )
+        .route(
+            "/api/docs/docx",
+            post(api::docs::generate_docx)
+                .layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024)),
+        )
         .route("/api/docs/xlsx", post(api::docs::generate_xlsx))
         .route("/api/docs/csv", post(api::docs::generate_csv))
         .route("/api/docs/pptx", post(api::docs::generate_pptx))
@@ -1150,6 +1186,14 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route(
             "/api/workflow-steps/test-api-call",
             post(api::workflows::test_api_call),
+        )
+        .route(
+            "/api/workflow-steps/test-collect-api-data",
+            post(api::workflows::test_collect_api_data),
+        )
+        .route(
+            "/api/workflow-steps/preview-transform-data",
+            post(api::workflows::preview_transform_data),
         )
         // 0.8.6 — Agent API broker. Lets the kronn-internal MCP forward
         // an agent-driven HTTP call through the same executor as
@@ -1328,6 +1372,21 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             get(api::quick_apis::export_qa),
         )
         .route("/api/quick-apis/import", post(api::quick_apis::import_qa))
+        // ── Quick Execs (reusable shell-free CLI collectors) ──
+        .route(
+            "/api/quick-execs",
+            get(api::quick_execs::list).post(api::quick_execs::create),
+        )
+        .route(
+            "/api/quick-execs/{id}",
+            put(api::quick_execs::update).delete(api::quick_execs::delete),
+        )
+        .route("/api/quick-execs/{id}/run", post(api::quick_execs::run))
+        .route(
+            "/api/quick-execs/{id}/export",
+            get(api::quick_execs::export),
+        )
+        .route("/api/quick-execs/import", post(api::quick_execs::import))
         // ── Discussions ──
         .route("/api/discussions", get(api::discussions::list))
         .route("/api/discussions", post(api::discussions::create))

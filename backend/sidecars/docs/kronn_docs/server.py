@@ -26,6 +26,7 @@ Design notes
 from __future__ import annotations
 
 import csv as _csv
+import html as _html
 import io
 import logging
 import os
@@ -67,6 +68,10 @@ class PdfRequest(BaseModel):
     """Input for POST /pdf — the Rust backend decides the output path so
     every file produced by this sidecar lands where the backend expects."""
     html: str = Field(..., description="Full HTML document (can include <style>).")
+    page_images: List[str] = Field(
+        default_factory=list,
+        description="Optional browser-rendered PNG data URLs, one per output page.",
+    )
     output_path: str = Field(..., description="Absolute path where the PDF will be written.")
     base_url: Optional[str] = Field(
         None,
@@ -102,6 +107,35 @@ def _pdf_page_stylesheet(html: str, page_size: Optional[str]) -> str:
     return f"@page {{ {'; '.join(declarations)}; }}" if declarations else ""
 
 
+def _materialized_pages_html(html: str, page_images: List[str]) -> str:
+    """Prefer browser-rendered Page images when supplied.
+
+    Live Pages can use CSS features that WeasyPrint intentionally does not
+    implement. The opaque iframe captures those pages with the browser engine;
+    the sidecar only paginates the resulting local PNGs. Discussion documents
+    omit ``page_images`` and keep their selectable-text HTML path unchanged.
+    """
+    if not page_images:
+        return html
+    if len(page_images) > 50:
+        raise ValueError("A rendered Page export is limited to 50 pages")
+    for image in page_images:
+        if not image.startswith("data:image/png;base64,"):
+            raise ValueError("Rendered Page images must be PNG data URLs")
+    pages = "".join(
+        '<section class="kronn-rendered-page">'
+        f'<img src="{_html.escape(image, quote=True)}" alt="Rendered Page {index}">'
+        "</section>"
+        for index, image in enumerate(page_images, start=1)
+    )
+    return f"""<!doctype html><html><head><style>
+      html, body {{ margin: 0; padding: 0; background: white; }}
+      .kronn-rendered-page {{ width: 210mm; min-height: 297mm; overflow: hidden; break-after: page; }}
+      .kronn-rendered-page:last-child {{ break-after: auto; }}
+      .kronn-rendered-page img {{ display: block; width: 100%; height: auto; margin: 0; }}
+    </style></head><body>{pages}</body></html>"""
+
+
 # ─── Endpoints ──────────────────────────────────────────────────────────────
 
 
@@ -128,8 +162,13 @@ def render_pdf(req: PdfRequest) -> DocResponse:
             detail=f"weasyprint not installed in the sidecar venv: {e}",
         )
 
+    try:
+        render_html = _materialized_pages_html(req.html, req.page_images)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+
     stylesheets = []
-    page_stylesheet = _pdf_page_stylesheet(req.html, req.page_size)
+    page_stylesheet = _pdf_page_stylesheet(render_html, req.page_size)
     if page_stylesheet:
         stylesheets.append(CSS(string=page_stylesheet))
 
@@ -137,7 +176,7 @@ def render_pdf(req: PdfRequest) -> DocResponse:
     output.parent.mkdir(parents=True, exist_ok=True)
 
     try:
-        HTML(string=req.html, base_url=req.base_url).write_pdf(
+        HTML(string=render_html, base_url=req.base_url).write_pdf(
             target=str(output),
             stylesheets=stylesheets or None,
         )
@@ -162,6 +201,10 @@ class DocxRequest(BaseModel):
     """Input for POST /docx — same HTML input as /pdf for workflow parity.
     Agents produce HTML once, users choose PDF or DOCX at export time."""
     html: str = Field(..., description="HTML document (headings, paragraphs, lists, tables).")
+    page_images: List[str] = Field(
+        default_factory=list,
+        description="Optional browser-rendered PNG data URLs, one per output page.",
+    )
     output_path: str = Field(..., description="Absolute path where the DOCX will be written.")
 
 
@@ -182,10 +225,15 @@ def render_docx(req: DocxRequest) -> DocResponse:
     output.parent.mkdir(parents=True, exist_ok=True)
 
     try:
+        render_html = _materialized_pages_html(req.html, req.page_images)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+
+    try:
         render_html_to_docx(
-            req.html,
+            render_html,
             output,
-            page_stylesheet=_pdf_page_stylesheet(req.html, "A4"),
+            page_stylesheet=_pdf_page_stylesheet(render_html, "A4"),
         )
     except Exception as e:
         logger.exception("DOCX rendering failed")

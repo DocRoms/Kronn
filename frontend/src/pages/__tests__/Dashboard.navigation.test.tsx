@@ -23,6 +23,7 @@ vi.mock('../McpPage', () => ({ McpPage: () => <div data-testid="mcp-page" /> }))
 vi.mock('../WorkflowsPage', () => ({ WorkflowsPage: () => <div data-testid="workflow-page" /> }));
 vi.mock('../PlanningPage', () => ({ PlanningPage: () => <div data-testid="planning-page" /> }));
 vi.mock('../SettingsPage', () => ({ SettingsPage: () => <div data-testid="settings-page" /> }));
+vi.mock('../PagesPage', () => ({ PagesPage: () => <div data-testid="pages-page" /> }));
 
 vi.mock('../../lib/api', () => ({
   projects: {
@@ -44,6 +45,7 @@ vi.mock('../../lib/api', () => ({
   workflows: {
     list: vi.fn().mockResolvedValue([]),
   },
+  pages: { capability: vi.fn().mockResolvedValue({ activated: false, activated_at: null }) },
   config: {
     getLanguage: vi.fn().mockResolvedValue('fr'),
     getUiLanguage: vi.fn().mockResolvedValue('fr'),
@@ -57,7 +59,7 @@ vi.mock('../../lib/api', () => ({
   },
 }));
 
-import { discussions as discussionsApi } from '../../lib/api';
+import { discussions as discussionsApi, pages as pagesApi } from '../../lib/api';
 import { Dashboard } from '../Dashboard';
 
 const makeDiscussion = (id: string): Discussion => ({
@@ -104,6 +106,35 @@ afterEach(() => {
 });
 
 describe('Dashboard reload/HMR navigation restoration', () => {
+  it('reveals Pages only after the first Page has activated the capability', async () => {
+    await renderDashboard();
+    expect(screen.queryByRole('button', { name: 'Pages' })).not.toBeInTheDocument();
+    cleanup();
+
+    vi.mocked(pagesApi.capability).mockResolvedValue({
+      activated: true,
+      activated_at: '2026-08-13T10:00:00Z',
+    });
+    await renderDashboard();
+
+    const button = await screen.findByRole('button', { name: 'Pages' });
+    const navOrder = Array.from(
+      document.querySelectorAll<HTMLButtonElement>('.dash-nav-tabs [data-tour-id^="nav-"]'),
+      item => item.dataset.tourId,
+    );
+    expect(navOrder).toEqual([
+      'nav-projects',
+      'nav-discussions',
+      'nav-planning',
+      'nav-workflows',
+      'nav-pages',
+      'nav-mcps',
+      'nav-settings',
+    ]);
+    button.click();
+    expect(await screen.findByTestId('pages-page')).toBeInTheDocument();
+  });
+
   it('restores the Discussions page and its existing active discussion', async () => {
     sessionStorage.setItem('kronn:navigation:page', 'discussions');
     sessionStorage.setItem('kronn:navigation:discussion', 'disc-42');

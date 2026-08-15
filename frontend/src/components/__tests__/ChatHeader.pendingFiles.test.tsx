@@ -104,9 +104,10 @@ describe('ChatHeader — pending files badge', () => {
     expect(pill?.querySelector('svg')).not.toBeNull();
   });
 
-  it('shows no badge when pendingFilesCount is 0', () => {
+  it('hides the modified-files action when pendingFilesCount is 0', () => {
     renderHeader(0);
     expect(document.querySelector('.disc-icon-btn-badge')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'git.filesBtn' })).toBeNull();
   });
 
   it('shows the count inside the badge when pendingFilesCount > 0', () => {
@@ -127,12 +128,6 @@ describe('ChatHeader — pending files badge', () => {
     // multiple .disc-icon-btn elements in the header).
     const btn = screen.getByRole('button', { name: 'git.filesBtn' });
     expect(btn.getAttribute('title')).toBe('5 files pending');
-  });
-
-  it('falls back to the default label when there are no pending files', () => {
-    renderHeader(0);
-    const btn = screen.getByRole('button', { name: 'git.filesBtn' });
-    expect(btn.getAttribute('title')).toBe('git.filesBtn');
   });
 
   it('is only rendered next to a project-scoped discussion', () => {

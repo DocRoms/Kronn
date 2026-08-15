@@ -4,10 +4,11 @@ import { I18nProvider } from '../../lib/I18nContext';
 import {
   discussions as discussionsApi,
   quickApis as quickApisApi,
+  quickExecs as quickExecsApi,
   quickPrompts as quickPromptsApi,
 } from '../../lib/api';
 import { WorkflowsPage } from '../WorkflowsPage';
-import type { AgentsConfig, QuickApi, QuickPrompt, Workflow, WorkflowSummary } from '../../types/generated';
+import type { AgentsConfig, QuickApi, QuickExec, QuickPrompt, Workflow, WorkflowSummary } from '../../types/generated';
 
 const mockWorkflowsApi = vi.hoisted(() => ({
   list: vi.fn().mockResolvedValue([]),
@@ -76,6 +77,19 @@ vi.mock('../../lib/api', () => ({
     exportQa: vi.fn(),
     importQa: vi.fn(),
   },
+  quickExecs: {
+    list: vi.fn().mockResolvedValue([]),
+    create: vi.fn(),
+    update: vi.fn(),
+    delete: vi.fn(),
+    run: vi.fn(),
+    export: vi.fn(),
+    import: vi.fn(),
+  },
+  pages: {
+    list: vi.fn().mockResolvedValue([]),
+    create: vi.fn(),
+  },
   config: {
     getUiLanguage: vi.fn().mockResolvedValue('fr'),
     saveUiLanguage: vi.fn().mockResolvedValue(undefined),
@@ -133,6 +147,8 @@ const fullConfig: AgentsConfig = {
 afterEach(() => {
   cleanup();
   sessionStorage.removeItem('kronn:postQpImproved');
+  localStorage.removeItem('kronn:automationNavigation');
+  localStorage.removeItem('kronn:automationCollapsedSections');
 });
 
 const wrap = async (ui: React.ReactElement) => {
@@ -145,6 +161,194 @@ const wrap = async (ui: React.ReactElement) => {
 };
 
 describe('WorkflowsPage', () => {
+  it('uses one searchable sidebar ordered Workflow → API → Prompt → Exec', async () => {
+    const alpha = {
+      id: 'wf-alpha', name: 'Alpha report', project_id: 'p-alpha', project_name: 'Alpha',
+      trigger_type: 'manual', step_count: 1, misconfigured_step_count: 0,
+      enabled: true, pinned: false, last_run: null, created_at: '2026-01-01T00:00:00Z',
+    } as WorkflowSummary;
+    const beta = { ...alpha, id: 'wf-beta', name: 'Beta report', project_id: null, project_name: null };
+    mockWorkflowsApi.list.mockResolvedValueOnce([alpha, beta]);
+    mockWorkflowsApi.get.mockResolvedValueOnce({
+      id: alpha.id,
+      name: alpha.name,
+      project_id: alpha.project_id,
+      trigger: { type: 'Manual' },
+      steps: [], actions: [], safety: { sandbox: false, max_files: null, max_lines: null, require_approval: false },
+      workspace_config: null, concurrency_limit: null, enabled: true, pinned: false,
+      created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z',
+    } as Workflow);
+    mockWorkflowsApi.listRuns.mockResolvedValueOnce([]);
+
+    await wrap(<WorkflowsPage projects={[{ id: 'p-alpha', name: 'Alpha' } as never]} />);
+
+    const sidebar = screen.getByRole('complementary', { name: 'Automatisation' });
+    const kinds = within(sidebar).getAllByRole('button').filter(button => button.dataset.tourId?.startsWith('automation-kind-'));
+    expect(kinds.map(button => button.dataset.tourId)).toEqual([
+      'automation-kind-workflow',
+      'automation-kind-quick-api',
+      'automation-kind-quick-prompt',
+      'automation-kind-quick-exec',
+    ]);
+
+    fireEvent.change(within(sidebar).getByRole('textbox', { name: 'Rechercher une automatisation…' }), {
+      target: { value: 'Alpha' },
+    });
+    expect(within(sidebar).getByRole('button', { name: 'Ouvrir Alpha report' })).toBeInTheDocument();
+    expect(within(sidebar).queryByRole('button', { name: 'Ouvrir Beta report' })).toBeNull();
+
+    await act(async () => {
+      fireEvent.click(within(sidebar).getByRole('button', { name: 'Ouvrir Alpha report' }));
+    });
+    await waitFor(() => expect(mockWorkflowsApi.get).toHaveBeenCalledWith('wf-alpha'));
+    expect(screen.getByTestId('workflow-detail-pane')).toBeInTheDocument();
+  });
+
+  it('opens a Quick Exec from the shared sidebar in the common detail area', async () => {
+    const quickExec = {
+      id: 'qe-aws', name: 'CloudWatch errors', icon: '⌘', description: 'Collecte les erreurs',
+      project_id: null, command: 'aws',
+      args: ['logs', 'start-query', '--log-group-name', '/aws/caddy/production', '--query-string', 'fields @timestamp, @message | filter status >= 500 | sort @timestamp desc'],
+      timeout_secs: 60,
+      output_format: 'json', variables: [],
+      created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z',
+    } as QuickExec;
+    vi.mocked(quickExecsApi.list).mockResolvedValueOnce([quickExec]);
+
+    await wrap(<WorkflowsPage projects={[]} />);
+    const sidebar = screen.getByRole('complementary', { name: 'Automatisation' });
+    expect(sidebar.querySelector('[data-tour-id="automation-kind-quick-exec"]'))
+      .toHaveTextContent('Quick Execs (CLI)');
+    await act(async () => {
+      fireEvent.click(within(sidebar).getByRole('button', { name: 'Ouvrir CloudWatch errors' }));
+    });
+
+    expect(screen.getByRole('heading', { name: 'CloudWatch errors' })).toBeInTheDocument();
+    const card = document.querySelector('.automation-viewer .qe-card');
+    expect(card).not.toBeNull();
+    expect(card).toHaveAttribute('data-detail', 'true');
+    expect(card).toHaveTextContent('aws');
+    expect(card).toHaveTextContent('JSON');
+    const commandPreview = card?.querySelector('.qe-command-preview');
+    expect(commandPreview?.querySelectorAll('code')).toHaveLength(1);
+    expect(commandPreview?.querySelector('.qe-command-line')).toHaveAttribute(
+      'title',
+      expect.stringContaining('filter status >= 500'),
+    );
+    expect(within(card as HTMLElement).getByRole('button', { name: 'Tester' }))
+      .toHaveClass('qp-launch-btn');
+    expect(screen.getByRole('region', { name: 'Éditeur Quick Exec' })).toBeInTheDocument();
+    expect(screen.getByDisplayValue('CloudWatch errors')).toBeInTheDocument();
+  });
+
+  it('restores the selected automation and collapsed sidebar sections', async () => {
+    const quickExec = {
+      id: 'qe-persisted', name: 'Persistent CLI', icon: '⌘', description: 'Persists navigation',
+      project_id: null, command: 'aws', args: ['sts', 'get-caller-identity'], timeout_secs: 30,
+      output_format: 'json', variables: [],
+      created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z',
+    } as QuickExec;
+    vi.mocked(quickExecsApi.list)
+      .mockResolvedValueOnce([quickExec])
+      .mockResolvedValueOnce([quickExec]);
+
+    const first = await wrap(<WorkflowsPage projects={[]} />);
+    const firstSidebar = screen.getByRole('complementary', { name: 'Automatisation' });
+    const workflowSection = firstSidebar.querySelector('[data-tour-id="automation-kind-workflow"]') as HTMLButtonElement;
+    fireEvent.click(workflowSection);
+    expect(workflowSection).toHaveAttribute('aria-expanded', 'false');
+
+    const search = within(firstSidebar).getByRole('textbox', { name: 'Rechercher une automatisation…' });
+    fireEvent.change(search, { target: { value: 'Persistent' } });
+    expect(workflowSection).toHaveAttribute('aria-expanded', 'true');
+    fireEvent.change(search, { target: { value: '' } });
+    expect(workflowSection).toHaveAttribute('aria-expanded', 'false');
+
+    fireEvent.click(within(firstSidebar).getByRole('button', { name: 'Ouvrir Persistent CLI' }));
+    expect(await screen.findByRole('heading', { name: 'Persistent CLI' })).toBeInTheDocument();
+    first.unmount();
+
+    await wrap(<WorkflowsPage projects={[]} />);
+    const restoredSidebar = screen.getByRole('complementary', { name: 'Automatisation' });
+    expect(restoredSidebar.querySelector('[data-tour-id="automation-kind-workflow"]'))
+      .toHaveAttribute('aria-expanded', 'false');
+    expect(await screen.findByRole('heading', { name: 'Persistent CLI' })).toBeInTheDocument();
+  });
+
+  it('drops a persisted automation selection when its resource no longer exists', async () => {
+    localStorage.setItem('kronn:automationNavigation', JSON.stringify({
+      tab: 'quickExecs',
+      resourceId: 'qe-deleted',
+    }));
+
+    await wrap(<WorkflowsPage projects={[]} />);
+
+    await waitFor(() => {
+      expect(JSON.parse(localStorage.getItem('kronn:automationNavigation') ?? '{}'))
+        .toEqual({ tab: 'quickExecs', resourceId: null });
+    });
+    expect(document.querySelector('.automation-page')).toHaveAttribute('data-has-selection', 'false');
+  });
+
+  it('reloads the persisted workflow detail instead of only highlighting its row', async () => {
+    const summary = {
+      id: 'wf-persisted', name: 'Persisted workflow', project_id: null, project_name: null,
+      trigger_type: 'manual', step_count: 0, misconfigured_step_count: 0,
+      enabled: true, pinned: false, last_run: null, created_at: '2026-01-01T00:00:00Z',
+    } as WorkflowSummary;
+    const workflow = {
+      id: summary.id, name: summary.name, project_id: null,
+      trigger: { type: 'Manual' }, steps: [], actions: [],
+      safety: { sandbox: false, max_files: null, max_lines: null, require_approval: false },
+      workspace_config: null, concurrency_limit: null, enabled: true, pinned: false,
+      created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z',
+    } as Workflow;
+    localStorage.setItem('kronn:automationNavigation', JSON.stringify({
+      tab: 'workflows',
+      resourceId: summary.id,
+    }));
+    mockWorkflowsApi.list.mockResolvedValueOnce([summary]);
+    mockWorkflowsApi.get.mockResolvedValueOnce(workflow);
+
+    await wrap(<WorkflowsPage projects={[]} />);
+
+    await waitFor(() => expect(mockWorkflowsApi.get).toHaveBeenCalledWith(summary.id));
+    expect(screen.getByTestId('workflow-detail-pane')).toBeInTheDocument();
+  });
+
+  it('opens a Quick Prompt editor directly while keeping its command actions', async () => {
+    const quickPrompt: QuickPrompt = {
+      id: 'qp-summary', name: 'Summarize release', icon: '✍️', description: 'Résumé de livraison',
+      prompt_template: 'Résume {{changes}}', project_id: null, agent: 'Codex', tier: 'default',
+      variables: [{ name: 'changes', label: 'Changements', placeholder: '', description: null, required: true }],
+      skill_ids: [], profile_ids: [], directive_ids: [],
+      created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z',
+    };
+    vi.mocked(quickPromptsApi.list).mockResolvedValueOnce([quickPrompt]);
+    vi.mocked(quickPromptsApi.update).mockClear();
+    vi.mocked(quickPromptsApi.update).mockResolvedValueOnce(quickPrompt);
+
+    await wrap(<WorkflowsPage projects={[]} installedAgentTypes={['Codex']} agentAccess={fullConfig} />);
+    const sidebar = screen.getByRole('complementary', { name: 'Automatisation' });
+    await act(async () => {
+      fireEvent.click(within(sidebar).getByRole('button', { name: 'Ouvrir Summarize release' }));
+    });
+
+    const commandBar = document.querySelector('.automation-viewer .qp-card[data-detail="true"]');
+    expect(commandBar).not.toBeNull();
+    expect(within(commandBar as HTMLElement).getByRole('button', { name: /Comparer/ })).toBeInTheDocument();
+    expect(screen.getByDisplayValue('Summarize release')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Modifier Summarize release' })).toBeNull();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Enregistrer' }));
+    });
+    await waitFor(() => expect(quickPromptsApi.update).toHaveBeenCalledWith(
+      'qp-summary',
+      expect.objectContaining({ name: 'Summarize release' }),
+    ));
+  });
+
   it('opens the Quick Prompts tab from the one-shot deploy target without an effect redirect', async () => {
     sessionStorage.setItem('kronn:postQpImproved', 'qp-deployed');
 
@@ -268,7 +472,7 @@ describe('WorkflowsPage', () => {
     );
 
     // Click on the workflow in the list to open detail
-    const workflowCard = screen.getByText('My Workflow');
+    const workflowCard = screen.getByRole('button', { name: 'Ouvrir My Workflow' });
     await act(async () => { fireEvent.click(workflowCard); });
 
     // Wait for the detail to load and click "Edit"
@@ -311,8 +515,8 @@ describe('WorkflowsPage', () => {
     // Favorites group header renders, the pinned card appears BOTH there
     // and in its project group (disc-sidebar mirror); the regular one once.
     expect(screen.getByText('Favoris')).toBeInTheDocument();
-    expect(screen.getAllByText('Pinned WF')).toHaveLength(2);
-    expect(screen.getAllByText('Regular WF')).toHaveLength(1);
+    expect(screen.getAllByText('Pinned WF')).toHaveLength(3);
+    expect(screen.getAllByText('Regular WF')).toHaveLength(2);
   });
 
   it('the star toggle pins a workflow through the partial update', async () => {
@@ -354,7 +558,7 @@ describe('WorkflowsPage', () => {
       <WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig} />
     );
 
-    await waitFor(() => expect(screen.getByText('Ticket → PR')).toBeDefined());
+    await waitFor(() => expect(screen.getAllByText('Ticket → PR')).toHaveLength(2));
     // i18n: 'wf.needsConfig' = '{0} à configurer' → "3 à configurer"
     expect(screen.getByText('3 à configurer')).toBeDefined();
   });
@@ -377,7 +581,7 @@ describe('WorkflowsPage', () => {
       <WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig} />
     );
 
-    await waitFor(() => expect(screen.getByText('Clean WF')).toBeDefined());
+    await waitFor(() => expect(screen.getAllByText('Clean WF')).toHaveLength(2));
     expect(screen.queryByText(/à configurer/)).toBeNull();
   });
 
@@ -691,6 +895,7 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
     mockWorkflowsApi.get.mockResolvedValue(labWorkflow());
     mockWorkflowsApi.listRuns.mockResolvedValue([]);
     mockWorkflowsApi.countRuns.mockResolvedValue(0);
+    mockWorkflowsApi.getRun.mockResolvedValue(null);
     const onInitialSelectionConsumed = vi.fn();
     const page = await wrap(
       <WorkflowsPage
@@ -711,6 +916,7 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
             installedAgentTypes={['ClaudeCode']}
             agentAccess={fullConfig}
             initialSelectedWorkflowId="wf-lab"
+            initialSelectedWorkflowRunId="run-from-page"
             onInitialSelectionConsumed={onInitialSelectionConsumed}
           />
         </I18nProvider>
@@ -718,6 +924,7 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
     });
 
     await waitFor(() => expect(mockWorkflowsApi.get).toHaveBeenCalledWith('wf-lab'));
+    expect(mockWorkflowsApi.getRun).toHaveBeenCalledWith('wf-lab', 'run-from-page');
     await waitFor(() => expect(onInitialSelectionConsumed).toHaveBeenCalledTimes(1));
     expect(screen.getByRole('button', { name: /Workflows/ })).toHaveAttribute('data-active', 'true');
     expect(screen.getByText('Éditer')).toBeInTheDocument();
@@ -855,7 +1062,7 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
       .mockResolvedValueOnce(Array.from({ length: 50 }, (_, index) => run(String(index + 10))));
 
     await wrap(<WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig} />);
-    await act(async () => { fireEvent.click(screen.getByText('PR Review LAB')); });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Ouvrir PR Review LAB' })); });
     await waitFor(() => expect(screen.getByText('Runs (60)')).toBeInTheDocument());
     expect(mockWorkflowsApi.listRuns).toHaveBeenNthCalledWith(1, 'wf-lab', 10, 0, true);
 
@@ -876,14 +1083,13 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
 
     await wrap(<WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig} />);
 
-    const listPane = screen.getByTestId('workflow-list-pane');
-    const detailPane = screen.getByTestId('workflow-detail-pane');
+    const listPane = document.querySelector<HTMLElement>('.automation-sidebar-items')!;
     listPane.scrollTop = 700;
-    detailPane.scrollTop = 500;
 
-    await act(async () => { fireEvent.click(screen.getByText('PR Review LAB')); });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Ouvrir PR Review LAB' })); });
 
     expect(listPane.scrollTop).toBe(700);
+    const detailPane = screen.getByTestId('workflow-detail-pane');
     expect(detailPane.scrollTop).toBe(0);
   });
 
@@ -931,7 +1137,7 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
         agentAccess={fullConfig}
       />
     );
-    await act(async () => { fireEvent.click(screen.getByText('PR Review LAB')); });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Ouvrir PR Review LAB' })); });
     await waitFor(() => expect(screen.getByText('Éditer')).toBeInTheDocument());
 
     // The selected Agent step deliberately exposes the same switcher in the
@@ -961,7 +1167,7 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
     mockWorkflowsApi.listRuns.mockResolvedValue([]);
 
     await wrap(<WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig} />);
-    await act(async () => { fireEvent.click(screen.getByText('PR Review LAB')); });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Ouvrir PR Review LAB' })); });
     await waitFor(() => expect(screen.getByText('Éditer')).toBeDefined());
     await act(async () => { fireEvent.click(screen.getByText('Éditer')); });
 

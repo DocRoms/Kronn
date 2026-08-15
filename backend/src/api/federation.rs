@@ -72,6 +72,33 @@ pub async fn federate_message(state: &AppState, disc_id: &str, msg: &DiscussionM
     emit_attachments(state, &shared_id, &msg.id, &from_invite_code).await;
 }
 
+/// Announce files that were pinned after their message had already federated.
+/// This is the attachment equivalent of `federate_message`, and is a no-op for
+/// local discussions.
+pub(crate) async fn federate_attachments_for_message(
+    state: &AppState,
+    disc_id: &str,
+    message_id: &str,
+) {
+    let did = disc_id.to_string();
+    let shared_id = state
+        .db
+        .with_conn(move |conn| {
+            Ok(crate::db::discussions::get_discussion(conn, &did)?.and_then(|d| d.shared_id))
+        })
+        .await
+        .ok()
+        .flatten();
+    let Some(shared_id) = shared_id else {
+        return;
+    };
+
+    let config = state.config.read().await;
+    let from_invite_code = crate::api::contacts::build_invite_code(&config.server).await;
+    drop(config);
+    emit_attachments(state, &shared_id, message_id, &from_invite_code).await;
+}
+
 /// Broadcast an atomic message revision to mirrors of the same shared
 /// discussion. The receiver applies the content-hash CAS and emits its own
 /// fresh local cursor event; duplicates converge on `idempotency_key`.

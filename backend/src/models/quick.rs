@@ -199,6 +199,103 @@ pub struct CreateQuickApiRequest {
     pub directive_ids: Vec<String>,
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// Quick Execs (saved shell-free CLI data collectors)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct QuickExec {
+    pub id: String,
+    pub name: String,
+    pub icon: String,
+    #[serde(default)]
+    pub description: String,
+    pub project_id: Option<String>,
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    pub timeout_secs: u32,
+    pub output_format: super::CollectQuickExecOutputFormat,
+    #[serde(default)]
+    pub variables: Vec<PromptVariable>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
+pub struct CreateQuickExecRequest {
+    pub name: String,
+    pub icon: Option<String>,
+    #[serde(default)]
+    pub description: String,
+    pub project_id: Option<String>,
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    pub timeout_secs: Option<u32>,
+    #[serde(default)]
+    pub output_format: super::CollectQuickExecOutputFormat,
+    #[serde(default)]
+    pub variables: Vec<PromptVariable>,
+}
+
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
+pub struct RunQuickExecRequest {
+    #[serde(default)]
+    #[ts(type = "Record<string, string>")]
+    pub variables: ::std::collections::HashMap<String, String>,
+}
+
+#[derive(Debug, Serialize, TS)]
+#[ts(export)]
+pub struct RunQuickExecResponse {
+    pub success: bool,
+    pub duration_ms: u64,
+    #[ts(type = "any")]
+    pub data: Option<serde_json::Value>,
+    pub stdout: Option<String>,
+    pub stderr: Option<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
+pub struct ImportQuickExecRequest {
+    pub content: String,
+    pub project_id: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct QuickExecExportEnvelope {
+    pub kind: String,
+    pub version: u32,
+    pub exported_at: DateTime<Utc>,
+    pub quick_exec: QuickExec,
+}
+
+/// Canonicalize the JSON body accepted by Quick API authoring surfaces.
+///
+/// Older UI/agent helpers encoded an object once before sending it, turning
+/// `{ "foo": "bar" }` into a top-level JSON string. `reqwest::json` then
+/// correctly encoded that string a second time, so APIs received a JSON
+/// string instead of the object they declared. Keep legitimate scalar string
+/// bodies untouched, but recover object/array text at the Quick API boundary
+/// so already-saved QAs start working without a migration.
+pub fn normalize_quick_api_body(body: Option<serde_json::Value>) -> Option<serde_json::Value> {
+    body.map(|value| match value {
+        serde_json::Value::String(raw) => match serde_json::from_str::<serde_json::Value>(&raw) {
+            Ok(parsed @ serde_json::Value::Object(_))
+            | Ok(parsed @ serde_json::Value::Array(_)) => parsed,
+            _ => serde_json::Value::String(raw),
+        },
+        other => other,
+    })
+}
+
 // 0.8.5 — Quick Prompt version snapshot. Written by `db::quick_prompts`
 // on every INSERT (v1) and UPDATE (v2, v3, …). Carries every editable
 // field at the time of the change so the history drawer can render the
