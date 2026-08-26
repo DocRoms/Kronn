@@ -16,6 +16,7 @@ import {
   Shield, Globe, Copy, Server, Mic, Volume2, HelpCircle, ChevronRight,
   Sun, Moon, Monitor, Terminal, Heart, Key, ExternalLink,
   Minimize2, Maximize2, Maximize, Settings2, BookOpen, BarChart3,
+  GraduationCap,
 } from 'lucide-react';
 import { userError } from '../lib/userError';
 import { STT_MODELS, getSttModelId, setSttModelId } from '../lib/stt-models';
@@ -63,6 +64,7 @@ import { IdentitySection } from '../components/settings/IdentitySection';
 import { RecoverySection } from '../components/settings/RecoverySection';
 import { AntiHallucSection } from '../components/settings/AntiHallucSection';
 import { ContinualLearningSection } from '../components/settings/ContinualLearningSection';
+import { LearningSection } from '../components/settings/LearningSection';
 import { ProfilesSection } from '../components/settings/ProfilesSection';
 import { UsageSection } from '../components/settings/UsageSection';
 import { DebugSection } from '../components/settings/DebugSection';
@@ -374,6 +376,7 @@ export function SettingsPage({
     { id: 'settings-scan', label: t('config.scan'), icon: <FolderSearch size={15} /> },
     { id: 'settings-sourcing', label: t('config.sourcing'), icon: <Shield size={15} /> },
     { id: 'settings-continual-learning', label: t('config.learning'), icon: <BookOpen size={15} /> },
+    { id: 'settings-learning', label: t('settings.learning.navLabel'), icon: <GraduationCap size={15} /> },
     { id: 'settings-agent-config', label: t('config.agentsAndSkills'), icon: <Cpu size={15} /> },
     { id: 'settings-identity', label: t('settings.identity'), icon: <MessageSquare size={15} /> },
     { id: 'settings-recovery', label: t('settings.recovery.title'), icon: <Key size={15} /> },
@@ -885,6 +888,10 @@ export function SettingsPage({
       {/* 0.10.0 — Continual Learning master toggle (beta, default OFF). Sits next
           to anti-hallu: it's the upstream quality gate the learnings rely on. */}
       <ContinualLearningSection toast={toast} t={t} />
+
+      {/* Mode Mentor — master switch for the guided-learning feature (Mentor +
+          Onboarding). Gates the "Apprendre" nav tab + page. Default OFF. */}
+      <LearningSection toast={toast} t={t} />
 
       {/* ── Agent Config Accordion (Agents / Skills / Profiles / Directives) ── */}
       <div id="settings-agent-config" className="set-card">

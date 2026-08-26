@@ -191,6 +191,12 @@ pub struct ServerConfig {
     /// discs keep their saved value (no retroactive change).
     #[serde(default = "default_summary_strategy_off")]
     pub default_summary_strategy: crate::models::SummaryStrategy,
+    /// Mode Mentor — master switch for the whole guided-learning feature
+    /// (Mentor + Onboarding). `false` = the "Apprendre" nav tab and page are
+    /// hidden instance-wide (the backend endpoints stay reachable but the UI
+    /// surface is gated). Off by default so an install opts in explicitly.
+    #[serde(default)]
+    pub mentor_enabled: bool,
     /// Mode Mentor — id of the parameterized "mentor→censeur turn" workflow a
     /// parcours triggers on each learner submission. Instance-specific (the
     /// workflow is created per Kronn instance), so no compile-time default:
@@ -627,6 +633,9 @@ pub struct ServerConfigPublic {
     /// `Off` by default in 0.8.6 onwards. UI surfaces an explanation of
     /// when to re-enable (small-context agents without MCP access).
     pub default_summary_strategy: crate::models::SummaryStrategy,
+    /// Mode Mentor — mirrors `ServerConfig.mentor_enabled`. `false` = the
+    /// frontend hides the "Apprendre" nav tab and the guided-learning page.
+    pub mentor_enabled: bool,
     /// Mode Mentor — mirrors `ServerConfig.mentor_turn_workflow_id` so the
     /// frontend can trigger the mentor→censeur workflow (via the existing
     /// workflows API) without an extra round-trip. `None` = not wired yet.
@@ -660,6 +669,10 @@ pub struct UpdateServerConfigRequest {
     /// `None` keeps the existing value.
     #[serde(default)]
     pub default_summary_strategy: Option<crate::models::SummaryStrategy>,
+    /// Mode Mentor — `Some(v)` toggles the guided-learning feature on/off ;
+    /// `None` keeps the existing value (standard PATCH semantic).
+    #[serde(default)]
+    pub mentor_enabled: Option<bool>,
     /// Mode Mentor — `Some(id)` wires (or rewires) the mentor→censeur turn
     /// workflow ; empty string clears it ; `None` keeps the existing value.
     #[serde(default)]

@@ -622,13 +622,13 @@ export function MentorPage() {
                               const lt = levelTier(topic.level);
                               // Bottom row holds refs (left) + the "prochaine étape" / parcours-state
                               // tags (right); skip it entirely when there's nothing to show.
-                              const hasBottom = topic.references.length > 0 || isNext || !!ex;
+                              const hasBottom = topic.references.length > 0 || isNext || (!!ex && !exDone);
                               return (
                               <button
                                 key={topic.topic_id}
                                 id={`onb-topic-${topic.topic_id}`}
                                 type="button"
-                                className={`mentor-selectable mentor-topic${selectedTopic?.topic_id === topic.topic_id ? ' active' : ''}${isNext ? ' next' : ''}`}
+                                className={`mentor-selectable mentor-topic${selectedTopic?.topic_id === topic.topic_id ? ' active' : ''}${isNext ? ' next' : ''}${exDone ? ' done' : ''}`}
                                 onClick={() => { setSelectedTopic(topic); }}
                               >
                                 <span className="mentor-topic-top">
@@ -644,15 +644,16 @@ export function MentorPage() {
                                     {topic.references.length > 0 && (
                                       <span className="mentor-topic-refs">{topic.references.length} {t('mentor.onboarding.refs')}</span>
                                     )}
-                                    <span className="mentor-topic-tags">
-                                      {isNext && <Badge tone="accent">{t('mentor.onboarding.nextStep')}</Badge>}
-                                      {ex && (
-                                        exGen ? <Badge tone="accent" icon={<Loader2 size={11} className="mentor-spin" />}>{t('mentor.status.generating')}</Badge>
-                                        : exFail ? <Badge tone="warning">{t('mentor.list.genFailed')}</Badge>
-                                        : exDone ? <Badge tone="success" icon={<Check size={11} />}>{t('mentor.status.done')}</Badge>
-                                        : <Badge tone="accent" icon={<CircleDot size={11} />}>{ex.progress_done}/{ex.progress_total}</Badge>
-                                      )}
-                                    </span>
+                                    {(isNext || (ex && !exDone)) && (
+                                      <span className="mentor-topic-tags">
+                                        {isNext && <Badge tone="accent">{t('mentor.onboarding.nextStep')}</Badge>}
+                                        {ex && !exDone && (
+                                          exGen ? <Badge tone="accent" icon={<Loader2 size={11} className="mentor-spin" />}>{t('mentor.status.generating')}</Badge>
+                                          : exFail ? <Badge tone="warning">{t('mentor.list.genFailed')}</Badge>
+                                          : <Badge tone="accent" icon={<CircleDot size={11} />}>{ex.progress_done}/{ex.progress_total}</Badge>
+                                        )}
+                                      </span>
+                                    )}
                                   </span>
                                 )}
                               </button>
@@ -806,6 +807,10 @@ function ParcoursView({
   // Last failed learner action (advance / mark-read) — surfaced near the action
   // instead of being swallowed, so a 4xx from the gate is visible.
   const [actionError, setActionError] = useState<string | null>(null);
+  // Id of the block/chapter section currently in view (scroll-spy). Distinct from
+  // the model's current phase: this tracks *where you're looking*, the phase dot
+  // tracks *where you're working*. Drives the accent liseré on the rail.
+  const [viewingId, setViewingId] = useState<string | null>(null);
 
   // Both the "Coup de pouce" and the closure synthesis run server-side. While
   // either is still generating, poll the parcours so it flips to its final state
@@ -912,6 +917,34 @@ function ParcoursView({
   // Completed-step count for the header tally (the mobile progress cue — the rail
   // is hidden < 900px). Derived from the same rail states shown in the gutter.
   const railDone = railSteps.filter((s) => s.state === 'done').length;
+
+  // Scroll-spy: highlight the rail step whose section sits in the upper viewport.
+  // Keyed on the joined ids so the observer only rebuilds when the section set
+  // changes (count/mode), not on every parcours mutation.
+  const railIds = railSteps.map((s) => s.id).join('|');
+  useEffect(() => {
+    const ids = railIds ? railIds.split('|') : [];
+    const els = ids
+      .map((id) => document.getElementById(id))
+      .filter((e): e is HTMLElement => e != null);
+    if (els.length === 0) return;
+    const seen = new Set<string>();
+    const obs = new IntersectionObserver(
+      (entries) => {
+        for (const e of entries) {
+          if (e.isIntersecting) seen.add(e.target.id);
+          else seen.delete(e.target.id);
+        }
+        // First id in rail order that's on screen = the topmost visible section.
+        setViewingId(ids.find((id) => seen.has(id)) ?? null);
+      },
+      // Top inset clears the sticky nav; bottom inset makes a section "current"
+      // once its top reaches the upper ~40% of the viewport.
+      { rootMargin: '-70px 0px -60% 0px' },
+    );
+    els.forEach((el) => obs.observe(el));
+    return () => obs.disconnect();
+  }, [railIds]);
   // Target archi renders as a Mermaid diagram when it's diagram source, else as text.
   const archiMermaid = useMemo(
     () => (parcours.target_archi ? mermaidSource(parcours.target_archi) : null),
@@ -1043,7 +1076,7 @@ function ParcoursView({
       </header>
 
       <div className="mentor-layout">
-        <StepRail title={t('mentor.rail.title')} steps={railSteps} />
+        <StepRail title={t('mentor.rail.title')} steps={railSteps} viewingId={viewingId} />
         <div className="mentor-main">
       {isOnboarding ? (
         <ChaptersView parcours={parcours} discId={discId} onUpdate={onUpdate} />
@@ -2048,7 +2081,9 @@ function jumpTo(id: string) {
 /** The clickable step rail (left column): the parcours' gated blocks (mentor) or
  *  chapters (onboarding), each showing done ✓ / current • / locked 🔒, and jumping
  *  to its section on click. Sticky on desktop, hidden on narrow screens. */
-function StepRail({ title, steps }: { title: string; steps: RailStep[] }) {
+function StepRail(
+  { title, steps, viewingId }: { title: string; steps: RailStep[]; viewingId?: string | null },
+) {
   return (
     <nav className="mentor-rail" aria-label={title}>
       <h4 className="mentor-rail-h">{title}</h4>
@@ -2056,7 +2091,7 @@ function StepRail({ title, steps }: { title: string; steps: RailStep[] }) {
         <button
           key={s.id}
           type="button"
-          className={`mentor-step mentor-step-${s.state}`}
+          className={`mentor-step mentor-step-${s.state}${s.id === viewingId ? ' mentor-step-viewing' : ''}`}
           onClick={() => jumpTo(s.id)}
           aria-current={s.state === 'active' ? 'step' : undefined}
         >

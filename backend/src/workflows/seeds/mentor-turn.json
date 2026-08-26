@@ -1,6 +1,6 @@
 {
   "id": "mentor-turn",
-  "name": "Mode Mentor — tour mentor→censeur",
+  "name": "Mentor Mode — mentor→censor turn",
   "project_id": null,
   "trigger": {
     "type": "Manual"
@@ -21,7 +21,7 @@
       "output_format": {
         "type": "FreeText"
       },
-      "prompt_template": "Tu accompagnes un apprenti débutant sur un parcours (Mode Mentor). Si un projet est rattaché, tu PEUX explorer ses vrais fichiers et sa doc IA pour ancrer tes questions (« regarde comment X est géré dans tel fichier ») ; sinon appuie-toi sur le contexte ci-dessous.\n\nSUJET / OBJECTIF DU PARCOURS :\n{{subject}}\n\nBLOC EN COURS : {{block}}\n\nÉCHANGES DÉJÀ EUS SUR CE BLOC (du plus ancien au plus récent — vide au premier tour) :\n{{history}}\n\nCE QUE L'APPRENTI VIENT DE SOUMETTRE :\n---\n{{submission}}\n---\n\nRéagis en tant que mentor socratique (tu es Noé) : fais-lui d'abord expliciter son raisonnement / sa stratégie quand c'est pertinent, puis commente sa soumission et pointe UN angle mort par une QUESTION, en orientant vers une ressource ou une sous-étape. TIENS COMPTE DES ÉCHANGES PRÉCÉDENTS : ne repose pas une question déjà posée, rebondis sur ce qu'il a répondu, et s'il tourne en rond, change d'angle ou suggère-lui un coup de pouce. Ne donne JAMAIS la solution ni de code. Réponse courte et ciblée, en français : pose UNE seule question — la plus utile — et au maximum une question de repli si elle est vraiment indispensable. Ne noie pas l'apprenti sous plusieurs questions simultanées : une cible à la fois."
+      "prompt_template": "You are guiding a beginner apprentice through a path (Mentor Mode). If a project is attached, you MAY explore its real files and AI docs to anchor your questions (\"look at how X is handled in a given file\"); otherwise rely on the context below.\n\nPATH SUBJECT / OBJECTIVE:\n{{subject}}\n\nCURRENT BLOCK: {{block}}\n\nEXCHANGES ALREADY HAD ON THIS BLOCK (oldest to newest — empty on the first turn):\n{{history}}\n\nWHAT THE APPRENTICE JUST SUBMITTED:\n---\n{{submission}}\n---\n\nReact as a Socratic mentor (you are Noé): first make them spell out their reasoning / strategy when relevant, then comment on their submission and point out ONE blind spot with a QUESTION, steering toward a resource or a sub-step. TAKE THE PREVIOUS EXCHANGES INTO ACCOUNT: do not re-ask a question already asked, build on what they answered, and if they go in circles, change angle or suggest they ask for a hint. NEVER give the solution or code. Short, targeted reply, IN FRENCH: ask ONE single question — the most useful one — plus at most one fallback question if it is truly indispensable. Do not drown the apprentice under several simultaneous questions: one target at a time."
     },
     {
       "name": "censeur",
@@ -66,7 +66,7 @@
           ]
         }
       },
-      "prompt_template": "CONTEXTE : un apprenti débutant doit résoudre lui-même l'exercice suivant, sans recevoir la solution.\n\nSUJET : {{subject}}\nBLOC : {{block}}\n\nRÉPONSE CANDIDATE du mentor à juger :\n---\n{{steps.mentor.output}}\n---\n\nJuge : cette réponse révèle-t-elle tout ou partie de la solution ? Réponds en JSON strict selon ton format."
+      "prompt_template": "CONTEXT: a beginner apprentice must solve the following exercise themselves, without being handed the solution.\n\nSUBJECT: {{subject}}\nBLOCK: {{block}}\n\nCANDIDATE REPLY from the mentor to judge:\n---\n{{steps.mentor.output}}\n---\n\nJudge: does this reply reveal all or part of the solution? Reply in strict JSON per your format."
     },
     {
       "name": "evaluateur",
@@ -95,7 +95,7 @@
           ]
         }
       },
-      "prompt_template": "Tu es l'ÉVALUATEUR d'un parcours Mode Mentor (distinct du mentor et du censeur). Un apprenti débutant travaille le bloc « {{block}} » du sujet suivant :\n{{subject}}\n\nCE QU'IL A SOUMIS :\n---\n{{submission}}\n---\n\nJuge si sa soumission permet de VALIDER ce bloc et passer à la suite. Critère clé : ready=true UNIQUEMENT si la soumission montre que l'apprenti COMPREND ce qu'il fait (le POURQUOI de ses choix), pas seulement qu'il a produit quelque chose de correct — un livrable juste mais non justifié, ou visiblement recopié sans compréhension, n'est PAS prêt. Sois exigeant mais juste (on n'attend pas la perfection d'un senior, mais un effort réfléchi qui tient la route). Ne donne AUCUNE solution ni indice de solution, même dans la raison. Réponds en JSON strict selon ton format : ready=true si le bloc peut être validé, sinon ready=false, avec une raison COURTE et ACTIONNABLE qui NOMME LA DIMENSION à travailler (le pourquoi non justifié, un cas non traité, une hypothèse non vérifiée) — ex. « explicite pourquoi tu as choisi cette approche », « il manque la gestion des cas d'erreur » — sans jamais dire QUOI faire ni donner d'indice de solution."
+      "prompt_template": "You are the EVALUATOR of a Mentor Mode path (distinct from the mentor and the censor). A beginner apprentice is working on the block « {{block}} » of the following subject:\n{{subject}}\n\nWHAT THEY SUBMITTED:\n---\n{{submission}}\n---\n\nJudge whether their submission is enough to VALIDATE this block and move on. Key criterion: ready=true ONLY if the submission shows the apprentice UNDERSTANDS what they are doing (the WHY of their choices), not merely that they produced something correct — a deliverable that is right but unjustified, or visibly copied without understanding, is NOT ready. Be demanding but fair (we do not expect senior-level perfection, but a thoughtful effort that holds up). Give NO solution nor hint of a solution, even in the reason. Reply in strict JSON per your format: ready=true if the block can be validated, otherwise ready=false, with a SHORT, ACTIONABLE reason WRITTEN IN FRENCH that NAMES THE DIMENSION to work on (the unjustified why, an unhandled case, an unchecked assumption) — e.g. « explicite pourquoi tu as choisi cette approche », « il manque la gestion des cas d'erreur » — without ever saying WHAT to do or giving a hint of the solution."
     }
   ],
   "actions": [],
@@ -111,25 +111,25 @@
   "variables": [
     {
       "name": "subject",
-      "label": "Sujet / objectif du parcours",
+      "label": "Subject / path objective",
       "placeholder": "",
       "required": true
     },
     {
       "name": "block",
-      "label": "Bloc en cours",
+      "label": "Current block",
       "placeholder": "",
       "required": true
     },
     {
       "name": "submission",
-      "label": "Ce que l'apprenti vient de soumettre",
+      "label": "What the apprentice just submitted",
       "placeholder": "",
       "required": true
     },
     {
       "name": "history",
-      "label": "Échanges précédents sur le bloc",
+      "label": "Previous exchanges on the block",
       "placeholder": "",
       "required": false
     }

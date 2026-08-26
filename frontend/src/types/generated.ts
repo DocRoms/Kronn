@@ -3540,6 +3540,13 @@ default_model_tier: ModelTier,
  */
 default_summary_strategy: SummaryStrategy,
 /**
+ * Mode Mentor — master switch for the whole guided-learning feature
+ * (Mentor + Onboarding). `false` = the "Apprendre" nav tab and page are
+ * hidden instance-wide (the backend endpoints stay reachable but the UI
+ * surface is gated). Off by default so an install opts in explicitly.
+ */
+mentor_enabled: boolean,
+/**
  * Mode Mentor — id of the parameterized "mentor→censeur turn" workflow a
  * parcours triggers on each learner submission. Instance-specific (the
  * workflow is created per Kronn instance), so no compile-time default:
@@ -3585,6 +3592,11 @@ default_model_tier: ModelTier,
  * when to re-enable (small-context agents without MCP access).
  */
 default_summary_strategy: SummaryStrategy,
+/**
+ * Mode Mentor — mirrors `ServerConfig.mentor_enabled`. `false` = the
+ * frontend hides the "Apprendre" nav tab and the guided-learning page.
+ */
+mentor_enabled: boolean,
 /**
  * Mode Mentor — mirrors `ServerConfig.mentor_turn_workflow_id` so the
  * frontend can trigger the mentor→censeur workflow (via the existing

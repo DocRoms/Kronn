@@ -1,6 +1,6 @@
 {
   "id": "mentor-hint",
-  "name": "Mode Mentor — coup de pouce gradué",
+  "name": "Mentor Mode — graduated hint",
   "project_id": null,
   "trigger": { "type": "Manual" },
   "steps": [
@@ -11,7 +11,7 @@
       "profile_ids": ["mentor-socratique"],
       "directive_ids": ["mentor-no-solution"],
       "output_format": { "type": "FreeText" },
-      "prompt_template": "Tu es le mentor socratique (Noé) d'un parcours Mode Mentor. L'apprenti débutant DEMANDE un coup de pouce sur le bloc en cours. Tu réponds à partir du contexte, sans explorer le projet.\n\nSUJET / OBJECTIF :\n{{subject}}\n\nBLOC EN COURS : {{block}}\n\nCE QU'IL A DÉJÀ ÉCRIT (peut être vide) :\n---\n{{submission}}\n---\n\nNIVEAU DU COUP DE POUCE : {{hint_level}} sur 4. L'échelle est GRADUÉE — plus le niveau est haut, plus tu es concret, mais tu ne donnes JAMAIS la solution ni de code :\n- niveau 1 : une question d'orientation très générale (le fais-tu réfléchir à la bonne piste ?).\n- niveau 2 : pointe la zone/le concept à creuser, ou une ressource, sous forme de question.\n- niveau 3 : montre un EXEMPLE ANALOGUE sur un AUTRE problème, structurellement proche mais jamais son cas réel — à lui de transposer (toujours SANS coder ni résoudre son exercice).\n- niveau 4 : avec bienveillance, dis-lui qu'il a épuisé les indices — propose une pause ou une relecture, rappelle qu'il peut choisir d'avancer quand même et y revenir plus tard, ou en parler à un pair / mentor humain s'il en a un ; ne donne aucun nouvel indice, jamais la solution.\n\nRéponds en français, court (2-3 phrases max), adapté au niveau demandé. Jamais la solution ni de code."
+      "prompt_template": "You are the Socratic mentor (Noé) of a Mentor Mode path. The beginner apprentice ASKS for a hint on the current block. You answer from the context, without exploring the project.\n\nSUBJECT / OBJECTIVE:\n{{subject}}\n\nCURRENT BLOCK: {{block}}\n\nWHAT THEY HAVE ALREADY WRITTEN (may be empty):\n---\n{{submission}}\n---\n\nHINT LEVEL: {{hint_level}} out of 4. The scale is GRADUATED — the higher the level, the more concrete you get, but you NEVER give the solution or code:\n- level 1: a very general orienting question (does it make them think about the right lead?).\n- level 2: point to the area/concept to dig into, or a resource, in the form of a question.\n- level 3: show an ANALOGOUS EXAMPLE on ANOTHER problem, structurally close but never their real case — for them to transpose (still WITHOUT coding or solving their exercise).\n- level 4: kindly, tell them they have exhausted the hints — suggest a break or a re-read, remind them they can choose to move on anyway and come back later, or talk to a peer / human mentor if they have one; give no new hint, never the solution.\n\nReply IN FRENCH, short (2-3 sentences max), matched to the requested level. Never the solution or code."
     },
     {
       "name": "censeur",
@@ -31,7 +31,7 @@
           "required": ["leak", "severity", "reason"]
         }
       },
-      "prompt_template": "CONTEXTE : un apprenti débutant doit résoudre lui-même l'exercice, sans recevoir la solution. Il a demandé un coup de pouce.\n\nSUJET : {{subject}}\nBLOC : {{block}}\n\nINDICE CANDIDAT du mentor à juger :\n---\n{{steps.mentor.output}}\n---\n\nJuge : cet indice révèle-t-il tout ou partie de la solution ? Réponds en JSON strict selon ton format."
+      "prompt_template": "CONTEXT: a beginner apprentice must solve the exercise themselves, without being handed the solution. They asked for a hint.\n\nSUBJECT: {{subject}}\nBLOCK: {{block}}\n\nCANDIDATE HINT from the mentor to judge:\n---\n{{steps.mentor.output}}\n---\n\nJudge: does this hint reveal all or part of the solution? Reply in strict JSON per your format."
     }
   ],
   "actions": [],
@@ -40,10 +40,10 @@
   "concurrency_limit": null,
   "guards": { "timeout_seconds": 900 },
   "variables": [
-    { "name": "subject", "label": "Sujet / objectif du parcours", "placeholder": "", "required": true },
-    { "name": "block", "label": "Bloc en cours", "placeholder": "", "required": true },
-    { "name": "hint_level", "label": "Niveau du coup de pouce (1-4)", "placeholder": "", "required": true },
-    { "name": "submission", "label": "Ce que l'apprenti a déjà écrit", "placeholder": "", "required": false }
+    { "name": "subject", "label": "Subject / path objective", "placeholder": "", "required": true },
+    { "name": "block", "label": "Current block", "placeholder": "", "required": true },
+    { "name": "hint_level", "label": "Hint level (1-4)", "placeholder": "", "required": true },
+    { "name": "submission", "label": "What the apprentice has already written", "placeholder": "", "required": false }
   ],
   "enabled": true,
   "created_at": "2026-01-01T00:00:00Z",

@@ -190,6 +190,12 @@ export function Dashboard({ onReset }: DashboardProps) {
   const { data: agentAccess, refetch: refetchAgentAccess } = useApi(() => configApi.getAgentAccess(), []);
   const { data: workflowList, refetch: refetchWorkflows } = useApi(() => workflowsApi.list(), []);
   const { data: skillList, refetch: refetchSkills } = useApi(() => skillsApi.list(), []);
+  // Mode Mentor — the whole guided-learning surface (nav tab + page) is gated
+  // behind an instance-wide config flag. `undefined` while loading; treat as
+  // off until the server confirms so the tab never flashes for opted-out
+  // installs. LearningSection fires `kronn:mentor-enabled-changed` on toggle.
+  const { data: serverConfig, refetch: refetchServerConfig } = useApi(() => configApi.getServerConfig(), []);
+  const mentorEnabled = serverConfig?.mentor_enabled ?? false;
 
   // KT-77 — a Vite full reload/HMR must not throw the user back to Projects.
   // Keep this tab-local: it restores an interrupted dev session without
@@ -199,6 +205,23 @@ export function Dashboard({ onReset }: DashboardProps) {
     // checkpoint real dashboard pages for the tab-local HMR restore.
     if (page !== 'mentor') writeDashboardPage(page);
   }, [page]);
+
+  // Mode Mentor — keep the nav in sync when the flag is toggled from Settings
+  // (custom-event bus, same pattern as profiles / agent-mention-colors).
+  useEffect(() => {
+    const onChange = () => refetchServerConfig();
+    window.addEventListener('kronn:mentor-enabled-changed', onChange);
+    return () => window.removeEventListener('kronn:mentor-enabled-changed', onChange);
+  }, [refetchServerConfig]);
+
+  // Safety net: if the feature is turned off while the user sits on the Mentor
+  // page, bounce them back to Projects. Guarded on a loaded config so the tab
+  // doesn't get yanked during the initial fetch window.
+  useEffect(() => {
+    if (serverConfig && !serverConfig.mentor_enabled && page === 'mentor') {
+      setPage('projects');
+    }
+  }, [serverConfig, page]);
 
   useEffect(() => {
     writeActiveDiscussionId(activeDiscussionId);
@@ -729,7 +752,12 @@ export function Dashboard({ onReset }: DashboardProps) {
           ['projects', Folder, t('nav.projects')],
           ['discussions', MessageSquare, t('nav.discussions')],
           ['planning', ListTodo, t('nav.planning')],
-          ['mentor', GraduationCap, t('nav.mentor')],
+          // Mode Mentor — only surface the "Apprendre" tab when the
+          // guided-learning feature is enabled instance-wide (Settings →
+          // Apprentissage). Off by default.
+          ...(mentorEnabled
+            ? [['mentor', GraduationCap, t('nav.mentor')] as [string, typeof Folder, string]]
+            : []),
           ['mcps', Puzzle, t('nav.mcps')],
           ['workflows', Workflow, t('nav.workflows')],
           // 0.8.6 (#61 follow-up 2026-05-21) — API call logs moved from a
@@ -1451,7 +1479,7 @@ export function Dashboard({ onReset }: DashboardProps) {
         )}
 
         {/* ════════ MODE MENTOR ════════ */}
-        {page === 'mentor' && (
+        {page === 'mentor' && mentorEnabled && (
           <ErrorBoundary mode="zone" label="Mentor">
             <Suspense fallback={<PageFallback />}>
               <MentorPage />

@@ -1,6 +1,6 @@
 {
   "id": "mentor-generator",
-  "name": "Mode Mentor — génération de parcours",
+  "name": "Mentor Mode — path generation",
   "project_id": null,
   "trigger": {
     "type": "Manual"
@@ -64,7 +64,7 @@
           ]
         }
       },
-      "prompt_template": "Tu prépares un parcours d'apprentissage « Mode Mentor » pour un développeur débutant. Il lui sera ouvert directement.\n\nSOURCE :\n- Si un ticket est fourni (ticket_key = \"{{ticket_key}}\"), récupère son titre + description via l'outil disponible (getJiraIssue / api_call) et base-toi dessus.\n- Sinon, pars du SUJET LIBRE : \"{{subject}}\".\n\nTu peux explorer la doc IA du projet (docs/AGENTS.md, repo-map.md, glossary.md) et les fichiers pour ancrer le contenu dans le vrai code. Ne cite un chemin de fichier ou une URL QUE s'il est réel et vérifié (ouvre le fichier / vérifie le chemin) ; n'invente JAMAIS un chemin ni un numéro de ligne (cf. la citation-grammar de docs/AGENTS.md).\n\nPRODUIS un brouillon de parcours, en français, adapté à un débutant :\n- objective : un TITRE COURT (≤ 10 mots), formulé comme un acquis avec un verbe d'action (« Configurer le cache Fastly », « Comprendre les TwigComponents ») — c'est le titre du parcours : PAS de phrase « À la fin tu sauras … », pas de sous-propositions, pas de point final.\n- criteria : 3 à 5 critères de réussite COURTS et vérifiables — UNE ligne chacun (≤ 10 mots, style checklist), jamais de paragraphe.\n- resources : 3 à 4 ressources à lire (doc officielle, article, ou fichier du repo). Chaque ressource = {title, url, kind} avec kind ∈ {doc, article, repo}. URLs RÉELLES et vérifiées ; pour un fichier du repo, url = chemin relatif réel (pas inventé).\n- target_archi : la cible « où on va », sous forme d'un DIAGRAMME Mermaid décrivant l'architecture attendue (composants/modules et leurs relations, flux de données) — le CONTRAT, pas l'implémentation. Règles STRICTES : (1) commence directement par une racine Mermaid, de préférence `flowchart TD` ou `flowchart LR` ; (2) n'entoure PAS le diagramme de balises ``` ni d'aucun texte : ce champ contient UNIQUEMENT la source Mermaid ; (3) garde-le simple et lisible (5 à 10 nœuds max), libellés courts en français ; (4) mets des responsabilités/rôles dans les nœuds, jamais de code d'implémentation.\n- target_tests : les tests d'acceptation « comment on saura que c'est bon » (en pseudo, given/when/then).\n\nNe donne PAS la solution : la cible décrit le contrat, pas le code. Réponds en JSON strict selon ton format."
+      "prompt_template": "You are preparing a « Mentor Mode » learning path for a beginner developer. It will be opened to them directly.\n\nSOURCE:\n- If a ticket is provided (ticket_key = \"{{ticket_key}}\"), fetch its title + description via the available tool (getJiraIssue / api_call) and base yourself on it.\n- Otherwise, start from the FREE SUBJECT: \"{{subject}}\".\n\nYou may explore the project's AI docs (docs/AGENTS.md, repo-map.md, glossary.md) and the files to anchor the content in the real code. Only cite a file path or a URL if it is real and verified (open the file / check the path); NEVER invent a path or a line number (cf. the citation grammar of docs/AGENTS.md).\n\nPRODUCE a draft path, IN FRENCH, suited to a beginner:\n- objective: a SHORT TITLE (≤ 10 words), phrased as an acquired skill with an action verb (« Configurer le cache Fastly », « Comprendre les TwigComponents ») — it is the path title: NO « À la fin tu sauras … » sentence, no sub-clauses, no final period.\n- criteria: 3 to 5 SHORT, verifiable success criteria — ONE line each (≤ 10 words, checklist style), never a paragraph.\n- resources: 3 to 4 resources to read (official docs, an article, or a repo file). Each resource = {title, url, kind} with kind ∈ {doc, article, repo}. REAL, verified URLs; for a repo file, url = real relative path (not invented).\n- target_archi: the « where we are going » target, as a Mermaid DIAGRAM describing the expected architecture (components/modules and their relationships, data flow) — the CONTRACT, not the implementation. STRICT rules: (1) start directly with a Mermaid root, preferably `flowchart TD` or `flowchart LR`; (2) do NOT wrap the diagram in ``` fences or any text: this field contains ONLY the Mermaid source; (3) keep it simple and readable (5 to 10 nodes max), short labels in French; (4) put responsibilities/roles in the nodes, never implementation code.\n- target_tests: the acceptance tests « how we will know it is good » (in pseudo, given/when/then).\n\nDo NOT give the solution: the target describes the contract, not the code. Reply in strict JSON per your format."
     }
   ],
   "actions": [],
@@ -80,13 +80,13 @@
   "variables": [
     {
       "name": "subject",
-      "label": "Sujet libre (vide si ticket)",
+      "label": "Free subject (empty if ticket)",
       "placeholder": "",
       "required": false
     },
     {
       "name": "ticket_key",
-      "label": "Clé du ticket (vide si sujet libre)",
+      "label": "Ticket key (empty if free subject)",
       "placeholder": "",
       "required": false
     }

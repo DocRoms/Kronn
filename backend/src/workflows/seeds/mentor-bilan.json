@@ -1,6 +1,6 @@
 {
   "id": "mentor-bilan",
-  "name": "Mode Mentor — synthèse de clôture",
+  "name": "Mentor Mode — closing synthesis",
   "project_id": null,
   "trigger": { "type": "Manual" },
   "steps": [
@@ -10,7 +10,7 @@
       "agent": "ClaudeCode",
       "profile_ids": ["mentor-prof"],
       "output_format": { "type": "FreeText" },
-      "prompt_template": "Tu clôtures un parcours d'apprentissage (Mode Mentor). Rédige une SYNTHÈSE DE CLÔTURE bienveillante, destinée à l'apprenti pour garder une trace de ce qu'il a appris. Ici la posture est EXPLICATIVE : le travail est fini, il n'y a plus de solution à cacher — tu peux nommer les concepts et les nommer clairement.\n\nSUJET / OBJECTIF DU PARCOURS :\n{{subject}}\n\nPOSTURE : {{mode}}\n\nCONTEXTE DU PARCOURS (critères de réussite, ressources, et — en posture mentor — le bilan écrit par l'apprenti lui-même ainsi que son plan / son code ; en posture onboarding — les chapitres du cours) :\n---\n{{context}}\n---\n\nCONSIGNES :\n- Si l'apprenti a rédigé son propre bilan, PARS DE SES MOTS : reprends et valorise ce qu'il a compris, puis comble seulement les vrais trous — sans le réprimander et sans tout réécrire à sa place.\n- Structure en Markdown, avec ces sections (titres `##`) : « Ce que tu as accompli », « Concepts clés à retenir », « Points de vigilance / à approfondir », « Où réutiliser ce que tu as appris » (le TRANSFERT : d'autres situations ou contextes où le même concept/pattern s'applique, et les signaux pour le reconnaître ailleurs), « Pour aller plus loin » (renvoie aux ressources).\n- Court et dense (250 à 350 mots), tutoiement, ton chaleureux mais précis. Pas de remplissage.\n- Réponds en français, en Markdown uniquement (pas de préambule du type « Voici la synthèse »)."
+      "prompt_template": "You are closing a learning path (Mentor Mode). Write a kind CLOSING SYNTHESIS, meant for the apprentice to keep a record of what they learned. Here the stance is EXPLANATORY: the work is done, there is no more solution to hide — you can name the concepts, and name them clearly.\n\nPATH SUBJECT / OBJECTIVE:\n{{subject}}\n\nSTANCE: {{mode}}\n\nPATH CONTEXT (success criteria, resources, and — in mentor stance — the wrap-up written by the apprentice themselves as well as their plan / their code; in onboarding stance — the course chapters):\n---\n{{context}}\n---\n\nINSTRUCTIONS:\n- If the apprentice wrote their own wrap-up, START FROM THEIR WORDS: pick up and value what they understood, then fill only the real gaps — without scolding them and without rewriting everything for them.\n- Structure it in Markdown, with these sections (`##` headings): « Ce que tu as accompli », « Concepts clés à retenir », « Points de vigilance / à approfondir », « Où réutiliser ce que tu as appris » (the TRANSFER: other situations or contexts where the same concept/pattern applies, and the signals to recognize it elsewhere), « Pour aller plus loin » (point back to the resources).\n- Short and dense (250 to 350 words), informal French (tutoiement), a warm but precise tone. No filler.\n- Reply IN FRENCH, in Markdown only (no preamble such as « Voici la synthèse »)."
     }
   ],
   "actions": [],
@@ -19,9 +19,9 @@
   "concurrency_limit": null,
   "guards": { "timeout_seconds": 900 },
   "variables": [
-    { "name": "subject", "label": "Sujet / objectif du parcours", "placeholder": "", "required": true },
-    { "name": "mode", "label": "Posture (mentor|onboarding)", "placeholder": "", "required": true },
-    { "name": "context", "label": "Contexte assemblé du parcours", "placeholder": "", "required": false }
+    { "name": "subject", "label": "Subject / path objective", "placeholder": "", "required": true },
+    { "name": "mode", "label": "Stance (mentor|onboarding)", "placeholder": "", "required": true },
+    { "name": "context", "label": "Assembled path context", "placeholder": "", "required": false }
   ],
   "enabled": true,
   "created_at": "2026-01-01T00:00:00Z",

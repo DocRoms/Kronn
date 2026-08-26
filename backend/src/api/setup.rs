@@ -775,6 +775,7 @@ pub async fn get_server_config(
         debug_mode: config.server.debug_mode,
         default_model_tier: config.server.default_model_tier,
         default_summary_strategy: config.server.default_summary_strategy,
+        mentor_enabled: config.server.mentor_enabled,
         mentor_turn_workflow_id: config.server.mentor_turn_workflow_id.clone(),
         mentor_generator_workflow_id: config.server.mentor_generator_workflow_id.clone(),
         mentor_course_workflow_id: config.server.mentor_course_workflow_id.clone(),
@@ -837,6 +838,10 @@ pub async fn set_server_config(
     // 0.8.6 phase 4 — default summary strategy. Same PATCH semantic.
     if let Some(strategy) = req.default_summary_strategy {
         config.server.default_summary_strategy = strategy;
+    }
+    // Mode Mentor — master on/off switch for the guided-learning UI.
+    if let Some(v) = req.mentor_enabled {
+        config.server.mentor_enabled = v;
     }
     // Mode Mentor — wire (or rewire) the mentor→censeur turn workflow. Empty
     // string clears it (feature reverts to viewer + state-machine only).

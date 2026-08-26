@@ -294,6 +294,7 @@ pub fn default_config() -> AppConfig {
             // ServerConfig field docs for rationale (modern agents
             // have large context + MCP access, no auto-summary needed).
             default_summary_strategy: crate::models::SummaryStrategy::Off,
+            mentor_enabled: false,
             mentor_turn_workflow_id: None,
             mentor_generator_workflow_id: None,
             mentor_course_workflow_id: None,

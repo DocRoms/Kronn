@@ -284,6 +284,7 @@ mod tests {
             debug_mode: false,
             default_model_tier: crate::models::ModelTier::Default,
             default_summary_strategy: crate::models::SummaryStrategy::Off,
+            mentor_enabled: false,
             mentor_turn_workflow_id: None,
             mentor_generator_workflow_id: None,
             mentor_course_workflow_id: None,

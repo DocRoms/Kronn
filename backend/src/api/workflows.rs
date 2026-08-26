@@ -734,12 +734,17 @@ fn validate_exec_steps(steps: &[WorkflowStep], allowlist: &[String]) -> Result<(
 
 /// GET /api/workflows
 pub async fn list(State(state): State<AppState>) -> Json<ApiResponse<Vec<WorkflowSummary>>> {
+    // Mode Mentor — when the guided-learning feature is disabled instance-wide,
+    // hide its builtin seeds from the Workflows page entirely (no "Système"
+    // section). The seeds stay in the DB and reactivate with the feature.
+    let mentor_enabled = state.config.read().await.server.mentor_enabled;
     match state
         .db
-        .with_conn(|conn| {
+        .with_conn(move |conn| {
             // Builtin Mode Mentor seeds are returned too, tagged `is_system` — the
             // Workflows page groups them under a collapsed "Système" section rather
-            // than hiding them, so they stay inspectable/tweakable.
+            // than hiding them, so they stay inspectable/tweakable. Skipped
+            // wholesale when the feature is off (see `mentor_enabled` above).
             let workflows = crate::db::workflows::list_workflows(conn)?;
             // Batch-load last runs and project names (avoids N+1 queries)
             let last_runs = crate::db::workflows::get_last_runs_all(conn)?;
@@ -747,6 +752,7 @@ pub async fn list(State(state): State<AppState>) -> Json<ApiResponse<Vec<Workflo
 
             let summaries = workflows
                 .into_iter()
+                .filter(|wf| mentor_enabled || !crate::db::workflows::is_system_workflow_id(&wf.id))
                 .map(|wf| {
                     let last_run = last_runs.get(&wf.id).map(|r| WorkflowRunSummary {
                         id: r.id.clone(),

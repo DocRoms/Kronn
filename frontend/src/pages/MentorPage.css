@@ -449,19 +449,33 @@
    already have room — don't shrink them. */
 html:not([data-density="medium"]):not([data-density="large"]) body[data-mentor-wide] .dash-main { max-width: 1180px; }
 
-/* Sticky top must clear the app's sticky top nav (`.dash-nav`, ~53px tall). */
-.mentor-rail { position: sticky; top: 66px; display: flex; flex-direction: column; gap: 2px; }
+/* Sticky top must clear the app's sticky top nav (`.dash-nav`, ~53px tall).
+   Wrapped as a canonical Kronn card (see `.dash-card`): surface bg + border +
+   xl radius + soft shadow, so the rail reads as a first-class panel. */
+.mentor-rail {
+  position: sticky; top: 66px; display: flex; flex-direction: column; gap: 2px;
+  background: var(--kr-bg-surface); border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-xl); box-shadow: var(--kr-shadow-sm);
+  padding: var(--kr-sp-4) var(--kr-sp-3);
+}
 .mentor-rail-h {
   font-size: var(--kr-fs-xs); letter-spacing: 0.08em; text-transform: uppercase;
-  color: var(--kr-text-faint); font-weight: 700; margin: 0 0 var(--kr-sp-4) var(--kr-sp-3);
+  color: var(--kr-text-faint); font-weight: 700;
+  margin: 0 0 var(--kr-sp-3) var(--kr-sp-3);
 }
+/* Every step is a soft neutral pill (mini-card); the current phase and the
+   in-view section layer stronger cues on top. */
 .mentor-step {
   display: flex; gap: var(--kr-sp-4); align-items: flex-start; width: 100%; text-align: left;
-  padding: var(--kr-sp-3) var(--kr-sp-4); border: none; background: transparent;
+  padding: var(--kr-sp-3) var(--kr-sp-4); border: none; background: var(--kr-bg-subtle);
   border-radius: var(--kr-r-md); cursor: pointer; color: var(--kr-text-secondary);
+  transition: background 0.15s, box-shadow 0.15s, color 0.15s;
 }
-.mentor-step:hover { background: var(--kr-bg-subtle); }
+.mentor-step:hover { background: var(--kr-bg-elevated); box-shadow: inset 0 0 0 1px var(--kr-border); }
 .mentor-step-active { background: var(--kr-bg-elevated); box-shadow: inset 0 0 0 1px var(--kr-border); color: var(--kr-text-primary); }
+/* Scroll-spy cue: the section in view gets the accent-tint pill of the Plugins
+   category pills (`.mcp-cat-pill-active`) — soft accent fill + accent label. */
+.mentor-step-viewing { background: rgba(var(--kr-accent-rgb), 0.12); color: var(--kr-accent); }
 .mentor-step-dot {
   width: 22px; height: 22px; border-radius: var(--kr-r-full); flex: none;
   display: grid; place-items: center; font-family: var(--kr-font-mono); font-size: var(--kr-fs-xs);
@@ -607,6 +621,11 @@ html:not([data-density="medium"]):not([data-density="large"]) body[data-mentor-w
 .mentor-onb-done { display: inline-flex; align-items: center; gap: var(--kr-sp-3); font-weight: 600; color: var(--kr-success); }
 /* "Prochaine étape" is a shared Badge now; keep only the whole-card highlight. */
 .mentor-topic.next { border-color: rgba(var(--kr-accent-rgb), 0.4); }
+/* A completed course carries no "done" tag (keeps the catalogue tags sparse);
+   instead the whole card is dimmed so it reads as already-done at a glance.
+   Hover lifts it back toward full opacity — it stays clickable to review/redo. */
+.mentor-topic.done { opacity: 0.5; }
+.mentor-topic.done:hover, .mentor-topic.done:focus-visible { opacity: 0.85; }
 @media (prefers-reduced-motion: reduce) { .mentor-onb-bar > span { transition: none; } }
 .mentor-catalog-list { display: flex; flex-direction: column; gap: var(--kr-sp-3); }
 .mentor-catalog-group { display: flex; flex-direction: column; gap: var(--kr-sp-2); }
