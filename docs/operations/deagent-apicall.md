@@ -210,12 +210,20 @@ GitHub usage exposed three orthogonal gaps:
    - Executor helper `resolve_path_params` substitutes `{key}` tokens
      (mask-and-restore for `{{var}}` disambiguation, percent-encoding
      for path-segment safety, `{{steps.X.data}}` template expansion
-     on the value).
+     on the value). Before any network call, it now requires an exact
+     bidirectional match between the placeholders declared in the path and
+     the supplied `path_params`: the error names unknown keys, missing keys
+     and the complete expected set.
    - Frontend `PathParamsEditor` (in `ApiCallStepCard.tsx`) renders
      one input per detected token with a live "URL résolue" preview
      below. Unresolved tokens flagged amber.
    - Round-trip safe: saved workflows keep BOTH the template and the
      values, so re-edit shows both.
+
+General discussions use the same scope contract from discovery through
+execution: a configuration with `include_general=true` is both advertised by
+`mcp_list` and executable by the shared broker. Project discussions continue
+to accept only global or explicitly project-linked configurations.
 
 2. **Validation rejected `Prompt missing for "main"` on ApiCall-only
    workflows** — `WorkflowWizard.tsx`'s last-step validator now

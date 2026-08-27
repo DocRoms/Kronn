@@ -85,9 +85,8 @@ Gemini for Python MCP servers) silently failed with
 host-side shape (RTK at `~/.local/share/rtk` is bind-mounted by
 design for the bidirectional savings counter) means we still need
 `kronn doctor` to catch legacy uid-0 leftovers and any new bind
-mounts that get added later. See
-[TD-20260429-uv-cache-uid-mismatch](../tech-debt/TD-20260429-uv-cache-uid-mismatch.md)
-for the full post-mortem.
+mounts that get added later. The incident history and its retained mitigation
+are documented here because no separate post-mortem is shipped in the docs.
 
 ## Adding a new bind mount?
 

@@ -194,7 +194,13 @@ value-free audit event. See
 
 **Docker host binding**: `main.rs` detects `KRONN_DATA_DIR` env var → binds to `0.0.0.0` (needed for nginx container). Otherwise uses `config.server.host` (default `127.0.0.1`).
 
-**Agent concurrency**: `Semaphore` in `AppState.agent_semaphore` limits concurrent agent processes. Configurable via `ServerConfig.max_concurrent_agents` (1–20, default 5). UI slider in Settings.
+**Agent concurrency**: `ServerConfig.max_concurrent_agents` (1–20, default 5)
+caps the aggregate machine-local pool (CLI processes plus Ollama inference).
+Each local family also has a configurable cap (default 1). The dispatcher
+enforces both limits atomically after resolving per-item overrides. Remote HTTP
+providers (LiteLLM and NVIDIA) stay outside the local pool and are unlimited
+unless the operator explicitly configures their per-provider cap. The Settings
+slider controls the local aggregate limit.
 
 **Agent timeouts**: `server.agent_global_timeout_min` is the absolute wall-clock
 limit for one agent execution (30 min by default, configurable from 1 to 120),

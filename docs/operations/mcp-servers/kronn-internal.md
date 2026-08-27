@@ -93,15 +93,16 @@ Bidirectional gateway between a CLI agent (Claude Code, Codex, Gemini, Kiro, Vib
    read-only context; no MCP tool can accept or reject a proposal.
    `[src: file: backend/scripts/disc-introspection-mcp.py:169-365]`
    `[src: file: backend/scripts/disc-introspection-mcp.py:3400-3548]`
-6. **Opaque-ID resolution** (0.9.2) — `resolve_id` identifies a pasted UUID
-   with one indexed backend read instead of making the agent probe each
+6. **Opaque-ID resolution** (0.9.2) — `resolve_id` identifies a pasted object id
+   with one resolver request instead of making the agent probe each
    object-specific tool.
 
 ## Opaque IDs
 
 Call `resolve_id({id})` first when the user pastes an ID without naming its
-object type. It supports messages, discussions, projects, workflows, Planning
-tasks, Quick Prompts, Quick APIs and Quick Execs, and returns only compact routing context:
+object type. The supported boundary is every **public MCP-addressable object**:
+an object that Kronn exposes through a reading or discovery tool. The resolver
+returns only compact routing context:
 
 ```json
 {
@@ -120,6 +121,37 @@ object APIs. The bridge never receives credentials beyond its existing bearer
 token, and the resolver does not return full descriptions, prompt templates,
 request bodies or secrets. Follow `suggested_tool` only when the full object is
 actually needed.
+
+### Public ID routing matrix
+
+| Resolved kind | Storage / selector | Canonical MCP reading route |
+|---|---|---|
+| `message` | SQLite UUID | `disc_get_message` |
+| `discussion` | SQLite UUID | `disc_load_other` |
+| `project` | SQLite UUID | `task_list(project_id=…)` |
+| `workflow` | SQLite UUID | `workflow_get` |
+| `workflow_run` | SQLite UUID; parent is the Workflow | `workflow_run_get` |
+| `task` | SQLite UUID or copyable `KT-###` reference | `task_get` |
+| `planning_proposal` | deterministic proposal id | `proposal_get` |
+| `task_execution` | SQLite UUID | `task_exec_status` |
+| `quick_prompt` | SQLite UUID | `qp_get` |
+| `quick_api` | SQLite UUID | `qa_list` |
+| `quick_exec` | SQLite UUID | `qe_list` |
+| `page` | SQLite UUID or slug | `page_get` |
+| `mcp_server` | stable plugin id | `mcp_list` |
+| `mcp_config` | SQLite UUID; parent is the plugin | `mcp_list` |
+| `skill` | builtin/custom library id | `skill_get` |
+| `profile` | builtin/custom library id | `profile_get` |
+| `directive` | builtin/custom library id | `directive_get` |
+
+The SQLite families are checked in one indexed query; the three agent-library
+selectors are then checked in-process. A value found in more than one family is
+returned as a typed `conflict`, never as an arbitrary match. Unknown values are
+returned as `not_found`. Internal evidence-row ids (dispatches, revisions,
+delivery/review receipts, validation rows, judge rows) are deliberately outside
+this contract because no standalone MCP reading tool exposes those rows; their
+owning public object is the addressable boundary.
+
 [src: file: backend/src/db/id_resolver.rs]
 [src: file: backend/src/api/id_resolver.rs]
 [src: file: backend/scripts/disc-introspection-mcp.py]
@@ -179,6 +211,182 @@ programmatic runner deliberately disables MCP; its supported Planning write
 path is the human-gated `kronn-plan-action` fence.
 `[src: file: backend/src/api/agent_tools.rs]`
 `[src: file: backend/scripts/vibe-runner.py]`
+
+## Task execution lifecycle
+
+Principal agents that can mutate Planning receive the typed execution lifecycle:
+`agent_list`, `task_exec_prepare`, `task_exec_launch`, `task_exec_status`,
+`task_exec_deliver`, `task_exec_review`, `task_exec_cancel` and
+`task_exec_reassign`. A principal must preflight before launch and reuse one
+idempotency key after an uncertain response. Native HTTP workers receive a
+narrowed surface: no backlog mutation or execution-status lookup, and
+`task_exec_deliver` accepts only the manifest. They never merge, approve or
+close the task.
+The optional `validations` passed to `task_exec_launch` are principal-owned and
+persisted on the implicit single-task run. They use the same `ValidationSpec`
+contract as campaign runs and cannot be supplied or changed by the delivery
+manifest.
+
+When the worker identity is not already known, call `agent_list()` first and
+copy one returned `worker` object unchanged into `task_exec_prepare`. Native
+HTTP providers are `discussion_agent` targets, punctual host processes are
+`agent` targets, and a joined CLI is an exact `cli` target carrying its durable
+`cli_session_id`. The catalogue reports `configured` and `reachable`
+independently; its only strict implication is
+`available => configured && reachable`. Availability is deliberately only a
+transport preflight, never a claim about task fit or model quality. Probe
+failures are reduced to stable reason codes and fixed phrases: upstream errors,
+keys, endpoints and hostnames are not returned. For Ollama, this discovery does
+not assert that the exact resolved tag is already pulled; a missing tag remains
+a separate, explicit `/api/chat` launch failure.
+
+The stdio bridge fingerprints the script contents it loaded. Before
+`task_exec_prepare`, `task_exec_launch`, `task_exec_reassign` or
+`task_exec_accept_worker_offer`, it compares that fingerprint with the script on
+disk and fails closed before any HTTP request if they differ or cannot be read.
+Reconnect the `kronn-internal` MCP process, restore the room with
+`disc_find_by_session({})`, then retry with the same idempotency key. A changed
+mtime with identical contents is not stale. `task_exec_status` and
+`task_exec_cancel` remain available for recovery, while commit, delivery and
+review remain available to finish an already-authorized execution. If a future
+optional field on one of those finishing tools changes its authorization or
+security boundary, that tool must join the freshness guard before release.
+
+The first transition to this fingerprinted bridge cannot be self-protected by a
+process that loaded the preceding schema. After upgrading to 0.11.0, reconnect
+each already-running `kronn-internal` MCP once and confirm that `bridge_info`
+reports `stale: false` before launching or reassigning work.
+
+For a verified tiny native-HTTP mutation, `task_exec_prepare` and
+`task_exec_launch` accept either
+`worker_scope: {mode: "prelocalized_edit", path, start_line, end_line}` or, for
+a pure insertion, `{mode: "prelocalized_insert_after", path, anchor_line}`.
+Pass the identical scope to both calls. Kronn validates it in the pinned
+worktree, then mechanically limits the worker to one exact read followed by one
+receipt-bound mutation. `prelocalized_insert_after` exposes only the new text
+and preserves the anchor; `prelocalized_edit` replaces its inclusive range,
+which is limited to 200 lines. Both are refused for CLI workers. See
+`docs/operations/ollama-local-models.md` for the complete eligibility and
+fallback contract.
+After reconnect, restore the room, refresh the plan and read the existing
+execution status instead of launching another attempt. The on-demand
+`tool_manual({tool: "task_exec_prepare"})` contains complete native and exact-CLI
+examples.
+
+Caller identity is transport-specific but always server-derived. The stdio
+bridge injects its durable `(source_agent, source_session_id)` and the backend
+resolves the exact active CLI session. Native Ollama, LiteLLM and NVIDIA tools
+omit every caller field: Kronn authorizes the trusted executor's current parent
+room for principal actions, or its child room plus exact typed provider for
+worker delivery. Unknown executions and foreign callers share the same opaque
+refusal. Planning event rows separately persist `actor_session_id`, so two
+concurrent sessions of the same provider remain distinguishable in the audit
+trail.
+
+For a native HTTP worker, the execution id is also server-derived. The executor
+uses its trusted dispatch job to resolve the execution, then revalidates the
+child room, provider and trigger message before parsing the manifest. The
+worker schema contains no execution-id field; if a client nevertheless injects
+one, it has no influence. The regression test uses two real concurrent
+executions and forges B's valid id in worker A's call to prove that A remains
+the only target.
+`[src: file: backend/src/api/agent_tools.rs]`
+`[src: file: backend/src/api_tests.rs]`
+
+Accepting a CLI worker control offer (`task_exec_accept_worker_offer`) crosses
+two deliberately distinct identity domains (KT-421). The live
+`(source_agent, source_session_id)` pair — the same one every other lifecycle
+tool sends — proves the caller is the exact `discussion_sessions` row the
+offer targets; it rotates across an MCP reload (`adhoc-*`). A separate
+`source_binding_session_id` names the reload-stable `disc_source_history`
+binding that actually moves the session origin -> child; it stays `cli-*`
+even after the live identity above has rotated. Collapsing the two, as an
+earlier revision did, makes a resumed CLI's own offer permanently
+unacceptable: its active identity no longer matches the durable one the
+accept step used to reuse for both checks. Both values are derived by the
+trusted bridge from its own state and are absent from the tool's input
+schema — the model supplies only `offer_id`; there is no fallback to
+agent-type/alias matching or any other permissive resolution if either is
+missing.
+An old bridge that has not reloaded this contract sends only the legacy pair
+and fails the request explicitly (`source_agent, source_session_id, and
+source_binding_session_id are required`), not silently with a stale or wrong
+attach. If `task_exec_accept_worker_offer` refuses this way, reconnect the
+`kronn-internal` MCP server for that session before retrying.
+`[src: file: backend/src/api/orchestration.rs]`
+`[src: file: backend/scripts/disc-introspection-mcp.py]`
+
+`task_exec_reassign(reason)` persists the reason and includes it verbatim in
+the replacement worker's handoff message. It is therefore a real recovery
+instruction, not an audit-only label. The chosen provider, tier, model and
+profile are synchronised to the durable child discussion in the same database
+transaction: that discussion is what the runtime resolves when it starts the
+replacement. If the room cannot be updated, the reassignment is refused rather
+than displaying one model in the execution while silently running another.
+The child room's initial task brief is pinned across prompt truncation. For a
+native HTTP worker or a spawned host CLI worker,
+`task_exec_deliver(manifest)` exposes only semantic fields:
+tests, ordered `{met, evidence}` DoD assertions, docs, migrations, risks,
+limitations and summary. After exact worker authorization, Kronn derives the
+contract version, task reference, committed HEAD/file inventory and the
+launch-time snapshotted DoD ids; a later DoD reorder/replacement is refused.
+The persisted result is still a complete DeliveryManifest v1. A joined CLI
+session and public/principal delivery retain the full manifest schema.
+Principal approval is bound to that delivery's exact HEAD and must include one
+non-empty evidence record for every current DoD id, all marked met. Worker
+claims and the task's live checkbox state remain useful context but never
+substitute for the principal's attempt-scoped review. Only after approval does
+Kronn execute the persisted mechanical validations on the ephemeral merge
+candidate; a red command returns the execution to the worker instead of
+advancing the parent branch.
+Workspace mutations remain guarded by a
+whole-file SHA-256 receipt; native tools accept only a 32-to-64-character
+leading hexadecimal prefix, compare it against the current full hash, and
+refuse shorter or stale values without writing. This tolerates a local model
+truncating the tail of a long receipt without weakening the guard below 128
+bits.
+
+A Claude/Codex-style host CLI launched as a `kind=agent` task worker is not a
+joined CLI session and therefore uses a third, deliberately smaller surface.
+The runner injects an opaque execution/child/provider/dispatch capability into
+that one process. In this mode `initialize` and `tools/list` expose only
+`task_exec_deliver(manifest)`; every other Kronn MCP call is refused even if the
+client guesses its name. The bridge ignores any out-of-schema execution id and
+forwards the runner capability to the existing native delivery path, which
+revalidates the exact child room, provider and dispatch trigger against SQLite.
+Two concurrent workers therefore cannot deliver each other's execution.
+Claude Code does not propagate session-level variables to stdio MCP children,
+so its strict per-run MCP config explicitly maps only the worker capability,
+discussion id, backend URL and optional auth token. The inline JSON contains
+environment placeholders rather than their values; the opaque capability does
+not appear in the process arguments.
+Codex has an additional transport boundary: it forwards only variables named in
+the MCP entry's `env_vars`. Kronn writes a narrow `KRONN_*` allowlist into the
+global Codex config and repeats it as a per-run `-c` override, so the dynamic
+discussion/task capability reaches that run immediately without rewriting
+shared config or leaking unrelated host variables.
+`[src: file: backend/src/agents/runner.rs]`
+`[src: file: backend/src/api/discussions/streaming.rs]`
+`[src: file: backend/scripts/disc-introspection-mcp.py]`
+
+Native HTTP workers can finish the Git side of that contract without receiving
+a shell. Their catalogue includes `git_commit`, but execution is refused unless
+SQLite proves that the caller is the exact current provider/dispatch in the
+child discussion and that the canonical directory is its attached, managed,
+`Working` task worktree. The tool validates every named relative path before it
+stages the first one, commits only those paths, and exposes no amend, checkout or
+push option. Project-scoped Workflow Agent steps do not receive it. This keeps a
+local Ollama/LiteLLM/NVIDIA worker capable of producing the clean committed HEAD
+required by `task_exec_deliver` without turning the HTTP tool catalogue into
+arbitrary Git access.
+`[src: file: backend/src/api/agent_workspace_tools.rs]`
+`[src: file: backend/src/api/agent_tools.rs]`
+`[src: file: backend/src/db/orchestration.rs]`
+
+`[src: file: backend/scripts/disc-introspection-mcp.py]`
+`[src: file: backend/src/api/orchestration.rs]`
+`[src: file: backend/src/api/agent_tools.rs]`
+`[src: file: backend/src/db/sql/136_planning_actor_session.sql]`
 
 ## Rich discussion output
 
