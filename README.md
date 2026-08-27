@@ -27,32 +27,33 @@
 
 **Smaller prompts, more code where code is enough: fewer hallucinations, lower token bill, eco-design by default.**
 
-> **Status: 0.10.0 (current release).** Functional but pre-1.0. Breaking changes happen between minor versions; patch versions are safe.
+> **Status: 0.11.0 (current release).** Functional but pre-1.0. Breaking changes happen between minor versions; patch versions are safe.
 > **License: AGPL-3.0.** Using Kronn locally to build *your own* product is fine; the copyleft only kicks in if you distribute a modified Kronn to others. See [License notes](#license-notes-agpl-3-0).
 
-## What's new in 0.10.0
+## What's new in 0.11.0
 
-- **Live Pages:** build a detailed sandboxed HTML report once, then let a manual
-  or cron workflow keep its JSON datasets up to date while Kronn retains the
-  data and presentation history.
-- **Zero-token data pipelines:** collect saved Quick APIs and reusable shell-free
-  Quick Execs concurrently, normalize JSON or CSV, reshape the typed result with a visual deterministic mapper, and publish the
-  result to a Page with `CollectApiData → TransformData → PublishPageData`.
-- **A real Page library:** search, favorite, select, archive or delete Pages;
-  link them to workflows and discussions; and let an agent create a standalone
-  or mock-backed Page through Kronn's MCP.
-- **One Automation library:** Workflows, Quick APIs, Quick Prompts and Quick
-  Execs now share the searchable sidebar + detail layout already used by
-  Discussions and Pages, with a common project filter.
-- **Continual Learning, opt-in beta:** agents can propose durable conventions,
-  preferences and pitfalls, but evidence checks and explicit human validation
-  gate every write to the dedicated learning document. It remains off by default.
+- **Durable task delegation:** run a planning task with a selected agent in its
+  own child discussion and isolated Git worktree, while the parent follows,
+  reviews, requests changes, reassigns and integrates through guarded fast-forward.
+- **Multi-agent prompt evaluation:** compare Quick Prompt answers side by side,
+  reorder columns, inspect model/time/token metrics, keep human and AI quality
+  scores, rank by any metric and open a reasoning-agent improvement discussion.
+- **Local and fallback agents as first-class workers:** Ollama, LiteLLM and NVIDIA
+  use Kronn's native tools alongside Codex, Claude, Vibe and the other CLIs, so
+  work can continue locally or during provider rate limits.
+- **Honest bounded tool use:** collection truncation preserves its shape and
+  total, context windows account for tools up front, and non-progressing local
+  tool loops converge to an explicit partial answer instead of running forever.
+- **Resilient multi-agent rooms:** exact CLI-session routing, durable wake/restart
+  recovery and piggyback room messages let parent and worker agents coordinate
+  without relying on one permanently blocking poll.
 
-See the complete [0.10.0 and 0.9.7 release notes](CHANGELOG.md).
+See the complete [0.11.0 release notes](CHANGELOG.md) and the
+[task delegation guide](docs/guides/task-orchestration.md).
 
 ## Contents
 
-- [What's new in 0.10.0](#whats-new-in-0100)
+- [What's new in 0.11.0](#whats-new-in-0110)
 - [60-second pitch](#60-second-pitch)
 - [The Kronn way: engineering, not prompting](#the-kronn-way-engineering-not-prompting)
 - [Quick start](#quick-start)
@@ -113,7 +114,7 @@ Download the installer for your OS from [Releases](https://github.com/DocRoms/Kr
 ### From source: one command
 
 ```bash
-git clone --branch 0.10.0 --depth 1 https://github.com/DocRoms/Kronn.git   # latest stable release
+git clone --branch 0.11.0 --depth 1 https://github.com/DocRoms/Kronn.git   # latest stable release
 cd Kronn
 ./kronn start        # guided setup & launch (Docker)
 ```
@@ -144,7 +145,7 @@ app, Docker deployment and a bare `make run-backend` do not require it.
 Requires Docker + Docker Compose. On Windows, WSL2 (Docker Engine inside WSL works, Docker Desktop optional).
 
 ```bash
-git clone --branch 0.10.0 --depth 1 https://github.com/DocRoms/Kronn.git   # latest stable release
+git clone --branch 0.11.0 --depth 1 https://github.com/DocRoms/Kronn.git   # latest stable release
 cd Kronn
 ./kronn start
 # → http://localhost:3140
@@ -172,7 +173,7 @@ Eight flows that scratch real itches. Each one is a primary use case, pick which
 
 Save `Analyse {{ticket}} and draft a PR` as a Quick Prompt. Paste 30 Jira keys (or pull them from a tracker step). Kronn fans out one discussion per item, in parallel, each with its own git worktree if you want isolation. Land them all behind a single human-approval Gate so nothing merges without you.
 
-> **Concrete run** (real numbers from a 30-ticket batch on Claude Sonnet, ~4k input + 6k output tokens per ticket, with prompt caching on): **~$3 of API spend, ~3 min wall time, 0 manual copy-paste.** Same batch on Ollama with `gemma3:27b` running locally: **$0, ~12 min wall time** depending on your hardware.
+> **Concrete run** (real numbers from a 30-ticket batch on Claude Sonnet, ~4k input + 6k output tokens per ticket, with prompt caching on): **~$3 of API spend, ~3 min wall time, 0 manual copy-paste.** Same batch on Ollama with `qwen3.8:27b` running locally: **$0**, a few minutes of wall time depending on your hardware.
 
 <p align="center">
   <img src="docs/screenshots/kronn-quick-prompts.en.png" alt="Quick Prompts library, four reusable templates (Refactor for testability, Audit module security, Generate changelog, Analyse Jira ticket) each with one variable and a Launch button, ready to fan out as a Batch" />

@@ -24,13 +24,13 @@ Project-specific terms. For deep dives, follow the linked `docs/architecture/` f
 
 **DbExport** — Full JSON dump of all database tables, retrieved via `GET /api/config/export` and restored via `POST /api/config/import`.
 
-**ServerConfig** — Backend server configuration: `host`, `port`, `domain` (for CORS), `auth_token` (opt-in Bearer auth), `auth_enabled` (distinguishes user-set from auto-generated token), `max_concurrent_agents` (1–20, default 5), `agent_stall_timeout` (1–60 min, default 5).
+**ServerConfig** — Backend server configuration: `host`, `port`, `domain` (for CORS), `auth_token` (opt-in Bearer auth), `auth_enabled` (distinguishes user-set from auto-generated token), `max_concurrent_agents` (aggregate local-agent pool, 1–20, default 5), `agent_stall_timeout` (1–60 min, default 5).
 
 **ServerConfigPublic** — Public view of ServerConfig returned by `GET /api/config/server`: `host`, `port`, `domain`, `max_concurrent_agents`, `auth_enabled`. Excludes `auth_token` for security.
 
 **auth_enabled** — Boolean flag on `ServerConfig`. When `true`, the auth token was explicitly enabled by the user from the Settings UI. Prevents legacy auto-generated tokens from blocking access after upgrade.
 
-**Agent semaphore** — `tokio::sync::Semaphore` in `AppState` limiting concurrent agent processes. Acquired with `acquire_owned()` in `make_agent_stream` and `orchestrate`. Size configurable via `max_concurrent_agents`.
+**Agent semaphore** — `tokio::sync::Semaphore` in `AppState` limiting work performed on the Kronn host. A normal discussion run acquires it only for a CLI or Ollama; LiteLLM and NVIDIA bypass it. Durable dispatch admission separately enforces the same aggregate local limit plus a per-family limit. Size configurable via `max_concurrent_agents`.
 
 **full_access** — Boolean field on `AgentConfig` (persisted in config.toml). When true, agent runner adds `--dangerously-skip-permissions` (Claude) or `--full-auto` (Codex) to CLI invocations. Controlled via `GET/POST /api/config/agent-access`.
 
