@@ -510,6 +510,12 @@ fn join_next_steps(
          unchanged tasks merely to report progress. The whole \
          `kronn-internal` surface is available to you, not just the `disc_*` \
          tools: workflows, api_call, skills, directives, profiles, audits.\n\
+         When a user request is clear, actionable, and has no matching planned \
+         task, check `plan_get` and `task_list` for an equivalent task first, \
+         then create exactly one task with `task_create`. Do not create a \
+         duplicate when the work is already planned or in flight. If the \
+         request, ownership, or scope is ambiguous, do not create or delegate \
+         it: submit a human-gated `kronn-plan-action` proposal instead.\n\
          Room messages support Markdown plus visual fences: `mermaid` renders \
          a diagram, `kronn-doc-preview` renders sandboxed HTML with PDF/DOCX \
          actions, and `kronn-doc-data` exposes CSV/XLSX/PPTX export. A plain \
@@ -525,8 +531,13 @@ fn join_next_steps(
          external action, call `disc_append` with a concise \
          \"task / scope / next action\" update. Peers and the human must know \
          what you are taking before implementation starts. Pure context reads \
-         do not need a noisy announcement. If the scope changes materially, \
-         post one updated intent before continuing.\n\n\
+         do not need a noisy announcement. For a clear, independent task, \
+         announce the delegation scope before launch, call `agent_list`, then \
+         use `task_exec_prepare` followed by `task_exec_launch` only when the \
+         selected worker is available and the preflight is launchable. Never \
+         invent a child room or launch a duplicate execution; use \
+         `task_exec_status` to observe the existing execution. If the scope \
+         changes materially, post one updated intent before continuing.\n\n\
          RECONNECTING IS ALREADY HANDLED — DO NOT ASK FOR A NEW TOKEN :\n\
          This join linked your durable CLI session to this room (see \
          `session_bound` in the join result). After an MCP reload, call \
@@ -2004,9 +2015,17 @@ fn invite_handoff(token: &str) -> String {
          ne demande pas qu'on te réexplique l'état, charge-le.\n\
          Tu peux créer, modifier, prioriser et cocher ces tâches \
          (`task_create`, `task_update`, `task_update_dod`, `task_add_blocker`, `task_remove_blocker`), \
-         en utilisant les outils `kronn-internal` autorisés.\n\
+         en utilisant les outils `kronn-internal` autorisés. Pour une demande \
+         utilisateur claire non planifiée, vérifie d'abord les doublons avec \
+         `plan_get` et `task_list`, puis crée une seule tâche ; si elle est \
+         ambiguë, propose un `kronn-plan-action` human-gated au lieu de créer \
+         ou déléguer. \
          Avant ta première action substantielle, annonce via `disc_append` la \
-         tâche, le périmètre et la prochaine action dans la room.\n\
+         tâche, le périmètre et la prochaine action dans la room. \
+         Pour un lot clair et indépendant, annonce son périmètre de délégation, \
+         choisis un worker via `agent_list`, puis enchaîne `task_exec_prepare` \
+         et `task_exec_launch` seulement si le preflight est launchable ; ne \
+         lance jamais un doublon et suis l'exécution avec `task_exec_status`.\n\
          Puis reste dans la room : boucle sur `disc_wait_for_peer` et réponds à \
          ce qui arrive. Si c'est calme, prends la tâche suivante du plan et \
          rends-en compte — te taire est lu comme un départ."
@@ -2521,6 +2540,16 @@ mod tests {
             assert!(handoff.contains(tool), "must state that {tool} is allowed");
         }
         assert!(handoff.contains("kronn-internal"));
+        assert!(handoff.contains("doublons"));
+        assert!(handoff.contains("kronn-plan-action"));
+        for tool in [
+            "agent_list",
+            "task_exec_prepare",
+            "task_exec_launch",
+            "task_exec_status",
+        ] {
+            assert!(handoff.contains(tool), "must state the dogfood path {tool}");
+        }
         assert!(
             handoff.contains("Avant ta première action substantielle")
                 && handoff.contains("périmètre")
@@ -6425,6 +6454,35 @@ mod tests {
             steps.contains("materially changes") && steps.contains("unchanged tasks"),
             "plan maintenance must be event-driven, never a noisy no-op rewrite",
         );
+        assert!(
+            steps.contains("clear, actionable")
+                && steps.contains("no matching planned task")
+                && steps.contains("equivalent task")
+                && steps.contains("task_create"),
+            "clear unplanned user requests must be duplicate-checked before task creation",
+        );
+        assert!(
+            steps.contains("kronn-plan-action")
+                && steps.contains("ambiguous")
+                && steps.contains("do not create or delegate"),
+            "ambiguous requests must remain human-gated",
+        );
+        for contract in [
+            "announce the delegation scope before launch",
+            "agent_list",
+            "task_exec_prepare",
+            "task_exec_launch",
+            "selected worker is available",
+            "preflight is launchable",
+            "Never invent a child room",
+            "duplicate execution",
+            "task_exec_status",
+        ] {
+            assert!(
+                steps.contains(contract),
+                "join protocol must state the delegated dogfood contract {contract}",
+            );
+        }
         assert!(
             steps.contains("plan_snapshot") && steps.contains("reconnect the Kronn MCP"),
             "a stale MCP tool catalogue needs an explicit read-only fallback",
