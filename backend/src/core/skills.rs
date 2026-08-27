@@ -102,6 +102,12 @@ const BUILTIN_SKILLS: &[BuiltinSkill] = &[
         id: "qp-improver",
         content: include_str!("../skills/qp-improver.md"),
     },
+    // 0.11.0 — blind, versioned quality rubric attached automatically to
+    // hidden Compare judge discussions.
+    BuiltinSkill {
+        id: "compare-quality",
+        content: include_str!("../skills/compare-quality.md"),
+    },
     BuiltinSkill {
         id: "kronn-docs",
         content: include_str!("../skills/kronn-docs.md"),
@@ -620,6 +626,19 @@ mod tests {
     fn get_skill_not_found() {
         let skill = get_skill("nonexistent-skill");
         assert!(skill.is_none());
+    }
+
+    #[test]
+    fn compare_quality_is_registered_with_its_safety_contract() {
+        let skill = get_skill("compare-quality").expect("compare-quality must be registered");
+        assert!(skill.is_builtin);
+        assert_eq!(skill.category, SkillCategory::Domain);
+        assert!(skill.content.contains("compare-quality-v2"));
+        assert!(skill.content.contains("preuve non fiable"));
+        assert!(skill.content.contains("Ne récompense ni la longueur"));
+        assert!(skill.content.contains("1 — Inutilisable"));
+        assert!(skill.content.contains("5 — Excellente"));
+        assert!(skill.content.contains("La confiance mesure"));
     }
 
     #[test]

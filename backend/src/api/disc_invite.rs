@@ -1029,6 +1029,12 @@ const WAIT_TIMEOUT_DEFAULT_SECS: u64 = 60;
 /// of a clean `timed_out`. Kept below it with room to spare; a Python test pins
 /// the relationship from the other side.
 const WAIT_TIMEOUT_MAX_SECS: u64 = 170;
+/// KT-374 — `timeout_secs = 0` is a PEEK: look once, answer now. The loop below
+/// already tests the deadline before it sleeps, so a zero budget costs one query
+/// and returns. It exists because the bridge attaches unread room messages to the
+/// return value of unrelated tools; paying the one-second floor on every such call
+/// would tax the quiet case, which is the common one.
+const WAIT_TIMEOUT_PEEK_SECS: u64 = 0;
 /// 0.8.12 PR B — "listening" outlives the requested wait by this margin,
 /// then expires on its own (read-side expiry, no reaper).
 const ACTIVITY_LISTENING_MARGIN_SECS: i64 = 30;
@@ -1066,7 +1072,8 @@ pub async fn wait_for_peer(
     let timeout_secs = q
         .timeout_secs
         .unwrap_or(WAIT_TIMEOUT_DEFAULT_SECS)
-        .clamp(1, WAIT_TIMEOUT_MAX_SECS);
+        .clamp(WAIT_TIMEOUT_PEEK_SECS, WAIT_TIMEOUT_MAX_SECS);
+    let is_peek = timeout_secs == WAIT_TIMEOUT_PEEK_SECS;
     let deadline = std::time::Instant::now() + Duration::from_secs(timeout_secs);
     let exclude = q.exclude_agent_type;
     let session_id = q.session_id;
@@ -1188,6 +1195,16 @@ pub async fn wait_for_peer(
                         &sess_touch,
                         conversation_id,
                     )?;
+                }
+                // KT-374 — a peek proves the process is alive, not that it is
+                // blocked waiting for you. Claiming `listening` here would say
+                // "I am at your disposal" while the agent went back to
+                // compiling, and the room would read a stale placeholder as
+                // attention. Same reason the comment above forbids prolonging
+                // `listening`: presence must never be more flattering than
+                // the truth.
+                if is_peek {
+                    return Ok(());
                 }
                 crate::db::discussion_sessions::set_session_activity(
                     conn,
@@ -1500,6 +1517,13 @@ pub async fn wait_for_peer(
                 // rows still gated by the awareness cap or ack cursor).
                 let delivered_in_window =
                     merged.iter().filter(|m| m.sort_order > since).count();
+                // KT-330 — reset-au-report by construction: recomputed from the
+                // immutable `since` on every poll and returned in the SAME DB
+                // snapshot as `observed_latest`. A caller only advances its cursor
+                // to a `latest_sort_order` it received, which necessarily carried
+                // this count — so a routing-withheld turn is reported before the
+                // cursor can move past it, never lost on an internal poll the
+                // caller never sees.
                 let withheld = peer_turns.saturating_sub(delivered_in_window) as u32;
                 Ok((
                     merged,
@@ -1615,7 +1639,14 @@ pub async fn wait_for_peer(
             // window + margin so the participants UI shows "dormant" instead
             // of "disconnected" during the pause — and hand the intended
             // next-poll instant back to the MCP caller for its scheduling.
-            let next_poll_at = if let Some(ref agent_type) = presence_agent {
+            // KT-374 — a peek promises no next poll, so it must not announce
+            // one. `waiting` + `next_poll_at` mean "dormant, I'll be back at
+            // this instant"; an agent piggybacking peeks on unrelated tool
+            // calls would wear that badge permanently while never intending
+            // to return. Peeks leave presence exactly as they found it.
+            let next_poll_at = if is_peek {
+                None
+            } else if let Some(ref agent_type) = presence_agent {
                 let waiting_ttl = pacing.next_delay_seconds as i64 + ACTIVITY_WAITING_MARGIN_SECS;
                 let next_poll_instant = chrono::Utc::now()
                     + chrono::Duration::seconds(pacing.next_delay_seconds as i64);
@@ -5346,6 +5377,109 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn withheld_by_routing_is_reported_with_the_cursor_advance_and_only_once() {
+        // KT-330 DoD-3/DoD-4(e) — a turn withheld by routing (addressed to
+        // ANOTHER identity) must be COUNTED and REPORTED to the caller in the
+        // very response that also advances its cursor, then never re-counted:
+        // reset-au-report, never a silent drop on an internal poll nor on a
+        // blind cursor advance.
+        let state = make_state_with_disc("d-withheld-once").await;
+        state
+            .db
+            .with_conn(|conn| {
+                crate::db::discussion_sessions::create_session(
+                    conn,
+                    "d-withheld-once",
+                    "ClaudeCode",
+                    Some("cli-observer"),
+                    "peer",
+                )?;
+                let other = crate::db::discussion_sessions::create_session(
+                    conn,
+                    "d-withheld-once",
+                    "Codex",
+                    Some("cli-other"),
+                    "peer",
+                )?;
+                let now = chrono::Utc::now().to_rfc3339();
+                // A peer turn addressed to `other` only — never to the observer.
+                conn.execute(
+                    "INSERT INTO messages (
+                         id, discussion_id, role, content, agent_type,
+                         timestamp, sort_order, target_agent
+                     ) VALUES (
+                         'msg-for-other', 'd-withheld-once', 'Agent',
+                         'private to the other CLI', 'ClaudeCode', ?1, 2, 'Codex'
+                     )",
+                    rusqlite::params![now],
+                )?;
+                conn.execute(
+                    "INSERT INTO message_targets (
+                         message_id, target_kind, agent_type, cli_session_id, position
+                     ) VALUES ('msg-for-other', 'cli', 'Codex', ?1, 0)",
+                    [other],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        // Armed wait for the observer, since=0: nothing addresses it, so it times
+        // out — but the withheld turn is reported in the SAME response that moved
+        // the cursor to 2.
+        let first = wait_for_peer(
+            State(state.clone()),
+            Path("d-withheld-once".to_string()),
+            Query(WaitForPeerQuery {
+                since_sort_order: Some(0),
+                timeout_secs: Some(1),
+                exclude_agent_type: Some("ClaudeCode".to_string()),
+                session_id: Some("cli-observer".to_string()),
+                conversation_id: None,
+                ack_awareness_upto: None,
+            }),
+        )
+        .await
+        .0
+        .data
+        .unwrap();
+        assert!(first.timed_out);
+        assert!(first.messages.is_empty());
+        assert_eq!(
+            first.latest_sort_order, 2,
+            "the cursor advances past the hidden turn"
+        );
+        assert_eq!(
+            first.withheld_by_routing, 1,
+            "the SAME response that moved the cursor says one turn was withheld — never a silent 0"
+        );
+
+        // The caller advances its cursor to what it just received. The withheld
+        // turn was reported exactly once: a fresh wait does not re-count it.
+        let second = wait_for_peer(
+            State(state),
+            Path("d-withheld-once".to_string()),
+            Query(WaitForPeerQuery {
+                since_sort_order: Some(first.latest_sort_order),
+                timeout_secs: Some(1),
+                exclude_agent_type: Some("ClaudeCode".to_string()),
+                session_id: Some("cli-observer".to_string()),
+                conversation_id: None,
+                ack_awareness_upto: None,
+            }),
+        )
+        .await
+        .0
+        .data
+        .unwrap();
+        assert!(second.timed_out);
+        assert_eq!(
+            second.withheld_by_routing, 0,
+            "reported once, tied to the response that advanced the cursor — not re-counted, not lost"
+        );
+    }
+
+    #[tokio::test]
     async fn wait_for_peer_times_out_with_no_messages() {
         let state = make_state_with_disc("d-wait-3").await;
         let resp = wait_for_peer(
@@ -5801,6 +5935,192 @@ mod tests {
         assert!(
             ahead > 0 && ahead <= max_delay + 2,
             "next_poll_at must be ~now + pacing delay ({max_delay}s), got {ahead}s ahead",
+        );
+    }
+
+    // ─── KT-374 — the peek: look once, answer now, promise nothing ───
+
+    #[tokio::test]
+    async fn a_peek_answers_immediately_instead_of_paying_the_one_second_floor() {
+        // The whole point of the peek is that the bridge can afford to run it
+        // on the return of tools that have nothing to do with the room. A
+        // floor of one second per quiet call would tax exactly the common
+        // case, so the cost is asserted here rather than assumed.
+        let state = make_state_with_disc("d-peek-fast").await;
+        state
+            .db
+            .with_conn(|conn| {
+                crate::db::discussion_sessions::join_disc_session(
+                    conn,
+                    "d-peek-fast",
+                    "ClaudeCode",
+                    "s-peek",
+                )
+                .map(|_| ())
+            })
+            .await
+            .unwrap();
+
+        let started = std::time::Instant::now();
+        let resp = wait_for_peer(
+            State(state.clone()),
+            Path("d-peek-fast".to_string()),
+            Query(WaitForPeerQuery {
+                since_sort_order: Some(0),
+                timeout_secs: Some(0),
+                exclude_agent_type: Some("ClaudeCode".to_string()),
+                session_id: Some("s-peek".to_string()),
+                conversation_id: None,
+                ack_awareness_upto: None,
+            }),
+        )
+        .await;
+        let elapsed = started.elapsed();
+
+        let data = resp.0.data.unwrap();
+        assert!(data.timed_out, "a quiet peek returns quiet, not an error");
+        assert!(
+            data.messages.is_empty(),
+            "nothing was posted, so nothing is delivered",
+        );
+        assert!(
+            elapsed < std::time::Duration::from_millis(WAIT_POLL_INTERVAL_MS),
+            "a peek must not sleep a poll interval; took {elapsed:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_peek_leaves_presence_exactly_as_it_found_it() {
+        // A peek proves the process is alive; it does NOT mean the agent is
+        // blocked waiting for you, nor that it will poll again at some
+        // instant. Writing either would make the participants surface more
+        // flattering than the truth for an agent that merely called an
+        // unrelated tool.
+        let state = make_state_with_disc("d-peek-presence").await;
+        state
+            .db
+            .with_conn(|conn| {
+                crate::db::discussion_sessions::join_disc_session(
+                    conn,
+                    "d-peek-presence",
+                    "ClaudeCode",
+                    "s-peek-p",
+                )
+                .map(|_| ())
+            })
+            .await
+            .unwrap();
+
+        let resp = wait_for_peer(
+            State(state.clone()),
+            Path("d-peek-presence".to_string()),
+            Query(WaitForPeerQuery {
+                since_sort_order: Some(0),
+                timeout_secs: Some(0),
+                exclude_agent_type: Some("ClaudeCode".to_string()),
+                session_id: Some("s-peek-p".to_string()),
+                conversation_id: None,
+                ack_awareness_upto: None,
+            }),
+        )
+        .await;
+        let data = resp.0.data.unwrap();
+
+        assert!(
+            activity_of(&state, "d-peek-presence", "ClaudeCode")
+                .await
+                .is_none(),
+            "a peek claims neither 'listening' nor 'waiting'",
+        );
+        assert!(
+            data.next_poll_at.is_none(),
+            "a peek announces no next poll, because it promises no return",
+        );
+
+        // A real wait, on the same session, still does its job: the peek
+        // narrowed nothing beyond itself.
+        let resp = wait_for_peer(
+            State(state.clone()),
+            Path("d-peek-presence".to_string()),
+            Query(WaitForPeerQuery {
+                since_sort_order: Some(0),
+                timeout_secs: Some(1),
+                exclude_agent_type: Some("ClaudeCode".to_string()),
+                session_id: Some("s-peek-p".to_string()),
+                conversation_id: None,
+                ack_awareness_upto: None,
+            }),
+        )
+        .await;
+        assert!(resp.0.data.unwrap().timed_out);
+        assert_eq!(
+            activity_of(&state, "d-peek-presence", "ClaudeCode")
+                .await
+                .as_deref(),
+            Some("waiting"),
+            "a genuine wait still records presence the way it always did",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_peek_still_delivers_what_is_actually_waiting() {
+        // Cheap must not mean blind: the peek is the mechanism KT-374 relies
+        // on to show an absorbed agent that a peer spoke, so it has to return
+        // the message, not merely a count.
+        //
+        // The peer turn is ADDRESSED to this session, which is the scenario
+        // the ticket is about — a peer announcing a scope at someone. An
+        // untargeted turn is awareness by design and deliberately does not
+        // wake anyone, so using one here would have tested the wrong thing.
+        let state = make_state_with_disc("d-peek-sees").await;
+        state
+            .db
+            .with_conn(|conn| {
+                let pk = crate::db::discussion_sessions::join_disc_session(
+                    conn,
+                    "d-peek-sees",
+                    "ClaudeCode",
+                    "s-peek-s",
+                )?;
+                conn.execute(
+                    "INSERT INTO messages
+                        (id, discussion_id, role, content, agent_type, timestamp,
+                         sort_order, target_agent)
+                     VALUES ('m-peek', 'd-peek-sees', 'Agent', 'je reprends KT-320',
+                             'Codex', datetime('now'), 1, 'ClaudeCode')",
+                    [],
+                )?;
+                conn.execute(
+                    "INSERT INTO message_targets (
+                         message_id, target_kind, agent_type, cli_session_id, position
+                     ) VALUES ('m-peek', 'cli', 'ClaudeCode', ?1, 0)",
+                    [pk],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let resp = wait_for_peer(
+            State(state.clone()),
+            Path("d-peek-sees".to_string()),
+            Query(WaitForPeerQuery {
+                since_sort_order: Some(0),
+                timeout_secs: Some(0),
+                exclude_agent_type: Some("ClaudeCode".to_string()),
+                session_id: Some("s-peek-s".to_string()),
+                conversation_id: None,
+                ack_awareness_upto: None,
+            }),
+        )
+        .await;
+        let data = resp.0.data.unwrap();
+        assert!(!data.timed_out, "a peek that finds a message is not quiet");
+        assert_eq!(data.messages.len(), 1);
+        assert_eq!(data.messages[0].content, "je reprends KT-320");
+        assert!(
+            data.messages[0].addressed_to_caller,
+            "the bridge marks this louder than ambient traffic, so the flag must survive",
         );
     }
 

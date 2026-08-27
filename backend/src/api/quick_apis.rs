@@ -74,6 +74,7 @@ pub async fn create(
         variables: req.variables,
         profile_ids: req.profile_ids,
         directive_ids: req.directive_ids,
+        pinned: false,
         created_at: now,
         updated_at: now,
     };
@@ -145,6 +146,7 @@ pub async fn update(
         variables: req.variables,
         profile_ids: req.profile_ids,
         directive_ids: req.directive_ids,
+        pinned: existing.pinned,
         created_at: existing.created_at,
         updated_at: Utc::now(),
     };
@@ -157,6 +159,29 @@ pub async fn update(
     {
         Ok(()) => Json(ApiResponse::ok(updated)),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
+    }
+}
+
+/// PATCH /api/quick-apis/:id — favorite-only partial update.
+pub async fn update_pinned(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<UpdateQuickFavoriteRequest>,
+) -> Json<ApiResponse<QuickApi>> {
+    let update_id = id.clone();
+    match state
+        .db
+        .with_conn(move |conn| {
+            if !crate::db::quick_apis::update_quick_api_pinned(conn, &update_id, req.pinned)? {
+                return Ok(None);
+            }
+            crate::db::quick_apis::get_quick_api(conn, &update_id)
+        })
+        .await
+    {
+        Ok(Some(item)) => Json(ApiResponse::ok(item)),
+        Ok(None) => Json(ApiResponse::err("Quick API not found")),
+        Err(error) => Json(ApiResponse::err(format!("DB error: {error}"))),
     }
 }
 
@@ -394,6 +419,7 @@ pub async fn run_qa(
         exec_setup_args: vec![],
         exec_stdin: None,
         quick_prompt_id: None,
+        quick_prompt_variables: std::collections::HashMap::new(),
         json_data_payload: None,
         collect_api_data: None,
         transform_data: None,
@@ -583,6 +609,7 @@ pub async fn batch_run_qa(
         exec_setup_args: vec![],
         exec_stdin: None,
         quick_prompt_id: None,
+        quick_prompt_variables: std::collections::HashMap::new(),
         json_data_payload: None,
         collect_api_data: None,
         transform_data: None,

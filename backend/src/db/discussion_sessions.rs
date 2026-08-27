@@ -73,6 +73,16 @@ pub enum PresenceState {
     /// No open poll, but the next poll is contractually due and the peer is
     /// expected to relaunch it. "En veille, revient."
     Dormant,
+    /// A backend-owned command or scheduled wake exists for this native agent.
+    /// The provider process is not currently generating, but Kronn is obliged
+    /// to dispatch it again when the durable condition completes.
+    ResumeExpected,
+    /// The sole watchdog redispatch also disappeared. Human action is needed;
+    /// this is an alert, never a spinner.
+    Stalled,
+    /// The provider/account explicitly exhausted its plan or credits. Retrying
+    /// the same provider is forbidden until a human or policy changes it.
+    QuotaExhausted,
     /// No open poll and past the pacing deadline (or paused/left): nothing will
     /// wake this participant on its own. The UI says "reconnexion requise",
     /// never "connecté".
@@ -139,6 +149,10 @@ pub struct ParticipantView {
     pub wake_mode: WakeMode,
     pub next_poll_at: Option<String>,
     pub last_write_at: Option<String>,
+    /// What durable command/wake/failure the native chip represents.
+    pub resume_reason: Option<String>,
+    /// Server timestamp of the durable obligation/failure.
+    pub resume_since: Option<String>,
     /// KT-37 — model DECLARED by this participant at join (durable, never
     /// inferred). `None` = not declared; the UI shows it as declared-at-join,
     /// never as a live/guessed value.
@@ -190,6 +204,71 @@ pub fn cli_session_alias(agent_type: &str, ordinal: Option<i64>) -> Option<Strin
     } else {
         format!("@{stem}-cli")
     })
+}
+
+/// One joined CLI session reduced to what alias resolution needs: its provider,
+/// its stable room ordinal and its session pk (the value a `MessageTarget::cli`
+/// carries). Built from a `ParticipantView` (or `DiscussionSession` + ordinal)
+/// by the caller so [`resolve_cli_session_mentions`] stays a pure text function.
+pub struct JoinedCliSession {
+    pub agent_type: String,
+    pub ordinal: Option<i64>,
+    pub session_pk: i64,
+}
+
+/// Resolve joined-CLI room-alias mentions (`@claude-cli`, `@codex-cli-2`) written
+/// in a message into the exact joined sessions they name. Returns the matched
+/// session pks ordered by first mention, deduplicated. A mention naming no
+/// joined session yields nothing — inert, never an error (KT-330).
+///
+/// Generation-first, exact-match: each joined session's alias is generated once
+/// via [`cli_session_alias`] — the single source of truth shared with the
+/// frontend and the message header — never by parsing the `-cli[-N]` shape here.
+/// The trailing `-` in `@claude-cli-2` fails the word-boundary that `@claude-cli`
+/// requires after itself, so `@claude-cli` can never match inside `@claude-cli-2`:
+/// two same-provider CLIs stay distinct.
+///
+/// Unlike prose provider mentions (`agent_mentions_in_prose`), code fences are
+/// deliberately NOT stripped. A missed wake strands a worker mid-collaboration
+/// (false negative); an extra wake from an alias quoted in code is a cheap,
+/// readable no-op (false positive). The asymmetric cost makes the raw match
+/// the right call for a wake trigger.
+pub fn resolve_cli_session_mentions(content: &str, sessions: &[JoinedCliSession]) -> Vec<i64> {
+    let lower = content.to_lowercase();
+    let mut found: Vec<(usize, i64)> = Vec::new();
+    for session in sessions {
+        let Some(alias) = cli_session_alias(&session.agent_type, session.ordinal) else {
+            continue; // unknown provider or synthesised obligation — never a bare trigger
+        };
+        // `cli_session_alias` already yields a lowercase alias.
+        for (index, _) in lower.match_indices(&alias) {
+            let before = lower[..index].chars().next_back();
+            let after = lower[index + alias.len()..].chars().next();
+            // Boundaries list what INVALIDATES a match, never an allowlist of
+            // punctuation: the room's real corpus writes `**@claude-cli**` (bold)
+            // and `` `@claude-cli` `` (inline code), so a punctuation allowlist
+            // would reject every format actually observed. Only two exclusions
+            // are needed — an alphanumeric before (rejects an email local part
+            // like `me@claude-client`) and an alphanumeric-or-`-` after (the sole
+            // guard keeping `@claude-cli` out of `@claude-cli-2` and out of
+            // `@claude-client`). Everything else (emphasis, code, brackets,
+            // em-dash) is a valid boundary.
+            let valid_before = before.is_none_or(|ch| !ch.is_alphanumeric());
+            let valid_after = after.is_none_or(|ch| !(ch.is_alphanumeric() || ch == '-'));
+            if valid_before && valid_after {
+                found.push((index, session.session_pk));
+                break; // one match wakes the session; extra mentions add nothing
+            }
+        }
+    }
+    found.sort_by_key(|(index, _)| *index);
+    let mut pks = Vec::new();
+    for (_, pk) in found {
+        if !pks.contains(&pk) {
+            pks.push(pk);
+        }
+    }
+    pks
 }
 
 /// Human label paired with [`cli_session_alias`]: `CLI` for the first session,
@@ -246,6 +325,26 @@ pub fn cli_session_identity(
     Ok((ordinal, alias))
 }
 
+/// Re-home a joined CLI session's membership to another discussion (KT-328 handshake:
+/// on acceptance the worker leaves the origin room and joins its sub-discussion). The
+/// "one active session = one discussion" invariant is preserved because
+/// `idx_disc_sessions_session_active` is on `(agent_type, session_id)` WITHOUT
+/// `disc_id`, so moving the row keeps exactly one active row for the identity. Only a
+/// non-`left` row moves. Returns whether a row moved (idempotent: a session already in
+/// the target room is a no-op `false`). Composes inside the caller's transaction.
+pub fn move_session_to_discussion(
+    conn: &Connection,
+    session_pk: i64,
+    to_disc_id: &str,
+) -> Result<bool> {
+    let changed = conn.execute(
+        "UPDATE discussion_sessions SET disc_id = ?2 \
+         WHERE id = ?1 AND status != 'left' AND disc_id != ?2",
+        params![session_pk, to_disc_id],
+    )?;
+    Ok(changed > 0)
+}
+
 /// Parse an RFC3339 (or SQLite `%Y-%m-%d %H:%M:%S`) timestamp, returning `None`
 /// on failure — deliberately NOT the `Utc::now()` fallback of `db::parse_dt`,
 /// because a bad `next_poll_at` must degrade a participant to `offline`, never
@@ -278,12 +377,21 @@ pub fn derive_presence_state(
     next_poll_at: Option<&str>,
     now: DateTime<Utc>,
     has_running_job: bool,
+    durable_resume_state: Option<PresenceState>,
 ) -> PresenceState {
     if status == "paused" || status == "left" {
         return PresenceState::Offline;
     }
     if has_running_job {
         return PresenceState::Running;
+    }
+    if let Some(
+        state @ (PresenceState::ResumeExpected
+        | PresenceState::Stalled
+        | PresenceState::QuotaExhausted),
+    ) = durable_resume_state
+    {
+        return state;
     }
     // An unexpired listening/reading placeholder means a wait was open within
     // its TTL window — genuine read-liveness.
@@ -523,6 +631,7 @@ pub fn list_participant_views(conn: &Connection, disc_id: &str) -> Result<Vec<Pa
                 next_poll_at.as_deref(),
                 now,
                 false,
+                None,
             );
             // read_live = an OPEN read channel — `Listening` only. `Running`
             // would be generation, not reading.
@@ -556,6 +665,8 @@ pub fn list_participant_views(conn: &Connection, disc_id: &str) -> Result<Vec<Pa
                 wake_mode: WakeMode::ExternalPoll,
                 next_poll_at,
                 last_write_at,
+                resume_reason: None,
+                resume_since: None,
                 model: r.get(14)?,
                 conversation_id: r.get(15)?,
                 cli_ordinal: r.get(16)?,
@@ -601,6 +712,146 @@ pub fn list_participant_views(conn: &Connection, disc_id: &str) -> Result<Vec<Pa
             || newest_offline_by_agent.get(&participant.agent_type) == Some(&participant.id)
     });
 
+    // KT-335 — native agents do not own a CLI session row. Project their
+    // backend-owned obligations from the durable job/dispatch sources instead
+    // of inventing client presence. Only the newest row per provider decides:
+    // a later successful dispatch must clear an older quota/stall badge.
+    let mut native_signals: std::collections::HashMap<
+        String,
+        (PresenceState, String, String, Option<String>),
+    > = std::collections::HashMap::new();
+    let signal_priority = |state: PresenceState| match state {
+        PresenceState::QuotaExhausted => 4,
+        PresenceState::Stalled => 3,
+        PresenceState::Running => 2,
+        PresenceState::ResumeExpected => 1,
+        _ => 0,
+    };
+    let mut insert_signal = |agent_type: String,
+                             state: PresenceState,
+                             reason: String,
+                             since: String,
+                             scheduled_at: Option<String>| {
+        let replace = native_signals
+            .get(&agent_type)
+            .is_none_or(|current| signal_priority(state) > signal_priority(current.0));
+        if replace {
+            native_signals.insert(agent_type, (state, reason, since, scheduled_at));
+        }
+    };
+
+    let mut seen_resume_agents = std::collections::HashSet::new();
+    let mut resume_stmt = conn.prepare(
+        "SELECT target_agent_json, status, reason, scheduled_at, updated_at
+           FROM agent_resume_jobs WHERE discussion_id = ?1
+          ORDER BY updated_at DESC, id DESC LIMIT 100",
+    )?;
+    for row in resume_stmt.query_map(params![disc_id], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, String>(4)?,
+        ))
+    })? {
+        let (agent_json, status, reason, scheduled_at, updated_at) = row?;
+        let Ok(agent) = serde_json::from_str::<crate::models::AgentType>(&agent_json) else {
+            continue;
+        };
+        let agent_type = format!("{agent:?}");
+        if !seen_resume_agents.insert(agent_type.clone()) {
+            continue;
+        }
+        let state = match status.as_str() {
+            "Pending" | "Running" => PresenceState::ResumeExpected,
+            "QuotaExhausted" => PresenceState::QuotaExhausted,
+            "Escalated" => PresenceState::Stalled,
+            _ => continue,
+        };
+        insert_signal(agent_type, state, reason, updated_at, Some(scheduled_at));
+    }
+
+    let default_agent: String = conn.query_row(
+        "SELECT agent FROM discussions WHERE id = ?1",
+        [disc_id],
+        |row| row.get(0),
+    )?;
+    let mut seen_dispatch_agents = std::collections::HashSet::new();
+    let mut dispatch_stmt = conn.prepare(
+        "SELECT agent_override_json, status, last_error, failure_kind,
+                COALESCE(agent_started_at, updated_at), updated_at
+           FROM agent_dispatch_jobs WHERE discussion_id = ?1
+          ORDER BY updated_at DESC, id DESC LIMIT 100",
+    )?;
+    for row in dispatch_stmt.query_map(params![disc_id], |row| {
+        Ok((
+            row.get::<_, Option<String>>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, Option<String>>(2)?,
+            row.get::<_, Option<String>>(3)?,
+            row.get::<_, String>(4)?,
+            row.get::<_, String>(5)?,
+        ))
+    })? {
+        let (agent_json, status, error, failure_kind, started_at, updated_at) = row?;
+        let agent_type = if let Some(agent_json) = agent_json {
+            serde_json::from_str::<crate::models::AgentType>(&agent_json)
+                .map(|agent| format!("{agent:?}"))
+                .unwrap_or_else(|_| default_agent.clone())
+        } else {
+            default_agent.clone()
+        };
+        if !seen_dispatch_agents.insert(agent_type.clone()) {
+            continue;
+        }
+        let state = match (status.as_str(), failure_kind.as_deref()) {
+            (_, Some("quota_exhausted")) => PresenceState::QuotaExhausted,
+            (_, Some("dispatch_stalled")) => PresenceState::Stalled,
+            ("Running", _) => PresenceState::Running,
+            ("Pending", Some("watchdog_stall_redispatch")) => PresenceState::ResumeExpected,
+            _ => continue,
+        };
+        insert_signal(
+            agent_type,
+            state,
+            error.unwrap_or_else(|| "agent dispatch".into()),
+            started_at,
+            (status == "Pending").then_some(updated_at),
+        );
+    }
+    let mut synth_id = -1_i64;
+    for (agent_type, (presence_state, reason, since, scheduled_at)) in native_signals {
+        rows.retain(|participant| {
+            participant.agent_type != agent_type
+                || participant.presence_state != PresenceState::Offline
+        });
+        rows.push(ParticipantView {
+            id: synth_id,
+            disc_id: disc_id.to_string(),
+            agent_type,
+            session_id: None,
+            role: "native_resume".into(),
+            status: "active".into(),
+            joined_at: since.clone(),
+            left_at: None,
+            last_seen: None,
+            activity: None,
+            presence_state,
+            read_live: false,
+            write_state: WriteState::Unknown,
+            wake_mode: WakeMode::NativeDispatch,
+            next_poll_at: scheduled_at,
+            last_write_at: None,
+            resume_reason: Some(reason),
+            resume_since: Some(since),
+            model: None,
+            conversation_id: None,
+            cli_ordinal: None,
+        });
+        synth_id -= 1;
+    }
+
     // 0.9.2-G — surface DEFERRED obligations for ABSENT agents as honest
     // "waiting for a runtime" participants instead of letting them vanish. A
     // dispatch that hit `RuntimeUnavailable` is kept Pending (durable
@@ -622,7 +873,6 @@ pub fn list_participant_views(conn: &Connection, disc_id: &str) -> Result<Vec<Pa
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let mut seen_obligation: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut synth_id = -1_i64;
     for (agent_json, available_at) in obligations {
         let Ok(agent) = serde_json::from_str::<crate::models::AgentType>(&agent_json) else {
             continue;
@@ -658,12 +908,15 @@ pub fn list_participant_views(conn: &Connection, disc_id: &str) -> Result<Vec<Pa
             wake_mode: WakeMode::NativeDispatch,
             next_poll_at: available_at,
             last_write_at: None,
+            resume_reason: Some("runtime_unavailable".into()),
+            resume_since: Some(now.to_rfc3339()),
             // A synthesised obligation is not a joined session — nothing declared.
             model: None,
             conversation_id: None,
             // No real session row, so no stable ordinal / room alias.
             cli_ordinal: None,
         });
+        synth_id -= 1;
         synth_id -= 1;
     }
 
@@ -1633,6 +1886,101 @@ mod tests {
     use super::*;
     use crate::db::migrations;
 
+    fn cli_session(agent_type: &str, ordinal: i64, pk: i64) -> JoinedCliSession {
+        JoinedCliSession {
+            agent_type: agent_type.into(),
+            ordinal: Some(ordinal),
+            session_pk: pk,
+        }
+    }
+
+    #[test]
+    fn resolve_cli_mentions_never_confuses_two_same_provider_sessions() {
+        // The crux of KT-330: `@claude-cli` (ordinal 1) and `@claude-cli-2`
+        // (ordinal 2) are the SAME provider. The word boundary after the alias
+        // keeps them distinct — never a parse of the `-N` suffix.
+        let sessions = vec![
+            cli_session("ClaudeCode", 1, 101),
+            cli_session("ClaudeCode", 2, 202),
+        ];
+        assert_eq!(
+            resolve_cli_session_mentions("@claude-cli-2 peux-tu relire ?", &sessions),
+            vec![202],
+            "the ordinal-2 alias must resolve to its own session, not the ordinal-1 one"
+        );
+        assert_eq!(
+            resolve_cli_session_mentions("@claude-cli à toi.", &sessions),
+            vec![101],
+            "the bare -cli alias must not be shadowed by the -cli-2 session"
+        );
+    }
+
+    #[test]
+    fn resolve_cli_mentions_no_match_is_inert() {
+        let sessions = vec![cli_session("ClaudeCode", 1, 101)];
+        // Bare provider mention, an unrelated CLI alias, and email-like text all
+        // name no joined session → nothing, never an error.
+        assert!(resolve_cli_session_mentions("@claude, merci.", &sessions).is_empty());
+        assert!(resolve_cli_session_mentions("@codex-cli, à toi.", &sessions).is_empty());
+        assert!(
+            resolve_cli_session_mentions("write to me@claude-client.dev", &sessions).is_empty()
+        );
+    }
+
+    #[test]
+    fn resolve_cli_mentions_wakes_through_markdown_emphasis_and_inline_code() {
+        // Differential regression for the KT-330 verdict: the room's real corpus
+        // never writes bare prose `@claude-cli` — it writes `**@claude-cli**`
+        // (bold, the exact form of the 18:34/18:39/18:57 messages that motivated
+        // the task) and `` `@claude-cli` `` (inline code). A punctuation-allowlist
+        // boundary rejected both; the invalidation-list boundary must wake on them.
+        let sessions = vec![
+            cli_session("ClaudeCode", 1, 101),
+            cli_session("ClaudeCode", 2, 202),
+        ];
+        assert_eq!(
+            resolve_cli_session_mentions("**@claude-cli** — à toi de rejouer.", &sessions),
+            vec![101],
+            "bold emphasis (`*` on both sides) must not block the wake"
+        );
+        assert_eq!(
+            resolve_cli_session_mentions("Merci `@claude-cli`, tu rejoues au diff ?", &sessions),
+            vec![101],
+            "inline code (backtick on both sides) must not block the wake"
+        );
+        // The emphasis boundary must NOT collapse the two same-provider sessions:
+        // `**@claude-cli-2**` still resolves to ordinal 2 only.
+        assert_eq!(
+            resolve_cli_session_mentions("**@claude-cli-2** peux-tu relire ?", &sessions),
+            vec![202],
+            "the `-2` guard must survive inside emphasis — no shadowing by ordinal 1"
+        );
+        // Emphasis around the domain-shaped false friend stays inert: an email
+        // local part is still rejected even when wrapped in markdown.
+        assert!(
+            resolve_cli_session_mentions("écris à `me@claude-client.dev`", &sessions).is_empty(),
+            "an alphanumeric before the alias still rejects an email, inside code too"
+        );
+    }
+
+    #[test]
+    fn resolve_cli_mentions_order_by_first_mention_dedup_and_wake_in_code() {
+        let sessions = vec![
+            cli_session("Codex", 1, 55),
+            cli_session("ClaudeCode", 1, 101),
+        ];
+        // Ordered by first mention, deduplicated across repeats. And — unlike
+        // prose provider mentions — a code-fenced alias STILL wakes (accepted
+        // cheap false positive: a missed wake is far worse than an extra one).
+        assert_eq!(
+            resolve_cli_session_mentions(
+                "@claude-cli commence.\n```\n@codex-cli here\n```\n@claude-cli confirme.",
+                &sessions
+            ),
+            vec![101, 55]
+        );
+    }
+
     fn setup_db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
         migrations::run(&conn).unwrap();
@@ -1660,38 +2008,102 @@ mod tests {
         let past = (now - Duration::seconds(600)).to_rfc3339();
         // A Running dispatch outranks everything.
         assert_eq!(
-            derive_presence_state("active", None, None, now, true),
+            derive_presence_state("active", None, None, now, true, None),
             PresenceState::Running
         );
         // An unexpired open-wait placeholder = genuine read-liveness.
         assert_eq!(
-            derive_presence_state("active", Some("listening"), None, now, false),
+            derive_presence_state("active", Some("listening"), None, now, false, None),
             PresenceState::Listening
         );
         assert_eq!(
-            derive_presence_state("active", Some("reading"), None, now, false),
+            derive_presence_state("active", Some("reading"), None, now, false, None),
             PresenceState::Listening
         );
         // No open poll but the next poll is still due → dormant.
         assert_eq!(
-            derive_presence_state("active", None, Some(&future), now, false),
+            derive_presence_state("active", None, Some(&future), now, false, None),
             PresenceState::Dormant
         );
         // No open poll AND past the deadline → offline (the anti-"connecté" case).
         assert_eq!(
-            derive_presence_state("active", None, Some(&past), now, false),
+            derive_presence_state("active", None, Some(&past), now, false, None),
             PresenceState::Offline
         );
         // Never scheduled a poll → offline, never a lingering "connected".
         assert_eq!(
-            derive_presence_state("active", None, None, now, false),
+            derive_presence_state("active", None, None, now, false, None),
             PresenceState::Offline
         );
         // paused/left project to offline even with a fresh activity + running job.
         assert_eq!(
-            derive_presence_state("paused", Some("listening"), Some(&future), now, true),
+            derive_presence_state("paused", Some("listening"), Some(&future), now, true, None),
             PresenceState::Offline
         );
+        assert_eq!(
+            derive_presence_state(
+                "active",
+                None,
+                None,
+                now,
+                false,
+                Some(PresenceState::ResumeExpected),
+            ),
+            PresenceState::ResumeExpected
+        );
+    }
+
+    #[test]
+    fn durable_native_resume_is_visible_with_reason_and_disappears_when_settled() {
+        let conn = setup_db();
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO agent_resume_jobs (
+                 id, discussion_id, target_agent_json, kind, status, dedupe_key,
+                 reason, scheduled_at, created_at, updated_at
+             ) VALUES ('resume-1', 'd1', '\"Ollama\"', 'Wake', 'Pending',
+                       'resume:d1:ollama:ci', 'waiting for CI', ?1, ?1, ?1)",
+            [&now],
+        )
+        .unwrap();
+
+        let visible = list_participant_views(&conn, "d1").unwrap();
+        let native = visible
+            .iter()
+            .find(|participant| participant.role == "native_resume")
+            .expect("durable wake must project an honest native participant");
+        assert_eq!(native.agent_type, "Ollama");
+        assert_eq!(native.presence_state, PresenceState::ResumeExpected);
+        assert_eq!(native.resume_reason.as_deref(), Some("waiting for CI"));
+        assert_eq!(native.resume_since.as_deref(), Some(now.as_str()));
+
+        conn.execute(
+            "UPDATE agent_resume_jobs
+             SET status = 'QuotaExhausted', failure_kind = 'quota_exhausted', updated_at = ?1
+             WHERE id = 'resume-1'",
+            [Utc::now().to_rfc3339()],
+        )
+        .unwrap();
+        let quota = list_participant_views(&conn, "d1").unwrap();
+        assert_eq!(
+            quota
+                .iter()
+                .find(|participant| participant.role == "native_resume")
+                .unwrap()
+                .presence_state,
+            PresenceState::QuotaExhausted
+        );
+
+        conn.execute(
+            "UPDATE agent_resume_jobs SET status = 'Completed', updated_at = ?1
+             WHERE id = 'resume-1'",
+            [Utc::now().to_rfc3339()],
+        )
+        .unwrap();
+        assert!(list_participant_views(&conn, "d1")
+            .unwrap()
+            .iter()
+            .all(|participant| participant.role != "native_resume"));
     }
 
     #[test]

@@ -105,6 +105,22 @@ fn workflow_timeout_deadline(
     tokio::time::Instant::now() + remaining
 }
 
+/// Whether a fresh top-level run must create a dedicated worktree.
+///
+/// Isolation is explicitly opt-in. Workspace hooks are the compatibility
+/// exception: workflows authored before the flag existed used the presence of
+/// hooks to request a worktree, so dropping them would silently change their
+/// behaviour.
+fn workflow_requests_workspace(config: Option<&WorkspaceConfig>) -> bool {
+    config.is_some_and(|config| {
+        config.require_isolation
+            || config.hooks.after_create.is_some()
+            || config.hooks.before_run.is_some()
+            || config.hooks.after_run.is_some()
+            || config.hooks.before_remove.is_some()
+    })
+}
+
 pub const UNCERTAIN_SIDE_EFFECT_STATE_KEY: &str = "__kronn.uncertain_side_effect";
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -375,6 +391,16 @@ async fn execute_run_with_notify_policy(
         };
 
     let db = state.db.clone();
+    // Snapshot the persisted per-model Ollama ceilings once for the whole
+    // run. Every agent spawn in this run (main path, repair, debate and
+    // rollback) must resolve the same operator-visible configuration.
+    let ollama_context_overrides = state
+        .config
+        .read()
+        .await
+        .server
+        .ollama_context_overrides
+        .clone();
 
     // Register a cancellation token keyed by the run id. The "⏹ Arrêter" UI
     // triggers this token via POST /api/workflows/.../runs/:run_id/cancel.
@@ -445,7 +471,17 @@ async fn execute_run_with_notify_policy(
     // preserved worktree, not create a second one.
     let is_resume = !run.step_results.is_empty() || run.workspace_path.is_some();
 
-    // Create or attach workspace (if we have a project path)
+    // Isolation is opt-in. Before KT-343 every project-linked workflow tried
+    // to create a worktree even when `require_isolation` was false, which made
+    // read-only fire-and-forget fan-outs trip the isolated-parent safety guard.
+    // Hooks are the one compatibility exception: legacy hook-only configs
+    // still request a worktree because silently dropping after_create / etc.
+    // would be a different behavioral regression.
+    let workspace_requested = workflow_requests_workspace(workflow.workspace_config.as_ref());
+
+    // Create or attach workspace (if we have a project path). An inherited or
+    // resumed workspace remains authoritative even if the workflow definition
+    // was edited after the run started.
     let workspace = if !project_path.is_empty() {
         let repo_path = crate::core::scanner::resolve_host_path(&project_path);
         if repo_path.exists() {
@@ -477,6 +513,13 @@ async fn execute_run_with_notify_policy(
                     )),
                     _ => None, // resume without worktree (or worktree gone) — run in main tree
                 }
+            } else if !workspace_requested {
+                tracing::debug!(
+                    run_id = %run.id,
+                    workflow_id = %workflow.id,
+                    "workflow isolation disabled — running under the main-tree exclusivity guard"
+                );
+                None
             } else {
                 match Workspace::create(&repo_path, &workflow.name, &run.id, hooks).await {
                     Ok(ws) => {
@@ -1218,7 +1261,10 @@ async fn execute_run_with_notify_policy(
                             &agent_extra_context,
                             Some(progress_tx),
                             Some(&agents_config.model_tiers),
-                            agents_config.lite_llm.base_url.as_deref(),
+                            Some(&crate::models::setup::HttpEndpoints::from_agents(
+                                agents_config,
+                            )),
+                            Some(&ollama_context_overrides),
                             native_tools,
                         )
                         .await;
@@ -2219,7 +2265,10 @@ async fn execute_run_with_notify_policy(
                         &agent_extra_context,
                         None,
                         Some(&agents_config.model_tiers),
-                        agents_config.lite_llm.base_url.as_deref(),
+                        Some(&crate::models::setup::HttpEndpoints::from_agents(
+                            agents_config,
+                        )),
+                        Some(&ollama_context_overrides),
                         native_tools,
                     )
                     .await
@@ -3153,6 +3202,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn workspace_is_opt_in_but_legacy_hooks_keep_requesting_it() {
+        assert!(!workflow_requests_workspace(None));
+        assert!(!workflow_requests_workspace(Some(&WorkspaceConfig {
+            hooks: WorkspaceHooks::default(),
+            require_isolation: false,
+        })));
+        assert!(workflow_requests_workspace(Some(&WorkspaceConfig {
+            hooks: WorkspaceHooks::default(),
+            require_isolation: true,
+        })));
+        assert!(workflow_requests_workspace(Some(&WorkspaceConfig {
+            hooks: WorkspaceHooks {
+                before_run: Some("echo prepare".into()),
+                ..WorkspaceHooks::default()
+            },
+            require_isolation: false,
+        })));
+    }
+
     // ─── next_step_index_for_resume — Goto-loop bug fix (0.7.0) ─────────
 
     fn fake_step(name: &str) -> crate::models::WorkflowStep {
@@ -3209,6 +3278,7 @@ mod tests {
             exec_setup_args: vec![],
             exec_stdin: None,
             quick_prompt_id: None,
+            quick_prompt_variables: std::collections::HashMap::new(),
             json_data_payload: None,
             collect_api_data: None,
             transform_data: None,
@@ -3545,6 +3615,7 @@ mod tests {
             exec_setup_args: vec![],
             exec_stdin: None,
             quick_prompt_id: None,
+            quick_prompt_variables: std::collections::HashMap::new(),
             json_data_payload: None,
             collect_api_data: None,
             transform_data: None,
@@ -4119,6 +4190,7 @@ mod tests {
             batch_total: 0,
             batch_completed: 0,
             batch_failed: 0,
+            batch_no_response: 0,
             batch_name: None,
             parent_run_id: None,
             state: ::std::collections::HashMap::new(),
@@ -4206,6 +4278,138 @@ mod tests {
             2,
             "DB persisted both step results"
         );
+    }
+
+    #[tokio::test]
+    async fn project_linked_fire_and_forget_batch_runs_without_parent_worktree() {
+        // KT-343 composition regression: the runner used to create a worktree
+        // for every project-linked workflow, even when isolation was disabled.
+        // BatchQuickPrompt correctly rejects fire-and-forget from a parent
+        // worktree because the parent may delete it while children still run.
+        // Driving the real runner against a real git repo locks both contracts
+        // together; reverting to unconditional isolation makes this test fail.
+        let (state, tokens, agents) = test_state_and_configs();
+        let repo = tempfile::TempDir::new().unwrap();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args([
+                    "-c",
+                    "user.email=test@kronn.local",
+                    "-c",
+                    "user.name=Kronn Test",
+                ])
+                .args(args)
+                .current_dir(repo.path())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "-q"]);
+        std::fs::write(repo.path().join("README.md"), "fixture\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "fixture"]);
+
+        let now = chrono::Utc::now();
+        let project: Project = serde_json::from_value(serde_json::json!({
+            "id": "proj-fanout", "name": "Fanout fixture",
+            "path": repo.path().to_string_lossy(),
+            "repo_url": null, "token_override": null,
+            "ai_config": {"detected": false, "configs": []},
+            "created_at": now.to_rfc3339(), "updated_at": now.to_rfc3339(),
+        }))
+        .unwrap();
+        let qp = QuickPrompt {
+            id: "qp-fanout".into(),
+            pinned: false,
+            name: "Read-only analysis".into(),
+            icon: "🔎".into(),
+            prompt_template: "Analyse {{ticket}}".into(),
+            variables: vec![PromptVariable {
+                name: "ticket".into(),
+                label: "Ticket".into(),
+                placeholder: "KT-1".into(),
+                description: None,
+                required: true,
+                pattern: None,
+            }],
+            agent: AgentType::ClaudeCode,
+            project_id: Some(project.id.clone()),
+            skill_ids: vec![],
+            profile_ids: vec![],
+            directive_ids: vec![],
+            tier: ModelTier::Default,
+            agent_settings: None,
+            description: "Composition fixture".into(),
+            created_at: now,
+            updated_at: now,
+        };
+
+        let project_db = project.clone();
+        let qp_db = qp.clone();
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::projects::insert_project(conn, &project_db)?;
+                crate::db::quick_prompts::insert_quick_prompt(conn, &qp_db)?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let mut workflow = make_workflow_with_artifacts(Default::default());
+        workflow.id = "wf-fanout".into();
+        workflow.name = "Read-only project fanout".into();
+        workflow.project_id = Some(project.id);
+        workflow.workspace_config = None;
+        let mut fanout = fake_step("fanout");
+        fanout.step_type = StepType::BatchQuickPrompt;
+        fanout.batch_quick_prompt_id = Some(qp.id);
+        fanout.batch_items_from = Some(r#"["KT-1"]"#.into());
+        fanout.batch_wait_for_completion = Some(false);
+        fanout.batch_workspace_mode = Some("Direct".into());
+        workflow.steps = vec![fanout];
+
+        let mut run = pending_run("run-fanout", &workflow.id);
+        insert_wf_and_run(&state, &workflow, &run).await;
+        execute_run(
+            state.clone(),
+            &workflow,
+            &mut run,
+            &tokens,
+            &agents,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("read-only project fan-out must execute");
+
+        assert_eq!(run.status, RunStatus::Success);
+        assert_eq!(run.workspace_path, None, "isolation is not implicit");
+        let parent_id = run.id.clone();
+        let (child_runs, discussions) = state
+            .db
+            .with_conn(move |conn| -> anyhow::Result<(i64, i64)> {
+                let child_runs = conn.query_row(
+                    "SELECT COUNT(*) FROM workflow_runs WHERE parent_run_id = ?1",
+                    [&parent_id],
+                    |row| row.get(0),
+                )?;
+                let discussions = conn.query_row(
+                    "SELECT COUNT(*) FROM discussions WHERE workflow_run_id IN (SELECT id FROM workflow_runs WHERE parent_run_id = ?1)",
+                    [&parent_id],
+                    |row| row.get(0),
+                )?;
+                Ok((child_runs, discussions))
+            })
+            .await
+            .unwrap();
+        assert_eq!(child_runs, 1, "one durable child batch run is created");
+        assert_eq!(discussions, 1, "one fire-and-forget discussion is queued");
     }
 
     #[tokio::test]

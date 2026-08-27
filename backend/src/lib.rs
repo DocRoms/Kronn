@@ -180,9 +180,9 @@ pub struct AppState {
     pub ws_broadcast: Arc<tokio::sync::broadcast::Sender<crate::models::WsMessage>>,
     /// Registry of in-flight cancellable tasks keyed by a string id — used by
     /// the "⏹ Arrêter" UI to abort a running agent discussion or workflow
-    /// run. Keys are either a `disc_id` (from `make_agent_stream`) or a
-    /// `run_id` (from the workflow runner). Tokens are inserted when work
-    /// starts and removed in its finally-block — see the Registry impl below.
+    /// run. Keys are a durable agent-dispatch id, a `disc_id` for legacy
+    /// non-dispatch streams, or a workflow `run_id`. Tokens are inserted when
+    /// work starts and removed in its finally-block — see the Registry impl below.
     pub cancel_registry: Arc<Mutex<HashMap<String, tokio_util::sync::CancellationToken>>>,
     /// OAuth2 access-token cache for API plugins. Keyed by `mcp_configs.id`,
     /// value is the bearer token + its absolute expiry. In-memory only —
@@ -683,6 +683,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             get(api::setup::get_scan_depth).post(api::setup::set_scan_depth),
         )
         .route(
+            "/api/config/agent-concurrency",
+            post(api::setup::set_agent_concurrency),
+        )
+        .route(
             "/api/config/agent-access",
             get(api::setup::get_agent_access).post(api::setup::set_agent_access),
         )
@@ -1035,7 +1039,13 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         // ── Ollama (local LLM) ──
         .route("/api/ollama/health", get(api::ollama::health))
         .route("/api/ollama/models", get(api::ollama::models))
+        .route(
+            "/api/ollama/context-override",
+            post(api::ollama::set_context_override),
+        )
         // ── LiteLLM (OpenAI-compatible proxy) ──
+        .route("/api/nvidia/models", get(api::nvidia::models))
+        .route("/api/nvidia/probe", post(api::nvidia::probe))
         .route("/api/lite-llm/health", get(api::lite_llm::health))
         .route("/api/lite-llm/models", get(api::lite_llm::models))
         .route("/api/lite-llm/test", post(api::lite_llm::test))
@@ -1231,6 +1241,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             get(api::api_call_logs::list_api_call_logs),
         )
         .route(
+            "/api/api-call-logs/drift",
+            get(api::api_call_logs::api_call_drift),
+        )
+        .route(
             "/api/api-call-logs/purge",
             post(api::api_call_logs::purge_api_call_logs),
         )
@@ -1300,6 +1314,23 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             "/api/workflow-runs/batch-summaries",
             get(api::workflows::list_batch_run_summaries),
         )
+        .route("/api/comparisons", post(api::compare::create_ad_hoc))
+        .route(
+            "/api/workflow-runs/{run_id}/compare-details",
+            get(api::compare::details),
+        )
+        .route(
+            "/api/workflow-runs/{run_id}/compare-details/{discussion_id}/manual",
+            put(api::compare::update_manual_score),
+        )
+        .route(
+            "/api/workflow-runs/{run_id}/compare-judge",
+            post(api::compare::start_judge),
+        )
+        .route(
+            "/api/workflow-runs/{run_id}/compare-improve",
+            post(api::compare::start_improvement),
+        )
         .route(
             "/api/workflow-runs/{run_id}",
             delete(api::workflows::delete_batch_run),
@@ -1315,7 +1346,9 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         )
         .route(
             "/api/quick-prompts/{id}",
-            put(api::quick_prompts::update).delete(api::quick_prompts::delete),
+            put(api::quick_prompts::update)
+                .patch(api::quick_prompts::update_pinned)
+                .delete(api::quick_prompts::delete),
         )
         .route(
             "/api/quick-prompts/{id}/batch",
@@ -1360,7 +1393,9 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         )
         .route(
             "/api/quick-apis/{id}",
-            put(api::quick_apis::update).delete(api::quick_apis::delete),
+            put(api::quick_apis::update)
+                .patch(api::quick_apis::update_pinned)
+                .delete(api::quick_apis::delete),
         )
         .route("/api/quick-apis/{id}/run", post(api::quick_apis::run_qa))
         .route(
@@ -1379,7 +1414,9 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         )
         .route(
             "/api/quick-execs/{id}",
-            put(api::quick_execs::update).delete(api::quick_execs::delete),
+            put(api::quick_execs::update)
+                .patch(api::quick_execs::update_pinned)
+                .delete(api::quick_execs::delete),
         )
         .route("/api/quick-execs/{id}/run", post(api::quick_execs::run))
         .route(
@@ -1387,6 +1424,14 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             get(api::quick_execs::export),
         )
         .route("/api/quick-execs/import", post(api::quick_execs::import))
+        .route(
+            "/api/discussions/{id}/agent-resume-jobs",
+            get(api::agent_jobs::list_for_discussion),
+        )
+        .route(
+            "/api/discussions/{discussion_id}/agent-resume-jobs/{job_id}/cancel",
+            post(api::agent_jobs::cancel),
+        )
         // ── Discussions ──
         .route("/api/discussions", get(api::discussions::list))
         .route("/api/discussions", post(api::discussions::create))
@@ -1441,6 +1486,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route(
             "/api/discussions/{id}/agent-dispatches/retry",
             post(api::discussions::retry_agent_dispatch),
+        )
+        .route(
+            "/api/discussions/{id}/agent-dispatches/{dispatch_id}/stop",
+            post(api::discussions::stop_agent_dispatch),
         )
         .route(
             "/api/discussions/{id}/stop",
@@ -1568,6 +1617,114 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route(
             "/api/disc/workspace/history-lease",
             post(api::disc_workspace::disc_workspace_history_lease),
+        )
+        // ── Maintenance (KT-373) — see what a disk-full recovery would remove,
+        // and remove only what was just shown. No "clean everything" verb.
+        .route(
+            "/api/maintenance/build-artifacts",
+            get(api::maintenance::list_build_artifacts),
+        )
+        .route(
+            "/api/maintenance/build-artifacts/reclaim",
+            post(api::maintenance::reclaim_build_artifacts),
+        )
+        // ── Orchestration (KT-328) — reachable launch + CLI-worker accept surface.
+        // Without these the control offer names a tool that resolves to nothing.
+        .route(
+            "/api/orchestration/provision",
+            post(api::orchestration::provision),
+        )
+        .route(
+            "/api/orchestration/tool/workers",
+            post(api::orchestration::task_worker_catalogue),
+        )
+        .route(
+            "/api/orchestration/tool/prepare",
+            post(api::orchestration::task_exec_prepare),
+        )
+        .route(
+            "/api/orchestration/tool/launch",
+            post(api::orchestration::task_exec_launch),
+        )
+        .route(
+            "/api/orchestration/tool/executions/{id}/status",
+            post(api::orchestration::task_exec_status),
+        )
+        .route(
+            "/api/orchestration/tool/executions/{id}/cancel",
+            post(api::orchestration::task_exec_cancel),
+        )
+        .route(
+            "/api/orchestration/tool/executions/{id}/reassign",
+            post(api::orchestration::task_exec_reassign),
+        )
+        .route(
+            "/api/orchestration/campaigns",
+            post(api::orchestration::create_campaign),
+        )
+        .route(
+            "/api/orchestration/campaigns/{id}",
+            get(api::orchestration::get_campaign),
+        )
+        .route(
+            "/api/orchestration/discussions/{id}/campaign",
+            get(api::orchestration::get_discussion_campaign),
+        )
+        .route(
+            "/api/orchestration/campaigns/{id}/launch",
+            post(api::orchestration::launch_campaign_task),
+        )
+        .route(
+            "/api/orchestration/campaigns/{id}/control",
+            post(api::orchestration::control_campaign),
+        )
+        .route(
+            "/api/orchestration/discussion-links",
+            get(api::orchestration::list_execution_discussion_links),
+        )
+        .route(
+            "/api/orchestration/executions/{id}",
+            get(api::orchestration::get_execution_detail),
+        )
+        .route(
+            "/api/orchestration/executions/{id}/observability",
+            get(api::orchestration::get_execution_observability),
+        )
+        .route(
+            "/api/orchestration/executions/{id}/recovery",
+            get(api::orchestration::get_execution_recovery),
+        )
+        .route(
+            "/api/orchestration/executions/{id}/resume",
+            post(api::orchestration::resume_execution),
+        )
+        .route(
+            "/api/orchestration/executions/{id}/cancel",
+            post(api::orchestration::cancel_execution),
+        )
+        .route(
+            "/api/orchestration/executions/{id}/reassign",
+            post(api::orchestration::reassign_execution),
+        )
+        .route(
+            "/api/orchestration/executions/{id}/review",
+            post(api::orchestration::human_review),
+        )
+        .route(
+            "/api/orchestration/accept-offer",
+            post(api::orchestration::accept_offer),
+        )
+        .route(
+            "/api/orchestration/deliver",
+            post(api::orchestration::deliver),
+        )
+        .route(
+            "/api/orchestration/worker-commit",
+            post(api::orchestration::commit_spawned_worker),
+        )
+        .route(
+            "/api/orchestration/review",
+            post(api::orchestration::review),
         )
         .route(
             "/api/disc/find_by_session",

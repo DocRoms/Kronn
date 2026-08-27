@@ -122,7 +122,8 @@ pub async fn execute_step(
     // the BUILT-IN fallback (opus) instead of the configured model (fable).
     // Discussions already plumb this (streaming.rs:484); workflows now do too.
     model_tiers: Option<&crate::models::setup::ModelTiersConfig>,
-    lite_llm_base_url: Option<&str>,
+    http_endpoints: Option<&crate::models::setup::HttpEndpoints>,
+    ollama_context_overrides: Option<&std::collections::HashMap<String, u64>>,
     native_tools: Option<Arc<dyn crate::agents::tools::ToolExecutor>>,
 ) -> StepOutcome {
     let start = Instant::now();
@@ -247,7 +248,8 @@ pub async fn execute_step(
             tokens_config,
             full_access,
             model_tiers,
-            lite_llm_base_url,
+            http_endpoints,
+            ollama_context_overrides,
             native_tools.clone(),
             progress_tx.as_ref(),
         )
@@ -318,7 +320,8 @@ pub async fn execute_step(
                             tokens_config,
                             full_access,
                             model_tiers,
-                            lite_llm_base_url,
+                            http_endpoints,
+                            ollama_context_overrides,
                             native_tools.clone(),
                             None,
                         )
@@ -393,7 +396,8 @@ pub async fn execute_step(
                                 tokens_config,
                                 full_access,
                                 model_tiers,
-                                lite_llm_base_url,
+                                http_endpoints,
+                                ollama_context_overrides,
                                 native_tools.clone(),
                                 None,
                             )
@@ -486,7 +490,8 @@ pub async fn execute_step(
                     let pre_debate = final_output.clone();
                     match run_multi_agent_debate(
                         step, &mar, &final_output, project_path, work_dir,
-                        tokens_config, full_access, model_tiers, lite_llm_base_url,
+                        tokens_config, full_access, model_tiers, http_endpoints,
+                        ollama_context_overrides,
                         native_tools.clone(),
                         progress_tx.as_ref(),
                     ).await {
@@ -759,7 +764,8 @@ async fn run_agent_with_timeout(
     tokens_config: &TokensConfig,
     full_access: bool,
     model_tiers: Option<&crate::models::setup::ModelTiersConfig>,
-    lite_llm_base_url: Option<&str>,
+    http_endpoints: Option<&crate::models::setup::HttpEndpoints>,
+    ollama_context_overrides: Option<&std::collections::HashMap<String, u64>>,
     native_tools: Option<Arc<dyn crate::agents::tools::ToolExecutor>>,
     progress_tx: Option<&ProgressSender>,
 ) -> Result<AgentOutput> {
@@ -791,7 +797,12 @@ async fn run_agent_with_timeout(
             .and_then(|s| s.tier)
             .unwrap_or_default(),
         model_tiers,
-        lite_llm_base_url,
+        http_endpoints,
+        ollama_context_overrides,
+        // Workflow steps already expose their own timeout; use that exact
+        // value for the initial HTTP request too instead of the discussion
+        // Settings budget or a transport-only constant.
+        http_request_timeout: Some(stall_timeout),
         ollama_format: ollama_format.as_ref(),
         // Explicit per-step model (from the wizard's model picker) — now
         // actually consumed at run time, not just stamped for display.
@@ -859,6 +870,7 @@ async fn drive_agent_to_output(
     let mut output = String::new();
     let is_stream_json = process.output_mode() == OutputMode::StreamJson;
     let mut stream_json_tokens: u64 = 0;
+    let mut stream_json_failure: Option<runner::StreamJsonFailure> = None;
     // Tool-call accumulator (see run_agent_with_timeout's doc): Claude Code's
     // stream-json emits tool input as partial JSON deltas; we buffer them and
     // surface a `🔧 Edit · src/foo.rs` one-liner on ToolEnd.
@@ -885,6 +897,11 @@ async fn drive_agent_to_output(
                             ..
                         } => {
                             stream_json_tokens = input_tokens + output_tokens;
+                        }
+                        StreamJsonEvent::TerminalError(failure) => {
+                            stream_json_tokens = stream_json_tokens
+                                .max(failure.input_tokens + failure.output_tokens);
+                            stream_json_failure = Some(failure);
                         }
                         StreamJsonEvent::ToolStart(name) => {
                             // Emit the tool name immediately — gives the user
@@ -957,6 +974,10 @@ async fn drive_agent_to_output(
     // (auth expiry, rate limit, context overflow, panic stack…) silently
     // dropped on the floor.
     let stderr_lines = process.captured_stderr_flushed().await;
+
+    if let Some(failure) = stream_json_failure {
+        anyhow::bail!(failure.user_message());
+    }
 
     let success = status.map(|s| s.success).unwrap_or(false);
     if !success {
@@ -1077,7 +1098,8 @@ async fn run_multi_agent_debate(
     tokens_config: &TokensConfig,
     full_access: bool,
     model_tiers: Option<&crate::models::setup::ModelTiersConfig>,
-    lite_llm_base_url: Option<&str>,
+    http_endpoints: Option<&crate::models::setup::HttpEndpoints>,
+    ollama_context_overrides: Option<&std::collections::HashMap<String, u64>>,
     native_tools: Option<Arc<dyn crate::agents::tools::ToolExecutor>>,
     progress_tx: Option<&ProgressSender>,
 ) -> Result<(String, u64, Vec<NativeToolCallLog>)> {
@@ -1139,7 +1161,8 @@ async fn run_multi_agent_debate(
             tokens_config,
             full_access,
             model_tiers,
-            lite_llm_base_url,
+            http_endpoints,
+            ollama_context_overrides,
             native_tools.clone(),
             progress_tx,
         )
@@ -1187,7 +1210,8 @@ async fn run_multi_agent_debate(
             tokens_config,
             full_access,
             model_tiers,
-            lite_llm_base_url,
+            http_endpoints,
+            ollama_context_overrides,
             native_tools.clone(),
             progress_tx,
         )
@@ -1572,6 +1596,7 @@ mod tests {
             exec_setup_args: vec![],
             exec_stdin: None,
             quick_prompt_id: None,
+            quick_prompt_variables: std::collections::HashMap::new(),
             json_data_payload: None,
             collect_api_data: None,
             transform_data: None,
@@ -2033,6 +2058,19 @@ mod drive_agent_to_output_tests {
     }
 
     #[tokio::test]
+    async fn failed_fable_result_bails_with_structured_stdout_cause() {
+        let fable_429 = r#"{"type":"result","subtype":"error_during_execution","is_error":true,"result":"You've hit your org's monthly spend limit · run /usage-credits to manage your plan.","api_error_status":429,"terminal_reason":"api_error","cost_usd":0,"usage":{"input_tokens":0,"output_tokens":0}}"#;
+        let proc = ScriptedProcess::stream_json([fable_429]).with_exit(false, Some(1));
+        let err = drive_agent_to_output(proc, None, LONG, &AgentType::ClaudeCode, "fable-quota")
+            .await
+            .expect_err("structured provider error must fail the step");
+        let msg = err.to_string();
+        assert!(msg.contains("monthly spend limit"), "got: {msg}");
+        assert!(msg.contains("HTTP 429"), "got: {msg}");
+        assert!(!msg.contains("NO output at all"), "got: {msg}");
+    }
+
+    #[tokio::test]
     async fn failed_exit_no_stderr_gives_actionable_message() {
         let proc = ScriptedProcess::stream_json(Vec::<String>::new()).with_exit(false, Some(137)); // SIGKILL-ish, no stderr
         let err = drive_agent_to_output(proc, None, LONG, &AgentType::ClaudeCode, "killed")
@@ -2159,7 +2197,11 @@ mod http_native_tool_step_tests {
             "",
             None,
             None,
-            Some(&server.uri()),
+            Some(&crate::models::setup::HttpEndpoints {
+                lite_llm: Some(server.uri()),
+                nvidia: None,
+            }),
+            None,
             Some(tools),
         )
         .await;
@@ -2184,6 +2226,7 @@ mod http_native_tool_step_tests {
         Mock::given(method("POST"))
             .and(path("/api/chat"))
             .and(body_string_contains("\"name\":\"task_list\""))
+            .and(body_string_contains("\"num_ctx\":12345"))
             .respond_with(ResponseTemplate::new(200).set_body_string(
                 "{\"message\":{\"content\":\"\",\"tool_calls\":[{\"function\":{\"name\":\"task_list\",\"arguments\":{}}}]},\"done\":false}\n\
                  {\"done\":true,\"prompt_eval_count\":6,\"eval_count\":2}\n",
@@ -2195,6 +2238,7 @@ mod http_native_tool_step_tests {
             .and(path("/api/chat"))
             .and(body_string_contains("KT-189"))
             .and(body_string_contains(r#""role":"tool""#))
+            .and(body_string_contains("\"num_ctx\":12345"))
             .respond_with(ResponseTemplate::new(200).set_body_string(
                 "{\"message\":{\"content\":\"KT-189 is Native tools\"},\"done\":false}\n\
                  {\"done\":true,\"prompt_eval_count\":10,\"eval_count\":4}\n",
@@ -2203,7 +2247,9 @@ mod http_native_tool_step_tests {
             .await;
 
         let previous_host = std::env::var("OLLAMA_HOST").ok();
+        let previous_ctx_cap = std::env::var("KRONN_OLLAMA_NUM_CTX_CAP").ok();
         std::env::set_var("OLLAMA_HOST", server.uri());
+        std::env::remove_var("KRONN_OLLAMA_NUM_CTX_CAP");
         let calls = Arc::new(Mutex::new(Vec::new()));
         let tools: Arc<dyn ToolExecutor> = Arc::new(ReadOnlyTools {
             calls: calls.clone(),
@@ -2230,6 +2276,7 @@ mod http_native_tool_step_tests {
         };
         let dir = tempfile::tempdir().expect("temporary project");
         let project = dir.path().to_string_lossy();
+        let overrides = std::collections::HashMap::from([("test-model".to_string(), 12_345)]);
         let outcome = execute_step(
             &step,
             &project,
@@ -2241,12 +2288,17 @@ mod http_native_tool_step_tests {
             None,
             None,
             None,
+            Some(&overrides),
             Some(tools),
         )
         .await;
         match previous_host {
             Some(value) => std::env::set_var("OLLAMA_HOST", value),
             None => std::env::remove_var("OLLAMA_HOST"),
+        }
+        match previous_ctx_cap {
+            Some(value) => std::env::set_var("KRONN_OLLAMA_NUM_CTX_CAP", value),
+            None => std::env::remove_var("KRONN_OLLAMA_NUM_CTX_CAP"),
         }
 
         assert_eq!(outcome.result.status, RunStatus::Success);

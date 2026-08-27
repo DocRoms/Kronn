@@ -1,0 +1,6 @@
+-- KT-381 — forward repair for development databases that recorded migration
+-- 136 before task_execution_events.actor_session_id was added to that file.
+--
+-- The conditional schema work lives in migrations.rs because SQLite does not
+-- support ALTER TABLE ... ADD COLUMN IF NOT EXISTS. Keeping a numbered SQL
+-- entry still provides the normal atomic migration receipt and backup trigger.

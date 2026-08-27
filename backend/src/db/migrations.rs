@@ -475,7 +475,109 @@ const MIGRATIONS: &[(&str, &str)] = &[
         include_str!("sql/125_live_page_publication_changes.sql"),
     ),
     ("126_quick_execs", include_str!("sql/126_quick_execs.sql")),
+    (
+        "127_task_orchestration",
+        include_str!("sql/127_task_orchestration.sql"),
+    ),
+    (
+        "128_task_execution_delivery",
+        include_str!("sql/128_task_execution_delivery.sql"),
+    ),
+    (
+        "129_orchestration_self_review",
+        include_str!("sql/129_orchestration_self_review.sql"),
+    ),
+    (
+        "130_batch_compare_evaluations",
+        include_str!("sql/130_batch_compare_evaluations.sql"),
+    ),
+    (
+        "131_batch_compare_prompt_review",
+        include_str!("sql/131_batch_compare_prompt_review.sql"),
+    ),
+    (
+        "132_ad_hoc_compare_runs",
+        include_str!("sql/132_ad_hoc_compare_runs.sql"),
+    ),
+    (
+        "133_batch_no_response",
+        include_str!("sql/133_batch_no_response.sql"),
+    ),
+    (
+        "134_orchestration_campaign_policy",
+        include_str!("sql/134_orchestration_campaign_policy.sql"),
+    ),
+    (
+        "135_orchestration_resilience",
+        include_str!("sql/135_orchestration_resilience.sql"),
+    ),
+    (
+        "136_planning_actor_session",
+        include_str!("sql/136_planning_actor_session.sql"),
+    ),
+    (
+        "137_agent_resume_jobs",
+        include_str!("sql/137_agent_resume_jobs.sql"),
+    ),
+    (
+        "138_agent_dispatch_failure_state",
+        include_str!("sql/138_agent_dispatch_failure_state.sql"),
+    ),
+    (
+        "139_task_execution_actor_session_repair",
+        include_str!("sql/139_task_execution_actor_session_repair.sql"),
+    ),
+    (
+        "140_task_execution_active_blocker_cleanup",
+        include_str!("sql/140_task_execution_active_blocker_cleanup.sql"),
+    ),
+    (
+        "141_task_execution_worker_scope",
+        include_str!("sql/141_task_execution_worker_scope.sql"),
+    ),
+    (
+        "142_task_execution_worker_dod_snapshot",
+        include_str!("sql/142_task_execution_worker_dod_snapshot.sql"),
+    ),
+    (
+        "143_quick_items_pinned",
+        include_str!("sql/143_quick_items_pinned.sql"),
+    ),
 ];
+
+/// Apply one migration inside the caller-owned transaction.
+///
+/// Migration 136 originally shipped on the 0.11 development branch with only
+/// the `planning_task_events` column. Adding the second ALTER to that already
+/// receipted file did not repair existing development databases. Migration 139
+/// is therefore deliberately implemented as a schema-aware forward repair:
+/// fresh databases already have both columns, while historical partial ones
+/// receive only the missing column. Keeping the inspection and ALTER inside
+/// the migration transaction makes its receipt truthful after a crash.
+fn apply_migration(tx: &rusqlite::Transaction<'_>, name: &str, sql: &str) -> Result<()> {
+    tx.execute_batch(sql)?;
+    if name == "139_task_execution_actor_session_repair" {
+        ensure_actor_session_columns(tx)?;
+    }
+    Ok(())
+}
+
+fn ensure_actor_session_columns(tx: &rusqlite::Transaction<'_>) -> Result<()> {
+    // These identifiers are compile-time constants, never caller input.
+    for table in ["planning_task_events", "task_execution_events"] {
+        let query = format!(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('{table}') \
+             WHERE name = 'actor_session_id')"
+        );
+        let exists: bool = tx.query_row(&query, [], |row| row.get(0))?;
+        if !exists {
+            tx.execute_batch(&format!(
+                "ALTER TABLE {table} ADD COLUMN actor_session_id TEXT;"
+            ))?;
+        }
+    }
+    Ok(())
+}
 
 // These migrations shipped on the 0.9.6 development branch before its rebase
 // onto 0.9.5. Main had meanwhile claimed 107–112, so the SQL files had to move
@@ -611,7 +713,7 @@ pub fn run_with_backup(conn: &Connection, db_path: Option<&Path>) -> Result<()> 
             let tx = conn
                 .unchecked_transaction()
                 .map_err(|e| anyhow::anyhow!("begin tx for migration {name}: {e}"))?;
-            tx.execute_batch(sql)
+            apply_migration(&tx, name, sql)
                 .map_err(|e| anyhow::anyhow!("migration {name} failed and was rolled back: {e}"))?;
             tx.execute("INSERT INTO _migrations (name) VALUES (?1)", [name])?;
             tx.commit()
@@ -650,7 +752,7 @@ pub(crate) fn run_through(conn: &Connection, stop_after: &str) -> Result<()> {
         )?;
         if !already_applied {
             let tx = conn.unchecked_transaction()?;
-            tx.execute_batch(sql)?;
+            apply_migration(&tx, name, sql)?;
             tx.execute("INSERT INTO _migrations (name) VALUES (?1)", [name])?;
             tx.commit()?;
         }
@@ -953,6 +1055,140 @@ mod tests {
             !table_exists,
             "the CREATE must have been rolled back, not left half-applied"
         );
+    }
+
+    #[test]
+    fn actor_session_forward_repair_upgrades_a_receipted_partial_136() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_through(&conn, "135_orchestration_resilience").unwrap();
+
+        // Reproduce the exact historical development state: migration 136 had
+        // added the planning column and recorded its receipt before the task
+        // execution ALTER was appended to the already-shipped SQL file.
+        conn.execute_batch(
+            "ALTER TABLE planning_task_events ADD COLUMN actor_session_id TEXT;
+             INSERT INTO _migrations (name) VALUES ('136_planning_actor_session');",
+        )
+        .unwrap();
+
+        let column_count = |table: &str| -> i64 {
+            conn.query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM pragma_table_info('{table}') \
+                     WHERE name = 'actor_session_id'"
+                ),
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(column_count("planning_task_events"), 1);
+        assert_eq!(column_count("task_execution_events"), 0);
+
+        run(&conn).unwrap();
+
+        assert_eq!(column_count("planning_task_events"), 1);
+        assert_eq!(column_count("task_execution_events"), 1);
+        let repair_receipt: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM _migrations \
+                 WHERE name = '139_task_execution_actor_session_repair')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            repair_receipt,
+            "the forward repair must be durably receipted"
+        );
+
+        // A second startup is a no-op, not a duplicate-column boot failure.
+        run(&conn).unwrap();
+        assert_eq!(column_count("task_execution_events"), 1);
+    }
+
+    #[test]
+    fn actor_session_forward_repair_is_a_noop_on_a_fresh_database() {
+        let conn = Connection::open_in_memory().unwrap();
+        run(&conn).unwrap();
+        run(&conn).unwrap();
+
+        for table in ["planning_task_events", "task_execution_events"] {
+            let count: i64 = conn
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) FROM pragma_table_info('{table}') \
+                         WHERE name = 'actor_session_id'"
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 1, "{table} must contain exactly one repaired column");
+        }
+    }
+
+    #[test]
+    fn active_blocker_cleanup_repairs_only_non_live_holds() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_through(&conn, "139_task_execution_actor_session_repair").unwrap();
+
+        // This migration-level test exercises only the state projection repaired
+        // by migration 140; parent aggregates are deliberately out of scope.
+        conn.execute_batch("PRAGMA foreign_keys = OFF;").unwrap();
+        conn.execute_batch(
+            "INSERT INTO task_executions (
+                 id, orchestration_run_id, task_id, parent_discussion_id, status,
+                 blocked_from_status, interrupted_from_status, blocked_reason,
+                 blocked_reason_code, created_at, updated_at
+             ) VALUES
+             ('working-stale', 'run-w', 'task-w', 'disc-w', 'Working',
+              'Provisioning', NULL, 'awaiting_worker_acceptance',
+              'awaiting_worker_acceptance', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
+             ('done-stale', 'run-d', 'task-d', 'disc-d', 'Done',
+              'Provisioning', NULL, 'awaiting_worker_acceptance',
+              'awaiting_worker_acceptance', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
+             ('blocked-live', 'run-b', 'task-b', 'disc-b', 'Blocked',
+              'Provisioning', NULL, 'awaiting_worker_acceptance',
+              'awaiting_worker_acceptance', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
+             ('interrupted-live', 'run-i', 'task-i', 'disc-i', 'Interrupted',
+              'Provisioning', 'Blocked', 'awaiting_worker_acceptance',
+              'awaiting_worker_acceptance', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
+             ('interrupted-stale', 'run-is', 'task-is', 'disc-is', 'Interrupted',
+              'Provisioning', 'Working', 'awaiting_worker_acceptance',
+              'awaiting_worker_acceptance', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
+             ('interrupted-corrupt', 'run-ic', 'task-ic', 'disc-ic', 'Interrupted',
+              'Provisioning', NULL, 'awaiting_worker_acceptance',
+              'awaiting_worker_acceptance', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');",
+        )
+        .unwrap();
+
+        run(&conn).unwrap();
+        let blocker = |id: &str| -> (Option<String>, Option<String>, Option<String>) {
+            conn.query_row(
+                "SELECT blocked_from_status, blocked_reason, blocked_reason_code \
+                 FROM task_executions WHERE id = ?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap()
+        };
+
+        for id in [
+            "working-stale",
+            "done-stale",
+            "interrupted-stale",
+            "interrupted-corrupt",
+        ] {
+            assert_eq!(blocker(id), (None, None, None), "{id} must be repaired");
+        }
+        let live = (
+            Some("Provisioning".to_string()),
+            Some("awaiting_worker_acceptance".to_string()),
+            Some("awaiting_worker_acceptance".to_string()),
+        );
+        assert_eq!(blocker("blocked-live"), live);
+        assert_eq!(blocker("interrupted-live"), live);
     }
 
     #[test]
@@ -1370,6 +1606,182 @@ mod tests {
             )
             .unwrap();
         assert_eq!(reply_to.as_deref(), Some("u-1"));
+    }
+
+    #[test]
+    fn task_orchestration_migration_widens_actor_kind_preserving_events() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_through(&conn, "126_quick_execs").unwrap();
+        conn.execute(
+            "INSERT INTO planning_tasks (id, task_number, title, created_at, updated_at)
+             VALUES ('t-old', 1, 'Legacy', '2026-08-16T00:00:00Z', '2026-08-16T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO planning_task_events
+                 (id, task_id, action, actor_kind, actor_id, changes_json, created_at)
+             VALUES ('ev-old', 't-old', 'created', 'agent', 'Codex', '{}', '2026-08-16T00:01:00Z')",
+            [],
+        )
+        .unwrap();
+
+        run(&conn).unwrap();
+
+        // The pre-existing event survived the table rebuild verbatim.
+        let (task_id, actor_kind, actor_id): (String, String, String) = conn
+            .query_row(
+                "SELECT task_id, actor_kind, actor_id FROM planning_task_events WHERE id = 'ev-old'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (task_id.as_str(), actor_kind.as_str(), actor_id.as_str()),
+            ("t-old", "agent", "Codex")
+        );
+
+        // The widened CHECK now admits a backend-attributed event…
+        conn.execute(
+            "INSERT INTO planning_task_events
+                 (id, task_id, action, actor_kind, changes_json, created_at)
+             VALUES ('ev-backend', 't-old', 'closed', 'backend', '{}', '2026-08-16T00:02:00Z')",
+            [],
+        )
+        .expect("backend actor must be accepted after 127");
+        // …but an unknown kind is still rejected.
+        assert!(conn
+            .execute(
+                "INSERT INTO planning_task_events
+                     (id, task_id, action, actor_kind, changes_json, created_at)
+                 VALUES ('ev-bad', 't-old', 'x', 'martian', '{}', '2026-08-16T00:03:00Z')",
+                [],
+            )
+            .is_err());
+
+        // The new orchestration tables exist and the one-active-per-task index is present.
+        let index_present: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index'
+                 AND name='idx_task_executions_one_active_per_task')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(index_present);
+    }
+
+    #[test]
+    fn quick_item_favorites_migration_keeps_existing_rows_unpinned() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_through(&conn, "142_task_execution_worker_dod_snapshot").unwrap();
+        conn.execute_batch(
+            "INSERT INTO quick_prompts
+                 (id, name, prompt_template, created_at, updated_at)
+             VALUES ('qp-old', 'Prompt', 'Body', '2026-08-26T00:00:00Z', '2026-08-26T00:00:00Z');
+             INSERT INTO quick_apis
+                 (id, name, api_plugin_slug, api_config_id, api_endpoint_path,
+                  created_at, updated_at)
+             VALUES ('qa-old', 'API', 'demo', 'cfg', '/items',
+                     '2026-08-26T00:00:00Z', '2026-08-26T00:00:00Z');
+             INSERT INTO quick_execs
+                 (id, name, command, created_at, updated_at)
+             VALUES ('qe-old', 'Exec', 'echo', '2026-08-26T00:00:00Z', '2026-08-26T00:00:00Z');",
+        )
+        .unwrap();
+
+        run(&conn).unwrap();
+
+        for (table, id) in [
+            ("quick_prompts", "qp-old"),
+            ("quick_apis", "qa-old"),
+            ("quick_execs", "qe-old"),
+        ] {
+            let pinned: i64 = conn
+                .query_row(
+                    &format!("SELECT pinned FROM {table} WHERE id = ?1"),
+                    [id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(pinned, 0, "{table} legacy row became favorite");
+        }
+    }
+
+    /// Release gate for 0.11.0: model a persistent 0.10.0 database by applying
+    /// every migration through 126, close it, then reopen it through the exact
+    /// production backup + migration path. This is intentionally broader than
+    /// the migration-127 unit test above: it proves the upgrade receipts and
+    /// operator rollback snapshot on a real file.
+    #[test]
+    fn persistent_0_10_database_upgrades_with_backup_and_preserves_planning_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("kronn.db");
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            run_through(&conn, "126_quick_execs").unwrap();
+            conn.execute(
+                "INSERT INTO planning_tasks
+                     (id, task_number, title, description, status, priority, created_at, updated_at)
+                 VALUES
+                     ('release-upgrade-task', 11, 'Preserve me', '0.10 data',
+                      'in_progress', 'high', '2026-08-14T00:00:00Z', '2026-08-14T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        }
+
+        let conn = Connection::open(&db_path).unwrap();
+        run_with_backup(&conn, Some(&db_path)).unwrap();
+
+        let preserved: (String, String, String) = conn
+            .query_row(
+                "SELECT title, description, status FROM planning_tasks
+                 WHERE id = 'release-upgrade-task'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            preserved,
+            (
+                "Preserve me".to_string(),
+                "0.10 data".to_string(),
+                "in_progress".to_string(),
+            )
+        );
+        for migration in [
+            "127_task_orchestration",
+            "128_task_execution_delivery",
+            "129_orchestration_self_review",
+            "134_orchestration_campaign_policy",
+        ] {
+            let applied: bool = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM _migrations WHERE name = ?1)",
+                    [migration],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(applied, "missing post-0.10 migration receipt: {migration}");
+        }
+        let backup_path = db_path.with_extension("db.backup");
+        assert!(
+            backup_path.exists(),
+            "pre-upgrade rollback snapshot is missing"
+        );
+        let backup = Connection::open(backup_path).unwrap();
+        let orchestration_applied: bool = backup
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM _migrations WHERE name = '127_task_orchestration')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            !orchestration_applied,
+            "backup must remain at the 0.10 schema boundary"
+        );
     }
 
     #[test]

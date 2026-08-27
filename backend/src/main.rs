@@ -313,22 +313,69 @@ async fn main() -> anyhow::Result<()> {
     // Durable agent-dispatch recovery runs before the legacy awaiting scan.
     // A Running row means the process died mid-turn; return it to Pending so
     // the worker can either resume execution or observe an already-persisted
+    // KT-373 — publish the disk thresholds before anything can provision, so a
+    // configured floor applies to the very first worktree of this boot.
+    {
+        let config = state.config.read().await;
+        kronn::core::worktree::set_disk_thresholds(
+            config.server.disk_warning_gib,
+            config.server.disk_critical_gib,
+        );
+    }
     // reply without spending tokens twice.
     match state
         .db
         .with_conn(kronn::db::agent_dispatch::recover_after_restart)
         .await
     {
-        Ok(recovery) if recovery.requeued > 0 || recovery.cancelled_workflow_children > 0 => {
+        Ok(recovery)
+            if recovery.requeued > 0
+                || recovery.cancelled_workflow_children > 0
+                || recovery.superseded > 0 =>
+        {
             tracing::warn!(
-                "Agent dispatch recovery: requeued {} ordinary job(s), cancelled {} child job(s) whose workflow owner was interrupted",
+                "Agent dispatch recovery: requeued {} ordinary job(s), cancelled {} child job(s) whose workflow owner was interrupted, retired {} job(s) the room had already moved past",
                 recovery.requeued,
-                recovery.cancelled_workflow_children
+                recovery.cancelled_workflow_children,
+                recovery.superseded
             )
         }
         Ok(_) => {}
         Err(error) => tracing::warn!("Agent dispatch recovery failed: {error}"),
     }
+    match state
+        .db
+        .with_conn(kronn::db::agent_jobs::recover_after_restart)
+        .await
+    {
+        Ok(requeued) if requeued > 0 => tracing::warn!(
+            "Agent resume recovery: requeued {requeued} backend-owned job(s) interrupted by restart"
+        ),
+        Ok(_) => {}
+        Err(error) => tracing::warn!("Agent resume recovery failed: {error}"),
+    }
+
+    // 0.11.0 (KT-322) — reconcile the orchestration tree before the dispatcher
+    // can claim recovered worker jobs. Every in-flight execution is first made
+    // visibly Interrupted, then classified against its durable lineage and the
+    // real Git refs. Managed workspaces orphaned by FK SET NULL are collected
+    // only when their checkout is provably ours and clean.
+    let orchestration_recovery = kronn::api::orchestration::reconcile_at_boot(&state).await;
+    if orchestration_recovery.interrupted > 0
+        || orchestration_recovery.orphan_workspaces_removed > 0
+        || !orchestration_recovery.errors.is_empty()
+    {
+        tracing::warn!(
+            interrupted = orchestration_recovery.interrupted,
+            classified = orchestration_recovery.classified,
+            resumed_or_parked = orchestration_recovery.resumed_or_parked,
+            orphans_removed = orchestration_recovery.orphan_workspaces_removed,
+            orphans_preserved = orchestration_recovery.orphan_workspaces_preserved,
+            errors = ?orchestration_recovery.errors,
+            "Task orchestration boot reconciliation completed"
+        );
+    }
+    kronn::api::orchestration::start_resilience_watchdog(state.clone());
 
     // KT-289 — remove checkout directories left discoverable by terminal runs
     // from an earlier process. Run this after dispatch recovery: children owned
@@ -453,6 +500,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     kronn::api::discussions::start_agent_dispatcher(state.clone());
+    kronn::api::agent_jobs::start_agent_resume_runner(state.clone());
 
     // 0.8.11 (B7) — opt-in run retention. Only when the operator set
     // `run_retention_days > 0`; parent runs referenced by a retained child are

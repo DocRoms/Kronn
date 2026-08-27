@@ -154,16 +154,15 @@ pub async fn discussions(
 pub async fn update(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    Json(request): Json<UpdateLivePageRequest>,
+    Json(mut request): Json<UpdateLivePageRequest>,
 ) -> Json<ApiResponse<crate::models::LivePageDetail>> {
-    if let Some(title) = request.title.as_deref() {
-        let title = title.trim();
-        if title.is_empty() || title.chars().count() > 200 {
-            return Json(ApiResponse::err_coded(
-                ApiErrorCode::Validation,
-                "Page title must contain 1-200 characters",
-            ));
-        }
+    if let Some(title) = request.title.take() {
+        request.title = match normalize_page_title(&title) {
+            Ok(title) => Some(title),
+            Err(message) => {
+                return Json(ApiResponse::err_coded(ApiErrorCode::Validation, message));
+            }
+        };
     }
     match state
         .db
@@ -316,13 +315,12 @@ pub async fn create(
     State(state): State<AppState>,
     Json(request): Json<CreateLivePageRequest>,
 ) -> Json<ApiResponse<crate::models::LivePageDetail>> {
-    let title = request.title.trim();
-    if title.is_empty() || title.chars().count() > 200 {
-        return Json(ApiResponse::err_coded(
-            ApiErrorCode::Validation,
-            "Page title must contain 1-200 characters",
-        ));
-    }
+    let title = match normalize_page_title(&request.title) {
+        Ok(title) => title,
+        Err(message) => {
+            return Json(ApiResponse::err_coded(ApiErrorCode::Validation, message));
+        }
+    };
     if request.html.trim().is_empty() || request.html.len() > MAX_PAGE_HTML_BYTES {
         return Json(ApiResponse::err_coded(
             ApiErrorCode::Validation,
@@ -335,7 +333,7 @@ pub async fn create(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
-        .unwrap_or_else(|| slugify(title));
+        .unwrap_or_else(|| slugify(&title));
     if !valid_slug(&slug) {
         return Json(ApiResponse::err_coded(
             ApiErrorCode::Validation,
@@ -349,7 +347,7 @@ pub async fn create(
     let page = LivePage {
         id: page_id.clone(),
         project_id: request.project_id,
-        title: title.to_string(),
+        title,
         slug,
         current_revision_id: revision_id.clone(),
         data_revision: 0,
@@ -463,6 +461,15 @@ fn slugify(title: &str) -> String {
     }
 }
 
+fn normalize_page_title(title: &str) -> Result<String, &'static str> {
+    let title = title.trim();
+    if title.is_empty() || title.chars().count() > 200 {
+        Err("Page title must contain 1-200 characters")
+    } else {
+        Ok(title.to_string())
+    }
+}
+
 fn valid_slug(slug: &str) -> bool {
     !slug.is_empty()
         && slug.len() <= 100
@@ -486,5 +493,16 @@ mod tests {
         );
         assert!(valid_slug("adobe-tests-indicateurs"));
         assert!(!valid_slug("Adobe--tests"));
+    }
+
+    #[test]
+    fn page_title_is_trimmed_and_limited_to_two_hundred_characters() {
+        assert_eq!(
+            normalize_page_title("  Production health  ").unwrap(),
+            "Production health"
+        );
+        assert!(normalize_page_title("   ").is_err());
+        assert!(normalize_page_title(&"é".repeat(200)).is_ok());
+        assert!(normalize_page_title(&"é".repeat(201)).is_err());
     }
 }

@@ -38,7 +38,7 @@ pub async fn cancel_run_tree(
     };
 
     let lookup_id = run_id.to_string();
-    let child_disc_ids = state
+    let (child_disc_ids, child_dispatch_ids) = state
         .db
         .with_conn(move |conn| {
             let mut stmt = conn.prepare(
@@ -47,7 +47,17 @@ pub async fn cancel_run_tree(
                  WHERE wr.parent_run_id = ?1 OR d.workflow_run_id = ?1",
             )?;
             let rows = stmt.query_map([lookup_id], |row| row.get::<_, String>(0))?;
-            Ok(rows.filter_map(|row| row.ok()).collect::<Vec<_>>())
+            let discussion_ids = rows.filter_map(|row| row.ok()).collect::<Vec<_>>();
+            let dispatch_ids = discussion_ids
+                .iter()
+                .filter_map(|discussion_id| {
+                    crate::db::agent_dispatch::find_active_for_discussion(conn, discussion_id)
+                        .ok()
+                        .flatten()
+                        .map(|job| job.id)
+                })
+                .collect::<Vec<_>>();
+            Ok((discussion_ids, dispatch_ids))
         })
         .await
         .context("find child discussions for workflow cancellation")?;
@@ -55,6 +65,9 @@ pub async fn cancel_run_tree(
     let mut child_discs_cancelled = 0u32;
     for discussion_id in &child_disc_ids {
         child_discs_cancelled += u32::from(cancel_registered_token(state, discussion_id)?);
+    }
+    for dispatch_id in &child_dispatch_ids {
+        child_discs_cancelled += u32::from(cancel_registered_token(state, dispatch_id)?);
     }
 
     let settle_ids = child_disc_ids.clone();
@@ -205,7 +218,7 @@ mod tests {
             let mut registry = state.cancel_registry.lock().unwrap();
             for index in 0..4 {
                 let token = tokio_util::sync::CancellationToken::new();
-                registry.insert(format!("cancel-child-{index}"), token.clone());
+                registry.insert(format!("cancel-job-{index}"), token.clone());
                 live_tokens.push(token);
             }
         }

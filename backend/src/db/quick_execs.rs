@@ -7,7 +7,7 @@ use super::parse_dt;
 use crate::models::{CollectQuickExecOutputFormat, QuickExec};
 
 const COLUMNS: &str = "id, name, description, icon, project_id, command, args_json, \
-    timeout_secs, output_format, variables_json, created_at, updated_at";
+    timeout_secs, output_format, variables_json, created_at, updated_at, pinned";
 
 fn parse_output_format(value: &str) -> CollectQuickExecOutputFormat {
     match value {
@@ -42,6 +42,7 @@ fn row_to_quick_exec(row: &rusqlite::Row<'_>) -> rusqlite::Result<QuickExec> {
         timeout_secs: row.get::<_, i64>(7)?.clamp(1, 1800) as u32,
         output_format: parse_output_format(&output_format),
         variables: serde_json::from_str(&variables_json).unwrap_or_default(),
+        pinned: row.get::<_, i32>(12).unwrap_or(0) != 0,
         created_at: parse_dt(row.get(10)?),
         updated_at: parse_dt(row.get(11)?),
     })
@@ -107,6 +108,13 @@ pub fn update_quick_exec(conn: &Connection, quick_exec: &QuickExec) -> Result<()
     Ok(())
 }
 
+pub fn update_quick_exec_pinned(conn: &Connection, id: &str, pinned: bool) -> Result<bool> {
+    Ok(conn.execute(
+        "UPDATE quick_execs SET pinned = ?2 WHERE id = ?1",
+        params![id, pinned as i32],
+    )? > 0)
+}
+
 pub fn delete_quick_exec(conn: &Connection, id: &str) -> Result<()> {
     conn.execute("DELETE FROM quick_execs WHERE id = ?1", [id])?;
     Ok(())
@@ -123,6 +131,7 @@ mod tests {
         crate::db::migrations::run(&conn).unwrap();
         let item = QuickExec {
             id: "qe-1".into(),
+            pinned: false,
             name: "AWS inventory".into(),
             icon: "⌘".into(),
             description: "Collect instances".into(),

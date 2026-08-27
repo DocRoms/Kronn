@@ -65,6 +65,10 @@ pub struct AgentDispatchJob {
     pub agent_started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
     pub last_error: Option<String>,
+    /// Machine-readable terminal cause. In particular `quota_exhausted` must
+    /// never be treated as a process crash by the watchdog.
+    pub failure_kind: Option<String>,
+    pub watchdog_redispatches: u32,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -115,15 +119,18 @@ fn map_job(row: &Row<'_>) -> rusqlite::Result<AgentDispatchJob> {
         agent_started_at: row.get::<_, Option<String>>(16)?.map(parse_dt),
         completed_at: row.get::<_, Option<String>>(17)?.map(parse_dt),
         last_error: row.get(18)?,
-        created_at: parse_dt(row.get(19)?),
-        updated_at: parse_dt(row.get(20)?),
+        failure_kind: row.get(19)?,
+        watchdog_redispatches: row.get::<_, i64>(20)?.max(0) as u32,
+        created_at: parse_dt(row.get(21)?),
+        updated_at: parse_dt(row.get(22)?),
     })
 }
 
 const JOB_COLUMNS: &str = "id, discussion_id, trigger_message_id, trigger_sort_order,
     dedupe_key, agent_override_json, chain_prompt_ids_json, next_chain_index,
     batch_item, group_id, group_concurrency_limit, status, attempts, turn_attempts,
-    available_at, claimed_at, agent_started_at, completed_at, last_error, created_at, updated_at";
+    available_at, claimed_at, agent_started_at, completed_at, last_error,
+    failure_kind, watchdog_redispatches, created_at, updated_at";
 
 pub fn list_active_for_discussion(
     conn: &Connection,
@@ -401,8 +408,43 @@ pub fn list_exhausted_ids(conn: &Connection, limit: usize) -> Result<Vec<String>
     Ok(rows.filter_map(|row| row.ok()).collect())
 }
 
+/// The agent a job will actually run as: its own override when the batch item
+/// carries one, the discussion's agent otherwise. Written once here so the two
+/// places that compare families can never drift apart.
+const EFFECTIVE_AGENT: &str = "COALESCE(
+    json_extract(%T%.agent_override_json, '$'),
+    (SELECT agent FROM discussions WHERE id = %T%.discussion_id)
+)";
+
+/// Providers that consume the machine-wide local pool. Remote HTTP routes are
+/// intentionally absent: their capacity belongs to the remote service.
+const LOCAL_AGENT_SQL_LIST: &str =
+    "'ClaudeCode','Codex','GeminiCli','Kiro','Vibe','CopilotCli','Ollama'";
+
+fn effective_agent(alias: &str) -> String {
+    EFFECTIVE_AGENT.replace("%T%", alias)
+}
+
 pub fn claim(conn: &Connection, id: &str) -> Result<Option<AgentDispatchJob>> {
+    claim_with_limits(conn, id, None)
+}
+
+/// `limits` is a JSON object mapping an agent name to how many of its runs may
+/// be `Running` at once, e.g. `{"Ollama":1,"ClaudeCode":2}`. The reserved
+/// `__local_global` key additionally caps the sum of Ollama plus every CLI.
+/// An agent absent from the map is unlimited — that is how a remote HTTP
+/// provider stays uncapped and outside the machine-local pool.
+/// `None` disables the check entirely, which is what the in-transaction callers
+/// want: they claim a job the scheduler already admitted.
+pub fn claim_with_limits(
+    conn: &Connection,
+    id: &str,
+    limits: Option<&str>,
+) -> Result<Option<AgentDispatchJob>> {
     let now = Utc::now().to_rfc3339();
+    let candidate_agent = effective_agent("candidate");
+    let family_agent = effective_agent("family");
+    let local_family_agent = effective_agent("local_family");
     conn.query_row(
         &format!(
             "UPDATE agent_dispatch_jobs AS candidate
@@ -438,9 +480,31 @@ pub fn claim(conn: &Connection, id: &str) -> Result<Option<AgentDispatchJob>> {
                           AND running.status = 'Running'
                     ) < group_concurrency_limit
                )
-             RETURNING {JOB_COLUMNS}"
+               AND (
+                    ?4 IS NULL
+                    OR json_extract(?4, '$.' || ({candidate_agent})) IS NULL
+                    OR (
+                        SELECT COUNT(*)
+                        FROM agent_dispatch_jobs AS family
+                        WHERE family.status = 'Running'
+                          AND ({family_agent}) = ({candidate_agent})
+                    ) < json_extract(?4, '$.' || ({candidate_agent}))
+               )
+               AND (
+                    ?4 IS NULL
+                    OR json_extract(?4, '$.__local_global') IS NULL
+                    OR ({candidate_agent}) NOT IN ({local_agents})
+                    OR (
+                        SELECT COUNT(*)
+                        FROM agent_dispatch_jobs AS local_family
+                        WHERE local_family.status = 'Running'
+                          AND ({local_family_agent}) IN ({local_agents})
+                    ) < json_extract(?4, '$.__local_global')
+               )
+             RETURNING {JOB_COLUMNS}",
+            local_agents = LOCAL_AGENT_SQL_LIST,
         ),
-        params![id, now, i64::from(MAX_DISPATCH_ATTEMPTS)],
+        params![id, now, i64::from(MAX_DISPATCH_ATTEMPTS), limits],
         map_job,
     )
     .optional()
@@ -472,6 +536,11 @@ pub fn claim(conn: &Connection, id: &str) -> Result<Option<AgentDispatchJob>> {
 pub struct AgentDispatchRestartRecovery {
     pub requeued: u64,
     pub cancelled_workflow_children: u64,
+    /// Jobs retired because the room moved past the turn that triggered them.
+    /// Counted separately from `requeued` so a restart that silently drops a
+    /// turn is visible in the boot log rather than inferred later from an
+    /// agent answering something nobody asked any more.
+    pub superseded: u64,
 }
 
 pub fn recover_after_restart(conn: &Connection) -> Result<AgentDispatchRestartRecovery> {
@@ -540,6 +609,46 @@ pub fn recover_after_restart(conn: &Connection) -> Result<AgentDispatchRestartRe
             )",
         [],
     )?;
+    // KT-333 — a restart used to re-serve every Running job as if it were new,
+    // with no comparison to what the room had become. The measured episode:
+    // trigger at sort_order 1540, the agent had already posted three partial
+    // answers (1541-1543), and each restart handed it the same brief again
+    // until the attempt budget ran out and the turn was lost outright. Both
+    // outcomes are wrong, and neither was distinguishable from a normal retry.
+    //
+    // A turn is stale once the room has spoken past it. Retiring it costs the
+    // request; re-serving it costs an answer to a question nobody is asking any
+    // more, posted with the authority of a fresh reply — and someone has to
+    // notice and undo it. The fail-closed treatment already applied to
+    // interrupted workflow children above is the same judgement.
+    let superseded = tx.execute(
+        "UPDATE agent_dispatch_jobs
+         SET status = 'Cancelled', completed_at = ?1, updated_at = ?1,
+             claimed_at = NULL, agent_started_at = NULL,
+             last_error = 'superseded_by_newer_turns'
+         WHERE status = 'Running'
+           AND EXISTS (
+               SELECT 1 FROM messages newer
+                WHERE newer.discussion_id = agent_dispatch_jobs.discussion_id
+                  AND newer.sort_order > agent_dispatch_jobs.trigger_sort_order
+           )",
+        [&now],
+    )?;
+    // Leaving `awaiting_agent` set would park the room on an answer that is
+    // never coming: the job it was waiting for has just been retired. Same
+    // release the workflow branch performs, for the same reason.
+    tx.execute(
+        "UPDATE discussions
+            SET awaiting_agent = 0
+          WHERE awaiting_agent = 1
+            AND id IN (
+                SELECT discussion_id FROM agent_dispatch_jobs
+                 WHERE status = 'Cancelled'
+                   AND last_error = 'superseded_by_newer_turns'
+                   AND completed_at = ?1
+            )",
+        [&now],
+    )?;
     let requeued = tx.execute(
         "UPDATE agent_dispatch_jobs
          SET status = 'Pending', claimed_at = NULL, agent_started_at = NULL,
@@ -552,6 +661,7 @@ pub fn recover_after_restart(conn: &Connection) -> Result<AgentDispatchRestartRe
     Ok(AgentDispatchRestartRecovery {
         requeued: requeued as u64,
         cancelled_workflow_children: cancelled as u64,
+        superseded: superseded as u64,
     })
 }
 
@@ -582,6 +692,79 @@ pub fn mark_completed(conn: &Connection, id: &str) -> Result<bool> {
 
 pub fn mark_failed(conn: &Connection, id: &str, error: &str) -> Result<bool> {
     set_terminal(conn, id, DispatchStatus::Failed, Some(error))
+}
+
+pub fn mark_failed_with_kind(
+    conn: &Connection,
+    id: &str,
+    error: &str,
+    failure_kind: &str,
+) -> Result<bool> {
+    let now = Utc::now().to_rfc3339();
+    Ok(conn.execute(
+        "UPDATE agent_dispatch_jobs
+         SET status = 'Failed', completed_at = ?3, updated_at = ?3,
+             last_error = ?2, failure_kind = ?4
+         WHERE id = ?1 AND status IN ('Pending', 'Running')",
+        params![id, error, now, failure_kind],
+    )? > 0)
+}
+
+/// Claimed provider processes older than `before` whose cancel token vanished
+/// are candidates for the crash watchdog. Callers still check the in-memory
+/// registry immediately before transitioning to avoid killing a live run.
+pub fn list_watchdog_candidates(
+    conn: &Connection,
+    before: DateTime<Utc>,
+) -> Result<Vec<AgentDispatchJob>> {
+    let mut statement = conn.prepare(&format!(
+        "SELECT {JOB_COLUMNS} FROM agent_dispatch_jobs
+         WHERE status = 'Running' AND agent_started_at IS NOT NULL
+           AND agent_started_at <= ?1 AND failure_kind IS NULL
+         ORDER BY agent_started_at, id LIMIT 64"
+    ))?;
+    let rows = statement.query_map([before.to_rfc3339()], map_job)?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WatchdogTransition {
+    Redispatched,
+    Escalated,
+    Unchanged,
+}
+
+pub fn apply_watchdog_stall(conn: &Connection, id: &str) -> Result<WatchdogTransition> {
+    let now = Utc::now();
+    let retry_at = (now + Duration::seconds(2)).to_rfc3339();
+    let now = now.to_rfc3339();
+    let retried = conn.execute(
+        "UPDATE agent_dispatch_jobs
+         SET status = 'Pending', claimed_at = NULL, agent_started_at = NULL,
+             available_at = ?2, watchdog_redispatches = 1,
+             last_error = 'watchdog_stall_redispatch', updated_at = ?3
+         WHERE id = ?1 AND status = 'Running' AND watchdog_redispatches = 0
+           AND failure_kind IS NULL",
+        params![id, retry_at, now],
+    )?;
+    if retried > 0 {
+        return Ok(WatchdogTransition::Redispatched);
+    }
+    let escalated = conn.execute(
+        "UPDATE agent_dispatch_jobs
+         SET status = 'Failed', completed_at = ?2, updated_at = ?2,
+             last_error = 'watchdog_stall_after_redispatch',
+             failure_kind = 'dispatch_stalled'
+         WHERE id = ?1 AND status = 'Running' AND watchdog_redispatches = 1
+           AND failure_kind IS NULL",
+        params![id, now],
+    )?;
+    Ok(if escalated > 0 {
+        WatchdogTransition::Escalated
+    } else {
+        WatchdogTransition::Unchanged
+    })
 }
 
 fn set_terminal(
@@ -675,6 +858,27 @@ pub fn cancel_for_discussion(conn: &Connection, discussion_id: &str) -> Result<u
         params![discussion_id, now],
     )?;
     Ok(changed as u64)
+}
+
+/// Cancel one exact durable response without touching sibling jobs queued for
+/// the same discussion. The discussion id is part of the predicate so an id
+/// copied from another room cannot be used as a cross-room cancellation
+/// handle.
+pub fn cancel_for_discussion_by_id(
+    conn: &Connection,
+    discussion_id: &str,
+    dispatch_id: &str,
+) -> Result<bool> {
+    let now = Utc::now().to_rfc3339();
+    let changed = conn.execute(
+        "UPDATE agent_dispatch_jobs
+         SET status = 'Cancelled', completed_at = ?3, updated_at = ?3,
+             last_error = 'cancelled'
+         WHERE id = ?2 AND discussion_id = ?1
+           AND status IN ('Pending', 'Running')",
+        params![discussion_id, dispatch_id, now],
+    )?;
+    Ok(changed > 0)
 }
 
 /// Cancel every queued native response for a discussion. Running work is left
@@ -837,6 +1041,116 @@ mod tests {
         .unwrap()
     }
 
+    /// The room speaks past a running job, the way an agent's own partial
+    /// answers did in the measured episode.
+    fn room_moves_past(connection: &Connection, sort_order: i64, id: &str) {
+        let now = Utc::now().to_rfc3339();
+        connection
+            .execute(
+                "INSERT INTO messages
+                 (id, discussion_id, role, content, timestamp, sort_order, received_at)
+                 VALUES (?1, 'd1', 'Agent', 'je reprends comme implémenteur…', ?2, ?3, ?2)",
+                rusqlite::params![id, now, sort_order],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn a_restart_retires_a_job_the_room_has_already_moved_past() {
+        // KT-333 — the exact shape of the incident: the job is claimed and
+        // running, the agent posts partial answers, the backend restarts. The
+        // old behaviour handed the same brief back as if it were new, again
+        // and again, until the attempt budget ran out and the turn was lost.
+        let connection = connection();
+        let job = enqueue_default(&connection, "stale-job", "turn-1");
+        claim(&connection, &job.id).unwrap().unwrap();
+        mark_agent_started(&connection, &job.id).unwrap();
+        connection
+            .execute(
+                "UPDATE discussions SET awaiting_agent = 1 WHERE id = 'd1'",
+                [],
+            )
+            .unwrap();
+        room_moves_past(&connection, 2, "partial-answer");
+
+        let recovery = recover_after_restart(&connection).unwrap();
+
+        assert_eq!(recovery.superseded, 1);
+        assert_eq!(
+            recovery.requeued, 0,
+            "a stale job must not also be counted as retryable",
+        );
+        let stale = get(&connection, "stale-job").unwrap().unwrap();
+        assert_eq!(stale.status, DispatchStatus::Cancelled);
+        assert_eq!(
+            stale.last_error.as_deref(),
+            Some("superseded_by_newer_turns"),
+            "the reason has to be readable later, not inferred from a silence",
+        );
+        // The room must not stay parked on an answer that is never coming.
+        let awaiting: i64 = connection
+            .query_row(
+                "SELECT awaiting_agent FROM discussions WHERE id = 'd1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(awaiting, 0, "the discussion is released, not left waiting");
+    }
+
+    #[test]
+    fn a_restart_still_replays_a_job_nothing_has_spoken_past() {
+        // The control that gives the test above its meaning: if the room did
+        // not move, the turn was never answered and is still owed. Retiring it
+        // here would trade a wrong answer for a missing one.
+        let connection = connection();
+        let job = enqueue_default(&connection, "fresh-job", "turn-1");
+        claim(&connection, &job.id).unwrap().unwrap();
+        mark_agent_started(&connection, &job.id).unwrap();
+
+        let recovery = recover_after_restart(&connection).unwrap();
+
+        assert_eq!(recovery.superseded, 0);
+        assert_eq!(recovery.requeued, 1);
+        let fresh = get(&connection, "fresh-job").unwrap().unwrap();
+        assert_eq!(fresh.status, DispatchStatus::Pending);
+        assert_eq!(fresh.last_error.as_deref(), Some("backend_restarted"));
+    }
+
+    #[test]
+    fn retiring_a_stale_job_changes_nothing_about_dispatch_idempotence() {
+        // DoD-3 asks that the orchestration replay path (KT-318,
+        // `orch-dispatch:{exec}:{attempt}`) survive this fix, so both halves of
+        // it are pinned here.
+        //
+        // A dedupe key is spent for good — `enqueue` hands back whatever job
+        // already holds it, terminal or not. That predates this change (a
+        // Completed or workflow-Cancelled job behaves the same) and is exactly
+        // what makes replay idempotent, so retiring a stale job must not be
+        // read as freeing its key. A genuine re-dispatch does not need it
+        // freed: it carries the next attempt number.
+        let connection = connection();
+        let job = enqueue_default(&connection, "stale-job", "orch-dispatch:exec-1:1");
+        claim(&connection, &job.id).unwrap().unwrap();
+        room_moves_past(&connection, 2, "partial-answer");
+        assert_eq!(recover_after_restart(&connection).unwrap().superseded, 1);
+
+        // Same key, same job: replaying a dispatch stays a no-op rather than
+        // becoming a second run of the same turn.
+        let replayed = enqueue_default(&connection, "would-be-duplicate", "orch-dispatch:exec-1:1");
+        assert_eq!(
+            replayed.id, "stale-job",
+            "an idempotent replay must not spawn a second job",
+        );
+        assert_eq!(replayed.status, DispatchStatus::Cancelled);
+
+        // The next attempt is a different key, and it queues normally: the
+        // retirement closes the stale turn without blocking the live one.
+        let next_attempt = enqueue_default(&connection, "attempt-2", "orch-dispatch:exec-1:2");
+        assert_eq!(next_attempt.id, "attempt-2");
+        assert_eq!(next_attempt.status, DispatchStatus::Pending);
+    }
+
     #[test]
     fn explicit_retry_copies_only_the_failed_target_and_is_idempotent() {
         let connection = connection();
@@ -975,6 +1289,153 @@ mod tests {
         assert!(claim(&connection, "j1").unwrap().is_none());
     }
 
+    /// A second discussion, so a per-agent cap can be tested for what it is:
+    /// a limit across the whole instance, not the existing one-run-per-room rule.
+    fn seed_second_discussion(connection: &Connection) {
+        let now = Utc::now().to_rfc3339();
+        connection
+            .execute(
+                "INSERT INTO discussions (id, title, created_at, updated_at)
+                 VALUES ('d2', 'Dispatch 2', ?1, ?1)",
+                [&now],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO messages
+                 (id, discussion_id, role, content, timestamp, sort_order, received_at)
+                 VALUES ('u2', 'd2', 'User', 'go', ?1, 1, ?1)",
+                [&now],
+            )
+            .unwrap();
+    }
+
+    fn enqueue_for(connection: &Connection, id: &str, discussion: &str, agent: &AgentType) {
+        enqueue(
+            connection,
+            NewAgentDispatchJob {
+                id,
+                discussion_id: discussion,
+                trigger_message_id: if discussion == "d1" { "u1" } else { "u2" },
+                trigger_sort_order: 1,
+                dedupe_key: id,
+                agent_override: Some(agent),
+                chain_prompt_ids: &[],
+                batch_item: None,
+                group_id: None,
+                group_concurrency_limit: None,
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn claim_refuses_a_second_run_of_an_agent_already_at_its_limit() {
+        let connection = connection();
+        seed_second_discussion(&connection);
+        enqueue_for(&connection, "j-a", "d1", &AgentType::Ollama);
+        enqueue_for(&connection, "j-b", "d2", &AgentType::Ollama);
+
+        let limits = r#"{"Ollama":1}"#;
+        assert!(claim_with_limits(&connection, "j-a", Some(limits))
+            .unwrap()
+            .is_some());
+        assert!(
+            claim_with_limits(&connection, "j-b", Some(limits))
+                .unwrap()
+                .is_none(),
+            "the local model serves one slot: a second run must wait, not queue on it"
+        );
+    }
+
+    #[test]
+    fn claim_leaves_an_agent_absent_from_the_map_uncapped() {
+        let connection = connection();
+        seed_second_discussion(&connection);
+        enqueue_for(&connection, "j-a", "d1", &AgentType::LiteLlm);
+        enqueue_for(&connection, "j-b", "d2", &AgentType::LiteLlm);
+
+        // Remote providers are deliberately left out of the map.
+        let limits = r#"{"Ollama":1}"#;
+        assert!(claim_with_limits(&connection, "j-a", Some(limits))
+            .unwrap()
+            .is_some());
+        assert!(
+            claim_with_limits(&connection, "j-b", Some(limits))
+                .unwrap()
+                .is_some(),
+            "a remote endpoint someone else scales must not be held back"
+        );
+    }
+
+    #[test]
+    fn claim_counts_every_agent_on_its_own() {
+        let connection = connection();
+        seed_second_discussion(&connection);
+        enqueue_for(&connection, "j-a", "d1", &AgentType::Ollama);
+        enqueue_for(&connection, "j-b", "d2", &AgentType::ClaudeCode);
+
+        let limits = r#"{"Ollama":1,"ClaudeCode":1}"#;
+        assert!(claim_with_limits(&connection, "j-a", Some(limits))
+            .unwrap()
+            .is_some());
+        assert!(
+            claim_with_limits(&connection, "j-b", Some(limits))
+                .unwrap()
+                .is_some(),
+            "one agent at its cap must not block a different one"
+        );
+    }
+
+    #[test]
+    fn claim_caps_the_sum_of_different_local_agent_families() {
+        let connection = connection();
+        seed_second_discussion(&connection);
+        enqueue_for(&connection, "j-a", "d1", &AgentType::Ollama);
+        enqueue_for(&connection, "j-b", "d2", &AgentType::ClaudeCode);
+
+        let limits = r#"{"Ollama":5,"ClaudeCode":5,"__local_global":1}"#;
+        assert!(claim_with_limits(&connection, "j-a", Some(limits))
+            .unwrap()
+            .is_some());
+        assert!(
+            claim_with_limits(&connection, "j-b", Some(limits))
+                .unwrap()
+                .is_none(),
+            "different local families must still share the machine-wide pool"
+        );
+    }
+
+    #[test]
+    fn remote_agents_neither_consume_nor_obey_the_local_global_pool() {
+        let limits = r#"{"Ollama":5,"ClaudeCode":5,"__local_global":1}"#;
+
+        let remote_first = connection();
+        seed_second_discussion(&remote_first);
+        enqueue_for(&remote_first, "j-remote", "d1", &AgentType::LiteLlm);
+        enqueue_for(&remote_first, "j-local", "d2", &AgentType::Ollama);
+        assert!(claim_with_limits(&remote_first, "j-remote", Some(limits))
+            .unwrap()
+            .is_some());
+        assert!(claim_with_limits(&remote_first, "j-local", Some(limits))
+            .unwrap()
+            .is_some());
+
+        let local_first = connection();
+        seed_second_discussion(&local_first);
+        enqueue_for(&local_first, "j-local", "d1", &AgentType::Ollama);
+        enqueue_for(&local_first, "j-remote", "d2", &AgentType::Nvidia);
+        assert!(claim_with_limits(&local_first, "j-local", Some(limits))
+            .unwrap()
+            .is_some());
+        assert!(
+            claim_with_limits(&local_first, "j-remote", Some(limits))
+                .unwrap()
+                .is_some(),
+            "a remote candidate must bypass a full local pool"
+        );
+    }
+
     #[test]
     fn active_dispatches_keep_their_turn_and_concrete_agent() {
         let connection = connection();
@@ -1017,6 +1478,39 @@ mod tests {
         assert!(claim(&connection, "j2").unwrap().is_none());
         assert!(mark_completed(&connection, "j1").unwrap());
         assert!(claim(&connection, "j2").unwrap().is_some());
+    }
+
+    #[test]
+    fn cancelling_one_dispatch_preserves_same_agent_siblings() {
+        let connection = connection();
+        enqueue_default(&connection, "j-old", "message:u-old");
+        enqueue_default(&connection, "j-new", "message:u-new");
+        enqueue_default(&connection, "j-latest", "message:u-latest");
+        assert!(claim(&connection, "j-old").unwrap().is_some());
+
+        assert!(cancel_for_discussion_by_id(&connection, "d1", "j-old").unwrap());
+        assert_eq!(
+            get(&connection, "j-old").unwrap().unwrap().status,
+            DispatchStatus::Cancelled
+        );
+        assert_eq!(
+            get(&connection, "j-new").unwrap().unwrap().status,
+            DispatchStatus::Pending
+        );
+        assert_eq!(
+            get(&connection, "j-latest").unwrap().unwrap().status,
+            DispatchStatus::Pending
+        );
+        assert!(has_active_for_discussion(&connection, "d1").unwrap());
+
+        assert!(
+            !cancel_for_discussion_by_id(&connection, "another-disc", "j-new").unwrap(),
+            "a dispatch id is not a cross-discussion cancellation capability"
+        );
+        assert_eq!(
+            get(&connection, "j-new").unwrap().unwrap().status,
+            DispatchStatus::Pending
+        );
     }
 
     #[test]
@@ -1468,5 +1962,68 @@ mod tests {
             list_exhausted_ids(&connection, 10).unwrap(),
             vec!["j1".to_string()]
         );
+    }
+
+    #[test]
+    fn watchdog_redispatches_once_then_escalates_durably() {
+        let connection = connection();
+        enqueue_default(&connection, "j1", "message:u1");
+        claim(&connection, "j1").unwrap();
+        mark_agent_started(&connection, "j1").unwrap();
+        connection
+            .execute(
+                "UPDATE agent_dispatch_jobs SET agent_started_at = ?1 WHERE id = 'j1'",
+                [(Utc::now() - Duration::minutes(5)).to_rfc3339()],
+            )
+            .unwrap();
+        assert_eq!(
+            list_watchdog_candidates(&connection, Utc::now())
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            apply_watchdog_stall(&connection, "j1").unwrap(),
+            WatchdogTransition::Redispatched
+        );
+        let first = get(&connection, "j1").unwrap().unwrap();
+        assert_eq!(first.status, DispatchStatus::Pending);
+        assert_eq!(first.watchdog_redispatches, 1);
+
+        connection
+            .execute(
+                "UPDATE agent_dispatch_jobs SET available_at = ?1 WHERE id = 'j1'",
+                [Utc::now().to_rfc3339()],
+            )
+            .unwrap();
+        claim(&connection, "j1").unwrap();
+        mark_agent_started(&connection, "j1").unwrap();
+        assert_eq!(
+            apply_watchdog_stall(&connection, "j1").unwrap(),
+            WatchdogTransition::Escalated
+        );
+        let second = get(&connection, "j1").unwrap().unwrap();
+        assert_eq!(second.status, DispatchStatus::Failed);
+        assert_eq!(second.failure_kind.as_deref(), Some("dispatch_stalled"));
+    }
+
+    #[test]
+    fn quota_exhaustion_is_terminal_and_never_a_watchdog_candidate() {
+        let connection = connection();
+        enqueue_default(&connection, "j1", "message:u1");
+        claim(&connection, "j1").unwrap();
+        mark_agent_started(&connection, "j1").unwrap();
+        assert!(mark_failed_with_kind(
+            &connection,
+            "j1",
+            "provider plan exhausted",
+            "quota_exhausted",
+        )
+        .unwrap());
+        let job = get(&connection, "j1").unwrap().unwrap();
+        assert_eq!(job.failure_kind.as_deref(), Some("quota_exhausted"));
+        assert!(list_watchdog_candidates(&connection, Utc::now())
+            .unwrap()
+            .is_empty());
     }
 }

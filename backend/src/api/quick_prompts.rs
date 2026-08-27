@@ -48,6 +48,7 @@ pub async fn create(
         tier: req.tier,
         agent_settings: req.agent_settings,
         description: req.description,
+        pinned: false,
         created_at: now,
         updated_at: now,
     };
@@ -104,6 +105,7 @@ pub async fn update(
         // Description is always taken from the request, even if empty —
         // that's how the user clears it.
         description: req.description,
+        pinned: existing.pinned,
         created_at: existing.created_at,
         updated_at: Utc::now(),
     };
@@ -116,6 +118,33 @@ pub async fn update(
     {
         Ok(()) => Json(ApiResponse::ok(updated)),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
+    }
+}
+
+/// PATCH /api/quick-prompts/:id — favorite-only partial update.
+///
+/// This deliberately bypasses `update_quick_prompt`: pinning is library
+/// metadata, not a new prompt revision, so it must not pollute version history.
+pub async fn update_pinned(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<UpdateQuickFavoriteRequest>,
+) -> Json<ApiResponse<QuickPrompt>> {
+    let update_id = id.clone();
+    match state
+        .db
+        .with_conn(move |conn| {
+            if !crate::db::quick_prompts::update_quick_prompt_pinned(conn, &update_id, req.pinned)?
+            {
+                return Ok(None);
+            }
+            crate::db::quick_prompts::get_quick_prompt(conn, &update_id)
+        })
+        .await
+    {
+        Ok(Some(item)) => Json(ApiResponse::ok(item)),
+        Ok(None) => Json(ApiResponse::err("Quick prompt not found")),
+        Err(error) => Json(ApiResponse::err(format!("DB error: {error}"))),
     }
 }
 

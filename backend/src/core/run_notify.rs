@@ -15,7 +15,7 @@ use crate::AppState;
 pub fn should_notify(status: &RunStatus) -> bool {
     matches!(
         status,
-        RunStatus::Failed | RunStatus::Interrupted | RunStatus::StoppedByGuard
+        RunStatus::Partial | RunStatus::Failed | RunStatus::Interrupted | RunStatus::StoppedByGuard
     )
 }
 
@@ -29,6 +29,7 @@ pub fn build_payload(
 ) -> String {
     let label = match status {
         RunStatus::Failed => "FAILED",
+        RunStatus::Partial => "PARTIAL",
         RunStatus::Interrupted => "INTERRUPTED (backend restarted mid-run)",
         RunStatus::StoppedByGuard => "STOPPED BY GUARD",
         _ => "ended",

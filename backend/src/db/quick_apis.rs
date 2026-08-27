@@ -56,6 +56,7 @@ fn row_to_quick_api(row: &rusqlite::Row) -> QuickApi {
             .unwrap_or_default(),
         directive_ids: parse_json_opt::<Vec<String>>(row.get::<_, String>(21).ok())
             .unwrap_or_default(),
+        pinned: row.get::<_, i32>(22).unwrap_or(0) != 0,
     }
 }
 
@@ -64,7 +65,7 @@ const COLUMNS: &str = "id, name, description, icon, project_id, \
      api_query_json, api_path_params_json, api_headers_json, api_body, \
      api_extract_json, api_pagination_json, api_timeout_ms, api_max_retries, \
      variables_json, created_at, updated_at, \
-     profile_ids_json, directive_ids_json";
+     profile_ids_json, directive_ids_json, pinned";
 
 pub fn list_quick_apis(conn: &Connection) -> Result<Vec<QuickApi>> {
     let sql = format!("SELECT {COLUMNS} FROM quick_apis ORDER BY updated_at DESC");
@@ -212,6 +213,13 @@ pub fn update_quick_api(conn: &Connection, qa: &QuickApi) -> Result<()> {
     Ok(())
 }
 
+pub fn update_quick_api_pinned(conn: &Connection, id: &str, pinned: bool) -> Result<bool> {
+    Ok(conn.execute(
+        "UPDATE quick_apis SET pinned = ?2 WHERE id = ?1",
+        params![id, pinned as i32],
+    )? > 0)
+}
+
 pub fn delete_quick_api(conn: &Connection, id: &str) -> Result<()> {
     conn.execute("DELETE FROM quick_apis WHERE id = ?1", params![id])?;
     Ok(())
@@ -232,6 +240,7 @@ mod tests {
     fn mk_quick_api() -> QuickApi {
         QuickApi {
             id: "qa-1".into(),
+            pinned: false,
             name: "Create Jira ticket".into(),
             description: "Reusable POST /issue".into(),
             icon: "🔌".into(),

@@ -9,7 +9,7 @@
 
 use crate::models::{AgentType, TokensConfig};
 
-const AGENT_ALIASES: [(&str, AgentType); 8] = [
+const AGENT_ALIASES: [(&str, AgentType); 9] = [
     ("@claude", AgentType::ClaudeCode),
     ("@codex", AgentType::Codex),
     ("@vibe", AgentType::Vibe),
@@ -18,6 +18,7 @@ const AGENT_ALIASES: [(&str, AgentType); 8] = [
     ("@copilot", AgentType::CopilotCli),
     ("@ollama", AgentType::Ollama),
     ("@litellm", AgentType::LiteLlm),
+    ("@nvidia", AgentType::Nvidia),
 ];
 
 pub fn agent_alias(agent: &AgentType) -> Option<&'static str> {
@@ -87,6 +88,7 @@ pub fn agent_prompt_budget(agent_type: &AgentType) -> usize {
         AgentType::Vibe => 60_000,        // ~15K tokens, Mistral 128K window (API mode)
         AgentType::Ollama => 100_000,     // ~25K tokens, depends on model (llama3 128K window)
         AgentType::LiteLlm => 100_000,    // unknown upstream — same conservative floor as Ollama
+        AgentType::Nvidia => 100_000,     // catalogue spans many windows — same conservative floor
         AgentType::Custom => 60_000,      // reasonable default
     }
 }
@@ -106,6 +108,9 @@ pub fn auth_mode_for(agent_type: &AgentType, tokens: &TokensConfig) -> String {
         AgentType::Ollama => "ollama",
         // Auth belongs to the proxy, not to Kronn: it holds the upstream keys.
         AgentType::LiteLlm => "",
+        // Unlike LiteLLM (whose proxy may be keyless), an NVIDIA call is always
+        // keyed: naming the provider lets the UI show the key-override badge.
+        AgentType::Nvidia => "nvidia",
         AgentType::Custom => "",
     };
     let has_key = tokens.active_key_for(provider).is_some();
@@ -128,6 +133,7 @@ pub fn agent_display_name(agent_type: &AgentType) -> String {
         AgentType::CopilotCli => "GitHub Copilot".into(),
         AgentType::Ollama => "Ollama".into(),
         AgentType::LiteLlm => "LiteLLM".into(),
+        AgentType::Nvidia => "NVIDIA".into(),
         AgentType::Custom => "Custom".into(),
     }
 }

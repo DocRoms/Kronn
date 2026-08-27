@@ -317,7 +317,7 @@ pub async fn discussion_workspaces(
             if crate::db::discussions::get_discussion(conn, &disc_id)?.is_none() {
                 anyhow::bail!("discussion not found");
             }
-            crate::db::discussion_workspaces::list_for_discussion(conn, &disc_id)
+            crate::db::discussion_workspaces::list_visible_for_discussion(conn, &disc_id)
         })
         .await;
     match result {
@@ -382,6 +382,20 @@ pub async fn disc_workspace_set(
     let result = state
         .db
         .with_conn(move |conn| {
+            // KT-328: a room already served by a backend-owned `managed` worktree
+            // must not be re-declared by a CLI — the accepting worker READS that row,
+            // it does not overwrite it. Refuse cleanly (→ Conflict) rather than let
+            // the UNIQUE canonical_path index throw an opaque constraint error, or
+            // create a second external row with no designated teardown authority.
+            if let Some(managed) =
+                crate::db::discussion_workspaces::get_managed_for_discussion(conn, &disc_id)?
+            {
+                let owner = managed.task_execution_id.as_deref().unwrap_or("?");
+                anyhow::bail!(
+                    "workspace is backend-owned (managed) for execution {owner}; \
+                     read it via the room workspace list, do not declare it"
+                );
+            }
             let task_id = if let Some(reference) = task_ref {
                 let task = crate::db::planning::get_task(conn, &reference)?
                     .ok_or_else(|| anyhow::anyhow!("planning task not found"))?;
@@ -449,6 +463,7 @@ pub async fn disc_workspace_set(
             let message = error.to_string();
             let code = if message.contains("UNIQUE constraint failed")
                 || message.contains("another discussion")
+                || message.contains("backend-owned")
             {
                 ApiErrorCode::Conflict
             } else {

@@ -4,6 +4,7 @@
 
 use crate::AppState;
 
+use anyhow::Context;
 use axum::response::sse::{Event, Sse};
 
 use super::streaming::{
@@ -65,7 +66,7 @@ impl Drop for DispatchHandoffGuard {
     }
 }
 
-struct DispatchSettlement {
+pub(crate) struct DispatchSettlement {
     changed: bool,
     batch_run: Option<crate::models::WorkflowRun>,
 }
@@ -73,30 +74,117 @@ struct DispatchSettlement {
 /// Persist a dispatch terminal state and its parent batch progress as one
 /// atomic unit. If either write fails, the job remains runnable and recovery
 /// can retry without leaving a batch permanently stuck at n-1/N.
-fn persist_dispatch_settlement(
+pub(crate) fn persist_dispatch_settlement(
     conn: &rusqlite::Connection,
     job_id: &str,
     discussion_id: &str,
     group_id: Option<&str>,
-    child_succeeded: bool,
+    child_outcome: crate::db::workflows::BatchChildOutcome,
     error: Option<&str>,
+    failure_kind: Option<&str>,
 ) -> anyhow::Result<DispatchSettlement> {
     let transaction = conn.unchecked_transaction()?;
     let changed = if let Some(error) = error {
-        crate::db::agent_dispatch::mark_failed(&transaction, job_id, error)?
+        if let Some(failure_kind) = failure_kind {
+            crate::db::agent_dispatch::mark_failed_with_kind(
+                &transaction,
+                job_id,
+                error,
+                failure_kind,
+            )?
+        } else {
+            crate::db::agent_dispatch::mark_failed(&transaction, job_id, error)?
+        }
     } else {
         crate::db::agent_dispatch::mark_completed(&transaction, job_id)?
     };
+    if changed && failure_kind == Some("quota_exhausted") {
+        crate::db::agent_jobs::mark_completion_dispatch_failure(
+            &transaction,
+            job_id,
+            crate::models::AgentResumeJobStatus::QuotaExhausted,
+            crate::models::AgentResumeFailureKind::QuotaExhausted,
+            error.unwrap_or("provider quota exhausted"),
+        )?;
+    }
+    if changed && failure_kind != Some("quota_exhausted") {
+        let interruption_reason = if error.is_some() {
+            "worker_failed_without_delivery"
+        } else {
+            "worker_completed_without_delivery"
+        };
+        let actor = crate::models::PlanningActor {
+            kind: crate::models::PlanningActorKind::Backend,
+            id: Some("orchestrator".into()),
+            session_id: None,
+            source_message_id: None,
+        };
+        if let Some(interrupted) =
+            crate::db::orchestration::interrupt_undelivered_execution_for_dispatch(
+                &transaction,
+                job_id,
+                interruption_reason,
+                &actor,
+            )?
+        {
+            let parent = crate::db::discussions::get_discussion(
+                &transaction,
+                &interrupted.parent_discussion_id,
+            )?
+            .context("parent discussion vanished before undelivered-worker notice")?;
+            let target = crate::models::MessageTarget::discussion_agent(parent.agent);
+            let (title, instruction) = if error.is_some() {
+                (
+                    "Worker échoué sans livraison durable",
+                    "Examine l'erreur du dispatch dans la sous-discussion, puis réaffecte ou annule explicitement l'exécution.",
+                )
+            } else {
+                (
+                    "Worker terminé sans livraison durable",
+                    "Relis le bilan du worker dans la sous-discussion, puis réaffecte ou annule explicitement l'exécution.",
+                )
+            };
+            let message_id = format!("orch-worker-undelivered:{}", interrupted.execution_id);
+            // KT-402 — the deterministic id exists so a resume can never
+            // double-post; the insert has to tolerate its own replay for the
+            // same reason. Measured: a stream timeout failed the dispatch, the
+            // watchdog requeued it, the requeue failed too, and the second
+            // settlement died on UNIQUE(messages.id) — leaving the dispatch row
+            // unsettled.
+            let already_posted: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM messages WHERE id = ?1)",
+                [&message_id],
+                |row| row.get(0),
+            )?;
+            if !already_posted {
+                let message = crate::api::orchestration::orchestrator_message(
+                    message_id,
+                    format!(
+                        "**{title}**\n\nLe dispatch `{job_id}` de la tâche `{}` s'est terminé sans appel valide à `task_exec_deliver`. L'exécution `{}` est maintenant `Interrupted` au lieu de rester faussement `Working`. {instruction}",
+                        interrupted.task_id, interrupted.execution_id,
+                    ),
+                );
+                crate::db::discussions::insert_message_with_targets_and_dispatches_within_tx(
+                    &transaction,
+                    &interrupted.parent_discussion_id,
+                    &message,
+                    &[target],
+                    &[],
+                    None,
+                )?;
+            }
+        }
+    }
     let mut batch_run = None;
     if changed {
         let still_awaiting =
             crate::db::agent_dispatch::has_active_for_discussion(&transaction, discussion_id)?;
         crate::db::discussions::set_awaiting_agent(&transaction, discussion_id, still_awaiting)?;
         if let Some(run_id) = group_id {
-            batch_run = crate::db::workflows::increment_batch_progress(
+            batch_run = crate::db::workflows::increment_batch_progress_with_outcome(
                 &transaction,
                 run_id,
-                child_succeeded,
+                child_outcome,
             )?;
         }
     }
@@ -300,9 +388,21 @@ pub(crate) async fn stream_dispatch_job(
     initial_event: Option<Event>,
 ) -> Option<Sse<SseStream>> {
     let claim_id = job_id.clone();
+    // Admission is where a local slot is actually granted: the claim refuses a
+    // job whose agent already has all of its runs in flight, atomically, so two
+    // dispatch scans cannot both believe the slot is free.
+    let limits = {
+        let config = state.config.read().await;
+        crate::agents::runner::agent_concurrency_limits(
+            &config.agents,
+            config.server.max_concurrent_agents,
+        )
+    };
     let job = match state
         .db
-        .with_conn(move |conn| crate::db::agent_dispatch::claim(conn, &claim_id))
+        .with_conn(move |conn| {
+            crate::db::agent_dispatch::claim_with_limits(conn, &claim_id, Some(&limits))
+        })
         .await
     {
         Ok(Some(job)) => job,
@@ -459,7 +559,13 @@ pub(crate) async fn stream_claimed_dispatch_job(
                 finish_dispatch_turn(&state, job, content, succeeded).await
             }
             Ok(None) => {
-                fail_dispatch_job(&state, &job, "agent finished without a durable reply").await
+                fail_dispatch_job_with_outcome(
+                    &state,
+                    &job,
+                    "agent finished without a durable reply",
+                    crate::db::workflows::BatchChildOutcome::NoResponse,
+                )
+                .await
             }
             Err(error) => {
                 fail_dispatch_job(&state, &job, &format!("reply lookup failed: {error}")).await
@@ -486,12 +592,98 @@ fn dispatch_target_tier(
         .and_then(|target| target.tier)
 }
 
+fn select_quota_alternative(
+    allowed_agents: &[crate::models::AgentType],
+    current: &crate::models::AgentType,
+    available_agents: &[crate::models::AgentType],
+) -> Option<crate::models::AgentType> {
+    // An empty allow-list means "no explicit fallback policy", not "all agents".
+    // Ordering is the persisted KT-321 policy order, so the choice is stable and
+    // explainable rather than dependent on detection order.
+    allowed_agents
+        .iter()
+        .find(|candidate| *candidate != current && available_agents.contains(candidate))
+        .cloned()
+}
+
+async fn try_quota_provider_fallback(
+    state: &AppState,
+    job: &crate::db::agent_dispatch::AgentDispatchJob,
+) -> anyhow::Result<Option<(crate::models::AgentType, String)>> {
+    let available_agents = crate::api::orchestration::available_agent_types_for_state(state).await;
+    let dispatch_id = job.id.clone();
+    let candidate = state
+        .db
+        .with_conn(move |conn| {
+            let Some(execution) =
+                crate::db::orchestration::get_execution_for_dispatch(conn, &dispatch_id)?
+            else {
+                return Ok(None);
+            };
+            if execution.status.is_terminal() {
+                return Ok(None);
+            }
+            let current = execution
+                .worker_agent_type
+                .as_deref()
+                .map(crate::db::orchestration::agent_type_from_db)
+                .transpose()?
+                .context("quota fallback execution has no current provider")?;
+            let run = crate::db::orchestration::get_orchestration_run(
+                conn,
+                &execution.orchestration_run_id,
+            )?
+            .context("quota fallback orchestration run vanished")?;
+            let Some(alternative) =
+                select_quota_alternative(&run.allowed_agents, &current, &available_agents)
+            else {
+                return Ok(None);
+            };
+            Ok(Some((execution.id, alternative)))
+        })
+        .await?;
+    let Some((execution_id, alternative)) = candidate else {
+        return Ok(None);
+    };
+    let selection = crate::models::CampaignWorkerSelection {
+        target: crate::models::MessageTarget::agent(alternative.clone()),
+        model: None,
+        profile_id: None,
+    };
+    let view = crate::api::orchestration::reassign_native_execution(
+        state,
+        &execution_id,
+        selection,
+        "automatic quota fallback authorized by the campaign allow-list",
+    )
+    .await?;
+    state.agent_dispatch_notify.notify_one();
+    Ok(Some((alternative, view.execution.parent_discussion_id)))
+}
+
 async fn finish_dispatch_turn(
     state: &AppState,
     job: crate::db::agent_dispatch::AgentDispatchJob,
     response: String,
     execution_succeeded: bool,
 ) {
+    if !execution_succeeded && super::is_hard_quota_exhausted(&response) {
+        let detail = response.trim().chars().take(800).collect::<String>();
+        let durable_error = if detail.is_empty() {
+            "quota_exhausted: provider plan or credit limit reached".to_string()
+        } else {
+            format!("quota_exhausted: {detail}")
+        };
+        fail_dispatch_job_with_outcome_kind(
+            state,
+            &job,
+            &durable_error,
+            crate::db::workflows::BatchChildOutcome::Failed,
+            Some("quota_exhausted"),
+        )
+        .await;
+        return;
+    }
     if super::message_matches_silent_crash(&response) && job.turn_attempts < 2 {
         tracing::warn!(
             "Discussion {} matched silent-crash pattern — retrying once",
@@ -503,15 +695,17 @@ async fn finish_dispatch_turn(
             .db
             .with_conn(move |conn| {
                 let transaction = conn.unchecked_transaction()?;
-                crate::db::discussions::delete_last_agent_messages(
-                    &transaction,
-                    &retry_discussion_id,
-                )?;
-                crate::db::agent_dispatch::retry_after(
+                let queued = crate::db::agent_dispatch::retry_after(
                     &transaction,
                     &retry_id,
                     5,
                     "silent_agent_crash",
+                )?;
+                anyhow::ensure!(queued, "silent-crash dispatch is no longer running");
+                crate::db::discussions::delete_dispatch_reply_messages(
+                    &transaction,
+                    &retry_discussion_id,
+                    &retry_id,
                 )?;
                 crate::db::discussions::set_awaiting_agent(
                     &transaction,
@@ -613,7 +807,8 @@ async fn finish_dispatch_turn(
                 &complete_id,
                 &complete_discussion_id,
                 complete_group_id.as_deref(),
-                true,
+                crate::db::workflows::BatchChildOutcome::Success,
+                None,
                 None,
             )
         })
@@ -644,11 +839,38 @@ async fn fail_dispatch_job(
     job: &crate::db::agent_dispatch::AgentDispatchJob,
     error: &str,
 ) {
+    fail_dispatch_job_with_outcome(
+        state,
+        job,
+        error,
+        crate::db::workflows::BatchChildOutcome::Failed,
+    )
+    .await;
+}
+
+async fn fail_dispatch_job_with_outcome(
+    state: &AppState,
+    job: &crate::db::agent_dispatch::AgentDispatchJob,
+    error: &str,
+    child_outcome: crate::db::workflows::BatchChildOutcome,
+) {
+    fail_dispatch_job_with_outcome_kind(state, job, error, child_outcome, None).await;
+}
+
+async fn fail_dispatch_job_with_outcome_kind(
+    state: &AppState,
+    job: &crate::db::agent_dispatch::AgentDispatchJob,
+    error: &str,
+    child_outcome: crate::db::workflows::BatchChildOutcome,
+    failure_kind: Option<&str>,
+) {
     tracing::error!("Agent dispatch {} failed: {error}", job.id);
     let fail_id = job.id.clone();
     let fail_discussion_id = job.discussion_id.clone();
     let fail_group_id = job.group_id.clone();
     let fail_error = error.to_string();
+    let quota_exhausted = failure_kind == Some("quota_exhausted");
+    let failure_kind = failure_kind.map(str::to_string);
     let failed = state
         .db
         .with_conn(move |conn| {
@@ -657,8 +879,9 @@ async fn fail_dispatch_job(
                 &fail_id,
                 &fail_discussion_id,
                 fail_group_id.as_deref(),
-                false,
+                child_outcome,
                 Some(&fail_error),
+                failure_kind.as_deref(),
             )
         })
         .await;
@@ -678,6 +901,76 @@ async fn fail_dispatch_job(
         Err(db_error) => {
             tracing::error!("Unable to persist failed dispatch {}: {db_error}", job.id);
             return;
+        }
+    }
+    if quota_exhausted {
+        let provider = job
+            .agent_override
+            .as_ref()
+            .map(|agent| format!("{agent:?}"))
+            .unwrap_or_else(|| "discussion provider".into());
+        match try_quota_provider_fallback(state, job).await {
+            Ok(Some((alternative, target_discussion))) => {
+                let message = crate::api::orchestration::orchestrator_message(
+                    format!("provider-quota-fallback:{}", job.id),
+                    format!(
+                        "**Bascule automatique — quota épuisé**\n\nLe provider `{provider}` a épuisé son quota sur le dispatch `{}`. La politique KT-321 autorise `{alternative:?}`, disponible : Kronn a réassigné la même exécution dans sa sous-discussion et son worktree existants, sans perdre l'historique ni les constats.",
+                        job.id
+                    ),
+                );
+                if let Err(db_error) = state
+                    .db
+                    .with_conn(move |conn| {
+                        crate::db::discussions::insert_message(conn, &target_discussion, &message)?;
+                        Ok(())
+                    })
+                    .await
+                {
+                    tracing::warn!(dispatch_job_id = %job.id, "quota fallback notice could not be persisted: {db_error}");
+                }
+            }
+            fallback => {
+                if let Err(error) = fallback {
+                    tracing::warn!(dispatch_job_id = %job.id, "authorized quota fallback failed: {error}");
+                }
+                let dispatch_id = job.id.clone();
+                let provider_for_db = provider.clone();
+                let escalation = state
+                    .db
+                    .with_conn(move |conn| {
+                        crate::db::orchestration::escalate_execution_for_dispatch_quota(
+                            conn,
+                            &dispatch_id,
+                            &provider_for_db,
+                        )
+                    })
+                    .await;
+                let target_discussion = match escalation {
+                    Ok(Some((_execution_id, parent_discussion_id))) => parent_discussion_id,
+                    Ok(None) => job.discussion_id.clone(),
+                    Err(db_error) => {
+                        tracing::error!(dispatch_job_id = %job.id, "quota escalation failed: {db_error}");
+                        job.discussion_id.clone()
+                    }
+                };
+                let message = crate::api::orchestration::orchestrator_message(
+                    format!("provider-quota-escalation:{}", job.id),
+                    format!(
+                        "**Intervention humaine requise — quota épuisé**\n\nLe provider `{provider}` a refusé le dispatch `{}` pour limite de plan/crédits. Aucun provider alternatif explicitement autorisé n'est disponible ; Kronn ne relancera pas le même compte. Bascule de compte ou réaffectation explicite requise.",
+                        job.id
+                    ),
+                );
+                if let Err(db_error) = state
+                    .db
+                    .with_conn(move |conn| {
+                        crate::db::discussions::insert_message(conn, &target_discussion, &message)?;
+                        Ok(())
+                    })
+                    .await
+                {
+                    tracing::warn!(dispatch_job_id = %job.id, "quota notice could not be persisted: {db_error}");
+                }
+            }
         }
     }
     state.agent_dispatch_notify.notify_waiters();
@@ -768,7 +1061,7 @@ pub(crate) fn render_chain_qp_prompt(
 mod chain_render_tests {
     use super::{
         dispatch_target_tier, persist_dispatch_settlement, render_chain_qp_prompt,
-        DispatchHandoffGuard,
+        select_quota_alternative, DispatchHandoffGuard,
     };
     use std::sync::Arc;
     use tokio::sync::RwLock;
@@ -794,6 +1087,33 @@ mod chain_render_tests {
         assert_eq!(
             dispatch_target_tier(&targets, Some(&AgentType::Ollama)),
             None
+        );
+    }
+
+    #[test]
+    fn quota_fallback_requires_an_explicit_available_alternative() {
+        use crate::models::AgentType;
+
+        assert_eq!(
+            select_quota_alternative(
+                &[AgentType::Codex, AgentType::Ollama, AgentType::LiteLlm],
+                &AgentType::Codex,
+                &[AgentType::Codex, AgentType::LiteLlm],
+            ),
+            Some(AgentType::LiteLlm)
+        );
+        assert_eq!(
+            select_quota_alternative(
+                &[AgentType::Codex, AgentType::Ollama],
+                &AgentType::Codex,
+                &[AgentType::Codex],
+            ),
+            None
+        );
+        assert_eq!(
+            select_quota_alternative(&[], &AgentType::Codex, &[AgentType::Ollama]),
+            None,
+            "an empty allow-list is not implicit permission to switch providers"
         );
     }
 
@@ -966,6 +1286,7 @@ mod chain_render_tests {
                     batch_total: 1,
                     batch_completed: 0,
                     batch_failed: 0,
+                    batch_no_response: 0,
                     batch_name: Some("Atomic batch".into()),
                     parent_run_id: None,
                     state: std::collections::HashMap::new(),
@@ -1008,7 +1329,8 @@ mod chain_render_tests {
                     "j-atomic",
                     "d-atomic",
                     Some("batch-atomic"),
-                    true,
+                    crate::db::workflows::BatchChildOutcome::Success,
+                    None,
                     None,
                 )
             })
@@ -1037,7 +1359,8 @@ mod chain_render_tests {
                     "j-atomic",
                     "d-atomic",
                     Some("batch-atomic"),
-                    true,
+                    crate::db::workflows::BatchChildOutcome::Success,
+                    None,
                     None,
                 )
             })
@@ -1047,5 +1370,319 @@ mod chain_render_tests {
         let batch = settled.batch_run.unwrap();
         assert_eq!(batch.batch_completed, 1);
         assert_eq!(batch.status, crate::models::RunStatus::Success);
+    }
+
+    #[tokio::test]
+    async fn completed_task_worker_without_delivery_interrupts_and_wakes_the_principal() {
+        let db = Arc::new(crate::db::Database::open_in_memory().unwrap());
+        let execution_id = db
+            .with_conn(|conn| {
+                let now = chrono::Utc::now().to_rfc3339();
+                for (id, title) in [("d-parent", "Parent"), ("d-child", "Child")] {
+                    conn.execute(
+                        "INSERT INTO discussions (id, title, created_at, updated_at)
+                         VALUES (?1, ?2, ?3, ?3)",
+                        rusqlite::params![id, title, now],
+                    )?;
+                }
+                conn.execute(
+                    "INSERT INTO planning_tasks
+                     (id, task_number, title, status, created_at, updated_at)
+                     VALUES ('t-undelivered', 9901, 'Undelivered', 'todo', ?1, ?1)",
+                    [&now],
+                )?;
+                let actor = crate::models::PlanningActor {
+                    kind: crate::models::PlanningActorKind::Backend,
+                    id: Some("orchestrator".into()),
+                    session_id: None,
+                    source_message_id: None,
+                };
+                let execution = crate::db::orchestration::launch_single_task(
+                    conn,
+                    &crate::models::LaunchSingleTaskInput::new("t-undelivered", "d-parent"),
+                    &actor,
+                )?
+                .execution;
+                for status in [
+                    crate::models::TaskExecutionStatus::Provisioning,
+                    crate::models::TaskExecutionStatus::Working,
+                ] {
+                    crate::db::orchestration::transition_execution(
+                        conn,
+                        &execution.id,
+                        status,
+                        &actor,
+                        serde_json::json!({}),
+                    )?;
+                }
+                conn.execute(
+                    "INSERT INTO messages
+                     (id, discussion_id, role, content, timestamp, sort_order, received_at)
+                     VALUES ('u-undelivered', 'd-child', 'User', 'go', ?1, 1, ?1)",
+                    [&now],
+                )?;
+                crate::db::agent_dispatch::enqueue_for_latest_user(
+                    conn,
+                    crate::db::agent_dispatch::NewLatestUserDispatch {
+                        id: "j-undelivered",
+                        discussion_id: "d-child",
+                        dedupe_key: "message:u-undelivered",
+                        agent_override: Some(&crate::models::AgentType::Ollama),
+                        chain_prompt_ids: &[],
+                        batch_item: None,
+                        group_id: None,
+                        group_concurrency_limit: None,
+                    },
+                )?;
+                crate::db::agent_dispatch::claim(conn, "j-undelivered")?;
+                crate::db::orchestration::attach_execution_dispatch(
+                    conn,
+                    &execution.id,
+                    "j-undelivered",
+                )?;
+                Ok(execution.id)
+            })
+            .await
+            .unwrap();
+
+        let settled = db
+            .with_conn(|conn| {
+                persist_dispatch_settlement(
+                    conn,
+                    "j-undelivered",
+                    "d-child",
+                    None,
+                    crate::db::workflows::BatchChildOutcome::Success,
+                    None,
+                    None,
+                )
+            })
+            .await
+            .unwrap();
+        assert!(settled.changed);
+
+        db.with_conn(move |conn| {
+            let execution = crate::db::orchestration::get_task_execution(conn, &execution_id)?
+                .expect("execution must remain queryable");
+            assert_eq!(
+                execution.status,
+                crate::models::TaskExecutionStatus::Interrupted
+            );
+            let notice_id = format!("orch-worker-undelivered:{execution_id}");
+            let notice: String = conn.query_row(
+                "SELECT content FROM messages WHERE id = ?1 AND discussion_id = 'd-parent'",
+                [&notice_id],
+                |row| row.get(0),
+            )?;
+            assert!(notice.contains("sans livraison durable"));
+            assert_eq!(
+                crate::db::discussions::list_message_targets(conn, &notice_id)?.len(),
+                1,
+                "the principal wake must carry a typed target"
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_task_worker_without_delivery_interrupts_and_wakes_the_principal() {
+        let db = Arc::new(crate::db::Database::open_in_memory().unwrap());
+        let execution_id = db
+            .with_conn(|conn| {
+                let now = chrono::Utc::now().to_rfc3339();
+                for (id, title) in [("d-fail-parent", "Parent"), ("d-fail-child", "Child")] {
+                    conn.execute(
+                        "INSERT INTO discussions (id, title, created_at, updated_at)
+                         VALUES (?1, ?2, ?3, ?3)",
+                        rusqlite::params![id, title, now],
+                    )?;
+                }
+                conn.execute(
+                    "INSERT INTO planning_tasks
+                     (id, task_number, title, status, created_at, updated_at)
+                     VALUES ('t-failed-undelivered', 9902, 'Failed', 'todo', ?1, ?1)",
+                    [&now],
+                )?;
+                let actor = crate::models::PlanningActor {
+                    kind: crate::models::PlanningActorKind::Backend,
+                    id: Some("orchestrator".into()),
+                    session_id: None,
+                    source_message_id: None,
+                };
+                let execution = crate::db::orchestration::launch_single_task(
+                    conn,
+                    &crate::models::LaunchSingleTaskInput::new(
+                        "t-failed-undelivered",
+                        "d-fail-parent",
+                    ),
+                    &actor,
+                )?
+                .execution;
+                for status in [
+                    crate::models::TaskExecutionStatus::Provisioning,
+                    crate::models::TaskExecutionStatus::Working,
+                ] {
+                    crate::db::orchestration::transition_execution(
+                        conn,
+                        &execution.id,
+                        status,
+                        &actor,
+                        serde_json::json!({}),
+                    )?;
+                }
+                conn.execute(
+                    "INSERT INTO messages
+                     (id, discussion_id, role, content, timestamp, sort_order, received_at)
+                     VALUES ('u-failed-undelivered', 'd-fail-child', 'User', 'go', ?1, 1, ?1)",
+                    [&now],
+                )?;
+                crate::db::agent_dispatch::enqueue_for_latest_user(
+                    conn,
+                    crate::db::agent_dispatch::NewLatestUserDispatch {
+                        id: "j-failed-undelivered",
+                        discussion_id: "d-fail-child",
+                        dedupe_key: "message:u-failed-undelivered",
+                        agent_override: Some(&crate::models::AgentType::Ollama),
+                        chain_prompt_ids: &[],
+                        batch_item: None,
+                        group_id: None,
+                        group_concurrency_limit: None,
+                    },
+                )?;
+                crate::db::agent_dispatch::claim(conn, "j-failed-undelivered")?;
+                crate::db::orchestration::attach_execution_dispatch(
+                    conn,
+                    &execution.id,
+                    "j-failed-undelivered",
+                )?;
+                Ok(execution.id)
+            })
+            .await
+            .unwrap();
+
+        let settled = db
+            .with_conn(|conn| {
+                persist_dispatch_settlement(
+                    conn,
+                    "j-failed-undelivered",
+                    "d-fail-child",
+                    None,
+                    crate::db::workflows::BatchChildOutcome::Failed,
+                    Some("provider crashed"),
+                    Some("runtime_error"),
+                )
+            })
+            .await
+            .unwrap();
+        assert!(settled.changed);
+
+        db.with_conn(move |conn| {
+            let execution = crate::db::orchestration::get_task_execution(conn, &execution_id)?
+                .expect("execution must remain queryable");
+            assert_eq!(
+                execution.status,
+                crate::models::TaskExecutionStatus::Interrupted
+            );
+            let recovery = crate::db::orchestration::get_execution_recovery(conn, &execution_id)?
+                .expect("failure must leave an explicit human recovery");
+            assert_eq!(recovery.recovery_reason, "worker_failed_without_delivery");
+            let notice_id = format!("orch-worker-undelivered:{execution_id}");
+            let notice: String = conn.query_row(
+                "SELECT content FROM messages WHERE id = ?1 AND discussion_id = 'd-fail-parent'",
+                [&notice_id],
+                |row| row.get(0),
+            )?;
+            assert!(notice.contains("Worker échoué sans livraison durable"));
+            assert!(notice.contains("Examine l'erreur du dispatch"));
+            assert_eq!(
+                crate::db::discussions::list_message_targets(conn, &notice_id)?.len(),
+                1
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn terminal_agent_without_reply_is_counted_as_no_response_failure() {
+        let db = Arc::new(crate::db::Database::open_in_memory().unwrap());
+        db.with_conn(|conn| {
+            let now = chrono::Utc::now().to_rfc3339();
+            conn.execute(
+                "INSERT INTO discussions (id, title, created_at, updated_at)
+                 VALUES ('d-silent', 'Silent child', ?1, ?1)",
+                [&now],
+            )?;
+            conn.execute(
+                "INSERT INTO messages
+                 (id, discussion_id, role, content, timestamp, sort_order, received_at)
+                 VALUES ('u-silent', 'd-silent', 'User', 'go', ?1, 1, ?1)",
+                [&now],
+            )?;
+            crate::db::workflows::ensure_batch_placeholder_workflow(
+                conn,
+                "qp-silent",
+                "Silent QP",
+                None,
+            )?;
+            conn.execute(
+                "INSERT INTO workflow_runs
+                 (id, workflow_id, status, started_at, run_type, batch_total)
+                 VALUES ('batch-silent', 'qp:qp-silent', 'Running', ?1, 'batch', 1)",
+                [&now],
+            )?;
+            crate::db::agent_dispatch::enqueue_for_latest_user(
+                conn,
+                crate::db::agent_dispatch::NewLatestUserDispatch {
+                    id: "j-silent",
+                    discussion_id: "d-silent",
+                    dedupe_key: "message:u-silent",
+                    agent_override: None,
+                    chain_prompt_ids: &[],
+                    batch_item: None,
+                    group_id: Some("batch-silent"),
+                    group_concurrency_limit: None,
+                },
+            )?;
+            crate::db::agent_dispatch::claim(conn, "j-silent")?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let settled = db
+            .with_conn(|conn| {
+                persist_dispatch_settlement(
+                    conn,
+                    "j-silent",
+                    "d-silent",
+                    Some("batch-silent"),
+                    crate::db::workflows::BatchChildOutcome::NoResponse,
+                    Some("agent finished without a durable reply"),
+                    None,
+                )
+            })
+            .await
+            .unwrap();
+        assert!(settled.changed);
+
+        db.with_conn(|conn| {
+            let job = crate::db::agent_dispatch::get(conn, "j-silent")?.unwrap();
+            assert_eq!(
+                job.status,
+                crate::db::agent_dispatch::DispatchStatus::Failed
+            );
+            let run = crate::db::workflows::get_run(conn, "batch-silent")?.unwrap();
+            assert_eq!(run.status, crate::models::RunStatus::Failed);
+            assert_eq!(run.batch_completed, 0);
+            assert_eq!(run.batch_failed, 1);
+            assert_eq!(run.batch_no_response, 1);
+            Ok(())
+        })
+        .await
+        .unwrap();
     }
 }

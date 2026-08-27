@@ -201,6 +201,7 @@ pub async fn create_bundle(
             tier: qp.request.tier,
             agent_settings: qp.request.agent_settings.clone(),
             description: qp.request.description.clone(),
+            pinned: false,
             created_at: now,
             updated_at: now,
         });
@@ -229,6 +230,7 @@ pub async fn create_bundle(
             variables: qa.request.variables.clone(),
             profile_ids: qa.request.profile_ids.clone(),
             directive_ids: qa.request.directive_ids.clone(),
+            pinned: false,
             created_at: now,
             updated_at: now,
         });

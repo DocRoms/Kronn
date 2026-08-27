@@ -514,6 +514,12 @@ mod silent_crash_detector_tests {
         // Retrying it would be wrong (the stall is real, not transient).
         let stall = "⚠️ Partial response — the agent was interrupted after 40 min without output.";
         assert!(!message_matches_silent_crash(stall));
+
+        let structured_quota = "[Agent provider error]\n\nYou've hit your org's monthly spend limit.\n\n(HTTP 429; terminal_reason=api_error)";
+        assert!(
+            !message_matches_silent_crash(structured_quota),
+            "a structured provider failure must settle once, never enter the silent-crash retry"
+        );
     }
 
     #[test]

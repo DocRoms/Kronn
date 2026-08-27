@@ -1725,7 +1725,7 @@ the final report so the user can judge for themselves.
                 config_keys: vec![],
                 endpoints: vec![
                     ApiEndpoint { path: "/current_user".into(), method: "GET".into(), description: "[USER · sanity] Authenticated Fastly user. Use first to verify that the local CLI credential is valid.".into() },
-                    ApiEndpoint { path: "/service".into(), method: "GET".into(), description: "[SERVICES] List services visible to the authenticated account.".into() },
+                    ApiEndpoint { path: "/service".into(), method: "GET".into(), description: "[SERVICES] List services visible to the authenticated account. WARNING: every service embeds its complete version history, so the raw account response can exceed the agent context by hundreds of thousands of tokens. For a service inventory, ALWAYS pass `extract={\"path\":\"$[*]['id','name','version']\",\"fail_on_empty\":false}` (or an equivalently narrow field projection) instead of consuming the raw payload.".into() },
                     ApiEndpoint { path: "/service/{service_id}".into(), method: "GET".into(), description: "[SERVICES] Metadata for one service.".into() },
                     ApiEndpoint { path: "/service/{service_id}/details".into(), method: "GET".into(), description: "[SERVICES] Detailed service state, including versions and active configuration.".into() },
                     ApiEndpoint { path: "/service/{service_id}/domain".into(), method: "GET".into(), description: "[DOMAINS] Domains attached to a service.".into() },
@@ -2412,21 +2412,29 @@ this is just for reference if the agent debugs raw auth.
 - **Synthetic** (WebPageTest-style scheduled tests): `/v1/sites`,
   `/v1/tests`, `/v1/deploys`. Tracks Core Web Vitals + custom metrics
   on a schedule (every 30min, hourly, daily…) from chosen regions.
-- **LUX** (Real User Monitoring — JS beacon on real user pages):
-  `/v1/lux/...`. Aggregated CWV from real visitors, segmented by
-  device/country/page-label/etc.
-
-A single API key works for both.
+- **LUX** (Real User Monitoring) exists as a product, but its REST
+  endpoints answer 404 on this API (verified 2026-08-20). Everything
+  below therefore goes through the synthetic endpoints.
 
 ## 3. Common workflows
 
-- **Did this deploy break perf?** → POST `/v1/deploys` to mark a
-  release timeline → next test run carries the deploy_id → compare
-  `/v1/tests?since=<deploy_id>` against pre-deploy baseline.
-- **CWV regression on prod?** → GET `/v1/lux/sites/<id>/metrics`
-  with `metric=lcp&granularity=hour&start=<ts>&end=<ts>`.
-- **Top slow URLs?** → GET `/v1/lux/sites/<id>/url_metrics`
-  with `metric=lcp&order=desc&limit=20`.
+First, always: GET `/v1/sites` to resolve the site_id by name.
+
+- **Core Web Vitals over a period?** → GET `/v1/tests` with
+  `site_id=<id>&start_timestamp=<unix>&end_timestamp=<unix>`, and
+  narrow the payload with an `extract` such as
+  `$.data[*]['day','browser','url','largest_contentful_paint','cumulative_layout_shift','lighthouse_performance']`.
+  Without that extract a single page is ~20 KB and fills the window.
+- **One browser only?** → add `browser=Chrome` (values are the labels
+  returned in the rows: `Chrome`, `Firefox`, `Samsung Galaxy S7`,
+  `Apple iPhone 7`), which also cuts the result count sharply.
+- **Did this deploy break perf?** → POST `/v1/deploys` to mark the
+  release, then compare `/v1/tests` windows either side of its
+  timestamp.
+
+WATCH OUT: `site=<id>` is accepted and silently ignored — the parameter
+is `site_id`. A response that looks fine may be for another site
+entirely, so check `site_id` in the rows you get back.
 
 ## 4. Pagination
 
@@ -2450,20 +2458,19 @@ is well within bounds for typical fan-outs.
                     ApiEndpoint { path: "/v1/account".into(),                                method: "GET".into(),  description: "[ACCOUNT · sanity] Account info + plan tier — quickest way to verify the key works (200 = OK, 401 = bad key).".into() },
                     ApiEndpoint { path: "/v1/teams".into(),                                  method: "GET".into(),  description: "[TEAMS] List teams in the account — useful to scope subsequent calls.".into() },
                     // ── Synthetic — Sites ──
-                    ApiEndpoint { path: "/v1/sites".into(),                                  method: "GET".into(),  description: "[SYNTHETIC · sites] List monitored sites with their site_id (used as path param everywhere else).".into() },
+                    ApiEndpoint { path: "/v1/sites".into(),                                  method: "GET".into(),  description: "[SYNTHETIC · sites] Monitored sites. Returns `{sites:[{site_id, name, …}]}`. START HERE: every other endpoint needs a site_id.".into() },
                     ApiEndpoint { path: "/v1/sites/{site_id}".into(),                        method: "GET".into(),  description: "[SYNTHETIC · sites] One site's config (URL, regions, browsers, schedule).".into() },
                     // ── Synthetic — Tests ──
-                    ApiEndpoint { path: "/v1/tests".into(),                                  method: "GET".into(),  description: "[SYNTHETIC · tests] List test runs across all sites. Query: `site=<id>`, `since=<unix_ts>`, `until=<unix_ts>`, `limit=N`, `browser=chrome|firefox`, `region=<id>`. One row per (URL × browser × region × timestamp).".into() },
+                    ApiEndpoint { path: "/v1/tests".into(),                                  method: "GET".into(),  description: "[SYNTHETIC · tests] Test runs. Query (verified against the live API): `site_id=<id>` — NOT `site`, which the API accepts and silently ignores, returning every site; `start_timestamp=<unix>` + `end_timestamp=<unix>` — NOT `since`/`until`, whose absence returns HTTP 422; `browser=Chrome|Firefox|Samsung Galaxy S7|Apple iPhone 7`; `per_page=<n>` (maximum 100; 500 returns HTTP 422), `page=<n>`. PAGINATED: `{data:[…], links, meta:{current_page, per_page, total, last_page}}`, 10 per page by default. Traverse pages 1 through `meta.last_page` to aggregate the complete period. Each row is ~2 KB across 80+ fields, so ALWAYS narrow with `extract`. For the core browser/CWV/performance tuple, use exactly `$.data[*]['browser','largest_contentful_paint','cumulative_layout_shift','lighthouse_performance']`; the flat result repeats those four values per run. Other metric fields include first_contentful_paint, speedindex, time_to_interactive, total_blocking_time, plus day and url.".into() },
                     ApiEndpoint { path: "/v1/tests/{test_id}".into(),                        method: "GET".into(),  description: "[SYNTHETIC · tests] Single test run with full waterfall, every CWV metric, screenshots, traces.".into() },
                     // ── Synthetic — Deploys (release timeline markers) ──
-                    ApiEndpoint { path: "/v1/deploys".into(),                                method: "GET".into(),  description: "[SYNTHETIC · deploys · list] List release markers. Query: `site=<id>`, `since=<ts>`, `limit=N`. Use to correlate perf changes with releases.".into() },
+                    ApiEndpoint { path: "/v1/deploys".into(),                                method: "GET".into(),  description: "[SYNTHETIC · deploys · list] Release markers. Query: `site_id=<id>` (verified). Returns `{deploys:[…], meta}`. Use to correlate perf changes with releases.".into() },
                     ApiEndpoint { path: "/v1/deploys".into(),                                method: "POST".into(), description: "[SYNTHETIC · deploys · create] Mark a release on the timeline. Body: `{\"site_id\":<id>,\"note\":\"v0.6.0\",\"details\":\"<changelog excerpt>\"}`. Returns the new deploy_id.".into() },
                     ApiEndpoint { path: "/v1/deploys/{deploy_id}".into(),                    method: "GET".into(),  description: "[SYNTHETIC · deploys] One deploy + its associated tests (auto-fired post-deploy).".into() },
-                    // ── LUX (RUM) ──
-                    ApiEndpoint { path: "/v1/lux/sites".into(),                              method: "GET".into(),  description: "[LUX · sites] List LUX-enabled sites (subset of synthetic sites that have the JS beacon installed).".into() },
-                    ApiEndpoint { path: "/v1/lux/sites/{site_id}/metrics".into(),            method: "GET".into(),  description: "[LUX · metrics] Aggregated CWV time series. Query: `metric=lcp|cls|inp|fcp|ttfb`, `granularity=hour|day`, `start=<ISO>`, `end=<ISO>`, `dimension=device|country|page_label`.".into() },
-                    ApiEndpoint { path: "/v1/lux/sites/{site_id}/url_metrics".into(),        method: "GET".into(),  description: "[LUX · per-URL] Top URLs ranked by a metric. Query: `metric=lcp|cls|inp`, `order=asc|desc`, `limit=N`, `start=<ISO>`, `end=<ISO>`. Use to find slowest pages.".into() },
-                    ApiEndpoint { path: "/v1/lux/sites/{site_id}/page_groups".into(),        method: "GET".into(),  description: "[LUX · page groups] Performance segmented by page label (homepage, article, search…). Same query params as url_metrics.".into() },
+                    // LUX (RUM) endpoints are NOT declared: `/v1/lux/sites` and its
+                    // children answer 404 on the live API (verified 2026-08-20).
+                    // Declaring them sent agents chasing an aggregated time series
+                    // that does not exist, when /v1/tests was the only real source.
                 ],
             }),
         },

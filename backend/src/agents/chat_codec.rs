@@ -21,6 +21,11 @@ use serde_json::Value;
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct ChatChunk {
     pub delta: Option<String>,
+    /// Why the provider stopped, when it says so. Surfaced because an empty reply
+    /// is otherwise undiagnosable: `length` means the model spent its output budget
+    /// (a reasoning model can burn it all thinking), `stop` means it chose to end.
+    /// Guessing between those in a user-facing message is what this replaces.
+    pub finish_reason: Option<String>,
     pub done: bool,
     pub error: Option<String>,
     pub prompt_tokens: u64,
@@ -129,6 +134,9 @@ impl ChatCodec for OpenAiCodec {
         if let Some(usage) = json.get("usage").filter(|u| !u.is_null()) {
             chunk.prompt_tokens = usage["prompt_tokens"].as_u64().unwrap_or(0);
             chunk.eval_tokens = usage["completion_tokens"].as_u64().unwrap_or(0);
+        }
+        if let Some(reason) = choice["finish_reason"].as_str() {
+            chunk.finish_reason = Some(reason.to_string());
         }
         // A non-streaming body has no `[DONE]`; its finish_reason ends it.
         if !choice["finish_reason"].is_null() && choice["delta"].is_null() {

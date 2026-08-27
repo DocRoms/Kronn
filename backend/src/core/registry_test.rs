@@ -515,6 +515,13 @@ mod tests {
             .endpoints
             .iter()
             .any(|endpoint| endpoint.path == "/current_user"));
+        let service_list = api
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.path == "/service")
+            .unwrap();
+        assert!(service_list.description.contains("ALWAYS pass `extract="));
+        assert!(service_list.description.contains("'id','name','version'"));
         assert!(api
             .endpoints
             .iter()

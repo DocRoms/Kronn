@@ -112,6 +112,7 @@ pub async fn disc_create(
     let no_agent = req.no_agent;
     let disc = Discussion {
         awaiting_agent: false,
+        agent_running: false,
         id: disc_id.clone(),
         project_id: req.project_id.clone(),
         title: req.title.clone(),
@@ -439,6 +440,62 @@ pub async fn disc_append(
             };
         }
     }
+    // KT-330 — resolve joined-CLI room-alias mentions (`@claude-cli`) in the body
+    // into Cli wake targets, server-side, via the SAME shared resolver as the
+    // native path. New bridges resolve mentions client-side, but an older or
+    // plain-text bridge sends none; this fallback means a prose mention of a
+    // joined peer wakes it regardless of the client. Additive: explicit targets
+    // win, the author never self-targets, joined-only, deduplicated by session.
+    if routing_candidate {
+        let did = req.disc_id.clone();
+        let content = req.messages[0].content.clone();
+        let author = author_cli_session_id;
+        match state
+            .db
+            .with_read_conn(move |conn| {
+                let views = crate::db::discussion_sessions::list_participant_views(conn, &did)?;
+                let joined: Vec<crate::db::discussion_sessions::JoinedCliSession> = views
+                    .iter()
+                    .map(|v| crate::db::discussion_sessions::JoinedCliSession {
+                        agent_type: v.agent_type.clone(),
+                        ordinal: v.cli_ordinal,
+                        session_pk: v.id,
+                    })
+                    .collect();
+                Ok(
+                    crate::db::discussion_sessions::resolve_cli_session_mentions(&content, &joined)
+                        .into_iter()
+                        .filter(|pk| Some(*pk) != author)
+                        .filter_map(|pk| {
+                            views.iter().find(|v| v.id == pk).map(|v| {
+                                MessageTarget::cli(
+                                    crate::db::discussions::parse_agent_type(&v.agent_type),
+                                    pk,
+                                )
+                            })
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .await
+        {
+            Ok(mention_targets) => {
+                for target in mention_targets {
+                    if !requested_targets
+                        .iter()
+                        .any(|existing| existing.cli_session_id == target.cli_session_id)
+                    {
+                        requested_targets.push(target);
+                    }
+                }
+            }
+            Err(error) => {
+                return Json(ApiResponse::err(format!(
+                    "DB error resolving CLI mentions: {error}"
+                )))
+            }
+        }
+    }
     // Resolve the whole presence snapshot in one DB turn, then feed the pure
     // shared routing policy. On lookup failure we fail closed as a no-agent
     // room: this live MCP caller is already a proven peer, so duplicate native
@@ -625,6 +682,7 @@ pub async fn disc_append(
                     .map(|(job_id, agent)| crate::db::discussions::UserDispatchSpec {
                         job_id,
                         agent_override: agent.as_ref(),
+                        dedupe_key: None,
                     })
                     .collect::<Vec<_>>();
                 if let Some(author_cli_session_id) = author_cli_session_id {
@@ -2150,6 +2208,119 @@ mod tests {
         assert_eq!(
             targets,
             vec![MessageTarget::cli(AgentType::Codex, cli_session_id)]
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn disc_append_wakes_a_prose_mentioned_peer_and_excludes_the_author() {
+        // KT-330 DoD-4(a): the `disc_append` authoring path resolves a bare
+        // prose mention (no typed target — an older/plain-text bridge) into an
+        // exact Cli target, and never routes the message back to its own author.
+        crate::core::anti_halluc::set_mode("off");
+        let (state, _tmp) = lint_state(false).await;
+        let peer = state
+            .db
+            .with_conn(|conn| {
+                // Author: the Codex CLI that appends (@codex-cli).
+                crate::db::discussion_sessions::create_session(
+                    conn,
+                    "d-lint",
+                    "Codex",
+                    Some("codex-author"),
+                    "peer",
+                )?;
+                // Peer: a joined ClaudeCode CLI, mentionable as @claude-cli.
+                crate::db::discussion_sessions::create_session(
+                    conn,
+                    "d-lint",
+                    "ClaudeCode",
+                    Some("claude-peer"),
+                    "peer",
+                )
+            })
+            .await
+            .unwrap();
+
+        // Bold + inline code, the room's real corpus. The author names its OWN
+        // alias too: the fallback must wake the peer from prose yet drop the
+        // author from its own routing.
+        let msg = agent_msg(
+            "prose-cli-mention",
+            "**@claude-cli** relis, et `@codex-cli` je continue.",
+        );
+        append_as(&state, vec![msg], Some("codex-author")).await;
+
+        let targets = state
+            .db
+            .with_conn(move |conn| {
+                let message_id = conn.query_row(
+                    "SELECT id FROM messages WHERE source_msg_id = 'prose-cli-mention'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )?;
+                crate::db::discussions::list_message_targets(conn, &message_id)
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            targets,
+            vec![MessageTarget::cli(AgentType::ClaudeCode, peer)],
+            "a prose mention wakes the named joined peer, never the author itself"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn disc_append_dedups_a_prose_mention_against_an_explicit_target() {
+        // KT-330 DoD-4(a): the fallback is additive — when the same peer is
+        // named by BOTH an explicit typed target and a prose alias, it is
+        // persisted once, not duplicated.
+        crate::core::anti_halluc::set_mode("off");
+        let (state, _tmp) = lint_state(false).await;
+        let peer = state
+            .db
+            .with_conn(|conn| {
+                crate::db::discussion_sessions::create_session(
+                    conn,
+                    "d-lint",
+                    "Codex",
+                    Some("codex-author"),
+                    "peer",
+                )?;
+                crate::db::discussion_sessions::create_session(
+                    conn,
+                    "d-lint",
+                    "ClaudeCode",
+                    Some("claude-peer"),
+                    "peer",
+                )
+            })
+            .await
+            .unwrap();
+
+        let mut msg = agent_msg("dedup-cli-mention", "**@claude-cli** double-checké");
+        msg.targets = vec![MessageTarget::cli(AgentType::ClaudeCode, peer)];
+        append_as(&state, vec![msg], Some("codex-author")).await;
+
+        let targets = state
+            .db
+            .with_conn(move |conn| {
+                let message_id = conn.query_row(
+                    "SELECT id FROM messages WHERE source_msg_id = 'dedup-cli-mention'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )?;
+                crate::db::discussions::list_message_targets(conn, &message_id)
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            targets,
+            vec![MessageTarget::cli(AgentType::ClaudeCode, peer)],
+            "an explicit target and a prose mention of the same session collapse to one"
         );
     }
 

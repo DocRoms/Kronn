@@ -216,9 +216,9 @@ pub async fn agent_api_call(
     //      via mcp_list)
     //
     // If all three sources are empty, we fall through to
-    // `execute_api_call_step_with_db` which has its own fallback
-    // (global config → empty project_id is fine; scoped config →
-    // surfaces "not linked to any project" error).
+    // `execute_api_call_step_with_db` in General-discussion scope:
+    // global and `include_general` configs are accepted, while a config
+    // with neither visibility flag still fails closed.
     let project_id: Option<String> = if let Some(pid) = req.project_id.clone() {
         Some(pid)
     } else if let Some(did) = req.disc_id.clone().filter(|s| !s.is_empty()) {

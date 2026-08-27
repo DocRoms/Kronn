@@ -79,6 +79,9 @@ pub struct QuickPrompt {
     /// use case. Empty string = legacy QP created before 2026-04-10.
     #[serde(default)]
     pub description: String,
+    /// User-pinned / favorite Quick Prompt in the Automation library.
+    #[serde(default)]
+    pub pinned: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -167,6 +170,10 @@ pub struct QuickApi {
     #[serde(default)]
     pub directive_ids: Vec<String>,
 
+    /// User-pinned / favorite Quick API in the Automation library.
+    #[serde(default)]
+    pub pinned: bool,
+
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -219,6 +226,9 @@ pub struct QuickExec {
     pub output_format: super::CollectQuickExecOutputFormat,
     #[serde(default)]
     pub variables: Vec<PromptVariable>,
+    /// User-pinned / favorite Quick Exec in the Automation library.
+    #[serde(default)]
+    pub pinned: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -239,6 +249,14 @@ pub struct CreateQuickExecRequest {
     pub output_format: super::CollectQuickExecOutputFormat,
     #[serde(default)]
     pub variables: Vec<PromptVariable>,
+}
+
+/// Partial favorite toggle shared by Quick Prompts, Quick APIs and Quick
+/// Execs. All three resource routes accept the exact same PATCH payload.
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
+pub struct UpdateQuickFavoriteRequest {
+    pub pinned: bool,
 }
 
 #[derive(Debug, Deserialize, TS)]

@@ -47,6 +47,7 @@ fn parse_run_status(s: &str) -> RunStatus {
         "Pending" => RunStatus::Pending,
         "Running" => RunStatus::Running,
         "Success" => RunStatus::Success,
+        "Partial" => RunStatus::Partial,
         "Failed" => RunStatus::Failed,
         "Cancelled" => RunStatus::Cancelled,
         "WaitingApproval" => RunStatus::WaitingApproval,
@@ -61,6 +62,7 @@ fn run_status_str(s: &RunStatus) -> &'static str {
         RunStatus::Pending => "Pending",
         RunStatus::Running => "Running",
         RunStatus::Success => "Success",
+        RunStatus::Partial => "Partial",
         RunStatus::Failed => "Failed",
         RunStatus::Cancelled => "Cancelled",
         RunStatus::WaitingApproval => "WaitingApproval",
@@ -306,6 +308,9 @@ pub fn list_batch_run_summaries(conn: &Connection) -> Result<Vec<BatchRunSummary
             run_id: br.id,
             batch_name: br.batch_name,
             batch_total: br.batch_total,
+            batch_completed: br.batch_completed,
+            batch_failed: br.batch_failed,
+            batch_no_response: br.batch_no_response,
             status: br.status,
             quick_prompt_id,
             quick_prompt_name,
@@ -336,8 +341,8 @@ pub struct DeletedBatchSummary {
 /// Behaviour:
 /// - Verifies the run exists AND is `run_type = 'batch'` (refuses to delete
 ///   linear runs by accident).
-/// - Deletes child discussions first (which cascades to discussion_messages
-///   via the existing FK), then the batch run row.
+/// - Deletes child discussions and archived AI-judge discussions first (which
+///   cascade to their messages), then the batch run row.
 /// - Wrapped in a transaction so partial state is impossible on failure.
 ///
 /// Returns the count of discussions actually deleted (handy for the frontend
@@ -360,10 +365,21 @@ pub fn delete_batch_run_with_discussions(
 
     conn.execute_batch("BEGIN")?;
     let tx_result: Result<usize> = (|| {
-        let n_discs: usize = conn.execute(
+        let mut judge_stmt = conn.prepare(
+            "SELECT judge_discussion_id FROM batch_compare_judge_runs
+             WHERE run_id = ?1 AND judge_discussion_id IS NOT NULL",
+        )?;
+        let judge_ids = judge_stmt
+            .query_map([run_id], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(judge_stmt);
+        let mut n_discs: usize = conn.execute(
             "DELETE FROM discussions WHERE workflow_run_id = ?1",
             params![run_id],
         )?;
+        for judge_id in judge_ids {
+            n_discs += conn.execute("DELETE FROM discussions WHERE id = ?1", [judge_id])?;
+        }
         conn.execute("DELETE FROM workflow_runs WHERE id = ?1", params![run_id])?;
         Ok(n_discs)
     })();
@@ -464,6 +480,12 @@ pub fn create_batch_run(
     let run_id = Uuid::new_v4().to_string();
     let now = Utc::now();
     let qp = input.quick_prompt;
+    // A comparison score is only meaningful for the exact prompt revision it
+    // graded. Stamp the current immutable QP version into trigger_context so
+    // later edits cannot make historical ratings float against an unknown body.
+    let originating_version = crate::db::quick_prompts::current_version_index(conn, &qp.id)
+        .ok()
+        .flatten();
 
     let run = WorkflowRun {
         id: run_id.clone(),
@@ -476,6 +498,7 @@ pub fn create_batch_run(
             "type": "batch",
             "quick_prompt_id": qp.id,
             "quick_prompt_name": qp.name,
+            "quick_prompt_version": originating_version,
             "batch_size": batch_total,
             "parent_run_id": input.parent_run_id,
         })),
@@ -488,6 +511,7 @@ pub fn create_batch_run(
         batch_total,
         batch_completed: 0,
         batch_failed: 0,
+        batch_no_response: 0,
         batch_name: input.batch_name.clone(),
         parent_run_id: input.parent_run_id.clone(),
         state: ::std::collections::HashMap::new(),
@@ -553,6 +577,7 @@ pub fn create_batch_run(
                 .unwrap_or(qp.tier);
             let discussion = Discussion {
                 awaiting_agent: false,
+                agent_running: false,
                 id: disc_id,
                 project_id: effective_project_id.clone(),
                 title: item.title.clone(),
@@ -611,10 +636,6 @@ pub fn create_batch_run(
     // aggregator can group "what was the QP body that produced this run".
     // `None` means the QP has no snapshot (legacy QP pre-0.8.5 without a
     // backfill); the discussion-level columns stay NULL in that case.
-    let originating_version = crate::db::quick_prompts::current_version_index(conn, &qp.id)
-        .ok()
-        .flatten();
-
     // Single transaction: placeholder workflow + run + all discussions/messages.
     conn.execute_batch("BEGIN")?;
     let tx_result: Result<()> = (|| {
@@ -803,7 +824,7 @@ pub fn list_runs(conn: &Connection, workflow_id: &str) -> Result<Vec<WorkflowRun
 pub fn purge_runs_older_than(conn: &Connection, days: u32) -> Result<usize> {
     let n = conn.execute(
         "DELETE FROM workflow_runs
-          WHERE status IN ('Success','Failed','Cancelled','StoppedByGuard','Interrupted')
+          WHERE status IN ('Success','Partial','Failed','Cancelled','StoppedByGuard','Interrupted')
             AND finished_at IS NOT NULL
             AND finished_at < datetime('now', ?1)
             AND id NOT IN (
@@ -868,7 +889,7 @@ pub fn terminal_workspace_cleanup_candidates(
            JOIN workflows workflow ON workflow.id = run.workflow_id
            JOIN projects project ON project.id = workflow.project_id
           WHERE run.workspace_path IS NOT NULL
-            AND run.status IN ('Success', 'Failed', 'Cancelled', 'StoppedByGuard')
+            AND run.status IN ('Success', 'Partial', 'Failed', 'Cancelled', 'StoppedByGuard')
             AND NOT EXISTS (
                 SELECT 1
                   FROM workflow_runs child
@@ -898,7 +919,7 @@ pub fn mark_workspace_cleaned(
     Ok(conn.execute(
         "UPDATE workflow_runs SET workspace_path = NULL
           WHERE id = ?1 AND workspace_path = ?2
-            AND status IN ('Success', 'Failed', 'Cancelled', 'StoppedByGuard')",
+            AND status IN ('Success', 'Partial', 'Failed', 'Cancelled', 'StoppedByGuard')",
         params![run_id, workspace_path],
     )? > 0)
 }
@@ -1187,8 +1208,8 @@ pub fn insert_run(conn: &Connection, run: &WorkflowRun) -> Result<()> {
         "INSERT INTO workflow_runs (id, workflow_id, status, trigger_context,
          step_results_json, tokens_used, workspace_path, started_at, finished_at,
          run_type, batch_total, batch_completed, batch_failed, batch_name, parent_run_id, state,
-         produced_branches)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+         produced_branches, batch_no_response)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
         params![
             run.id,
             run.workflow_id,
@@ -1220,13 +1241,21 @@ pub fn insert_run(conn: &Connection, run: &WorkflowRun) -> Result<()> {
             } else {
                 Some(serde_json::to_string(&run.produced_branches)?)
             },
+            run.batch_no_response as i64,
         ],
     )?;
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatchChildOutcome {
+    Success,
+    Failed,
+    NoResponse,
+}
+
 /// Atomically increment batch_completed or batch_failed on a batch run, and
-/// mark the run as Success/Failed when all children are accounted for.
+/// mark the run as Success/Partial/Failed when all children are accounted for.
 /// Returns the updated run if the transition happened (either progress tick
 /// or final completion), so the caller can broadcast the right WS event.
 pub fn increment_batch_progress(
@@ -1234,26 +1263,50 @@ pub fn increment_batch_progress(
     run_id: &str,
     child_succeeded: bool,
 ) -> Result<Option<WorkflowRun>> {
-    let column = if child_succeeded {
-        "batch_completed"
-    } else {
-        "batch_failed"
+    increment_batch_progress_with_outcome(
+        conn,
+        run_id,
+        if child_succeeded {
+            BatchChildOutcome::Success
+        } else {
+            BatchChildOutcome::Failed
+        },
+    )
+}
+
+pub fn increment_batch_progress_with_outcome(
+    conn: &Connection,
+    run_id: &str,
+    outcome: BatchChildOutcome,
+) -> Result<Option<WorkflowRun>> {
+    let (update, counter) = match outcome {
+        BatchChildOutcome::Success => (
+            "UPDATE workflow_runs SET batch_completed = batch_completed + 1
+             WHERE id = ?1 AND run_type = 'batch' AND status = 'Running'",
+            "batch_completed",
+        ),
+        BatchChildOutcome::Failed => (
+            "UPDATE workflow_runs SET batch_failed = batch_failed + 1
+             WHERE id = ?1 AND run_type = 'batch' AND status = 'Running'",
+            "batch_failed",
+        ),
+        BatchChildOutcome::NoResponse => (
+            "UPDATE workflow_runs
+             SET batch_failed = batch_failed + 1,
+                 batch_no_response = batch_no_response + 1
+             WHERE id = ?1 AND run_type = 'batch' AND status = 'Running'",
+            "batch_failed+batch_no_response",
+        ),
     };
     // Counters are part of the terminal state (waiters/UI read them): a late
     // child must not advance a batch already Cancelled/Interrupted.
-    let bumped = conn.execute(
-        &format!(
-            "UPDATE workflow_runs SET {0} = {0} + 1              WHERE id = ?1 AND run_type = 'batch' AND status = 'Running'",
-            column
-        ),
-        params![run_id],
-    )?;
+    let bumped = conn.execute(update, params![run_id])?;
     if bumped == 0 {
         // A′ observability — a frozen counter means a child completed after
         // the batch left Running (late finisher post-cancel/terminal).
         tracing::warn!(
             target: "kronn::invariant",
-            run_id = %run_id, counter = %column,
+            run_id = %run_id, counter = %counter,
             "batch progress bump blocked — batch no longer Running"
         );
         return Ok(None);
@@ -1269,11 +1322,12 @@ pub fn increment_batch_progress(
 
     let done = run.batch_completed + run.batch_failed;
     if done >= run.batch_total && run.status == RunStatus::Running {
-        // All children done — mark the run final. Success if at least one
-        // succeeded, Failed if ALL failed. This matches user intuition:
-        // "the batch did something useful" vs "the batch accomplished nothing".
-        let final_status = if run.batch_completed > 0 {
+        // A useful partial result is still degraded: reporting Success here
+        // hid failed and silent agents in real Compare runs.
+        let final_status = if run.batch_failed == 0 {
             RunStatus::Success
+        } else if run.batch_completed > 0 {
+            RunStatus::Partial
         } else {
             RunStatus::Failed
         };
@@ -1769,6 +1823,7 @@ fn row_to_run(row: &rusqlite::Row) -> WorkflowRun {
     // 0.7.0 — branches preserved by the runner during worktree cleanup.
     // Same tolerance as `state` for legacy / corrupt rows.
     let produced_branches_str: Option<String> = row.get(16).unwrap_or(None);
+    let batch_no_response: i64 = row.get(17).unwrap_or(0);
 
     WorkflowRun {
         id: row.get(0).unwrap_or_default(),
@@ -1787,6 +1842,7 @@ fn row_to_run(row: &rusqlite::Row) -> WorkflowRun {
         batch_total: batch_total as u32,
         batch_completed: batch_completed as u32,
         batch_failed: batch_failed as u32,
+        batch_no_response: batch_no_response as u32,
         batch_name,
         parent_run_id,
         state: state_str
@@ -1811,4 +1867,4 @@ fn row_to_run(row: &rusqlite::Row) -> WorkflowRun {
 const WORKFLOW_RUN_COLS: &str = "id, workflow_id, status, trigger_context, step_results_json, \
     tokens_used, workspace_path, started_at, finished_at, \
     run_type, batch_total, batch_completed, batch_failed, batch_name, parent_run_id, state, \
-    produced_branches";
+    produced_branches, batch_no_response";

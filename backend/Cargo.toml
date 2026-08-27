@@ -1,6 +1,6 @@
 [package]
 name = "kronn"
-version = "0.10.0"
+version = "0.11.0"
 edition = "2021"
 description = "Self-hosted AI dev workflow control plane"
 license = "AGPL-3.0-only"
@@ -40,6 +40,7 @@ open = "5"              # Open URLs in system browser
 
 # Process management
 which = "8"           # Find executables in PATH
+libc = "0.2"          # Unix process control (setpgid, kill -pgid)
 
 # Async streams
 futures = "0.3"
@@ -86,6 +87,10 @@ anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 directories = "6"     # XDG paths
+# Parse a proposed Rust edit before any durable write. `span-locations` makes
+# the refusal actionable for a bounded local-model repair.
+syn = { version = "2", features = ["full", "visit", "extra-traits"] }
+proc-macro2 = { version = "1", features = ["span-locations"] }
 
 # Document extraction (context files: xlsx, docx, pptx, pdf)
 calamine = "0.36"                                           # Excel spreadsheets
@@ -117,11 +122,8 @@ tempfile = "3"
 tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
 futures = "0.3"
 wiremock = "0.6"          # HTTP mock server for ApiCall step tests
-# AST-aware lint: detect raw `Command::new` calls in prod code. The bash
-# grep variant the CI used pre-0.8.2 false-positived on string literals
-# inside audit prompts. See examples/lint-no-raw-command.rs.
-syn = { version = "2", features = ["full", "visit", "extra-traits"] }
-proc-macro2 = { version = "1", features = ["span-locations"] }
+# `syn` and `proc-macro2` are regular dependencies because the same AST parser
+# now protects agent edits; the AST-aware lint example still reuses them.
 walkdir = "2"
 proptest = "1"          # Property tests for crypto (roundtrip + universal tamper rejection)
 

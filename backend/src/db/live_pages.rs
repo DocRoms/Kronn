@@ -961,6 +961,31 @@ mod tests {
     }
 
     #[test]
+    fn update_live_page_persists_a_renamed_title_without_changing_its_slug() {
+        let conn = test_connection();
+        let page = fixture(&conn);
+
+        let updated = update_live_page(
+            &conn,
+            &page.id,
+            &UpdateLivePageRequest {
+                title: Some("Production health".into()),
+                pinned: None,
+                archived: None,
+            },
+        )
+        .unwrap()
+        .expect("existing Page");
+
+        assert_eq!(updated.page.title, "Production health");
+        assert_eq!(updated.page.slug, page.slug);
+        assert_eq!(
+            get_live_page(&conn, &page.id).unwrap().unwrap().page.title,
+            "Production health"
+        );
+    }
+
+    #[test]
     fn recent_publications_are_limited_and_keep_workflow_provenance() {
         let conn = test_connection();
         let page = fixture(&conn);

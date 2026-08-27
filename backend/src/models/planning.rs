@@ -119,6 +119,12 @@ pub enum PlanningActorKind {
     #[default]
     Human,
     Agent,
+    /// 0.11.0 (KT-317) — an autonomous Kronn backend transition (claim,
+    /// integrate, reconcile). Distinct from `Agent` so a task change made by the
+    /// orchestrator is attributable and cannot be spoofed by a chat message.
+    Backend,
+    /// 0.11.0 (KT-317) — a system/maintenance transition (boot reconcile).
+    System,
 }
 
 impl PlanningActorKind {
@@ -126,6 +132,22 @@ impl PlanningActorKind {
         match self {
             Self::Human => "human",
             Self::Agent => "agent",
+            Self::Backend => "backend",
+            Self::System => "system",
+        }
+    }
+}
+
+impl std::str::FromStr for PlanningActorKind {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "human" => Ok(Self::Human),
+            "agent" => Ok(Self::Agent),
+            "backend" => Ok(Self::Backend),
+            "system" => Ok(Self::System),
+            _ => anyhow::bail!("Unknown planning actor kind: {value}"),
         }
     }
 }
@@ -137,6 +159,10 @@ pub struct PlanningActor {
     pub kind: PlanningActorKind,
     #[serde(default)]
     pub id: Option<String>,
+    /// Durable joined-CLI source session. Two sessions of the same provider
+    /// keep the same `id` but are never conflated in the audit trail.
+    #[serde(default)]
+    pub session_id: Option<String>,
     #[serde(default)]
     pub source_message_id: Option<String>,
 }
@@ -188,6 +214,7 @@ pub struct PlanningTaskEvent {
     pub action: String,
     pub actor_kind: PlanningActorKind,
     pub actor_id: Option<String>,
+    pub actor_session_id: Option<String>,
     pub changes: serde_json::Value,
     pub source_message_id: Option<String>,
     pub created_at: DateTime<Utc>,

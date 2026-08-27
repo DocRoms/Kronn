@@ -7,6 +7,7 @@
 
 use super::*;
 use crate::db::migrations;
+use chrono::Duration;
 
 fn test_db() -> Connection {
     let conn = Connection::open_in_memory().unwrap();
@@ -269,11 +270,22 @@ fn coverage_of_an_agent_with_no_sessions_is_unknown_not_zero_percent() {
 // ── per-message attribution ─────────────────────────────────────────
 
 fn cli_message(conn: &Connection, id: &str, sort_order: i64, at: &str, session_pk: i64) {
+    cli_message_in_discussion(conn, "d", id, sort_order, at, session_pk);
+}
+
+fn cli_message_in_discussion(
+    conn: &Connection,
+    discussion_id: &str,
+    id: &str,
+    sort_order: i64,
+    at: &str,
+    session_pk: i64,
+) {
     conn.execute(
         "INSERT INTO messages (id, discussion_id, role, content, timestamp,
              sort_order, tokens_used)
-         VALUES (?1, 'd', 'Agent', 'hi', ?2, ?3, 0)",
-        params![id, at, sort_order],
+         VALUES (?1, ?2, 'Agent', 'hi', ?3, ?4, 0)",
+        params![id, discussion_id, at, sort_order],
     )
     .unwrap();
     conn.execute(
@@ -639,6 +651,133 @@ fn a_measured_runaway_session_is_told_to_rotate() {
 }
 
 #[test]
+fn active_time_ignores_a_fifteen_hour_pause_and_stays_under_the_cap() {
+    let conn = test_db();
+    let pk = session(&conn, "ClaudeCode", "cli-a");
+    upsert(
+        &conn,
+        &CliSessionTelemetry {
+            input_tokens: Some(1),
+            cache_creation_tokens: Some(0),
+            cache_read_tokens: Some(0),
+            output_tokens: Some(1),
+            measured_responses: Some(1),
+            ..row(pk)
+        },
+    )
+    .unwrap();
+
+    // Make the old wall-clock implementation breach the 48-hour ceiling.
+    conn.execute(
+        "UPDATE discussion_sessions SET joined_at = ?1 WHERE id = ?2",
+        params![(Utc::now() - Duration::hours(50)).to_rfc3339(), pk],
+    )
+    .unwrap();
+
+    // Thirteen hours of turns every 30 minutes, then a 15-hour overnight
+    // pause. The default 30-minute cap charges only the boundary after the
+    // pause, not the night itself.
+    let start = chrono::DateTime::parse_from_rfc3339("2026-08-05T08:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    for index in 0..=26 {
+        cli_message(
+            &conn,
+            &format!("active-{index}"),
+            index + 1,
+            &(start + Duration::minutes(index * 30)).to_rfc3339(),
+            pk,
+        );
+    }
+    cli_message(
+        &conn,
+        "after-pause",
+        28,
+        &(start + Duration::hours(28)).to_rfc3339(),
+        pk,
+    );
+
+    let out = assess_session(
+        &conn,
+        pk,
+        &crate::core::session_budget::SessionBudget::default(),
+    )
+    .unwrap();
+    assert_eq!(out.verdict, crate::core::session_budget::BudgetVerdict::Ok);
+    let active = out
+        .axes
+        .iter()
+        .find(|axis| axis.name == "active_hours")
+        .unwrap();
+    assert_eq!(active.current, Some(13.5));
+}
+
+#[test]
+fn active_time_orders_timestamps_across_discussions_not_local_sort_order() {
+    let conn = test_db();
+    let pk = session(&conn, "ClaudeCode", "cli-a");
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO discussions (id, project_id, title, agent, language,
+             created_at, updated_at)
+         VALUES ('d2', 'p', 'D2', 'ClaudeCode', 'fr', ?1, ?1)",
+        params![now],
+    )
+    .unwrap();
+
+    // sort_order is local to each discussion. The later turn in d2 has the
+    // same local order as the earlier turn in d, so SQL ordering by that field
+    // can put the timestamps backwards.
+    cli_message_in_discussion(
+        &conn,
+        "d2",
+        "newer-room",
+        1,
+        "2026-08-05T11:00:00+02:00",
+        pk,
+    );
+    cli_message_in_discussion(&conn, "d", "older-room", 1, "2026-08-05T07:00:00Z", pk);
+
+    assert_eq!(
+        active_hours_for_session(&conn, pk, 30).unwrap(),
+        Some(0.5),
+        "the two-hour UTC gap is capped after chronological sorting"
+    );
+}
+
+#[test]
+fn inactivity_threshold_is_configurable_per_budget() {
+    let conn = test_db();
+    let pk = session(&conn, "ClaudeCode", "cli-a");
+    upsert(
+        &conn,
+        &CliSessionTelemetry {
+            input_tokens: Some(1),
+            cache_creation_tokens: Some(0),
+            cache_read_tokens: Some(0),
+            output_tokens: Some(1),
+            measured_responses: Some(1),
+            ..row(pk)
+        },
+    )
+    .unwrap();
+    cli_message(&conn, "threshold-1", 1, "2026-08-05T08:00:00Z", pk);
+    cli_message(&conn, "threshold-2", 2, "2026-08-05T10:00:00Z", pk);
+
+    let budget = crate::core::session_budget::SessionBudget {
+        max_inactive_gap_minutes: 15,
+        ..crate::core::session_budget::SessionBudget::default()
+    };
+    let out = assess_session(&conn, pk, &budget).unwrap();
+    let active = out
+        .axes
+        .iter()
+        .find(|axis| axis.name == "active_hours")
+        .unwrap();
+    assert_eq!(active.current, Some(0.25));
+}
+
+#[test]
 fn turns_count_only_this_sessions_own_messages() {
     // Counting every message in the room would charge us for a peer's turns and
     // rotate a session that barely spoke.
@@ -654,7 +793,7 @@ fn turns_count_only_this_sessions_own_messages() {
     };
     let out = assess_session(&conn, mine, &budget).unwrap();
     let turns = out.axes.iter().find(|axis| axis.name == "turns").unwrap();
-    assert_eq!(turns.current, Some(1), "peer turns were counted as ours");
+    assert_eq!(turns.current, Some(1.0), "peer turns were counted as ours");
 }
 
 #[test]

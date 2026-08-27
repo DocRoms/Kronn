@@ -3082,6 +3082,13 @@ args = ["@example/old-mcp"]
             "Codex entry should reference the bridge script. Got:\n{}",
             plan.content
         );
+        for env_var in crate::agents::runner::KRONN_INTERNAL_CODEX_ENV_VARS {
+            assert!(
+                plan.content.contains(env_var),
+                "Codex entry must forward {env_var} to the stdio bridge. Got:\n{}",
+                plan.content
+            );
+        }
         // The summary line lives on every host_sync log — verify the
         // count includes the bridge.
         assert!(plan.summary.contains("MCP servers"));

@@ -2321,6 +2321,7 @@ pub async fn trigger(
         batch_total: 0,
         batch_completed: 0,
         batch_failed: 0,
+        batch_no_response: 0,
         batch_name: None,
         parent_run_id: None,
         state: ::std::collections::HashMap::new(),
@@ -2735,6 +2736,7 @@ pub async fn test_step(
     let cfg = state.config.read().await;
     let tokens = cfg.tokens.clone();
     let agents = cfg.agents.clone();
+    let ollama_context_overrides = cfg.server.ollama_context_overrides.clone();
     drop(cfg);
 
     // Resolve project path (for MCP context). 0.8.3 — also pre-format
@@ -2778,12 +2780,13 @@ pub async fn test_step(
         AgentType::CopilotCli => agents.copilot_cli.full_access,
         AgentType::Ollama => agents.ollama.full_access,
         AgentType::LiteLlm => agents.lite_llm.full_access,
+        AgentType::Nvidia => agents.nvidia.full_access,
         AgentType::Custom => false,
     };
     // Owned clone for the spawned task — the Test button must resolve model
     // tiers exactly like a real run (run-9 finding: overrides were dropped).
     let model_tiers = agents.model_tiers.clone();
-    let lite_llm_base_url = agents.lite_llm.base_url.clone();
+    let http_endpoints = crate::models::setup::HttpEndpoints::from_agents(&agents);
     let native_tools = Some(crate::api::agent_tools::KronnToolExecutor::workflow_arc(
         state.clone(),
         req.project_id.clone(),
@@ -2841,7 +2844,8 @@ pub async fn test_step(
             &agent_extra_context,
             Some(progress_tx),
             Some(&model_tiers),
-            lite_llm_base_url.as_deref(),
+            Some(&http_endpoints),
+            Some(&ollama_context_overrides),
             native_tools,
         )
         .await;
@@ -3354,11 +3358,11 @@ pub async fn delete_batch_run(
     // Cancel BEFORE deleting, or the batch's child agents keep
     // running, write into rows that no longer exist (FOREIGN KEY constraint
     // failed) and hold their semaphore permits. Same sequence as `cancel_run`:
-    // trigger the disc-keyed tokens of the children + the run's own token,
+    // trigger the dispatch-keyed tokens of the children + the run's own token,
     // then let the DB delete proceed. Best-effort: a registry hiccup must not
     // block the delete. A child's own agent-task finally path handles the rest.
     let run_id_for_discs = run_id.clone();
-    let child_disc_ids: Vec<String> = match state
+    let (child_disc_ids, child_dispatch_ids): (Vec<String>, Vec<String>) = match state
         .db
         .with_conn(move |conn| {
             let mut stmt = conn.prepare("SELECT id FROM discussions WHERE workflow_run_id = ?1")?;
@@ -3368,7 +3372,16 @@ pub async fn delete_batch_run(
                 })?
                 .filter_map(|r| r.ok())
                 .collect();
-            Ok(ids)
+            let dispatch_ids = ids
+                .iter()
+                .filter_map(|discussion_id| {
+                    crate::db::agent_dispatch::find_active_for_discussion(conn, discussion_id)
+                        .ok()
+                        .flatten()
+                        .map(|job| job.id)
+                })
+                .collect();
+            Ok((ids, dispatch_ids))
         })
         .await
     {
@@ -3379,7 +3392,7 @@ pub async fn delete_batch_run(
                 run_id,
                 e
             );
-            Vec::new()
+            (Vec::new(), Vec::new())
         }
     };
 
@@ -3391,6 +3404,12 @@ pub async fn delete_batch_run(
         }
         for disc_id in &child_disc_ids {
             if let Some(token) = map.remove(disc_id) {
+                token.cancel();
+                cancelled += 1;
+            }
+        }
+        for dispatch_id in &child_dispatch_ids {
+            if let Some(token) = map.remove(dispatch_id) {
                 token.cancel();
                 cancelled += 1;
             }
@@ -4088,6 +4107,7 @@ pub async fn suggestions(
                     exec_setup_args: vec![],
                     exec_stdin: None,
                     quick_prompt_id: None,
+                    quick_prompt_variables: std::collections::HashMap::new(),
                     json_data_payload: None,
                     collect_api_data: None,
                     transform_data: None,
@@ -4932,6 +4952,7 @@ mod tests {
             exec_setup_args: vec![],
             exec_stdin: None,
             quick_prompt_id: None,
+            quick_prompt_variables: std::collections::HashMap::new(),
             json_data_payload: None,
             collect_api_data: None,
             transform_data: None,
@@ -5626,6 +5647,7 @@ mod tests {
         use crate::models::PromptVariable;
         let qp = QuickPrompt {
             id: "src-qp".into(),
+            pinned: false,
             name: "audit_repo".into(),
             icon: "🔍".into(),
             prompt_template: "Audit {{repo}}".into(),

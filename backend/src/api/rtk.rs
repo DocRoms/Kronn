@@ -84,6 +84,7 @@ fn rtk_args_for(agent_type: &AgentType) -> Option<Vec<&'static str>> {
         | AgentType::Vibe
         | AgentType::Ollama
         | AgentType::LiteLlm
+        | AgentType::Nvidia
         | AgentType::Custom => None,
     }
 }
@@ -110,6 +111,7 @@ fn rtk_uninstall_args_for(agent_type: &AgentType) -> Option<Vec<&'static str>> {
         | AgentType::Vibe
         | AgentType::Ollama
         | AgentType::LiteLlm
+        | AgentType::Nvidia
         | AgentType::Custom => None,
     }
 }

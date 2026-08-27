@@ -128,6 +128,15 @@ pub async fn save(config: &AppConfig) -> Result<()> {
 
     persist_atomic(dir, path.clone(), content).await?;
 
+    // KT-373 — republish what the running process reads directly rather than
+    // through the config on every use. Doing it here instead of at each of the
+    // half-dozen save sites means a new one cannot forget: persisting a
+    // threshold and applying it are the same action.
+    crate::core::worktree::set_disk_thresholds(
+        config.server.disk_warning_gib,
+        config.server.disk_critical_gib,
+    );
+
     tracing::info!("Config saved to {}", path.display());
     Ok(())
 }
@@ -279,9 +288,13 @@ pub fn default_config() -> AppConfig {
             auth_strict_localhost: false,
             failure_notify_url: None,
             run_retention_days: 0,
+            disk_critical_gib: crate::models::setup::DEFAULT_DISK_CRITICAL_GIB,
+            disk_warning_gib: crate::models::setup::DEFAULT_DISK_WARNING_GIB,
             max_concurrent_agents: 5,
             agent_stall_timeout_min: 5,
             agent_global_timeout_min: crate::models::DEFAULT_AGENT_GLOBAL_TIMEOUT_MIN,
+            local_agent_global_timeout_min: crate::models::DEFAULT_LOCAL_AGENT_GLOBAL_TIMEOUT_MIN,
+            ollama_context_overrides: std::collections::HashMap::new(),
             pseudo: None,
             avatar_email: None,
             bio: None,
@@ -335,6 +348,7 @@ pub fn default_config() -> AppConfig {
         },
         agents: AgentsConfig {
             claude_code: AgentConfig {
+                concurrency: None,
                 path: None,
                 installed: false,
                 version: None,
@@ -343,6 +357,7 @@ pub fn default_config() -> AppConfig {
                 base_url: None,
             },
             codex: AgentConfig {
+                concurrency: None,
                 path: None,
                 installed: false,
                 version: None,
@@ -356,6 +371,7 @@ pub fn default_config() -> AppConfig {
             copilot_cli: AgentConfig::default(),
             ollama: AgentConfig::default(),
             lite_llm: AgentConfig::default(),
+            nvidia: AgentConfig::default(),
             model_tiers: Default::default(),
         },
         language: "fr".into(),
@@ -593,6 +609,64 @@ mod tests {
         );
 
         std::env::remove_var("KRONN_DATA_DIR");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// KT-405 — the per-model context override must survive an actual
+    /// save/load round trip through the real config file, not just serde's
+    /// in-memory (de)serialization: an empty map is the common case and must
+    /// not become `None`/error on an older config that never had the key.
+    #[tokio::test]
+    #[serial]
+    async fn ollama_context_overrides_round_trip_through_the_real_config_file() {
+        let _lock = ENV_LOCK.lock().await;
+        let tmp = scratch_dir("ollama-ctx-overrides");
+        let previous_data_dir = std::env::var_os("KRONN_DATA_DIR");
+        std::env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
+
+        let mut cfg = default_config();
+        cfg.server
+            .ollama_context_overrides
+            .insert("qwen3.8:27b-mlx".to_string(), 100_000);
+        cfg.server
+            .ollama_context_overrides
+            .insert("gemma4:12b-mlx".to_string(), 40_000);
+        save(&cfg).await.unwrap();
+
+        let loaded = load().await.unwrap().expect("config was just saved");
+        assert_eq!(
+            loaded
+                .server
+                .ollama_context_overrides
+                .get("qwen3.8:27b-mlx"),
+            Some(&100_000)
+        );
+        assert_eq!(
+            loaded.server.ollama_context_overrides.get("gemma4:12b-mlx"),
+            Some(&40_000)
+        );
+
+        // An older config.toml with no such key at all — not merely an empty
+        // table — must still load: the field is genuinely new.
+        let path = tmp.join("config.toml");
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let stripped: String = raw
+            .lines()
+            .filter(|line| !line.contains("ollama_context_overrides"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !stripped.contains("ollama_context_overrides"),
+            "sanity: the key is really gone from the written file"
+        );
+        std::fs::write(&path, stripped).unwrap();
+        let reloaded = load().await.unwrap().expect("config still loads");
+        assert!(reloaded.server.ollama_context_overrides.is_empty());
+
+        match previous_data_dir {
+            Some(value) => std::env::set_var("KRONN_DATA_DIR", value),
+            None => std::env::remove_var("KRONN_DATA_DIR"),
+        }
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

@@ -153,6 +153,8 @@ class ResolveIdTests(unittest.TestCase):
     def test_tool_is_discoverable_and_dispatched(self):
         tool = next(item for item in self.mod.TOOLS if item["name"] == "resolve_id")
         self.assertEqual(tool["inputSchema"]["required"], ["id"])
+        self.assertIn("any public MCP-addressable Kronn object id", tool["description"])
+        self.assertIn("colliding ids fail explicitly", tool["description"])
         self.assertIn("resolve_id", self.mod.DISPATCH)
 
     def test_calls_single_compact_backend_endpoint(self):
@@ -416,6 +418,857 @@ class DiscSourceBindingToolTests(unittest.TestCase):
                     "confirm_transfer": True,
                 })
         self.assertIn("ownership changed", str(conflict.exception))
+
+
+class TaskExecPrincipalSurfaceTests(unittest.TestCase):
+    """KT-324 — narrow principal lifecycle tools inject active identity and
+    never let the model name its own source session."""
+
+    def setUp(self):
+        self.mod = _load_module()
+        self.mod._set_current_disc_id("disc-parent")
+
+    def test_catalogue_covers_prepare_launch_status_cancel_and_reassign(self):
+        expected = {
+            "agent_list",
+            "task_exec_prepare", "task_exec_launch", "task_exec_status",
+            "task_exec_cancel", "task_exec_reassign",
+        }
+        tools = {item["name"]: item for item in self.mod.TOOLS}
+        self.assertTrue(expected.issubset(tools))
+        for name in expected:
+            props = tools[name]["inputSchema"]["properties"]
+            self.assertNotIn("source_agent", props)
+            self.assertNotIn("source_session_id", props)
+
+    def test_agent_list_injects_room_identity_and_documents_honest_availability(self):
+        http = mock.MagicMock(return_value={
+            "success": True,
+            "data": {"workers": []},
+        })
+        with mock.patch.object(
+            self.mod, "_agent_type_for_session", return_value="Codex",
+        ), mock.patch.object(
+            self.mod, "_session_id_for_caller", return_value="adhoc-live-a",
+        ), mock.patch.object(
+            self.mod, "_durable_session_id", return_value="cli-durable-a",
+        ), mock.patch.object(self.mod, "_http", http):
+            self.assertEqual(self.mod.call_agent_list({}), {"workers": []})
+        http.assert_called_once_with("POST", "/api/orchestration/tool/workers", {
+            "parent_discussion_id": "disc-parent",
+            "source_agent": "Codex",
+            "source_session_id": "adhoc-live-a",
+        })
+        manual = self.mod.TOOL_MANUALS["agent_list"]
+        self.assertIn("available => configured && reachable", manual)
+        self.assertIn("never contain keys, endpoints, hostnames", manual)
+        self.assertIn("exact `cli_session_id`", manual)
+        self.assertIn("task_exec_prepare", manual)
+        self.assertIn("task_exec_launch", manual)
+        self.assertIn("NVIDIA is not completion-probed", manual)
+        self.assertIn("exact resolved tag is already pulled", manual)
+
+    def test_ollama_delegation_guidance_is_bounded_and_fail_closed(self):
+        tools = {item["name"]: item for item in self.mod.TOOLS}
+        prepare = tools["task_exec_prepare"]["description"]
+        launch = tools["task_exec_launch"]["description"]
+        manual = self.mod.TOOL_MANUALS["task_exec_prepare"]
+        manual_call = 'tool_manual({tool: "task_exec_prepare"})'
+        self.assertIn("MUST", prepare)
+        self.assertIn(manual_call, prepare)
+        self.assertIn("MUST", launch)
+        self.assertIn(manual_call, launch)
+        self.assertNotIn("cross-layer parity", prepare)
+        self.assertIn("one atomic, prelocalised mutation", manual)
+        self.assertIn("prelocalized_insert_after", manual)
+        self.assertIn("preserves the anchor mechanically", manual)
+        self.assertIn("cross-layer parity", manual)
+        self.assertIn("at most one", manual)
+        self.assertIn("reassigned to a stronger worker", manual)
+        self.assertIn("principal-owned", manual)
+        self.assertIn('kind: \"discussion_agent\"', manual)
+        self.assertNotIn('kind: \"agent\", agent_type: \"Ollama\"', manual)
+
+    def test_compact_task_exec_shape_errors_point_back_to_the_manual(self):
+        manual_call = 'tool_manual({tool: "task_exec_prepare"})'
+        with self.assertRaises(RuntimeError) as local_error:
+            self.mod.call_task_exec_prepare({
+                "task_reference": "KT-324", "worker": "Ollama",
+            })
+        self.assertIn(manual_call, str(local_error.exception))
+
+        with mock.patch.object(
+            self.mod, "_task_exec_identity", return_value=("Codex", "cli-1"),
+        ), mock.patch.object(
+            self.mod, "_http", return_value={
+                "success": False, "error": "invalid worker_scope",
+            },
+        ):
+            with self.assertRaises(RuntimeError) as backend_error:
+                self.mod.call_task_exec_launch({
+                    "task_reference": "KT-324",
+                    "worker": {"kind": "discussion_agent", "agent_type": "Ollama"},
+                    "worker_scope_intent": "scoped",
+                    "worker_scope": {"mode": "unknown"},
+                })
+        self.assertIn("invalid worker_scope", str(backend_error.exception))
+        self.assertIn(manual_call, str(backend_error.exception))
+
+    def test_prepare_and_launch_are_scoped_to_current_room(self):
+        http = mock.MagicMock(return_value={"success": True, "data": {"launchable": True}})
+        worker = {"kind": "discussion_agent", "agent_type": "Ollama"}
+        worker_scope = {
+            "mode": "prelocalized_edit", "path": "backend/src/lib.rs",
+            "start_line": 40, "end_line": 44,
+        }
+        validations = [{"command": "cargo fmt --check", "timeout_secs": 120}]
+        with mock.patch.object(self.mod, "_agent_type_for_session", return_value="ClaudeCode"), \
+             mock.patch.object(self.mod, "_session_id_for_caller", return_value="adhoc-live-a"), \
+             mock.patch.object(self.mod, "_durable_session_id", return_value="cli-durable-a"), \
+             mock.patch.object(self.mod, "_http", http):
+            self.mod.call_task_exec_prepare({
+                "task_reference": "KT-324", "worker": worker,
+                "worker_scope_intent": "scoped",
+                "worker_scope": worker_scope,
+            })
+            self.mod.call_task_exec_launch({
+                "task_reference": "KT-324", "worker": worker,
+                "worker_scope_intent": "scoped",
+                "base_rev": "main", "idempotency_key": "launch-324",
+                "validations": validations,
+                "worker_scope": worker_scope,
+            })
+        identity = {
+            "source_agent": "ClaudeCode", "source_session_id": "adhoc-live-a",
+        }
+        http.assert_has_calls([
+            mock.call("POST", "/api/orchestration/tool/prepare", {
+                "task_reference": "KT-324", "parent_discussion_id": "disc-parent",
+                "worker": worker, "worker_scope_intent": "scoped",
+                "worker_scope": worker_scope, **identity,
+            }),
+            mock.call("POST", "/api/orchestration/tool/launch", {
+                "task_reference": "KT-324", "parent_discussion_id": "disc-parent",
+                "worker": worker, "base_rev": "main",
+                "idempotency_key": "launch-324", "validations": validations,
+                "worker_scope_intent": "scoped", "worker_scope": worker_scope,
+                **identity,
+            }),
+        ])
+
+        launch_schema = next(
+            item for item in self.mod.TOOLS if item["name"] == "task_exec_launch"
+        )["inputSchema"]["properties"]["validations"]
+        self.assertEqual(launch_schema["type"], "array")
+        self.assertEqual(launch_schema["items"], {"type": "object"})
+        manual = self.mod.TOOL_MANUALS["task_exec_prepare"]
+        self.assertIn("[{command, quick_exec_id?, timeout_secs?}]", manual)
+        for name in ("task_exec_prepare", "task_exec_launch"):
+            tool_schema = next(
+                item for item in self.mod.TOOLS if item["name"] == name
+            )["inputSchema"]
+            self.assertIn("worker_scope_intent", tool_schema["required"])
+            self.assertEqual(
+                tool_schema["properties"]["worker_scope_intent"]["enum"],
+                ["generic", "scoped"],
+            )
+            schema = tool_schema["properties"]["worker_scope"]
+            self.assertEqual(schema["type"], "object")
+            self.assertNotIn("properties", schema)
+        self.assertIn(
+            '{mode: \"prelocalized_edit\", path, start_line, end_line}', manual,
+        )
+        self.assertIn('worker_scope_intent: \"scoped\"', manual)
+        self.assertIn('worker_scope_intent: \"generic\"', manual)
+
+    def test_fresh_bridge_refuses_a_host_schema_that_dropped_scope_intent(self):
+        worker = {"kind": "discussion_agent", "agent_type": "Ollama"}
+        scope = {
+            "mode": "prelocalized_insert_after",
+            "path": "docs/operations/ollama-local-models.md",
+            "anchor_line": 168,
+        }
+        with mock.patch.object(self.mod, "_http") as http:
+            for tool_name, call in (
+                ("task_exec_prepare", self.mod.call_task_exec_prepare),
+                ("task_exec_launch", self.mod.call_task_exec_launch),
+            ):
+                with self.subTest(tool_name=tool_name):
+                    with self.assertRaises(RuntimeError) as refused:
+                        call({
+                            "task_reference": "KT-466",
+                            "worker": worker,
+                            "worker_scope": scope,
+                        })
+                    self.assertIn("worker_scope_intent", str(refused.exception))
+                    self.assertIn("reconnect", str(refused.exception).lower())
+            http.assert_not_called()
+
+    def test_explicit_generic_scope_intent_remains_supported_and_consistent(self):
+        http = mock.MagicMock(return_value={"success": True, "data": {"launchable": True}})
+        worker = {"kind": "agent", "agent_type": "Codex"}
+        with mock.patch.object(
+            self.mod, "_task_exec_identity", return_value=("Codex", "cli-1"),
+        ), mock.patch.object(self.mod, "_http", http):
+            self.mod.call_task_exec_prepare({
+                "task_reference": "KT-466",
+                "worker": worker,
+                "worker_scope_intent": "generic",
+            })
+            self.mod.call_task_exec_launch({
+                "task_reference": "KT-466",
+                "worker": worker,
+                "worker_scope_intent": "generic",
+            })
+        for recorded_call in http.call_args_list:
+            body = recorded_call.args[2]
+            self.assertEqual(body["worker_scope_intent"], "generic")
+            self.assertNotIn("worker_scope", body)
+
+        with mock.patch.object(self.mod, "_http") as refused_http:
+            with self.assertRaises(RuntimeError) as refused:
+                self.mod.call_task_exec_launch({
+                    "task_reference": "KT-466",
+                    "worker": worker,
+                    "worker_scope_intent": "generic",
+                    "worker_scope": {"mode": "prelocalized_edit"},
+                })
+            self.assertIn("forbids worker_scope", str(refused.exception))
+            refused_http.assert_not_called()
+
+    def test_stale_bridge_refuses_capability_mutations_before_http(self):
+        self.mod._BRIDGE_SCRIPT_MTIME_AT_LOAD = 1.0
+        self.mod._BRIDGE_SCRIPT_SHA256_AT_LOAD = "outdated-contract"
+        sensitive_calls = [
+            (
+                "agent_list",
+                self.mod.call_agent_list,
+                {},
+            ),
+            (
+                "task_exec_prepare",
+                self.mod.call_task_exec_prepare,
+                {"task_reference": "KT-1", "worker": {}},
+            ),
+            (
+                "task_exec_launch",
+                self.mod.call_task_exec_launch,
+                {"task_reference": "KT-1", "worker": {}},
+            ),
+            (
+                "task_exec_reassign",
+                self.mod.call_task_exec_reassign,
+                {"task_execution_id": "exec-1", "worker": {}, "reason": "fallback"},
+            ),
+            (
+                "task_exec_accept_worker_offer",
+                self.mod.call_task_exec_accept_worker_offer,
+                {"offer_id": "offer-1"},
+            ),
+        ]
+        with mock.patch.object(self.mod, "_http") as http:
+            for tool_name, call, args in sensitive_calls:
+                with self.subTest(tool_name=tool_name):
+                    with self.assertRaises(RuntimeError) as refused:
+                        call(args)
+                    self.assertIn(tool_name, str(refused.exception))
+                    self.assertIn("Reconnect", str(refused.exception))
+            http.assert_not_called()
+
+        info = self.mod.call_bridge_info({})
+        self.assertTrue(info["stale"])
+        self.assertNotEqual(
+            info["script_sha256_at_load"], info["script_sha256_now"]
+        )
+
+    def test_stale_bridge_keeps_status_and_cancel_for_recovery(self):
+        self.mod._BRIDGE_SCRIPT_MTIME_AT_LOAD = 1.0
+        self.mod._BRIDGE_SCRIPT_SHA256_AT_LOAD = "outdated-contract"
+        http = mock.MagicMock(return_value={"success": True, "data": {"id": "exec-1"}})
+        with mock.patch.object(
+            self.mod,
+            "_task_exec_identity",
+            return_value=("Codex", "session-1"),
+        ), mock.patch.object(self.mod, "_http", http):
+            self.mod.call_task_exec_status({"task_execution_id": "exec-1"})
+            self.mod.call_task_exec_cancel({
+                "task_execution_id": "exec-1",
+                "reason": "stop unsafe stale launch",
+                "cleanup_policy": "preserve",
+            })
+        self.assertEqual(http.call_count, 2)
+
+    def test_status_cancel_and_reassign_forward_only_derived_identity(self):
+        http = mock.MagicMock(return_value={"success": True, "data": {"execution": {"id": "e"}}})
+        selection = {"target": {"kind": "cli", "agent_type": "Codex", "cli_session_id": 7}}
+        with mock.patch.object(self.mod, "_agent_type_for_session", return_value="ClaudeCode"), \
+            mock.patch.object(self.mod, "_session_id_for_caller", return_value="adhoc-live-a"), \
+             mock.patch.object(self.mod, "_http", http):
+            self.mod.call_task_exec_status({"task_execution_id": "exec-1"})
+            self.mod.call_task_exec_status({"task_reference": "KT/324"})
+            self.mod.call_task_exec_cancel({
+                "task_execution_id": "exec-1", "reason": "stop",
+                "cleanup_policy": "preserve",
+            })
+            self.mod.call_task_exec_reassign({
+                "task_execution_id": "exec-1", "worker": selection,
+                "reason": "provider unavailable",
+            })
+        identity = {"source_agent": "ClaudeCode", "source_session_id": "adhoc-live-a"}
+        http.assert_has_calls([
+            mock.call("POST", "/api/orchestration/tool/executions/exec-1/status", identity),
+            mock.call("POST", "/api/orchestration/tool/executions/KT%2F324/status", identity),
+            mock.call("POST", "/api/orchestration/tool/executions/exec-1/cancel", {
+                **identity, "reason": "stop", "cleanup_policy": "preserve",
+            }),
+            mock.call("POST", "/api/orchestration/tool/executions/exec-1/reassign", {
+                **identity, "worker": selection, "reason": "provider unavailable",
+            }),
+        ])
+
+    def test_deliver_and_review_use_the_live_session_like_the_rest_of_the_family(self):
+        """KT-378 follow-up — the fix originally reached only five of eight tools.
+
+        `deliver` and `review` are party-scoped exactly like `status` and
+        `cancel`: the backend checks them against `discussion_sessions`, whose
+        row carries the LIVE identity. Leaving them on the durable `cli-*` id
+        made a perfectly resumed worker look absent — and they sit on the second
+        half of the pilot's path, after a worktree has already been provisioned.
+        """
+        http = mock.MagicMock(return_value={"success": True, "data": {"execution": {"id": "e"}}})
+        manifest = {"version": "DeliveryManifest v1", "summary": "docs only"}
+        decision = {"version": "ReviewDecision v1", "verdict": "approve"}
+        with mock.patch.object(self.mod, "_agent_type_for_session", return_value="ClaudeCode"), \
+             mock.patch.object(self.mod, "_session_id_for_caller", return_value="adhoc-live-a"), \
+             mock.patch.object(self.mod, "_durable_session_id", return_value="cli-durable-a"), \
+             mock.patch.object(self.mod, "_http", http):
+            self.mod.call_task_exec_deliver({
+                "task_execution_id": "exec-1", "manifest": manifest,
+            })
+            self.mod.call_task_exec_review({
+                "task_execution_id": "exec-1", "decision": decision,
+            })
+
+        for call in http.call_args_list:
+            body = call.args[2]
+            self.assertEqual(
+                body["source_session_id"], "adhoc-live-a",
+                f"{call.args[1]} must authorize with the live room session",
+            )
+            self.assertNotEqual(
+                body["source_session_id"], "cli-durable-a",
+                f"{call.args[1]} still sends the durable id — a resumed worker reads as absent",
+            )
+
+    def test_accepting_an_offer_sends_distinct_live_and_durable_identities(self):
+        """Acceptance proves the exact live target and moves its durable link."""
+        http = mock.MagicMock(return_value={
+            "success": True,
+            "data": {"child_discussion_id": "disc-child", "execution": {"id": "e"}},
+        })
+        with mock.patch.object(self.mod, "_agent_type_for_session", return_value="ClaudeCode"), \
+             mock.patch.object(self.mod, "_session_id_for_caller", return_value="adhoc-live-a"), \
+             mock.patch.object(self.mod, "_durable_session_id", return_value="cli-durable-a"), \
+             mock.patch.object(self.mod, "_read_binding", return_value={"resume_token": "resume-a"}), \
+             mock.patch.object(self.mod, "_set_current_disc_id"), \
+             mock.patch.object(self.mod, "_set_read_cursor"), \
+             mock.patch.object(self.mod, "_read_cursor", return_value=-1), \
+             mock.patch.object(self.mod, "_write_binding"), \
+             mock.patch.object(self.mod, "_http", http):
+            self.mod.call_task_exec_accept_worker_offer({"offer_id": "offer-1"})
+
+        self.assertTrue(http.call_args_list, "the accept call must reach the backend")
+        body = http.call_args_list[0].args[2]
+        self.assertEqual(
+            body["source_session_id"], "adhoc-live-a",
+            "the exact active session must authorize the targeted offer",
+        )
+        self.assertEqual(
+            body["source_binding_session_id"], "cli-durable-a",
+            "the durable room binding must be transferred independently",
+        )
+
+    def test_lifecycle_tools_degrade_explicitly_without_an_active_session(self):
+        with mock.patch.object(self.mod, "_agent_type_for_session", return_value="Ollama"), \
+             mock.patch.object(self.mod, "_session_id_for_caller", return_value=None), \
+             mock.patch.object(self.mod, "_http") as http:
+            with self.assertRaises(RuntimeError) as error:
+                self.mod.call_task_exec_status({"task_execution_id": "exec-1"})
+        self.assertIn("join or resume", str(error.exception))
+        http.assert_not_called()
+
+
+class TaskExecAcceptWorkerOfferTests(unittest.TestCase):
+    """KT-328 tranche 2 — the CLI-worker accept tool: server-derived identity and
+    a local rebind that follows the session into the child sub-discussion."""
+
+    def setUp(self):
+        self.mod = _load_module()
+
+    def test_schema_takes_only_offer_id_identity_is_server_derived(self):
+        tool = next(
+            item for item in self.mod.TOOLS
+            if item["name"] == "task_exec_accept_worker_offer"
+        )
+        self.assertEqual(tool["inputSchema"]["required"], ["offer_id"])
+        props = tool["inputSchema"]["properties"]
+        # The caller must NOT be able to name a session — identity is server-derived.
+        self.assertNotIn("source_session_id", props)
+        self.assertNotIn("cli_session_id", props)
+        self.assertNotIn("source_agent", props)
+
+    def test_accept_derives_identity_and_rebinds_to_child(self):
+        self.mod._set_current_disc_id("disc-origin")
+        http = mock.MagicMock(return_value={
+            "success": True,
+            "data": {
+                "child_discussion_id": "disc-child",
+                "execution": {"id": "exec-1"},
+            },
+        })
+        writes = []
+        with mock.patch.object(self.mod, "_agent_type_for_session", return_value="ClaudeCode"), \
+             mock.patch.object(self.mod, "_session_id_for_caller", return_value="live-sess-a"), \
+             mock.patch.object(self.mod, "_durable_session_id", return_value="sess-a"), \
+             mock.patch.object(
+                 self.mod, "_read_binding",
+                 return_value={"disc_id": "disc-origin", "resume_token": "kr-resume-x"},
+             ), \
+             mock.patch.object(
+                 self.mod, "_write_binding",
+                 side_effect=lambda *a, **k: writes.append((a, k)) or True,
+             ), \
+             mock.patch.object(self.mod, "_http", http):
+            result = self.mod.call_task_exec_accept_worker_offer({"offer_id": "offer-9"})
+
+        # The model sent only offer_id. The bridge independently derived the
+        # exact live target identity and its durable room binding.
+        http.assert_called_once_with("POST", "/api/orchestration/accept-offer", {
+            "offer_id": "offer-9",
+            "source_agent": "ClaudeCode",
+            "source_session_id": "live-sess-a",
+            "source_binding_session_id": "sess-a",
+        })
+        self.assertEqual(result["child_discussion_id"], "disc-child")
+        self.assertEqual(result["local_rebound_to"], "disc-child")
+        # In-memory current room followed the server-side move (env-independent global).
+        self.assertEqual(self.mod._CURRENT_DISC_ID, "disc-child")
+        # Cursor seeded so the brief just posted to the child is delivered next.
+        self.assertEqual(self.mod._read_cursor("disc-child"), -1)
+        # Durable binding rewritten to the child, REUSING the existing resume credential
+        # (the moved session row keeps its resume_token_hash).
+        self.assertEqual(len(writes), 1)
+        bind_args, bind_kwargs = writes[0]
+        self.assertEqual(bind_args[0], "disc-child")
+        self.assertEqual(bind_args[1], "kr-resume-x")
+        self.assertEqual(bind_kwargs.get("last_read_sort_order"), -1)
+
+    def test_accept_requires_offer_id(self):
+        with mock.patch.object(self.mod, "_http") as http:
+            with self.assertRaises(RuntimeError) as empty:
+                self.mod.call_task_exec_accept_worker_offer({})
+            self.assertIn("offer_id is required", str(empty.exception))
+        http.assert_not_called()
+
+    def test_refused_offer_surfaces_opaque_reason_without_rebinding(self):
+        self.mod._set_current_disc_id("disc-origin")
+        http = mock.MagicMock(return_value={
+            "success": False,
+            "error": "offer not found or not addressed to this session",
+            "error_code": "not_found",
+        })
+        with mock.patch.object(self.mod, "_agent_type_for_session", return_value="ClaudeCode"), \
+             mock.patch.object(self.mod, "_session_id_for_caller", return_value="live-sess-a"), \
+             mock.patch.object(self.mod, "_durable_session_id", return_value="sess-a"), \
+             mock.patch.object(
+                 self.mod, "_read_binding",
+                 return_value={"disc_id": "disc-origin", "resume_token": "kr-resume-x"},
+             ), \
+             mock.patch.object(self.mod, "_write_binding") as write_binding, \
+             mock.patch.object(self.mod, "_http", http):
+            with self.assertRaises(RuntimeError) as refused:
+                self.mod.call_task_exec_accept_worker_offer({"offer_id": "ghost"})
+        self.assertIn("not found or not addressed", str(refused.exception))
+        # No rebind on refusal: still bound to the origin, no durable write.
+        self.assertEqual(self.mod._CURRENT_DISC_ID, "disc-origin")
+        write_binding.assert_not_called()
+
+
+class TaskExecDeliverTests(unittest.TestCase):
+    """KT-319 tranche 2 — the worker deliver tool: server-derived identity, no local
+    move (the worker stays in the sub-discussion), opaque refusal on rejection."""
+
+    def setUp(self):
+        self.mod = _load_module()
+
+    def _spawned_context(self):
+        return {
+            "execution_id": "exec-a",
+            "discussion_id": "disc-child-a",
+            "agent_type": "Codex",
+            "source_message_id": "trigger-a",
+        }
+
+    def test_schema_takes_execution_and_manifest_identity_is_server_derived(self):
+        tool = next(
+            item for item in self.mod.TOOLS if item["name"] == "task_exec_deliver"
+        )
+        self.assertEqual(
+            tool["inputSchema"]["required"], ["task_execution_id", "manifest"]
+        )
+        props = tool["inputSchema"]["properties"]
+        # The caller must NOT be able to name a session — identity is server-derived.
+        self.assertNotIn("source_session_id", props)
+        self.assertNotIn("cli_session_id", props)
+        self.assertNotIn("source_agent", props)
+
+    def test_deliver_derives_identity_and_posts_the_manifest(self):
+        self.mod._set_current_disc_id("disc-child")
+        http = mock.MagicMock(return_value={
+            "success": True,
+            "data": {
+                "review_discussion_id": "disc-parent",
+                "execution": {"id": "exec-1", "status": "AwaitingReview"},
+            },
+        })
+        manifest = {"version": "1", "task_ref": "KT-319", "head_sha": "abcdef1234567"}
+        with mock.patch.object(self.mod, "_agent_type_for_session", return_value="ClaudeCode"), \
+             mock.patch.object(self.mod, "_session_id_for_caller", return_value="sess-a"), \
+             mock.patch.object(self.mod, "_write_binding") as write_binding, \
+             mock.patch.object(self.mod, "_http", http):
+            result = self.mod.call_task_exec_deliver({
+                "task_execution_id": "exec-1",
+                "manifest": manifest,
+            })
+
+        # The caller sent ONLY the execution id + manifest + this bridge's own durable
+        # pair — never a session id from the model.
+        http.assert_called_once_with("POST", "/api/orchestration/deliver", {
+            "task_execution_id": "exec-1",
+            "manifest": manifest,
+            "source_agent": "ClaudeCode",
+            "source_session_id": "sess-a",
+        })
+        self.assertEqual(result["review_discussion_id"], "disc-parent")
+        # Deliver does NOT move the session: still in the child, no durable rebind.
+        self.assertEqual(self.mod._CURRENT_DISC_ID, "disc-child")
+        write_binding.assert_not_called()
+
+    def test_spawned_worker_catalogue_is_exact_commit_then_delivery_surface(self):
+        encoded = json.dumps(self._spawned_context())
+        with mock.patch.dict(
+            os.environ, {self.mod._TASK_WORKER_CONTEXT_ENV: encoded}, clear=False
+        ):
+            tools = self.mod._visible_tools()
+            listed = self.mod._handle({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {},
+            })
+            initialized = self.mod._handle({
+                "jsonrpc": "2.0", "id": 2, "method": "initialize", "params": {},
+            })
+
+        self.assertEqual(
+            [tool["name"] for tool in tools],
+            ["task_exec_commit", "task_exec_deliver"],
+        )
+        self.assertEqual(listed["result"]["tools"], tools)
+        by_name = {tool["name"]: tool for tool in tools}
+        commit_schema = by_name["task_exec_commit"]["inputSchema"]
+        self.assertFalse(commit_schema["additionalProperties"])
+        self.assertEqual(commit_schema["required"], ["files", "message"])
+        self.assertEqual(set(commit_schema["properties"]), {"files", "message"})
+        for forbidden in [
+            "task_execution_id", "workspace", "workspace_id", "repository",
+            "branch", "ref", "amend", "push", "spawned_agent",
+        ]:
+            self.assertNotIn(forbidden, commit_schema["properties"])
+
+        schema = by_name["task_exec_deliver"]["inputSchema"]
+        self.assertEqual(schema["required"], ["manifest"])
+        self.assertEqual(set(schema["properties"]), {"manifest"})
+        projected = schema["properties"]["manifest"]
+        self.assertEqual(
+            projected["required"],
+            [
+                "tests", "dod_status", "docs", "migrations", "risks",
+                "limitations", "summary",
+            ],
+        )
+        self.assertNotIn("head_sha", projected["properties"])
+        self.assertNotIn("task_ref", projected["properties"])
+        self.assertNotIn(
+            "dod_id",
+            projected["properties"]["dod_status"]["items"]["properties"],
+        )
+        self.assertEqual(
+            projected["properties"]["dod_status"]["items"]["required"],
+            ["met", "evidence"],
+        )
+        self.assertIn("task_exec_commit", initialized["result"]["instructions"])
+        self.assertIn("task_exec_deliver", initialized["result"]["instructions"])
+        self.assertIn("manifest", initialized["result"]["instructions"])
+        self.assertNotIn("task_execution_id", initialized["result"]["instructions"])
+        self.assertIn("opaque DoD ids", initialized["result"]["instructions"])
+
+    def test_spawned_worker_ignores_forged_execution_and_uses_runner_context(self):
+        encoded = json.dumps(self._spawned_context())
+        manifest = {
+            "tests": [],
+            "dod_status": [{"met": True, "evidence": "src/lib.rs:1"}],
+            "docs": [],
+            "migrations": [],
+            "risks": [],
+            "limitations": [],
+            "summary": "implemented",
+        }
+        http = mock.MagicMock(return_value={
+            "success": True,
+            "data": {
+                "review_discussion_id": "disc-parent",
+                "execution": {"id": "exec-a", "status": "AwaitingReview"},
+            },
+        })
+        with mock.patch.dict(
+            os.environ, {self.mod._TASK_WORKER_CONTEXT_ENV: encoded}, clear=False
+        ), mock.patch.object(
+            self.mod, "_task_exec_identity", side_effect=AssertionError("must not join")
+        ), mock.patch.object(self.mod, "_http", http):
+            result = self.mod.call_task_exec_deliver({
+                "task_execution_id": "exec-b",
+                "manifest": manifest,
+            })
+
+        http.assert_called_once_with("POST", "/api/orchestration/deliver", {
+            "task_execution_id": "exec-a",
+            "manifest": manifest,
+            "spawned_agent": {
+                "discussion_id": "disc-child-a",
+                "agent_type": "Codex",
+                "source_message_id": "trigger-a",
+            },
+        })
+        self.assertEqual(result["execution"]["id"], "exec-a")
+
+    def test_spawned_worker_commit_uses_runner_context_and_gate_allows_it(self):
+        encoded = json.dumps(self._spawned_context())
+        http = mock.MagicMock(return_value={
+            "success": True,
+            "data": {
+                "hash": "abc1234",
+                "files": ["src/lib.rs"],
+                "message": "fix: bounded change",
+            },
+        })
+        with mock.patch.dict(
+            os.environ, {self.mod._TASK_WORKER_CONTEXT_ENV: encoded}, clear=False
+        ), mock.patch.object(self.mod, "_http", http):
+            response = self.mod._handle({
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "tools/call",
+                "params": {
+                    "name": "task_exec_commit",
+                    "arguments": {
+                        "files": ["src/lib.rs"],
+                        "message": "fix: bounded change",
+                        # Out-of-schema selectors are ignored even if a client
+                        # bypasses MCP schema validation.
+                        "task_execution_id": "forged-exec",
+                        "workspace_id": "forged-workspace",
+                    },
+                },
+            })
+
+        http.assert_called_once_with("POST", "/api/orchestration/worker-commit", {
+            "task_execution_id": "exec-a",
+            "files": ["src/lib.rs"],
+            "message": "fix: bounded change",
+            "spawned_agent": {
+                "discussion_id": "disc-child-a",
+                "agent_type": "Codex",
+                "source_message_id": "trigger-a",
+            },
+        })
+        self.assertEqual(response["result"]["content"][0]["type"], "text")
+        self.assertNotIn("error", response)
+
+    def test_spawned_worker_commit_refuses_wrong_mode_and_invalid_arguments(self):
+        with mock.patch.dict(os.environ, {}, clear=True), \
+             mock.patch.object(self.mod, "_http") as http:
+            with self.assertRaises(RuntimeError) as unavailable:
+                self.mod.call_task_exec_commit({
+                    "files": ["src/lib.rs"], "message": "fix",
+                })
+        self.assertIn("only to a spawned", str(unavailable.exception))
+        http.assert_not_called()
+
+        encoded = json.dumps(self._spawned_context())
+        invalid = [
+            {"files": [], "message": "fix"},
+            {"files": [""], "message": "fix"},
+            {"files": ["src/lib.rs"] * 101, "message": "fix"},
+            {"files": ["src/lib.rs"], "message": "   "},
+        ]
+        with mock.patch.dict(
+            os.environ, {self.mod._TASK_WORKER_CONTEXT_ENV: encoded}, clear=False
+        ), mock.patch.object(self.mod, "_http") as http:
+            for args in invalid:
+                with self.assertRaises(RuntimeError):
+                    self.mod.call_task_exec_commit(args)
+        http.assert_not_called()
+
+    def test_spawned_worker_context_fails_closed_and_hidden_tools_are_refused(self):
+        with mock.patch.dict(
+            os.environ,
+            {self.mod._TASK_WORKER_CONTEXT_ENV: json.dumps({"execution_id": "exec-a"})},
+            clear=False,
+        ), mock.patch.object(self.mod, "_http") as http:
+            with self.assertRaises(RuntimeError) as incomplete:
+                self.mod.call_task_exec_deliver({"manifest": {"version": "1"}})
+            hidden = self.mod._handle({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {"name": "task_list", "arguments": {}},
+            })
+
+        self.assertIn("context is incomplete", str(incomplete.exception))
+        self.assertEqual(hidden["error"]["code"], -32601)
+        self.assertIn("unavailable", hidden["error"]["message"])
+        http.assert_not_called()
+
+    def test_deliver_requires_execution_id_and_manifest(self):
+        with mock.patch.object(self.mod, "_http") as http:
+            with self.assertRaises(RuntimeError) as no_exec:
+                self.mod.call_task_exec_deliver({"manifest": {"version": "1"}})
+            self.assertIn("task_execution_id is required", str(no_exec.exception))
+            with self.assertRaises(RuntimeError) as no_manifest:
+                self.mod.call_task_exec_deliver({"task_execution_id": "exec-1"})
+            self.assertIn("manifest", str(no_manifest.exception))
+        http.assert_not_called()
+
+    def test_refused_delivery_surfaces_opaque_reason(self):
+        self.mod._set_current_disc_id("disc-child")
+        http = mock.MagicMock(return_value={
+            "success": False,
+            "error": "execution not found or not addressed to this session",
+            "error_code": "not_found",
+        })
+        with mock.patch.object(self.mod, "_agent_type_for_session", return_value="ClaudeCode"), \
+             mock.patch.object(self.mod, "_durable_session_id", return_value="sess-b"), \
+             mock.patch.object(self.mod, "_http", http):
+            with self.assertRaises(RuntimeError) as refused:
+                self.mod.call_task_exec_deliver({
+                    "task_execution_id": "exec-1",
+                    "manifest": {"version": "1", "task_ref": "KT-319", "head_sha": "abcdef1"},
+                })
+        self.assertIn("not found or not addressed", str(refused.exception))
+
+    def test_spawned_worker_instructions_order_commit_before_delivery(self):
+        """Verify that spawned worker instructions forbid shell git commit and order
+        task_exec_commit before task_exec_deliver."""
+        encoded = json.dumps(self._spawned_context())
+        with mock.patch.dict(
+            os.environ, {self.mod._TASK_WORKER_CONTEXT_ENV: encoded}, clear=False
+        ):
+            initialized = self.mod._handle({
+                "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {},
+            })
+
+        instructions = initialized["result"]["instructions"]
+
+        # Verify that instructions forbid shell git commit
+        self.assertIn("Do not run `git commit`", instructions)
+        self.assertIn("task_exec_commit", instructions)
+
+        # Verify the order: task_exec_commit must appear before task_exec_deliver
+        commit_pos = instructions.find("task_exec_commit")
+        deliver_pos = instructions.find("task_exec_deliver")
+
+        self.assertGreater(commit_pos, -1, "task_exec_commit not found in instructions")
+        self.assertGreater(deliver_pos, -1, "task_exec_deliver not found in instructions")
+        self.assertLess(commit_pos, deliver_pos,
+            "task_exec_commit must appear before task_exec_deliver in instructions")
+
+
+class TaskExecReviewTests(unittest.TestCase):
+    """KT-319 tranche 3a — the principal review tool: server-derived identity, no local
+    move, opaque refusal on a caller who is not a party to the execution."""
+
+    def setUp(self):
+        self.mod = _load_module()
+
+    def test_schema_takes_execution_and_decision_identity_is_server_derived(self):
+        tool = next(
+            item for item in self.mod.TOOLS if item["name"] == "task_exec_review"
+        )
+        self.assertEqual(
+            tool["inputSchema"]["required"], ["task_execution_id", "decision"]
+        )
+        props = tool["inputSchema"]["properties"]
+        # The caller must NOT be able to name a session — identity is server-derived.
+        self.assertNotIn("source_session_id", props)
+        self.assertNotIn("cli_session_id", props)
+        self.assertNotIn("source_agent", props)
+
+    def test_review_derives_identity_and_posts_the_decision(self):
+        self.mod._set_current_disc_id("disc-parent")
+        http = mock.MagicMock(return_value={
+            "success": True,
+            "data": {
+                "verdict": "approve",
+                "execution": {"id": "exec-1", "status": "Approved"},
+            },
+        })
+        decision = {"version": "1", "task_ref": "KT-319", "decision": "approve"}
+        with mock.patch.object(self.mod, "_agent_type_for_session", return_value="ClaudeCode"), \
+             mock.patch.object(self.mod, "_session_id_for_caller", return_value="sess-b"), \
+             mock.patch.object(self.mod, "_write_binding") as write_binding, \
+             mock.patch.object(self.mod, "_http", http):
+            result = self.mod.call_task_exec_review({
+                "task_execution_id": "exec-1",
+                "decision": decision,
+            })
+
+        # The caller sent ONLY the execution id + decision + this bridge's own durable
+        # pair — never a session id from the model.
+        http.assert_called_once_with("POST", "/api/orchestration/review", {
+            "task_execution_id": "exec-1",
+            "decision": decision,
+            "source_agent": "ClaudeCode",
+            "source_session_id": "sess-b",
+        })
+        self.assertEqual(result["verdict"], "approve")
+        # Review does NOT move the deciding session, no durable rebind.
+        self.assertEqual(self.mod._CURRENT_DISC_ID, "disc-parent")
+        write_binding.assert_not_called()
+
+    def test_review_requires_execution_id_and_decision(self):
+        with mock.patch.object(self.mod, "_http") as http:
+            with self.assertRaises(RuntimeError) as no_exec:
+                self.mod.call_task_exec_review({"decision": {"version": "1"}})
+            self.assertIn("task_execution_id is required", str(no_exec.exception))
+            with self.assertRaises(RuntimeError) as no_decision:
+                self.mod.call_task_exec_review({"task_execution_id": "exec-1"})
+            self.assertIn("decision", str(no_decision.exception))
+        http.assert_not_called()
+
+    def test_refused_review_surfaces_opaque_reason(self):
+        self.mod._set_current_disc_id("disc-parent")
+        http = mock.MagicMock(return_value={
+            "success": False,
+            "error": "execution not found or not addressed to this session",
+            "error_code": "not_found",
+        })
+        with mock.patch.object(self.mod, "_agent_type_for_session", return_value="ClaudeCode"), \
+             mock.patch.object(self.mod, "_durable_session_id", return_value="sess-x"), \
+             mock.patch.object(self.mod, "_http", http):
+            with self.assertRaises(RuntimeError) as refused:
+                self.mod.call_task_exec_review({
+                    "task_execution_id": "exec-1",
+                    "decision": {"version": "1", "task_ref": "KT-319", "decision": "approve"},
+                })
+        self.assertIn("not found or not addressed", str(refused.exception))
 
 
 class CallDiscGetMessageTests(unittest.TestCase):
@@ -1649,7 +2502,14 @@ class DiscAppendSimpleModeTests(unittest.TestCase):
         with mock.patch.object(self.mod, "_current_disc_meta", return_value={
             "agent": "ClaudeCode",
         }), mock.patch.object(self.mod, "_http") as mock_http:
-            mock_http.return_value = {"success": True, "data": {}}
+            # `/participants` really returns an ARRAY (Vec<ParticipantView>);
+            # the old catch-all dict was a shape the server never sends, and the
+            # KT-372 guard now refuses shapes it cannot read.
+            mock_http.side_effect = lambda method, path, body=None, **kw: (
+                {"success": True, "data": []}
+                if path.endswith("/participants")
+                else {"success": True, "data": {}}
+            )
             self.mod.call_disc_append({
                 "content": "Peux-tu continuer, @ollama ?",
             })
@@ -1695,7 +2555,11 @@ class DiscAppendSimpleModeTests(unittest.TestCase):
         with mock.patch.object(self.mod, "_current_disc_meta", return_value={
             "agent": "ClaudeCode",
         }), mock.patch.object(self.mod, "_http") as mock_http:
-            mock_http.return_value = {"success": True, "data": {}}
+            mock_http.side_effect = lambda method, path, body=None, **kw: (
+                {"success": True, "data": []}
+                if path.endswith("/participants")
+                else {"success": True, "data": {}}
+            )
             self.mod.call_disc_append({
                 "content": "@codex puis @claude puis @codex, comparez.",
             })
@@ -1915,6 +2779,170 @@ class DiscAppendSimpleModeTests(unittest.TestCase):
         self.assertEqual(msg["targets"], [{
             "kind": "cli", "agent_type": "Codex", "cli_session_id": 41,
         }])
+
+    def _ambiguity_http(self, participants):
+        def http(method, path, body=None, **kwargs):
+            if path.endswith("/participants"):
+                return {"success": True, "data": participants}
+            return {"success": True, "data": {}}
+        return http
+
+    def test_bare_alias_is_refused_when_that_provider_has_joined_the_room(self):
+        # KT-372 — `@claude` names the NATIVE agent and `@claude-cli-2` a joined
+        # session. Both resolve, so the message is delivered — to the wrong
+        # identity, silently. Observed 2026-08-21: the KT-211 guard missed it
+        # because that one only fires inside a reply to a CLI-authored message.
+        participants = [
+            {"id": 103, "agent_type": "ClaudeCode", "cli_ordinal": 1},
+            {"id": 104, "agent_type": "ClaudeCode", "cli_ordinal": 2},
+        ]
+        with mock.patch.object(self.mod, "_current_disc_meta", return_value={
+            "agent": "ClaudeCode",
+        }), mock.patch.object(self.mod, "_http", side_effect=self._ambiguity_http(participants)):
+            with self.assertRaises(RuntimeError) as ctx:
+                self.mod.call_disc_append({"content": "@claude peux-tu relire ?"})
+        message = str(ctx.exception)
+        self.assertIn("@claude-cli", message)
+        self.assertIn("@claude-cli-2", message)
+        self.assertIn("silently", message)
+
+    def test_bare_alias_stays_free_when_no_cli_of_that_provider_joined(self):
+        # The native identity is a legitimate target. Nothing is ambiguous when
+        # it is the only one, so nothing is refused.
+        participants = [{"id": 9, "agent_type": "Codex", "cli_ordinal": 1}]
+        with mock.patch.object(self.mod, "_current_disc_meta", return_value={
+            "agent": "ClaudeCode",
+        }), mock.patch.object(self.mod, "_http", side_effect=self._ambiguity_http(participants)):
+            appended = self.mod.call_disc_append({"content": "@claude un point"})
+        self.assertIsNotNone(appended)
+
+    def test_naming_both_identities_is_a_deliberate_fan_out(self):
+        # Listing the exact CLI alongside its native identity is the author
+        # saying they mean both — same escape the reply guard already allows.
+        participants = [{"id": 104, "agent_type": "ClaudeCode", "cli_ordinal": 1}]
+        with mock.patch.object(self.mod, "_current_disc_meta", return_value={
+            "agent": "ClaudeCode",
+        }), mock.patch.object(self.mod, "_http", side_effect=self._ambiguity_http(participants)):
+            appended = self.mod.call_disc_append({
+                "content": "@claude et @claude-cli : avis tous les deux",
+            })
+        self.assertIsNotNone(appended)
+
+    def test_explicit_targets_are_the_author_choosing_the_native_identity(self):
+        # Prose is where the accident happens; an explicit `targets` argument is
+        # the author stating which identity they mean, so it is never second
+        # guessed.
+        participants = [{"id": 104, "agent_type": "ClaudeCode", "cli_ordinal": 1}]
+        with mock.patch.object(self.mod, "_current_disc_meta", return_value={
+            "agent": "ClaudeCode",
+        }), mock.patch.object(self.mod, "_http", side_effect=self._ambiguity_http(participants)):
+            appended = self.mod.call_disc_append({
+                "content": "@claude je vise bien le natif",
+                "targets": [{"kind": "discussion_agent", "agent_type": "ClaudeCode"}],
+            })
+        self.assertIsNotNone(appended)
+
+    def test_the_bridge_emits_exactly_what_the_router_contract_expects(self):
+        """KT-372 — the joint, from this side.
+
+        Both suites were green while the incident happened between them. This
+        pins the bridge half against the SAME fixture the Rust integration test
+        feeds to the router: whichever side drifts, a test breaks instead of a
+        room. It does not prove the traversal on its own — it makes the two
+        halves impossible to change independently.
+        """
+        fixture = json.loads(
+            (Path(__file__).resolve().parent.parent / "tests" / "fixtures"
+             / "room_routing_contract.json").read_text(encoding="utf-8")
+        )
+        participants = fixture["participants"]
+
+        def http(method, path, body=None, **kwargs):
+            if path.endswith("/participants"):
+                return {"success": True, "data": participants}
+            return {"success": True, "data": {}}
+
+        for case in fixture["cases"]:
+            with self.subTest(case=case["name"]):
+                with mock.patch.object(self.mod, "_current_disc_meta", return_value={
+                    "agent": fixture["room_agent"],
+                }), mock.patch.object(self.mod, "_http", side_effect=http):
+                    if case["outcome"] == "delivers":
+                        emitted = self.mod._structured_message_targets(
+                            case["mention"], "d1"
+                        )
+                        self.assertEqual(emitted, case["emits"])
+                    else:
+                        with self.assertRaises(RuntimeError) as ctx:
+                            self.mod.call_disc_append({"content": case["mention"]})
+                        for fragment in case["refusal_mentions"]:
+                            self.assertIn(fragment, str(ctx.exception))
+
+    def test_disc_meta_shows_the_exact_mention_for_every_identity(self):
+        # KT-372 DoD-4 — the incident was not a resolution failure: the author
+        # could not SEE that both identities existed while writing. Refusing
+        # afterwards helps; showing them beforehand is what prevents it.
+        def http(method, path, body=None, **kwargs):
+            if path.endswith("/meta"):
+                return {"success": True, "data": {"id": "d1", "agent": "ClaudeCode"}}
+            if path.endswith("/participants"):
+                return {"success": True, "data": [
+                    {"id": 103, "agent_type": "ClaudeCode", "cli_ordinal": 1},
+                    {"id": 104, "agent_type": "ClaudeCode", "cli_ordinal": 2},
+                    {"id": 105, "agent_type": "Codex", "cli_ordinal": 1},
+                ]}
+            return {"success": True, "data": {}}
+        with mock.patch.object(self.mod, "_disc_id", return_value="d1"), \
+             mock.patch.object(self.mod, "_http", side_effect=http):
+            meta = self.mod.call_disc_meta({})
+
+        mentions = [entry["mention"] for entry in meta["addressable"]]
+        self.assertIn("@claude", mentions)
+        self.assertIn("@claude-cli", mentions)
+        self.assertIn("@claude-cli-2", mentions)
+        self.assertIn("@codex-cli", mentions)
+        # The provider present as BOTH is named, so the caller can check the one
+        # condition that matters without scanning the list.
+        self.assertEqual(meta["ambiguous_aliases"], ["ClaudeCode"])
+
+    def test_disc_meta_stays_useful_when_participants_cannot_be_read(self):
+        # Advisory field: metadata is what the caller came for. Never fail the
+        # call a reader depends on for something that only enriches it.
+        def http(method, path, body=None, **kwargs):
+            if path.endswith("/meta"):
+                return {"success": True, "data": {"id": "d1", "agent": "ClaudeCode"}}
+            raise RuntimeError("participants endpoint down")
+        with mock.patch.object(self.mod, "_disc_id", return_value="d1"), \
+             mock.patch.object(self.mod, "_http", side_effect=http):
+            meta = self.mod.call_disc_meta({})
+        self.assertEqual(meta["agent"], "ClaudeCode")
+        self.assertNotIn("addressable", meta)
+
+    def test_an_unreadable_participant_list_refuses_like_a_failed_one(self):
+        # A 200 carrying an unexpected shape is not "no participants" — it is an
+        # answer we cannot read. Treating it as empty would let the ambiguity
+        # through on the one path where the server actually replied.
+        def http(method, path, body=None, **kwargs):
+            if path.endswith("/participants"):
+                return {"success": True, "data": {"unexpected": "shape"}}
+            return {"success": True, "data": {}}
+        with mock.patch.object(self.mod, "_current_disc_meta", return_value={
+            "agent": "ClaudeCode",
+        }), mock.patch.object(self.mod, "_http", side_effect=http):
+            with self.assertRaises(RuntimeError) as ctx:
+                self.mod.call_disc_append({"content": "@claude relis stp"})
+        self.assertIn("cannot read", str(ctx.exception))
+
+    def test_an_old_server_without_ordinals_still_refuses_the_ambiguity(self):
+        # Never invent a rank we cannot verify — name the alias FORM instead,
+        # but do not let the ambiguity through just because the server is old.
+        participants = [{"id": 104, "agent_type": "ClaudeCode"}]
+        with mock.patch.object(self.mod, "_current_disc_meta", return_value={
+            "agent": "ClaudeCode",
+        }), mock.patch.object(self.mod, "_http", side_effect=self._ambiguity_http(participants)):
+            with self.assertRaises(RuntimeError) as ctx:
+                self.mod.call_disc_append({"content": "@claude relis stp"})
+        self.assertIn("@claude-cli[-N]", str(ctx.exception))
 
     def test_reply_to_native_author_keeps_the_short_alias_free(self):
         # The replied message has no CLI author: `@codex` legitimately
@@ -5469,11 +6497,26 @@ class AuditBridgeHardeningTests(unittest.TestCase):
         self.assertFalse(out["stale"], "a just-loaded bridge must not read stale")
         self.assertTrue(out["script_path"].endswith("disc-introspection-mcp.py"))
 
-    def test_bridge_info_detects_newer_script_on_disk(self):
-        self.mod._BRIDGE_SCRIPT_MTIME_AT_LOAD = 1.0  # loaded aeons ago
+    def test_bridge_info_detects_different_script_on_disk(self):
+        self.mod._BRIDGE_SCRIPT_MTIME_AT_LOAD = 1.0
+        self.mod._BRIDGE_SCRIPT_SHA256_AT_LOAD = "outdated-contract"
         out = self.mod.call_bridge_info({})
         self.assertTrue(out["stale"])
         self.assertIn("reconnect", out["hint"])
+
+    def test_bridge_info_uses_hash_as_authority_when_mtime_only_changes(self):
+        self.mod._BRIDGE_SCRIPT_MTIME_AT_LOAD = 1.0
+        out = self.mod.call_bridge_info({})
+        self.assertFalse(out["stale"])
+
+    def test_bridge_info_fails_closed_when_script_cannot_be_verified(self):
+        with mock.patch.object(
+            self.mod, "_bridge_script_snapshot", return_value=(0.0, None)
+        ):
+            out = self.mod.call_bridge_info({})
+            self.assertTrue(out["stale"])
+            with self.assertRaises(RuntimeError):
+                self.mod._require_fresh_bridge("task_exec_launch")
 
     def test_briefing_state_present_and_absent(self):
         import tempfile
@@ -6782,7 +7825,7 @@ class PlanningToolTests(unittest.TestCase):
         resp = self.mod._handle(
             {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}
         )
-        self.assertEqual(resp["result"]["serverInfo"]["version"], "0.3.2")
+        self.assertEqual(resp["result"]["serverInfo"]["version"], "0.3.8")
 
     def test_plan_get_defaults_to_current_discussion(self):
         with mock.patch.object(self.mod, "_http", self.fake_http):
@@ -6835,7 +7878,8 @@ class PlanningToolTests(unittest.TestCase):
 
     def test_task_create_attributes_the_acting_agent(self):
         with mock.patch.object(self.mod, "_http", self.fake_http), \
-             mock.patch.object(self.mod, "_agent_type_for_session", return_value="Codex"):
+             mock.patch.object(self.mod, "_agent_type_for_session", return_value="Codex"), \
+             mock.patch.object(self.mod, "_durable_session_id", return_value="cli-session-a"):
             self.mod.call_task_create({
                 "title": "Plan it",
                 "priority": "critical",
@@ -6848,6 +7892,7 @@ class PlanningToolTests(unittest.TestCase):
         self.assertEqual(body["actor"], {
             "kind": "agent",
             "id": "Codex",
+            "session_id": "cli-session-a",
             "source_message_id": "MSG-12345678",
         })
         expected_key = "mcp-task-create:" + hashlib.sha256(
@@ -6943,7 +7988,8 @@ class PlanningToolTests(unittest.TestCase):
 
     def test_task_remove_blocker_encodes_both_references_and_attributes_actor(self):
         with mock.patch.object(self.mod, "_http", self.fake_http), \
-             mock.patch.object(self.mod, "_agent_type_for_session", return_value="Codex"):
+             mock.patch.object(self.mod, "_agent_type_for_session", return_value="Codex"), \
+             mock.patch.object(self.mod, "_durable_session_id", return_value="cli-session-a"):
             self.mod.call_task_remove_blocker({
                 "task_id": "KT/42",
                 "blocker_task_id": "KT/7",
@@ -6955,6 +8001,7 @@ class PlanningToolTests(unittest.TestCase):
         self.assertEqual(body["actor"], {
             "kind": "agent",
             "id": "Codex",
+            "session_id": "cli-session-a",
             "source_message_id": "MSG-12345678",
         })
 
@@ -7633,6 +8680,226 @@ class DiscussionWorkspaceToolTests(unittest.TestCase):
         http.assert_not_called()
 
 
+class RoomReachesTheAgentTests(unittest.TestCase):
+    """KT-374 — the room arrives on an unrelated tool's result.
+
+    The incident these pin down is not a missing counter: it is a peer
+    announcing a scope, and the agent reading it after committing the
+    duplicate. So the assertions are about what an agent that never called
+    `disc_wait_for_peer` actually ends up seeing.
+    """
+
+    def setUp(self):
+        self.mod = _load_module()
+        self.env_patch = mock.patch.dict(
+            os.environ, {"KRONN_DISCUSSION_ID": "disc-374"}, clear=False,
+        )
+        self.env_patch.start()
+        self.addCleanup(self.env_patch.stop)
+        self.now = [1000.0]
+        clock = mock.patch.object(
+            self.mod.time, "monotonic", side_effect=lambda: self.now[0],
+        )
+        clock.start()
+        self.addCleanup(clock.stop)
+
+    def _peer_turn(self, addressed=True, content="je reprends KT-320"):
+        return {
+            "timed_out": False,
+            "latest_sort_order": 77,
+            "messages": [{
+                "message_id": "m-peer",
+                "content": content,
+                "agent_type": "Codex",
+                "addressed_to_caller": addressed,
+            }],
+        }
+
+    def _call(self, tool="task_get", data=None, wait=None):
+        """Drive a real tools/call through _handle, like the CLI does."""
+        data = {"reference": "KT-320"} if data is None else data
+        with mock.patch.dict(self.mod.DISPATCH, {tool: lambda args: data}), \
+                mock.patch.object(self.mod, "_wait_once", wait or (lambda a: None)):
+            response = self.mod._handle({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": tool, "arguments": {}},
+            })
+        return json.loads(response["result"]["content"][0]["text"])
+
+    def test_a_peer_turn_reaches_an_agent_that_never_asked_for_it(self):
+        """DoD-1 — the whole point: no disc_wait_for_peer call anywhere."""
+        payload = self._call(wait=lambda args: self._peer_turn())
+        self.assertIn("kronn_room", payload)
+        # The tool's own answer is untouched — the room rides along, it does
+        # not replace what was asked for.
+        self.assertEqual(payload["reference"], "KT-320")
+        # The CONTENT is there, not merely a count: a count would not have
+        # prevented the duplicate work this ticket was opened for.
+        self.assertEqual(
+            payload["kronn_room"]["attention_required"][0]["content"], "je reprends KT-320",
+        )
+
+    def test_a_turn_addressed_to_me_lands_in_its_own_list_not_a_shared_one(self):
+        """DoD-2 — the distinction is structural, not something to re-derive.
+
+        A homogeneous array plus a counter puts the work of telling a debt from
+        background noise back on the reader, on every read — which is the step
+        a busy agent skips.
+        """
+        mine = self._call(wait=lambda args: self._peer_turn(addressed=True))
+        self.assertEqual(len(mine["kronn_room"]["attention_required"]), 1)
+        self.assertNotIn("context", mine["kronn_room"])
+        self.assertIn("addressed to YOU", mine["kronn_room"]["hint"])
+
+        self.now[0] += 3600  # past the throttle window
+        ambient = self._call(wait=lambda args: self._peer_turn(addressed=False))
+        self.assertNotIn("attention_required", ambient["kronn_room"])
+        self.assertEqual(len(ambient["kronn_room"]["context"]), 1)
+        self.assertNotIn("addressed to YOU", ambient["kronn_room"]["hint"])
+        self.assertIn("do not answer it", ambient["kronn_room"]["hint"])
+
+    def test_a_capped_batch_never_marks_the_held_back_turns_as_read(self):
+        """The cap must not become a silent drop.
+
+        `_wait_once` stages the cursor at everything the SERVER returned. If the
+        batch is trimmed after that, the stage covers turns the agent was never
+        shown, and the next wait treats them as read. This is the failure mode
+        the cap introduces, so it gets its own proof.
+        """
+        overflow = {
+            "timed_out": False,
+            "latest_sort_order": 60,
+            "messages": [
+                {"message_id": f"m{i}", "sort_order": 50 + i,
+                 "content": f"turn {i}", "addressed_to_caller": True}
+                for i in range(12)
+            ],
+        }
+        # Exercise the real staging path rather than a stub of it.
+        def transport(method, url, **kwargs):
+            return {"success": True, "data": overflow}
+
+        self.mod._set_read_cursor("disc-374", 49)
+        with mock.patch.dict(self.mod.DISPATCH, {"task_get": lambda args: {"ok": True}}), \
+                mock.patch.object(self.mod, "_transport_in_worker", transport), \
+                mock.patch.object(self.mod, "_agent_type_for_session", lambda: "ClaudeCode"), \
+                mock.patch.object(self.mod, "_session_id_for_caller", lambda: "sess-104"):
+            response = self.mod._handle({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": "task_get", "arguments": {}},
+            })
+        room = json.loads(response["result"]["content"][0]["text"])["kronn_room"]
+
+        shown = room["attention_required"]
+        self.assertEqual(len(shown), self.mod._ROOM_PEEK_MAX_MESSAGES)
+        self.assertEqual(room["unread"], 12)
+        self.assertEqual(room["remaining"], 12 - self.mod._ROOM_PEEK_MAX_MESSAGES)
+        # Oldest-first, so "what was shown" and "what the cursor covers" are the
+        # same set — a single position cannot describe a batch with holes.
+        self.assertEqual(shown[0]["sort_order"], 50)
+        self.assertEqual(
+            self.mod._PENDING_READ_SORT_ORDER_BY_DISC["disc-374"]["sort_order"],
+            shown[-1]["sort_order"],
+            "the cursor stops at the last message actually shown, not at the server's latest",
+        )
+
+    def test_the_peek_reads_from_the_durable_cursor_and_stages_what_it_shows(self):
+        """DoD-3 — one source of truth, so nothing is shown twice.
+
+        This one mocks the TRANSPORT rather than `_wait_once`: the staging it
+        asserts lives inside `_wait_once`, so stubbing that function would
+        have verified the mock instead of the mechanism. The first version of
+        this test did exactly that and passed for the wrong reason.
+        """
+        self.mod._set_read_cursor("disc-374", 41)
+        urls = []
+
+        def transport(method, url, **kwargs):
+            urls.append(url)
+            return {"success": True, "data": self._peer_turn()}
+
+        with mock.patch.dict(self.mod.DISPATCH, {"task_get": lambda args: {"reference": "KT-320"}}), \
+                mock.patch.object(self.mod, "_transport_in_worker", transport), \
+                mock.patch.object(self.mod, "_agent_type_for_session", lambda: "ClaudeCode"), \
+                mock.patch.object(self.mod, "_session_id_for_caller", lambda: "sess-104"):
+            response = self.mod._handle({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": "task_get", "arguments": {}},
+            })
+        payload = json.loads(response["result"]["content"][0]["text"])
+        self.assertIn("kronn_room", payload)
+
+        # The peek asks the server from the durable cursor, and asks it not to
+        # block — the two properties the whole design rests on.
+        self.assertIn("since_sort_order=41", urls[0])
+        self.assertIn("timeout_secs=0", urls[0])
+
+        # Staged, not committed: an interrupted turn replays what it showed
+        # instead of silently marking unread messages as read.
+        self.assertEqual(
+            self.mod._PENDING_READ_SORT_ORDER_BY_DISC["disc-374"]["sort_order"], 77,
+        )
+        self.assertEqual(
+            self.mod._read_cursor("disc-374"), 41,
+            "the committed cursor only moves on the NEXT tool call, not here",
+        )
+
+    def test_a_quiet_room_adds_nothing_at_all(self):
+        """DoD-4 — silence must cost the caller nothing, not even a key."""
+        quiet = self._call(wait=lambda args: {"timed_out": True, "messages": [],
+                                              "latest_sort_order": 41})
+        self.assertNotIn("kronn_room", quiet)
+        self.assertEqual(quiet["reference"], "KT-320")
+
+    def test_a_burst_of_tool_calls_makes_one_peek_not_one_each(self):
+        """DoD-4 — bounded cost: a busy turn is not a burst of requests."""
+        peeks = []
+
+        def wait(args):
+            peeks.append(1)
+            return self._peer_turn()
+
+        for _ in range(5):
+            self._call(wait=wait)
+        self.assertEqual(len(peeks), 1, "the throttle window admits one peek")
+
+        self.now[0] += self.mod._ROOM_PEEK_MIN_INTERVAL_SECS + 1
+        self._call(wait=wait)
+        self.assertEqual(len(peeks), 2, "a later call peeks again")
+
+    def test_the_room_tools_are_not_peeked_on_top_of(self):
+        """A wait already does this properly; peeking over it is waste."""
+        peeks = []
+
+        def wait(args):
+            peeks.append(1)
+            return self._peer_turn()
+
+        for tool in ("disc_wait_for_peer", "disc_join", "disc_leave"):
+            self.now[0] += 3600
+            payload = self._call(tool=tool, data={"ok": True}, wait=wait)
+            self.assertNotIn("kronn_room", payload)
+        self.assertEqual(peeks, [])
+
+    def test_a_failing_peek_never_breaks_the_tool_it_rode_on(self):
+        """The room is a courtesy attached to someone else's call.
+
+        An unreachable backend must not turn `task_get` into a failure — the
+        agent asked for a task, and it gets its task.
+        """
+        def boom(args):
+            raise RuntimeError("backend down")
+
+        payload = self._call(wait=boom)
+        self.assertEqual(payload["reference"], "KT-320")
+        self.assertNotIn("kronn_room", payload)
+
+    def test_a_non_dict_result_is_left_exactly_as_it_was(self):
+        """Shapes callers already parse are never rewritten to carry a hint."""
+        payload = self._call(data=["a", "b"], wait=lambda args: self._peer_turn())
+        self.assertEqual(payload, ["a", "b"])
+
+
 class WaitOutsideLlmLoopTests(unittest.TestCase):
     """KT-189 — disc_wait_for_peer holds quiet waits bridge-side.
 
@@ -7686,6 +8953,44 @@ class WaitOutsideLlmLoopTests(unittest.TestCase):
         self.assertTrue(all(call["timeout_secs"] <= self.mod._WAIT_POLL_SECS for call in calls))
         # …and the cursor advances between polls from what was observed.
         self.assertEqual(calls[1]["since_sort_order"], 41)
+
+    def test_withheld_by_routing_accumulates_across_quiet_polls(self):
+        """KT-330 DoD-3 (bridge surface) — accumulate-until-report.
+
+        The endpoint recomputes withheld per poll from its own `since`; the
+        bridge chains several inner polls and advances the cursor between them.
+        A peer turn withheld by routing during an intermediate quiet poll must
+        NOT be dropped just because that poll's result is discarded — its count
+        has to reach the caller in the one result actually returned.
+        """
+        def q(withheld):
+            poll = self._quiet()
+            poll["withheld_by_routing"] = withheld
+            return poll
+
+        answers = [
+            q(1),  # intermediate quiet poll withholds 1 routed-away turn
+            q(2),  # another quiet poll withholds 2 more
+            {"timed_out": False, "messages": [{"message_id": "m1"}],
+             "latest_sort_order": 42},  # delivered poll, none of its own
+        ]
+        calls = []
+
+        def fake_wait_once(args):
+            calls.append(1)
+            self.now[0] += 60
+            return answers[len(calls) - 1]
+
+        with mock.patch.object(self.mod, "_wait_once", fake_wait_once):
+            result = self.mod.call_disc_wait_for_peer({"timeout_secs": 170})
+
+        self.assertEqual(result["messages"][0]["message_id"], "m1")
+        # 1 + 2 + 0 across the whole logical wait — never just the last poll's 0.
+        self.assertEqual(
+            result["withheld_by_routing"], 3,
+            "intermediate withheld counts must accumulate, not vanish on a cursor advance",
+        )
+        self.assertIn("intentionally withheld", result["routing_visibility"])
 
     def test_default_wait_is_unbounded_and_does_not_return_on_inner_quiet_polls(self):
         # Bridge contract: without an opt-in budget, inner quiet polls do not

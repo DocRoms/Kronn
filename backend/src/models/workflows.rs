@@ -390,6 +390,15 @@ pub struct WorkflowStep {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quick_prompt_id: Option<String>,
 
+    /// Optional bindings from Quick Prompt variable names to workflow
+    /// template expressions. This keeps the QP reusable from the library
+    /// (`{{production_errors}}`) while an Agent step can feed it from an
+    /// upstream result (`{{steps.shape.data.toppages}}`). Applied when the
+    /// step inherits the QP prompt; an inline prompt override remains the
+    /// source of truth and ignores these bindings.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub quick_prompt_variables: std::collections::HashMap<String, String>,
+
     // ─── Notify fields ───────────────────────────────────────────────────
     // Only meaningful when `step_type == Notify`. Webhook-based workflow
     // finalizer: posts to an external URL with a rendered body. Zero agent
@@ -1133,12 +1142,13 @@ pub struct WorkflowSafety {
 pub struct WorkspaceConfig {
     #[serde(default)]
     pub hooks: WorkspaceHooks,
-    /// When true, a run MUST get its own git worktree — if `Workspace::create`
-    /// fails, the run is aborted instead of silently falling back to the main
-    /// checkout. Set on code-pushing presets (Ticket→PR, AutoDev…) where
-    /// running agents that `git push` / mutate files in the developer's main
-    /// working tree is dangerous. Default false → legacy warn-and-fallback
-    /// (fine for read-only audit/briefing workflows on non-git projects).
+    /// When true, a run gets its own git worktree and MUST NOT fall back to the
+    /// main checkout if creation fails. Set on code-pushing presets
+    /// (Ticket→PR, AutoDev…). Default false means the workflow intentionally
+    /// runs in the project's main tree under the per-project exclusivity guard;
+    /// this is the safe, low-overhead choice for read-only audit, fan-out and
+    /// reporting workflows. Legacy configs that declare workspace hooks still
+    /// request a worktree so those hooks do not silently stop running.
     #[serde(default)]
     pub require_isolation: bool,
 }
@@ -1184,6 +1194,12 @@ pub struct WorkflowRun {
     /// For batch runs: number of child discussions that ended with an error.
     #[serde(default)]
     pub batch_failed: u32,
+    /// For batch runs: failed children that reached a terminal agent execution
+    /// without persisting any Agent reply. This is a subset of
+    /// `batch_failed`, kept separately so the UI never disguises silence as a
+    /// normal agent error.
+    #[serde(default)]
+    pub batch_no_response: u32,
     /// For batch runs: display name shown in the sidebar group header.
     /// Example: "Cadrage to-Frame — 10 avr 14:00".
     #[serde(default)]
@@ -1249,6 +1265,10 @@ pub enum RunStatus {
     Pending,
     Running,
     Success,
+    /// Terminal degraded success: at least one child completed successfully
+    /// and at least one child failed. Used by batch fan-out runs so a useful
+    /// partial result is never reported as a complete success.
+    Partial,
     Failed,
     Cancelled,
     WaitingApproval,
@@ -1272,6 +1292,7 @@ impl RunStatus {
     pub fn is_terminal(&self) -> bool {
         match self {
             RunStatus::Success
+            | RunStatus::Partial
             | RunStatus::Failed
             | RunStatus::Cancelled
             | RunStatus::StoppedByGuard
@@ -1503,6 +1524,9 @@ pub struct BatchRunSummary {
     pub run_id: String,
     pub batch_name: Option<String>,
     pub batch_total: u32,
+    pub batch_completed: u32,
+    pub batch_failed: u32,
+    pub batch_no_response: u32,
     pub status: RunStatus,
     /// Id + name of the Quick Prompt that this batch fans out. Resolved from
     /// the batch run's virtual `qp:<id>` workflow_id prefix. Used by the
@@ -1651,8 +1675,9 @@ mod step_deserialization_tests {
     fn workspace_config_require_isolation_defaults_false_for_legacy_rows() {
         // Back-compat: a workflow saved before the field existed has a
         // workspace_config with only `hooks`. It MUST deserialize with
-        // require_isolation = false — otherwise existing workflows would
-        // suddenly abort when their worktree can't be made.
+        // require_isolation = false. The runner preserves the legacy hook
+        // behavior by requesting a worktree, but may still fall back to the
+        // main tree when creation fails.
         let legacy: WorkspaceConfig = serde_json::from_str(r#"{"hooks":{}}"#).unwrap();
         assert!(!legacy.require_isolation);
 

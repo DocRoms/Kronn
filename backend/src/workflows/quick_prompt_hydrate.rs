@@ -13,11 +13,11 @@
 //! - `tier` via `agent_settings.tier`
 //! - `skill_ids` (si vide côté step)
 //!
-//! Pas de variables au niveau step : les `{{var}}` du QP sont résolus avec
-//! le `TemplateContext` du workflow (launch_variables / state / steps.X).
-//! Si le QP utilise `{{host}}` et que le workflow ne l'expose pas, le
-//! `fail_fast_on_unresolved` côté `execute_step` flagge l'erreur — pas
-//! besoin d'un mécanisme dédié.
+//! Par défaut, les `{{var}}` du QP sont résolus avec le `TemplateContext` du
+//! workflow (launch_variables / state / steps.X). Un step peut aussi déclarer
+//! `quick_prompt_variables` pour relier un nom portable du QP à une expression
+//! dynamique du workflow, par exemple `production_errors` vers
+//! `{{steps.shape.data.toppages}}`.
 
 use crate::db::Database;
 use crate::models::WorkflowStep;
@@ -60,6 +60,14 @@ pub async fn hydrate_step_from_quick_prompt(
     // texte non-vide.
     if step.prompt_template.trim().is_empty() {
         step.prompt_template = qp.prompt_template;
+        for (variable, source) in &step.quick_prompt_variables {
+            if variable.trim().is_empty() {
+                continue;
+            }
+            step.prompt_template = step
+                .prompt_template
+                .replace(&format!("{{{{{variable}}}}}"), source);
+        }
     }
 
     // `agent` : c'est aussi un champ obligatoire (pas Option). On laisse
@@ -136,6 +144,7 @@ mod tests {
     fn make_qp(id: &str, prompt: &str) -> QuickPrompt {
         QuickPrompt {
             id: id.to_string(),
+            pinned: false,
             name: "Test QP".to_string(),
             icon: "P".to_string(),
             prompt_template: prompt.to_string(),
@@ -189,6 +198,7 @@ mod tests {
             batch_concurrent_limit: None,
             quick_api_id: None,
             quick_prompt_id,
+            quick_prompt_variables: std::collections::HashMap::new(),
             notify_config: None,
             api_plugin_slug: None,
             api_config_id: None,
@@ -263,6 +273,55 @@ mod tests {
             step.agent_settings.as_ref().unwrap().tier,
             Some(ModelTier::Reasoning)
         );
+    }
+
+    #[tokio::test]
+    async fn maps_portable_qp_variable_to_workflow_expression() {
+        let db = Database::open_in_memory().unwrap();
+        let qp_id = seed_qp(
+            &db,
+            make_qp(
+                "qp-workflow-binding",
+                "Analyse ces erreurs : {{production_errors}}",
+            ),
+        )
+        .await;
+        let mut step = blank_step(Some(qp_id));
+        step.quick_prompt_variables.insert(
+            "production_errors".to_string(),
+            "{{steps.shape.data.toppages}}".to_string(),
+        );
+
+        hydrate_step_from_quick_prompt(&mut step, &db)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            step.prompt_template,
+            "Analyse ces erreurs : {{steps.shape.data.toppages}}"
+        );
+    }
+
+    #[tokio::test]
+    async fn inline_prompt_override_ignores_qp_variable_bindings() {
+        let db = Database::open_in_memory().unwrap();
+        let qp_id = seed_qp(
+            &db,
+            make_qp("qp-workflow-binding-override", "QP {{production_errors}}"),
+        )
+        .await;
+        let mut step = blank_step(Some(qp_id));
+        step.prompt_template = "Inline {{production_errors}}".to_string();
+        step.quick_prompt_variables.insert(
+            "production_errors".to_string(),
+            "{{steps.shape.data.toppages}}".to_string(),
+        );
+
+        hydrate_step_from_quick_prompt(&mut step, &db)
+            .await
+            .unwrap();
+
+        assert_eq!(step.prompt_template, "Inline {{production_errors}}");
     }
 
     #[tokio::test]

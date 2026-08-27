@@ -37,26 +37,28 @@ pub const RTK_UPDATE_CMD: &str =
 /// each vendor's release page / npm registry. Pairs (agent → version).
 ///
 /// Bumped per Kronn release; see `docs/AGENTS.md` for the bump checklist.
-/// Captured 2026-05-11.
+/// Captured 2026-08-19.
 pub fn latest_known_agent_version(agent_type: &AgentType) -> Option<&'static str> {
     match agent_type {
         // @anthropic-ai/claude-code on npm
-        AgentType::ClaudeCode => Some("2.0.51"),
+        AgentType::ClaudeCode => Some("2.1.235"),
         // @openai/codex on npm
-        AgentType::Codex => Some("0.62.0"),
+        AgentType::Codex => Some("0.148.0"),
         // mistral-vibe on PyPI
-        AgentType::Vibe => Some("0.0.16"),
+        AgentType::Vibe => Some("2.24.2"),
         // @google/gemini-cli on npm
-        AgentType::GeminiCli => Some("0.18.0"),
+        AgentType::GeminiCli => Some("0.55.1"),
         // ollama (binary release on ollama.com)
-        AgentType::Ollama => Some("0.4.7"),
+        AgentType::Ollama => Some("0.32.14"),
         // @github/copilot on npm
-        AgentType::CopilotCli => Some("0.0.346"),
+        AgentType::CopilotCli => Some("1.0.80"),
         // Kiro (preview, AWS distributes via cli.kiro.dev — no stable version
         // promise yet; we don't surface a freshness pill).
         AgentType::Kiro => None,
         // litellm on PyPI
-        AgentType::LiteLlm => Some("1.95.0"),
+        AgentType::LiteLlm => Some("1.97.0"),
+        // Remote endpoint: no local package, so no freshness pill to surface.
+        AgentType::Nvidia => None,
         AgentType::Custom => None,
     }
 }

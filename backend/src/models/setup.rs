@@ -109,6 +109,18 @@ pub struct ServerConfig {
     /// still referenced by a retained child are always preserved.
     #[serde(default)]
     pub run_retention_days: u32,
+    /// KT-373 — refuse to provision a worktree below this much free disk, in
+    /// GiB. On 2026-08-21 the dev volume hit 100% with seven worktrees each
+    /// holding its own Rust `target/`; provisioning kept going until nothing
+    /// worked. A build that is refused costs a message, a build that fills the
+    /// disk costs the machine.
+    #[serde(default = "default_disk_critical_gib")]
+    pub disk_critical_gib: u64,
+    /// Warn — but still provision — below this much free disk, in GiB. Must
+    /// stay above `disk_critical_gib` to mean anything; see
+    /// `disk_thresholds()`, which is the only place they are read together.
+    #[serde(default = "default_disk_warning_gib")]
+    pub disk_warning_gib: u64,
     /// Maximum concurrent agent processes (default: 5)
     #[serde(default = "default_max_agents")]
     pub max_concurrent_agents: usize,
@@ -120,6 +132,22 @@ pub struct ServerConfig {
     /// watchdog above and is read when each new run starts.
     #[serde(default = "default_agent_global_timeout")]
     pub agent_global_timeout_min: u32,
+    /// Absolute wall-clock limit for locally-served HTTP agents (Ollama).
+    /// Local inference is legitimately much slower than a hosted CLI, so it
+    /// has an explicit, visible budget instead of a hidden runtime multiplier.
+    #[serde(default = "default_local_agent_global_timeout")]
+    pub local_agent_global_timeout_min: u32,
+    /// KT-405 — per-model context override, persisted (unlike
+    /// `KRONN_OLLAMA_NUM_CTX_CAP`, which is process-global and disappears on
+    /// restart). Keyed by the exact Ollama model tag (`"qwen3.8:27b-mlx"`).
+    /// The env var still wins when set — it is the break-glass escape hatch
+    /// for an operator who cannot reach the UI; this is the persistent,
+    /// per-model dial meant to be set once and forgotten. Bounds and warnings
+    /// against the model's advertised window / this machine's RAM ceiling are
+    /// enforced at the setter, not here — a deserialized config from an older
+    /// Kronn or a smaller machine must still load.
+    #[serde(default)]
+    pub ollama_context_overrides: std::collections::HashMap<String, u64>,
     /// User identity — displayed in messages and used for future multi-user
     #[serde(default)]
     pub pseudo: Option<String>,
@@ -193,9 +221,10 @@ pub struct ServerConfig {
     /// tokens for no win in those cases. The `Off` default makes
     /// Kronn cheaper out of the box.
     ///
-    /// Re-enable `Auto` (Settings) when running small-context agents
-    /// (Ollama 8B / Vibe / older models) that lack MCP access and
-    /// can't ask Kronn for older history themselves.
+    /// Re-enable `Auto` (Settings) for small-context or HTTP agents when a
+    /// proactive summary is preferable. HTTP agents have no arbitrary MCP
+    /// bridge, but a discussion run may receive bounded Kronn-native history
+    /// tools; the chosen strategy remains an operator trade-off.
     ///
     /// Strict semantic — only consulted on NEW disc creation. Existing
     /// discs keep their saved value (no retroactive change).
@@ -237,16 +266,35 @@ fn default_global_context_mode() -> String {
 fn default_anti_hallucination_mode() -> String {
     crate::core::anti_halluc::DEFAULT_MODE_STR.to_string()
 }
+/// A cold `cargo build` of this workspace writes a few GiB; the floor is set
+/// so a refused provisioning still leaves room to work, investigate and clean.
+pub(crate) const DEFAULT_DISK_CRITICAL_GIB: u64 = 5;
+pub(crate) const DEFAULT_DISK_WARNING_GIB: u64 = 20;
+fn default_disk_critical_gib() -> u64 {
+    DEFAULT_DISK_CRITICAL_GIB
+}
+fn default_disk_warning_gib() -> u64 {
+    DEFAULT_DISK_WARNING_GIB
+}
 fn default_max_agents() -> usize {
     5
 }
 fn default_agent_stall_timeout() -> u32 {
     5
 }
-pub(crate) const MAX_AGENT_GLOBAL_TIMEOUT_MIN: u32 = 120;
+// 240, raised from 120 (KT-403): a hard task on a locally-served 27B measured
+// at ~2 h 40 of honest work. The old ceiling existed to stop hung runs from
+// squatting the agent semaphore; since an abandoned tool loop now halts itself
+// at the next round boundary, a long window no longer keeps a dead run alive.
+pub(crate) const MAX_AGENT_GLOBAL_TIMEOUT_MIN: u32 = 240;
 pub(crate) const DEFAULT_AGENT_GLOBAL_TIMEOUT_MIN: u32 = 30;
 fn default_agent_global_timeout() -> u32 {
     DEFAULT_AGENT_GLOBAL_TIMEOUT_MIN
+}
+
+pub(crate) const DEFAULT_LOCAL_AGENT_GLOBAL_TIMEOUT_MIN: u32 = 240;
+fn default_local_agent_global_timeout() -> u32 {
+    DEFAULT_LOCAL_AGENT_GLOBAL_TIMEOUT_MIN
 }
 
 pub(crate) fn clamp_agent_global_timeout_min(input: u64) -> u32 {
@@ -381,9 +429,61 @@ pub struct AgentsConfig {
     pub ollama: AgentConfig,
     #[serde(default)]
     pub lite_llm: AgentConfig,
+    #[serde(default)]
+    pub nvidia: AgentConfig,
     /// Per-agent model tier overrides (Economy/Reasoning model names).
     #[serde(default)]
     pub model_tiers: ModelTiersConfig,
+}
+
+/// Endpoint slots of the OpenAI-wire providers, carried as one value.
+///
+/// Both slots travel together deliberately. While they were two independent
+/// fields on the spawn config, every call site wired LiteLLM's and none wired
+/// NVIDIA's, so a configured NVIDIA endpoint never reached the runner and the
+/// public default silently won (KT-337). One value means a call site cannot
+/// wire one provider and forget the other.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct HttpEndpoints {
+    pub lite_llm: Option<String>,
+    pub nvidia: Option<String>,
+}
+
+impl HttpEndpoints {
+    pub fn from_agents(agents: &AgentsConfig) -> Self {
+        Self {
+            lite_llm: agents.lite_llm.base_url.clone(),
+            nvidia: agents.nvidia.base_url.clone(),
+        }
+    }
+
+    /// The endpoint slot this agent reads, `None` meaning "fall back to the
+    /// provider's own default".
+    pub fn for_agent(&self, agent_type: &AgentType) -> Option<&str> {
+        // Deliberately EXHAUSTIVE, no catch-all. The previous `_ =>` arm handed
+        // LiteLLM's proxy to every other agent, so a new OpenAI-wire provider
+        // (OpenRouter, Together, …) would have inherited someone else's endpoint
+        // silently — the comment warned about it without preventing it. Listing
+        // every variant means the next provider fails to COMPILE here and has to
+        // choose its slot, which is the only guard that cannot be forgotten.
+        match agent_type {
+            AgentType::Nvidia => self.nvidia.as_deref(),
+            AgentType::LiteLlm => self.lite_llm.as_deref(),
+            // Ollama shares the HTTP chat path but resolves its host from
+            // `ollama_base_url_pub()` and never reads this slot
+            // [agents/runner.rs, the non-openai-wire branch]; CLI agents never
+            // reach that path at all. `None` is therefore the honest answer for
+            // both, not a fallback.
+            AgentType::Ollama
+            | AgentType::ClaudeCode
+            | AgentType::Codex
+            | AgentType::Vibe
+            | AgentType::GeminiCli
+            | AgentType::Kiro
+            | AgentType::CopilotCli
+            | AgentType::Custom => None,
+        }
+    }
 }
 
 impl AgentsConfig {
@@ -398,6 +498,7 @@ impl AgentsConfig {
             AgentType::CopilotCli => self.copilot_cli.full_access,
             AgentType::Ollama => self.ollama.full_access,
             AgentType::LiteLlm => self.lite_llm.full_access,
+            AgentType::Nvidia => self.nvidia.full_access,
             _ => false,
         }
     }
@@ -411,6 +512,7 @@ impl AgentsConfig {
             || self.copilot_cli.full_access
             || self.ollama.full_access
             || self.lite_llm.full_access
+            || self.nvidia.full_access
     }
 
     /// Returns true if at least one agent is marked as installed.
@@ -434,6 +536,12 @@ pub struct AgentConfig {
     pub version: Option<String>,
     #[serde(default)]
     pub full_access: bool,
+    /// How many runs of THIS agent may execute at once. `None` takes the
+    /// built-in default for its family. A remote HTTP provider parallelises
+    /// fine and is left unlimited; a local one is not — Ollama serves a single
+    /// inference slot, so extra runs only queue and throw away its KV cache.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub concurrency: Option<u32>,
     /// Optional UI color used for this agent's canonical `@mention`.
     /// `None` keeps the built-in frontend color.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -503,6 +611,8 @@ pub struct ModelTiersConfig {
     pub ollama: ModelTierConfig,
     #[serde(default)]
     pub lite_llm: ModelTierConfig,
+    #[serde(default)]
+    pub nvidia: ModelTierConfig,
 }
 
 // ─── Setup wizard ─────────────────────────────────────────────────────────
@@ -607,14 +717,21 @@ pub enum AgentType {
     Kiro,
     CopilotCli,
     /// Local LLM via Ollama (0.4.0). Runs over the HTTP `/api/chat` path,
-    /// not a CLI process. It has no filesystem or arbitrary MCP access, but
-    /// Kronn exposes a small native tool catalogue executed server-side.
+    /// not a CLI process. It has no host shell or arbitrary MCP bridge; Kronn
+    /// exposes a bounded native workspace/Git/API catalogue server-side when
+    /// the execution context provides the corresponding scope.
     Ollama,
     /// OpenAI-compatible proxy (LiteLLM). Same HTTP execution path as Ollama,
     /// different wire format (`OpenAiCodec`). "Installed" means the `litellm`
     /// binary is present; "reachable" means the proxy is actually running,
     /// which the health endpoint reports separately.
     LiteLlm,
+    /// NVIDIA-hosted models (0.11.0). Same OpenAI-compatible HTTP path as
+    /// LiteLLM — one API key serves the whole catalogue, so there is no local
+    /// binary to install and "reachable" is the only meaningful health signal.
+    /// The catalogue endpoint lists models the ACCOUNT may not be entitled to,
+    /// so a model is only trusted once a real probe has answered.
+    Nvidia,
     Custom,
 }
 
@@ -635,6 +752,15 @@ pub struct SetAgentAccessRequest {
 
 #[derive(Debug, Deserialize, TS)]
 #[ts(export)]
+pub struct SetAgentConcurrencyRequest {
+    pub agent: AgentType,
+    /// `None` restores the family default: unlimited for a remote provider,
+    /// 1 for Ollama, 5 for a CLI.
+    pub concurrency: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
 pub struct SetAgentMentionColorRequest {
     pub agent: AgentType,
     /// `None` or an empty string restores the built-in color.
@@ -650,6 +776,7 @@ pub struct ServerConfigPublic {
     pub max_concurrent_agents: usize,
     pub agent_stall_timeout_min: u32,
     pub agent_global_timeout_min: u32,
+    pub local_agent_global_timeout_min: u32,
     pub auth_enabled: bool,
     pub pseudo: Option<String>,
     pub avatar_email: Option<String>,
@@ -679,6 +806,7 @@ pub struct UpdateServerConfigRequest {
     pub max_concurrent_agents: Option<usize>,
     pub agent_stall_timeout_min: Option<u64>,
     pub agent_global_timeout_min: Option<u64>,
+    pub local_agent_global_timeout_min: Option<u64>,
     pub pseudo: Option<String>,
     pub avatar_email: Option<String>,
     pub bio: Option<String>,
