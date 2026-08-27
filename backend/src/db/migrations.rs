@@ -543,6 +543,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "143_quick_items_pinned",
         include_str!("sql/143_quick_items_pinned.sql"),
     ),
+    (
+        "144_external_api_connections",
+        include_str!("sql/144_external_api_connections.sql"),
+    ),
 ];
 
 /// Apply one migration inside the caller-owned transaction.

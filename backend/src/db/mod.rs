@@ -11,6 +11,7 @@ pub mod disc_source;
 pub mod discussion_sessions;
 pub mod discussion_workspaces;
 pub mod discussions;
+pub mod external_api_connections;
 pub mod id_resolver;
 pub mod learnings;
 pub mod lite_llm_model_failures;
