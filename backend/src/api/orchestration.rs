@@ -4149,7 +4149,9 @@ pub(crate) async fn continue_approved_review(
 /// integration checkpoints are the durable job record; boot reconciliation can
 /// resume them after a server stop. The spawned task is deliberately detached
 /// from the HTTP/MCP request, so dropping that transport cannot cancel a long
-/// validation command.
+/// validation command. Concurrent enqueues are safe: the first task commits
+/// the `Approved -> Integrating` candidate-anchor checkpoint, and every later
+/// task loses that durable status gate before it can build, validate, or apply.
 fn enqueue_approved_integration(state: &AppState, outcome: ReviewOutcome) -> ReviewOutcome {
     let ReviewOutcome::Reviewed {
         verdict: ReviewVerdict::Approve,
@@ -8670,6 +8672,9 @@ mod tests {
     };
     use std::path::Path;
     use std::process::Command;
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::sync::RwLock;
 
     #[test]
     fn recovered_apply_must_win_its_durable_claim_before_touching_git() {
@@ -13566,6 +13571,196 @@ mod tests {
         assert_eq!(
             exec_of(&db, &exec_id).await.status,
             TaskExecutionStatus::Done
+        );
+    }
+
+    async fn wait_for_execution_status(
+        db: &Database,
+        exec_id: &str,
+        expected: TaskExecutionStatus,
+    ) -> TaskExecution {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let execution = exec_of(db, exec_id).await;
+                if execution.status == expected {
+                    return execution;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("execution {exec_id} did not reach {}", expected.as_str()))
+    }
+
+    fn review_request(exec_id: &str, decision: &str) -> ReviewRequest {
+        ReviewRequest {
+            task_execution_id: exec_id.to_string(),
+            decision: serde_json::from_str(decision).expect("review decision JSON"),
+            source_agent: Some("ClaudeCode".to_string()),
+            source_session_id: Some("sess-b".to_string()),
+        }
+    }
+
+    /// A transport timeout after the handler has accepted an approval must not
+    /// own the validation process. Hold the request wrapper open until the
+    /// controlled validation is running, then abort it and prove the detached
+    /// job reaches its terminal checkpoint.
+    #[tokio::test]
+    async fn aborted_review_transport_does_not_orphan_validating_integration() {
+        let repo = init_repo();
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        let state = AppState::new_defaults(
+            Arc::new(RwLock::new(crate::core::config::default_config())),
+            db.clone(),
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        );
+        let (_parent, _child, exec_id, _head, _path) =
+            delivered_awaiting_review(&db, repo.path()).await;
+        let run_id = exec_of(&db, &exec_id).await.orchestration_run_id;
+        db.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE orchestration_runs SET validation_json = ?2 WHERE id = ?1",
+                rusqlite::params![
+                    run_id,
+                    serde_json::to_string(&vec![ValidationSpec {
+                        command: "sleep 1".to_string(),
+                        quick_exec_id: None,
+                        timeout_secs: Some(5),
+                    }])?
+                ],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let request = review_request(&exec_id, &review_approve(&db, &exec_id).await);
+        let response_task = tokio::spawn(async move {
+            let response = review(State(state), Json(request)).await;
+            // Model middleware/response serialization still owns this future;
+            // cancelling it models a caller disconnect after the handler has
+            // accepted the review but while the detached validation is active.
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            response
+        });
+
+        wait_for_execution_status(&db, &exec_id, TaskExecutionStatus::Validating).await;
+        response_task.abort();
+        assert!(
+            response_task.await.is_err(),
+            "the request transport was cancelled"
+        );
+
+        let terminal = wait_for_execution_status(&db, &exec_id, TaskExecutionStatus::Done).await;
+        assert!(terminal.integrated_sha.is_some());
+        let id = exec_id.clone();
+        let (reviews, validations): (i64, i64) = db
+            .with_conn(move |conn| {
+                Ok((
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM task_execution_reviews WHERE task_execution_id = ?1",
+                        [&id],
+                        |row| row.get(0),
+                    )?,
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM task_execution_validation_runs WHERE task_execution_id = ?1",
+                        [&id],
+                        |row| row.get(0),
+                    )?,
+                ))
+            })
+            .await
+            .unwrap();
+        assert_eq!(reviews, 1);
+        assert_eq!(validations, 1);
+    }
+
+    /// Two concurrent approve/retry transports can both enqueue work from the
+    /// same durable approval. The candidate-anchor status CAS lets exactly one
+    /// task cross into integration, so neither validation nor application is
+    /// duplicated.
+    #[tokio::test]
+    async fn concurrent_review_retries_share_one_durable_integration_claim() {
+        let repo = init_repo();
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        let state = AppState::new_defaults(
+            Arc::new(RwLock::new(crate::core::config::default_config())),
+            db.clone(),
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        );
+        let (_parent, _child, exec_id, _head, _path) =
+            delivered_awaiting_review(&db, repo.path()).await;
+        let run_id = exec_of(&db, &exec_id).await.orchestration_run_id;
+        db.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE orchestration_runs SET validation_json = ?2 WHERE id = ?1",
+                rusqlite::params![
+                    run_id,
+                    serde_json::to_string(&vec![ValidationSpec {
+                        command: "sleep 1".to_string(),
+                        quick_exec_id: None,
+                        timeout_secs: Some(5),
+                    }])?
+                ],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let decision = review_approve(&db, &exec_id).await;
+        let first = tokio::spawn(review(
+            State(state.clone()),
+            Json(review_request(&exec_id, &decision)),
+        ));
+        let second = tokio::spawn(review(
+            State(state),
+            Json(review_request(&exec_id, &decision)),
+        ));
+        let (first, second) = tokio::join!(first, second);
+        let first = first.unwrap().0;
+        let second = second.unwrap().0;
+        assert!(
+            first.success || second.success,
+            "one approval must be accepted"
+        );
+        assert!(
+            first.success || second.error_code.as_deref() == Some("conflict"),
+            "the competing retry must either win or observe the durable claim"
+        );
+
+        let terminal = wait_for_execution_status(&db, &exec_id, TaskExecutionStatus::Done).await;
+        assert!(terminal.integrated_sha.is_some());
+        let id = exec_id.clone();
+        let (reviews, validations, integrations): (i64, i64, i64) = db
+            .with_conn(move |conn| {
+                Ok((
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM task_execution_reviews WHERE task_execution_id = ?1",
+                        [&id],
+                        |row| row.get(0),
+                    )?,
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM task_execution_validation_runs WHERE task_execution_id = ?1",
+                        [&id],
+                        |row| row.get(0),
+                    )?,
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM task_execution_events \
+                         WHERE task_execution_id = ?1 \
+                           AND from_status = 'Approved' AND to_status = 'Integrating'",
+                        [&id],
+                        |row| row.get(0),
+                    )?,
+                ))
+            })
+            .await
+            .unwrap();
+        assert_eq!(reviews, 1, "the review decision remains idempotent");
+        assert_eq!(integrations, 1, "only one task wins the durable claim");
+        assert_eq!(
+            validations, 1,
+            "the losing task never records a duplicate validation"
         );
     }
 
