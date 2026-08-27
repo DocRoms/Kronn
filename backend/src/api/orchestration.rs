@@ -1312,7 +1312,8 @@ async fn provision_task_execution_inner(
         // already have created it (resume): adopt it only after proving HEAD==base,
         // else create it fresh (fail-closed on any foreign/stale collision).
         let create_result = if worktree_path.exists() {
-            worktree::verify_worktree_head(&worktree_path, &base_sha).map(|_| ())
+            worktree::verify_worktree_head(&worktree_path, &base_sha)
+                .and_then(|_| worktree::materialize_task_submodules(&repo_path, &worktree_path))
         } else {
             worktree::create_task_worktree(
                 &repo_path,
