@@ -14,9 +14,12 @@ import { datasetRecords, recordsToRows } from '../lib/live-page-csv';
 import { buildSandboxDocument, requestRenderedPageHtml, runtimeData } from '../lib/live-page-sandbox';
 import { formatRelativeTime } from '../lib/relativeTime';
 import { CopyIdPill } from '../components/CopyIdPill';
+import { FavoriteToggle } from '../components/FavoriteToggle';
 import { HtmlCodeEditor, HtmlRevisionDiff } from '../components/HtmlCodeEditor';
 import { useT } from '../lib/I18nContext';
 import { useAsyncGuard } from '../hooks/useAsyncGuard';
+import { userError } from '../lib/userError';
+import { standaloneLivePageUrl } from '../lib/live-page-navigation';
 import './DiscussionsPage.css';
 import './PagesPage.css';
 
@@ -63,6 +66,41 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
 }
 
+// KT-463 — the Export and Sync popovers are native <details>/<summary>,
+// uncontrolled by React. Native <details> never closes itself on an
+// outside click or Escape; only clicking <summary> again toggles it. This
+// mutates the DOM's own `open` property directly instead of introducing
+// React state, since nothing else needs to observe or drive that state.
+function useDismissibleDetails<T extends HTMLDetailsElement>() {
+  const ref = useRef<T>(null);
+  useEffect(() => {
+    const close = () => {
+      const el = ref.current;
+      if (el?.open) el.open = false;
+    };
+    const onPointerDown = (event: MouseEvent) => {
+      const el = ref.current;
+      if (el?.open && !el.contains(event.target as Node)) close();
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      const el = ref.current;
+      if (el?.open && event.key === 'Escape') {
+        close();
+        // Keyboard users lose their place once the popover's content
+        // collapses out from under a focused element inside it.
+        el.querySelector('summary')?.focus();
+      }
+    };
+    document.addEventListener('mousedown', onPointerDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', onPointerDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, []);
+  return ref;
+}
+
 interface PagesPageProps {
   initialSelectedPageId?: string | null;
   onInitialSelectionConsumed?: () => void;
@@ -95,6 +133,10 @@ export function PagesPage({
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
   const [bulkBusy, setBulkBusy] = useState(false);
   const [editingHtml, setEditingHtml] = useState(false);
+  const [editingTitle, setEditingTitle] = useState(false);
+  const [titleDraft, setTitleDraft] = useState('');
+  const [titleError, setTitleError] = useState<string | null>(null);
+  const [savingTitle, setSavingTitle] = useState(false);
   const [htmlDraft, setHtmlDraft] = useState('');
   const [comparisonRevisionId, setComparisonRevisionId] = useState<string | null>(null);
   const [savingHtml, setSavingHtml] = useState(false);
@@ -106,6 +148,8 @@ export function PagesPage({
   } | null>(null);
   const [exportBusy, setExportBusy] = useState<'pdf' | 'docx' | null>(null);
   const [exportResult, setExportResult] = useState<{ url: string; filename: string } | null>(null);
+  const exportMenuRef = useDismissibleDetails<HTMLDetailsElement>();
+  const refreshMenuRef = useDismissibleDetails<HTMLDetailsElement>();
   const [selectedDatasetId, setSelectedDatasetId] = useState<string | null>(null);
   const [datasetExportBusy, setDatasetExportBusy] = useState(false);
   const iframeRef = useRef<HTMLIFrameElement>(null);
@@ -212,6 +256,8 @@ export function PagesPage({
     try {
       await loadDetail(page.id);
       setEditingHtml(false);
+      setEditingTitle(false);
+      setTitleError(null);
       setError(null);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -346,6 +392,53 @@ export function PagesPage({
     }
   });
 
+  const persistTitle = useAsyncGuard(async (pageId: string, previousTitle: string, title: string) => {
+    setSavingTitle(true);
+    setTitleError(null);
+    try {
+      const updated = await pagesApi.update(pageId, { title });
+      setPages(current => current.map(page => page.id === pageId ? updated : page));
+      setDetail(current => current?.id === pageId ? updated : current);
+      setTitleDraft(updated.title);
+      setEditingTitle(false);
+      setError(null);
+    } catch (cause) {
+      // Keep the persisted title as the visible source of truth. The failed
+      // draft must never leak into the sidebar or masquerade as a saved name.
+      setTitleDraft(previousTitle);
+      setTitleError(userError(cause));
+    } finally {
+      setSavingTitle(false);
+    }
+  });
+
+  const saveTitle = useCallback(() => {
+    if (!detail) return;
+    const title = titleDraft.trim();
+    if (title.length === 0) {
+      setTitleError(t('pages.titleRequired'));
+      return;
+    }
+    if ([...title].length > 200) {
+      setTitleError(t('pages.titleTooLong'));
+      return;
+    }
+    void persistTitle(detail.id, detail.title, title);
+  }, [detail, persistTitle, t, titleDraft]);
+
+  const startTitleEdit = useCallback(() => {
+    if (!detail) return;
+    setTitleDraft(detail.title);
+    setTitleError(null);
+    setEditingTitle(true);
+  }, [detail]);
+
+  const cancelTitleEdit = useCallback(() => {
+    setTitleDraft(detail?.title ?? '');
+    setTitleError(null);
+    setEditingTitle(false);
+  }, [detail]);
+
   const leaveSelectionMode = useCallback(() => {
     setSelectionMode(false);
     setSelectedIds(new Set());
@@ -414,15 +507,13 @@ export function PagesPage({
         </button>
         {!selectionMode && (
           <div className="disc-item-actions">
-            <button
-              type="button"
-              className="disc-item-more-btn live-page-row-favorite"
-              onClick={() => void updatePage(page, { pinned: !page.pinned })}
-              title={page.pinned ? t('pages.unfavorite') : t('pages.favorite')}
-              aria-label={page.pinned ? t('pages.unfavorite') : t('pages.favorite')}
-            >
-              <Star size={14} fill={page.pinned ? 'currentColor' : 'none'} />
-            </button>
+            <FavoriteToggle
+              active={page.pinned}
+              onToggle={() => void updatePage(page, { pinned: !page.pinned })}
+              activeLabel={t('pages.unfavorite')}
+              inactiveLabel={t('pages.favorite')}
+              itemName={page.title}
+            />
           </div>
         )}
       </div>
@@ -530,8 +621,37 @@ export function PagesPage({
         {detail ? (
           <>
             <header className="live-pages-viewer-header">
-              <div>
-                <h1>{detail.title}</h1>
+              <div className="live-pages-title-block">
+                {editingTitle ? (
+                  <form
+                    className="live-pages-title-editor"
+                    onSubmit={(event) => { event.preventDefault(); saveTitle(); }}
+                  >
+                    <input
+                      value={titleDraft}
+                      onChange={(event) => { setTitleDraft(event.target.value); setTitleError(null); }}
+                      onKeyDown={(event) => { if (event.key === 'Escape') cancelTitleEdit(); }}
+                      aria-label={t('pages.titleInput')}
+                      maxLength={201}
+                      autoFocus
+                      disabled={savingTitle}
+                    />
+                    <button type="submit" disabled={savingTitle} aria-label={t('pages.saveTitle')} title={t('pages.saveTitle')}>
+                      {savingTitle ? <Loader2 size={14} className="spin" /> : <Save size={14} />}
+                    </button>
+                    <button type="button" onClick={cancelTitleEdit} disabled={savingTitle} aria-label={t('pages.cancelTitle')} title={t('pages.cancelTitle')}>
+                      <X size={14} />
+                    </button>
+                    {titleError && <small role="alert">{titleError}</small>}
+                  </form>
+                ) : (
+                  <div className="live-pages-title-display">
+                    <h1>{detail.title}</h1>
+                    <button type="button" onClick={startTitleEdit} aria-label={t('pages.renameTitle', detail.title)} title={t('pages.renameTitle', detail.title)}>
+                      <Pencil size={13} />
+                    </button>
+                  </div>
+                )}
                 <div className="live-pages-identity">
                   <button
                     type="button"
@@ -550,13 +670,24 @@ export function PagesPage({
                 </div>
               </div>
               <div className="live-pages-header-actions">
+                <a
+                  className="live-pages-open-tab"
+                  href={standaloneLivePageUrl(detail.id)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  aria-label={t('pages.openInNewTab', detail.title)}
+                  title={t('pages.openInNewTab', detail.title)}
+                >
+                  <ExternalLink size={13} />
+                  <span>{t('pages.openInNewTabLabel')}</span>
+                </a>
                 <button type="button" className="live-pages-header-icon" onClick={() => void updatePage(detail, { pinned: !detail.pinned })} title={detail.pinned ? t('pages.unfavorite') : t('pages.favorite')}>
                   <Star size={14} fill={detail.pinned ? 'currentColor' : 'none'} />
                 </button>
                 <div className="live-pages-revision">
                   <Activity size={13} /> data r{detail.data_revision} · HTML r{detail.revision.revision}
                 </div>
-                <details className="live-pages-export-menu">
+                <details className="live-pages-export-menu" data-testid="live-page-export-menu" ref={exportMenuRef}>
                   <summary><Download size={13} />{t('pages.export')}<ChevronDown size={12} /></summary>
                   <div className="live-pages-export-popover">
                     <button type="button" onClick={() => void exportPage('pdf')} disabled={exportBusy !== null}>
@@ -568,7 +699,7 @@ export function PagesPage({
                     {exportResult && <a href={exportResult.url} download={exportResult.filename} target="_blank" rel="noopener noreferrer"><ExternalLink size={12} />{exportResult.filename}</a>}
                   </div>
                 </details>
-                <details className="live-pages-refresh-menu" data-testid="live-page-refresh-menu">
+                <details className="live-pages-refresh-menu" data-testid="live-page-refresh-menu" ref={refreshMenuRef}>
                   <summary
                     aria-label={t('pages.autoRefresh')}
                     data-state={latestPublication ? 'synced' : 'waiting'}
@@ -603,13 +734,32 @@ export function PagesPage({
                             className="live-pages-linked-workflow-run"
                             onClick={() => void runLinkedWorkflow(workflow)}
                             disabled={!workflow.enabled || runningWorkflowId !== null}
+                            data-state={runningWorkflowId === workflow.id
+                              ? 'running'
+                              : workflowRunFeedback?.workflowId === workflow.id
+                                ? workflowRunFeedback.kind
+                                : 'idle'}
                             title={workflow.enabled ? t('pages.runLinkedWorkflow', workflow.name) : t('pages.runDisabledWorkflow')}
                             aria-label={workflow.enabled ? t('pages.runLinkedWorkflow', workflow.name) : t('pages.runDisabledWorkflow')}
                           >
-                            {runningWorkflowId === workflow.id ? <Loader2 size={12} className="spin" /> : <Play size={12} />}
+                            {runningWorkflowId === workflow.id
+                              ? <Loader2 size={12} className="spin" />
+                              : workflowRunFeedback?.workflowId === workflow.id
+                                ? workflowRunFeedback.kind === 'success'
+                                  ? <CheckCircle2 size={12} data-testid="live-page-sync-success-icon" />
+                                  : <X size={12} data-testid="live-page-sync-error-icon" />
+                                : <Play size={12} />}
                           </button>
                           {workflowRunFeedback?.workflowId === workflow.id && (
-                            <small data-kind={workflowRunFeedback.kind}>{workflowRunFeedback.message}</small>
+                            <small
+                              data-kind={workflowRunFeedback.kind}
+                              role={workflowRunFeedback.kind === 'error' ? 'alert' : 'status'}
+                            >
+                              {workflowRunFeedback.kind === 'success'
+                                ? <CheckCircle2 size={11} aria-hidden="true" />
+                                : <X size={11} aria-hidden="true" />}
+                              {workflowRunFeedback.message}
+                            </small>
                           )}
                         </span>
                       )) : <small>{t('pages.noLinkedWorkflows')}</small>}

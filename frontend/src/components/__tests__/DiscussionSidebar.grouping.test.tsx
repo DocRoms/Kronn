@@ -29,7 +29,7 @@ vi.mock('../../lib/api', async () => {
 
 import { projects as projectsApi } from '../../lib/api';
 import { DiscussionSidebar } from '../DiscussionSidebar';
-import type { Discussion, Project, BatchRunSummary } from '../../types/generated';
+import type { Discussion, Project, BatchRunSummary, ExecutionDiscussionLink } from '../../types/generated';
 
 const noop = () => {};
 
@@ -93,6 +93,9 @@ const mkProject = (id: string, name: string, repo_url: string | null = null): Pr
 const mkBatchSummary = (over: Partial<BatchRunSummary> & { run_id: string }): BatchRunSummary => ({
   batch_name: null,
   batch_total: 1,
+  batch_completed: 1,
+  batch_failed: 0,
+  batch_no_response: 0,
   status: 'Completed' as BatchRunSummary['status'],
   quick_prompt_id: null,
   quick_prompt_name: null,
@@ -113,6 +116,179 @@ beforeEach(() => {
 });
 
 describe('DiscussionSidebar — grouping', () => {
+  it('nests execution rooms once under their principal and keeps orphans visible', async () => {
+    const onSelect = vi.fn();
+    const projects = [mkProject('p-1', 'Kronn')];
+    const discussions = [
+      mkDisc({ id: 'parent', project_id: 'p-1', title: 'Principal room' }),
+      mkDisc({
+        id: 'child', project_id: 'p-1', title: 'Worker room',
+        message_count: 3, non_system_message_count: 3,
+      }),
+      mkDisc({ id: 'orphan', project_id: 'p-1', title: 'Orphan worker' }),
+    ];
+    const executionLinks: ExecutionDiscussionLink[] = [
+      {
+        execution_id: 'exec-1', orchestration_run_id: 'run-1', task_id: 'task-1',
+        task_reference: 'KT-323', task_title: 'Wire orchestration UX',
+        parent_discussion_id: 'parent', sub_discussion_id: 'child', status: 'Working',
+      },
+      {
+        execution_id: 'exec-orphan', orchestration_run_id: 'run-1', task_id: 'task-2',
+        task_reference: 'KT-999', task_title: 'Missing parent',
+        parent_discussion_id: 'missing', sub_discussion_id: 'orphan', status: 'Interrupted',
+      },
+    ];
+
+    const { container } = render(
+      <DiscussionSidebar
+        {...baseProps}
+        projects={projects}
+        discussions={discussions}
+        executionLinks={executionLinks}
+        lastSeenMsgCount={{ child: 1 }}
+        onSelect={onSelect}
+      />,
+    );
+
+    expect(await screen.findByText('KT-323')).toBeInTheDocument();
+    expect(screen.getByText('Wire orchestration UX')).toBeInTheDocument();
+    expect(container.querySelectorAll('.disc-orchestration-child')).toHaveLength(1);
+    expect(screen.getAllByText('Worker room')).toHaveLength(1);
+    expect(screen.getByText('Orphan worker')).toBeInTheDocument();
+    expect(container.querySelector('.disc-group-count')).toHaveTextContent('3');
+    expect(container.querySelector('.disc-group-unseen')).toHaveTextContent('2');
+
+    const child = container.querySelector('.disc-orchestration-child');
+    // KT-464 — the row's favorite toggle also carries "Worker room" in its
+    // own label now; only the open button's name has the em dash + count.
+    fireEvent.click(within(child as HTMLElement).getByRole('button', { name: /Worker room — \d+ messages/ }));
+    expect(onSelect).toHaveBeenCalledWith('child', 3);
+  });
+
+  it('folds a parent past one execution and leaves a single child alone', async () => {
+    // Children used to render unconditionally, so a parent with several
+    // executions stretched the sidebar with no way to fold it back. The
+    // control only appears past one child: hiding a lone execution behind a
+    // click would trade one annoyance for another.
+    const onToggleGroup = vi.fn();
+    const projects = [mkProject('p-1', 'Kronn')];
+    const discussions = [
+      mkDisc({ id: 'solo', project_id: 'p-1', title: 'One execution' }),
+      mkDisc({ id: 'solo-child', project_id: 'p-1', title: 'Solo worker' }),
+      mkDisc({ id: 'busy', project_id: 'p-1', title: 'Two executions' }),
+      mkDisc({ id: 'busy-a', project_id: 'p-1', title: 'Worker A' }),
+      mkDisc({ id: 'busy-b', project_id: 'p-1', title: 'Worker B' }),
+    ];
+    const link = (id: string, parent: string, child: string): ExecutionDiscussionLink => ({
+      execution_id: id, orchestration_run_id: 'run-1', task_id: `task-${id}`,
+      task_reference: `KT-${id}`, task_title: `Task ${id}`,
+      parent_discussion_id: parent, sub_discussion_id: child, status: 'Working',
+    });
+
+    const { container } = render(
+      <DiscussionSidebar
+        {...baseProps}
+        projects={projects}
+        discussions={discussions}
+        executionLinks={[
+          link('solo1', 'solo', 'solo-child'),
+          link('busyA', 'busy', 'busy-a'),
+          link('busyB', 'busy', 'busy-b'),
+        ]}
+        onToggleGroup={onToggleGroup}
+      />,
+    );
+
+    await screen.findByText('Solo worker');
+    // One toggle only: the single-execution parent must not get one.
+    const toggles = container.querySelectorAll('.disc-orchestration-toggle');
+    expect(toggles).toHaveLength(1);
+    expect(toggles[0]).toHaveTextContent('2');
+    // Children are visible by default — folding on the user's behalf would
+    // hide work they just launched.
+    expect(toggles[0]).toHaveAttribute('aria-expanded', 'true');
+    expect(container.querySelectorAll('.disc-orchestration-child')).toHaveLength(3);
+
+    fireEvent.click(toggles[0]);
+    expect(onToggleGroup).toHaveBeenCalledWith('__exec_children__:busy');
+  });
+
+  it('hides a folded parent\'s children without touching its siblings', async () => {
+    const projects = [mkProject('p-1', 'Kronn')];
+    const discussions = [
+      mkDisc({ id: 'busy', project_id: 'p-1', title: 'Two executions' }),
+      mkDisc({ id: 'busy-a', project_id: 'p-1', title: 'Worker A' }),
+      mkDisc({ id: 'busy-b', project_id: 'p-1', title: 'Worker B' }),
+      mkDisc({ id: 'other', project_id: 'p-1', title: 'Untouched parent' }),
+      mkDisc({ id: 'other-a', project_id: 'p-1', title: 'Worker C' }),
+      mkDisc({ id: 'other-b', project_id: 'p-1', title: 'Worker D' }),
+    ];
+    const link = (id: string, parent: string, child: string): ExecutionDiscussionLink => ({
+      execution_id: id, orchestration_run_id: 'run-1', task_id: `task-${id}`,
+      task_reference: `KT-${id}`, task_title: `Task ${id}`,
+      parent_discussion_id: parent, sub_discussion_id: child, status: 'Working',
+    });
+
+    const { container } = render(
+      <DiscussionSidebar
+        {...baseProps}
+        projects={projects}
+        discussions={discussions}
+        executionLinks={[
+          link('busyA', 'busy', 'busy-a'),
+          link('busyB', 'busy', 'busy-b'),
+          link('otherC', 'other', 'other-a'),
+          link('otherD', 'other', 'other-b'),
+        ]}
+        collapsedGroups={new Set(['__exec_children__:busy'])}
+      />,
+    );
+
+    await screen.findByText('Worker C');
+    expect(screen.queryByText('Worker A')).not.toBeInTheDocument();
+    expect(screen.queryByText('Worker B')).not.toBeInTheDocument();
+    // The fold is per parent: the other one keeps its children.
+    expect(container.querySelectorAll('.disc-orchestration-child')).toHaveLength(2);
+    const folded = container.querySelector('.disc-orchestration-toggle');
+    expect(folded).toHaveAttribute('aria-expanded', 'false');
+  });
+
+  it('keeps a pinned execution room reachable from Favoris', async () => {
+    // Favoris is a shortcut, not the tree. The canonical list drops execution
+    // children so they are not rendered twice under Projects — correct there,
+    // but it also made a pinned sub-discussion impossible to reach directly,
+    // which is the whole point of pinning one.
+    const projects = [mkProject('p-1', 'Kronn')];
+    const discussions = [
+      mkDisc({ id: 'parent', project_id: 'p-1', title: 'Principal room' }),
+      mkDisc({ id: 'child', project_id: 'p-1', title: 'Pinned worker', pinned: true }),
+    ];
+
+    const { container } = render(
+      <DiscussionSidebar
+        {...baseProps}
+        projects={projects}
+        discussions={discussions}
+        executionLinks={[{
+          execution_id: 'exec-1', orchestration_run_id: 'run-1', task_id: 'task-1',
+          task_reference: 'KT-1', task_title: 'Pinned task',
+          parent_discussion_id: 'parent', sub_discussion_id: 'child', status: 'Working',
+        }]}
+      />,
+    );
+
+    const favorites = await waitFor(() => {
+      const section = container.querySelector('.disc-sidebar-favorites');
+      expect(section).toBeTruthy();
+      return section as HTMLElement;
+    });
+    expect(within(favorites).getByText('Pinned worker')).toBeInTheDocument();
+    // Still nested under its parent: the shortcut adds a route, it does not
+    // move the child out of the tree.
+    expect(container.querySelectorAll('.disc-orchestration-child')).toHaveLength(1);
+  });
+
   it('renders one org header per distinct org, "Local" sorts last', async () => {
     const projects = [
       mkProject('p-acme', 'AcmeRepo', 'git@github.com:acme-org/AcmeRepo.git'),
@@ -240,7 +416,9 @@ describe('DiscussionSidebar — grouping', () => {
 
     // The row is a native button: its click path is shared by pointer and
     // keyboard activation (the browser synthesizes click for Enter/Space).
-    const row = screen.getByRole('button', { name: /Click me/ });
+    // KT-464 — the row's favorite toggle also carries "Click me" in its own
+    // label; only the open button's name has the em dash + count.
+    const row = screen.getByRole('button', { name: /Click me — \d+ messages/ });
     fireEvent.click(row);
     expect(onSelect).toHaveBeenCalledWith('d1', 7);
   });
@@ -466,9 +644,12 @@ describe('DiscussionSidebar — high-volume smart sections', () => {
     await waitFor(() => expect(projectsApi.discSources).toHaveBeenCalled());
 
     const followUp = document.querySelector('.disc-sidebar-follow-up') as HTMLElement;
-    expect(within(followUp).getAllByRole('button', { name: /Unread discussion/ })).toHaveLength(5);
+    // KT-464 — each row's favorite toggle also carries the discussion title
+    // in its own label now; only the open button's name has the count.
+    const openRowName = /Unread discussion \d+ — \d+ messages/;
+    expect(within(followUp).getAllByRole('button', { name: openRowName })).toHaveLength(5);
     fireEvent.click(within(followUp).getByText(/15 disc\.showMore/));
-    expect(within(followUp).getAllByRole('button', { name: /Unread discussion/ })).toHaveLength(20);
+    expect(within(followUp).getAllByRole('button', { name: openRowName })).toHaveLength(20);
   });
 });
 
@@ -568,6 +749,33 @@ describe('DiscussionSidebar — batch groups', () => {
     expect(pill).not.toBeNull();
     expect(pill!.getAttribute('data-batch-status')).toBe('done');
     expect(pill!.textContent).toContain('2/2');
+  });
+
+  it('shows the durable partial breakdown instead of a success pill', async () => {
+    const summaries = [mkBatchSummary({
+      run_id: runId,
+      status: 'Partial',
+      batch_total: 6,
+      batch_completed: 4,
+      batch_failed: 2,
+      batch_no_response: 1,
+      quick_prompt_name: 'Compare agents',
+    })];
+    render(
+      <DiscussionSidebar
+        {...baseProps}
+        projects={projects}
+        discussions={batchDiscs}
+        batchSummaries={summaries}
+      />
+    );
+    await waitFor(() => expect(projectsApi.discSources).toHaveBeenCalled());
+
+    const pill = document.querySelector('[data-batch-key="batch::run-123"] [data-batch-status]')!;
+    expect(pill).toHaveAttribute('data-batch-status', 'partial');
+    expect(pill).toHaveTextContent('4/6');
+    expect(pill).toHaveTextContent('1✕');
+    expect(pill).toHaveTextContent('1∅');
   });
 
   it('a running batch (disc in sendingMap) flips the pastille to running', async () => {
@@ -892,5 +1100,49 @@ describe('DiscussionSidebar — queued (awaiting_agent) indicator', () => {
     await waitFor(() => expect(projectsApi.discSources).toHaveBeenCalled());
 
     expect(document.querySelector('.disc-item-queued')).toBeNull();
+  });
+
+  // The reload case. `awaiting_agent` stays set for the WHOLE run, so alone it
+  // cannot say whether the agent is waiting for a slot or already working —
+  // and a reload leaves `sendingMap` empty, which used to show an hourglass
+  // over a job that was running. `agent_running` is the DB's answer.
+  it('no hourglass over a running job after a reload, with sendingMap empty', async () => {
+    const discussions = [
+      mkDisc({
+        id: 'q3',
+        project_id: null,
+        title: 'Reloaded mid-run',
+        awaiting_agent: true,
+        agent_running: true,
+      }),
+    ];
+
+    render(
+      <DiscussionSidebar {...baseProps} discussions={discussions} sendingMap={{}} queuedMap={{}} />
+    );
+    await waitFor(() => expect(projectsApi.discSources).toHaveBeenCalled());
+
+    expect(document.querySelector('.disc-item-queued')).toBeNull();
+  });
+
+  it('still shows the hourglass after a reload when the job is only queued', async () => {
+    // The other half: dropping the hourglass whenever the page reloads would
+    // trade one wrong state for another. A Pending job must still read queued.
+    const discussions = [
+      mkDisc({
+        id: 'q4',
+        project_id: null,
+        title: 'Reloaded while queued',
+        awaiting_agent: true,
+        agent_running: false,
+      }),
+    ];
+
+    render(
+      <DiscussionSidebar {...baseProps} discussions={discussions} sendingMap={{}} queuedMap={{}} />
+    );
+    await waitFor(() => expect(projectsApi.discSources).toHaveBeenCalled());
+
+    expect(document.querySelector('.disc-item-queued')).not.toBeNull();
   });
 });

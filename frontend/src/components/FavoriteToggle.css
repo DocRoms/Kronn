@@ -1,0 +1,26 @@
+.kr-favorite-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--kr-r-sm);
+  background: transparent;
+  color: var(--kr-text-faint);
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+
+.kr-favorite-toggle:hover,
+.kr-favorite-toggle:focus-visible {
+  background: var(--kr-bg-hover);
+  color: var(--kr-text-primary);
+  outline: none;
+}
+
+.kr-favorite-toggle[data-active='true'] {
+  color: var(--kr-accent);
+}

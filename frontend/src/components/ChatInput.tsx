@@ -303,6 +303,28 @@ export function ChatInput({
     }, 250);
   }, []);
 
+  // KT-453/457 — "Talk about it in the discussion" from the Git diff viewer
+  // prefills the draft with a file/range/SHA quote. Never overwrite an
+  // in-progress draft: append below it, same as a normal paste would. Must
+  // go through the same persistence contract as typed input — a
+  // programmatic prefill the user never touches again would otherwise
+  // vanish on reload instead of surviving like every other draft.
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent<{ discussionId: string; text: string }>).detail;
+      if (!detail?.text || detail.discussionId !== discussion?.id) return;
+      const existing = chatInputValueRef.current;
+      const next = existing.trim().length > 0 ? `${existing}\n\n${detail.text}` : detail.text;
+      updateChatInput(next);
+      scheduleDraftSave(next);
+      chatInputRef.current?.focus();
+      const end = next.length;
+      chatInputRef.current?.setSelectionRange(end, end);
+    };
+    window.addEventListener('kronn:composer-prefill', handler);
+    return () => window.removeEventListener('kronn:composer-prefill', handler);
+  }, [discussion?.id, updateChatInput, scheduleDraftSave]);
+
   const flushDraftNow = useCallback((discId: string, text: string) => {
     if (draftSaveTimerRef.current) {
       clearTimeout(draftSaveTimerRef.current);
@@ -424,6 +446,17 @@ export function ChatInput({
 
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
   const [mentionIndex, setMentionIndex] = useState(0);
+  // Keyboard tier pick inside the mention palette. `null` means UNTOUCHED, and
+  // that distinction is load-bearing: Tab/Enter must keep sending no tier at all
+  // (no override) unless the user actually pressed Left/Right, otherwise every
+  // mention would silently start carrying an explicit tier override.
+  const [mentionTierIndex, setMentionTierIndex] = useState<number | null>(null);
+  // Set when keydown CONSUMED a Left/Right for tier picking. `onKeyUp` refreshes
+  // the mention query on Left/Right (they normally move the caret out of the
+  // mention) and that refresh resets the highlighted row to 0 — which threw the
+  // selection back to the top of the list on every tier keypress. keyup cannot
+  // see keydown's preventDefault, so the fact has to be carried explicitly.
+  const tierKeyConsumedRef = useRef(false);
   const mentionRangeRef = useRef<Pick<AgentMentionQuery, 'start' | 'end'> | null>(null);
 
   const refreshMentionQuery = useCallback((text: string, cursorPos: number) => {
@@ -1346,6 +1379,11 @@ export function ChatInput({
                               className="disc-mention-tier-choice"
                               data-tier={tier}
                               data-current={mentionRoutingMode(m)?.tier === tier}
+                              data-keyboard-selected={
+                                i === mentionIndex
+                                && mentionTierIndex !== null
+                                && MENTION_TIER_CHOICES[mentionTierIndex] === tier
+                              }
                               aria-label={`${m.displayTrigger} · ${mentionTierChoiceTitle(m.type as AgentType, tier)}`}
                               title={mentionTierChoiceTitle(m.type as AgentType, tier)}
                               onMouseDown={event => {
@@ -1644,6 +1682,16 @@ export function ChatInput({
               (emojiMatch || mentionQuery !== null)
               && (e.key === 'ArrowUp' || e.key === 'ArrowDown')
             ) return;
+            // A Left/Right that picked a tier moved no caret and must not refresh:
+            // the refresh would reset the highlighted row to 0 and undo the
+            // Up/Down the user had just done. Only that exact case is skipped —
+            // a Left/Right on a row WITHOUT tiers still moves the caret and still
+            // needs the refresh, which is why this is a consumed-flag and not a
+            // blanket exclusion of the two keys.
+            if (tierKeyConsumedRef.current) {
+              tierKeyConsumedRef.current = false;
+              return;
+            }
             if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'].includes(e.key)) {
               const ta = e.currentTarget;
               refreshMentionQuery(ta.value, ta.selectionStart ?? ta.value.length);
@@ -1676,15 +1724,51 @@ export function ChatInput({
               }
             }
             if (mentionQuery !== null) {
-              const filtered = MENTION_OPTIONS.filter(
-                ({ mention }) => mention.trigger.slice(1).startsWith(mentionQuery ?? ''),
+              // The SAME list the palette renders, so the highlighted row and the
+              // row Tab/Enter applies can never drift apart.
+              const filtered = filteredMentionOptions;
+              const highlighted = filtered[mentionIndex]?.mention;
+              // Only a non-CLI agent mention exposes tiers (a joined CLI manages
+              // its own model), which is exactly the render-side condition.
+              const tierable = Boolean(
+                highlighted?.type
+                && highlighted.target
+                && highlighted.target.kind !== 'cli',
               );
-              if (e.key === 'ArrowDown') { e.preventDefault(); setMentionIndex(i => Math.min(i + 1, filtered.length - 1)); return; }
-              if (e.key === 'ArrowUp') { e.preventDefault(); setMentionIndex(i => Math.max(i - 1, 0)); return; }
+              if (e.key === 'ArrowDown') { e.preventDefault(); setMentionIndex(i => Math.min(i + 1, filtered.length - 1)); setMentionTierIndex(null); return; }
+              if (e.key === 'ArrowUp') { e.preventDefault(); setMentionIndex(i => Math.max(i - 1, 0)); setMentionTierIndex(null); return; }
+              if (tierable && highlighted && (e.key === 'ArrowRight' || e.key === 'ArrowLeft')) {
+                // preventDefault keeps the caret still, so the query survives —
+                // the keyup handler refreshes on Left/Right precisely because they
+                // normally move the caret out of the mention. The flag tells that
+                // handler this keypress was ours, so it leaves the highlighted row
+                // alone instead of resetting it to the top.
+                e.preventDefault();
+                tierKeyConsumedRef.current = true;
+                const step = e.key === 'ArrowRight' ? 1 : -1;
+                setMentionTierIndex(current => {
+                  // Start from what is already in effect for this row rather than
+                  // from index 0, so one keypress moves one step from what the user
+                  // can see highlighted.
+                  const from = current
+                    ?? Math.max(
+                      0,
+                      MENTION_TIER_CHOICES.indexOf(
+                        (mentionRoutingMode(highlighted)?.tier as ModelTier | undefined) ?? 'default',
+                      ),
+                    );
+                  return Math.min(Math.max(from + step, 0), MENTION_TIER_CHOICES.length - 1);
+                });
+                return;
+              }
               if ((e.key === 'Tab' || e.key === 'Enter') && filtered.length > 0) {
                 e.preventDefault();
                 const selectedMention = filtered[mentionIndex].mention;
-                applyMentionSuggestion(selectedMention.trigger, selectedMention.type);
+                applyMentionSuggestion(
+                  selectedMention.trigger,
+                  selectedMention.type,
+                  mentionTierIndex === null ? undefined : MENTION_TIER_CHOICES[mentionTierIndex],
+                );
                 return;
               }
               if (e.key === 'Escape') { setMentionQuery(null); return; }

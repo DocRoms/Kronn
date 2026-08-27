@@ -75,6 +75,7 @@ const defaultModelTiers = {
   copilot_cli: { economy: null, reasoning: null },
   ollama: { economy: null, reasoning: null },
   lite_llm: { economy: null, reasoning: null },
+  nvidia: { economy: null, reasoning: null },
 };
 
 const fullConfig: AgentsConfig = {
@@ -86,11 +87,13 @@ const fullConfig: AgentsConfig = {
   copilot_cli: { path: null, installed: false, version: null, full_access: false },
   ollama: { path: null, installed: false, version: null, full_access: false },
   lite_llm: { path: null, installed: false, version: null, full_access: false },
+  nvidia: { path: null, installed: false, version: null, full_access: false },
   model_tiers: defaultModelTiers,
 };
 
 const sampleQpWithVar: QuickPrompt = {
   id: 'qp-1',
+  pinned: false,
   name: 'Analyse ticket',
   icon: '🎯',
   prompt_template: 'Analyse the ticket {{ticket}} and report findings.',
@@ -103,6 +106,7 @@ const sampleQpWithVar: QuickPrompt = {
 
 const sampleQpNoVar: QuickPrompt = {
   id: 'qp-2',
+  pinned: false,
   name: 'Daily standup',
   icon: '📅',
   prompt_template: 'Summarize what changed since yesterday.',

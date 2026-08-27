@@ -4,6 +4,7 @@ import { sortQuickApis, sortQuickPrompts } from '../automationSort';
 
 const quickPrompt = (id: string, name: string, updatedAt: string): QuickPrompt => ({
   id,
+  pinned: false,
   name,
   icon: '✨',
   prompt_template: name,
@@ -27,6 +28,7 @@ const quickApi = (
   updatedAt: string,
 ): QuickApi => ({
   id,
+  pinned: false,
   name,
   icon: '⚡',
   description: '',

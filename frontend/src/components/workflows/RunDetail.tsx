@@ -19,6 +19,7 @@ const STATUS_COLORS: Record<string, string> = {
   Pending: 'var(--kr-warning)',
   Running: 'var(--kr-cyan)',
   Success: 'var(--kr-success)',
+  Partial: 'var(--kr-warning)',
   Failed: 'var(--kr-error)',
   Cancelled: 'var(--kr-cancelled)',
   WaitingApproval: 'var(--kr-accent-ink)',

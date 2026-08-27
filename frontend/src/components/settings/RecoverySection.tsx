@@ -105,7 +105,7 @@ export function RecoverySection({ toast, t }: RecoverySectionProps) {
               <button className="set-action-btn" onClick={downloadCode}>
                 <Download size={13} /> {t('settings.recovery.download')}
               </button>
-              <button className="btn-ghost" onClick={() => setRecoveryCode(null)}>
+              <button className="btn btn-ghost" onClick={() => setRecoveryCode(null)}>
                 {t('settings.recovery.doneSaved')}
               </button>
             </div>

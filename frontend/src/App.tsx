@@ -5,10 +5,12 @@ import type { SetupStatus } from './types/generated';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { UpdateBanner } from './components/UpdateBanner';
 import { BackendStatus } from './components/BackendStatus';
+import { standaloneLivePageId } from './lib/live-page-navigation';
 import './App.css';
 
 const SetupWizard = lazy(() => import('./pages/SetupWizard').then(m => ({ default: m.SetupWizard })));
 const Dashboard = lazy(() => import('./pages/Dashboard').then(m => ({ default: m.Dashboard })));
+const StandaloneLivePage = lazy(() => import('./pages/StandaloneLivePage').then(m => ({ default: m.StandaloneLivePage })));
 
 export function App() {
   const [setupStatus, setSetupStatus] = useState<SetupStatus | null>(null);
@@ -124,6 +126,17 @@ export function App() {
               setupApi.getStatus().then(setSetupStatus).catch(e => console.warn('Setup status refresh failed:', e));
             }}
           />
+        </Suspense>
+      </ErrorBoundary>
+    );
+  }
+
+  const standalonePageId = standaloneLivePageId(window.location.hash);
+  if (standalonePageId) {
+    return (
+      <ErrorBoundary>
+        <Suspense fallback={<LoadingScreen />}>
+          <StandaloneLivePage pageId={standalonePageId} />
         </Suspense>
       </ErrorBoundary>
     );

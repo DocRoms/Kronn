@@ -20,8 +20,8 @@
  * This spec exercises that contract end-to-end on a real ClaudeCode
  * disc:
  *
- *   - Fire `POST /run` with a SHORT --max-time so the SSE side is
- *     killed within 1s — simulates the user's network dropping.
+ *   - Fire `POST /run`, observe the durable provider-start boundary,
+ *     then abort the SSE side — simulates the user's network dropping.
  *   - Wait for the agent to save its reply via the polling path.
  *   - Verify the disc has a saved Agent message even though no SSE
  *     consumer was listening when it landed.
@@ -41,6 +41,11 @@ interface DiscBody {
   messages?: Array<{ role: string; content: string }>;
 }
 
+interface DiscussionListed {
+  id: string;
+  agent_running?: boolean;
+}
+
 async function readDisc(request: APIRequestContext, id: string): Promise<DiscBody | null> {
   const r = await request.get(`/api/discussions/${id}`);
   if (!r.ok()) return null;
@@ -48,13 +53,33 @@ async function readDisc(request: APIRequestContext, id: string): Promise<DiscBod
   return (j?.data as DiscBody) ?? null;
 }
 
+async function waitForProviderStart(request: APIRequestContext, id: string): Promise<void> {
+  const deadline = Date.now() + 60_000;
+  while (Date.now() < deadline) {
+    const r = await request.get('/api/discussions?page=1&per_page=50');
+    if (r.ok()) {
+      const j = await r.json();
+      const list: DiscussionListed[] = j?.data ?? [];
+      if (list.find(d => d.id === id)?.agent_running) return;
+    }
+    await new Promise(resolve => setTimeout(resolve, 250));
+  }
+  throw new Error(`provider did not start within 60s for discussion ${id}`);
+}
+
 let discId: string | null = null;
 
 test.describe.configure({ timeout: 120_000, retries: 0 });
 
+test.skip(
+  process.env.KRONN_REAL_AGENT_E2E !== '1',
+  'real-agent spec — set KRONN_REAL_AGENT_E2E=1 (credentials + billed tokens required)',
+);
+
 test.describe('Disc network-drop — agent task survives client SSE disconnect', () => {
   test.afterAll(async ({ request }) => {
     if (discId) {
+      await request.post(`/api/discussions/${discId}/stop`).catch(() => { /* idempotent */ });
       await request.delete(`/api/discussions/${discId}`).catch(() => { /* idempotent */ });
     }
   });
@@ -66,51 +91,64 @@ test.describe('Disc network-drop — agent task survives client SSE disconnect',
         title: TITLE,
         agent: 'ClaudeCode',
         language: 'fr',
-        initial_prompt: 'Réponds par UN SEUL MOT: ok. Ne fais aucun appel d outil.',
+        initial_prompt:
+          'Réponds avec exactement vingt lignes numérotées décrivant brièvement ' +
+          'les étapes d une revue de code. Ne fais aucun appel d outil.',
       },
     });
     expect(create.ok()).toBe(true);
     const cj = await create.json();
     expect(cj?.success).toBe(true);
-    discId = cj?.data?.id;
-    expect(discId).toBeTruthy();
+    const createdDiscId: string | undefined = cj?.data?.id;
+    expect(createdDiscId).toBeTruthy();
+    if (!createdDiscId) throw new Error('discussion creation returned no id');
+    discId = createdDiscId;
 
-    // 2. Fire `POST /run` and immediately abort. This simulates a
-    //    network drop / browser tab close mid-stream — the backend's
+    // 2. Fire `POST /run`, wait until the provider really starts, then abort.
+    //    This simulates a network drop / browser tab close mid-stream — the
+    //    backend's
     //    `tokio::spawn` keeps the AgentProcess alive regardless of
     //    whether the SSE consumer is still listening.
     const controller = new AbortController();
-    const runPromise = fetch(`${BACKEND_URL}/api/discussions/${discId}/run`, {
+    const runPromise = fetch(`${BACKEND_URL}/api/discussions/${createdDiscId}/run`, {
       method: 'POST',
       keepalive: true,
       signal: controller.signal,
     }).catch(() => { /* abort is expected */ });
-    // 1s window is plenty for the backend to spawn the agent before
-    // we close the connection — the cancel registry entry is set
-    // synchronously inside `make_agent_stream`.
-    setTimeout(() => controller.abort(), 1_000);
-    void runPromise;
+    // A claimed job can wait behind the per-agent capacity gate. Polling the
+    // DB-backed start boundary avoids disconnecting while the job is merely
+    // queued, which would make this a false-positive resilience test.
+    try {
+      await waitForProviderStart(request, createdDiscId);
+    } finally {
+      // Also close the client connection if the start wait fails, so a failed
+      // canary never leaves an unobserved SSE consumer behind.
+      controller.abort();
+      await runPromise;
+    }
 
-    // 3. Poll until the agent saves its reply. ClaudeCode answers a
-    //    one-word prompt in ~5-15s; we give it 60s.
+    // 3. Poll until the agent saves its reply. The bounded twenty-line prompt
+    //    normally completes quickly; we give it 60s.
     let final: DiscBody | null = null;
     for (let i = 0; i < 60; i++) {
       await new Promise(r => setTimeout(r, 1_000));
-      const d = await readDisc(request, discId!);
+      const d = await readDisc(request, createdDiscId);
       if (d && d.message_count >= 2) {
         final = d;
         break;
       }
     }
     expect(final, 'Agent message must persist within 60s even after SSE was cut').toBeTruthy();
+    if (!final) throw new Error('agent message did not persist after SSE disconnect');
 
     // 4. The reply must be a real Agent message (not a "Erreur" /
     //    "interrupted" footer). A natural completion proves the
     //    detached task ran to its `insert_message` path independently
     //    of the SSE consumer.
-    const lastAgent = final!.messages?.slice().reverse().find(m => m.role === 'Agent');
+    const lastAgent = final.messages?.slice().reverse().find(m => m.role === 'Agent');
     expect(lastAgent).toBeTruthy();
-    const content = lastAgent!.content;
+    if (!lastAgent) throw new Error('expected an Agent message after SSE disconnect');
+    const content = lastAgent.content;
     expect(content.length, 'Agent reply must contain real content, not just an error footer').toBeGreaterThan(0);
     expect(content).not.toMatch(/Erreur:/);
   });

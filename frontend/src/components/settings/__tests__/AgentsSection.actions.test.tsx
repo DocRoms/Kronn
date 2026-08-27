@@ -28,6 +28,7 @@ const {
   detectMock,
   setAgentAccessMock,
   setAgentMentionColorMock,
+  setAgentConcurrencyMock,
   usageGetMock,
   getModelTiersMock,
 } = vi.hoisted(() => ({
@@ -38,6 +39,7 @@ const {
   detectMock: vi.fn(),
   setAgentAccessMock: vi.fn(),
   setAgentMentionColorMock: vi.fn(),
+  setAgentConcurrencyMock: vi.fn(),
   usageGetMock: vi.fn(),
   getModelTiersMock: vi.fn(),
 }));
@@ -47,6 +49,7 @@ vi.mock('../../../lib/api', () => buildApiMock({
     getServerConfig: getServerConfigMock as never,
     setAgentAccess: setAgentAccessMock as never,
     setAgentMentionColor: setAgentMentionColorMock as never,
+    setAgentConcurrency: setAgentConcurrencyMock as never,
     getModelTiers: getModelTiersMock as never,
   },
   agents: {
@@ -120,6 +123,8 @@ beforeEach(() => {
   toggleMock.mockResolvedValue(undefined);
   detectMock.mockReset();
   detectMock.mockResolvedValue([]);
+  setAgentConcurrencyMock.mockReset();
+  setAgentConcurrencyMock.mockResolvedValue(undefined);
   setAgentAccessMock.mockReset();
   setAgentAccessMock.mockResolvedValue(undefined);
   setAgentMentionColorMock.mockReset();
@@ -146,6 +151,7 @@ beforeEach(() => {
     copilot_cli: { ...emptyTier },
     ollama: { ...emptyTier },
     lite_llm: { ...emptyTier },
+    nvidia: { ...emptyTier },
   });
   sessionStorage.removeItem('kronn:model-config-target');
 });
@@ -181,6 +187,61 @@ describe('AgentsSection — model-error deep link', () => {
       expect(select?.classList.contains('set-model-tier-focus')).toBe(true);
     });
     expect(sessionStorage.getItem('kronn:model-config-target')).toBeNull();
+  });
+});
+
+describe('AgentsSection — per-agent concurrency', () => {
+  it('renders the control on Ollama, whose dedicated card is not the generic one', () => {
+    // Ollama and LiteLLM render through their own cards; a control mounted only
+    // in the generic body silently skips exactly the agent that needs it most.
+    renderSection({ agents: [makeAgent({ name: 'Ollama', agent_type: 'Ollama', installed: true })] });
+    const input = screen.getByTestId('agent-concurrency-Ollama') as HTMLInputElement;
+    expect(input).toBeTruthy();
+    // One inference slot: the placeholder must show the default that applies.
+    expect(input.placeholder).toBe('1');
+  });
+
+  it('shows unlimited for a remote provider and 5 for a CLI', () => {
+    renderSection({
+      agents: [
+        makeAgent({ name: 'Nvidia', agent_type: 'Nvidia', installed: true }),
+        makeAgent({ name: 'AgentClaude', agent_type: 'ClaudeCode', installed: true }),
+      ],
+    });
+    expect((screen.getByTestId('agent-concurrency-Nvidia') as HTMLInputElement).placeholder).toBe('\u221e');
+    expect((screen.getByTestId('agent-concurrency-ClaudeCode') as HTMLInputElement).placeholder).toBe('5');
+  });
+
+  it('persists a new value and refetches', async () => {
+    const { refetchAgentAccess } = renderSection({
+      agents: [makeAgent({ name: 'Ollama', agent_type: 'Ollama', installed: true })],
+    });
+    fireEvent.change(screen.getByTestId('agent-concurrency-Ollama'), { target: { value: '3' } });
+    await waitFor(() =>
+      expect(setAgentConcurrencyMock).toHaveBeenCalledWith({ agent: 'Ollama', concurrency: 3 }),
+    );
+    await waitFor(() => expect(refetchAgentAccess).toHaveBeenCalled());
+  });
+
+  it('clearing the field restores the family default rather than unlimiting it', async () => {
+    // Start from a set value: clearing an already-empty number input fires no
+    // change event, so the real scenario is overridden -> cleared.
+    renderSection({
+      agents: [makeAgent({ name: 'Ollama', agent_type: 'Ollama', installed: true })],
+      agentAccess: { ollama: { concurrency: 4 } } as never,
+    });
+    fireEvent.change(screen.getByTestId('agent-concurrency-Ollama'), { target: { value: '' } });
+    await waitFor(() =>
+      expect(setAgentConcurrencyMock).toHaveBeenCalledWith({ agent: 'Ollama', concurrency: null }),
+    );
+  });
+
+  it('never sends 0, which would mean an agent that is enabled but never runs', async () => {
+    renderSection({ agents: [makeAgent({ name: 'Ollama', agent_type: 'Ollama', installed: true })] });
+    fireEvent.change(screen.getByTestId('agent-concurrency-Ollama'), { target: { value: '0' } });
+    await waitFor(() =>
+      expect(setAgentConcurrencyMock).toHaveBeenCalledWith({ agent: 'Ollama', concurrency: 1 }),
+    );
   });
 });
 
@@ -314,10 +375,12 @@ describe('AgentsSection — full-access switch', () => {
       copilot_cli: { ...blank },
       ollama: { ...blank },
       lite_llm: { ...blank },
+      nvidia: { ...blank },
       model_tiers: {
         claude_code: { ...blankTier }, codex: { ...blankTier }, gemini_cli: { ...blankTier },
         kiro: { ...blankTier }, vibe: { ...blankTier }, copilot_cli: { ...blankTier }, ollama: { ...blankTier },
         lite_llm: { ...blankTier },
+        nvidia: { ...blankTier },
       },
       ...over,
     };

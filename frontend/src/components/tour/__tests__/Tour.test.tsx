@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, act } from '@testing-library/react';
 import { TourProvider, useTour } from '../TourProvider';
 import { TourOverlay } from '../TourOverlay';
@@ -83,6 +83,12 @@ beforeEach(() => {
   vi.mocked(discussionsApi.update).mockClear();
 });
 
+afterEach(() => {
+  // A failed timer-driven assertion must not leave fake timers installed and
+  // turn every following test into an unrelated timeout cascade.
+  vi.useRealTimers();
+});
+
 describe('Guided Tour', () => {
   it('auto-launches on first visit (no localStorage flag)', async () => {
     vi.useFakeTimers();
@@ -141,7 +147,7 @@ describe('Guided Tour', () => {
     // room: the point is that it walks, not that it walks instantly.
     await act(async () => {
       fireEvent.keyDown(document, { key: 'ArrowRight' });
-      await vi.advanceTimersByTimeAsync(80_000);
+      await vi.advanceTimersByTimeAsync(600_000);
     });
 
     // Every targeted step in between is missing, so the tour walks over all of
@@ -276,7 +282,7 @@ describe('Guided Tour', () => {
     fireEvent.click(screen.getByTestId('start'));
     expect(screen.getByTestId('step').textContent).toBe('0');
     // Step 0 → 1: advancing runs navigateToStep which awaits
-    // waitForElement up to 2s when the selector isn't in the DOM
+    // waitForElement up to 5s when the selector isn't in the DOM
     // (the test harness doesn't render the real pages).
     await act(async () => {
       fireEvent.keyDown(document, { key: 'ArrowRight' });
@@ -307,7 +313,7 @@ describe('Guided Tour', () => {
     // Explicit non-forced start — resumeStep is read from localStorage.
     fireEvent.click(screen.getByTestId('resume'));
     // Wait for navigateToStep to settle (50ms kickoff + 300ms page wait
-    // + 2s waitForElement timeout).
+    // + 5s waitForElement timeout).
     await act(async () => { await new Promise(r => setTimeout(r, 2500)); });
     expect(loadTourProgress(TOUR_STEPS.map(step => step.id)).resumeStepIndex).toBe(3);
   });

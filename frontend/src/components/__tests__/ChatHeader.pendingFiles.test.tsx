@@ -104,10 +104,10 @@ describe('ChatHeader — pending files badge', () => {
     expect(pill?.querySelector('svg')).not.toBeNull();
   });
 
-  it('hides the modified-files action when pendingFilesCount is 0', () => {
+  it('keeps the Code action visible when pendingFilesCount is 0', () => {
     renderHeader(0);
     expect(document.querySelector('.disc-icon-btn-badge')).toBeNull();
-    expect(screen.queryByRole('button', { name: 'git.filesBtn' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'git.filesBtn' })).toBeInTheDocument();
   });
 
   it('shows the count inside the badge when pendingFilesCount > 0', () => {
@@ -130,10 +130,10 @@ describe('ChatHeader — pending files badge', () => {
     expect(btn.getAttribute('title')).toBe('5 files pending');
   });
 
-  it('is only rendered next to a project-scoped discussion', () => {
-    // No project_id → no git button at all, so obviously no badge.
+  it('remains available when the discussion has no direct project', () => {
     renderHeader(5, makeDiscussion({ project_id: null }));
-    expect(document.querySelector('.disc-icon-btn-badge')).toBeNull();
+    expect(screen.getByRole('button', { name: 'git.filesBtn' })).toBeInTheDocument();
+    expect(document.querySelector('.disc-icon-btn-badge')?.textContent).toBe('5');
   });
 
   it('shows pending planning items inside the plan button', () => {

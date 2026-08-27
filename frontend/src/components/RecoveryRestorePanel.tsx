@@ -84,7 +84,7 @@ export function RecoveryRestorePanel({ toast, t, onRestored }: RecoveryRestorePa
         >
           {busy ? t('common.loading') : t('mcp.recovery.restoreBtn')}
         </button>
-        <button type="button" className="btn-ghost" onClick={() => setOpen(false)}>
+        <button type="button" className="btn btn-ghost" onClick={() => setOpen(false)}>
           {t('common.cancel')}
         </button>
       </div>

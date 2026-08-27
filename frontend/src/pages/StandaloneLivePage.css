@@ -1,0 +1,25 @@
+.standalone-live-page {
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+  background: var(--kr-bg-base);
+}
+
+.standalone-live-page iframe {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: #fff;
+}
+
+.standalone-live-page-state {
+  display: grid;
+  min-height: 100vh;
+  place-items: center;
+  padding: var(--kr-sp-6);
+  background: var(--kr-bg-base);
+  color: var(--kr-text-secondary);
+  font: 500 var(--kr-fs-sm) var(--kr-font-sans);
+  text-align: center;
+}

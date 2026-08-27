@@ -86,6 +86,7 @@ const sampleProjects = [
 // token in the endpoint path so the variables editor renders pre-filled.
 const editApi: QuickApi = {
   id: 'qa-1',
+  pinned: false,
   name: 'Fetch a thing',
   icon: '📦',
   description: 'Fetches one thing by id',

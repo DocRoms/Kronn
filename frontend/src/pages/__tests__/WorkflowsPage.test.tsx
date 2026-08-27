@@ -24,6 +24,7 @@ const mockWorkflowsApi = vi.hoisted(() => ({
   deleteAllRuns: vi.fn(),
   cancelRun: vi.fn().mockResolvedValue({ run_cancelled: true, child_discs_cancelled: 0 }),
   triggerStream: vi.fn(),
+  importWorkflow: vi.fn(),
 }));
 
 // 0.8.2 — WorkflowsPage now uses useWebSocket() to listen for live
@@ -64,14 +65,17 @@ vi.mock('../../lib/api', () => ({
     history: vi.fn().mockResolvedValue([]),
     create: vi.fn(),
     update: vi.fn(),
+    setPinned: vi.fn(),
     delete: vi.fn(),
     batchRun: vi.fn(),
     exportQp: vi.fn(),
+    importQp: vi.fn(),
   },
   quickApis: {
     list: vi.fn().mockResolvedValue([]),
     create: vi.fn(),
     update: vi.fn(),
+    setPinned: vi.fn(),
     delete: vi.fn(),
     runQa: vi.fn(),
     exportQa: vi.fn(),
@@ -81,6 +85,7 @@ vi.mock('../../lib/api', () => ({
     list: vi.fn().mockResolvedValue([]),
     create: vi.fn(),
     update: vi.fn(),
+    setPinned: vi.fn(),
     delete: vi.fn(),
     run: vi.fn(),
     export: vi.fn(),
@@ -118,6 +123,7 @@ const defaultModelTiers = {
   copilot_cli: { economy: null, reasoning: null },
   ollama: { economy: null, reasoning: null },
   lite_llm: { economy: null, reasoning: null },
+  nvidia: { economy: null, reasoning: null },
 };
 
 const restrictedConfig: AgentsConfig = {
@@ -129,6 +135,7 @@ const restrictedConfig: AgentsConfig = {
   copilot_cli: { path: null, installed: false, version: null, full_access: false },
   ollama: { path: null, installed: false, version: null, full_access: false },
   lite_llm: { path: null, installed: false, version: null, full_access: false },
+  nvidia: { path: null, installed: false, version: null, full_access: false },
   model_tiers: defaultModelTiers,
 };
 
@@ -141,6 +148,7 @@ const fullConfig: AgentsConfig = {
   copilot_cli: { path: null, installed: false, version: null, full_access: false },
   ollama: { path: null, installed: false, version: null, full_access: false },
   lite_llm: { path: null, installed: false, version: null, full_access: false },
+  nvidia: { path: null, installed: false, version: null, full_access: false },
   model_tiers: defaultModelTiers,
 };
 
@@ -207,6 +215,7 @@ describe('WorkflowsPage', () => {
   it('opens a Quick Exec from the shared sidebar in the common detail area', async () => {
     const quickExec = {
       id: 'qe-aws', name: 'CloudWatch errors', icon: '⌘', description: 'Collecte les erreurs',
+      pinned: false,
       project_id: null, command: 'aws',
       args: ['logs', 'start-query', '--log-group-name', '/aws/caddy/production', '--query-string', 'fields @timestamp, @message | filter status >= 500 | sort @timestamp desc'],
       timeout_secs: 60,
@@ -244,6 +253,7 @@ describe('WorkflowsPage', () => {
   it('restores the selected automation and collapsed sidebar sections', async () => {
     const quickExec = {
       id: 'qe-persisted', name: 'Persistent CLI', icon: '⌘', description: 'Persists navigation',
+      pinned: false,
       project_id: null, command: 'aws', args: ['sts', 'get-caller-identity'], timeout_secs: 30,
       output_format: 'json', variables: [],
       created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z',
@@ -319,6 +329,7 @@ describe('WorkflowsPage', () => {
   it('opens a Quick Prompt editor directly while keeping its command actions', async () => {
     const quickPrompt: QuickPrompt = {
       id: 'qp-summary', name: 'Summarize release', icon: '✍️', description: 'Résumé de livraison',
+      pinned: false,
       prompt_template: 'Résume {{changes}}', project_id: null, agent: 'Codex', tier: 'default',
       variables: [{ name: 'changes', label: 'Changements', placeholder: '', description: null, required: true }],
       skill_ids: [], profile_ids: [], directive_ids: [],
@@ -512,11 +523,78 @@ describe('WorkflowsPage', () => {
       <WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig} />
     );
 
-    // Favorites group header renders, the pinned card appears BOTH there
-    // and in its project group (disc-sidebar mirror); the regular one once.
-    expect(screen.getByText('Favoris')).toBeInTheDocument();
-    expect(screen.getAllByText('Pinned WF')).toHaveLength(3);
+    // The pinned workflow appears in the unified sidebar's Favorites +
+    // Workflows sections and in the legacy card list's Favorites + project
+    // groups. The ordinary workflow appears once in each regular list.
+    expect(screen.getAllByText('Favoris')).toHaveLength(2);
+    expect(screen.getAllByText('Pinned WF')).toHaveLength(4);
     expect(screen.getAllByText('Regular WF')).toHaveLength(2);
+  });
+
+  it('keeps workflow favorites rendered in the unified sidebar while a detail is selected', async () => {
+    localStorage.setItem('kronn:automationNavigation', JSON.stringify({
+      tab: 'workflows',
+      resourceId: 'wf-pin',
+    }));
+    const summary: WorkflowSummary = {
+      id: 'wf-pin', name: 'Pinned detail', project_id: null, project_name: null,
+      trigger_type: 'manual', step_count: 1, misconfigured_step_count: 0,
+      enabled: true, pinned: true, last_run: null, created_at: '2026-01-01T00:00:00Z',
+    };
+    mockWorkflowsApi.list.mockResolvedValueOnce([summary]);
+    mockWorkflowsApi.get.mockResolvedValueOnce({
+      id: summary.id, name: summary.name, project_id: null,
+      trigger: { type: 'Manual' }, steps: [], actions: [],
+      safety: { sandbox: false, max_files: null, max_lines: null, require_approval: false },
+      workspace_config: null, concurrency_limit: null, enabled: true, pinned: true,
+      created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z',
+    } as Workflow);
+
+    await wrap(<WorkflowsPage projects={[]} />);
+
+    const sidebar = screen.getByRole('complementary', { name: 'Automatisation' });
+    expect(within(sidebar).getByRole('button', { name: /Favoris \(1\)/ })).toBeInTheDocument();
+    expect(within(sidebar).getAllByRole('button', { name: 'Ouvrir Pinned detail' })).toHaveLength(2);
+    expect(screen.getByTestId('workflow-detail-pane')).toBeInTheDocument();
+  });
+
+  it('groups pinned Quick API, Prompt and Exec resources and toggles them with one API shape', async () => {
+    const quickPrompt: QuickPrompt = {
+      id: 'qp-favorite', name: 'Prompt favori', icon: '✍️', prompt_template: 'Résume',
+      variables: [], agent: 'Codex', project_id: null, skill_ids: [], profile_ids: [],
+      directive_ids: [], tier: 'default', description: '', pinned: true,
+      created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z',
+    };
+    const quickApi: QuickApi = {
+      id: 'qa-favorite', name: 'API favorite', icon: '🔌', description: '', project_id: null,
+      api_plugin_slug: 'demo', api_config_id: 'cfg', api_endpoint_path: '/items',
+      variables: [], profile_ids: [], directive_ids: [], pinned: true,
+      created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z',
+    };
+    const quickExec: QuickExec = {
+      id: 'qe-favorite', name: 'Exec favori', icon: '⌘', description: '', project_id: null,
+      command: 'git', args: ['status'], timeout_secs: 30, output_format: 'text',
+      variables: [], pinned: true,
+      created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z',
+    };
+    vi.mocked(quickPromptsApi.list).mockResolvedValueOnce([quickPrompt]);
+    vi.mocked(quickApisApi.list).mockResolvedValueOnce([quickApi]);
+    vi.mocked(quickExecsApi.list).mockResolvedValueOnce([quickExec]);
+    mockWorkflowsApi.list.mockResolvedValueOnce([]);
+
+    await wrap(<WorkflowsPage projects={[]} installedAgentTypes={['Codex']} agentAccess={fullConfig} />);
+
+    const sidebar = screen.getByRole('complementary', { name: 'Automatisation' });
+    const favorites = sidebar.querySelector('.automation-favorites-section') as HTMLElement;
+    expect(within(favorites).getByRole('button', { name: /Favoris \(3\)/ })).toBeInTheDocument();
+    expect(within(favorites).getByRole('button', { name: 'Ouvrir API favorite' })).toBeInTheDocument();
+    expect(within(favorites).getByRole('button', { name: 'Ouvrir Prompt favori' })).toBeInTheDocument();
+    expect(within(favorites).getByRole('button', { name: 'Ouvrir Exec favori' })).toBeInTheDocument();
+
+    fireEvent.click(within(favorites).getByRole('button', {
+      name: 'Retirer des favoris · Prompt favori',
+    }));
+    await waitFor(() => expect(quickPromptsApi.setPinned).toHaveBeenCalledWith('qp-favorite', false));
   });
 
   it('the star toggle pins a workflow through the partial update', async () => {
@@ -532,7 +610,7 @@ describe('WorkflowsPage', () => {
     );
 
     await act(async () => {
-      fireEvent.click(screen.getByLabelText('Épingler en favori'));
+      fireEvent.click(screen.getByLabelText('Ajouter aux favoris'));
     });
     expect(mockWorkflowsApi.update).toHaveBeenCalledWith('wf-reg', { pinned: true });
   });
@@ -1191,6 +1269,7 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
   it('uses the workflow card hierarchy for Quick Prompts', async () => {
     const qp: QuickPrompt = {
       id: 'qp-release-notes',
+      pinned: false,
       name: 'Release notes',
       icon: '✍️',
       description: 'Prépare des notes de version claires et actionnables.',
@@ -1237,6 +1316,7 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
   it('filters Quick Prompts by agent without changing the selected sort', async () => {
     const qp = (id: string, name: string, agent: QuickPrompt['agent']): QuickPrompt => ({
       id,
+      pinned: false,
       name,
       icon: '✨',
       description: '',
@@ -1278,6 +1358,7 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
   it('changes a Quick Prompt agent and AI mode together from its card', async () => {
     const qp: QuickPrompt = {
       id: 'qp-agent-tier',
+      pinned: false,
       name: 'Review release',
       icon: '🔎',
       description: '',
@@ -1327,7 +1408,7 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
     ));
   });
 
-  it('offers AI-assisted creation and JSON import from the Quick APIs tab', async () => {
+  it('offers AI-assisted creation and global JSON import from the Quick APIs tab', async () => {
     const onNavigateDiscussion = vi.fn();
     vi.mocked(discussionsApi.create).mockResolvedValueOnce({ id: 'disc-qa-architect' } as never);
     vi.mocked(quickApisApi.importQa).mockResolvedValueOnce({ id: 'qa-imported' } as never);
@@ -1346,7 +1427,7 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
 
     expect(screen.getByRole('button', { name: 'Importer' })).toHaveAttribute(
       'title',
-      'Importe un Quick API exporté depuis Kronn (.json).',
+      expect.stringContaining('Le type est détecté automatiquement'),
     );
     await act(async () => {
       fireEvent.click(screen.getByRole('button', { name: /Créer avec l'IA/ }));
@@ -1363,8 +1444,10 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
     expect(onNavigateDiscussion).toHaveBeenCalledWith('disc-qa-architect');
 
     fireEvent.click(screen.getByRole('button', { name: 'Importer' }));
-    const modalTitle = screen.getByRole('heading', { name: 'Importer un Quick API' });
-    expect(modalTitle).toBeInTheDocument();
+    const globalModalTitle = screen.getByRole('heading', { name: 'Importer dans Automation' });
+    const modal = globalModalTitle.closest('.wf-import-modal');
+    expect(modal).not.toBeNull();
+    expect(globalModalTitle).toBeInTheDocument();
     expect(screen.getByText(/\.kronn-qa\.json/)).toBeInTheDocument();
 
     const content = JSON.stringify({
@@ -1383,9 +1466,8 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
       fireEvent.change(fileInput!, { target: { files: [file] } });
     });
     await waitFor(() => expect(screen.getByText('Imported QA')).toBeInTheDocument());
+    expect(screen.getByRole('heading', { name: 'Importer un Quick API' })).toBeInTheDocument();
 
-    const modal = modalTitle.closest('.wf-import-modal');
-    expect(modal).not.toBeNull();
     await act(async () => {
       fireEvent.click(within(modal as HTMLElement).getByRole('button', { name: 'Importer' }));
     });
@@ -1393,6 +1475,129 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
       content,
       project_id: null,
     }));
+  });
+
+  it('keeps the global importer available while an Automation resource is selected', async () => {
+    const qp: QuickPrompt = {
+      id: 'qp-selected', name: 'Selected prompt', icon: '🧪', description: '',
+      pinned: false,
+      prompt_template: 'Test', variables: [], agent: 'ClaudeCode', project_id: null,
+      skill_ids: [], profile_ids: [], directive_ids: [], tier: 'default', agent_settings: null,
+      created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z',
+    };
+    vi.mocked(quickPromptsApi.list).mockResolvedValueOnce([qp]);
+
+    await wrap(<WorkflowsPage projects={[]} installedAgentTypes={[]} agentAccess={fullConfig} />);
+    fireEvent.click(screen.getByRole('button', { name: /Quick Prompts \(1\)/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Ouvrir Selected prompt' }));
+
+    expect(screen.getByRole('button', { name: 'Importer' })).toBeInTheDocument();
+  });
+
+  it('routes Quick Prompt and Quick Exec files through their existing import APIs', async () => {
+    vi.mocked(quickPromptsApi.importQp).mockResolvedValueOnce({ id: 'qp-imported' } as never);
+    vi.mocked(quickExecsApi.import).mockResolvedValueOnce({ id: 'qe-imported' } as never);
+    const { container } = await wrap(
+      <WorkflowsPage projects={[]} installedAgentTypes={[]} agentAccess={fullConfig} />,
+    );
+
+    const importFile = async (content: string, filename: string, expectedTitle: string) => {
+      fireEvent.click(screen.getByRole('button', { name: 'Importer' }));
+      const file = new File([content], filename, { type: 'application/json' });
+      Object.defineProperty(file, 'text', { value: vi.fn().mockResolvedValue(content) });
+      await act(async () => {
+        fireEvent.change(container.querySelector<HTMLInputElement>('input[type="file"]')!, {
+          target: { files: [file] },
+        });
+      });
+      const modal = screen.getByRole('heading', { name: expectedTitle }).closest('.wf-import-modal');
+      await act(async () => {
+        fireEvent.click(within(modal as HTMLElement).getByRole('button', { name: 'Importer' }));
+      });
+    };
+
+    const qpContent = JSON.stringify({
+      kind: 'kronn.quick_prompt', quick_prompt: { name: 'Imported prompt', variables: [] },
+    });
+    await importFile(qpContent, 'prompt.json', 'Importer un Quick Prompt');
+    await waitFor(() => expect(quickPromptsApi.importQp).toHaveBeenCalledWith({
+      content: qpContent,
+      project_id: null,
+    }));
+
+    const qeContent = JSON.stringify({
+      kind: 'kronn.quick_exec', quick_exec: { name: 'Imported exec', variables: [] },
+    });
+    await importFile(qeContent, 'exec.json', 'Importer un Quick Exec');
+    await waitFor(() => expect(quickExecsApi.import).toHaveBeenCalledWith({
+      content: qeContent,
+      project_id: null,
+    }));
+  });
+
+  it('shows explicit errors for invalid and ambiguous Automation exports', async () => {
+    const { container } = await wrap(
+      <WorkflowsPage projects={[]} installedAgentTypes={[]} agentAccess={fullConfig} />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Importer' }));
+    const input = container.querySelector<HTMLInputElement>('input[type="file"]')!;
+
+    const invalidContent = JSON.stringify({ kind: 'kronn.unknown', item: {} });
+    const invalidFile = new File([invalidContent], 'invalid.json', { type: 'application/json' });
+    Object.defineProperty(invalidFile, 'text', { value: vi.fn().mockResolvedValue(invalidContent) });
+    await act(async () => {
+      fireEvent.change(input, { target: { files: [invalidFile] } });
+    });
+    expect(await screen.findByText(/Export Kronn non pris en charge/)).toBeInTheDocument();
+
+    const ambiguousContent = JSON.stringify({
+      kind: 'kronn.workflow',
+      workflow: { name: 'Workflow' },
+      quick_exec: { name: 'Exec' },
+    });
+    const ambiguousFile = new File([ambiguousContent], 'ambiguous.json', { type: 'application/json' });
+    Object.defineProperty(ambiguousFile, 'text', { value: vi.fn().mockResolvedValue(ambiguousContent) });
+    await act(async () => {
+      fireEvent.change(input, { target: { files: [ambiguousFile] } });
+    });
+    expect(await screen.findByText(/Export Kronn ambigu/)).toBeInTheDocument();
+  });
+
+  it('dispatches the Pages capability reconciliation after a workflow import', async () => {
+    mockWorkflowsApi.importWorkflow.mockResolvedValueOnce({ id: 'wf-imported' });
+    mockWorkflowsApi.get.mockResolvedValueOnce({
+      id: 'wf-imported', name: 'Imported workflow', project_id: null,
+      trigger: { type: 'Manual' }, steps: [], actions: [], variables: [], enabled: false,
+      pinned: false, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z',
+    });
+    const activated = vi.fn();
+    window.addEventListener('kronn:pages-activated', activated, { once: true });
+
+    const { container } = await wrap(
+      <WorkflowsPage projects={[]} installedAgentTypes={[]} agentAccess={fullConfig} />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Importer' }));
+    const content = JSON.stringify({
+      kind: 'kronn.workflow',
+      version: 3,
+      workflow: { name: 'Imported workflow', steps: [] },
+      referenced_pages: [{ id: 'page-old', slug: 'ops', title: 'Ops', html: '<main />', datasets: [] }],
+    });
+    const file = new File([content], 'workflow.json', { type: 'application/json' });
+    Object.defineProperty(file, 'text', { value: vi.fn().mockResolvedValue(content) });
+    await act(async () => {
+      fireEvent.change(container.querySelector<HTMLInputElement>('input[type="file"]')!, {
+        target: { files: [file] },
+      });
+    });
+    const modal = screen.getByRole('heading', { name: 'Importer un workflow' }).closest('.wf-import-modal');
+    await act(async () => {
+      fireEvent.click(within(modal as HTMLElement).getByRole('button', { name: 'Importer' }));
+    });
+
+    await waitFor(() => expect(activated).toHaveBeenCalledOnce());
+    expect(mockWorkflowsApi.importWorkflow).toHaveBeenCalledWith({ content, project_id: null });
+    window.removeEventListener('kronn:pages-activated', activated);
   });
 
   it('groups Quick APIs by API and sorts each group by endpoint', async () => {
@@ -1403,6 +1608,7 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
       endpoint: string,
     ): QuickApi => ({
       id,
+      pinned: false,
       name,
       icon: '⚡',
       description: '',

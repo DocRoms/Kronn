@@ -282,6 +282,7 @@ export function PlanningPage({
                 <li>{t('contextHelp.planning.global')}</li>
                 <li>{t('contextHelp.planning.discussions')}</li>
                 <li>{t('contextHelp.planning.priority')}</li>
+                <li>{t('contextHelp.planning.orchestration')}</li>
               </ul>
               <p className="kr-context-help-agent-note">{t('contextHelp.planning.mcp')}</p>
             </ContextHelp>

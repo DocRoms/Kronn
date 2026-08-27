@@ -29,6 +29,8 @@ const cli = (id: number, agent_type: string, cli_ordinal: number | null = null):
   wake_mode: 'external_poll',
   next_poll_at: null,
   last_write_at: null,
+  resume_reason: null,
+  resume_since: null,
   model: null,
   conversation_id: null,
 });

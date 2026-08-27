@@ -385,6 +385,20 @@ select.input option {
   background: var(--kr-warning);
 }
 
+.disc-participant-presence-dot[data-presence="resume_expected"] {
+  background: var(--kr-info);
+}
+
+.disc-participant-presence-dot[data-presence="stalled"] {
+  background: var(--kr-danger);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--kr-danger) 20%, transparent);
+}
+
+.disc-participant-presence-dot[data-presence="quota_exhausted"] {
+  background: var(--kr-warning);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--kr-warning) 24%, transparent);
+}
+
 .disc-participant-running {
   flex-shrink: 0;
   color: var(--kr-success);

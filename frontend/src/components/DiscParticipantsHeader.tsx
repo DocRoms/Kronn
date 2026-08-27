@@ -61,6 +61,8 @@ interface ParticipantRow {
   wake_mode?: 'native_dispatch' | 'external_poll';
   next_poll_at?: string | null;
   last_write_at?: string | null;
+  resume_reason?: string | null;
+  resume_since?: string | null;
 }
 
 // Presence thresholds live in `lib/discPresence.ts` (pure, unit-tested);
@@ -99,6 +101,9 @@ function presenceLabel(
 ): string {
   if (participant.status === 'paused') return t('disc.presencePaused');
   if (state === 'running') return t('disc.presenceRunning');
+  if (state === 'resume_expected') return t('disc.presenceResumeExpected');
+  if (state === 'stalled') return t('disc.presenceStalled');
+  if (state === 'quota_exhausted') return t('disc.presenceQuotaExhausted');
   if (state === 'listening') {
     return participant.activity === 'reading'
       ? t('disc.activityReading')
@@ -353,7 +358,7 @@ export function DiscParticipantsHeader({ discId, toast, t }: DiscParticipantsHea
             </header>
             <div className="disc-participant-details-meta">
               <span>{selectedParticipant.role}</span>
-              <span>{t('disc.targetCli')}</span>
+              <span>{selectedParticipant.wake_mode === 'native_dispatch' ? t('disc.targetNative') : t('disc.targetCli')}</span>
             </div>
             <dl>
               <div>
@@ -364,6 +369,18 @@ export function DiscParticipantsHeader({ discId, toast, t }: DiscParticipantsHea
                 <div>
                   <dt>{t('disc.participantModel')}</dt>
                   <dd className="disc-participant-model">{selectedParticipant.model}</dd>
+                </div>
+              )}
+              {selectedParticipant.resume_reason && (
+                <div>
+                  <dt>{t('disc.resumeReason')}</dt>
+                  <dd>{selectedParticipant.resume_reason}</dd>
+                </div>
+              )}
+              {selectedParticipant.resume_since && (
+                <div>
+                  <dt>{t('disc.resumeSince')}</dt>
+                  <dd>{new Date(selectedParticipant.resume_since).toLocaleString()}</dd>
                 </div>
               )}
             </dl>

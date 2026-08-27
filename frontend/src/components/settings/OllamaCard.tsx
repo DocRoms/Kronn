@@ -9,7 +9,7 @@
 import { useState, useEffect, useCallback, type ReactNode } from 'react';
 import { ollama as ollamaApi, config as configApi } from '../../lib/api';
 import type { OllamaHealthResponse, OllamaModel, ModelTiersConfig } from '../../types/generated';
-import { RefreshCw, ExternalLink, Download, AlertTriangle, Loader2 } from 'lucide-react';
+import { RefreshCw, ExternalLink, Download, AlertTriangle, Loader2, Save, RotateCcw } from 'lucide-react';
 import { SUGGESTED_MODELS } from './ollamaModels';
 import '../../pages/SettingsPage.css';
 
@@ -17,6 +17,18 @@ interface OllamaCardProps {
   t: (key: string, ...args: (string | number)[]) => string;
   modelCostSuffix?: (model: string) => string;
   headerAccessory?: ReactNode;
+}
+
+interface ContextFeedback {
+  warnings: string[];
+  error?: string;
+}
+
+const CONTEXT_FLOOR = 2_048;
+const CONTEXT_OVERRIDE_MAX = 1_048_576;
+
+function formatContextTokens(value: number | null): string {
+  return value == null ? '—' : value.toLocaleString();
 }
 
 // Hardware tier of a suggested model — drives a badge so users don't pull a
@@ -51,6 +63,16 @@ export function OllamaCard({ t, modelCostSuffix, headerAccessory }: OllamaCardPr
   const [tiers, setTiers] = useState<ModelTiersConfig | null>(null);
   // Which tier row is mid-save (disables just that <select>).
   const [savingTier, setSavingTier] = useState<'economy' | 'default' | 'reasoning' | null>(null);
+  const [contextDrafts, setContextDrafts] = useState<Record<string, string>>({});
+  const [savingContext, setSavingContext] = useState<string | null>(null);
+  const [contextFeedback, setContextFeedback] = useState<Record<string, ContextFeedback>>({});
+
+  const syncModels = useCallback((nextModels: OllamaModel[]) => {
+    setModels(nextModels);
+    setContextDrafts(Object.fromEntries(
+      nextModels.map(model => [model.name, model.context_override?.toString() ?? '']),
+    ));
+  }, []);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -65,16 +87,16 @@ export function OllamaCard({ t, modelCostSuffix, headerAccessory }: OllamaCardPr
       }
       if (h.status === 'online') {
         const m = await ollamaApi.models();
-        setModels(m.models);
+        syncModels(m.models);
       } else {
-        setModels([]);
+        syncModels([]);
       }
     } catch {
       setHealth({ status: 'offline', version: null, endpoint: '', models_count: 0, hint: null });
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [syncModels]);
 
   useEffect(() => {
     let active = true;
@@ -88,9 +110,9 @@ export function OllamaCard({ t, modelCostSuffix, headerAccessory }: OllamaCardPr
         if (nextTiers) setTiers(nextTiers);
         if (nextHealth.status === 'online') {
           const nextModels = await ollamaApi.models();
-          if (active) setModels(nextModels.models);
+          if (active) syncModels(nextModels.models);
         } else {
-          setModels([]);
+          syncModels([]);
         }
       })
       .catch(() => {
@@ -102,7 +124,7 @@ export function OllamaCard({ t, modelCostSuffix, headerAccessory }: OllamaCardPr
         if (active) setLoading(false);
       });
     return () => { active = false; };
-  }, []);
+  }, [syncModels]);
 
   // Assign an installed model to a tier (economy/default/reasoning) — ISO with
   // the per-tier picking every other agent gets in AgentsSection. `null` clears
@@ -132,6 +154,60 @@ export function OllamaCard({ t, modelCostSuffix, headerAccessory }: OllamaCardPr
       setSavingTier(null);
     }
   }, [tiers]);
+
+  const saveContextOverride = useCallback(async (model: OllamaModel, reset = false) => {
+    const raw = contextDrafts[model.name]?.trim() ?? '';
+    const parsed = Number(raw);
+    if (!reset && (
+      raw === '' || !Number.isInteger(parsed)
+      || parsed < CONTEXT_FLOOR || parsed > CONTEXT_OVERRIDE_MAX
+    )) {
+      setContextFeedback(prev => ({
+        ...prev,
+        [model.name]: { warnings: [], error: t('ollama.contextInvalid') },
+      }));
+      return;
+    }
+    const value = reset ? null : parsed;
+
+    setSavingContext(model.name);
+    setContextFeedback(prev => ({ ...prev, [model.name]: { warnings: [] } }));
+    try {
+      const result = await ollamaApi.setContextOverride(model.name, value);
+      try {
+        const refreshed = await ollamaApi.models();
+        syncModels(refreshed.models);
+      } catch {
+        // The mutation is already durable. Keep the UI honest even if the
+        // follow-up probe temporarily fails; the Refresh button can recover
+        // trained-window/origin details later.
+        setModels(prev => prev.map(item => item.name === model.name ? {
+          ...item,
+          context_override: result.num_ctx,
+          context_ceiling: result.num_ctx ?? item.context_ceiling,
+          context_origin: result.num_ctx == null ? 'refresh_required' : 'model_override',
+        } : item));
+        setContextDrafts(prev => ({
+          ...prev,
+          [model.name]: result.num_ctx?.toString() ?? '',
+        }));
+      }
+      setContextFeedback(prev => ({
+        ...prev,
+        [model.name]: { warnings: result.warnings },
+      }));
+    } catch (error) {
+      setContextFeedback(prev => ({
+        ...prev,
+        [model.name]: {
+          warnings: [],
+          error: error instanceof Error ? error.message : t('ollama.contextSaveFailed'),
+        },
+      }));
+    } finally {
+      setSavingContext(null);
+    }
+  }, [contextDrafts, syncModels, t]);
 
   const statusColor = health?.status === 'online'
     ? 'var(--kr-success)'
@@ -284,6 +360,82 @@ export function OllamaCard({ t, modelCostSuffix, headerAccessory }: OllamaCardPr
               {/* Bench-based guidance (2026-07) — which local model fits which
                   job, so users don't put a weak model on a demanding step. */}
               <div className="set-ollama-tier-guidance">💡 {t('ollama.tierGuidance')}</div>
+              <details className="set-ollama-context-section">
+                <summary className="set-ollama-context-summary text-xs text-muted">
+                  {t('ollama.contextTitle')}
+                </summary>
+                <div className="set-ollama-context-list">
+                  {models.map(model => {
+                    const feedback = contextFeedback[model.name];
+                    const isSaving = savingContext === model.name;
+                    return (
+                      <div className="set-ollama-context-card" key={model.name}>
+                        <div className="set-ollama-context-head">
+                          <code className="set-ollama-model-name">{model.name}</code>
+                          <span className="text-2xs text-muted">{model.size}</span>
+                        </div>
+                        <div className="set-ollama-context-metrics">
+                          <span>{t('ollama.contextAdvertised')} <strong>{formatContextTokens(model.advertised_context)}</strong></span>
+                          <span>{t('ollama.contextCeiling')} <strong>{formatContextTokens(model.context_ceiling)}</strong></span>
+                          <span>{t('ollama.contextOriginLabel')} <strong>{t(`ollama.contextOrigin.${model.context_origin}`)}</strong></span>
+                        </div>
+                        {model.context_origin === 'portable_fallback' && (
+                          <div className="set-ollama-context-alert" role="alert">
+                            <AlertTriangle size={12} />
+                            <span>{t('ollama.contextFallbackWarning')}</span>
+                          </div>
+                        )}
+                        <div className="set-ollama-context-editor">
+                          <label htmlFor={`ollama-context-${model.name}`}>{t('ollama.contextOverride')}</label>
+                          <input
+                            id={`ollama-context-${model.name}`}
+                            type="number"
+                            min={CONTEXT_FLOOR}
+                            max={CONTEXT_OVERRIDE_MAX}
+                            step={1024}
+                            value={contextDrafts[model.name] ?? ''}
+                            placeholder={t('ollama.contextAuto')}
+                            disabled={isSaving}
+                            aria-label={t('ollama.contextOverrideFor', model.name)}
+                            onChange={event => setContextDrafts(prev => ({
+                              ...prev,
+                              [model.name]: event.target.value,
+                            }))}
+                          />
+                          <button
+                            type="button"
+                            className="set-ollama-context-action"
+                            disabled={isSaving}
+                            onClick={() => saveContextOverride(model)}
+                          >
+                            {isSaving ? <Loader2 size={11} className="spin" /> : <Save size={11} />}
+                            {t('ollama.contextSave')}
+                          </button>
+                          <button
+                            type="button"
+                            className="set-ollama-context-action"
+                            disabled={isSaving || model.context_override == null}
+                            onClick={() => saveContextOverride(model, true)}
+                          >
+                            <RotateCcw size={11} />
+                            {t('ollama.contextReset')}
+                          </button>
+                        </div>
+                        {feedback?.error && (
+                          <div className="set-ollama-context-error" role="alert">{feedback.error}</div>
+                        )}
+                        {feedback?.warnings.map(warning => (
+                          <div className="set-ollama-context-alert" role="alert" key={warning}>
+                            <AlertTriangle size={12} />
+                            <span>{warning}</span>
+                          </div>
+                        ))}
+                      </div>
+                    );
+                  })}
+                </div>
+                <p className="set-ollama-context-hint">{t('ollama.contextHint')}</p>
+              </details>
               <div className="set-ollama-pull-hint">
                 <span className="text-2xs text-muted">
                   {t('ollama.tierPickerHint')}

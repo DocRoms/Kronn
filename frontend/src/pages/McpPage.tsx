@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { mcps as mcpsApi } from '../lib/api';
+import { mcps as mcpsApi, apiCallLogs, type EndpointDrift } from '../lib/api';
 import { useT } from '../lib/I18nContext';
 import { useToast } from '../hooks/useToast';
 import { useAsyncGuard } from '../hooks/useAsyncGuard';
@@ -20,7 +20,7 @@ import { SecretField } from '../components/SecretField';
 import {
   Puzzle, Plus, Trash2, Eye, Check, RefreshCw, Square, CheckSquare, Minus,
   X, Key, Pencil, FileText, ExternalLink, Save, Search,
-  Plug, Globe, Info, Sparkles, Upload, Download, ChevronRight, Terminal,
+  Plug, Globe, Info, Sparkles, Upload, Download, ChevronRight, Terminal, AlertTriangle,
 } from 'lucide-react';
 import { HostSyncChip } from '../components/HostSyncChip';
 import { HostSyncPreview } from '../components/HostSyncPreview';
@@ -59,6 +59,12 @@ import { MatrixText } from '../components/MatrixText';
 import './McpPage.css';
 
 const slugify = (label: string) => label.toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+
+const hasAgentScope = (
+  isGlobal: boolean,
+  includeGeneral: boolean,
+  projectIds: string[],
+) => isGlobal || includeGeneral || projectIds.length > 0;
 
 /** Placeholder hints for common MCP env vars — helps non-dev users understand what to enter */
 const ENV_PLACEHOLDERS: Record<string, string> = {
@@ -151,7 +157,7 @@ interface McpPageProps {
 
 export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initialSelectedConfigId, installedAgentTypes, configLanguage }: McpPageProps) {
   const { t } = useT();
-  const { toast } = useToast();
+  const { toast, ToastContainer } = useToast();
   const [editingLabelId, setEditingLabelId] = useState<string | null>(null);
   const [editingLabelText, setEditingLabelText] = useState('');
   const [showAddMcp, setShowAddMcp] = useState(false);
@@ -266,6 +272,25 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
     } catch { /* localStorage disabled (incognito / quota) — sort defaults to A→Z on next load */ }
   }, [mcpSortReversed]);
   const [selectedConfigId, setSelectedConfigId] = useState<string | null>(initialSelectedConfigId ?? null);
+  // Endpoints that keep failing, grouped by plugin. A spec is written once and
+  // never re-checked against the API, so when it drifts nothing says so — this
+  // reads the call log Kronn already keeps. Failure to load is not worth an
+  // error: the page works without it.
+  const [driftBySlug, setDriftBySlug] = useState<Record<string, EndpointDrift[]>>({});
+  useEffect(() => {
+    let cancelled = false;
+    void apiCallLogs.drift()
+      .then(rows => {
+        if (cancelled) return;
+        const grouped: Record<string, EndpointDrift[]> = {};
+        for (const row of rows ?? []) {
+          (grouped[row.plugin_slug] ??= []).push(row);
+        }
+        setDriftBySlug(grouped);
+      })
+      .catch(() => { /* advisory only */ });
+    return () => { cancelled = true; };
+  }, []);
   const [probeByConfig, setProbeByConfig] = useState<Record<string, McpProbeResponse>>({});
   const [probingConfigId, setProbingConfigId] = useState<string | null>(null);
   // The detail panel is viewport-fixed, so it must start below whatever chrome
@@ -881,11 +906,31 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
   };
 
   const handleToggleConfigGlobal = async (config: McpConfigDisplay) => {
+    const nextGlobal = !config.is_global;
+    if (!hasAgentScope(nextGlobal, config.include_general, config.project_ids)) {
+      toast(t('mcp.scopeRequired'), 'warning');
+      return;
+    }
     try {
-      await mcpsApi.updateConfig(config.id, { is_global: !config.is_global });
+      await mcpsApi.updateConfig(config.id, { is_global: nextGlobal });
       refetchMcps();
     } catch (e) {
       console.warn('Failed to toggle global:', e);
+      toast(t('common.actionFailed', userError(e)), 'error');
+    }
+  };
+
+  const handleToggleConfigGeneral = async (config: McpConfigDisplay) => {
+    const nextGeneral = !config.include_general;
+    if (!hasAgentScope(config.is_global, nextGeneral, config.project_ids)) {
+      toast(t('mcp.scopeRequired'), 'warning');
+      return;
+    }
+    try {
+      await mcpsApi.updateConfig(config.id, { include_general: nextGeneral });
+      refetchMcps();
+    } catch (e) {
+      console.warn('Failed to toggle general scope:', e);
       toast(t('common.actionFailed', userError(e)), 'error');
     }
   };
@@ -920,6 +965,10 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
     const newIds = currentlyLinked
       ? config.project_ids.filter(id => id !== projectId)
       : [...config.project_ids, projectId];
+    if (!hasAgentScope(config.is_global, config.include_general, newIds)) {
+      toast(t('mcp.scopeRequired'), 'warning');
+      return;
+    }
     try {
       await mcpsApi.setConfigProjects(configId, { project_ids: newIds });
       refetchMcps();
@@ -1551,6 +1600,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
     // While the detail panel is open the page reserves its width so cards
     // reflow beside it instead of sitting hidden underneath.
     <div className={selectedConfigId ? 'mcp-page-with-panel' : undefined}>
+      <ToastContainer />
       {/* 0.8.6 (#33 fix 2026-05-21) — Custom plugin export modal.
           Renders unconditionally at the top so it survives navigation
           inside McpPage (detail panel state can flip while the modal
@@ -2249,6 +2299,11 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
               const cfgServer = mcpOverview.servers.find(s => s.id === cfg.server_id);
               const cfgKind = kindForServer(cfg.server_id);
               const supportsHostSync = cfgKind !== 'api';
+              const hasVisibleScope = hasAgentScope(
+                cfg.is_global,
+                cfg.include_general,
+                cfg.project_ids,
+              );
 
               const card = (
                 <button
@@ -2282,7 +2337,16 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                       ? <span className="mcp-scope-badge mcp-scope-global">Global</span>
                       : linkedProjects > 0
                         ? <span className="mcp-scope-badge mcp-scope-projects">{linkedProjects} {linkedProjects > 1 ? t('mcp.projectPlural') : t('mcp.project')}</span>
-                        : <span className="mcp-scope-badge mcp-scope-none">{t('wiz.noProject')}</span>
+                        : cfg.include_general
+                          ? <span className="mcp-scope-badge mcp-scope-general">{t('mcp.general')}</span>
+                          : (
+                            <span
+                              className="mcp-scope-badge mcp-scope-orphan"
+                              title={t('mcp.scopeOrphanTitle')}
+                            >
+                              <AlertTriangle size={10} /> {t('mcp.scopeOrphanShort')}
+                            </span>
+                          )
                     }
                     {cfg.env_keys.length > 0 && (
                       <span className="mcp-installed-keys"><Key size={10} /> {cfg.env_keys.length}</span>
@@ -2297,6 +2361,31 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                         ⚠ {t(cfg.registry_drift.orphaned ? 'mcp.registryOrphanShort' : 'mcp.registryDriftShort')}
                       </span>
                     )}
+                    {(() => {
+                      // Observed failures, not a verdict: an endpoint can fail
+                      // because the API had an outage. The wording separates
+                      // "never succeeded" (the endpoint is wrong) from "succeeds
+                      // too" (the declared parameters are), because the fix
+                      // differs — and names the endpoint so it can be checked.
+                      const drifting = driftBySlug[cfg.server_id] ?? [];
+                      if (drifting.length === 0) return null;
+                      const worst = drifting[0];
+                      const key = worst.successes > 0 ? 'mcp.drift.sometimes' : 'mcp.drift.never';
+                      return (
+                        <span
+                          className="mcp-scope-badge mcp-scope-drift"
+                          data-testid={`mcp-endpoint-drift-${cfg.server_id}`}
+                          title={t(
+                            key,
+                            worst.failures,
+                            worst.endpoint_path,
+                            `HTTP ${worst.http_status}`,
+                          )}
+                        >
+                          ⚠ {t('mcp.drift.short')}
+                        </span>
+                      );
+                    })()}
                   </div>
 
                   <div className="mcp-plugin-card-footer">
@@ -2719,9 +2808,24 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                     })()}
                     <div className="mcp-detail-section">
                       <h3 className="mcp-detail-section-title">{t('mcp.scope')}</h3>
+                      {!hasVisibleScope && (
+                        <div className="mcp-scope-orphan-warning" role="alert">
+                          <AlertTriangle size={16} aria-hidden="true" />
+                          <span>
+                            <strong>{t('mcp.scopeOrphanTitle')}</strong>
+                            <small>{t('mcp.scopeOrphanBody')}</small>
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => void handleToggleConfigGeneral(cfg)}
+                          >
+                            {t('mcp.scopeRepairGeneral')}
+                          </button>
+                        </div>
+                      )}
                       <div className="mcp-toggle-row">
                         <span className={`mcp-toggle-label mcp-toggle-global${cfg.is_global ? ' mcp-toggle-global-active' : ''}`} onClick={() => handleToggleConfigGlobal(cfg)} title={cfg.is_global ? t('mcp.disableGlobal') : t('mcp.enableGlobal')}>Global</span>
-                        <span className={`mcp-toggle-label mcp-toggle-general${cfg.include_general ? ' mcp-toggle-general-active' : ''}`} onClick={async () => { try { await mcpsApi.updateConfig(cfg.id, { include_general: !cfg.include_general }); refetchMcps(); } catch (e) { console.warn(e); } }} title={cfg.include_general ? t('mcp.disableGeneral') : t('mcp.enableGeneral')}>{t('mcp.general')}</span>
+                        <span className={`mcp-toggle-label mcp-toggle-general${cfg.include_general ? ' mcp-toggle-general-active' : ''}`} onClick={() => void handleToggleConfigGeneral(cfg)} title={cfg.include_general ? t('mcp.disableGeneral') : t('mcp.enableGeneral')}>{t('mcp.general')}</span>
                       </div>
                       <div className="mcp-toggle-row">
                         {(() => {

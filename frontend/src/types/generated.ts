@@ -131,6 +131,13 @@ error: string | null, };
 
 export type AgentConfig = { path: string | null, installed: boolean, version: string | null, full_access: boolean,
 /**
+ * How many runs of THIS agent may execute at once. `None` takes the
+ * built-in default for its family. A remote HTTP provider parallelises
+ * fine and is left unlimited; a local one is not — Ollama serves a single
+ * inference slot, so extra runs only queue and throw away its KV cache.
+ */
+concurrency?: number | null,
+/**
  * Optional UI color used for this agent's canonical `@mention`.
  * `None` keeps the built-in frontend color.
  */
@@ -238,7 +245,19 @@ token_estimate: number, };
 
 export type AgentProjectUsage = { project_id: string, project_name: string, tokens_used: number, message_count: number, };
 
-export type AgentsConfig = { claude_code: AgentConfig, codex: AgentConfig, gemini_cli: AgentConfig, kiro: AgentConfig, vibe: AgentConfig, copilot_cli: AgentConfig, ollama: AgentConfig, lite_llm: AgentConfig,
+export type AgentResumeFailureKind = "command_failed" | "backend_restarted" | "dispatch_stalled" | "quota_exhausted" | "runtime_unavailable";
+
+export type AgentResumeJobKind = "command" | "wake";
+
+export type AgentResumeJobStatus = "pending" | "running" | "completed" | "failed" | "cancelled" | "quota_exhausted" | "escalated";
+
+/**
+ * Redacted, bounded state exposed to agents and the attention UI. The command
+ * snapshot and variable values intentionally remain backend-only.
+ */
+export type AgentResumeJobView = { id: string, discussion_id: string, target_agent: AgentType, source_dispatch_job_id: string | null, task_execution_id: string | null, quick_exec_id: string | null, kind: AgentResumeJobKind, status: AgentResumeJobStatus, reason: string, scheduled_at: string, chain_depth: number, wake_budget: number, watchdog_redispatches: number, completion_dispatch_id: string | null, result: QuickExecResult | null, failure_kind: AgentResumeFailureKind | null, started_at: string | null, completed_at: string | null, last_error: string | null, created_at: string, updated_at: string, };
+
+export type AgentsConfig = { claude_code: AgentConfig, codex: AgentConfig, gemini_cli: AgentConfig, kiro: AgentConfig, vibe: AgentConfig, copilot_cli: AgentConfig, ollama: AgentConfig, lite_llm: AgentConfig, nvidia: AgentConfig,
 /**
  * Per-agent model tier overrides (Economy/Reasoning model names).
  */
@@ -254,7 +273,7 @@ model?: string | null,
  */
 tier?: ModelTier | null, reasoning_effort?: string | null, max_tokens?: number | null, };
 
-export type AgentType = "ClaudeCode" | "Codex" | "Vibe" | "GeminiCli" | "Kiro" | "CopilotCli" | "Ollama" | "LiteLlm" | "Custom";
+export type AgentType = "ClaudeCode" | "Codex" | "Vibe" | "GeminiCli" | "Kiro" | "CopilotCli" | "Ollama" | "LiteLlm" | "Nvidia" | "Custom";
 
 export type AgentUsageSummary = { agent_type: string, total_tokens: number, message_count: number, by_project: Array<AgentProjectUsage>, };
 
@@ -670,6 +689,25 @@ export type AutoTriggers = { common?: Array<string>,
  */
 locales?: Record<string, string[]>, };
 
+export type BatchCompareAiEvaluation = { score: number, confidence: number, positives: Array<string>, negatives: Array<string>, contract_violations: Array<string>, judge_run_id: string, judge_agent: AgentType, judge_tier: ModelTier, judge_model: string | null, judge_duration_ms: number | null, judge_tokens_used: number | null, rubric_version: string, judged_at: string, };
+
+export type BatchCompareDetails = { run_id: string, prompt_compatibility: ComparePromptCompatibility, improvement_availability: CompareImprovementAvailability, evaluations: Array<BatchCompareEvaluation>, latest_judge_run: BatchCompareJudgeRun | null, };
+
+export type BatchCompareEvaluation = { discussion_id: string, manual_score: number | null, manual_updated_at: string | null, ai: BatchCompareAiEvaluation | null, };
+
+export type BatchCompareJudgeRun = { id: string, status: string, judge_agent: AgentType, judge_tier: ModelTier,
+/**
+ * True when the selected judge agent also produced one of the candidate
+ * answers. The verdict remains usable but the UI must expose the bias.
+ */
+self_evaluation: boolean, judge_model: string | null, judge_discussion_id: string | null, rubric_version: string, prompt_review: BatchComparePromptReview | null, error: string | null, tokens_used: number | null, duration_ms: number | null, started_at: string, finished_at: string | null, };
+
+export type BatchComparePromptFinding = { text: string, affects: BatchComparePromptImpact, };
+
+export type BatchComparePromptImpact = "all" | "some";
+
+export type BatchComparePromptReview = { worth_improving: boolean, strengths: Array<string>, weaknesses: Array<BatchComparePromptFinding>, recommendations: Array<BatchComparePromptFinding>, };
+
 /**
  * 0.6.0 — payload for `POST /api/quick-apis/:id/batch`. Fan-out the same
  * QA over a list of items (sub-domains, ticket keys, languages, etc.)
@@ -708,7 +746,7 @@ status: string, duration_ms: number, envelope: JsonValue | null, error: string |
  * batch group ("↗ run #3 de Recap hebdo") so users can trace a batch back
  * to the workflow that spawned it.
  */
-export type BatchRunSummary = { run_id: string, batch_name: string | null, batch_total: number, status: RunStatus,
+export type BatchRunSummary = { run_id: string, batch_name: string | null, batch_total: number, batch_completed: number, batch_failed: number, batch_no_response: number, status: RunStatus,
 /**
  * Id + name of the Quick Prompt that this batch fans out. Resolved from
  * the batch run's virtual `qp:<id>` workflow_id prefix. Used by the
@@ -730,6 +768,17 @@ parent_workflow_id: string | null, parent_workflow_name: string | null,
  * workflow (ordered by started_at). None for manual batches.
  */
 parent_run_sequence: number | null, };
+
+/**
+ * Structured discriminant for a non-terminal `Blocked` TaskExecution (KT-328). A
+ * `Blocked` row also carries a human-readable `blocked_reason`, but a consumer
+ * classifies the hold on THIS code — never by matching prose (KT-334 owns the
+ * attention-center split). New codes are added here without a schema migration (the
+ * column has no SQL CHECK); the strict `FromStr` is the domain guard, so a corrupt
+ * value surfaces instead of being silently coerced. Variant names serialize to the
+ * exact DB strings (snake_case) so `as_str` and the enum stay in lockstep.
+ */
+export type BlockedReasonCode = "awaiting_worker_acceptance" | "worker_session_committed_elsewhere";
 
 export type BootstrapProjectRequest = { name: string, description: string, agent: AgentType, mcp_config_ids?: Array<string>, skill_ids?: Array<string>, };
 
@@ -882,6 +931,23 @@ dod_progress: string | null, };
 
 export type BundleWorkflowCreated = { id: string, name: string, };
 
+export type CampaignTaskCandidate = { task: PlanningTaskSummary, plan_position: number, launchable: boolean, reasons: Array<CampaignTaskReason>, };
+
+/**
+ * Stable reasons why a plan entry cannot be selected by a campaign. Codes are
+ * for clients; `detail` stays readable for agents and humans.
+ */
+export type CampaignTaskReason = { code: string, detail: string, };
+
+/**
+ * Exact default worker choice for a campaign. The typed target preserves the
+ * identity (including an exact joined CLI session); model and profile remain
+ * explicit, independently overrideable launch dimensions.
+ */
+export type CampaignWorkerSelection = { target: MessageTarget, model?: string | null, profile_id?: string | null, };
+
+export type CancellationCleanupPolicy = "preserve" | "remove_if_clean";
+
 /**
  * What a CI check is known to be. `Unknown` is its own value: a check nobody
  * could read is not a passing one.
@@ -1005,6 +1071,10 @@ timeout_secs?: number | null,
  */
 output_format: CollectQuickExecOutputFormat, };
 
+export type CompareImprovementAvailability = "available" | "different_prompts" | "missing_prompt" | "no_shared_quick_prompt";
+
+export type ComparePromptCompatibility = "identical" | "different" | "missing";
+
 export type ConditionAction = { "type": "Stop" } | { "type": "Skip" } | { "type": "Goto", step_name: string, max_iterations?: number | null, };
 
 export type Contact = { id: string, pseudo: string, avatar_email: string | null, kronn_url: string, invite_code: string, status: string, created_at: string, updated_at: string, };
@@ -1051,6 +1121,10 @@ export type ContextFile = { id: string, discussion_id: string, filename: string,
  * null) so the frontend can split pending-vs-attached without ambiguity.
  */
 message_id: string | null, created_at: string, };
+
+export type CreateAdHocCompareRequest = { discussion_ids: Array<string>, };
+
+export type CreateAdHocCompareResponse = { run_id: string, };
 
 export type CreateDirectiveRequest = { name: string, description: string, icon: string, category: DirectiveCategory, content: string, conflicts?: Array<string>, };
 
@@ -1245,6 +1319,14 @@ gate_step?: string | null, };
  * Response for [`decide_run`].
  */
 export type DecideRunResponse = { run_id: string, new_status: RunStatus, };
+
+/**
+ * Worker → backend/principal delivery (ADR §5, KT-319 DoD-1). Every field DoD-1
+ * enumerates is REQUIRED: `docs` / `migrations` / `risks` / `limitations` are
+ * present even when empty, so "no migrations" is an explicit `[]`, never a
+ * silent omission.
+ */
+export type DeliveryManifestV1 = { version: string, task_ref: string, head_sha: string, files_touched: Array<ManifestFile>, tests: Array<ManifestTest>, dod_status: Array<ManifestDodStatus>, docs: Array<string>, migrations: Array<string>, risks: Array<string>, limitations: Array<string>, summary: string, };
 
 export type DependencyCheckStatus = "UpToDate" | "UpdatesAvailable" | "Unsupported" | "Unavailable" | "Error" | "TimedOut";
 
@@ -1578,6 +1660,13 @@ workflow_run_id?: string | null,
  */
 awaiting_agent: boolean,
 /**
+ * A provider invocation for this discussion has actually started and is
+ * `Running` right now. Distinct from `awaiting_agent`, which stays true for
+ * the whole obligation — including while the job waits behind the
+ * per-agent concurrency cap.
+ */
+agent_running?: boolean,
+/**
  * Test mode — branch the main repo was on before the user entered test
  * mode. `Some` means the user is actively testing this discussion's
  * branch in their main repo; `None` means normal worktree operation.
@@ -1676,6 +1765,13 @@ workflow_run_id?: string | null,
  * "en file" state survives navigation, reloads and missed WS frames.
  */
 awaiting_agent: boolean,
+/**
+ * A provider invocation for this discussion has actually started and is
+ * `Running` right now. Distinct from `awaiting_agent`, which stays true for
+ * the whole obligation — including while the job waits behind the
+ * per-agent concurrency cap.
+ */
+agent_running?: boolean,
 /**
  * Test mode — branch the main repo was on before the user entered test
  * mode. `Some` means the user is actively testing this discussion's
@@ -1947,7 +2043,14 @@ cli_billable_tokens: number | null, cli_sessions: number, cli_sessions_measured:
  */
 cli_sessions_unmeasured: number, };
 
-export type DiscussionWorkspace = { id: string, disc_id: string, session_pk: number | null, session_agent_type: string | null, task_id: string | null, task_reference: string | null, project_id: string, workspace_path: string | null, canonical_path: string | null, branch: string, head_sha: string | null, ownership: string, state: string, created_at: string, updated_at: string, };
+export type DiscussionWorkspace = { id: string, disc_id: string, session_pk: number | null, session_agent_type: string | null, task_id: string | null, task_reference: string | null, project_id: string, workspace_path: string | null, canonical_path: string | null, branch: string, head_sha: string | null, ownership: string, state: string,
+/**
+ * Managed-worktree lineage (KT-318, migration 127). Populated only for a
+ * backend-owned `managed` row: the principal room it was spawned from, the
+ * parent HEAD it was pinned at, and the owning TaskExecution. All NULL for a
+ * CLI-declared `external` workspace.
+ */
+parent_discussion_id: string | null, base_sha: string | null, task_execution_id: string | null, created_at: string, updated_at: string, };
 
 export type DiscWorkspaceBlocker = { kind: string, message: string, };
 
@@ -1996,6 +2099,22 @@ export type DriftCheckResponse = { audit_date: string | null, stale_sections: Ar
 export type DriftSection = { ai_file: string, audit_step: number, changed_sources: Array<string>, };
 
 /**
+ * One endpoint that keeps failing the same way, for the plugin's spec health.
+ */
+export type EndpointDrift = { plugin_slug: string, endpoint_path: string,
+/**
+ * The HTTP status it keeps returning — 404 reads as "declared but gone",
+ * 422 as "the parameters in the spec are not the ones it wants".
+ */
+http_status: number, failures: number,
+/**
+ * Successes on the same endpoint over the window. Zero means the spec has
+ * never been right about it; non-zero means it works SOMETIMES, so the
+ * fault is in how it is being called rather than in its existence.
+ */
+successes: number, last_seen: string, };
+
+/**
  * One piece of evidence backing a claim. `kind` mirrors the citable source
  * types; `reference` is the resolvable ref (file:line / url / disc-id / cmd /
  * user:date); `quote` is the supporting excerpt (the NL premise the Gate-2
@@ -2014,6 +2133,22 @@ export type EvidenceCheck = { reference: string, status: string, fabricated: boo
 export type EvidenceTarget = "task" | "review_finding";
 
 export type ExecResponse = { stdout: string, stderr: string, exit_code: number, };
+
+/**
+ * Compact sidebar edge. The canonical relation already lives on
+ * `task_executions`; this projection avoids overloading the workflow-run FK on
+ * discussions or making clients fetch every execution detail separately.
+ */
+export type ExecutionDiscussionLink = { execution_id: string, orchestration_run_id: string, task_id: string, task_reference: string, task_title: string, parent_discussion_id: string, sub_discussion_id: string, status: TaskExecutionStatus, };
+
+/**
+ * Durable decision produced by boot reconciliation. `Interrupted` remains the
+ * visible execution status until this decision is applied, so merely opening
+ * the database can never claim that a worker, review or Git mutation resumed.
+ */
+export type ExecutionRecoveryAction = "resume_provisioning" | "resume_worker" | "await_review" | "await_human" | "rebuild_candidate" | "run_validations" | "apply_fast_forward" | "idempotent_close" | "block_dirty_target" | "block_missing_workspace" | "block_missing_discussion" | "block_agent_unavailable";
+
+export type ExecutionTimeoutKind = "activity" | "total_duration" | "review_wait" | "human_wait";
 
 export type ExportPluginBundleRequest = { config_ids: Array<string>, include_values?: boolean, passphrase?: string | null, confirmation?: string | null, };
 
@@ -2065,6 +2200,11 @@ export type FetchFileResponse = { found: boolean, filename: string | null, mime_
  * transport a simple JSON envelope; the peer decodes + writes to disk.
  */
 data_base64: string | null, };
+
+/**
+ * How a file changed, in a [`DeliveryManifestV1`].
+ */
+export type FileChangeKind = "added" | "modified" | "deleted";
 
 /**
  * Where a finding stands. `Open` and `Unproven` are distinct on purpose: a
@@ -2178,6 +2318,8 @@ export type GitCommitRequest = { files: Array<string>, message: string, amend?: 
 
 export type GitCommitResponse = { hash: string, message: string, };
 
+export type GitCommitSummary = { sha: string, short_sha: string, subject: string, author_name: string, author_time: number, };
+
 export type GitDiffQuery = { path: string,
 /**
  * When true, return the COMMITTED diff for this path (`<default>...HEAD`)
@@ -2202,7 +2344,34 @@ export type GitStatusResponse = { branch: string, default_branch: string, is_def
  * Lets the "Fichiers" panel surface the disc's cumulative work
  * (what would land in the next merge), not just the uncommitted slice.
  */
-committed_files: Array<GitFileStatus>, ahead: number, behind: number, has_upstream: boolean,
+committed_files: Array<GitFileStatus>,
+/**
+ * Bounded page of commits attributable to the selected workspace/range,
+ * newest first. Empty is an honest value: a Direct main checkout without
+ * a declared baseline cannot be retroactively attributed to one discussion.
+ */
+commits: Array<GitCommitSummary>,
+/**
+ * Total number of attributable commits in the range, independently of
+ * the bounded page returned in `commits`.
+ */
+commits_total: number,
+/**
+ * Zero-based offset of the bounded page returned in `commits`.
+ */
+commits_offset: number,
+/**
+ * True when at least one later page remains after `commits`.
+ */
+commits_truncated: boolean,
+/**
+ * Effective workspace provenance for discussion-scoped requests.
+ */
+workspace: GitWorkspaceProvenance | null,
+/**
+ * Human-readable explanation when no file/commit can be shown.
+ */
+empty_reason: string | null, ahead: number, behind: number, has_upstream: boolean,
 /**
  * Tracking ref for the current branch (for example `origin/main`).
  */
@@ -2235,6 +2404,8 @@ languages_checked_at: string | null,
 languages_cached: boolean, };
 
 export type GitSwitchBranchRequest = { branch: string, };
+
+export type GitWorkspaceProvenance = { workspace_id: string | null, ownership: string, state: string, path: string | null, branch: string, base_sha: string | null, head_sha: string | null, integrated_sha: string | null, task_execution_id: string | null, task_reference: string | null, };
 
 /**
  * Which guard tripped — surfaced verbatim in the SSE `GuardTriggered`
@@ -2310,6 +2481,12 @@ broken_links: Array<string>,
 redirects_to: Array<string>, };
 
 /**
+ * Only one strategy in V1 (ADR §4). Kept as an enum so KT-320+ can add variants
+ * without a schema migration on the discriminator.
+ */
+export type IntegrationStrategy = "two_phase_ff_only";
+
+/**
  * Wire shape returned by the invite endpoint. The frontend displays
  * `instruction_text` directly in the copy-paste modal — the wording
  * lives server-side so we can tweak it (i18n, channel, etc.) without
@@ -2375,6 +2552,23 @@ custom_prompt?: string | null,
  * oversize, and no way to graft a checkpoint onto the wrong pipeline.
  */
 resume_run_id?: string | null, };
+
+/**
+ * The versioned, backward-compatible wire response for a single-task launch —
+ * the V1 contract KT-318's endpoint will return (no endpoint is wired in
+ * KT-317). `schema_version` lets a consumer branch on the orchestration schema;
+ * new fields are added later with `#[serde(default)]`. Built from the internal
+ * `LaunchOutcome`. Serde/typegen tested here so KT-318 can expose it unchanged.
+ */
+export type LaunchTaskExecutionResponseV1 = {
+/**
+ * Always [`ORCHESTRATION_SCHEMA_VERSION`]; pins the response contract.
+ */
+schema_version: number, run: OrchestrationRun, execution: TaskExecution,
+/**
+ * `true` when an idempotency-key match returned the existing execution.
+ */
+deduplicated: boolean, };
 
 /**
  * A continual-learning candidate (table `learnings`).
@@ -2592,6 +2786,24 @@ export type LivePageWorkflowLink = { id: string, name: string, enabled: boolean,
 export type LivePageWrite = { dataset: string, operation: LivePageWriteOperation, value: any, observed_at: string | null, dedupe_key: string | null, key_field: string | null, };
 
 export type LivePageWriteOperation = "replace" | "append" | "upsert";
+
+/**
+ * A per-DoD coverage claim. `dod_id` references the task's DoD item; the schema
+ * only enforces shape — the approve guard (DoD-5, tranche 3) enforces coverage.
+ */
+export type ManifestDodStatus = { dod_id: string, met: boolean, evidence: string | null, };
+
+/**
+ * One touched file in a [`DeliveryManifestV1`].
+ */
+export type ManifestFile = { path: string, kind: FileChangeKind, };
+
+/**
+ * One reported test in a [`DeliveryManifestV1`]. `evidence` is a `path:line` or
+ * the command that proves the status; the reviewer (not the schema) refuses a
+ * green without evidence.
+ */
+export type ManifestTest = { name: string, status: TestStatus, evidence: string | null, };
 
 /**
  * A configured instance of an MCP server — with label, env secrets, etc.
@@ -2841,7 +3053,7 @@ default?: string | null, reasoning?: string | null, };
 /**
  * Global model tier overrides per agent.
  */
-export type ModelTiersConfig = { claude_code: ModelTierConfig, codex: ModelTierConfig, gemini_cli: ModelTierConfig, kiro: ModelTierConfig, vibe: ModelTierConfig, copilot_cli: ModelTierConfig, ollama: ModelTierConfig, lite_llm: ModelTierConfig, };
+export type ModelTiersConfig = { claude_code: ModelTierConfig, codex: ModelTierConfig, gemini_cli: ModelTierConfig, kiro: ModelTierConfig, vibe: ModelTierConfig, copilot_cli: ModelTierConfig, ollama: ModelTierConfig, lite_llm: ModelTierConfig, nvidia: ModelTierConfig, };
 
 /**
  * Config for the "Multi-agent review" option on an Agent step (see
@@ -2949,6 +3161,54 @@ headers?: { [key in string]: string },
 body_template: string, };
 
 /**
+ * One catalogue entry, plus what a real probe said about it (if one ran).
+ */
+export type NvidiaModel = {
+/**
+ * The id to send as `model`, e.g. `meta/llama-3.1-8b-instruct`.
+ */
+id: string,
+/**
+ * Vendor prefix of the id (`meta`, `nvidia`, `deepseek-ai`…). Taken from the
+ * id rather than `owned_by`, which is the same information without the risk
+ * of the two disagreeing.
+ */
+vendor: string,
+/**
+ * Last known probe verdict for this id, `None` when never probed. The UI
+ * gates tier assignment on this being `Usable`.
+ */
+probe: NvidiaProbeVerdict | null, };
+
+export type NvidiaModelsResponse = { models: Array<NvidiaModel>,
+/**
+ * Endpoint the catalogue came from, so the card can show which service it is
+ * talking to (the hosted endpoint, or a self-hosted NIM).
+ */
+endpoint: string,
+/**
+ * Whether a key is configured. The catalogue lists fine without one, which
+ * would otherwise look like a working setup right up to the first real call.
+ */
+has_key: boolean, };
+
+export type NvidiaProbeRequest = { model: string, };
+
+export type NvidiaProbeResponse = { model: string, verdict: NvidiaProbeVerdict,
+/**
+ * Human-readable explanation for the card. Never the raw upstream body when
+ * it could carry account identifiers.
+ */
+detail: string, };
+
+/**
+ * What a real invocation established. Kept distinct from a plain boolean because
+ * the reasons are not interchangeable: `Retired` and `NotEntitled` are dead ends,
+ * while `NoAnswer` may be a cold start worth retrying.
+ */
+export type NvidiaProbeVerdict = "Usable" | "NotEntitled" | "Retired" | "Refused" | "NoAnswer";
+
+/**
  * Static header injected server-side alongside the `Authorization: Bearer`
  * from an OAuth2 exchange. Used for providers (Adobe Analytics, some Salesforce
  * endpoints) that require extra identification headers beyond the
@@ -3001,7 +3261,39 @@ status: string, version: string | null, endpoint: string, models_count: number,
  */
 hint: string | null, };
 
-export type OllamaModel = { name: string, size: string, modified: string, };
+export type OllamaModel = { name: string, size: string, modified: string,
+/**
+ * KT-405 — this model's trained context window, from Ollama's
+ * `/api/show`. `None` when Ollama did not answer (offline, cold load
+ * that outlasted the retry ladder) — never a fallback NUMBER standing in
+ * for a fact Kronn does not have.
+ */
+advertised_context: number | null,
+/**
+ * The CEILING a run against this model would be sized within — not
+ * necessarily the exact `num_ctx` a specific run sends: a short,
+ * tool-free prompt is sized smaller than this ceiling by
+ * `ollama_num_ctx`. This is "how large could it go", computed the same
+ * way a real run computes it (persistent override, else env override,
+ * else advertised context clamped to this machine's RAM ceiling, else
+ * the portable fallback).
+ */
+context_ceiling: number,
+/**
+ * The persistent value saved for this exact model tag, independent of
+ * which higher-precedence source currently determines the ceiling. For
+ * example, an env override may be active while this remains `Some` so
+ * Settings can still pre-fill, edit or reset the saved value honestly.
+ */
+context_override: number | null,
+/**
+ * Why `context_ceiling` is what it is: "operator_override" |
+ * "model_override" | "model_window" | "machine_ceiling" |
+ * "portable_fallback". A string, not the internal enum — this crosses
+ * into the API surface and a frontend has no reason to know Rust
+ * variant names.
+ */
+context_origin: string, };
 
 export type OllamaModelsResponse = { models: Array<OllamaModel>, };
 
@@ -3012,7 +3304,40 @@ export type OllamaModelsResponse = { models: Array<OllamaModel>, };
  */
 export type OnInvalid = "Continue" | "Fail";
 
+/**
+ * Operator-visible campaign state (KT-321). Kept distinct from the original
+ * coarse lifecycle status so existing migration-127 databases remain readable:
+ * `Paused` and `AwaitingHuman` are durable holds, not terminal outcomes.
+ */
+export type OrchestrationControlState = "running" | "paused" | "awaiting_human" | "completed" | "cancelled" | "failed";
+
 export type OrchestrationRequest = { agents: Array<AgentType>, max_rounds?: number | null, skill_ids?: Array<string>, profile_ids?: Array<string>, directive_ids?: Array<string>, };
+
+export type OrchestrationResiliencePolicy = { activity_timeout_secs: number | null, review_timeout_secs: number | null, human_wait_timeout_secs: number | null, cancellation_cleanup_policy: CancellationCleanupPolicy, };
+
+/**
+ * The mandatory campaign envelope (ADR §1, §2).
+ */
+export type OrchestrationRun = { id: string, kind: OrchestrationRunKind, discussion_id: string, project_id: string | null, target_workspace_id: string | null, target_branch: string | null, max_review_rounds: number, max_concurrent_executions: number, token_budget: number | null, integration_strategy: IntegrationStrategy, validations: Array<ValidationSpec>, escalation_notify_url: string | null,
+/**
+ * DoD-7: the worker cannot self-approve BY DEFAULT (`false`). Only an explicit
+ * launcher opt-in (KT-321) sets this `true`, and only then may the execution's own
+ * worker identity decide its review — the exception is never a default.
+ */
+allow_self_review: boolean, status: OrchestrationRunStatus,
+/**
+ * Durable principal/campaign control. A paused or human-gated run cannot
+ * launch work even though its coarse lifecycle is still `Active`.
+ */
+control_state: OrchestrationControlState, control_reason?: string | null, timeout_secs?: number | null, max_cli_concurrent_executions: number, allowed_agents: Array<AgentType>, default_worker?: CampaignWorkerSelection | null, auto_continue: boolean, created_at: string, updated_at: string, };
+
+/**
+ * The V1 shape is one implicit run per launch (`single_task`); `campaign` is
+ * reserved for KT-321 (a principal driving several ready tasks).
+ */
+export type OrchestrationRunKind = "single_task" | "campaign";
+
+export type OrchestrationRunStatus = "active" | "completed" | "cancelled" | "failed";
 
 /**
  * stab-3 — pacing state COMPUTED BY THE SERVER (the agents apply it, they
@@ -3059,6 +3384,14 @@ export type PartialAuditRequest = { agent: AgentType, steps: Array<number>, };
  * plus the server-derived state the UI switches to.
  */
 export type ParticipantView = { id: number, disc_id: string, agent_type: string, session_id: string | null, role: string, status: string, joined_at: string, left_at: string | null, last_seen: string | null, activity: string | null, presence_state: PresenceState, read_live: boolean, write_state: WriteState, wake_mode: WakeMode, next_poll_at: string | null, last_write_at: string | null,
+/**
+ * What durable command/wake/failure the native chip represents.
+ */
+resume_reason: string | null,
+/**
+ * Server timestamp of the durable obligation/failure.
+ */
+resume_since: string | null,
 /**
  * KT-37 — model DECLARED by this participant at join (durable, never
  * inferred). `None` = not declared; the UI shows it as declared-at-join,
@@ -3249,9 +3582,14 @@ resume_token: string,
  */
 self_alias: string | null, cli_ordinal: number | null, };
 
-export type PlanningActor = { kind: PlanningActorKind, id: string | null, source_message_id: string | null, };
+export type PlanningActor = { kind: PlanningActorKind, id: string | null,
+/**
+ * Durable joined-CLI source session. Two sessions of the same provider
+ * keep the same `id` but are never conflated in the audit trail.
+ */
+session_id: string | null, source_message_id: string | null, };
 
-export type PlanningActorKind = "human" | "agent";
+export type PlanningActorKind = "human" | "agent" | "backend" | "system";
 
 /**
  * KT-30 — minimal, read-only dependency reference for the plan projection.
@@ -3307,11 +3645,11 @@ export type PlanningProposalItem = { id: string, item_index: number, action: Pro
  */
 result_task_id?: string, decided_at?: string, };
 
-export type PlanningTaskChange = { task_id: string, task_reference: string, task_title: string, id: string, action: string, actor_kind: PlanningActorKind, actor_id: string | null, changes: JsonValue, source_message_id: string | null, created_at: string, };
+export type PlanningTaskChange = { task_id: string, task_reference: string, task_title: string, id: string, action: string, actor_kind: PlanningActorKind, actor_id: string | null, actor_session_id: string | null, changes: JsonValue, source_message_id: string | null, created_at: string, };
 
 export type PlanningTaskDetail = { subtasks: Array<PlanningTaskSummary>, description: string, blocked_reason: string | null, definition_of_done: Array<PlanningDodItem>, links: Array<PlanningTaskLink>, blockers: Array<PlanningTaskSummary>, blocking: Array<PlanningTaskSummary>, workspaces?: Array<PlanningWorkspaceSummary>, events: Array<PlanningTaskEvent>, id: string, reference: string, parent_id: string | null, parent_reference: string | null, parent_title: string | null, title: string, status: PlanningTaskStatus, priority: PlanningTaskPriority, rank: number, completed_subtasks: number, total_subtasks: number, project_ids: Array<string>, discussion_ids: Array<string>, tags: Array<string>, blocker_count: number, created_at: string, updated_at: string, };
 
-export type PlanningTaskEvent = { id: string, action: string, actor_kind: PlanningActorKind, actor_id: string | null, changes: JsonValue, source_message_id: string | null, created_at: string, };
+export type PlanningTaskEvent = { id: string, action: string, actor_kind: PlanningActorKind, actor_id: string | null, actor_session_id: string | null, changes: JsonValue, source_message_id: string | null, created_at: string, };
 
 export type PlanningTaskLink = { id: string, label: string, url: string, position: number, };
 
@@ -3389,11 +3727,17 @@ export type PortablePluginConfig = { source_config_id: string, server: McpServer
  * 0.9.2-G — honest presence state, server-derived (never a bare "connected"
  * badge inferred from a lingering session row). See [`derive_presence_state`].
  */
-export type PresenceState = "running" | "listening" | "dormant" | "offline";
+export type PresenceState = "running" | "listening" | "dormant" | "resume_expected" | "stalled" | "quota_exhausted" | "offline";
 
 export type PreviewTransformDataRequest = { sample: JsonValue, fields: Array<TransformDataField>, };
 
 export type PreviewTransformDataResponse = { value: JsonValue | null, error: string | null, };
+
+/**
+ * What the principal currently owns. This makes the coordinator inspectable
+ * instead of an opaque loop hidden behind an "active" badge.
+ */
+export type PrincipalAttention = { active_executions: number, cli_executions: number, awaiting_review: number, awaiting_human: number, ready_tasks: number, actions: Array<string>, };
 
 /**
  * One preserved branch on a workflow run. Mirrors `workspace::PreservedBranch`
@@ -3586,7 +3930,11 @@ profile_ids: Array<string>,
  * 0.8.5 — optional directive binding. Same rationale as
  * `profile_ids` above.
  */
-directive_ids: Array<string>, created_at: string, updated_at: string, };
+directive_ids: Array<string>,
+/**
+ * User-pinned / favorite Quick API in the Automation library.
+ */
+pinned: boolean, created_at: string, updated_at: string, };
 
 /**
  * Self-contained envelope produced by `GET /api/quick-apis/:id/export`.
@@ -3598,7 +3946,11 @@ export type QuickApiExportEnvelope = { kind: string, version: number, exported_a
  */
 quick_api: QuickApi, };
 
-export type QuickExec = { id: string, name: string, icon: string, description: string, project_id: string | null, command: string, args: Array<string>, timeout_secs: number, output_format: CollectQuickExecOutputFormat, variables: Array<PromptVariable>, created_at: string, updated_at: string, };
+export type QuickExec = { id: string, name: string, icon: string, description: string, project_id: string | null, command: string, args: Array<string>, timeout_secs: number, output_format: CollectQuickExecOutputFormat, variables: Array<PromptVariable>,
+/**
+ * User-pinned / favorite Quick Exec in the Automation library.
+ */
+pinned: boolean, created_at: string, updated_at: string, };
 
 export type QuickExecExportEnvelope = { kind: string, version: number, exported_at: string, quick_exec: QuickExec, };
 
@@ -3672,7 +4024,11 @@ agent_settings?: AgentSettings | null,
  * in the batch-workflow picker so the user knows which QP fits their
  * use case. Empty string = legacy QP created before 2026-04-10.
  */
-description: string, created_at: string, updated_at: string, };
+description: string,
+/**
+ * User-pinned / favorite Quick Prompt in the Automation library.
+ */
+pinned: boolean, created_at: string, updated_at: string, };
 
 /**
  * Self-contained envelope produced by `GET /api/quick-prompts/:id/export`.
@@ -3836,6 +4192,33 @@ export type RetryAgentDispatchResponse = { dispatch_id: string, trigger_message_
 export type RetryConfig = { max_retries: number, backoff: string, };
 
 /**
+ * Principal → backend review (ADR §5, KT-319). `comment` is schema-optional but
+ * REQUIRED when `decision == request_changes` (a change request with no reason
+ * is not actionable — DoD-4); that conditional is enforced by the parse layer,
+ * not expressible in the JSON subset.
+ */
+export type ReviewDecisionV1 = { version: string, task_ref: string, decision: ReviewVerdict,
+/**
+ * Exact delivered HEAD the reviewer inspected. Required by the parse
+ * layer for approval; optional for request_changes, whose findings may be
+ * issued before the reviewer finishes every validation.
+ */
+reviewed_head_sha: string | null,
+/**
+ * Principal-owned evidence for worker-unmet DoD items, bound durably to
+ * this review's execution attempt and reviewed HEAD.
+ */
+dod_verifications: Array<ReviewDodVerification>, comment: string | null, findings: Array<ReviewFinding>, };
+
+/**
+ * Evidence produced by the authorized reviewer for a DoD item the worker
+ * could not verify itself (most often a shell test on an HTTP worker). It is
+ * persisted inside the attempt-scoped ReviewDecision, never inferred from a
+ * mutable Planning checkbox.
+ */
+export type ReviewDodVerification = { dod_id: string, met: boolean, evidence: string, };
+
+/**
  * One finding: a cause, where it lives, and what is known about it.
  */
 export type ReviewFinding = { id: string, repo: string, pr_number: number,
@@ -3879,6 +4262,11 @@ mechanical_evidence: Array<string>,
  * indistinguishable from an absence.
  */
 omissions: Array<string>, };
+
+/**
+ * The principal's verdict on a delivered attempt.
+ */
+export type ReviewVerdict = "approve" | "request_changes";
 
 /**
  * Atomic edit/resend request. `expected_revision` is the opaque timestamp
@@ -4057,7 +4445,14 @@ export type RunQuickExecRequest = { variables?: Record<string, string>, };
 
 export type RunQuickExecResponse = { success: boolean, duration_ms: number, data: any, stdout: string | null, stderr: string | null, error: string | null, };
 
-export type RunStatus = "Pending" | "Running" | "Success" | "Failed" | "Cancelled" | "WaitingApproval" | "StoppedByGuard" | "Interrupted";
+export type RunStatus = "Pending" | "Running" | "Success" | "Partial" | "Failed" | "Cancelled" | "WaitingApproval" | "StoppedByGuard" | "Interrupted";
+
+/**
+ * The action the §4bis boot saga takes for an in-flight integration, decided by
+ * comparing durable checkpoints against the *real* parent tip. Pure logic so it
+ * is testable without a Git repo (the actual ref reads + apply are KT-320/322).
+ */
+export type SagaResumeAction = "RebuildCandidate" | "RunValidations" | "ApplyFastForward" | "IdempotentClose" | "BlockDirtyTarget" | "NoOp";
 
 export type SaveApiKeyRequest = { id?: string | null, name: string, provider: string, value: string, };
 
@@ -4066,6 +4461,8 @@ export type ScanConfig = { paths: Array<string>, ignore: Array<string>,
  * Max depth when scanning for git repos (2–10, default 4)
  */
 scan_depth: number, };
+
+export type ScheduleAgentWakeRequest = { delay_seconds: number, reason: string, dedupe_key: string, task_execution_id?: string | null, };
 
 export type Section = { heading: string, bytes: number, class: SectionClass,
 /**
@@ -4127,6 +4524,20 @@ failure_notify_url: string | null,
  */
 run_retention_days: number,
 /**
+ * KT-373 — refuse to provision a worktree below this much free disk, in
+ * GiB. On 2026-08-21 the dev volume hit 100% with seven worktrees each
+ * holding its own Rust `target/`; provisioning kept going until nothing
+ * worked. A build that is refused costs a message, a build that fills the
+ * disk costs the machine.
+ */
+disk_critical_gib: number,
+/**
+ * Warn — but still provision — below this much free disk, in GiB. Must
+ * stay above `disk_critical_gib` to mean anything; see
+ * `disk_thresholds()`, which is the only place they are read together.
+ */
+disk_warning_gib: number,
+/**
  * Maximum concurrent agent processes (default: 5)
  */
 max_concurrent_agents: number,
@@ -4140,6 +4551,24 @@ agent_stall_timeout_min: number,
  * watchdog above and is read when each new run starts.
  */
 agent_global_timeout_min: number,
+/**
+ * Absolute wall-clock limit for locally-served HTTP agents (Ollama).
+ * Local inference is legitimately much slower than a hosted CLI, so it
+ * has an explicit, visible budget instead of a hidden runtime multiplier.
+ */
+local_agent_global_timeout_min: number,
+/**
+ * KT-405 — per-model context override, persisted (unlike
+ * `KRONN_OLLAMA_NUM_CTX_CAP`, which is process-global and disappears on
+ * restart). Keyed by the exact Ollama model tag (`"qwen3.8:27b-mlx"`).
+ * The env var still wins when set — it is the break-glass escape hatch
+ * for an operator who cannot reach the UI; this is the persistent,
+ * per-model dial meant to be set once and forgotten. Bounds and warnings
+ * against the model's advertised window / this machine's RAM ceiling are
+ * enforced at the setter, not here — a deserialized config from an older
+ * Kronn or a smaller machine must still load.
+ */
+ollama_context_overrides: { [key in string]: number },
 /**
  * User identity — displayed in messages and used for future multi-user
  */
@@ -4224,9 +4653,10 @@ default_model_tier: ModelTier,
  * tokens for no win in those cases. The `Off` default makes
  * Kronn cheaper out of the box.
  *
- * Re-enable `Auto` (Settings) when running small-context agents
- * (Ollama 8B / Vibe / older models) that lack MCP access and
- * can't ask Kronn for older history themselves.
+ * Re-enable `Auto` (Settings) for small-context or HTTP agents when a
+ * proactive summary is preferable. HTTP agents have no arbitrary MCP
+ * bridge, but a discussion run may receive bounded Kronn-native history
+ * tools; the chosen strategy remains an operator trade-off.
  *
  * Strict semantic — only consulted on NEW disc creation. Existing
  * discs keep their saved value (no retroactive change).
@@ -4254,7 +4684,7 @@ agent_handoff_paid_unlimited: boolean,
  */
 agent_handoff_blocked_agents: Array<AgentType>, };
 
-export type ServerConfigPublic = { host: string, port: number, domain: string | null, max_concurrent_agents: number, agent_stall_timeout_min: number, agent_global_timeout_min: number, auth_enabled: boolean, pseudo: string | null, avatar_email: string | null, bio: string | null, debug_mode: boolean,
+export type ServerConfigPublic = { host: string, port: number, domain: string | null, max_concurrent_agents: number, agent_stall_timeout_min: number, agent_global_timeout_min: number, local_agent_global_timeout_min: number, auth_enabled: boolean, pseudo: string | null, avatar_email: string | null, bio: string | null, debug_mode: boolean,
 /**
  * Whether discussion composers expose the out-of-context note control.
  */
@@ -4289,10 +4719,16 @@ export type SessionBudget = {
  */
 max_traffic_tokens: number,
 /**
- * Wall-clock age. A session open for days accumulates context it will
- * never use again.
+ * Observed active time, in hours. Long gaps between this session's turns
+ * are treated as inactivity rather than work.
  */
-max_age_hours: number,
+max_active_hours: number,
+/**
+ * Maximum gap counted as continuous work between two turns. The default
+ * is 30 minutes: enough to cover a normal edit/test cycle, while a longer
+ * gap is more plausibly a pause than active context accumulation.
+ */
+max_inactive_gap_minutes: number,
 /**
  * Messages this session posted to rooms.
  */
@@ -4305,6 +4741,13 @@ soft_ratio: number, };
 
 export type SetAgentAccessRequest = { agent: AgentType, full_access: boolean, };
 
+export type SetAgentConcurrencyRequest = { agent: AgentType,
+/**
+ * `None` restores the family default: unlimited for a remote provider,
+ * 1 for Ollama, 5 for a CLI.
+ */
+concurrency?: number | null, };
+
 export type SetAgentMentionColorRequest = { agent: AgentType,
 /**
  * `None` or an empty string restores the built-in color.
@@ -4312,6 +4755,27 @@ export type SetAgentMentionColorRequest = { agent: AgentType,
 color?: string | null, };
 
 export type SetBriefingRequest = { notes?: string | null, };
+
+export type SetOllamaContextOverrideRequest = { model: string,
+/**
+ * `None` clears the override, back to the auto-derived cap.
+ */
+num_ctx?: number | null, };
+
+export type SetOllamaContextOverrideResponse = { model: string,
+/**
+ * The override actually stored, echoed back so the caller does not have
+ * to re-fetch `/api/ollama/models` to know what stuck.
+ */
+num_ctx: number | null,
+/**
+ * Every independent reason the value is worth a second look — e.g. BOTH
+ * above the model's advertised window AND above this machine's RAM
+ * ceiling, which are two distinct facts, not one. Never blocks the
+ * write: the operator asked for a specific number, and a machine can
+ * genuinely have more RAM free than Kronn's coarse tiers assume.
+ */
+warnings: Array<string>, };
 
 export type SetRecoveryResponse = {
 /**
@@ -4410,6 +4874,21 @@ metrics: Array<Metric>, } | { "state": "unavailable", diagnosis: string, remedy:
  * Result of mechanically verifying one `[src: …]` marker.
  */
 export type SourceStatus = "verified" | "not_found" | "out_of_bounds" | "empty_ref" | "outside_project" | "unchecked" | "rejected";
+
+export type StartAgentBackgroundJobRequest = {
+/**
+ * A user-saved, shell-free Quick Exec. Its definition is snapshotted when
+ * the job is created so a later edit cannot mutate queued work.
+ */
+quick_exec_id: string, variables?: Record<string, string>, reason: string, dedupe_key: string, task_execution_id?: string | null, };
+
+export type StartBatchCompareImprovementRequest = { agent: AgentType, tier?: ModelTier, };
+
+export type StartBatchCompareImprovementResponse = { discussion_id: string, };
+
+export type StartBatchCompareJudgeRequest = { agent: AgentType, tier?: ModelTier, };
+
+export type StartBatchCompareJudgeResponse = { judge_run_id: string, judge_discussion_id: string, status: string, };
 
 export type StartBriefingResponse = { discussion_id: string, };
 
@@ -4594,6 +5073,205 @@ tokens_used: number, };
  */
 export type SummaryStrategy = "Auto" | "OnDemand" | "Off";
 
+/**
+ * The durable unit of work (ADR §1, §3, §4bis).
+ */
+export type TaskExecution = { id: string, orchestration_run_id: string, task_id: string, parent_discussion_id: string, sub_discussion_id: string | null, workspace_id: string | null, dispatch_job_id: string | null, base_sha: string | null, child_branch: string | null,
+/**
+ * Worker identity — the durable typed `MessageTarget` contract (ADR §5), not
+ * a loose provider string. `worker_target_kind` mirrors [`MessageTargetKind`]
+ * and, for a `Cli` worker, `worker_cli_session_id` pins the exact joined
+ * session (two CLIs of one provider are never confused). All-or-nothing:
+ * a set kind requires `worker_agent_type`; `Cli` also requires the session id.
+ * All NULL until provisioning (KT-318) selects the worker.
+ */
+worker_target_kind: MessageTargetKind | null, worker_cli_session_id: number | null, worker_agent_type: string | null, worker_model: string | null, worker_model_tier: string | null, worker_profile_id?: string | null,
+/**
+ * Optional principal-authored mechanical scope for a deliberately tiny
+ * local-worker edit. It is persisted with the execution and interpreted
+ * by the runner; the worker cannot broaden it through prose or tool args.
+ */
+worker_scope?: TaskWorkerScope | null,
+/**
+ * Ordered DoD ids frozen when the execution is created. Native HTTP and
+ * spawned-host workers submit assertions by position, so delivery must
+ * refuse a task whose DoD was reordered/replaced under the active brief.
+ * `None` identifies executions created before migration 142.
+ */
+worker_dod_ids?: Array<string> | null,
+/**
+ * Semantic brief/re-dispatch counter (ADR §5). 0 at launch; KT-319 bumps it
+ * per business attempt so brief/dispatch dedupe keys are attempt-scoped.
+ */
+attempt_no: number, status: TaskExecutionStatus,
+/**
+ * Durable resume checkpoints (ADR §3). Set while the row is on a `Blocked`
+ * (→ the state to clear back to) or `Interrupted` (→ the exact state it left)
+ * hold; cleared once resumed. Consumed by the checkpoint guard in
+ * `db::orchestration::transition_execution`.
+ */
+blocked_from_status: TaskExecutionStatus | null, interrupted_from_status: TaskExecutionStatus | null, review_rounds: number, max_review_rounds: number, candidate_target_sha: string | null, candidate_merge_sha: string | null, integrated_sha: string | null, backup_ref: string | null, blocked_reason: string | null,
+/**
+ * Structured discriminant for the current `Blocked` hold (KT-328). Consumers
+ * branch on this, never on `blocked_reason` prose (KT-334). NULL for a native
+ * checkpoint-refused block in V1; set for the CLI control-offer holds.
+ */
+blocked_reason_code: BlockedReasonCode | null, outcome_reason: string | null, idempotency_key: string | null, created_at: string, updated_at: string, finished_at: string | null, };
+
+/**
+ * Delivery/review pair for one semantic worker attempt. Keeping every attempt
+ * makes review ping-pong inspectable instead of replacing its history with the
+ * latest answer.
+ */
+export type TaskExecutionAttemptDetail = { attempt_no: number, delivery: DeliveryManifestV1 | null, review: ReviewDecisionV1 | null, };
+
+/**
+ * Redacted journal row. The persisted event may contain arbitrary comments,
+ * validation output or reasons in `changes_json`; none of that crosses this
+ * observability boundary. Durable correlation and attribution IDs remain.
+ */
+export type TaskExecutionAuditEvent = { id: string, action: string, from_status: TaskExecutionStatus | null, to_status: TaskExecutionStatus | null, actor_kind: PlanningActorKind, actor_id: string | null, actor_session_id: string | null, source_message_id: string | null, created_at: string, };
+
+/**
+ * One-call projection for the execution detail UI (KT-323). Durable state stays
+ * sourced from the orchestration aggregate; task DoD, manifests, validations
+ * and telemetry are joined here so clients never reconstruct lineage from chat.
+ */
+export type TaskExecutionDetail = { lineage: TaskExecutionLineage, target_branch: string | null, definition_of_done: Array<PlanningDodItem>, attempts: Array<TaskExecutionAttemptDetail>, validation_runs: Array<TaskExecutionValidationRun>, recovery: TaskExecutionRecovery | null, usage: TaskExecutionUsage, };
+
+/**
+ * One journaled transition (ADR §3; DoD-3).
+ */
+export type TaskExecutionEvent = { id: string, task_execution_id: string, action: string, from_status: TaskExecutionStatus | null, to_status: TaskExecutionStatus | null, actor_kind: PlanningActorKind, actor_id: string | null, actor_session_id: string | null, changes: any, source_message_id: string | null, created_at: string, };
+
+/**
+ * What one execution consumed. In-app replies and joined CLI sessions are kept
+ * separate because the former is a per-message counter while the latter is a
+ * whole-session running total. Unknown CLI telemetry remains `None`, never 0.
+ */
+export type TaskExecutionHttpPhase = "read" | "mutation" | "commit" | "delivery" | "finalization" | "exploration" | "answer";
+
+export type TaskExecutionHttpPhaseUsage = { phase: TaskExecutionHttpPhase, turns: number, prompt_tokens: number, eval_tokens: number, duration_ms: number, };
+
+export type TaskExecutionHttpToolUsage = { name: string, ok: boolean, };
+
+/**
+ * Secret-free provider accounting for one HTTP model response. Tool names are
+ * bounded protocol identifiers; arguments, results, prompts and endpoints are
+ * deliberately absent from this durable projection.
+ */
+export type TaskExecutionHttpTurnUsage = { turn: number, dispatch_id?: string | null, provider: string, phase: TaskExecutionHttpPhase, prompt_tokens: number, eval_tokens: number, duration_ms: number, provider_ok: boolean, requested_tools: Array<string>, executed_tools: Array<TaskExecutionHttpToolUsage>, };
+
+/**
+ * Aggregate across every dispatch/rework of one durable task execution. The
+ * totals cover the complete journal while `recent_turns` is bounded for UI and
+ * MCP payload safety.
+ */
+export type TaskExecutionHttpUsage = { turns: number, prompt_tokens: number, eval_tokens: number, traffic_tokens: number, peak_context_tokens: number, duration_ms: number, phases: Array<TaskExecutionHttpPhaseUsage>, recent_turns: Array<TaskExecutionHttpTurnUsage>, };
+
+/**
+ * A resolved TaskExecution + its lineage, answerable in one query (DoD-4):
+ * OrchestrationRun → TaskExecution → task → parent/sub-discussion → workspace,
+ * without rebuilding the chain from chat messages.
+ */
+export type TaskExecutionLineage = { execution: TaskExecution, orchestration_run_kind: OrchestrationRunKind, task_reference: string, task_title: string, parent_discussion_id: string, sub_discussion_id: string | null, workspace_canonical_path: string | null, };
+
+/**
+ * A bounded counter used by the execution observability projection. `code` is
+ * produced only from closed enums / fixed constants in the service layer, never
+ * copied from user or agent prose.
+ */
+export type TaskExecutionMetricCount = { code: string, count: number, };
+
+/**
+ * Operational metrics for one execution. Usage keeps unknown CLI telemetry as
+ * `None`; state and reason labels remain bounded so this projection can safely
+ * feed dashboards without a cardinality explosion.
+ */
+export type TaskExecutionMetrics = { state_durations: Array<TaskExecutionStateDuration>, waiting_duration_ms: number, review_rounds: number, attempt_count: number, validation_failures: number, failures: Array<TaskExecutionMetricCount>, blocking_reasons: Array<TaskExecutionMetricCount>, usage: TaskExecutionUsage, };
+
+/**
+ * One-call, secret-free observability surface. `lineage.execution` supplies the
+ * durable run/task/discussion/workspace/dispatch IDs, while `audit_events`
+ * supplies the ordered attributed history without raw payloads.
+ */
+export type TaskExecutionObservability = { lineage: TaskExecutionLineage, metrics: TaskExecutionMetrics, audit_events: Array<TaskExecutionAuditEvent>, };
+
+/**
+ * Read-only launch preflight for agent surfaces. Every refusal is a stable
+ * code + actionable detail; calling it never creates a run or worktree.
+ */
+export type TaskExecutionPreparation = { task: PlanningTaskDetail, parent_discussion_id: string, worker: MessageTarget, project_id: string | null, launchable: boolean, reasons: Array<CampaignTaskReason>, active_execution: TaskExecution | null, };
+
+/**
+ * Recovery projection kept separately from the business state machine.
+ */
+export type TaskExecutionRecovery = { task_execution_id: string, recovery_action: ExecutionRecoveryAction, recovery_reason: string, last_activity_at: string, total_deadline_at: string | null, activity_deadline_at: string | null, review_deadline_at: string | null, human_wait_started_at: string | null, assignment_generation: number, watchdog_redispatches: number, pending: boolean, updated_at: string, };
+
+/**
+ * Time spent in one state. The status enum bounds label cardinality to the
+ * state-machine domain; callers never receive a reason or another free-form
+ * string as a metric label.
+ */
+export type TaskExecutionStateDuration = { status: TaskExecutionStatus, duration_ms: number, };
+
+/**
+ * The TaskExecution state machine (ADR §3). Variant names are the exact DB
+ * strings (PascalCase, mirroring `RunStatus`) so `as_str` and the migration
+ * CHECK stay in lockstep.
+ */
+export type TaskExecutionStatus = "Pending" | "Provisioning" | "Blocked" | "Working" | "AwaitingReview" | "Approved" | "ChangesRequested" | "Integrating" | "Validating" | "Applying" | "Escalated" | "Interrupted" | "Done" | "Failed" | "Cancelled";
+
+export type TaskExecutionUsage = { duration_ms: number, in_app_tokens: number, in_app_messages: number, in_app_cost_usd: number | null, in_app_cost_is_partial: boolean, cli_traffic_tokens: number | null, cli_billable_tokens: number | null, cli_sessions: number, cli_sessions_measured: number, cli_sessions_unmeasured: number, http: TaskExecutionHttpUsage | null, };
+
+/**
+ * One recorded validation run (ADR §6). `exit_code` IS the verdict.
+ */
+export type TaskExecutionValidationRun = { id: string, task_execution_id: string, candidate_merge_sha: string | null, command: string, exit_code: number | null, duration_ms: number | null, output: string | null, quick_exec_id: string | null, created_at: string, };
+
+/**
+ * A durable CLI worker control offer (KT-328). Links a TaskExecution + attempt to
+ * the exact target session, the origin room it was posted in, and the
+ * sub-discussion it grants access to. The `id` is the opaque handle an agent
+ * accepts by — never a raw kr-join token.
+ */
+export type TaskExecutionWorkerOffer = { id: string, task_execution_id: string, attempt_no: number, target_cli_session_id: number, origin_discussion_id: string, child_discussion_id: string, status: WorkerOfferStatus, expires_at: string | null, offer_message_id: string | null, reason: string | null, accepted_at: string | null, declined_at: string | null, created_at: string, updated_at: string, };
+
+export type TaskWorkerCatalogue = { workers: Array<TaskWorkerCatalogueEntry>, };
+
+/**
+ * A worker identity that can be copied verbatim into `task_exec_prepare`.
+ *
+ * `configured` and `reachable` are independent observations. The only strict
+ * implication is `available => configured && reachable`; for example a saved
+ * provider can be temporarily down, while NVIDIA's public catalogue can be
+ * reachable before the account key is configured.
+ */
+export type TaskWorkerCatalogueEntry = { worker: MessageTarget, label: string,
+/**
+ * Model declared by an exact joined CLI. Native targets expose their
+ * tier-to-model resolution in `tiers` instead.
+ */
+declared_model: string | null, configured: boolean, reachable: boolean, available: boolean, tiers: Array<TaskWorkerTier>, reasons: Array<CampaignTaskReason>, warnings: Array<CampaignTaskReason>, };
+
+/**
+ * Machine-checkable scope for a worker that should not explore the repository.
+ *
+ * The target is deliberately only a path plus the minimum coordinates needed
+ * by the selected mechanical mutation. The CAS receipt is always produced by
+ * a real `read_file` inside the pinned worktree after provisioning; a
+ * principal-supplied hash would be stale authority.
+ */
+export type TaskWorkerScope = { "mode": "prelocalized_edit", path: string, start_line: number, end_line: number, } | { "mode": "prelocalized_insert_after", path: string, anchor_line: number, };
+
+/**
+ * One tier the native worker target can receive, with the model Kronn would
+ * resolve today. `None` is meaningful for host CLIs whose own account-aware
+ * default remains authoritative; HTTP providers need a concrete model before
+ * the catalogue can call them available.
+ */
+export type TaskWorkerTier = { tier: ModelTier, resolved_model: string | null, };
+
 export type TechDebtItem = { id: string, problem: string, area: string, severity: string, };
 
 /**
@@ -4707,6 +5385,11 @@ is_empty: boolean,
  */
 error: string | null, };
 
+/**
+ * A test verdict in a [`DeliveryManifestV1`].
+ */
+export type TestStatus = "pass" | "fail" | "skipped";
+
 export type TestStepRequest = { step: WorkflowStep, project_id?: string | null,
 /**
  * Mock previous step output (raw text or structured JSON)
@@ -4804,6 +5487,12 @@ export type TransformDataValueType = "string" | "number" | "boolean";
  */
 export type TriggerWorkflowRequest = { variables?: Record<string, string>, };
 
+export type UpdateBatchCompareManualScoreRequest = {
+/**
+ * `None` clears the human rating; otherwise the accepted range is 1..=5.
+ */
+score?: number | null, };
+
 /**
  * `PUT /api/mcps/custom/:server_id` — 0.8.6 — update a Custom API
  * plugin's spec (name, base_url, description, docs_url, fields,
@@ -4891,6 +5580,12 @@ export type UpdatePlanningDodItemRequest = { completed: boolean, actor?: Plannin
 
 export type UpdatePlanningTaskRequest = { title?: string | null, description?: string | null, status?: PlanningTaskStatus | null, priority?: PlanningTaskPriority | null, parent_id?: string | null | null, blocked_reason?: string | null | null, rank?: number | null, project_ids?: Array<string> | null, tags?: Array<string> | null, definition_of_done?: Array<CreatePlanningDodItem> | null, links?: Array<CreatePlanningTaskLink> | null, actor?: PlanningActor, };
 
+/**
+ * Partial favorite toggle shared by Quick Prompts, Quick APIs and Quick
+ * Execs. All three resource routes accept the exact same PATCH payload.
+ */
+export type UpdateQuickFavoriteRequest = { pinned: boolean, };
+
 export type UpdateWorkflowRequest = { name?: string | null, project_id?: string | null | null, trigger?: WorkflowTrigger | null, steps?: Array<WorkflowStep> | null, actions?: Array<WorkflowAction> | null, safety?: WorkflowSafety | null, workspace_config?: WorkspaceConfig | null, concurrency_limit?: number | null, guards?: WorkflowGuards | null,
 /**
  * Replace the artifact map entirely when present. To clear all
@@ -4972,6 +5667,11 @@ model_breakdowns: Array<UsageModelBreakdown>, input_tokens: number, output_token
  * Aggregate totals across all rows.
  */
 export type UsageTotals = { input_tokens: number, output_tokens: number, cache_creation_tokens: number, cache_read_tokens: number, total_tokens: number, total_cost: number, };
+
+/**
+ * One validation to run on the candidate before the parent is advanced (§6).
+ */
+export type ValidationSpec = { command: string, quick_exec_id?: string | null, timeout_secs?: number | null, };
 
 export type VersionCheck = { current: string, latest: string | null, release_url: string | null, up_to_date: boolean, };
 
@@ -5122,6 +5822,17 @@ withheld_by_routing: number, };
  * surface where Kronn owns the runner.
  */
 export type WakeMode = "native_dispatch" | "external_poll";
+
+/**
+ * Lifecycle of a CLI worker control offer (KT-328). `pending` is the published,
+ * unclaimed offer; `accepting` is the CAS-won intermediate held across the
+ * two-phase session transfer (crash-safe resume target); `accepted` is the
+ * committed handshake. `declined`/`expired`/`cancelled` are terminal non-accept
+ * outcomes that free the execution for a re-offer or a native fallback. Variant
+ * names serialize to the exact DB strings (snake_case) so `as_str` and the
+ * migration CHECK stay in lockstep.
+ */
+export type WorkerOfferStatus = "pending" | "accepting" | "accepted" | "declined" | "expired" | "cancelled";
 
 export type Workflow = { id: string, name: string, project_id: string | null, trigger: WorkflowTrigger, steps: Array<WorkflowStep>, actions: Array<WorkflowAction>, safety: WorkflowSafety, workspace_config: WorkspaceConfig | null, concurrency_limit: number | null,
 /**
@@ -5288,6 +5999,13 @@ batch_completed: number,
  */
 batch_failed: number,
 /**
+ * For batch runs: failed children that reached a terminal agent execution
+ * without persisting any Agent reply. This is a subset of
+ * `batch_failed`, kept separately so the UI never disguises silence as a
+ * normal agent error.
+ */
+batch_no_response: number,
+/**
  * For batch runs: display name shown in the sidebar group header.
  * Example: "Cadrage to-Frame — 10 avr 14:00".
  */
@@ -5418,6 +6136,15 @@ quick_api_id?: string | null,
  * pattern `quick_api_id` pour les ApiCall.
  */
 quick_prompt_id?: string | null,
+/**
+ * Optional bindings from Quick Prompt variable names to workflow
+ * template expressions. This keeps the QP reusable from the library
+ * (`{{production_errors}}`) while an Agent step can feed it from an
+ * upstream result (`{{steps.shape.data.toppages}}`). Applied when the
+ * step inherits the QP prompt; an inline prompt override remains the
+ * source of truth and ignores these bindings.
+ */
+quick_prompt_variables?: { [key in string]: string },
 /**
  * Webhook configuration for `StepType::Notify`. URL and body support
  * the same `{{steps.X.output}}` / `{{steps.X.data}}` templates as
@@ -5676,12 +6403,13 @@ export type WorkflowTrigger = { "type": "Cron", schedule: string, } | { "type": 
 
 export type WorkspaceConfig = { hooks: WorkspaceHooks,
 /**
- * When true, a run MUST get its own git worktree — if `Workspace::create`
- * fails, the run is aborted instead of silently falling back to the main
- * checkout. Set on code-pushing presets (Ticket→PR, AutoDev…) where
- * running agents that `git push` / mutate files in the developer's main
- * working tree is dangerous. Default false → legacy warn-and-fallback
- * (fine for read-only audit/briefing workflows on non-git projects).
+ * When true, a run gets its own git worktree and MUST NOT fall back to the
+ * main checkout if creation fails. Set on code-pushing presets
+ * (Ticket→PR, AutoDev…). Default false means the workflow intentionally
+ * runs in the project's main tree under the per-project exclusivity guard;
+ * this is the safe, low-overhead choice for read-only audit, fan-out and
+ * reporting workflows. Legacy configs that declare workspace hooks still
+ * request a worktree so those hooks do not silently stop running.
  */
 require_isolation: boolean, };
 

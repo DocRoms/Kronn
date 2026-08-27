@@ -8,7 +8,7 @@ import { MessageDateSeparator } from '../components/MessageDateSeparator';
 import { groupMessagesWithToolFold } from '../lib/discussionMessageGrouping';
 import { localCalendarDayKey } from '../lib/discussionDates';
 import { ChatInput } from '../components/ChatInput';
-import { discussions as discussionsApi, projects as projectsApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi, contacts as contactsApi, workflows as workflowsApi, quickPrompts as quickPromptsApi, planning as planningApi } from '../lib/api';
+import { discussions as discussionsApi, projects as projectsApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi, contacts as contactsApi, workflows as workflowsApi, quickPrompts as quickPromptsApi, planning as planningApi, orchestration as orchestrationApi } from '../lib/api';
 import { GitPanel } from '../components/GitPanel';
 import { DiscussionPlanPanel } from '../components/DiscussionPlanPanel';
 import { DiscussionSettingsPanel } from '../components/DiscussionSettingsPanel';
@@ -26,7 +26,7 @@ import { parseAgentQuestions } from '../lib/agent-question-parse';
 import { userError } from '../lib/userError';
 import { getDeployedVersion, setDeployedVersion } from '../lib/qp-improver-banner';
 import { sanitizeQpImproverPayload } from '../lib/qp-improver-sanitize';
-import type { Project, AgentDetection, Discussion, DiscussionDetail, DiscussionMessage, MessageChannel, AgentType, AgentsConfig, Skill, AgentProfile, Directive, McpConfigDisplay, McpIncompatibility, Contact, WsMessage, ContextFile, BatchRunSummary, DiscussionPlan, ProposalListResponse, MessageSearchHit, MessageTarget, ParticipantView } from '../types/generated';
+import type { Project, AgentDetection, Discussion, DiscussionDetail, DiscussionMessage, MessageChannel, AgentType, AgentsConfig, Skill, AgentProfile, Directive, McpConfigDisplay, McpIncompatibility, Contact, WsMessage, ContextFile, BatchRunSummary, DiscussionPlan, ProposalListResponse, ExecutionDiscussionLink, MessageSearchHit, MessageTarget, ParticipantView } from '../types/generated';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { useQpChain } from '../hooks/useQpChain';
 import { useMessageQueue } from '../hooks/useMessageQueue';
@@ -46,7 +46,7 @@ import {
   ChevronRight, Cpu, Loader2,
   MessageSquare, AlertTriangle,
   ShieldCheck, Check, Rocket, Play, Zap,
-  Menu, X, Clock, ExternalLink, Search, ChevronUp, ChevronDown, WifiOff,
+  Menu, X, Clock, ExternalLink, Search, ChevronUp, ChevronDown, WifiOff, Square,
 } from 'lucide-react';
 import { useIsMobile } from '../hooks/useMediaQuery';
 import {
@@ -80,9 +80,15 @@ function newClientMessageId(): string {
 function PendingAgentReplyBubble({
   agent,
   triggerMessageId,
+  status,
+  stopping,
+  onStop,
 }: {
   agent: AgentType;
   triggerMessageId: string;
+  status: string;
+  stopping: boolean;
+  onStop: () => void;
 }) {
   const { t } = useT();
   return (
@@ -98,9 +104,24 @@ function PendingAgentReplyBubble({
           <Cpu size={10} /> {AGENT_LABELS[agent] ?? agent}
           <Loader2 size={10} style={{ animation: 'spin 1s linear infinite', marginLeft: 4 }} />
         </div>
-        <div className="disc-streaming-waiting">
-          <span className="disc-pulse-dot" />
-          {t('disc.running')}
+        <div className="disc-pending-agent-status">
+          <div className="disc-streaming-waiting">
+            <span className="disc-pulse-dot" />
+            {status === 'Pending' ? t('disc.queued') : t('disc.running')}
+          </div>
+          <button
+            type="button"
+            className="disc-pending-agent-stop"
+            onClick={onStop}
+            disabled={stopping}
+            aria-label={t('disc.stopThisReply', AGENT_LABELS[agent] ?? agent)}
+            title={t('disc.stopThisReply', AGENT_LABELS[agent] ?? agent)}
+          >
+            {stopping
+              ? <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} />
+              : <Square size={10} fill="currentColor" />}
+            {stopping ? t('disc.stoppingReply') : t('disc.stopReply')}
+          </button>
         </div>
       </div>
     </div>
@@ -115,6 +136,8 @@ function StreamingAgentReplyBubble({
   logs,
   showLogs,
   onToggleLogs,
+  stopping,
+  onStop,
 }: {
   agent: AgentType;
   triggerMessageId: string;
@@ -123,6 +146,8 @@ function StreamingAgentReplyBubble({
   logs: string[];
   showLogs: boolean;
   onToggleLogs: () => void;
+  stopping: boolean;
+  onStop: () => void;
 }) {
   const { t } = useT();
   return (
@@ -139,10 +164,25 @@ function StreamingAgentReplyBubble({
             <Cpu size={10} /> {AGENT_LABELS[agent] ?? agent}
             <Loader2 size={10} style={{ animation: 'spin 1s linear infinite', marginLeft: 4 }} />
           </span>
-          <span className="disc-streaming-elapsed">
-            {elapsed >= 60
-              ? `${Math.floor(elapsed / 60)}m${String(elapsed % 60).padStart(2, '0')}s`
-              : `${elapsed}s`}
+          <span className="disc-pending-agent-actions">
+            <span className="disc-streaming-elapsed">
+              {elapsed >= 60
+                ? `${Math.floor(elapsed / 60)}m${String(elapsed % 60).padStart(2, '0')}s`
+                : `${elapsed}s`}
+            </span>
+            <button
+              type="button"
+              className="disc-pending-agent-stop"
+              onClick={onStop}
+              disabled={stopping}
+              aria-label={t('disc.stopThisReply', AGENT_LABELS[agent] ?? agent)}
+              title={t('disc.stopThisReply', AGENT_LABELS[agent] ?? agent)}
+            >
+              {stopping
+                ? <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} />
+                : <Square size={10} fill="currentColor" />}
+              {stopping ? t('disc.stoppingReply') : t('disc.stopReply')}
+            </button>
           </span>
         </div>
         {text ? (
@@ -387,6 +427,21 @@ export function DiscussionsPage({
   const [discussionPlan, setDiscussionPlan] = useState<DiscussionPlan | null>(null);
   const [proposalInbox, setProposalInbox] = useState<ProposalListResponse | null>(null);
   const [proposalInboxDiscussionId, setProposalInboxDiscussionId] = useState<string | null>(null);
+  const [executionDiscussionLinks, setExecutionDiscussionLinks] = useState<ExecutionDiscussionLink[]>([]);
+
+  const refreshExecutionDiscussionLinks = useCallback(() => {
+    orchestrationApi.discussionLinks()
+      .then(setExecutionDiscussionLinks)
+      .catch(error => console.warn('execution discussion links fetch failed', error));
+  }, []);
+
+  useEffect(() => {
+    refreshExecutionDiscussionLinks();
+    const interval = window.setInterval(() => {
+      if (!document.hidden) refreshExecutionDiscussionLinks();
+    }, 5_000);
+    return () => window.clearInterval(interval);
+  }, [allDiscussions.length, refreshExecutionDiscussionLinks]);
 
   useEffect(() => {
     if (!showGitPanel && !showPlanPanel && !showSettingsPanel && !showAssetsPanel) return;
@@ -615,6 +670,10 @@ export function DiscussionsPage({
     setBatchCompareDiscs([]);
     void refreshBatchCompare(discIds, true);
   }, [refreshBatchCompare]);
+  const openSelectedComparison = useCallback(async (discIds: string[]) => {
+    const comparison = await workflowsApi.createAdHocComparison({ discussion_ids: discIds });
+    openBatchCompare(comparison.run_id, t('disc.compare.freeSelection'), discIds);
+  }, [openBatchCompare, t]);
   const [copiedMsgId, setCopiedMsgId] = useState<string | null>(null);
   const [ttsEnabled, setTtsEnabled] = useState<boolean>(() => {
     try { return localStorage.getItem('kronn:ttsEnabled') === 'true'; } catch { return false; }
@@ -625,6 +684,7 @@ export function DiscussionsPage({
   const sendingTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [agentLogs, setAgentLogs] = useState<string[]>([]);
   const [showLogs, setShowLogs] = useState(false);
+  const [stoppingDispatchIds, setStoppingDispatchIds] = useState<Set<string>>(() => new Set());
   const onAgentLog = useCallback((log: string) => setAgentLogs(prev => [...prev.slice(-50), log]), []);
   const resetAgentLogs = useCallback(() => { setAgentLogs([]); setShowLogs(false); }, []);
   const chatEndRef = useRef<HTMLDivElement>(null);
@@ -965,7 +1025,6 @@ export function DiscussionsPage({
   const activeDiscussionMessages = activeDiscussion?.messages;
   const loadedActiveDiscussionId = activeDiscussion?.id;
   const activeDiscussionLanguage = activeDiscussion?.language;
-  const activeDiscussionWorkspaceMode = activeDiscussion?.workspace_mode;
   const activeDiscussionUnseenBasis = activeDiscussion ? unseenBasis(activeDiscussion) : 0;
 
   const sending = activeDiscussionId ? !!sendingMap[activeDiscussionId] : false;
@@ -1166,14 +1225,17 @@ export function DiscussionsPage({
       setSendingMap(prev => ({ ...prev, [msg.discussion_id]: true }));
       refetchDiscussions();
     }
-    // Batch progress tick — clear the spinner for the disc that just finished
-    // and refresh the list so the pill ticks live.
+    // Batch progress tick — refresh the list so the pill ticks live.
+    //
+    // It does NOT clear the spinner. A progress tick says "the batch advanced",
+    // not "this discussion finished": on a batch the tick fires while other
+    // items are still running, and clearing `sending` there unmounted the
+    // streaming bubble mid-run — taking the tool logs and the elapsed counter
+    // with it — and flipped the sidebar card back to the queued hourglass while
+    // the job was still `Running` in the database. `batch_run_child_finished`
+    // above is the event that actually means finished, and it already clears.
     if (msg.type === 'batch_run_progress') {
       refetchDiscussions();
-      setSendingMap(prev => ({ ...prev, [msg.discussion_id]: false }));
-      setQueuedMap(prev => ({ ...prev, [msg.discussion_id]: false }));
-      delete abortControllers.current[msg.discussion_id]; // keep sending⟺controller invariant
-      reloadDiscussion(msg.discussion_id);
     }
     // Backend boot recovered in-flight agent partials — refresh the affected
     // discs + tell the user so they don't resend on top of the recovered run.
@@ -1480,26 +1542,35 @@ export function DiscussionsPage({
     scrollToBottomSettled();
   }, [activeDiscussion?.id, activeDiscussion?.messages.length, scrollToBottomSettled]);
 
-  // Refresh the pending-files count on the git-panel icon for Isolated
-  // discussions. Fires on: discussion switch, every new message (typically
-  // after an agent reply lands), and when the agent run ends (sending: true
-  // → false). Silent on failure — the badge just stays at its last value.
+  // Refresh the code count on every discussion. Direct rooms can contain
+  // committed agent work too, and orchestrated parent rooms expose their child
+  // workspaces through the same endpoint. The Code button remains available at
+  // zero so a clean, integrated or unbound workspace is never silently hidden.
   useEffect(() => {
-    if (!loadedActiveDiscussionId || activeDiscussionWorkspaceMode !== 'Isolated') {
+    if (!loadedActiveDiscussionId) {
       setPendingFilesCount(0);
       return;
     }
     if (sending) return; // let the stream finish before polling
+    // Focused tests and a frontend hot-reloaded before the backend/client
+    // bundle can temporarily expose the previous API surface. Keep the Code
+    // button available and retry on the next discussion update instead of
+    // crashing the whole transcript.
+    if (typeof discussionsApi.gitStatus !== 'function') return;
     let cancelled = false;
     discussionsApi.gitStatus(loadedActiveDiscussionId)
-      .then((res: { files?: unknown }) => {
+      .then((res: { files?: unknown; committed_files?: unknown }) => {
         if (cancelled) return;
         const files = res?.files ?? [];
-        setPendingFilesCount(Array.isArray(files) ? files.length : 0);
+        const committed = res?.committed_files ?? [];
+        setPendingFilesCount(
+          (Array.isArray(files) ? files.length : 0)
+          + (Array.isArray(committed) ? committed.length : 0),
+        );
       })
       .catch(() => { /* keep last count on transient errors */ });
     return () => { cancelled = true; };
-  }, [loadedActiveDiscussionId, activeDiscussion?.messages.length, activeDiscussionWorkspaceMode, sending]);
+  }, [loadedActiveDiscussionId, activeDiscussion?.messages.length, sending]);
 
   // Handle prefill from parent (e.g. "validate audit" button on Projects page)
   useEffect(() => {
@@ -2197,6 +2268,22 @@ export function DiscussionsPage({
     onFire: handleSendMessage,
   });
 
+  // Queued follow-ups now live inside the scrollable transcript. Keep the
+  // same stick-to-bottom contract as streamed chunks so a newly queued turn is
+  // visible immediately, while a user reading older messages only gets the
+  // non-disruptive "new content" affordance.
+  useEffect(() => {
+    if (queuedMessages.length === 0) return;
+    const frame = requestAnimationFrame(() => {
+      if (stickToBottomRef.current) {
+        chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+      } else {
+        setHasNewWhileScrolledUp(true);
+      }
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [queuedMessages.length]);
+
   const handleStop = () => {
     if (!activeDiscussionId) return;
     const discId = activeDiscussionId;
@@ -2216,6 +2303,48 @@ export function DiscussionsPage({
     // rather than auto-firing them on the (now cancelled) completion edge.
     clearMessageQueue();
   };
+
+  const handleStopDispatch = useCallback(async (dispatchId: string) => {
+    if (!activeDiscussionId) return;
+    const discId = activeDiscussionId;
+    setStoppingDispatchIds(current => new Set(current).add(dispatchId));
+    try {
+      const result = await discussionsApi.stopDispatch(discId, dispatchId);
+      if (result.cancelled) {
+        setLoadedDiscussions(current => {
+          const discussion = current[discId];
+          if (!discussion) return current;
+          return {
+            ...current,
+            [discId]: {
+              ...discussion,
+              awaiting_agent: result.still_awaiting,
+              active_agent_dispatches: discussion.active_agent_dispatches
+                ?.filter(dispatch => dispatch.id !== dispatchId),
+            },
+          };
+        });
+        if (visibleStreamingReply?.id === dispatchId) {
+          abortControllers.current[discId]?.abort();
+          cleanupStream(discId);
+        }
+        toast(t('disc.stopReplyToast'), 'success');
+      } else {
+        toast(t('disc.stopAgentNothing'), 'info');
+      }
+      reloadDiscussion(discId);
+      refetchDiscussions();
+    } catch (error) {
+      toast(t('disc.stopAgentError', userError(error)), 'error');
+    } finally {
+      setStoppingDispatchIds(current => {
+        const next = new Set(current);
+        next.delete(dispatchId);
+        return next;
+      });
+    }
+  }, [abortControllers, activeDiscussionId, cleanupStream, refetchDiscussions, reloadDiscussion,
+    t, toast, visibleStreamingReply?.id]);
 
   const handleTtsToggle = useCallback(() => {
     setTtsEnabled(prev => {
@@ -2825,6 +2954,7 @@ export function DiscussionsPage({
           activeId={activeDiscussionId}
           sendingMap={sendingMap}
           queuedMap={queuedMap}
+          executionLinks={executionDiscussionLinks}
           lastSeenMsgCount={lastSeenMsgCount}
           onMarkAllRead={markAllDiscussionsSeen}
           onOpenGlobalSearch={() => setShowGlobalSearch(true)}
@@ -2852,6 +2982,7 @@ export function DiscussionsPage({
           onDelete={handleDiscDelete}
           onBulkArchive={handleBulkArchive}
           onBulkDelete={handleBulkDelete}
+          onCompareSelected={openSelectedComparison}
           onTogglePin={async (discId, pinned) => {
             try {
               await discussionsApi.update(discId, { pinned });
@@ -3109,11 +3240,13 @@ export function DiscussionsPage({
             remain available from the sidebar and via each column CTA. */}
         {batchCompare && !showNewDiscussion ? (
           <BatchComparePanel
+            runId={batchCompare.runId}
             label={batchCompare.label}
             discussions={batchCompareDiscs}
             loading={batchCompareLoading}
             error={batchCompareError}
             modelTiers={agentAccess?.model_tiers}
+            availableAgents={agents.filter(isUsable).map(agent => agent.agent_type)}
             runningIds={new Set([
               ...Object.entries(sendingMap).filter(([, running]) => running).map(([id]) => id),
               ...Object.entries(queuedMap).filter(([, queued]) => queued).map(([id]) => id),
@@ -3480,6 +3613,8 @@ export function DiscussionsPage({
                             logs={agentLogs}
                             showLogs={showLogs}
                             onToggleLogs={() => setShowLogs(value => !value)}
+                            stopping={stoppingDispatchIds.has(reply.id)}
+                            onStop={() => { void handleStopDispatch(reply.id); }}
                           />
                         )
                       : (
@@ -3487,6 +3622,9 @@ export function DiscussionsPage({
                             key={reply.id}
                             agent={reply.agent}
                             triggerMessageId={reply.triggerMessageId}
+                            status={reply.status}
+                            stopping={stoppingDispatchIds.has(reply.id)}
+                            onStop={() => { void handleStopDispatch(reply.id); }}
                           />
                         )
                   ));
@@ -4155,6 +4293,61 @@ export function DiscussionsPage({
                 return null;
               })()}
 
+              {/* Queued follow-ups are part of the transcript tail, after the
+                  live agent reply. Keeping this inside `.disc-messages` makes
+                  the outbox visible in chronological order and lets the normal
+                  bottom-scroll machinery follow it. */}
+              {queuedMessages.length > 0 && (
+                <div className="disc-queued-msgs" aria-label={t('disc.queuedAria')}>
+                  {/* ONE growing "outbox" bubble — each queued part on its own
+                      line, all sent together as a single merged message. */}
+                  <div className="disc-queued-bubble" title={t('disc.queuedHint')}>
+                    <div className="disc-queued-head">
+                      <Clock size={11} className="disc-queued-clock" />
+                      <span className="disc-queued-label">{t('disc.queuedAria')}</span>
+                      {queuedMessages.length > 1 && (
+                        <button
+                          type="button"
+                          className="disc-queued-clear"
+                          onClick={clearMessageQueue}
+                          aria-label={t('disc.queuedClearAll')}
+                          title={t('disc.queuedClearAll')}
+                        >
+                          {t('disc.queuedClearAll')}
+                        </button>
+                      )}
+                    </div>
+                    {queuedMessages.map(qm => (
+                      <div key={qm.id} className="disc-queued-line">
+                        {qm.targets?.map(target => (
+                          <span
+                            key={`${target.kind}:${target.agent_type}:${target.cli_session_id ?? ''}`}
+                            className="disc-queued-agent"
+                          >
+                            @{target.agent_type}
+                          </span>
+                        ))}
+                        {qm.replyToMessageId && (
+                          <span className="disc-queued-agent">
+                            {t('disc.reply')} #{qm.replyToMessageId.slice(0, 8)}
+                          </span>
+                        )}
+                        <span className="disc-queued-text">{qm.content}</span>
+                        <button
+                          type="button"
+                          className="disc-queued-cancel"
+                          onClick={() => removeQueuedMessage(qm.id)}
+                          aria-label={t('disc.queuedCancel')}
+                          title={t('disc.queuedCancel')}
+                        >
+                          <X size={11} />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               <div ref={chatEndRef} />
             </div>
 
@@ -4259,61 +4452,6 @@ export function DiscussionsPage({
               );
             })()}
 
-            {/* Queued follow-ups — messages the user typed while the agent is
-                still streaming. Rendered as ghost "outbox" bubbles just above
-                the composer; they auto-fire one-by-one as each response
-                completes (useMessageQueue). Each can be cancelled via its ✕. */}
-            {queuedMessages.length > 0 && (
-              <div className="disc-queued-msgs" aria-label={t('disc.queuedAria')}>
-                {/* ONE growing "outbox" bubble — each queued part on its own
-                    line, all sent together as a single merged message. */}
-                <div className="disc-queued-bubble" title={t('disc.queuedHint')}>
-                  <div className="disc-queued-head">
-                    <Clock size={11} className="disc-queued-clock" />
-                    <span className="disc-queued-label">{t('disc.queuedAria')}</span>
-                    {queuedMessages.length > 1 && (
-                      <button
-                        type="button"
-                        className="disc-queued-clear"
-                        onClick={clearMessageQueue}
-                        aria-label={t('disc.queuedClearAll')}
-                        title={t('disc.queuedClearAll')}
-                      >
-                        {t('disc.queuedClearAll')}
-                      </button>
-                    )}
-                  </div>
-                  {queuedMessages.map(qm => (
-                    <div key={qm.id} className="disc-queued-line">
-                      {qm.targets?.map(target => (
-                        <span
-                          key={`${target.kind}:${target.agent_type}:${target.cli_session_id ?? ''}`}
-                          className="disc-queued-agent"
-                        >
-                          @{target.agent_type}
-                        </span>
-                      ))}
-                      {qm.replyToMessageId && (
-                        <span className="disc-queued-agent">
-                          {t('disc.reply')} #{qm.replyToMessageId.slice(0, 8)}
-                        </span>
-                      )}
-                      <span className="disc-queued-text">{qm.content}</span>
-                      <button
-                        type="button"
-                        className="disc-queued-cancel"
-                        onClick={() => removeQueuedMessage(qm.id)}
-                        aria-label={t('disc.queuedCancel')}
-                        title={t('disc.queuedCancel')}
-                      >
-                        <X size={11} />
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
             {/* Input — unified composer.
                 `key={activeDiscussion.id}` forces a fresh mount whenever the
                 user switches discussions. Without this, React re-uses the
@@ -4373,9 +4511,9 @@ export function DiscussionsPage({
             </div>{/* end messages column */}
 
             {/* Git Panel (side panel) */}
-            {showGitPanel && activeDiscussion.project_id && (
+            {showGitPanel && (
               <GitPanel
-                projectId={activeDiscussion.project_id}
+                projectId={activeDiscussion.project_id ?? undefined}
                 discussionId={activeDiscussion.id}
                 initialWorkspaceId={initialGitWorkspaceId}
                 onClose={() => {

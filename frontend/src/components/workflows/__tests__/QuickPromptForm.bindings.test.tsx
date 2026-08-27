@@ -127,6 +127,7 @@ describe('QuickPromptForm bindings (0.8.5)', () => {
       <QuickPromptForm
         editPrompt={{
           id: 'qp-x', name: 'Edit me', icon: '⚡', prompt_template: 'foo',
+          pinned: false,
           variables: [], agent: 'ClaudeCode',
           project_id: null,
           skill_ids: ['s1'], profile_ids: ['p1'], directive_ids: ['d1'],
@@ -221,6 +222,7 @@ describe('QuickPromptForm — default model tier (0.8.6 phase 4)', () => {
       <QuickPromptForm
         editPrompt={{
           id: 'qp-legacy', name: 'Old QP', icon: '', prompt_template: 'do x',
+          pinned: false,
           variables: [], agent: 'ClaudeCode', project_id: null,
           skill_ids: [], profile_ids: [], directive_ids: [],
           tier: 'economy', description: '',

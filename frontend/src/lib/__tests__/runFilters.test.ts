@@ -6,18 +6,20 @@ const mk = (over: Partial<WorkflowRun>): WorkflowRun => ({
   id: 'run-x', workflow_id: 'wf', status: 'Success', trigger_context: null,
   step_results: [], tokens_used: 0, workspace_path: null,
   started_at: '2026-07-06T06:13:00Z', finished_at: null,
-  run_type: 'linear', batch_total: 0, batch_completed: 0, batch_failed: 0,
+  run_type: 'linear', batch_total: 0, batch_completed: 0, batch_failed: 0, batch_no_response: 0,
   batch_name: null, parent_run_id: null, state: {}, produced_branches: [], ...over,
 });
 
 describe('runFilters — status', () => {
   it('all passes everything; specific filters match exactly', () => {
     const failed = mk({ status: 'Failed' });
+    const partial = mk({ status: 'Partial' });
     const ok = mk({ status: 'Success' });
     const waiting = mk({ status: 'WaitingApproval' });
     const guard = mk({ status: 'StoppedByGuard' });
     expect([failed, ok, waiting, guard].every(r => runMatchesStatusFilter(r, 'all'))).toBe(true);
     expect(runMatchesStatusFilter(failed, 'failed')).toBe(true);
+    expect(runMatchesStatusFilter(partial, 'failed')).toBe(true);
     expect(runMatchesStatusFilter(ok, 'failed')).toBe(false);
     expect(runMatchesStatusFilter(waiting, 'waiting')).toBe(true);
     expect(runMatchesStatusFilter(guard, 'stopped')).toBe(true);

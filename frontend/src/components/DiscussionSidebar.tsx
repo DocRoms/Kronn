@@ -1,9 +1,9 @@
-import { useState, useMemo, useRef, useEffect, useCallback } from 'react';
+import { Fragment, useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import '../pages/DiscussionsPage.css';
 import { SwipeableDiscItem } from './SwipeableDiscItem';
 import { unseenBasis } from '../lib/discussionUiUtils';
 import { GlobalSearchPanel } from './GlobalSearchPanel';
-import type { Discussion, Project, Contact, BatchRunSummary, MessageSearchHit } from '../types/generated';
+import type { Discussion, Project, Contact, BatchRunSummary, ExecutionDiscussionLink, MessageSearchHit } from '../types/generated';
 import { projects as projectsApi } from '../lib/api';
 import { getProjectGroup, isHiddenPath } from '../lib/constants';
 import { gravatarUrl } from '../lib/gravatar';
@@ -12,7 +12,7 @@ import type { ToastFn } from '../hooks/useToast';
 import {
   Folder, ChevronLeft, ChevronRight, Plus, X, MessageSquare, Archive, Search,
   SlidersHorizontal, Users2, Trash2, Star, CheckCheck, Columns3, ListChecks, LogIn,
-  Loader2, Upload, CircleDot, Clock3, MoreHorizontal,
+  Loader2, Upload, CircleDot, Clock3, MoreHorizontal, ChevronDown,
 } from 'lucide-react';
 
 export interface DiscussionSidebarProps {
@@ -23,6 +23,9 @@ export interface DiscussionSidebarProps {
   /** Batch children created but not yet running (throttled). Rendered
    *  as a distinct "en file" state vs the active "en cours" spinner. */
   queuedMap?: Record<string, boolean>;
+  /** Durable parent/child execution lineage. Children are rendered exactly
+   * once under their principal room; missing parents stay ordinary rows. */
+  executionLinks?: ExecutionDiscussionLink[];
   lastSeenMsgCount: Record<string, number>;
   contacts: Contact[];
   contactsOnline: Record<string, boolean>;
@@ -34,6 +37,8 @@ export interface DiscussionSidebarProps {
   onDelete: (discId: string) => void;
   onBulkArchive?: (discIds: string[]) => Promise<void>;
   onBulkDelete?: (discIds: string[]) => Promise<void>;
+  /** Opens a durable free comparison for the selected discussions. */
+  onCompareSelected?: (discIds: string[]) => Promise<void>;
   onTogglePin: (discId: string, pinned: boolean) => void;
   onNewDiscussion: () => void;
   onImportDiscussion?: (file: File) => Promise<void>;
@@ -133,6 +138,7 @@ export function DiscussionSidebar({
   activeId,
   sendingMap,
   queuedMap = {},
+  executionLinks = [],
   lastSeenMsgCount,
   contacts,
   contactsOnline,
@@ -144,6 +150,7 @@ export function DiscussionSidebar({
   onDelete,
   onBulkArchive,
   onBulkDelete,
+  onCompareSelected,
   onTogglePin,
   onNewDiscussion,
   onImportDiscussion,
@@ -315,6 +322,21 @@ export function DiscussionSidebar({
     }
   };
 
+  const compareSelected = async () => {
+    if (!onCompareSelected || selectedIds.size < 2 || bulkActionInFlightRef.current) return;
+    bulkActionInFlightRef.current = true;
+    setBulkActionBusy(true);
+    try {
+      await onCompareSelected([...selectedIds]);
+      leaveSelectionMode();
+    } catch {
+      toast(t('disc.compare.selectionError'), 'error');
+    } finally {
+      bulkActionInFlightRef.current = false;
+      setBulkActionBusy(false);
+    }
+  };
+
   // 0.8.4 (#294) — cross-agent source bindings. Fetched once at mount
   // + on each disc list change so newly-imported discs get the badge
   // without a manual refresh. The map keys on disc.id.
@@ -412,14 +434,24 @@ export function DiscussionSidebar({
   // `awaiting_agent` is the DB truth serialized with the list — it covers
   // frames missed because the page wasn't mounted when the batch launched,
   // reloads, and WS reconnects. Running always wins over queued.
+  //
+  // `awaiting_agent` stays set for the WHOLE run (it clears only at a terminal
+  // state), so it cannot on its own tell "enqueued" from "running" — that is
+  // what `agent_running` answers, the dispatch status carried on the list row.
   const isQueuedDisc = (d: Discussion): boolean =>
-    !sendingMap[d.id] && (!!queuedMap[d.id] || d.awaiting_agent);
+    !sendingMap[d.id] && !d.agent_running && (!!queuedMap[d.id] || d.awaiting_agent);
+
+  // A run this client never opened a stream for — started from the API, or
+  // from another tab, or before a reload — leaves `sendingMap` empty. The DB
+  // knows better: `agent_running` is the job's real status.
+  const isRunningDisc = (d: Discussion): boolean =>
+    !!sendingMap[d.id] || !!d.agent_running;
 
   // Live discussions first: an active agent (spinner) is what the user is
   // waiting on — don't let it drown mid-list. Running > queued > rest,
   // most-recent inside each band.
   const byLiveThenRecent = (a: Discussion, b: Discussion): number => {
-    const rank = (d: Discussion) => (sendingMap[d.id] ? 0 : isQueuedDisc(d) ? 1 : 2);
+    const rank = (d: Discussion) => (isRunningDisc(d) ? 0 : isQueuedDisc(d) ? 1 : 2);
     return rank(a) - rank(b) || b.updated_at.localeCompare(a.updated_at);
   };
 
@@ -540,14 +572,38 @@ export function DiscussionSidebar({
   };
 
   // ─── Render ───────────────────────────────────────────────────────────
+  const discussionById = new Map(discussions.map(discussion => [discussion.id, discussion]));
+  const executionChildrenByParent = new Map<string, ExecutionDiscussionLink[]>();
+  const nestedExecutionChildIds = new Set<string>();
+  for (const link of executionLinks) {
+    const parent = discussionById.get(link.parent_discussion_id);
+    const child = discussionById.get(link.sub_discussion_id);
+    // An absent/archived parent is an orphan in the active tree: keep the child
+    // as a normal row so lineage damage never makes work disappear.
+    if (!parent || !child || parent.archived || child.archived || !matchesFilters(parent)) continue;
+    const siblings = executionChildrenByParent.get(parent.id) ?? [];
+    if (!siblings.some(candidate => candidate.sub_discussion_id === child.id)) {
+      siblings.push(link);
+      executionChildrenByParent.set(parent.id, siblings);
+      nestedExecutionChildIds.add(child.id);
+    }
+  }
   const contactsGroupKey = '__contacts__';
   const contactsCollapsed = collapsedGroups.has(contactsGroupKey) && !showJoin && !showAddContact;
   const onlineContactCount = contacts.filter(contact => contactsOnline[contact.id]).length;
-  const smartCandidates = discussions.filter(disc => !disc.archived && matchesFilters(disc));
+  const smartCandidates = discussions.filter(disc => (
+    !disc.archived && !nestedExecutionChildIds.has(disc.id) && matchesFilters(disc)
+  ));
+  // Rendering roots and counting the canonical tree are different concerns:
+  // execution children render under their parent, but their unread work must
+  // still reach the collapsed Projects badge and total.
+  const canonicalCandidates = discussions.filter(disc => (
+    !disc.archived && (nestedExecutionChildIds.has(disc.id) || matchesFilters(disc))
+  ));
   const projectNameById = new Map(projects.map(project => [project.id, project.name]));
   const projectsGroupKey = '__projects__';
   const projectsCollapsed = collapsedGroups.has(projectsGroupKey);
-  const canonicalUnseen = smartCandidates.reduce((sum, disc) => {
+  const canonicalUnseen = canonicalCandidates.reduce((sum, disc) => {
     if (disc.id === activeId) return sum;
     return sum + Math.max(0, unseenBasis(disc) - (lastSeenMsgCount[disc.id] ?? 0));
   }, 0);
@@ -560,7 +616,7 @@ export function DiscussionSidebar({
     !selectionMode && discussions.filter(disc => !disc.archived).length >= 20;
   const followUpDiscussions = (smartSectionsEnabled ? smartCandidates : [])
     .filter((disc) => {
-      if (sendingMap[disc.id] || isQueuedDisc(disc)) return true;
+      if (isRunningDisc(disc) || isQueuedDisc(disc)) return true;
       // A favorite has its own stable shortcut section. Keep it out of the
       // unread catch-all so Favoris does not disappear on a fresh workspace
       // where every old discussion is technically unseen.
@@ -570,7 +626,15 @@ export function DiscussionSidebar({
     })
     .sort(byLiveThenRecent);
   const followUpIds = new Set(followUpDiscussions.map(disc => disc.id));
-  const favoriteDiscussions = (selectionMode ? [] : smartCandidates)
+  // Favoris is a shortcut, not the tree. `smartCandidates` drops execution
+  // children so the canonical tree does not render them twice — correct there,
+  // but it also made a pinned sub-discussion impossible to reach from Favoris.
+  // Pinning one is an explicit request for a direct route to it, so the
+  // shortcut reads from a base that keeps them.
+  const favoriteCandidates = selectionMode
+    ? []
+    : discussions.filter(disc => !disc.archived && matchesFilters(disc));
+  const favoriteDiscussions = favoriteCandidates
     .filter(disc => disc.pinned && !followUpIds.has(disc.id))
     .sort(byLiveThenRecent);
   const favoriteIds = new Set(favoriteDiscussions.map(disc => disc.id));
@@ -585,7 +649,7 @@ export function DiscussionSidebar({
       disc={disc}
       isActive={disc.id === activeId}
       lastSeenCount={lastSeenMsgCount[disc.id] ?? 0}
-      isSending={!!sendingMap[disc.id]}
+      isSending={isRunningDisc(disc)}
       isQueued={isQueuedDisc(disc)}
       selectionMode={selectionMode}
       isSelected={selectedIds.has(disc.id)}
@@ -601,6 +665,93 @@ export function DiscussionSidebar({
       importedBy={importProvenance.get(disc.id) ?? null}
     />
   ));
+
+  const renderCanonicalRow = (disc: Discussion) => {
+    const children = (executionChildrenByParent.get(disc.id) ?? [])
+      .filter(link => {
+        const child = discussionById.get(link.sub_discussion_id);
+        return child ? matchesFilters(child) : false;
+      });
+    // A parent used to expand the sidebar permanently, one row per execution,
+    // with no way to fold it back. The toggle appears only past a single child:
+    // hiding one execution behind a click would trade one annoyance for
+    // another, and a parent with one execution is the common case.
+    //
+    // Children stay visible by default — collapsing on their behalf would hide
+    // work they just launched. Reuses `collapsedGroups`, so a parent they DO
+    // fold stays folded exactly like the Projects and Favoris sections.
+    const childGroupKey = `__exec_children__:${disc.id}`;
+    const collapsible = children.length > 1;
+    const childrenCollapsed = collapsible && collapsedGroups.has(childGroupKey);
+    return (
+      <Fragment key={disc.id}>
+        <SwipeableDiscItem
+          disc={disc}
+          isActive={disc.id === activeId}
+          lastSeenCount={lastSeenMsgCount[disc.id] ?? 0}
+          isSending={isRunningDisc(disc)}
+          isQueued={isQueuedDisc(disc)}
+          selectionMode={selectionMode}
+          isSelected={selectedIds.has(disc.id)}
+          onToggleSelection={toggleSelection}
+          onSelect={onSelect}
+          onArchive={onArchive}
+          onDelete={onDelete}
+          onStop={onStopDiscussion}
+          onTogglePin={onTogglePin}
+          t={t}
+          sourceAgents={sourceBindings.get(disc.id)}
+          importedBy={importProvenance.get(disc.id) ?? null}
+        />
+        {collapsible && (
+          <button
+            type="button"
+            className="disc-orchestration-toggle"
+            aria-expanded={!childrenCollapsed}
+            onClick={() => onToggleGroup(childGroupKey)}
+          >
+            <ChevronDown size={12} className={childrenCollapsed ? 'is-collapsed' : undefined} />
+            <span>{t('orch.sidebar.executionCount', children.length)}</span>
+          </button>
+        )}
+        {children.length > 0 && !childrenCollapsed && (
+          <div className="disc-orchestration-children" aria-label={t('orch.sidebar.executions')}>
+            {children.map(link => {
+              const child = discussionById.get(link.sub_discussion_id);
+              if (!child) return null;
+              return (
+                <div className="disc-orchestration-child" key={link.execution_id}>
+                  <div className="disc-orchestration-child-meta">
+                    <span>{link.task_reference}</span>
+                    <span title={link.task_title}>{link.task_title}</span>
+                    <span data-status={link.status}>{link.status}</span>
+                  </div>
+                  <SwipeableDiscItem
+                    disc={child}
+                    isActive={child.id === activeId}
+                    lastSeenCount={lastSeenMsgCount[child.id] ?? 0}
+                    isSending={isRunningDisc(child)}
+                    isQueued={isQueuedDisc(child)}
+                    selectionMode={selectionMode}
+                    isSelected={selectedIds.has(child.id)}
+                    onToggleSelection={toggleSelection}
+                    onSelect={onSelect}
+                    onArchive={onArchive}
+                    onDelete={onDelete}
+                    onStop={onStopDiscussion}
+                    onTogglePin={onTogglePin}
+                    t={t}
+                    sourceAgents={sourceBindings.get(child.id)}
+                    importedBy={importProvenance.get(child.id) ?? null}
+                  />
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </Fragment>
+    );
+  };
   const renderSmartSectionRows = (rows: Discussion[], keyPrefix: string) => {
     const expanded = expandedSmartSections.has(keyPrefix);
     const visible = expanded ? rows : rows.slice(0, SMART_SECTION_LIMIT);
@@ -647,6 +798,16 @@ export function DiscussionSidebar({
         <div className="disc-sidebar-header-actions">
           {selectionMode ? (
             <>
+              <button
+                type="button"
+                className="disc-icon-btn"
+                onClick={() => void compareSelected()}
+                disabled={selectedIds.size < 2 || bulkActionBusy || !onCompareSelected}
+                aria-label={t('disc.bulk.compare')}
+                title={selectedIds.size < 2 ? t('disc.compare.selectAtLeastTwo') : t('disc.bulk.compare')}
+              >
+                <Columns3 size={14} />
+              </button>
               <button
                 type="button"
                 className="disc-icon-btn"
@@ -1130,7 +1291,7 @@ export function DiscussionSidebar({
 
         {/* Canonical discussion tree. Smart sections above are shortcuts only;
             Projects remains the complete, non-duplicated source of truth. */}
-        {smartCandidates.length > 0 && (
+        {canonicalCandidates.length > 0 && (
           <div
             className="disc-sidebar-section disc-sidebar-projects"
             data-expanded={!projectsCollapsed}
@@ -1145,7 +1306,7 @@ export function DiscussionSidebar({
               <ChevronRight size={10} className="disc-chevron" data-expanded={!projectsCollapsed} />
               <Folder size={10} />
               <span>{t('projects.title')}</span>
-              <span className="disc-group-count">{smartCandidates.length}</span>
+              <span className="disc-group-count">{canonicalCandidates.length}</span>
               {canonicalUnseen > 0 && (
                 <span className="disc-group-unseen">{canonicalUnseen}</span>
               )}
@@ -1156,7 +1317,9 @@ export function DiscussionSidebar({
         {(() => {
           // Filter up front so header/count visibility follows the optional
           // source filter.
-          const globalDiscs = (activeDiscByProject.get(null) ?? []).filter(matchesFilters);
+          const globalDiscs = (activeDiscByProject.get(null) ?? [])
+            .filter(matchesFilters)
+            .filter(disc => !nestedExecutionChildIds.has(disc.id));
           if (globalDiscs.length === 0) return null;
           const isCollapsed = collapsedGroups.has('__global__');
           return (
@@ -1174,27 +1337,7 @@ export function DiscussionSidebar({
                   <span className="disc-group-unseen">{unseenByGroup.get('__global__')}</span>
                 )}
               </button>
-              {!isCollapsed && globalDiscs.sort(byLiveThenRecent).map(disc => (
-                <SwipeableDiscItem
-                  key={disc.id}
-                  disc={disc}
-                  isActive={disc.id === activeId}
-                  lastSeenCount={lastSeenMsgCount[disc.id] ?? 0}
-                  isSending={!!sendingMap[disc.id]}
-                  isQueued={isQueuedDisc(disc)}
-                  selectionMode={selectionMode}
-                  isSelected={selectedIds.has(disc.id)}
-                  onToggleSelection={toggleSelection}
-                  onSelect={onSelect}
-                  onArchive={onArchive}
-                  onDelete={onDelete}
-                  onStop={onStopDiscussion}
-                  onTogglePin={onTogglePin}
-                  t={t}
-                  sourceAgents={sourceBindings.get(disc.id)}
-                  importedBy={importProvenance.get(disc.id) ?? null}
-                />
-              ))}
+              {!isCollapsed && globalDiscs.sort(byLiveThenRecent).map(renderCanonicalRow)}
             </div>
           );
         })()}
@@ -1269,6 +1412,7 @@ export function DiscussionSidebar({
                         // Filter + sort, then split into batch groups vs loose discs.
                         const filtered = projDiscs
                           .filter(matchesFilters)
+                          .filter(disc => !nestedExecutionChildIds.has(disc.id))
                           .sort((a, b) => b.updated_at.localeCompare(a.updated_at));
                         // Group by workflow_run_id — discs without one are "loose".
                         const batchMap = new Map<string, typeof filtered>();
@@ -1287,14 +1431,14 @@ export function DiscussionSidebar({
                         //   - or all "terminal" discs done — we approximate via sendingMap
                         const batchGroups = Array.from(batchMap.entries())
                           .map(([runId, discs]) => {
-                            const anySending = discs.some(d => !!sendingMap[d.id]);
+                            const anySending = discs.some(isRunningDisc);
                             const total = discs.length;
                             // "Done" = not running AND not queued AND has at least 2 messages
                             // (user + agent reply). Excluding queuedMap matters on a batch
                             // retry over EXISTING discs (>=2 messages already): a throttled
                             // child would otherwise count as done and the pill jumps ahead.
                             // Rough live heuristic; the real authority is workflow_runs in DB.
-                            const done = discs.filter(d => !sendingMap[d.id] && !isQueuedDisc(d) && d.message_count >= 2).length;
+                            const done = discs.filter(d => !isRunningDisc(d) && !isQueuedDisc(d) && d.message_count >= 2).length;
                             // Children created but not yet running (throttled). Lets the
                             // group show "n en file" distinctly from "en cours".
                             const running = discs.filter(d => !!sendingMap[d.id]).length;
@@ -1387,13 +1531,40 @@ export function DiscussionSidebar({
                               // While active, split "en cours" from "en file"
                               // so a big batch reads honestly (e.g. "⏳ 3/23 · 5▶ · 15⏸")
                               // instead of 23 identical spinners.
+                              const terminalStatus = summaryForLabel?.status;
+                              const summaryCompleted = summaryForLabel?.batch_completed ?? bg.done;
+                              const summaryTotal = summaryForLabel?.batch_total ?? bg.total;
+                              const explicitFailures = Math.max(
+                                0,
+                                (summaryForLabel?.batch_failed ?? 0)
+                                  - (summaryForLabel?.batch_no_response ?? 0),
+                              );
+                              const terminalBreakdown = [
+                                explicitFailures > 0 ? `${explicitFailures}✕` : null,
+                                (summaryForLabel?.batch_no_response ?? 0) > 0
+                                  ? `${summaryForLabel?.batch_no_response}∅`
+                                  : null,
+                              ].filter(Boolean).join(' · ');
                               const statusPill = (bg.anySending || bg.queued > 0)
                                 ? `⏳ ${bg.done}/${bg.total}`
                                   + (bg.running > 0 ? ` · ${bg.running}▶` : '')
                                   + (bg.queued > 0 ? ` · ${bg.queued}⏸` : '')
+                                : terminalStatus === 'Partial'
+                                  ? `⚠ ${summaryCompleted}/${summaryTotal}`
+                                    + (terminalBreakdown ? ` · ${terminalBreakdown}` : '')
+                                  : terminalStatus === 'Failed'
+                                    ? `✕ 0/${summaryTotal}`
+                                      + (terminalBreakdown ? ` · ${terminalBreakdown}` : '')
                                 : bg.done === bg.total
                                   ? `✓ ${bg.total}/${bg.total}`
                                   : `${bg.done}/${bg.total}`;
+                              const statusKind = (bg.anySending || bg.queued > 0)
+                                ? 'running'
+                                : terminalStatus === 'Partial'
+                                  ? 'partial'
+                                  : terminalStatus === 'Failed'
+                                    ? 'failed'
+                                    : 'done';
                               const summary = batchMetaById.get(bg.runId);
                               const parentLabel = formatBatchParent(summary, t);
                               const parentWorkflowId = summary?.parent_workflow_id ?? null;
@@ -1426,7 +1597,7 @@ export function DiscussionSidebar({
                                       <span className="disc-batch-run-id" title={bg.runId}>
                                         {t('disc.batchRunId', shortRunId)}
                                       </span>
-                                      <span className="disc-group-count" data-batch-status={(bg.anySending || bg.queued > 0) ? 'running' : 'done'}>
+                                      <span className="disc-group-count" data-batch-status={statusKind}>
                                         {statusPill}
                                       </span>
                                     </button>
@@ -1617,32 +1788,28 @@ export function DiscussionSidebar({
                               const showAll = isExpanded;
                               // Live-first BEFORE the cap: a running disc must
                               // never be hidden behind "afficher plus".
-                              const orderedLoose = [...loose].sort(byLiveThenRecent);
+                              const treeLiveRank = (disc: Discussion) => {
+                                const children = executionChildrenByParent.get(disc.id) ?? [];
+                                if (disc.id === activeId || children.some(link => link.sub_discussion_id === activeId)) return -1;
+                                if (children.some(link => {
+                                  const child = discussionById.get(link.sub_discussion_id);
+                                  return child ? isRunningDisc(child) : false;
+                                })) return 0;
+                                if (children.some(link => {
+                                  const child = discussionById.get(link.sub_discussion_id);
+                                  return child ? isQueuedDisc(child) : false;
+                                })) return 1;
+                                return isRunningDisc(disc) ? 0 : isQueuedDisc(disc) ? 1 : 2;
+                              };
+                              const orderedLoose = [...loose].sort((a, b) => (
+                                treeLiveRank(a) - treeLiveRank(b)
+                                || b.updated_at.localeCompare(a.updated_at)
+                              ));
                               const visibleLoose = showAll ? orderedLoose : orderedLoose.slice(0, PROJECT_LOOSE_LIMIT);
                               const hiddenCount = orderedLoose.length - visibleLoose.length;
                               return (
                                 <>
-                                  {visibleLoose.map(disc => (
-                                    <SwipeableDiscItem
-                                      key={disc.id}
-                                      disc={disc}
-                                      isActive={disc.id === activeId}
-                                      lastSeenCount={lastSeenMsgCount[disc.id] ?? 0}
-                                      isSending={!!sendingMap[disc.id]}
-                                      isQueued={isQueuedDisc(disc)}
-                                      selectionMode={selectionMode}
-                                      isSelected={selectedIds.has(disc.id)}
-                                      onToggleSelection={toggleSelection}
-                                      onSelect={onSelect}
-                                      onArchive={onArchive}
-                                      onDelete={onDelete}
-                                      onStop={onStopDiscussion}
-                                      onTogglePin={onTogglePin}
-                                      t={t}
-                                      sourceAgents={sourceBindings.get(disc.id)}
-                                      importedBy={importProvenance.get(disc.id) ?? null}
-                                    />
-                                  ))}
+                                  {visibleLoose.map(renderCanonicalRow)}
                                   {hiddenCount > 0 && (
                                     <button
                                       className="disc-show-more-btn"

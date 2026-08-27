@@ -11,7 +11,7 @@ export const RUN_PAGE_SIZE = 10;
 export function runMatchesStatusFilter(run: WorkflowRun, f: RunStatusFilter): boolean {
   switch (f) {
     case 'all': return true;
-    case 'failed': return run.status === 'Failed';
+    case 'failed': return run.status === 'Failed' || run.status === 'Partial';
     case 'waiting': return run.status === 'WaitingApproval';
     case 'stopped': return run.status === 'StoppedByGuard';
     default: return true;

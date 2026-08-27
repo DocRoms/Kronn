@@ -746,6 +746,16 @@
   opacity: 1;
   font-variant-numeric: tabular-nums;
 }
+.disc-group-count[data-batch-status="partial"] {
+  color: var(--kr-warning);
+  opacity: 1;
+  font-variant-numeric: tabular-nums;
+}
+.disc-group-count[data-batch-status="failed"] {
+  color: var(--kr-error);
+  opacity: 1;
+  font-variant-numeric: tabular-nums;
+}
 
 /* Batch children wrapper — tree-view indent + left border so the
    contained discussions visually read as "inside" the 📦 group,
@@ -764,6 +774,78 @@
      eye notice the boundary at a glance. */
   background: rgba(var(--kr-accent-rgb), 0.015);
   border-radius: 0 0 var(--kr-r-sm) 0;
+}
+
+/* Fold control for a parent's executions. Aligned with the children's own
+ * indentation so the chevron reads as the head of that branch, not as another
+ * discussion row. Only rendered past one child — see the sidebar component. */
+.disc-orchestration-toggle {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin: 0 8px 2px 28px;
+  padding: 2px 6px;
+  border: none;
+  border-radius: var(--kr-r-sm);
+  background: none;
+  color: var(--kr-text-dim);
+  font-family: inherit;
+  font-size: var(--kr-fs-xs);
+  cursor: pointer;
+}
+.disc-orchestration-toggle:hover { color: var(--kr-text-secondary); background: var(--kr-bg-hover); }
+.disc-orchestration-toggle svg { transition: transform 0.15s; }
+/* Collapsed points right, the way a closed tree branch does everywhere else. */
+.disc-orchestration-toggle svg.is-collapsed { transform: rotate(-90deg); }
+
+.disc-orchestration-children {
+  display: grid;
+  gap: 3px;
+  margin: 0 8px 5px 28px;
+  padding: 3px 0 3px 8px;
+  border-left: 2px solid rgba(var(--kr-accent-rgb), 0.22);
+}
+
+.disc-orchestration-child {
+  min-width: 0;
+  border-radius: var(--kr-r-sm);
+  background: rgba(var(--kr-accent-rgb), 0.025);
+}
+
+.disc-orchestration-child-meta {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 7px 0;
+  color: var(--kr-text-dim);
+  font-size: 9px;
+}
+
+.disc-orchestration-child-meta > span:first-child {
+  color: var(--kr-accent);
+  font-family: var(--kr-font-mono);
+}
+
+.disc-orchestration-child-meta > span:nth-child(2) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.disc-orchestration-child-meta > span:last-child {
+  padding: 1px 4px;
+  border-radius: 999px;
+  background: rgba(var(--kr-accent-rgb), 0.1);
+  color: var(--kr-text-muted);
+  text-transform: lowercase;
+}
+
+@media (max-width: 680px) {
+  .disc-orchestration-children { margin-left: 18px; }
+  .disc-orchestration-toggle { margin-left: 18px; }
+  .disc-orchestration-child-meta { grid-template-columns: auto minmax(0, 1fr); }
+  .disc-orchestration-child-meta > span:last-child { grid-column: 2; justify-self: start; }
 }
 
 .disc-batch-review-backdrop {
@@ -1051,13 +1133,32 @@
   background: var(--kr-text-faint);
 }
 
+/* Running must read as motion, not as a colour. With one agent slot, a single
+   discussion computes while the others queue — a static dot forces the eye to
+   compare hues across rows to find the live one. The breathing halo answers
+   "which conversation was picked up?" at a glance. */
 .disc-item-status-dot[data-state="running"] {
   background: var(--kr-success);
-  box-shadow: 0 0 0 3px rgba(var(--kr-success-rgb), 0.14);
+  animation: disc-item-running-pulse 1.4s ease-in-out infinite;
 }
 
+@keyframes disc-item-running-pulse {
+  0%   { box-shadow: 0 0 0 0 rgba(var(--kr-success-rgb), 0.45); }
+  70%  { box-shadow: 0 0 0 5px rgba(var(--kr-success-rgb), 0); }
+  100% { box-shadow: 0 0 0 0 rgba(var(--kr-success-rgb), 0); }
+}
+
+/* Queued keeps a still, hollow dot: waiting is precisely NOT activity. */
 .disc-item-status-dot[data-state="queued"] {
-  background: var(--kr-warning);
+  background: transparent;
+  border: 1.5px solid var(--kr-warning);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .disc-item-status-dot[data-state="running"] {
+    animation: none;
+    box-shadow: 0 0 0 3px rgba(var(--kr-success-rgb), 0.14);
+  }
 }
 
 .disc-item-status-dot[data-state="unread"] {
@@ -1463,14 +1564,14 @@
 }
 
 /* ── Queued follow-up messages (CLI-style outbox) ──────────────────────────
-   Ghost "outbox" bubbles shown above the composer while the agent streams.
+   Ghost "outbox" bubbles at the scrollable transcript tail while the agent streams.
    User-aligned (right), dashed + accent-tinted to read as "pending, not yet
    sent", with a subtle pulse on the newest one. */
 .disc-queued-msgs {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  padding: 6px 12px 0;
+  padding: 10px 0 0;
   align-items: flex-end;
 }
 /* One growing bubble — a column of lines, one per queued part. */
@@ -3628,6 +3729,45 @@ button.disc-contact-open {
   gap: var(--kr-sp-3);
 }
 
+.disc-pending-agent-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--kr-sp-4);
+}
+
+.disc-pending-agent-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-sp-3);
+}
+
+.disc-pending-agent-stop {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+  padding: 4px 8px;
+  border: 1px solid rgba(var(--kr-error-rgb), 0.28);
+  border-radius: var(--kr-r-md);
+  background: rgba(var(--kr-error-rgb), 0.08);
+  color: var(--kr-error);
+  font-size: var(--kr-fs-xs);
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+
+.disc-pending-agent-stop:hover:not(:disabled) {
+  border-color: rgba(var(--kr-error-rgb), 0.48);
+  background: rgba(var(--kr-error-rgb), 0.15);
+}
+
+.disc-pending-agent-stop:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
 .disc-streaming-elapsed {
   font-size: var(--kr-fs-2xs);
   color: var(--kr-text-faint);
@@ -4809,6 +4949,16 @@ button.disc-contact-open {
 .disc-mention-tier-choice[data-current="true"] {
   background: rgba(var(--kr-accent-rgb), 0.12);
   border-color: rgba(var(--kr-accent-rgb), 0.3);
+}
+
+/* The tier the user is moving through with Left/Right, as opposed to
+   `data-current` which is the tier already in effect for that row. Both can be
+   visible at once — the reader needs to see where they came from and where they
+   are — so this one is a ring rather than a fill. */
+.disc-mention-tier-choice[data-keyboard-selected="true"] {
+  color: var(--kr-text-primary);
+  border-color: rgba(var(--kr-accent-rgb), 0.85);
+  box-shadow: 0 0 0 1px rgba(var(--kr-accent-rgb), 0.45) inset;
 }
 
 .disc-mention-routing-mode {

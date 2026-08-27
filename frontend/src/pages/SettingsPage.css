@@ -742,6 +742,133 @@
   color: var(--kr-text-muted);
 }
 
+.set-ollama-context-section {
+  margin-top: var(--kr-sp-4);
+  padding-top: var(--kr-sp-4);
+  border-top: 1px solid var(--kr-border);
+}
+
+.set-ollama-context-summary {
+  cursor: pointer;
+  user-select: none;
+  list-style-position: inside;
+}
+
+.set-ollama-context-section[open] .set-ollama-context-summary {
+  margin-bottom: var(--kr-sp-2);
+}
+
+.set-ollama-context-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-3);
+}
+
+.set-ollama-context-card {
+  padding: var(--kr-sp-3);
+  border: 1px solid var(--kr-border-light);
+  border-radius: var(--kr-r-sm);
+  background: var(--kr-bg-subtle);
+}
+
+.set-ollama-context-head,
+.set-ollama-context-editor {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  flex-wrap: wrap;
+}
+
+.set-ollama-context-head {
+  justify-content: space-between;
+  margin-bottom: var(--kr-sp-2);
+}
+
+.set-ollama-context-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--kr-sp-2);
+  margin-bottom: var(--kr-sp-3);
+  font-size: var(--kr-fs-2xs, 11px);
+  color: var(--kr-text-muted);
+}
+
+.set-ollama-context-metrics strong {
+  display: block;
+  margin-top: 1px;
+  color: var(--kr-text-primary);
+  font-weight: 600;
+}
+
+.set-ollama-context-editor label {
+  flex: 1 0 100%;
+  font-size: var(--kr-fs-2xs, 11px);
+  color: var(--kr-text-muted);
+}
+
+.set-ollama-context-editor input {
+  flex: 1 1 9rem;
+  min-width: 0;
+  padding: 4px 6px;
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-primary);
+  background: var(--kr-bg-input);
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-sm);
+}
+
+.set-ollama-context-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 7px;
+  font-size: var(--kr-fs-2xs, 11px);
+  color: var(--kr-text-primary);
+  background: var(--kr-bg-input);
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-sm);
+  cursor: pointer;
+}
+
+.set-ollama-context-action:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.set-ollama-context-alert {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--kr-sp-2);
+  margin-top: var(--kr-sp-2);
+  font-size: var(--kr-fs-2xs, 11px);
+  line-height: 1.4;
+  color: var(--kr-warning);
+}
+
+.set-ollama-context-alert svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+
+.set-ollama-context-error {
+  margin-top: var(--kr-sp-2);
+  font-size: var(--kr-fs-2xs, 11px);
+  color: var(--kr-danger);
+}
+
+.set-ollama-context-hint {
+  margin: var(--kr-sp-3) 0 0;
+  font-size: var(--kr-fs-2xs, 11px);
+  line-height: 1.45;
+  color: var(--kr-text-ghost);
+}
+
+@media (max-width: 680px) {
+  .set-ollama-context-metrics {
+    grid-template-columns: 1fr;
+  }
+}
+
 .set-ollama-model-row {
   display: flex;
   align-items: center;
@@ -1405,6 +1532,20 @@
   background-repeat: no-repeat;
   background-position: right 6px center;
   padding-right: 20px;
+}
+
+/* A text input backed by a `<datalist>`, not a `<select>`: same box, but WITHOUT
+   the chevron background-image. Chrome draws its own dropdown arrow for
+   `input[list]`, so reusing `.set-tier-select` here rendered TWO arrows. */
+.set-tier-input {
+  background: var(--kr-bg-input);
+  border: 1px solid var(--kr-border-strong);
+  border-radius: var(--kr-r-sm);
+  padding: 3px 6px;
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-primary);
+  font-family: inherit;
+  width: 150px;
 }
 
 .set-tier-select option {
@@ -2243,6 +2384,40 @@
   box-shadow: var(--kr-shadow-sm);
   transition: border-color 0.16s ease, box-shadow 0.16s ease, transform 0.16s ease;
 }
+/* A ContextHelp panel is `position: absolute`, so the row's `overflow: hidden`
+   (which is what makes the border-radius clip its content) was silently cutting
+   it off — the "Observed cost estimate" help was unreadable inside an agent row.
+   The panel is only mounted while open, so lifting the clip on `:has()` keeps the
+   rounded corners in every other state instead of trading one bug for another. */
+/* KT-337/KT-339 — the external-API zone. LiteLLM and NVIDIA are two connections
+   to one contract, so they read as a group rather than as unrelated agents. The
+   left rule ties the rows together visually without nesting them in a container,
+   which keeps each row's own styling (and its `overflow` clip) untouched. */
+.set-external-api-heading {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-3);
+  margin: var(--kr-sp-6) 0 var(--kr-sp-3);
+  color: var(--kr-text-secondary);
+  font-size: var(--kr-fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.set-external-api-heading::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--kr-border-soft);
+}
+.set-agent-row[data-external-api='true'] {
+  margin-left: var(--kr-sp-4);
+}
+
+.set-agent-row:has(.kr-context-help-panel) {
+  overflow: visible;
+}
+
 
 .set-agent-row:hover {
   border-color: color-mix(in srgb, var(--agent-color) 28%, var(--kr-border-soft));
@@ -2348,6 +2523,48 @@
 
 .set-agent-mention-control input[type="color"]::-webkit-color-swatch-wrapper {
   padding: 0;
+}
+
+/* Same pill as the mention control next to it: identical height, radius and
+   font size, so a card header reads as one row of small controls. */
+.set-agent-concurrency-control {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  min-height: 28px;
+  padding: 2px 3px 2px var(--kr-sp-3);
+  color: var(--kr-text-muted);
+  font-size: var(--kr-fs-2xs);
+  font-weight: 650;
+  border: 1px solid var(--kr-border);
+  border-radius: 999px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.set-agent-concurrency-control input[type="number"] {
+  width: 44px;
+  height: 22px;
+  padding: 0 var(--kr-sp-1);
+  color: var(--kr-text-primary);
+  font-size: var(--kr-fs-2xs);
+  font-weight: 650;
+  text-align: center;
+  border: 1px solid var(--kr-border);
+  border-radius: 999px;
+  background: var(--kr-bg);
+}
+
+/* The spinners double the control's width for no gain at this size. */
+.set-agent-concurrency-control input[type="number"]::-webkit-outer-spin-button,
+.set-agent-concurrency-control input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+.set-agent-concurrency-control input[type="number"] {
+  -moz-appearance: textfield;
+  appearance: textfield;
 }
 
 .set-agent-mention-control input[type="color"]::-webkit-color-swatch {

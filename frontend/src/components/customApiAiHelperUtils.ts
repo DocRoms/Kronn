@@ -41,6 +41,8 @@ KRONN:APPLY
 
 ${t('mcp.custom.helper.sys.endpoints')}
 
+${t('mcp.custom.helper.sys.verify')}
+
 ${t('mcp.custom.helper.sys.partial')}
 
 ${t('mcp.custom.helper.sys.style')}

@@ -46,6 +46,7 @@ const makeProps = () => ({
   onDelete: vi.fn(),
   onBulkArchive: vi.fn().mockResolvedValue(undefined),
   onBulkDelete: vi.fn().mockResolvedValue(undefined),
+  onCompareSelected: vi.fn().mockResolvedValue(undefined),
   onTogglePin: vi.fn(),
   onNewDiscussion: vi.fn(),
   onClose: vi.fn(),
@@ -68,6 +69,27 @@ afterEach(() => {
 });
 
 describe('DiscussionSidebar — bulk selection', () => {
+  it('opens a free comparison only after at least two discussions are selected', async () => {
+    const props = makeProps();
+    render(<DiscussionSidebar {...props} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'disc.sidebar.moreActions' }));
+    fireEvent.click(screen.getByRole('button', { name: 'disc.bulk.start' }));
+    const compare = screen.getByRole('button', { name: 'disc.bulk.compare' });
+    expect(compare).toBeDisabled();
+
+    fireEvent.click(screen.getByRole('checkbox', { name: /Discussion disc-a/ }));
+    expect(compare).toBeDisabled();
+    fireEvent.click(screen.getByRole('checkbox', { name: /Discussion disc-b/ }));
+    expect(compare).toBeEnabled();
+    fireEvent.click(compare);
+
+    await waitFor(() => {
+      expect(props.onCompareSelected).toHaveBeenCalledWith(['disc-a', 'disc-b']);
+    });
+    expect(screen.queryByText('disc.bulk.selected:2')).not.toBeInTheDocument();
+  });
+
   it('selects rows without opening them and archives the selection after one confirmation', async () => {
     const props = makeProps();
     const confirmStub = vi.fn(() => true);

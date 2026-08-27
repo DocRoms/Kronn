@@ -296,6 +296,7 @@ export function SettingsPage({
   const [serverMaxAgents, setServerMaxAgents] = useState(5);
   const [serverStallTimeout, setServerStallTimeout] = useState(5);
   const [serverGlobalTimeout, setServerGlobalTimeout] = useState(30);
+  const [serverLocalGlobalTimeout, setServerLocalGlobalTimeout] = useState(240);
   const [serverDebugMode, setServerDebugMode] = useState(false);
   const [discussionNotesEnabled, setDiscussionNotesEnabled] = useState(true);
   // True after the user just toggled debug_mode. Shows a "restart required"
@@ -320,6 +321,7 @@ export function SettingsPage({
       setServerMaxAgents(cfg.max_concurrent_agents);
       setServerStallTimeout(cfg.agent_stall_timeout_min ?? 5);
       setServerGlobalTimeout(cfg.agent_global_timeout_min ?? 30);
+      setServerLocalGlobalTimeout(cfg.local_agent_global_timeout_min ?? 240);
       setServerDebugMode(cfg.debug_mode ?? false);
       setDiscussionNotesEnabled(cfg.discussion_notes_enabled ?? true);
     }
@@ -511,7 +513,7 @@ export function SettingsPage({
               </div>
               <div className="flex-row gap-6">
                 <input
-                  type="range" min={1} max={120} step={1}
+                  type="range" min={1} max={240} step={1}
                   value={serverGlobalTimeout}
                   aria-label={t('settings.globalTimeout')}
                   onChange={async (e) => {
@@ -534,6 +536,29 @@ export function SettingsPage({
                   </span>
                 </div>
               )}
+            </div>
+
+            <div className="mt-8">
+              <div className="flex-row gap-4 mb-4">
+                <span className="label" style={{ marginBottom: 0 }}>{t('settings.localGlobalTimeout')}</span>
+              </div>
+              <div className="flex-row gap-6">
+                <input
+                  type="range" min={1} max={240} step={1}
+                  value={serverLocalGlobalTimeout}
+                  aria-label={t('settings.localGlobalTimeout')}
+                  onChange={async (e) => {
+                    const v = Number(e.target.value);
+                    const prev = serverLocalGlobalTimeout;
+                    setServerLocalGlobalTimeout(v);
+                    try { await configApi.setServerConfig({ local_agent_global_timeout_min: v }); }
+                    catch (err) { setServerLocalGlobalTimeout(prev); toastActionFailed(err); }
+                  }}
+                  className="set-range"
+                />
+                <span className="text-base font-semibold text-accent" style={{ minWidth: 48, textAlign: 'center' }}>{serverLocalGlobalTimeout} min</span>
+              </div>
+              <div className="set-hint-xs">{t('settings.localGlobalTimeoutHint')}</div>
             </div>
 
             <div className="mt-8">

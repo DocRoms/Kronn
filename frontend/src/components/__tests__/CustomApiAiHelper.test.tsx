@@ -32,6 +32,7 @@ import {
 } from '../customApiAiHelperUtils';
 import { CustomApiAiHelper } from '../CustomApiAiHelper';
 import type { AgentType } from '../../types/generated';
+import en from '../../lib/i18n/locales/en';
 
 const t = (key: string, ...args: (string | number)[]) => {
   if (args.length === 0) return key;
@@ -190,6 +191,16 @@ describe('buildSystemPrompt', () => {
     // Resolves the i18n keys via the test translator
     expect(prompt).toContain('mcp.custom.helper.sys.role');
     expect(prompt).toContain('mcp.custom.helper.sys.partial');
+  });
+
+  it('requires a discriminating response check before accepting a filtered 200', () => {
+    const translate = (key: string) => en[key] ?? key;
+    const prompt = buildSystemPrompt(translate);
+
+    expect(prompt).toContain('test EVERY endpoint with a real call');
+    expect(prompt).toContain('a 200 does not prove the filter applied');
+    expect(prompt).toContain('compare a discriminating field of the response');
+    expect(prompt).toContain('❔ unverified:');
   });
 });
 

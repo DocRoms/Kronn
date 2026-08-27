@@ -456,6 +456,19 @@
   text-align: center;
 }
 
+.plan-focus-overflow {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  cursor: pointer;
+}
+
+.plan-focus-overflow:hover {
+  color: var(--kr-accent);
+  text-decoration: underline;
+}
+
 .plan-focus-empty {
   margin: 8px 0;
   border: 1px dashed var(--kr-border);
@@ -751,4 +764,129 @@
 .plan-dod > button[data-done="true"] {
   color: var(--kr-text-muted);
   text-decoration: line-through;
+}
+
+/* ── Task orchestration (KT-323) ───────────────────────────────────────── */
+.orch-campaign,
+.orch-exec,
+.orch-inline-action,
+.plan-orch-launch {
+  border: 1px solid var(--kr-border-subtle);
+  border-radius: var(--kr-radius-md);
+  background: var(--kr-bg-elevated);
+}
+
+.orch-campaign { margin: 8px; padding: 8px; }
+.orch-campaign-toggle { width: 100%; color: var(--kr-text-muted); text-align: right; }
+.orch-campaign-attention { margin: 6px 0; color: var(--kr-accent); font-size: var(--kr-fs-xs); }
+.orch-campaign-list,
+.orch-campaign-reasons,
+.orch-exec-failing,
+.orch-exec-dod { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.orch-campaign-item { display: flex; align-items: center; gap: 8px; padding: 7px; border-top: 1px solid var(--kr-border-subtle); }
+.orch-campaign-task { display: grid; min-width: 0; flex: 1; }
+.orch-campaign-ref { color: var(--kr-accent); font: 10px var(--kr-font-mono); }
+.orch-campaign-title { overflow: hidden; color: var(--kr-text-primary); font-size: var(--kr-fs-xs); text-overflow: ellipsis; white-space: nowrap; }
+.orch-campaign-reasons { color: var(--kr-warning); font-size: var(--kr-fs-2xs); }
+.orch-campaign-launch,
+.plan-orch-launch > button { padding: 6px 9px; border-radius: var(--kr-radius-sm); }
+
+.plan-orch-launch { margin: 8px 0; padding: 8px; }
+.orch-exec { display: grid; gap: 10px; margin: 10px 0; padding: 10px; }
+.orch-exec-head { display: flex; align-items: center; gap: 7px; }
+.orch-exec-status { padding: 2px 6px; border-radius: 999px; background: rgba(var(--kr-accent-rgb), .1); color: var(--kr-accent); font-size: 9px; text-transform: uppercase; }
+.orch-exec-task { overflow: hidden; flex: 1; font-size: var(--kr-fs-xs); text-overflow: ellipsis; white-space: nowrap; }
+.orch-exec-facts { display: grid; grid-template-columns: minmax(70px, auto) minmax(0, 1fr); gap: 4px 8px; margin: 0; font-size: var(--kr-fs-2xs); }
+.orch-exec-facts dt { color: var(--kr-text-dim); }
+.orch-exec-facts dd { overflow-wrap: anywhere; margin: 0; color: var(--kr-text-secondary); font-family: var(--kr-font-mono); }
+.orch-exec-partial { display: block; color: var(--kr-warning); font-family: var(--kr-font-sans); }
+.orch-exec-failing,
+.orch-exec-recovery { padding: 7px; border-left: 2px solid var(--kr-warning); background: rgba(var(--kr-warning-rgb), .07); color: var(--kr-warning); font-size: var(--kr-fs-2xs); }
+.orch-exec-dod { color: var(--kr-text-secondary); font-size: var(--kr-fs-2xs); }
+.orch-exec-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.orch-exec-actions button { padding: 5px 8px; border: 1px solid var(--kr-border-medium); border-radius: var(--kr-radius-sm); }
+
+.orch-action-error,
+.orch-launch-error { padding: 8px; border: 1px solid rgba(var(--kr-error-rgb), .35); border-radius: var(--kr-radius-sm); background: rgba(var(--kr-error-rgb), .08); color: var(--kr-error); font-size: var(--kr-fs-xs); }
+.orch-action-error,
+.orch-launch-error { display: grid; gap: 3px; }
+.orch-inline-action { display: grid; gap: 8px; margin: 8px 0; padding: 10px; }
+.orch-inline-action label { display: grid; gap: 4px; color: var(--kr-text-muted); font-size: var(--kr-fs-2xs); }
+.orch-inline-action textarea { min-height: 72px; resize: vertical; }
+.orch-inline-action > div { display: flex; justify-content: flex-end; gap: 6px; }
+.orch-approval-head { overflow-wrap: anywhere; color: var(--kr-text-muted); }
+.orch-inline-action > .orch-approval-dod-list {
+  display: grid;
+  justify-content: stretch;
+  gap: 8px;
+}
+.orch-approval-dod {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  margin: 0;
+  padding: 8px;
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-radius-sm);
+}
+.orch-approval-confirm {
+  grid-template-columns: auto minmax(0, 1fr) !important;
+  align-items: start;
+}
+.orch-approval-confirm input { margin-top: 2px; }
+
+.orch-launch-backdrop { position: fixed; z-index: 500; inset: 0; display: grid; place-items: center; padding: 20px; background: rgba(0, 0, 0, .58); }
+.orch-launch-dialog { display: grid; gap: 12px; width: min(680px, 100%); max-height: min(760px, calc(100vh - 40px)); overflow: auto; padding: 16px; border: 1px solid var(--kr-border-medium); border-radius: var(--kr-r-lg); background: var(--kr-bg-elevated); box-shadow: var(--kr-shadow-lg); }
+.orch-launch-dialog > header,
+.orch-launch-dialog > footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.orch-launch-dialog h3 { margin: 0; }
+
+/* The dialog shipped with layout CSS but no control styling, so every field
+ * fell back to the browser's native look — the "plain HTML" report from
+ * acceptance testing. Scoped rather than per-element classes: a field added
+ * later inherits the app's look instead of silently regressing to defaults. */
+.orch-launch-dialog input:not([type="checkbox"]),
+.orch-launch-dialog select {
+  width: 100%;
+  padding: var(--kr-sp-5) var(--kr-sp-7);
+  font-size: var(--kr-fs-sm);
+  font-family: inherit;
+  color: var(--kr-text-primary);
+  background: var(--kr-bg-hover);
+  border: 1px solid var(--kr-border-medium);
+  border-radius: var(--kr-r-md);
+  outline: none;
+  transition: border-color 0.15s;
+}
+.orch-launch-dialog input:not([type="checkbox"]):focus,
+.orch-launch-dialog select:focus { border-color: var(--kr-accent-border-light); }
+.orch-launch-dialog input::placeholder { color: var(--kr-text-dim); }
+.orch-launch-dialog input:disabled,
+.orch-launch-dialog select:disabled { opacity: 0.55; cursor: not-allowed; }
+/* Native dropdown panels default to black-on-white, illegible on the dark
+ * theme — same fix the shared `.input` already carries. */
+.orch-launch-dialog select option {
+  background: var(--kr-bg-surface);
+  color: var(--kr-text-primary);
+}
+/* A checkbox is the one control the user clicks rather than types into. */
+.orch-launch-dialog input[type="checkbox"] { cursor: pointer; }
+.orch-launch-dialog header span,
+.orch-policy-note { color: var(--kr-text-muted); font-size: var(--kr-fs-xs); }
+.orch-launch-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.orch-launch-grid label,
+.orch-launch-auto { display: grid; gap: 4px; color: var(--kr-text-secondary); font-size: var(--kr-fs-xs); }
+.orch-launch-validations { grid-column: 1 / -1; }
+.orch-launch-validations textarea { min-height: 72px; resize: vertical; }
+.orch-launch-fallbacks { display: flex; flex-wrap: wrap; gap: 8px 14px; border: 1px solid var(--kr-border-subtle); border-radius: var(--kr-radius-sm); }
+.orch-launch-fallbacks legend { color: var(--kr-text-muted); font-size: var(--kr-fs-xs); }
+.orch-launch-fallbacks label,
+.orch-launch-auto { display: flex; align-items: center; gap: 5px; }
+
+@media (max-width: 680px) {
+  .orch-launch-backdrop { align-items: end; padding: 0; }
+  .orch-launch-dialog { max-height: 92vh; border-radius: var(--kr-r-lg) var(--kr-r-lg) 0 0; }
+  .orch-launch-grid { grid-template-columns: 1fr; }
+  .orch-launch-validations { grid-column: auto; }
+  .orch-campaign-item { align-items: stretch; flex-direction: column; }
 }

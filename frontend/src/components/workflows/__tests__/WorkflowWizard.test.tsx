@@ -426,6 +426,17 @@ describe('WorkflowWizard — step list handlers', () => {
     expect(screen.queryByText('wiz.agentExecIsolationWarning')).not.toBeInTheDocument();
   });
 
+  it('lets any project-linked workflow explicitly choose parent-run isolation', () => {
+    toStepsPage([mkStep(), mkStep({ name: 'review' })]);
+    fireEvent.click(screen.getByText('wiz.next')); // Steps → Config
+    fireEvent.click(screen.getByText('wiz.advanced'));
+
+    const isolation = screen.getByLabelText('wiz.requireIsolationAction') as HTMLInputElement;
+    expect(isolation).not.toBeChecked();
+    fireEvent.click(isolation);
+    expect(isolation).toBeChecked();
+  });
+
   it('editing a step name propagates to the step', () => {
     toStepsPage([mkStep(), mkStep({ name: 'beta' })]);
     const stepName = screen.getByDisplayValue('main') as HTMLInputElement;

@@ -54,8 +54,24 @@ test('exports a selection and imports it again through the Plugins UI', async ({
   const importDialog = page.getByRole('dialog', { name: 'Importer des plugins' });
   await importDialog.locator('input[type="file"]').setInputFiles(bundlePath!);
   await expect(importDialog.getByText(label)).toBeVisible();
+  // Capture the durable id directly from the creation response. Previously it
+  // was registered for teardown only after the scope modal closed. Any failure
+  // between those points leaked a global fixture into the operator database;
+  // later runs resynchronised every project for each orphan and slowed down.
+  const importResponsePromise = page.waitForResponse(response =>
+    response.request().method() === 'POST'
+    && response.url().includes('/api/mcps/bundles/import'),
+  );
   await importDialog.getByRole('button', { name: 'Importer le bundle' }).click();
+  const importResponse = await importResponsePromise;
+  expect(importResponse.ok()).toBe(true);
+  const importBody = await importResponse.json();
+  for (const id of importBody?.data?.imported_config_ids ?? []) {
+    createdConfigIds.add(id as string);
+  }
   await expect(importDialog.getByText(/1 configuration\(s\) créée\(s\)/)).toBeVisible();
+  expect(createdConfigIds.size).toBe(1);
+
   await expect(importDialog.getByRole('checkbox', {
     name: /Global — tous les projets/,
   })).toBeChecked();
@@ -68,7 +84,11 @@ test('exports a selection and imports it again through the Plugins UI', async ({
   // after updateConfig + setConfigProjects have completed, so use that
   // user-visible transition as the durable write receipt before reading the
   // overview. Without it, the assertion raced the PATCH and was flaky.
-  await expect(importDialog).not.toBeVisible();
+  // A global scope change rewrites the derived MCP files for every registered
+  // project before acknowledging completion. On a real operator database this
+  // is intentionally proportional to the project count, so keep a bounded but
+  // realistic receipt window instead of the generic 5 s assertion timeout.
+  await expect(importDialog).not.toBeVisible({ timeout: 30_000 });
 
   const overview = await request.get('/api/mcps');
   const overviewBody = await overview.json();
@@ -77,5 +97,4 @@ test('exports a selection and imports it again through the Plugins UI', async ({
   );
   expect(imported).toHaveLength(1);
   expect(imported[0].is_global).toBe(true);
-  createdConfigIds.add(imported[0].id);
 });

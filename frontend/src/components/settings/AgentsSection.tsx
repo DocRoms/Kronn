@@ -1,12 +1,36 @@
-import { useState, useEffect, useRef, type CSSProperties, type ReactNode } from 'react';
-import { config as configApi, agents as agentsApi, usage as usageApi } from '../../lib/api';
+import React, { useState, useEffect, useRef, type CSSProperties, type ReactNode } from 'react';
+import { config as configApi, agents as agentsApi, usage as usageApi, nvidia as nvidiaApi } from '../../lib/api';
 import { userError } from '../../lib/userError';
+import { useAsyncGuard } from '../../hooks/useAsyncGuard';
 import { OllamaCard } from './OllamaCard';
 import { LiteLlmCard } from './LiteLlmCard';
 import { CompressionSection } from './CompressionSection';
 import { ContextHelp } from '../ContextHelp';
 import { useApi } from '../../hooks/useApi';
-import type { AgentDetection, AgentsConfig, AgentType, ModelTiersConfig, UsageReport } from '../../types/generated';
+import type { AgentConfig, AgentDetection, AgentsConfig, AgentType, ModelTiersConfig, UsageReport } from '../../types/generated';
+
+/** Where each agent's config lives, and how many runs it allows by default.
+ *  `null` = unlimited: a remote endpoint someone else scales is not this
+ *  machine's problem, so it is only capped when the operator asks. Ollama
+ *  serves ONE inference slot — a second run does not compute sooner, it queues
+ *  and throws away the KV cache the first one warmed. A CLI is a process. */
+/** Only the keys of `AgentsConfig` that hold an `AgentConfig` — `model_tiers`
+ *  lives in the same object but is a different shape. */
+type AgentConfigKey = {
+  [K in keyof AgentsConfig]: AgentsConfig[K] extends AgentConfig ? K : never
+}[keyof AgentsConfig];
+
+const AGENT_CONCURRENCY: Partial<Record<AgentType, { key: AgentConfigKey; fallback: number | null }>> = {
+  ClaudeCode: { key: 'claude_code', fallback: 5 },
+  Codex: { key: 'codex', fallback: 5 },
+  GeminiCli: { key: 'gemini_cli', fallback: 5 },
+  Kiro: { key: 'kiro', fallback: 5 },
+  Vibe: { key: 'vibe', fallback: 5 },
+  CopilotCli: { key: 'copilot_cli', fallback: 5 },
+  Ollama: { key: 'ollama', fallback: 1 },
+  LiteLlm: { key: 'lite_llm', fallback: null },
+  Nvidia: { key: 'nvidia', fallback: null },
+};
 import type { ToastFn } from '../../hooks/useToast';
 import { isUpdateAvailable } from '../../lib/version';
 import {
@@ -19,7 +43,7 @@ import {
   Key, AlertTriangle, Save,
   Plus, Trash2, Download, Check,
   Loader2, RefreshCw, X, Eye, EyeOff, Play, StopCircle,
-  ExternalLink, FolderSearch, ArrowUpCircle, Copy, Gauge, FileText, Palette, GitFork, Info,
+  ExternalLink, FolderSearch, ArrowUpCircle, Copy, Gauge, FileText, Palette, GitFork, Info, Layers,
 } from 'lucide-react';
 import {
   ALL_USAGE_FILTER,
@@ -75,6 +99,53 @@ export function AgentsSection({
   const [addingKeyFor, setAddingKeyFor] = useState<string | null>(null);
   const [tokenVisible, setTokenVisible] = useState<Set<string>>(new Set());
   const [tierEditing, setTierEditing] = useState<Record<string, { economy: string; default: string; reasoning: string }>>({});
+  // KT-337 — NVIDIA's catalogue is fetched, never hardcoded: ~100 ids across 25
+  // vendors, and several are listed but not callable by this account. Loaded on
+  // demand (one click) rather than on mount, so opening Settings costs nothing.
+  const [nvidiaCatalogue, setNvidiaCatalogue] = useState<string[] | null>(null);
+  const [nvidiaLoading, setNvidiaLoading] = useState(false);
+  // Verdict per model id, from a real probe. The catalogue cannot answer this.
+  const [nvidiaProbes, setNvidiaProbes] = useState<Record<string, { verdict: string; detail: string }>>({});
+  // Draft text for the NVIDIA tier inputs, keyed `<agent>:<field>`. The field was
+  // uncontrolled (`defaultValue`), so it stopped reflecting a saved value after the
+  // first mount and a pick in the datalist only committed once focus left — which
+  // read as "I can no longer change the model". Controlled + committed on an exact
+  // catalogue match, on Enter, or on blur.
+  const [nvidiaDraft, setNvidiaDraft] = useState<Record<string, string>>({});
+  // Connection state for the header line, so NVIDIA reads like LiteLLM and Ollama
+  // ("online — N models") instead of showing an install state that means nothing
+  // for a remote endpoint. `hasKey` is separate on purpose: the catalogue answers
+  // WITHOUT a key, so "online" alone would describe an unusable setup as healthy.
+  const [nvidiaStatus, setNvidiaStatus] = useState<{ online: boolean; count: number; hasKey: boolean } | null>(null);
+  // `disabled={nvidiaLoading}` is closure-stale between two synchronous clicks, so
+  // it cannot be the only gate on an async handler (docs/AGENTS.md). Both NVIDIA
+  // buttons go through the ref-backed guard; the loading flag stays for the label.
+  const loadNvidiaCatalogue = useAsyncGuard(async () => {
+    setNvidiaLoading(true);
+    try {
+      const res = await nvidiaApi.models();
+      if (res) {
+        setNvidiaCatalogue(res.models.map(m => m.id));
+        setNvidiaStatus({ online: true, count: res.models.length, hasKey: res.has_key });
+        if (!res.has_key) toast(t('config.nvidiaNoKey'), 'info');
+      }
+    } catch (e) {
+      toast(String(e), 'error');
+    } finally {
+      setNvidiaLoading(false);
+    }
+  });
+  const probeNvidiaModel = useAsyncGuard(async (model: string) => {
+    try {
+      const res = await nvidiaApi.probe(model);
+      if (res) {
+        setNvidiaProbes(prev => ({ ...prev, [model]: { verdict: String(res.verdict), detail: res.detail } }));
+        toast(res.detail, res.verdict === 'Usable' ? 'success' : 'info');
+      }
+    } catch (e) {
+      toast(String(e), 'error');
+    }
+  });
   const [mentionColorOverrides, setMentionColorOverrides] = useState<AgentMentionColors>({});
   const [usageReport, setUsageReport] = useState<UsageReport | null>(null);
   const [costDisplayMode, setCostDisplayMode] = useState<'absolute' | 'relative'>('absolute');
@@ -260,10 +331,23 @@ export function AgentsSection({
   // wiped the side that wasn't being edited (saveTiers reads from the
   // editing map and writes both economy + reasoning back to the API).
   useEffect(() => {
+    let cancelled = false;
+    nvidiaApi.models()
+      .then(res => {
+        if (cancelled || !res) return;
+        const ids = res.models.map(m => m.id);
+        setNvidiaCatalogue(ids);
+        setNvidiaStatus({ online: true, count: ids.length, hasKey: res.has_key });
+      })
+      .catch(() => { if (!cancelled) setNvidiaStatus({ online: false, count: 0, hasKey: false }); });
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
     configApi.getModelTiers().then(tiers => {
       if (tiers) {
         const editing: Record<string, { economy: string; default: string; reasoning: string }> = {};
-        for (const key of ['claude_code', 'codex', 'gemini_cli', 'kiro', 'vibe', 'copilot_cli', 'ollama', 'lite_llm'] as const) {
+        for (const key of ['claude_code', 'codex', 'gemini_cli', 'kiro', 'vibe', 'copilot_cli', 'ollama', 'lite_llm', 'nvidia'] as const) {
           editing[key] = { economy: tiers[key]?.economy ?? '', default: tiers[key]?.default ?? '', reasoning: tiers[key]?.reasoning ?? '' };
         }
         setTierEditing(editing);
@@ -328,6 +412,47 @@ export function AgentsSection({
       installingRef.current = false;
       setInstalling(null);
     }
+  };
+
+  /** Compact, header-mounted like the mention colour: every card already has a
+   *  slot for it, including Ollama's and LiteLLM's dedicated ones. */
+  const renderConcurrencyControl = (agentType: AgentType) => {
+    const slot = AGENT_CONCURRENCY[agentType];
+    if (!slot) return null;
+    const current = agentAccess?.[slot.key]?.concurrency ?? null;
+    return (
+      <label
+        className="set-agent-concurrency-control"
+        title={t('agents.concurrencyHint')}
+      >
+        <Layers size={12} aria-hidden="true" />
+        <span>{t('agents.concurrency')}</span>
+        <input
+          type="number"
+          min={1}
+          max={20}
+          // Empty = the family default, which for a remote provider IS
+          // unlimited. Never 0: "never run" is what disabling the agent is for.
+          placeholder={slot.fallback === null ? '\u221e' : String(slot.fallback)}
+          value={current ?? ''}
+          aria-label={t('agents.concurrency')}
+          data-testid={`agent-concurrency-${agentType}`}
+          onChange={async (event) => {
+            const raw = event.target.value.trim();
+            const parsed = Number(raw);
+            if (raw !== '' && !Number.isFinite(parsed)) return;
+            const next = raw === '' ? null : Math.min(20, Math.max(1, parsed));
+            try {
+              await configApi.setAgentConcurrency({ agent: agentType, concurrency: next });
+            } catch (err) {
+              console.warn('Settings action failed:', err);
+              toast(t('common.actionFailed', userError(err)), 'error');
+            }
+            refetchAgentAccess();
+          }}
+        />
+      </label>
+    );
   };
 
   const renderMentionColorControl = (agentType: AgentType) => {
@@ -679,6 +804,26 @@ export function AgentsSection({
         )}
 
         {agents.map(agent => {
+          // KT-337/KT-339 — LiteLLM and NVIDIA are not two different providers from
+          // Kronn's point of view: they are two connections to the SAME contract
+          // (`{base}/v1/chat/completions`, `/v1/models`, bearer auth, OpenAiCodec).
+          // Grouping them under one heading is the UI those connections will keep
+          // once KT-339 makes them user-definable; only the aliases stay hardcoded
+          // for now, so this costs no model change.
+          const externalApiAgents: AgentType[] = ['LiteLlm', 'Nvidia'];
+          const isFirstExternalApi =
+            agent.agent_type === externalApiAgents[0] ||
+            // If LiteLLM is absent from the list, NVIDIA opens the section.
+            (agent.agent_type === 'Nvidia' && !agents.some(a => a.agent_type === 'LiteLlm'));
+          const externalApiHeading = isFirstExternalApi ? (
+            <div className="set-external-api-heading" key="external-api-heading">
+              <span>{t('config.externalApiTitle')}</span>
+              <ContextHelp title={t('config.externalApiTitle')}>
+                <p>{t('config.externalApiHelp')}</p>
+              </ContextHelp>
+            </div>
+          ) : null;
+
           // Ollama gets its own dedicated card with health check + model picker
           if (agent.agent_type === 'Ollama') {
             return (
@@ -691,7 +836,7 @@ export function AgentsSection({
                 <OllamaCard
                   t={t}
                   modelCostSuffix={modelCostSuffix}
-                  headerAccessory={renderMentionColorControl('Ollama')}
+                  headerAccessory={<>{renderMentionColorControl('Ollama')}{renderConcurrencyControl('Ollama')}</>}
                 />
               </div>
             );
@@ -700,17 +845,20 @@ export function AgentsSection({
           // treatment, but connection-first since nothing is auto-detectable.
           if (agent.agent_type === 'LiteLlm') {
             return (
+              <div key="litellm-group">
+                {externalApiHeading}
               <div
-                key="litellm"
                 className="set-agent-row set-agent-row-ollama"
                 data-agent-type="LiteLlm"
+                data-external-api="true"
                 style={{ '--agent-color': agentColor('LiteLlm', mentionColors) } as CSSProperties}
               >
                 <LiteLlmCard
                   t={t}
                   modelCostSuffix={modelCostSuffix}
-                  headerAccessory={renderMentionColorControl('LiteLlm')}
+                  headerAccessory={<>{renderMentionColorControl('LiteLlm')}{renderConcurrencyControl('LiteLlm')}</>}
                 />
+              </div>
               </div>
             );
           }
@@ -728,6 +876,9 @@ export function AgentsSection({
             GeminiCli: { key: 'google', hint: 'GEMINI_API_KEY', url: 'https://aistudio.google.com/apikey' },
             Vibe: { key: 'mistral', hint: 'MISTRAL_API_KEY', url: 'https://console.mistral.ai/api-keys' },
             CopilotCli: { key: 'github', hint: 'GH_TOKEN', url: 'https://github.com/settings/tokens' },
+            // KT-337 — NVIDIA has no CLI to log into: the key IS the whole setup,
+            // so the generic token field is all it needs to become usable.
+            Nvidia: { key: 'nvidia', hint: 'NVIDIA_API_KEY', url: 'https://build.nvidia.com/settings/api-keys' },
           };
           const tf = tokenField[agent.agent_type];
           const authReady = agent.auth_ready !== false;
@@ -744,10 +895,14 @@ export function AgentsSection({
                     : false;
 
           return (
+          <React.Fragment key={agent.name}>
+          {/* NVIDIA opens (or joins) the external-API zone; every other agent
+              renders on its own as before. */}
+          {agent.agent_type === 'Nvidia' && externalApiHeading}
           <div
-            key={agent.name}
             className="set-agent-row"
             data-agent-type={agent.agent_type}
+            data-external-api={agent.agent_type === 'Nvidia' ? 'true' : undefined}
             style={{ '--agent-color': agentColor(agent.agent_type, mentionColors) } as CSSProperties}
           >
             <div className="set-agent-card-header">
@@ -872,6 +1027,19 @@ export function AgentsSection({
                   })()}
                   </div>
                   <div className="set-agent-runtime-state">
+                    {agent.agent_type === 'Nvidia' && (
+                      <div className="text-xs mt-2">
+                        {nvidiaStatus === null
+                          ? <span className="text-ghost">…</span>
+                          : !nvidiaStatus.online
+                            ? <span style={{ color: 'rgba(var(--kr-danger-rgb), 0.7)' }}>{t('config.nvidiaOffline')}</span>
+                            : !nvidiaStatus.hasKey
+                              ? <span style={{ color: 'rgba(var(--kr-warning-amber-rgb), 0.8)' }}>{t('config.nvidiaKeyMissing')}</span>
+                              : <span style={{ color: 'rgba(var(--kr-success-rgb), 0.6)' }}>
+                                  {t('liteLlm.online')} — {nvidiaStatus.count} {t('config.nvidiaCatalogueModels')}
+                                </span>}
+                      </div>
+                    )}
                     {!agent.installed && !agent.runtime_available && (
                       <div className="text-xs text-faint mt-2">
                         <code className="set-code">{agent.install_command}</code>
@@ -921,6 +1089,7 @@ export function AgentsSection({
                   is "Activé". */}
               <div className="set-agent-actions">
                 {renderMentionColorControl(agent.agent_type)}
+                {renderConcurrencyControl(agent.agent_type)}
                 {agent.installed ? (
                   <>
                   <button
@@ -1184,6 +1353,10 @@ export function AgentsSection({
                 Kiro: 'kiro',
                 Vibe: 'vibe',
                 CopilotCli: 'copilot_cli',
+                // KT-337 — NVIDIA joins the generic tier block. Its catalogue is
+                // fetched, not hardcoded: ~100 ids across 25 vendors, several of
+                // which this account cannot call, so a baked-in list would lie.
+                Nvidia: 'nvidia',
               } as Partial<Record<AgentType, string>>)[agent.agent_type];
               if (!agentKey) return null;
               const editing = tierEditing[agentKey];
@@ -1221,6 +1394,14 @@ export function AgentsSection({
                 },
                 kiro: { options: [], fallbackEconomy: null, fallbackDefault: null, fallbackReasoning: null, modelsUrl: '' },
                 vibe: { options: [], fallbackEconomy: null, fallbackDefault: null, fallbackReasoning: null, modelsUrl: '' },
+                nvidia: {
+                  // Filled at runtime from /v1/models (see nvidiaCatalogue).
+                  options: [],
+                  // No built-in default on purpose: the backend refuses to guess
+                  // an id, because a wrong one 404s or hangs.
+                  fallbackEconomy: null, fallbackDefault: null, fallbackReasoning: null,
+                  modelsUrl: 'https://build.nvidia.com/models',
+                },
                 copilot_cli: {
                   // Copilot's enabled models depend on the account and its
                   // policy. Keep only current CLI identifiers here; an empty
@@ -1253,11 +1434,66 @@ export function AgentsSection({
                   copilot_cli: tierOf('copilot_cli'),
                   ollama: tierOf('ollama'),
                   lite_llm: tierOf('lite_llm'),
+                  nvidia: tierOf('nvidia'),
                 };
                 try { await configApi.setModelTiers(newTiers); toast(t('config.saved'), 'success'); } catch { toast(t('config.saveError'), 'error'); }
               };
 
+              // KT-337 — a fetched-catalogue provider needs a free-text field, not a
+              // dropdown: the catalogue is long, partly uncallable, and a pasted id
+              // must be accepted. The datalist offers the catalogue as suggestions
+              // once loaded; the badge shows what a real probe said, because being
+              // listed is NOT being usable for this provider.
+              const renderCatalogueInput = (field: 'economy' | 'default' | 'reasoning', icon: string, iconColor: string) => {
+                const current = editing[field] ?? '';
+                const probe = current ? nvidiaProbes[current] : undefined;
+                const badge = probe
+                  ? (probe.verdict === 'Usable' ? '✅' : probe.verdict === 'NoAnswer' ? '⏳' : '⛔')
+                  : '';
+                const draftKey = `${agentKey}:${field}`;
+                const shown = nvidiaDraft[draftKey] ?? current;
+                const commit = (raw: string) => {
+                  const value = raw.trim();
+                  setNvidiaDraft(d => { const next = { ...d }; delete next[draftKey]; return next; });
+                  if (value !== current) saveTiers(field, value);
+                };
+                return (
+                  <div className="flex-row gap-2" key={field}>
+                    <span className="text-2xs" style={{ color: iconColor, width: 14 }} title={field}>{icon}</span>
+                    <input
+                      className="set-tier-input"
+                      list="nvidia-model-catalogue"
+                      data-model-tier-agent={agent.agent_type}
+                      data-model-tier={field}
+                      placeholder={t('config.defaultModel')}
+                      value={shown}
+                      onChange={e => {
+                        const next = e.target.value;
+                        setNvidiaDraft(d => ({ ...d, [draftKey]: next }));
+                        // A datalist pick lands as a complete catalogue id in one
+                        // change event: commit it right away instead of waiting for
+                        // blur. Free text keeps committing on Enter/blur so a save
+                        // does not fire on every keystroke.
+                        if ((nvidiaCatalogue ?? []).includes(next)) commit(next);
+                      }}
+                      onKeyDown={e => { if (e.key === 'Enter') commit((e.target as HTMLInputElement).value); }}
+                      onBlur={e => commit(e.target.value)}
+                      aria-label={t('disc.modelTier') + ' ' + field}
+                    />
+                    {current && (
+                      <button
+                        className="set-icon-btn"
+                        style={{ fontSize: 10 }}
+                        title={probe ? probe.detail : t('config.nvidiaVerifyModel')}
+                        onClick={() => probeNvidiaModel(current)}
+                      >{badge || '🔍'}</button>
+                    )}
+                  </div>
+                );
+              };
+
               const renderSelect = (field: 'economy' | 'default' | 'reasoning', options: string[], icon: string, iconColor: string, fallback: string | null) => {
+                if (agent.agent_type === 'Nvidia') return renderCatalogueInput(field, icon, iconColor);
                 if (options.length === 0) return (
                   <span className="text-2xs text-ghost" style={{ padding: '2px 6px' }}>{icon} N/A</span>
                 );
@@ -1304,6 +1540,22 @@ export function AgentsSection({
                     )}
                   </div>
                   <div className="flex-row gap-5">
+                    {agent.agent_type === 'Nvidia' && (
+                      <>
+                        {/* One shared datalist feeds the three tier inputs. */}
+                        <datalist id="nvidia-model-catalogue">
+                          {(nvidiaCatalogue ?? []).map(id => <option key={id} value={id} />)}
+                        </datalist>
+                        <button
+                          className="set-icon-btn text-2xs"
+                          disabled={nvidiaLoading}
+                          title={t('config.nvidiaLoadCatalogue')}
+                          onClick={() => loadNvidiaCatalogue()}
+                        >
+                          {nvidiaCatalogue ? `${nvidiaCatalogue.length} ⟳` : (nvidiaLoading ? '…' : '⟳')}
+                        </button>
+                      </>
+                    )}
                     {renderSelect('economy', models.options, '\u26A1', 'rgba(var(--kr-success-rgb), 0.6)', models.fallbackEconomy)}
                     {renderSelect('default', models.options, '\uD83C\uDFAF', 'rgba(var(--kr-info-rgb), 0.6)', models.fallbackDefault)}
                     {renderSelect('reasoning', models.options, '\uD83E\uDDE0', 'rgba(var(--kr-warning-amber-rgb), 0.6)', models.fallbackReasoning)}
@@ -1313,6 +1565,7 @@ export function AgentsSection({
             })()}
             </div>
           </div>
+          </React.Fragment>
           );
         })}
         {/* Best practices links */}
