@@ -539,12 +539,13 @@ export const TOUR_STEPS: TourStep[] = [
     groupKey: 'tour.group.automation',
   },
   {
-    id: 'context-help',
+    id: 'task-orchestration',
     page: 'planning',
-    // In-page help takes over once the tour has taught the mental model.
+    // Planning may have no selected task during onboarding, so anchor on its
+    // always-present help control while teaching the complete execution cycle.
     selector: '.kr-context-help',
-    titleKey: 'tour.contextHelp.title',
-    descKey: 'tour.contextHelp.desc',
+    titleKey: 'tour.taskOrchestration.title',
+    descKey: 'tour.taskOrchestration.desc',
     position: 'bottom',
     groupKey: 'tour.group.automation',
   },

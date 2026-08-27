@@ -139,6 +139,65 @@ describe('parseDiffLines', () => {
   });
 
   it('handles empty input gracefully', () => {
-    expect(parseDiffLines('')).toEqual([{ kind: 'context', content: '', raw: '' }]);
+    expect(parseDiffLines('')).toEqual([
+      { kind: 'context', content: '', raw: '', newLine: 0, oldLine: 0 },
+    ]);
+  });
+
+  it('tracks pre/post-image line numbers from the hunk header', () => {
+    const parsed = parseDiffLines(sample);
+    expect(parsed.map(p => [p.kind, p.oldLine, p.newLine])).toEqual([
+      ['meta', null, null],    // diff --git
+      ['meta', null, null],    // index
+      ['meta', null, null],    // ---
+      ['meta', null, null],    // +++
+      ['hunk', null, null],    // @@ -1,3 +1,4 @@
+      ['context', 1, 1],       // ` fn main() {`
+      ['del', 2, null],        // -    let x = 1;
+      ['add', null, 2],        // +    let x = 2;
+      ['add', null, 3],        // +    let y = 3;
+      ['context', 3, 4],       // ` }`
+    ]);
+  });
+
+  it('resets the line cursor at each hunk header', () => {
+    const twoHunks = [
+      '@@ -1,1 +1,1 @@',
+      '-old top',
+      '+new top',
+      '@@ -50,1 +52,1 @@',
+      '-old bottom',
+      '+new bottom',
+    ].join('\n');
+    const parsed = parseDiffLines(twoHunks);
+    expect(parsed.map(p => [p.kind, p.oldLine, p.newLine])).toEqual([
+      ['hunk', null, null],
+      ['del', 1, null],
+      ['add', null, 1],
+      ['hunk', null, null],
+      ['del', 50, null],
+      ['add', null, 52],
+    ]);
+  });
+
+  it('treats "\\ No newline at end of file" as meta and does not consume a cursor slot', () => {
+    const diff = [
+      '@@ -1,1 +1,2 @@',
+      '-old',
+      '\\ No newline at end of file',
+      '+new',
+      '+trailing',
+    ].join('\n');
+    const parsed = parseDiffLines(diff);
+    expect(parsed.map(p => p.kind)).toEqual(['hunk', 'del', 'meta', 'add', 'add']);
+    // The marker sits between `-old` and `+new` but must not shift `+new`'s
+    // line number — it isn't a real source line.
+    expect(parsed.map(p => [p.oldLine, p.newLine])).toEqual([
+      [null, null],
+      [1, null],
+      [null, null],
+      [null, 1],
+      [null, 2],
+    ]);
   });
 });

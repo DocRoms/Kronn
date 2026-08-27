@@ -135,6 +135,23 @@ describe('Dashboard reload/HMR navigation restoration', () => {
     expect(await screen.findByTestId('pages-page')).toBeInTheDocument();
   });
 
+  it('reveals Pages immediately when a workflow import activates the capability', async () => {
+    vi.mocked(pagesApi.capability)
+      .mockResolvedValueOnce({ activated: false, activated_at: null })
+      .mockResolvedValueOnce({ activated: true, activated_at: '2026-08-26T16:00:00Z' });
+    await renderDashboard();
+    expect(screen.queryByRole('button', { name: 'Pages' })).not.toBeInTheDocument();
+
+    await act(async () => {
+      window.dispatchEvent(new Event('kronn:pages-activated'));
+    });
+
+    const pagesButton = await screen.findByRole('button', { name: 'Pages' });
+    expect(pagesApi.capability).toHaveBeenCalledTimes(2);
+    pagesButton.click();
+    expect(await screen.findByTestId('pages-page')).toBeInTheDocument();
+  });
+
   it('restores the Discussions page and its existing active discussion', async () => {
     sessionStorage.setItem('kronn:navigation:page', 'discussions');
     sessionStorage.setItem('kronn:navigation:discussion', 'disc-42');

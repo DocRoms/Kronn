@@ -498,13 +498,15 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
                   </span>
                 )}
                 <span className="disc-msg-author-name">{msg.author_pseudo || 'anonyme'}</span>
-                <span
-                  className="disc-msg-author-kind"
-                  style={{ fontSize: 'var(--kr-fs-xs)', fontWeight: 400, opacity: 0.55 }}
-                  title="Message humain — saisi dans Kronn"
-                >
-                  · humain
-                </span>
+                {msg.author_pseudo !== 'Orchestrateur' && (
+                  <span
+                    className="disc-msg-author-kind"
+                    style={{ fontSize: 'var(--kr-fs-xs)', fontWeight: 400, opacity: 0.55 }}
+                    title="Message humain — saisi dans Kronn"
+                  >
+                    · humain
+                  </span>
+                )}
               </div>
             )}
             {msg.role === 'Agent' && (

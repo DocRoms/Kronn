@@ -49,6 +49,11 @@ vi.mock('../../lib/api', () => ({
     runAgent: vi.fn().mockResolvedValue(undefined),
     orchestrate: vi.fn().mockResolvedValue(undefined),
     stop: vi.fn(),
+    stopDispatch: vi.fn().mockResolvedValue({
+      cancelled: true,
+      dispatch_id: 'dispatch',
+      still_awaiting: true,
+    }),
     searchMessages: vi.fn().mockResolvedValue([]),
     _streamSSE: vi.fn(),
     worktreeUnlock: vi.fn().mockResolvedValue('ok'),
@@ -134,6 +139,9 @@ vi.mock('../../lib/api', () => ({
     update: vi.fn(),
     linkDiscussion: vi.fn(),
     addBlocker: vi.fn(),
+  },
+  orchestration: {
+    discussionLinks: vi.fn().mockResolvedValue([]),
   },
   config: {
     getUiLanguage: vi.fn().mockResolvedValue('fr'),
@@ -413,6 +421,156 @@ describe('DiscussionsPage', () => {
     expect(body).toContain('ClaudeCode');
   });
 
+  it('renders a queued follow-up in the transcript after the live agent reply', async () => {
+    const fullDisc = {
+      ...makeListDiscussion('d-queued-inline', 1),
+      awaiting_agent: true,
+      messages: [
+        {
+          id: 'u-running', role: 'User' as const, channel: 'main' as const,
+          content: 'Question en cours', agent_type: null,
+          timestamp: '2026-08-26T10:00:00Z', tokens_used: 0, auth_mode: null,
+        },
+      ],
+      active_agent_dispatches: [{
+        id: 'job-running',
+        trigger_message_id: 'u-running',
+        agent_type: 'ClaudeCode' as const,
+        status: 'Running',
+      }],
+      message_targets: {},
+    };
+    const completedDisc = {
+      ...fullDisc,
+      awaiting_agent: false,
+      active_agent_dispatches: [],
+      messages: [
+        ...fullDisc.messages,
+        {
+          id: 'a-running', role: 'Agent' as const, channel: 'main' as const,
+          content: 'Réponse terminée', agent_type: 'ClaudeCode' as const,
+          reply_to_message_id: 'u-running', timestamp: '2026-08-26T10:00:10Z',
+          tokens_used: 12, auth_mode: null,
+        },
+      ],
+      message_count: 2,
+      non_system_message_count: 2,
+    };
+    let currentRunFinished = false;
+    let queuedRunFinished = false;
+    let sentPayload: Parameters<typeof discussionsApi.sendMessageStream>[1] | undefined;
+    vi.mocked(discussionsApi.get).mockImplementation(async () => {
+      if (!currentRunFinished) return fullDisc;
+      if (!sentPayload?.client_message_id) return completedDisc;
+      const queuedUser = {
+        id: sentPayload.client_message_id,
+        role: 'User' as const,
+        channel: 'main' as const,
+        content: sentPayload.content,
+        agent_type: null,
+        timestamp: '2026-08-26T10:00:11Z',
+        tokens_used: 0,
+        auth_mode: null,
+      };
+      return {
+        ...completedDisc,
+        awaiting_agent: !queuedRunFinished,
+        messages: queuedRunFinished
+          ? [
+              ...completedDisc.messages,
+              queuedUser,
+              {
+                id: 'a-queued', role: 'Agent' as const, channel: 'main' as const,
+                content: 'Réponse au message en queue', agent_type: 'ClaudeCode' as const,
+                reply_to_message_id: queuedUser.id, timestamp: '2026-08-26T10:00:12Z',
+                tokens_used: 8, auth_mode: null,
+              },
+            ]
+          : [...completedDisc.messages, queuedUser],
+        message_count: queuedRunFinished ? 4 : 3,
+        non_system_message_count: queuedRunFinished ? 4 : 3,
+      };
+    });
+    vi.mocked(discussionsApi.sendMessageStream).mockImplementation(
+      async (_discId, payload, _onText, onDone, _onError, _signal, onStart, _onLog, onAccepted) => {
+        sentPayload = payload;
+        onStart?.();
+        onAccepted?.({
+          message_id: payload.client_message_id ?? 'u-queued',
+          sort_order: 3,
+          duplicate: false,
+        });
+        queuedRunFinished = true;
+        onDone?.();
+      },
+    );
+
+    const lifted = liftedProps();
+    lifted.sendingMap = { 'd-queued-inline': true };
+    lifted.streamingMap = { 'd-queued-inline': 'Réponse partielle' };
+
+    const { rerender } = await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[fullDisc]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        initialActiveDiscussionId="d-queued-inline"
+        {...lifted}
+      />,
+    );
+
+    const textarea = document.querySelector('textarea') as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: 'Mon prochain message' } });
+    fireEvent.click(screen.getByRole('button', { name: /Ajouter à la file/ }));
+
+    const transcript = document.querySelector('.disc-messages');
+    const liveReply = screen.getByTestId('streaming-agent-ClaudeCode');
+    const queued = screen.getByLabelText("Messages en file d'attente");
+    expect(transcript).toContainElement(queued);
+    expect(liveReply.compareDocumentPosition(queued) & Node.DOCUMENT_POSITION_FOLLOWING)
+      .not.toBe(0);
+    // The queue is the chronological tail immediately before the scroll anchor.
+    expect(queued.nextElementSibling).toBe(transcript?.lastElementChild);
+
+    // Completion drains the queue into one durable turn. The backend reloads
+    // first with the completed current answer, then with the accepted queued
+    // user row and its final agent reply. The ghost must disappear and the
+    // persisted user content must occur exactly once.
+    currentRunFinished = true;
+    await act(async () => {
+      rerender(
+        <I18nProvider>
+          <DiscussionsPage
+            projects={[]}
+            agents={[]}
+            allDiscussions={[completedDisc]}
+            configLanguage="fr"
+            agentAccess={null}
+            refetchDiscussions={noop}
+            refetchProjects={noop}
+            onNavigate={noop}
+            toast={toastFn}
+            initialActiveDiscussionId="d-queued-inline"
+            {...lifted}
+            sendingMap={{ 'd-queued-inline': false }}
+            streamingMap={{ 'd-queued-inline': '' }}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    await waitFor(() => expect(sentPayload?.content).toBe('Mon prochain message'));
+    await waitFor(() => expect(screen.queryByLabelText("Messages en file d'attente")).toBeNull());
+    await waitFor(() => expect(screen.getByText('Réponse au message en queue')).toBeInTheDocument());
+    expect(screen.getAllByText('Mon prochain message')).toHaveLength(1);
+  });
+
   it('shows one live placeholder for every agent in a general multi-model turn', async () => {
     const fullDisc: Discussion = {
       ...makeListDiscussion('d-plural', 1),
@@ -450,7 +608,8 @@ describe('DiscussionsPage', () => {
 
     expect(screen.getByTestId('streaming-agent-LiteLlm')).toHaveTextContent('LiteLLM');
     expect(screen.getByTestId('pending-agent-Ollama')).toHaveTextContent('Ollama');
-    expect(screen.getAllByText("Agent en cours d'exécution...")).toHaveLength(2);
+    expect(screen.getAllByText("Agent en cours d'exécution...")).toHaveLength(1);
+    expect(screen.getByText("En file — en attente d'un créneau agent")).toBeInTheDocument();
   });
 
   it('keeps overlapping reply slots attached to their own turns and reorders a late reply', async () => {
@@ -472,6 +631,11 @@ describe('DiscussionsPage', () => {
       ],
     };
     vi.mocked(discussionsApi.get).mockResolvedValue(fullDisc);
+    vi.mocked(discussionsApi.stopDispatch).mockResolvedValue({
+      cancelled: true,
+      dispatch_id: 'new-ollama',
+      still_awaiting: true,
+    });
 
     await wrap(
       <DiscussionsPage
@@ -499,6 +663,14 @@ describe('DiscussionsPage', () => {
     expect(screen.getByTestId('pending-agent-LiteLlm')).toHaveAttribute('data-reply-trigger', 'u-new');
     expect(screen.getByTestId('pending-agent-Ollama')).toHaveAttribute('data-reply-trigger', 'u-new');
     expect(screen.getByTestId('pending-agent-Codex')).toHaveAttribute('data-reply-trigger', 'u-new');
+
+    fireEvent.click(screen.getByRole('button', {
+      name: 'Arrêter uniquement la réponse de Ollama',
+    }));
+    await waitFor(() => {
+      expect(discussionsApi.stopDispatch).toHaveBeenCalledWith('d-overlap', 'new-ollama');
+    });
+    expect(toastFn).toHaveBeenCalledWith('Réponse agent arrêtée', 'success');
   });
 
   it('restores active discussion on remount via initialActiveDiscussionId', async () => {

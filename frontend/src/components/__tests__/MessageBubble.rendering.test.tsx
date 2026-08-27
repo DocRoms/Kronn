@@ -308,6 +308,18 @@ describe('MessageBubble — author pseudo / avatar (User)', () => {
     expect(author?.textContent).toContain('anonyme');
     expect(author?.textContent).toContain('humain');
   });
+
+  it('does not label the Orchestrateur system persona as a human', () => {
+    const { container } = renderBubble(makeMessage({
+      role: 'User',
+      content: 'Sous-tâche lancée',
+      author_pseudo: 'Orchestrateur',
+    }));
+    const author = container.querySelector('.disc-msg-author');
+    expect(author).toHaveTextContent('Orchestrateur');
+    expect(author).not.toHaveTextContent('humain');
+    expect(container.querySelector('.disc-msg-author-kind')).toBeNull();
+  });
 });
 
 describe('MessageBubble — durable routing receipt', () => {

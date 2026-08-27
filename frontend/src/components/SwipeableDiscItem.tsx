@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, memo } from 'react';
 import {
-  ShieldCheck, Zap, Rocket, GitBranch, Loader2, Users, Users2, Square, Star,
+  ShieldCheck, Zap, Rocket, GitBranch, Loader2, Users, Users2, Square,
   Link2, Download, AlertTriangle, Check, MoreHorizontal, Copy, Archive, Trash2,
 } from 'lucide-react';
 import type { Discussion } from '../types/generated';
@@ -10,6 +10,7 @@ import { sourceAgentShortLabel, unseenBasis } from '../lib/discussionUiUtils';
 import { gravatarUrl } from '../lib/gravatar';
 import { useT } from '../lib/I18nContext';
 import { MatrixText } from './MatrixText';
+import { FavoriteToggle } from './FavoriteToggle';
 import '../pages/DiscussionsPage.css';
 
 const SWIPE_THRESHOLD = 80;
@@ -201,10 +202,16 @@ export const SwipeableDiscItem = memo(function SwipeableDiscItem({
             </span>
           )}
           {!selectionMode && (
+            /* Queued is not idle and not running: the job is enqueued and its
+               agent is at its concurrency cap. Say so — a silent dot on a batch
+               that will not start for minutes reads as a dead discussion. */
             <span
               className="disc-item-status-dot"
               data-state={isSending ? 'running' : isQueued ? 'queued' : showBadge ? 'unread' : 'idle'}
-              aria-hidden="true"
+              title={isQueued && !isSending ? t('disc.awaitingAgentSlot') : undefined}
+              aria-hidden={isQueued && !isSending ? undefined : true}
+              aria-label={isQueued && !isSending ? t('disc.awaitingAgentSlot') : undefined}
+              role={isQueued && !isSending ? 'status' : undefined}
             />
           )}
           <span className="disc-item-content">
@@ -352,6 +359,15 @@ export const SwipeableDiscItem = memo(function SwipeableDiscItem({
                 <Square size={8} style={{ fill: 'currentColor' }} />
               </button>
             )}
+            {onTogglePin && (
+              <FavoriteToggle
+                active={!!disc.pinned}
+                onToggle={() => onTogglePin(disc.id, !disc.pinned)}
+                activeLabel={t('disc.unpin')}
+                inactiveLabel={t('disc.pin')}
+                itemName={disc.title}
+              />
+            )}
             <button
               ref={actionMenuButtonRef}
               type="button"
@@ -375,19 +391,6 @@ export const SwipeableDiscItem = memo(function SwipeableDiscItem({
                 role="menu"
                 data-placement={actionMenuPlacement}
               >
-                {onTogglePin && (
-                  <button
-                    type="button"
-                    role="menuitem"
-                    onClick={() => {
-                      onTogglePin(disc.id, !disc.pinned);
-                      setActionMenuOpen(false);
-                    }}
-                  >
-                    <Star size={12} />
-                    {t(disc.pinned ? 'disc.unpin' : 'disc.pin')}
-                  </button>
-                )}
                 <button type="button" role="menuitem" data-copied={copied} onClick={() => void copyDiscussionId()}>
                   {copied ? <Check size={12} /> : <Copy size={12} />}
                   {t('disc.copyId')}

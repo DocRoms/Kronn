@@ -23,7 +23,7 @@ import type {
 } from '../../types/generated';
 import { ExecutionLimitsCard } from './ExecutionLimitsCard';
 import type { AgentsConfig } from '../../types/generated';
-import { promptNeedsFileAccess } from '../../lib/ollamaHints';
+import { promptNeedsUnboundWorkspace } from '../../lib/ollamaHints';
 import {
   Plus, Loader2, Check, X, ChevronRight, ChevronDown, ChevronUp,
   Clock, GitBranch, Zap, HelpCircle, Settings, Shield,
@@ -1804,17 +1804,13 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
             </div>
           )}
 
-          {/* Worktree isolation hint — visible whenever a project is bound.
-              Each WorkflowRun creates its own git worktree at
-              `.kronn/worktrees/<name>-<run_id>` and ALL steps share that
-              `work_dir`. Without this note the user wonders whether
-              consecutive Agent → Exec → Agent steps see the same files. */}
+          {/* Workspace mode hint — visible whenever a project is bound. */}
           {projectId && (
             <div className="wf-worktree-hint mb-5">
               <span title={t('wiz.worktreeIconTooltip')} className="flex-row" style={{ cursor: 'help' }}>
                 <GitBranch size={11} />
               </span>
-              <span>{t('wiz.worktreeHint')}</span>
+              <span>{t(requireIsolation ? 'wiz.worktreeHint' : 'wiz.mainTreeHint')}</span>
             </div>
           )}
 
@@ -4101,19 +4097,19 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                         Gate/Exec/BatchQuickPrompt. */}
                     {(!step.step_type || step.step_type.type === 'Agent') && (
                       <div className="mb-5">
-                        {/* HTTP agents have no filesystem or arbitrary MCP bridge,
-                            but workflow runs now expose a bounded Kronn-native
-                            catalogue for APIs, Quick APIs and Planning reads. */}
+                        {/* HTTP agents have no host shell or arbitrary MCP bridge.
+                            A project-bound run receives Kronn's bounded workspace,
+                            git and API tools; an unbound run cannot read files. */}
                         {(step.agent === 'Ollama' || step.agent === 'LiteLlm') && (
                           <div className="wf-ollama-note" role="note">
                             <Info size={12} />
                             <span>{t('wiz.httpAgentNoFilesNote')}</span>
                           </div>
                         )}
-                        {/* Active lint: the prompt looks like it asks the agent to
-                            READ files/worktree — impossible for a tool-less Ollama.
-                            Escalate to a warning so the user injects the content. */}
-                        {(step.agent === 'Ollama' || step.agent === 'LiteLlm') && promptNeedsFileAccess(step.prompt_template) && (
+                        {/* Only warn when no project can back the bounded
+                            workspace catalogue. With a project, reading via
+                            `find_files` / `read_file` is an intended capability. */}
+                        {(step.agent === 'Ollama' || step.agent === 'LiteLlm') && promptNeedsUnboundWorkspace(step.prompt_template, projectId) && (
                           <div className="wf-ollama-note wf-ollama-note--warn" role="alert">
                             <AlertTriangle size={12} />
                             <span>{t('wiz.ollamaContextLint')}</span>
@@ -4808,6 +4804,28 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                 />
               </div>
 
+              {/* Workflow-level workspace isolation. Child batch discussions
+                  keep their own Direct/Isolated setting; this switch controls
+                  the parent run's checkout and is deliberately opt-in. */}
+              <div className="mb-8">
+                <div className="flex-row gap-3 mb-4">
+                  <GitBranch size={14} className="text-muted" />
+                  <span className="text-md font-semibold text-secondary">{t('wiz.workflowIsolation')}</span>
+                </div>
+                <label className="wf-checkbox-label">
+                  <input
+                    type="checkbox"
+                    checked={requireIsolation}
+                    disabled={!projectId}
+                    onChange={e => setRequireIsolation(e.target.checked)}
+                  />
+                  <span>{t('wiz.requireIsolationAction')}</span>
+                </label>
+                <p className="text-xs text-faint" style={{ margin: '6px 0 0' }}>
+                  {t(projectId ? 'wiz.workflowIsolationHint' : 'wiz.workflowIsolationNoProject')}
+                </p>
+              </div>
+
               {/* Workspace hooks */}
               <div>
                 <div className="flex-row gap-3 mb-4">
@@ -4852,6 +4870,12 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
           </div>
           {concurrencyLimit && (
             <div className="wf-summary-row"><span className="wf-summary-label">Concurrence</span> max {concurrencyLimit} runs</div>
+          )}
+          {projectId && (
+            <div className="wf-summary-row">
+              <span className="wf-summary-label">{t('wiz.workflowIsolation')}</span>
+              {t(requireIsolation ? 'wiz.workspaceModeIsolated' : 'wiz.workspaceModeMain')}
+            </div>
           )}
           <div className="wf-summary-row"><span className="wf-summary-label">Steps</span> {steps.length}</div>
           {steps.map((s, i) => {

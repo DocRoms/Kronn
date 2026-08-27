@@ -26,7 +26,7 @@ vi.mock('../../lib/api', () => ({
     getScanDepth: vi.fn().mockResolvedValue(4),
     getScanPaths: vi.fn().mockResolvedValue(['/home/user/repos']),
     getScanIgnore: vi.fn().mockResolvedValue(['node_modules', '.git']),
-    getServerConfig: vi.fn().mockResolvedValue({ host: '127.0.0.1', port: 3140, domain: null, max_concurrent_agents: 5, agent_stall_timeout_min: 5, agent_global_timeout_min: 30, auth_enabled: true, discussion_notes_enabled: true }),
+    getServerConfig: vi.fn().mockResolvedValue({ host: '127.0.0.1', port: 3140, domain: null, max_concurrent_agents: 5, agent_stall_timeout_min: 5, agent_global_timeout_min: 30, local_agent_global_timeout_min: 240, auth_enabled: true, discussion_notes_enabled: true }),
     setServerConfig: vi.fn().mockResolvedValue(undefined),
     getNetworkExposure: vi.fn().mockResolvedValue({ exposed: false, restart_required: false, port: 3140, reachable_ips: [] }),
     setNetworkExposure: vi.fn().mockResolvedValue({ exposed: false, restart_required: false, port: 3140, reachable_ips: [] }),
@@ -71,6 +71,13 @@ vi.mock('../../lib/api', () => ({
     exportData: vi.fn(),
     importData: vi.fn(),
     discoverKeys: vi.fn().mockResolvedValue({ discovered: [], imported_count: 0 }),
+  },
+  // KT-337 — AgentsSection loads the NVIDIA catalogue on mount (header status +
+  // model datalist). This file mocks the api module by hand, so the namespace has
+  // to be here too or the mount reaches the network and the page never settles.
+  nvidia: {
+    models: vi.fn().mockResolvedValue({ models: [], endpoint: 'https://integrate.api.nvidia.com', has_key: false }),
+    probe: vi.fn().mockResolvedValue({ model: '', verdict: 'Usable', detail: '' }),
   },
   agents: {
     detect: vi.fn(),
@@ -617,7 +624,7 @@ describe('SettingsPage', () => {
     (config.setServerConfig as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('boom'));
     await wrap(<SettingsPage {...defaultProps} />);
 
-    const slider = screen.getByLabelText('Agents simultanés max') as HTMLInputElement;
+    const slider = screen.getByLabelText('Agents locaux simultanés max') as HTMLInputElement;
     // Seeded from the getServerConfig mock (max_concurrent_agents: 5).
     expect(slider.value).toBe('5');
 
@@ -632,15 +639,18 @@ describe('SettingsPage', () => {
     await wrap(<SettingsPage {...defaultProps} />);
 
     const globalSlider = screen.getByLabelText("Durée maximale d'une exécution agent") as HTMLInputElement;
+    const localGlobalSlider = screen.getByLabelText('Durée maximale des agents locaux (Ollama)') as HTMLInputElement;
     const stallSlider = screen.getByLabelText("Timeout d'inactivité agent") as HTMLInputElement;
-    const concurrencySlider = screen.getByLabelText('Agents simultanés max') as HTMLInputElement;
+    const concurrencySlider = screen.getByLabelText('Agents locaux simultanés max') as HTMLInputElement;
     const agentsCard = document.getElementById('settings-agent-config');
     const serverCard = document.getElementById('settings-server');
     expect(agentsCard).toContainElement(concurrencySlider);
     expect(agentsCard).toContainElement(globalSlider);
+    expect(agentsCard).toContainElement(localGlobalSlider);
     expect(agentsCard).toContainElement(stallSlider);
     expect(serverCard).not.toContainElement(globalSlider);
     expect(globalSlider.value).toBe('30');
+    expect(localGlobalSlider.value).toBe('240');
     expect(stallSlider.value).toBe('5');
 
     await act(async () => { fireEvent.change(globalSlider, { target: { value: '120' } }); });
@@ -649,7 +659,14 @@ describe('SettingsPage', () => {
       agent_global_timeout_min: 120,
     }));
     expect(globalSlider.value).toBe('120');
+    expect(localGlobalSlider.value).toBe('240');
     expect(stallSlider.value).toBe('5');
+
+    await act(async () => { fireEvent.change(localGlobalSlider, { target: { value: '180' } }); });
+    await waitFor(() => expect(configApi.setServerConfig).toHaveBeenCalledWith({
+      local_agent_global_timeout_min: 180,
+    }));
+    expect(localGlobalSlider.value).toBe('180');
   });
 
   it('warns when inactivity can never outlast the absolute execution limit', async () => {
@@ -660,6 +677,7 @@ describe('SettingsPage', () => {
       max_concurrent_agents: 5,
       agent_stall_timeout_min: 120,
       agent_global_timeout_min: 30,
+      local_agent_global_timeout_min: 240,
       auth_enabled: true,
       discussion_notes_enabled: true,
     });

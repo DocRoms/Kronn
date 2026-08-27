@@ -7,7 +7,14 @@
 // is only the fetch-failed fallback (mirrors PollBackoffPolicy::default
 // max_delay_seconds).
 export type Freshness = 'fresh' | 'idle' | 'away';
-export type HonestPresenceState = 'running' | 'listening' | 'dormant' | 'offline';
+export type HonestPresenceState =
+  | 'running'
+  | 'listening'
+  | 'dormant'
+  | 'resume_expected'
+  | 'stalled'
+  | 'quota_exhausted'
+  | 'offline';
 
 const FALLBACK_MAX_DELAY_MS = 480_000;
 export const AWAY_MARGIN_MS = 2 * 60_000;
@@ -46,6 +53,9 @@ const HONEST_PRESENCE_STATES = new Set<HonestPresenceState>([
   'running',
   'listening',
   'dormant',
+  'resume_expected',
+  'stalled',
+  'quota_exhausted',
   'offline',
 ]);
 
@@ -71,7 +81,7 @@ export function honestPresenceState(
 
 export function freshnessForPresence(state: HonestPresenceState): Freshness {
   if (state === 'running' || state === 'listening') return 'fresh';
-  return state === 'dormant' ? 'idle' : 'away';
+  return state === 'dormant' || state === 'resume_expected' ? 'idle' : 'away';
 }
 
 export function secondsUntil(nextPollAt: string | null | undefined): number | null {

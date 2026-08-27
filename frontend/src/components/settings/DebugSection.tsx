@@ -268,7 +268,7 @@ export function DebugSection({
             <div className="flex-row gap-2" style={{ marginLeft: 'auto', alignItems: 'center' }}>
               <button
                 type="button"
-                className="btn-ghost"
+                className="btn btn-ghost"
                 onClick={() => setFollow(f => !f)}
                 title={follow ? t('settings.debugLogsStopFollow') : t('settings.debugLogsStartFollow')}
                 aria-pressed={follow}
@@ -278,7 +278,7 @@ export function DebugSection({
               </button>
               <button
                 type="button"
-                className="btn-ghost"
+                className="btn btn-ghost"
                 onClick={() => void refresh()}
                 disabled={loading}
                 title={t('settings.debugLogsRefresh')}
@@ -288,7 +288,7 @@ export function DebugSection({
               </button>
               <button
                 type="button"
-                className="btn-ghost"
+                className="btn btn-ghost"
                 onClick={() => void handleCopy()}
                 disabled={lines.length === 0}
                 title={t('settings.debugLogsCopy')}
@@ -298,7 +298,7 @@ export function DebugSection({
               </button>
               <button
                 type="button"
-                className="btn-ghost"
+                className="btn btn-ghost"
                 onClick={() => void handleClear()}
                 disabled={buffered === 0}
                 title={t('settings.debugLogsClear')}
@@ -340,7 +340,7 @@ export function DebugSection({
           <div className="mt-8 flex-row gap-3" style={{ alignItems: 'center' }}>
             <button
               type="button"
-              className="btn-accent"
+              className="btn btn-accent"
               onClick={() => void handleReportBug()}
               disabled={reporting}
               title={t('settings.debugReportHint')}

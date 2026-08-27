@@ -719,6 +719,37 @@
   color: var(--kr-text-faint);
 }
 
+.mcp-scope-general {
+  background: rgba(var(--kr-info-rgb), 0.1);
+  color: var(--kr-info);
+}
+
+.mcp-scope-orphan {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  border-color: rgba(var(--kr-warning-rgb), 0.35);
+  background: rgba(var(--kr-warning-rgb), 0.1);
+  color: var(--kr-warning);
+}
+
+.mcp-scope-orphan-warning {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-3);
+  margin-bottom: var(--kr-sp-4);
+  padding: var(--kr-sp-4);
+  border: 1px solid rgba(var(--kr-warning-rgb), 0.35);
+  border-radius: var(--kr-r-md);
+  background: rgba(var(--kr-warning-rgb), 0.08);
+  color: var(--kr-warning);
+}
+
+.mcp-scope-orphan-warning > span { display: flex; min-width: 0; flex: 1; flex-direction: column; }
+.mcp-scope-orphan-warning small { color: var(--kr-text-secondary); }
+.mcp-scope-orphan-warning button { flex: 0 0 auto; padding: 5px 8px; border: 1px solid currentColor; border-radius: var(--kr-r-sm); background: transparent; color: inherit; cursor: pointer; }
+.mcp-scope-orphan-warning button:hover { background: rgba(var(--kr-warning-rgb), 0.12); }
+
 .mcp-installed-keys {
   display: inline-flex;
   align-items: center;

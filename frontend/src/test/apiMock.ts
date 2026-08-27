@@ -51,6 +51,7 @@ export const API_NAMESPACES = [
   'stats',
   'ollama',
   'liteLlm',
+  'nvidia',
   'debugApi',
   'themes',
   'docs',
@@ -60,6 +61,7 @@ export const API_NAMESPACES = [
   'userContext',
   'version',
   'apiCallLogs',
+  'orchestration',
   'learnings',
   'health',
   // KT-190 — joined-CLI token telemetry coverage.
@@ -104,6 +106,7 @@ interface DefaultMock {
   stats: Record<string, AnyFn>;
   ollama: Record<string, AnyFn>;
   liteLlm: Record<string, AnyFn>;
+  nvidia: Record<string, AnyFn>;
   debugApi: Record<string, AnyFn>;
   themes: Record<string, AnyFn>;
   docs: Record<string, AnyFn>;
@@ -113,6 +116,7 @@ interface DefaultMock {
   userContext: Record<string, AnyFn>;
   version: Record<string, AnyFn>;
   apiCallLogs: Record<string, AnyFn>;
+  orchestration: Record<string, AnyFn>;
   learnings: Record<string, AnyFn>;
   telemetry: Record<string, AnyFn>;
   measuredRatio: AnyFn;
@@ -348,6 +352,11 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       archive: resolve(undefined),
       unarchive: resolve(undefined),
       stop: resolve({ cancelled: false }),
+      stopDispatch: resolve({
+        cancelled: false,
+        dispatch_id: '',
+        still_awaiting: false,
+      }),
       dismissPartial: resolve({ recovered: false }),
       createPr: resolve({ url: '' }),
       listContextFiles: resolve([]),
@@ -515,6 +524,15 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
     ollama: {
       health: resolve({ status: 'not_installed', version: null, endpoint: 'http://localhost:11434', models_count: 0, hint: null }),
       models: resolve({ models: [] }),
+      setContextOverride: resolve({ model: '', num_ctx: null, warnings: [] }),
+    },
+
+    nvidia: {
+      // AgentsSection loads the catalogue on mount (it feeds both the header
+      // status line and the model datalist), so every settings test needs this
+      // namespace or the mount throws.
+      models: resolve({ models: [], endpoint: 'https://integrate.api.nvidia.com', has_key: false }),
+      probe: resolve({ model: '', verdict: 'Usable', detail: '' }),
     },
 
     liteLlm: {
@@ -573,6 +591,56 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       list: resolve([]),
       get: resolve(null),
       purge: resolve(0),
+    },
+
+    orchestration: {
+      // 0.11.0 (KT-323) — task campaigns. An empty candidate list with nothing
+      // in flight is the neutral default: the panel renders nothing, so a
+      // component that merely mounts does not have to care about it.
+      campaign: resolve({
+        run: { id: 'run-mock', status: 'Running' },
+        candidates: [],
+        principal_attention: {
+          active_executions: 0,
+          cli_executions: 0,
+          awaiting_review: 0,
+          awaiting_human: 0,
+          ready_tasks: 0,
+          actions: [],
+        },
+      }),
+      discussionCampaign: resolve(null),
+      createCampaign: resolve({
+        run: { id: 'run-mock', status: 'active' },
+        candidates: [],
+        principal_attention: {
+          active_executions: 0,
+          cli_executions: 0,
+          awaiting_review: 0,
+          awaiting_human: 0,
+          ready_tasks: 0,
+          actions: [],
+        },
+      }),
+      discussionLinks: resolve([]),
+      execution: resolve(null),
+      executionObservability: resolve(null),
+      cancelExecution: resolve({}),
+      reassignExecution: resolve({}),
+      reviewExecution: resolve({}),
+      launch: resolve({ execution: { id: 'exec-mock' }, worker_selection_reason: '' }),
+      control: resolve({
+        run: { id: 'run-mock', status: 'Paused' },
+        candidates: [],
+        principal_attention: {
+          active_executions: 0,
+          cli_executions: 0,
+          awaiting_review: 0,
+          awaiting_human: 0,
+          ready_tasks: 0,
+          actions: [],
+        },
+      }),
     },
 
     learnings: {

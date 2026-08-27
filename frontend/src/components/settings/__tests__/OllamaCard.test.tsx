@@ -16,7 +16,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, act, cleanup, waitFor } from '@testing-library/react';
 
 const { ollama, config } = vi.hoisted(() => ({
-  ollama: { health: vi.fn(), models: vi.fn() },
+  ollama: { health: vi.fn(), models: vi.fn(), setContextOverride: vi.fn() },
   config: { getModelTiers: vi.fn(), setModelTiers: vi.fn() },
 }));
 
@@ -37,11 +37,23 @@ const baseTiers = {
   ollama: { economy: null, reasoning: null, default: null },
 };
 
+const installedModel = (name: string, overrides: Record<string, unknown> = {}) => ({
+  name,
+  size: '4.0 GB',
+  modified: '2026-01-01',
+  advertised_context: 131_072,
+  context_ceiling: 65_536,
+  context_override: null,
+  context_origin: 'machine_ceiling',
+  ...overrides,
+});
+
 beforeEach(() => {
   ollama.health.mockResolvedValue({
     status: 'not_installed', version: null, endpoint: '', models_count: 0, hint: null,
   });
   ollama.models.mockResolvedValue({ models: [] });
+  ollama.setContextOverride.mockResolvedValue({ model: '', num_ctx: null, warnings: [] });
   config.getModelTiers.mockResolvedValue(baseTiers);
   config.setModelTiers.mockResolvedValue(undefined);
 });
@@ -101,8 +113,8 @@ describe('OllamaCard — 4-state rendering', () => {
     });
     ollama.models.mockResolvedValue({
       models: [
-        { name: 'llama3.2:latest', size: 2_500_000_000, digest: 'sha:abc', modified_at: '2026-01-01' },
-        { name: 'qwen2.5-coder:14b', size: 9_000_000_000, digest: 'sha:def', modified_at: '2026-01-02' },
+        installedModel('llama3.2:latest'),
+        installedModel('qwen2.5-coder:14b'),
       ],
     });
     await mountCard();
@@ -111,6 +123,96 @@ describe('OllamaCard — 4-state rendering', () => {
     expect(screen.getAllByText(/qwen2\.5-coder:14b/).length).toBeGreaterThan(0);
     // Status line carries the count via the i18n template.
     expect(document.body.textContent).toMatch(/2 ollama\.models/);
+  });
+});
+
+describe('OllamaCard — per-model context policy', () => {
+  beforeEach(() => {
+    ollama.health.mockResolvedValue({
+      status: 'online', version: '0.12.0', endpoint: 'http://localhost:11434',
+      models_count: 1, hint: null,
+    });
+  });
+
+  it('keeps the context-window editor collapsed by default', async () => {
+    ollama.models.mockResolvedValue({ models: [installedModel('qwen3:8b')] });
+    await mountCard();
+
+    const summary = screen.getByText('ollama.contextTitle');
+    const details = summary.closest('details');
+    expect(details).not.toBeNull();
+    expect(details!.open).toBe(false);
+
+    fireEvent.click(summary);
+    expect(details!.open).toBe(true);
+  });
+
+  it('shows trained window, ceiling, origin and a loud portable fallback', async () => {
+    ollama.models.mockResolvedValue({
+      models: [installedModel('qwen3:8b', {
+        advertised_context: null,
+        context_ceiling: 8_192,
+        context_origin: 'portable_fallback',
+      })],
+    });
+    await mountCard();
+
+    expect(screen.getByText('ollama.contextAdvertised')).toBeTruthy();
+    expect(screen.getByText('ollama.contextCeiling')).toBeTruthy();
+    expect(screen.getByText('ollama.contextOrigin.portable_fallback')).toBeTruthy();
+    expect(screen.getByText('ollama.contextFallbackWarning')).toBeTruthy();
+    expect(document.body.textContent).toContain('8,192');
+  });
+
+  it('persists a bounded override and refreshes the effective projection', async () => {
+    const initial = installedModel('qwen3:8b');
+    const overridden = installedModel('qwen3:8b', {
+      context_override: 98_304,
+      context_ceiling: 98_304,
+      context_origin: 'model_override',
+    });
+    ollama.models
+      .mockResolvedValueOnce({ models: [initial] })
+      .mockResolvedValueOnce({ models: [overridden] });
+    ollama.setContextOverride.mockResolvedValue({
+      model: 'qwen3:8b', num_ctx: 98_304, warnings: ['Above RAM heuristic'],
+    });
+    await mountCard();
+
+    const input = screen.getByLabelText('ollama.contextOverrideFor(qwen3:8b)');
+    fireEvent.change(input, { target: { value: '98304' } });
+    fireEvent.click(screen.getByText('ollama.contextSave'));
+    await waitFor(() => expect(ollama.setContextOverride).toHaveBeenCalledWith('qwen3:8b', 98_304));
+    await waitFor(() => expect(screen.getByDisplayValue('98304')).toBeTruthy());
+    expect(screen.getByText('Above RAM heuristic')).toBeTruthy();
+  });
+
+  it('resets the saved override to automatic sizing', async () => {
+    ollama.models.mockResolvedValue({
+      models: [installedModel('qwen3:8b', {
+        context_override: 65_536,
+        context_origin: 'model_override',
+      })],
+    });
+    ollama.setContextOverride.mockResolvedValue({
+      model: 'qwen3:8b', num_ctx: null, warnings: [],
+    });
+    await mountCard();
+
+    fireEvent.click(screen.getByText('ollama.contextReset'));
+    await waitFor(() => expect(ollama.setContextOverride).toHaveBeenCalledWith('qwen3:8b', null));
+  });
+
+  it('refuses an invalid value before calling the backend', async () => {
+    ollama.models.mockResolvedValue({ models: [installedModel('qwen3:8b')] });
+    await mountCard();
+    fireEvent.change(
+      screen.getByLabelText('ollama.contextOverrideFor(qwen3:8b)'),
+      { target: { value: '512' } },
+    );
+    fireEvent.click(screen.getByText('ollama.contextSave'));
+    expect(await screen.findByText('ollama.contextInvalid')).toBeTruthy();
+    expect(ollama.setContextOverride).not.toHaveBeenCalled();
   });
 });
 
@@ -140,7 +242,7 @@ describe('OllamaCard — per-tier model picker', () => {
       models_count: 1, hint: null,
     });
     ollama.models.mockResolvedValue({
-      models: [{ name: 'llama3.2', size: 2_500_000_000, digest: 'sha:abc', modified_at: '2026-01-01' }],
+      models: [installedModel('llama3.2')],
     });
 
     await mountCard(model => model === 'llama3.2' ? ' · ≈ $0.00/M observed' : '');
@@ -156,7 +258,7 @@ describe('OllamaCard — per-tier model picker', () => {
       models_count: 1, hint: null,
     });
     ollama.models.mockResolvedValue({
-      models: [{ name: 'llama3.2', size: 2_500_000_000, digest: 'sha:abc', modified_at: '2026-01-01' }],
+      models: [installedModel('llama3.2')],
     });
     await mountCard();
 
@@ -181,8 +283,8 @@ describe('OllamaCard — per-tier model picker', () => {
     });
     ollama.models.mockResolvedValue({
       models: [
-        { name: 'llama3.2', size: 2_500_000_000, digest: 'sha:abc', modified_at: '2026-01-01' },
-        { name: 'qwen2.5-coder:14b', size: 9_000_000_000, digest: 'sha:def', modified_at: '2026-01-02' },
+        installedModel('llama3.2'),
+        installedModel('qwen2.5-coder:14b'),
       ],
     });
     config.getModelTiers.mockResolvedValue({ ...baseTiers, ollama: { economy: null, reasoning: null, default: 'llama3.2' } });

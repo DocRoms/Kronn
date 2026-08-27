@@ -20,6 +20,16 @@ describe('useMatrixDecode', () => {
     expect(getByTestId('out').textContent).toBe('Hello World');
   });
 
+  it('starts a fresh decode when an inactive label becomes active', () => {
+    const { getByTestId, rerender } = render(<TestHarness text="Wake" active={false} />);
+    expect(getByTestId('out').textContent).toBe('Wake');
+
+    rerender(<TestHarness text="Wake" active={true} />);
+    expect(getByTestId('out').textContent).toHaveLength(4);
+    act(() => { vi.advanceTimersByTime(16 * 40); });
+    expect(getByTestId('out').textContent).toBe('Wake');
+  });
+
   it('scrambles chars then settles to target when active', () => {
     const { getByTestId } = render(<TestHarness text="Kronn" active={true} />);
 

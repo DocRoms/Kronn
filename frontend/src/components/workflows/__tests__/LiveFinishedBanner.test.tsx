@@ -46,6 +46,14 @@ describe('LiveFinishedBanner — colour mapping', () => {
     expect(screen.getByText(/wf\.runDone:Failed/)).toBeInTheDocument();
   });
 
+  it('paints Partial runs amber without pretending they fully succeeded', () => {
+    const { container } = render(
+      <LiveFinishedBanner status="Partial" stepsExecuted={4} t={t} />
+    );
+    expect(container.querySelector('.wf-live-finished')).toHaveAttribute('data-status', 'waiting');
+    expect(screen.getByText(/wf\.runDone:Partial/)).toBeInTheDocument();
+  });
+
   it('paints red for Cancelled and StoppedByGuard (default failed bucket)', () => {
     const cancelled = render(
       <LiveFinishedBanner status="Cancelled" stepsExecuted={0} t={t} />

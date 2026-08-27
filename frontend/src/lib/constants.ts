@@ -19,6 +19,7 @@ export const AGENT_COLORS: Record<string, string> = {
   'GitHub Copilot': '#238636',
   Ollama: '#60A5FA',
   LiteLlm: '#14B8A6',
+  Nvidia: '#76B900',
 };
 
 export const AGENT_LABELS: Record<string, string> = {
@@ -30,9 +31,10 @@ export const AGENT_LABELS: Record<string, string> = {
   CopilotCli: 'GitHub Copilot',
   Ollama: 'Ollama',
   LiteLlm: 'LiteLLM',
+  Nvidia: 'NVIDIA',
 };
 
-export const ALL_AGENT_TYPES: AgentType[] = ['ClaudeCode', 'Codex', 'Vibe', 'GeminiCli', 'Kiro', 'CopilotCli', 'Ollama', 'LiteLlm'];
+export const ALL_AGENT_TYPES: AgentType[] = ['ClaudeCode', 'Codex', 'Vibe', 'GeminiCli', 'Kiro', 'CopilotCli', 'Ollama', 'LiteLlm', 'Nvidia'];
 
 export const MODEL_TIER_ICONS: Record<ModelTier, string> = {
   economy: '⚡',
@@ -49,6 +51,7 @@ const MODEL_TIER_CONFIG_KEY: Partial<Record<AgentType, keyof ModelTiersConfig>> 
   CopilotCli: 'copilot_cli',
   Ollama: 'ollama',
   LiteLlm: 'lite_llm',
+  Nvidia: 'nvidia',
 };
 
 /** Resolve the concrete model name Kronn will request for an agent/tier pair.
@@ -85,6 +88,7 @@ export const AGENT_MENTIONS: ReadonlyArray<{
   { trigger: '@copilot', type: 'CopilotCli', label: 'GitHub Copilot' },
   { trigger: '@ollama', type: 'Ollama', label: 'Ollama' },
   { trigger: '@litellm', type: 'LiteLlm', label: 'LiteLLM' },
+  { trigger: '@nvidia', type: 'Nvidia', label: 'NVIDIA' },
 ];
 
 /** Return every canonical agent mention found in text, once each and in the
@@ -148,6 +152,10 @@ const AGENT_CONFIG_KEY: Partial<Record<AgentType, keyof AgentsConfig>> = {
   Kiro: 'kiro',
   CopilotCli: 'copilot_cli',
   Ollama: 'ollama',
+  // LiteLlm was missing here: a saved mention colour was silently dropped for it.
+  // Both HTTP providers are listed now (KT-337).
+  LiteLlm: 'lite_llm',
+  Nvidia: 'nvidia',
 };
 
 const isRgbHex = (value: string | null | undefined): value is string =>
@@ -189,6 +197,8 @@ export function isAgentRestricted(agentAccess: AgentsConfig | undefined, agentTy
     Kiro: undefined,
     CopilotCli: agentAccess.copilot_cli?.full_access,
     Ollama: agentAccess.ollama?.full_access,
+    LiteLlm: agentAccess.lite_llm?.full_access,
+    Nvidia: agentAccess.nvidia?.full_access,
   };
   return map[agentType] === false;
 }
@@ -245,6 +255,8 @@ export function hasAgentFullAccess(agentAccess: AgentsConfig | undefined, agentT
     Kiro: undefined,
     CopilotCli: agentAccess.copilot_cli?.full_access,
     Ollama: agentAccess.ollama?.full_access,
+    LiteLlm: agentAccess.lite_llm?.full_access,
+    Nvidia: agentAccess.nvidia?.full_access,
   };
   return map[agentType] === true;
 }

@@ -273,7 +273,7 @@ export function IdentitySection({ toast, t }: IdentitySectionProps) {
               <div className="set-expose-restart" role="alert">
                 <span>{t('settings.exposeRestartRequired')}</span>
                 {isTauri ? (
-                  <button type="button" className="btn-ghost" onClick={restartApp}>
+                  <button type="button" className="btn btn-ghost" onClick={restartApp}>
                     {t('settings.exposeRestartBtn')}
                   </button>
                 ) : (

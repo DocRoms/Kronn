@@ -20,6 +20,12 @@ vi.mock('../pages/Dashboard', () => ({
   ),
 }));
 
+vi.mock('../pages/StandaloneLivePage', () => ({
+  StandaloneLivePage: ({ pageId }: { pageId: string }) => (
+    <div data-testid="standalone-page">{pageId}</div>
+  ),
+}));
+
 // Mock the API
 vi.mock('../lib/api', () => ({
   setup: {
@@ -52,6 +58,7 @@ import { setup as setupApi, config as configApi } from '../lib/api';
 
 beforeEach(() => {
   vi.clearAllMocks();
+  window.location.hash = '';
   setRetryDelay(0); // instant retries in tests
   setStatusTimeout(20); // short boot timeout so hangs resolve fast in tests
   // Default: backend unreachable on the fast probe too (matches the existing
@@ -95,6 +102,22 @@ describe('App', () => {
 
     render(<App />);
     await waitFor(() => expect(screen.getByTestId('dashboard')).toBeDefined());
+  });
+
+  it('opens a direct Live Page URL without mounting the dashboard chrome', async () => {
+    window.location.hash = '#page/page-1';
+    (setupApi.getStatus as ReturnType<typeof vi.fn>).mockResolvedValue({
+      is_first_run: false,
+      current_step: 'Complete',
+      agents_detected: [],
+      scan_paths_set: true,
+      repos_detected: [],
+      default_scan_path: '/home',
+    });
+
+    render(<App />);
+    await waitFor(() => expect(screen.getByTestId('standalone-page')).toHaveTextContent('page-1'));
+    expect(screen.queryByTestId('dashboard')).toBeNull();
   });
 
   it('shows API error screen after exhausting auto-retries', async () => {

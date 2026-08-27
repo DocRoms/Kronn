@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { LivePage, LivePageDetail, LivePagePublication } from '../../types/generated';
 
@@ -104,6 +104,10 @@ describe('PagesPage', () => {
     expect(frame).not.toHaveAttribute('allow-same-origin');
     expect(frame.getAttribute('srcdoc')).toContain("connect-src 'none'");
     expect(frame.getAttribute('srcdoc')).toContain('<h1>Adobe</h1>');
+    const standaloneLink = screen.getByRole('link', { name: 'pages.openInNewTab:Adobe Signals' });
+    expect(standaloneLink).toHaveAttribute('href', `${window.location.origin}${window.location.pathname}#page/page-1`);
+    expect(standaloneLink).toHaveAttribute('target', '_blank');
+    expect(standaloneLink).toHaveAttribute('rel', 'noopener noreferrer');
     expect(screen.getByText('data r3 · HTML r2')).toBeInTheDocument();
     expect(screen.getAllByText('1.5 KB')).toHaveLength(2);
     expect(screen.getByTitle('pages.datasetSizeTitle:summary,1.5 KB')).toBeInTheDocument();
@@ -155,6 +159,60 @@ describe('PagesPage', () => {
       created_by_agent: null,
     }));
     expect(pagesApi.updateHtml).toHaveBeenCalledTimes(1);
+  });
+
+  it('renames a Page, normalizes the title and restores it after a reload', async () => {
+    const view = render(<PagesPage />);
+    await screen.findByTestId('live-page-frame');
+    fireEvent.click(screen.getByLabelText('pages.renameTitle:Adobe Signals'));
+    const input = screen.getByLabelText('pages.titleInput');
+    fireEvent.change(input, { target: { value: '  Production health  ' } });
+    fireEvent.click(screen.getByLabelText('pages.saveTitle'));
+
+    await waitFor(() => expect(pagesApi.update).toHaveBeenCalledWith(page.id, {
+      title: 'Production health',
+    }));
+    expect(await screen.findByRole('heading', { name: 'Production health' })).toBeInTheDocument();
+    expect(screen.getByLabelText('pages.open:Production health')).toBeInTheDocument();
+
+    view.unmount();
+    const persisted = { ...detail, title: 'Production health' };
+    vi.mocked(pagesApi.list).mockResolvedValueOnce([persisted]);
+    vi.mocked(pagesApi.get).mockResolvedValueOnce(persisted);
+    render(<PagesPage />);
+    expect(await screen.findByRole('heading', { name: 'Production health' })).toBeInTheDocument();
+  });
+
+  it('refuses empty and overlong Page titles before calling the backend', async () => {
+    render(<PagesPage />);
+    await screen.findByTestId('live-page-frame');
+    fireEvent.click(screen.getByLabelText('pages.renameTitle:Adobe Signals'));
+    const input = screen.getByLabelText('pages.titleInput');
+    const updateCallsBeforeValidation = vi.mocked(pagesApi.update).mock.calls.length;
+
+    fireEvent.change(input, { target: { value: '   ' } });
+    fireEvent.click(screen.getByLabelText('pages.saveTitle'));
+    expect(screen.getByRole('alert')).toHaveTextContent('pages.titleRequired');
+    expect(pagesApi.update).toHaveBeenCalledTimes(updateCallsBeforeValidation);
+
+    fireEvent.change(input, { target: { value: 'x'.repeat(201) } });
+    fireEvent.click(screen.getByLabelText('pages.saveTitle'));
+    expect(screen.getByRole('alert')).toHaveTextContent('pages.titleTooLong');
+    expect(pagesApi.update).toHaveBeenCalledTimes(updateCallsBeforeValidation);
+  });
+
+  it('rolls the visible draft back to the persisted title when rename fails', async () => {
+    vi.mocked(pagesApi.update).mockRejectedValueOnce(new Error('Backend unavailable'));
+    render(<PagesPage />);
+    await screen.findByTestId('live-page-frame');
+    fireEvent.click(screen.getByLabelText('pages.renameTitle:Adobe Signals'));
+    const input = screen.getByLabelText('pages.titleInput');
+    fireEvent.change(input, { target: { value: 'Unsaved title' } });
+    fireEvent.click(screen.getByLabelText('pages.saveTitle'));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Backend unavailable');
+    expect(input).toHaveValue('Adobe Signals');
+    expect(screen.getByLabelText('pages.open:Adobe Signals')).toBeInTheDocument();
   });
 
   it('exports the data-materialized Page DOM as PDF from the header', async () => {
@@ -238,10 +296,20 @@ describe('PagesPage', () => {
     expect(screen.getByLabelText('pages.htmlTitle')).toHaveValue('<h1>Adobe legacy</h1>');
   });
 
-  it('runs an enabled workflow directly from the Page refresh menu', async () => {
+  it('shows distinct running, successful and failed Sync states', async () => {
+    let finishRun: ((result: { status: string }) => void) | undefined;
+    let failRun: ((message: string) => void) | undefined;
+    vi.mocked(workflowsApi.triggerStream).mockImplementation(async (
+      _id, _onStart, _onStep, onDone, onError,
+    ) => {
+      finishRun = onDone;
+      failRun = onError;
+    });
     render(<PagesPage />);
     fireEvent.click(await screen.findByLabelText('pages.autoRefresh'));
-    fireEvent.click(screen.getByLabelText('pages.runLinkedWorkflow:Adobe cron'));
+    const sync = screen.getByLabelText('pages.runLinkedWorkflow:Adobe cron');
+    expect(sync).toHaveAttribute('data-state', 'idle');
+    fireEvent.click(sync);
 
     await waitFor(() => expect(workflowsApi.triggerStream).toHaveBeenCalledWith(
       'wf-1',
@@ -250,7 +318,19 @@ describe('PagesPage', () => {
       expect.any(Function),
       expect.any(Function),
     ));
-    expect(await screen.findByText('pages.workflowRunSuccess')).toBeInTheDocument();
+    expect(sync).toHaveAttribute('data-state', 'running');
+    expect(sync.querySelector('.lucide-loader-circle')).toBeInTheDocument();
+
+    await act(async () => { finishRun?.({ status: 'Completed' }); });
+    expect(sync).toHaveAttribute('data-state', 'success');
+    expect(screen.getByTestId('live-page-sync-success-icon')).toBeInTheDocument();
+    expect(screen.getByRole('status')).toHaveTextContent('pages.workflowRunSuccess');
+
+    fireEvent.click(sync);
+    await act(async () => { failRun?.('Network unavailable'); });
+    expect(sync).toHaveAttribute('data-state', 'error');
+    expect(screen.getByTestId('live-page-sync-error-icon')).toBeInTheDocument();
+    expect(screen.getByRole('alert')).toHaveTextContent('Network unavailable');
   });
 
   it('searches, favorites and archives Pages with the library interactions', async () => {
@@ -264,7 +344,7 @@ describe('PagesPage', () => {
     expect(screen.queryByLabelText('pages.open:Adobe Signals')).not.toBeInTheDocument();
     fireEvent.change(screen.getByLabelText('pages.search'), { target: { value: '' } });
 
-    const favoriteButtons = screen.getAllByLabelText('pages.favorite');
+    const favoriteButtons = screen.getAllByLabelText(/^pages\.favorite/);
     fireEvent.click(favoriteButtons[0]);
     await waitFor(() => expect(pagesApi.update).toHaveBeenCalledWith(page.id, { pinned: true }));
     await waitFor(() => {
@@ -320,5 +400,104 @@ describe('PagesPage', () => {
     await waitFor(() => expect(pagesApi.get).toHaveBeenCalledWith(page.id));
     await waitFor(() => expect(JSON.parse(localStorage.getItem('kronn:pageNavigation') ?? '{}'))
       .toEqual({ resourceId: page.id }));
+  });
+});
+
+// ─── Popover dismiss (KT-463) ──────────────────────────────────────────────
+// The Export and Sync popovers are native <details>/<summary>: nothing about
+// them closes on an outside click or Escape by default.
+
+describe('PagesPage — popover dismiss (KT-463)', () => {
+  it('clicking outside the Export popover closes it', async () => {
+    render(<PagesPage />);
+    await screen.findByTestId('live-page-frame');
+    fireEvent.click(screen.getByText('pages.export'));
+    expect(screen.getByTestId('live-page-export-menu')).toHaveAttribute('open');
+
+    fireEvent.mouseDown(document.body);
+    expect(screen.getByTestId('live-page-export-menu')).not.toHaveAttribute('open');
+  });
+
+  it('clicking outside the Sync popover closes it', async () => {
+    render(<PagesPage />);
+    await screen.findByTestId('live-page-frame');
+    fireEvent.click(screen.getByLabelText('pages.autoRefresh'));
+    expect(screen.getByTestId('live-page-refresh-menu')).toHaveAttribute('open');
+
+    fireEvent.mouseDown(document.body);
+    expect(screen.getByTestId('live-page-refresh-menu')).not.toHaveAttribute('open');
+  });
+
+  it('a click on a button inside the Export popover does not close it prematurely, and still exports', async () => {
+    render(<PagesPage />);
+    await screen.findByTestId('live-page-frame');
+    fireEvent.click(screen.getByText('pages.export'));
+
+    fireEvent.mouseDown(screen.getByRole('button', { name: 'PDF' }));
+    expect(screen.getByTestId('live-page-export-menu')).toHaveAttribute('open');
+    fireEvent.click(screen.getByRole('button', { name: 'PDF' }));
+    await waitFor(() => expect(docsApi.generatePdf).toHaveBeenCalled());
+  });
+
+  it('a click on the linked-workflow button inside the Sync popover does not close it prematurely', async () => {
+    const onNavigateWorkflow = vi.fn();
+    render(<PagesPage onNavigateWorkflow={onNavigateWorkflow} />);
+    await screen.findByTestId('live-page-frame');
+    fireEvent.click(screen.getByLabelText('pages.autoRefresh'));
+
+    fireEvent.mouseDown(screen.getByRole('button', { name: 'Adobe cron' }));
+    expect(screen.getByTestId('live-page-refresh-menu')).toHaveAttribute('open');
+    fireEvent.click(screen.getByRole('button', { name: 'Adobe cron' }));
+    expect(onNavigateWorkflow).toHaveBeenCalledWith('wf-1');
+  });
+
+  it('clicking inside the open Export popover leaves it open even while the Sync popover is also open and gets closed', async () => {
+    render(<PagesPage />);
+    await screen.findByTestId('live-page-frame');
+    fireEvent.click(screen.getByText('pages.export'));
+    fireEvent.click(screen.getByLabelText('pages.autoRefresh'));
+    expect(screen.getByTestId('live-page-export-menu')).toHaveAttribute('open');
+    expect(screen.getByTestId('live-page-refresh-menu')).toHaveAttribute('open');
+
+    // Outside the Sync popover, but inside the Export popover.
+    fireEvent.mouseDown(screen.getByRole('button', { name: 'PDF' }));
+    expect(screen.getByTestId('live-page-export-menu')).toHaveAttribute('open');
+    expect(screen.getByTestId('live-page-refresh-menu')).not.toHaveAttribute('open');
+  });
+
+  it('Escape closes the Export popover and returns focus to its summary', async () => {
+    render(<PagesPage />);
+    await screen.findByTestId('live-page-frame');
+    const summary = screen.getByText('pages.export').closest('summary')!;
+    fireEvent.click(summary);
+    expect(screen.getByTestId('live-page-export-menu')).toHaveAttribute('open');
+
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(screen.getByTestId('live-page-export-menu')).not.toHaveAttribute('open');
+    expect(document.activeElement).toBe(summary);
+  });
+
+  it('Escape closes the Sync popover and returns focus to its summary', async () => {
+    render(<PagesPage />);
+    await screen.findByTestId('live-page-frame');
+    const summary = screen.getByLabelText('pages.autoRefresh');
+    fireEvent.click(summary);
+    expect(screen.getByTestId('live-page-refresh-menu')).toHaveAttribute('open');
+
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(screen.getByTestId('live-page-refresh-menu')).not.toHaveAttribute('open');
+    expect(document.activeElement).toBe(summary);
+  });
+
+  it('Escape and an outside click are no-ops when no popover is open', async () => {
+    render(<PagesPage />);
+    await screen.findByTestId('live-page-frame');
+
+    expect(() => {
+      fireEvent.keyDown(document, { key: 'Escape' });
+      fireEvent.mouseDown(document.body);
+    }).not.toThrow();
+    expect(screen.getByTestId('live-page-export-menu')).not.toHaveAttribute('open');
+    expect(screen.getByTestId('live-page-refresh-menu')).not.toHaveAttribute('open');
   });
 });

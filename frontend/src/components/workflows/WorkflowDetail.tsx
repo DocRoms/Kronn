@@ -1181,11 +1181,12 @@ export function LiveFinishedBanner({
   t: (key: string, ...args: (string | number)[]) => string;
 }) {
   const isSuccess = status === 'Success';
+  const isPartial = status === 'Partial';
   const isWaiting = status === 'WaitingApproval';
-  const dataStatus = isSuccess ? 'success' : isWaiting ? 'waiting' : 'failed';
+  const dataStatus = isSuccess ? 'success' : isPartial || isWaiting ? 'waiting' : 'failed';
   const color = isSuccess
     ? 'var(--kr-success)'
-    : isWaiting
+    : isPartial || isWaiting
       ? 'var(--kr-warning)'
       : 'var(--kr-error)';
   const label = isWaiting ? t('wf.runWaiting') : t('wf.runDone', status ?? '');
@@ -1193,7 +1194,9 @@ export function LiveFinishedBanner({
     <div className="wf-live-finished" data-status={dataStatus}>
       {isSuccess
         ? <Check size={12} className="text-success" />
-        : isWaiting
+        : isPartial
+          ? <AlertTriangle size={12} style={{ color }} />
+          : isWaiting
           ? <Hand size={12} style={{ color }} />
           : <X size={12} className="text-error" />}
       <span className="text-base font-semibold" style={{ color }}>{label}</span>

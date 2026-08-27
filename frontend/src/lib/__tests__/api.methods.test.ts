@@ -17,6 +17,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   config, projects, mcps, discussions, workflows, quickPrompts, quickApis,
   profiles, stats, apiCallLogs, userContext, setApiBase, setAuthToken, health,
+  ollama,
 } from '../api';
 
 let fetchMock: ReturnType<typeof vi.fn>;
@@ -199,6 +200,13 @@ describe('api.projects (rest)', () => {
     expect(url).toMatch(/\/api\/projects\/p-1\/git-blame\?path=application%2FA%20B\.php$/);
   });
   it('gitStatus', async () => { await exec(projects.gitStatus('p-1'), 'GET', '/projects/p-1/git-status'); });
+  it('gitStatus sends an explicit bounded commit page', async () => {
+    await exec(
+      projects.gitStatus('p-1', false, 40, 40),
+      'GET',
+      '/projects/p-1/git-status?commit_offset=40&commit_limit=40',
+    );
+  });
   it('gitDiff encodes the path query', async () => {
     await projects.gitDiff('p-1', 'src/x.ts');
     const [url] = fetchMock.mock.calls[0];
@@ -305,8 +313,22 @@ describe('api.discussions (rest)', () => {
   it('participants', async () => { await exec(discussions.participants('d-1'), 'GET', '/discussions/d-1/participants'); });
   it('invitePeer', async () => { await exec(discussions.invitePeer('d-1'), 'POST', '/discussions/d-1/invite-peer'); });
   it('stop', async () => { await exec(discussions.stop('d-1'), 'POST', '/discussions/d-1/stop'); });
+  it('stopDispatch', async () => {
+    await exec(
+      discussions.stopDispatch('d-1', 'job-2'),
+      'POST',
+      '/discussions/d-1/agent-dispatches/job-2/stop',
+    );
+  });
   it('dismissPartial', async () => { await exec(discussions.dismissPartial('d-1'), 'POST', '/discussions/d-1/dismiss-partial'); });
   it('gitStatus', async () => { await exec(discussions.gitStatus('d-1'), 'GET', '/discussions/d-1/git-status'); });
+  it('gitStatus keeps workspace selection while paging commits', async () => {
+    await exec(
+      discussions.gitStatus('d-1', 'ws-1', 40, 40),
+      'GET',
+      '/discussions/d-1/git-status?workspace_id=ws-1&commit_offset=40&commit_limit=40',
+    );
+  });
   it('gitDiff', async () => {
     await discussions.gitDiff('d-1', 'a.ts');
     const [url] = fetchMock.mock.calls[0];
@@ -444,6 +466,13 @@ describe('api.workflows (rest)', () => {
   });
   it('suggestions', async () => { await exec(workflows.suggestions('p-1'), 'GET', '/projects/p-1/workflow-suggestions'); });
   it('listBatchRunSummaries', async () => { await exec(workflows.listBatchRunSummaries(), 'GET', '/workflow-runs/batch-summaries'); });
+  it('createAdHocComparison', async () => {
+    await exec(
+      workflows.createAdHocComparison({ discussion_ids: ['d-1', 'd-2'] }),
+      'POST',
+      '/comparisons',
+    );
+  });
   it('deleteBatchRun', async () => { await exec(workflows.deleteBatchRun('r-1'), 'DELETE', '/workflow-runs/r-1'); });
 });
 
@@ -492,6 +521,14 @@ describe('api.quickApis (rest)', () => {
 describe('api small namespaces (rest)', () => {
   it('profiles.get', async () => { await exec(profiles.get('p-1'), 'GET', '/profiles/p-1'); });
   it('stats.tokenUsage', async () => { await exec(stats.tokenUsage(), 'GET', '/stats/tokens'); });
+  it('ollama.setContextOverride sends the exact per-model value', async () => {
+    const body = await exec(
+      ollama.setContextOverride('qwen3:8b', 65_536),
+      'POST',
+      '/ollama/context-override',
+    );
+    expect(body).toEqual({ model: 'qwen3:8b', num_ctx: 65_536 });
+  });
 
   it('apiCallLogs.list (no filter)', async () => {
     await apiCallLogs.list();

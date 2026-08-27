@@ -185,6 +185,7 @@ describe('ChatHeader — shared agent switcher', () => {
         copilot_cli: { ...blank },
         ollama: { ...blank },
         lite_llm: { ...blank },
+        nvidia: { ...blank },
       },
     });
     const trigger = screen.getByRole('button', { name: 'disc.switchAgentAndTier' });
@@ -220,6 +221,9 @@ describe('ChatHeader — shared agent switcher', () => {
       head_sha: 'abc123',
       ownership: 'external',
       state: 'attached',
+      parent_discussion_id: null,
+      base_sha: null,
+      task_execution_id: null,
       created_at: '2026-01-01',
       updated_at: '2026-01-01',
     }]);

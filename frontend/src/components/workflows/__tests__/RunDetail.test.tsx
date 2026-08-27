@@ -46,7 +46,7 @@ const mkRun = (over: Partial<WorkflowRun>): WorkflowRun => ({
   workspace_path: null,
   started_at: '2026-04-26T12:00:00Z',
   finished_at: '2026-04-26T12:00:01Z',
-  run_type: 'linear', batch_total: 0, batch_completed: 0, batch_failed: 0,
+  run_type: 'linear', batch_total: 0, batch_completed: 0, batch_failed: 0, batch_no_response: 0,
   batch_name: null, parent_run_id: null, state: {}, produced_branches: [],
   ...over,
 });

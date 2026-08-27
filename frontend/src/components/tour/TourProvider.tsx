@@ -9,6 +9,9 @@ import { waitForElement } from './useTourPositioning';
 import { loadTourProgress, saveTourProgress } from './tourProgress';
 
 const AUTO_START_DELAY = 800;
+const PAGE_TARGET_TIMEOUT_MS = 15_000;
+const REQUIRED_TARGET_TIMEOUT_MS = 5_000;
+const OPTIONAL_TARGET_TIMEOUT_MS = 2_000;
 const TOUR_STEP_IDS = TOUR_STEPS.map(step => step.id);
 
 interface TourContextValue {
@@ -53,6 +56,16 @@ export function TourProvider({ setPage, children }: TourProviderProps) {
   // Use a ref to always have fresh stepIndex in async callbacks
   const stepIndexRef = useRef(stepIndex);
   const progressRef = useRef(progress);
+
+  // The visible card becomes clickable as soon as React commits the state, but
+  // the passive effect below may run later under load. Keep the imperative
+  // navigation cursor in sync in the same tick as every state write; otherwise
+  // a click on the newly visible card can still read the previous index and
+  // navigate to the step already on screen, making Next appear to do nothing.
+  const commitStepIndex = useCallback((index: number) => {
+    stepIndexRef.current = index;
+    setStepIndex(index);
+  }, []);
 
   useEffect(() => {
     stepIndexRef.current = stepIndex;
@@ -113,7 +126,7 @@ export function TourProvider({ setPage, children }: TourProviderProps) {
     const step = TOUR_STEPS[stepIndexRef.current];
     if (active && step?.afterStep) step.afterStep();
     setActive(false);
-    setStepIndex(0);
+    commitStepIndex(0);
     const completedStepIds = step
       ? [...new Set([...progressRef.current.completedStepIds, step.id])]
       : progressRef.current.completedStepIds;
@@ -126,7 +139,7 @@ export function TourProvider({ setPage, children }: TourProviderProps) {
       progressRef.current.skippedStepIds,
     );
     void archiveDemoDiscussion();
-  }, [active, cleanupClickListener, persistProgress]);
+  }, [active, cleanupClickListener, commitStepIndex, persistProgress]);
 
   // Core navigation — called for every step transition
   /** `direction` is the way the user is travelling; a skipped step continues
@@ -136,9 +149,16 @@ export function TourProvider({ setPage, children }: TourProviderProps) {
     direction: 1 | -1 = 1,
   ): Promise<void> {
     if (targetIndex < 0 || targetIndex >= TOUR_STEPS.length) return;
-    if (navigatingRef.current) return;
+    // A visible Next/Prev click is a user command, not a hint. Page switches and
+    // lazy mounts can overlap with a fast click under load; dropping that click
+    // made the button appear broken. Serialize behind the in-flight transition
+    // so every accepted click is eventually applied.
+    while (navigatingRef.current) {
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
     navigatingRef.current = true;
-    cleanupClickListener();
+    try {
+      cleanupClickListener();
 
     const fromStep = TOUR_STEPS[stepIndexRef.current];
     const toStep = TOUR_STEPS[targetIndex];
@@ -165,7 +185,14 @@ export function TourProvider({ setPage, children }: TourProviderProps) {
 
     // Wait for selector
     if (toStep.selector) {
-      const el = await waitForElement(toStep.selector, 2000);
+      const el = await waitForElement(
+        toStep.selector,
+        toStep.optionalWhenMissing
+          ? OPTIONAL_TARGET_TIMEOUT_MS
+          : toStep.page !== fromStep?.page
+            ? PAGE_TARGET_TIMEOUT_MS
+            : REQUIRED_TARGET_TIMEOUT_MS,
+      );
 
       // A step whose target never appears has nothing to show. Skip it and keep
       // going in the direction the user was heading, rather than parking on a
@@ -197,7 +224,7 @@ export function TourProvider({ setPage, children }: TourProviderProps) {
         } else if (direction > 0) {
           finish();
         } else {
-          setStepIndex(targetIndex);
+          commitStepIndex(targetIndex);
           persistProgress(completedStepIds, toStep.id, true, skippedStepIds);
         }
         return;
@@ -207,7 +234,7 @@ export function TourProvider({ setPage, children }: TourProviderProps) {
       // Setup waitForClick listener
       if (toStep.waitForClick && el) {
         setWaitingForClick(true);
-        setStepIndex(targetIndex);
+        commitStepIndex(targetIndex);
         persistProgress(completedStepIds, toStep.id, true, skippedStepIds);
         navigatingRef.current = false;
 
@@ -244,10 +271,14 @@ export function TourProvider({ setPage, children }: TourProviderProps) {
       }
     }
 
-    setStepIndex(targetIndex);
+    commitStepIndex(targetIndex);
     persistProgress(completedStepIds, toStep.id, true, skippedStepIds);
-    navigatingRef.current = false;
-  }, [setPage, cleanupClickListener, finish, persistProgress]);
+    } finally {
+      // Exceptions in page hooks or persistence must never permanently disable
+      // the navigation buttons. Every exit path releases the serializer.
+      navigatingRef.current = false;
+    }
+  }, [setPage, cleanupClickListener, commitStepIndex, finish, persistProgress]);
 
   // Pre-fix: `next` and `prev` bailed out when `waitingForClick === true`,
   // and the TourOverlay also hid the buttons in that state. Effect: on
@@ -285,7 +316,7 @@ export function TourProvider({ setPage, children }: TourProviderProps) {
     // Initialize at the resume step directly. Pre-fix this set
     // `stepIndex(0)` first and bumped to the resume step 50 ms later,
     // which produced a visible flash of step 1 before jumping ahead.
-    setStepIndex(resumeStep);
+    commitStepIndex(resumeStep);
     persistProgress(
       latestProgress.completedStepIds,
       TOUR_STEPS[resumeStep]?.id ?? null,
@@ -301,7 +332,7 @@ export function TourProvider({ setPage, children }: TourProviderProps) {
     if (resumeStep > 0) {
       setTimeout(() => { navigateToStep(resumeStep); }, 50);
     }
-  }, [setPage, cleanupClickListener, navigateToStep, persistProgress]);
+  }, [setPage, cleanupClickListener, commitStepIndex, navigateToStep, persistProgress]);
 
   // The launcher is the real form, but its launch action is intercepted during
   // the demo: click or Ctrl/Cmd+Enter advances to the local seeded conversation

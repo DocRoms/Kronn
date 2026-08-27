@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 
 const mocks = vi.hoisted(() => ({
   discussionPlan: vi.fn(),
@@ -10,10 +10,38 @@ const mocks = vi.hoisted(() => ({
   get: vi.fn(),
   proposals: vi.fn(),
   decideProposalItem: vi.fn(),
+  discussion: vi.fn(),
+  workspaces: vi.fn(),
+  discussionCampaign: vi.fn(),
+  discussionLinks: vi.fn(),
+  execution: vi.fn(),
+  createCampaign: vi.fn(),
+  launch: vi.fn(),
+  cancelExecution: vi.fn(),
+  reassignExecution: vi.fn(),
+  reviewExecution: vi.fn(),
+  detectAgents: vi.fn(),
+  profiles: vi.fn(),
 }));
 
 vi.mock('../../lib/api', () => ({
   planning: mocks,
+  discussions: {
+    get: mocks.discussion,
+    workspaces: mocks.workspaces,
+  },
+  orchestration: {
+    discussionCampaign: mocks.discussionCampaign,
+    discussionLinks: mocks.discussionLinks,
+    execution: mocks.execution,
+    createCampaign: mocks.createCampaign,
+    launch: mocks.launch,
+    cancelExecution: mocks.cancelExecution,
+    reassignExecution: mocks.reassignExecution,
+    reviewExecution: mocks.reviewExecution,
+  },
+  agents: { detect: mocks.detectAgents },
+  profiles: { list: mocks.profiles },
 }));
 
 vi.mock('../../lib/I18nContext', () => ({
@@ -103,6 +131,7 @@ function detail(overrides: Partial<PlanningTaskDetail> = {}): PlanningTaskDetail
 describe('DiscussionPlanPanel', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    sessionStorage.clear();
     mocks.discussionPlan.mockResolvedValue(plan());
     mocks.update.mockResolvedValue({});
     mocks.updateDod.mockResolvedValue({});
@@ -112,6 +141,15 @@ describe('DiscussionPlanPanel', () => {
       pending_proposal_count: 0,
       pending_item_count: 0,
     });
+    mocks.discussion.mockResolvedValue({
+      id: 'disc-1', project_id: null, title: 'Test', agent: 'Codex',
+      language: 'fr', participants: [], messages: [], message_count: 0,
+    });
+    mocks.workspaces.mockResolvedValue([]);
+    mocks.discussionCampaign.mockResolvedValue(null);
+    mocks.discussionLinks.mockResolvedValue([]);
+    mocks.detectAgents.mockResolvedValue([]);
+    mocks.profiles.mockResolvedValue([]);
   });
 
   it('renders the primary objective and compact active timeline', async () => {
@@ -126,6 +164,163 @@ describe('DiscussionPlanPanel', () => {
     expect(screen.getAllByText('KT-1')).toHaveLength(2);
     expect(screen.getByText('planning.progress:0/1')).toBeInTheDocument();
     expect(screen.getAllByTitle('planning.copyTaskId:KT-1')).toHaveLength(2);
+  });
+
+  it('jumps to a worker room straight from the task row', async () => {
+    // The shortcut existed only inside the execution detail card, so seeing a
+    // worker's discussion meant drilling in first. The row is where someone
+    // scanning the plan asks the question.
+    const onNavigateDiscussion = vi.fn();
+    mocks.discussionLinks.mockResolvedValue([{
+      execution_id: 'exec-1', orchestration_run_id: 'run-1', task_id: 'task-1',
+      task_reference: 'KT-1', task_title: 'Build the panel',
+      parent_discussion_id: 'disc-1', sub_discussion_id: 'child-room',
+      status: 'Working',
+    }]);
+
+    render(
+      <DiscussionPlanPanel
+        discussionId="disc-1"
+        onClose={vi.fn()}
+        onNavigateDiscussion={onNavigateDiscussion}
+        toast={vi.fn()}
+      />,
+    );
+
+    const jump = await screen.findAllByTitle('orch.openSubDiscussion');
+    fireEvent.click(jump[0]);
+    expect(onNavigateDiscussion).toHaveBeenCalledWith('child-room');
+  });
+
+  it('offers no jump for a task that has no worker room', async () => {
+    // The affordance must not appear on every row: an unlaunched task has
+    // nowhere to go, and a dead control is worse than none.
+    render(
+      <DiscussionPlanPanel
+        discussionId="disc-1"
+        onClose={vi.fn()}
+        onNavigateDiscussion={vi.fn()}
+        toast={vi.fn()}
+      />,
+    );
+
+    await screen.findAllByText('Build the panel');
+    expect(screen.queryByTitle('orch.openSubDiscussion')).not.toBeInTheDocument();
+  });
+
+  it('mounts campaign launch controls in the real discussion plan', async () => {
+    mocks.discussionCampaign.mockResolvedValue({
+      run: {
+        id: 'run-1',
+        status: 'active',
+        target_branch: 'main',
+        allowed_agents: ['Codex'],
+        validations: [],
+        max_review_rounds: 3,
+      },
+      candidates: [{
+        task: task(),
+        plan_position: 0,
+        launchable: true,
+        reasons: [],
+      }],
+      principal_attention: {
+        active_executions: 0,
+        cli_executions: 0,
+        awaiting_review: 0,
+        awaiting_human: 0,
+        ready_tasks: 1,
+        actions: [],
+      },
+    });
+
+    render(
+      <DiscussionPlanPanel
+        discussionId="disc-1"
+        onClose={vi.fn()}
+        toast={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(await screen.findByTestId('orch-launch-KT-1'));
+    expect(screen.getByRole('dialog', { name: 'orch.config.title' })).toBeInTheDocument();
+  });
+
+  it('requires one explicit principal proof per DoD before approval', async () => {
+    const activeTask = task({ status: 'in_progress' });
+    mocks.discussionPlan.mockResolvedValue(plan({
+      primary_objective: activeTask,
+      active: [relation({ status: 'in_progress' }, { is_primary: true, actionable: false })],
+      stats: { ready: 0, blocked: 0, in_progress: 1, ideas: 0, done: 0, later: 0 },
+    }));
+    mocks.get.mockResolvedValue(detail({
+      status: 'in_progress',
+      definition_of_done: [{ id: 'dod-1', sentence: 'The code compiles', completed: false, position: 0 }],
+    }));
+    mocks.discussionLinks.mockResolvedValue([{
+      execution_id: 'exec-1', orchestration_run_id: 'run-1', task_id: 'task-1',
+      task_reference: 'KT-1', task_title: 'Build the panel',
+      parent_discussion_id: 'disc-1', sub_discussion_id: 'child-room',
+      status: 'AwaitingReview',
+    }]);
+    mocks.execution.mockResolvedValue({
+      lineage: {
+        execution: { id: 'exec-1', status: 'AwaitingReview', attempt_no: 2 },
+        task_reference: 'KT-1', task_title: 'Build the panel',
+        parent_discussion_id: 'disc-1', sub_discussion_id: 'child-room',
+        workspace_canonical_path: '/tmp/worker',
+      },
+      target_branch: 'main',
+      definition_of_done: [{ id: 'dod-1', sentence: 'The code compiles', completed: false, position: 0 }],
+      attempts: [{
+        attempt_no: 2,
+        delivery: { head_sha: 'abc12345' },
+        review: null,
+      }],
+      validation_runs: [],
+      recovery: null,
+      usage: {
+        duration_ms: 1000, in_app_tokens: 0, in_app_messages: 0,
+        in_app_cost_usd: null, in_app_cost_is_partial: false,
+        cli_traffic_tokens: null, cli_billable_tokens: null,
+        cli_sessions: 0, cli_sessions_measured: 0, cli_sessions_unmeasured: 0,
+      },
+    });
+    mocks.reviewExecution.mockResolvedValue({ verdict: 'approve', execution: {} });
+
+    render(
+      <DiscussionPlanPanel
+        discussionId="disc-1"
+        onClose={vi.fn()}
+        toast={vi.fn()}
+      />,
+    );
+
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Build the panel' }))[0]);
+    fireEvent.click(await screen.findByTestId('orch-exec-approve'));
+    const dialog = screen.getByRole('dialog', { name: 'orch.exec.approve' });
+    const submit = within(dialog).getByRole('button', { name: 'orch.exec.approve' });
+    expect(submit).toBeDisabled();
+
+    fireEvent.click(within(dialog).getByRole('checkbox', { name: 'The code compiles' }));
+    fireEvent.change(within(dialog).getByRole('textbox', { name: 'orch.approveEvidence' }), {
+      target: { value: 'cargo test: exit 0' },
+    });
+    expect(submit).toBeEnabled();
+    fireEvent.click(submit);
+
+    await waitFor(() => expect(mocks.reviewExecution).toHaveBeenCalledWith('exec-1', {
+      version: '1',
+      task_ref: 'KT-1',
+      decision: 'approve',
+      reviewed_head_sha: 'abc12345',
+      dod_verifications: [{
+        dod_id: 'dod-1',
+        met: true,
+        evidence: 'cargo test: exit 0',
+      }],
+      comment: undefined,
+    }));
   });
 
   it('refreshes an open plan in the background', async () => {
@@ -262,7 +457,7 @@ describe('DiscussionPlanPanel', () => {
     expect(await screen.findByText(/planning\.definitionOfDone · 1\/1/)).toBeInTheDocument();
   });
 
-  it('shows at most three current and five actionable tasks in plan order', async () => {
+  it('expands and collapses the bounded current and actionable task lists', async () => {
     const blockedCurrent = relation({
       id: 'current-blocked',
       reference: 'KT-9',
@@ -324,11 +519,23 @@ describe('DiscussionPlanPanel', () => {
     expect(screen.getByText('Current 3')).toBeInTheDocument();
     expect(screen.queryByText('Current but blocked')).not.toBeInTheDocument();
     expect(screen.queryByText('Current 4')).not.toBeInTheDocument();
-    expect(screen.getByText('planning.moreCurrent:1')).toBeInTheDocument();
+    const moreCurrent = screen.getByRole('button', { name: 'planning.moreCurrent:1' });
+    expect(moreCurrent).toHaveAttribute('aria-expanded', 'false');
+    fireEvent.click(moreCurrent);
+    expect(screen.getByText('Current 4')).toBeInTheDocument();
+    const collapseCurrent = screen.getByRole('button', { name: 'planning.collapseCurrent' });
+    expect(collapseCurrent).toHaveAttribute('aria-expanded', 'true');
+    fireEvent.click(collapseCurrent);
+    expect(screen.queryByText('Current 4')).not.toBeInTheDocument();
     expect(screen.getByText('Ready 1')).toBeInTheDocument();
     expect(screen.getByText('Ready 5')).toBeInTheDocument();
     expect(screen.queryByText('Ready 6')).not.toBeInTheDocument();
-    expect(screen.getByText('planning.moreReady:2')).toBeInTheDocument();
+    const moreReady = screen.getByRole('button', { name: 'planning.moreReady:2' });
+    fireEvent.click(moreReady);
+    expect(screen.getByText('Ready 6')).toBeInTheDocument();
+    expect(screen.getByText('Ready 7')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'planning.collapseReady' }));
+    expect(screen.queryByText('Ready 6')).not.toBeInTheDocument();
     expect(screen.getByText('planning.focusReady:7')).toBeInTheDocument();
     expect(screen.getByText('planning.focusBlocked:3')).toBeInTheDocument();
     expect(screen.getByText('planning.focusDone:3')).toBeInTheDocument();

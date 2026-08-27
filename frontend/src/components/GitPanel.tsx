@@ -10,6 +10,7 @@ import {
   Loader2, Check, X, Terminal, Maximize2, Minimize2,
 } from 'lucide-react';
 import { GitDiffViewer } from './GitDiffViewer';
+import type { DiffLine } from '../lib/diff-syntax';
 import type { DiscussionWorkspace } from '../types/generated';
 
 // ─── Types (mirrors backend GitStatusResponse / GitDiffResponse) ─────────────
@@ -26,12 +27,37 @@ interface GitStatus {
   is_default_branch: boolean;
   files: GitFile[];
   committed_files?: GitFile[];
+  commits?: Array<{
+    sha: string;
+    short_sha: string;
+    subject: string;
+    author_name: string;
+    author_time: number;
+  }>;
+  commits_total?: number;
+  commits_offset?: number;
+  commits_truncated?: boolean;
+  workspace?: {
+    workspace_id?: string | null;
+    ownership: string;
+    state: string;
+    path?: string | null;
+    branch: string;
+    base_sha?: string | null;
+    head_sha?: string | null;
+    integrated_sha?: string | null;
+    task_execution_id?: string | null;
+    task_reference?: string | null;
+  } | null;
+  empty_reason?: string | null;
   ahead: number;
   behind: number;
   has_upstream: boolean;
   provider: string;  // "github", "gitlab", "unknown"
   pr_url?: string | null;
 }
+
+const COMMIT_PAGE_SIZE = 40;
 
 interface Props {
   projectId?: string;
@@ -100,11 +126,15 @@ export function GitPanel({
   const { t } = useT();
   const [status, setStatus] = useState<GitStatus | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadingMoreCommits, setLoadingMoreCommits] = useState(false);
   const [error, setError] = useState('');
   const [workspaces, setWorkspaces] = useState<DiscussionWorkspace[]>([]);
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string | undefined>(
     initialWorkspaceId,
   );
+  const statusScopeKey = `${projectId ?? ''}:${discussionId ?? ''}:${selectedWorkspaceId ?? ''}`;
+  const statusScopeRef = useRef(statusScopeKey);
+  statusScopeRef.current = statusScopeKey;
 
   // Diff view
   const [diffPath, setDiffPath] = useState<string | null>(null);
@@ -146,7 +176,9 @@ export function GitPanel({
   const termEndRef = useRef<HTMLDivElement>(null);
 
   const fetchStatus = useCallback(async () => {
+    const requestScope = statusScopeKey;
     setLoading(true);
+    setLoadingMoreCommits(false);
     setError('');
     try {
       const res = discussionId
@@ -156,14 +188,61 @@ export function GitPanel({
         : projectId
           ? await projectsApi.gitStatus(projectId)
           : null;
-      if (res) setStatus(res);
-      else setError('No project or discussion ID');
+      if (res) {
+        if (statusScopeRef.current === requestScope) setStatus(res);
+      } else if (statusScopeRef.current === requestScope) {
+        setError('No project or discussion ID');
+      }
     } catch (e) {
-      setError(String(e));
+      if (statusScopeRef.current === requestScope) setError(String(e));
     } finally {
-      setLoading(false);
+      if (statusScopeRef.current === requestScope) setLoading(false);
     }
-  }, [projectId, discussionId, selectedWorkspaceId]);
+  }, [projectId, discussionId, selectedWorkspaceId, statusScopeKey]);
+
+  const loadMoreCommits = useCallback(async () => {
+    if (!status?.commits_truncated || loadingMoreCommits) return;
+    const offset = status.commits?.length ?? 0;
+    const requestScope = statusScopeKey;
+    setLoadingMoreCommits(true);
+    setError('');
+    try {
+      const res = discussionId
+        ? await discussionsApi.gitStatus(
+          discussionId,
+          selectedWorkspaceId,
+          offset,
+          COMMIT_PAGE_SIZE,
+        )
+        : projectId
+          ? await projectsApi.gitStatus(projectId, false, offset, COMMIT_PAGE_SIZE)
+          : null;
+      if (!res || statusScopeRef.current !== requestScope) return;
+      setStatus(current => {
+        if (!current) return current;
+        const seen = new Set(current.commits?.map(commit => commit.sha) ?? []);
+        const nextCommits = res.commits.filter(commit => !seen.has(commit.sha));
+        return {
+          ...current,
+          commits: [...(current.commits ?? []), ...nextCommits],
+          commits_total: res.commits_total,
+          commits_offset: 0,
+          commits_truncated: res.commits_truncated,
+        };
+      });
+    } catch (e) {
+      if (statusScopeRef.current === requestScope) setError(String(e));
+    } finally {
+      if (statusScopeRef.current === requestScope) setLoadingMoreCommits(false);
+    }
+  }, [
+    discussionId,
+    loadingMoreCommits,
+    projectId,
+    selectedWorkspaceId,
+    status,
+    statusScopeKey,
+  ]);
 
   useEffect(() => { fetchStatus(); }, [fetchStatus]);
 
@@ -196,9 +275,13 @@ export function GitPanel({
           if (previous && rows.some(row => row.id === previous)) return previous;
           // Legacy Isolated rows are already the default resolver target. For
           // Direct discussions, select the first declared CLI worktree so the
-          // panel never silently edits the project checkout instead.
-          const hasLegacy = attached.some(row => row.session_pk === null);
-          return hasLegacy ? undefined : attached[0]?.id;
+          // panel never silently edits the project checkout instead. When only
+          // retired evidence remains, select it too: historical code must not
+          // disappear merely because the checkout was cleaned.
+          const hasLegacy = attached.some(
+            row => row.session_pk === null && row.disc_id === discussionId,
+          );
+          return hasLegacy ? undefined : (attached[0]?.id ?? rows[0]?.id);
         });
       })
       .catch(() => {
@@ -230,6 +313,44 @@ export function GitPanel({
     }
   }, [discussionId, projectId, selectedWorkspaceId]);
 
+  // KT-453/461 — "Talk about it in the discussion", fired from
+  // GitDiffViewer's contiguous line-range selection. Prefills the composer
+  // via a window event (same idiom as `kronn:discussion-updated`) instead of
+  // prop-drilling into ChatInput, which owns its own uncontrolled textarea.
+  // Only wired when this panel is discussion-scoped: a Project > Code
+  // viewer has no composer to prefill.
+  const handleCommentSelection = useCallback((selection: { lines: DiffLine[] }) => {
+    if (!discussionId || !diffPath || selection.lines.length === 0) return;
+    const first = selection.lines[0];
+    const last = selection.lines[selection.lines.length - 1];
+    const firstLine = first.newLine ?? first.oldLine;
+    const lastLine = last.newLine ?? last.oldLine;
+    // A pure-deletion selection only has pre-image (old) line numbers — flag
+    // that explicitly so it's never misread as a post-image (new) reference.
+    const oldOnly = selection.lines.every(line => line.kind === 'del');
+    const sideSuffix = oldOnly ? ' (old)' : '';
+    const range = firstLine == null
+      ? diffPath
+      : lastLine == null || lastLine === firstLine
+        ? `${diffPath}:${firstLine}${sideSuffix}`
+        : `${diffPath}:${firstLine}-${lastLine}${sideSuffix}`;
+    // The workspace's base HEAD is still meaningful provenance for an
+    // uncommitted (working-tree) diff — it's what the tree is sitting on,
+    // just not what the tree currently contains — so it's included too,
+    // labeled distinctly from an exact commit reference.
+    const headSha = status?.workspace?.head_sha;
+    const reference = !headSha
+      ? range
+      : diffCommitted
+        ? `${range} · HEAD ${headSha.slice(0, 10)}`
+        : `${range} · WORKTREE · base HEAD ${headSha.slice(0, 10)}`;
+    const diffBlock = selection.lines.map(line => line.raw).join('\n');
+    const text = `\`\`\`diff\n${diffBlock}\n\`\`\`\n\n${t('git.diffCommentIntro', reference)}`;
+    window.dispatchEvent(new CustomEvent('kronn:composer-prefill', {
+      detail: { discussionId, text },
+    }));
+  }, [discussionId, diffPath, diffCommitted, status, t]);
+
   const toggleExpanded = () => {
     setExpanded(value => {
       const next = !value;
@@ -241,17 +362,6 @@ export function GitPanel({
   useEffect(() => () => {
     onExpandedChange?.(false);
   }, [onExpandedChange]);
-
-  useEffect(() => {
-    if (!expanded || diffPath || !status) return;
-    const firstWorkingFile = status.files[0];
-    const firstCommittedFile = status.committed_files?.[0];
-    if (firstWorkingFile) {
-      void openDiff(firstWorkingFile.path);
-    } else if (firstCommittedFile) {
-      void openDiff(firstCommittedFile.path, true);
-    }
-  }, [diffPath, expanded, openDiff, status]);
 
   const handleCreateBranch = async () => {
     if (!branchName.trim() || !projectId) return;
@@ -418,6 +528,15 @@ export function GitPanel({
     }
   };
 
+  const historicalWorkspace = !!status?.workspace
+    && status.workspace.state !== 'attached';
+  const visibleCommits = status?.commits ?? [];
+  const commitsTotal = status?.commits_total ?? visibleCommits.length;
+  const isDefaultDiscussionWorkspace = (workspace: DiscussionWorkspace) =>
+    workspace.session_pk === null
+    && workspace.disc_id === discussionId
+    && workspace.state === 'attached';
+
   // ─── Diff view ──────────────────────────────────────────────────────────────
   if (diffPath) {
     return (
@@ -462,6 +581,8 @@ export function GitPanel({
               content={diffContent}
               loading={diffLoading}
               className="git-expanded-preview"
+              onCommentSelection={discussionId ? handleCommentSelection : undefined}
+              t={t}
             />
             <aside className="git-expanded-files" aria-label={t('git.changedFilesList')}>
               <div className="git-expanded-files-head">
@@ -493,7 +614,13 @@ export function GitPanel({
             </aside>
           </div>
         ) : (
-          <GitDiffViewer path={diffPath} content={diffContent} loading={diffLoading} />
+          <GitDiffViewer
+            path={diffPath}
+            content={diffContent}
+            loading={diffLoading}
+            onCommentSelection={discussionId ? handleCommentSelection : undefined}
+            t={t}
+          />
         )}
       </aside>
     );
@@ -516,6 +643,7 @@ export function GitPanel({
           <button
             type="button"
             className="disc-tool-panel-icon"
+            data-testid="git-expand-toggle"
             onClick={toggleExpanded}
             title={expanded ? t('git.collapsePanel') : t('git.expandPanel')}
             aria-label={expanded ? t('git.collapsePanel') : t('git.expandPanel')}
@@ -530,9 +658,7 @@ export function GitPanel({
         </div>
       </header>
 
-      {discussionId && workspaces.some(
-        row => row.session_pk !== null || row.state === 'attached',
-      ) && (
+      {discussionId && workspaces.length > 0 && (
         <label className="git-workspace-picker">
           <span>{t('git.workspaceSelector')}</span>
           <select
@@ -546,16 +672,15 @@ export function GitPanel({
             }}
             aria-label={t('git.workspaceSelector')}
           >
-            {workspaces.some(row => row.session_pk === null && row.state === 'attached') && (
+            {workspaces.some(isDefaultDiscussionWorkspace) && (
               <option value="">{t('git.workspaceDefault')}</option>
             )}
             {workspaces
-              .filter(row => row.session_pk !== null)
+              .filter(row => !isDefaultDiscussionWorkspace(row))
               .map(workspace => (
                 <option
                   key={workspace.id}
                   value={workspace.id}
-                  disabled={workspace.state !== 'attached'}
                 >
                   {workspace.task_reference ? `${workspace.task_reference} · ` : ''}
                   {workspace.branch}
@@ -586,6 +711,25 @@ export function GitPanel({
             {status.ahead > 0 && <span className="git-badge">↑{status.ahead}</span>}
             {status.behind > 0 && <span className="git-badge git-badge-behind">↓{status.behind}</span>}
           </div>
+
+          {status.workspace && (
+            <div className="git-workspace-provenance" data-state={status.workspace.state}>
+              <div className="git-workspace-provenance-head">
+                <strong>{t('git.effectiveWorkspace')}</strong>
+                <span>{t(`planning.workspaceState.${status.workspace.state}`)}</span>
+              </div>
+              {status.workspace.path && <code title={status.workspace.path}>{status.workspace.path}</code>}
+              <div className="git-workspace-provenance-facts">
+                <span>{status.workspace.ownership}</span>
+                {status.workspace.task_reference && <span>{status.workspace.task_reference}</span>}
+                {status.workspace.head_sha && <span>HEAD {status.workspace.head_sha.slice(0, 10)}</span>}
+                {status.workspace.integrated_sha && <span>{t('git.integrated')} {status.workspace.integrated_sha.slice(0, 10)}</span>}
+              </div>
+              {historicalWorkspace && (
+                <p>{t('git.historicalWorkspace')}</p>
+              )}
+            </div>
+          )}
 
           {/* Warning: on default branch */}
           {status.is_default_branch && status.files.length > 0 && (
@@ -621,14 +765,14 @@ export function GitPanel({
 
           {/* Actions bar: push, create PR — always visible when applicable */}
           <div className="git-actions-bar">
-            {status.ahead > 0 && (
+            {!historicalWorkspace && status.ahead > 0 && (
               <button className="git-small-btn git-small-btn-push" onClick={handlePush} disabled={pushLoading}>
                 {pushLoading ? <Loader2 size={10} style={{ animation: 'spin 1s linear infinite' }} /> : <Upload size={10} />}
                 {t('git.push')}
               </button>
             )}
             {/* Create PR/MR button: show when on a non-default branch and no PR exists */}
-            {!status.is_default_branch && !status.pr_url && !showPrForm && (
+            {!historicalWorkspace && !status.is_default_branch && !status.pr_url && !showPrForm && (
               <button className="git-small-btn git-small-btn-pr" onClick={openPrForm}>
                 <GitPullRequest size={10} />
                 {status.provider === 'gitlab' ? t('git.createMr') : t('git.createPr')}
@@ -718,7 +862,41 @@ export function GitPanel({
 
           {/* File list */}
           {status.files.length === 0 && (!status.committed_files || status.committed_files.length === 0) && (
-            <div className="git-empty">{t('git.noChanges')}</div>
+            <div className="git-empty">{status.empty_reason ?? t('git.noChanges')}</div>
+          )}
+
+          {commitsTotal > 0 && (
+            <div className="git-commit-history" data-testid="git-commit-history">
+              <div className="git-file-header">
+                <span className="git-file-count">
+                  <GitCommit size={11} style={{ marginRight: 4 }} />
+                  {t('git.commits', String(commitsTotal))}
+                </span>
+                <small className="git-commit-history-progress">
+                  {t('git.commitsShown', String(visibleCommits.length), String(commitsTotal))}
+                </small>
+              </div>
+              <div className="git-commit-history-list">
+                {visibleCommits.map(commit => (
+                  <div className="git-commit-history-row" key={commit.sha} title={commit.sha}>
+                    <code>{commit.short_sha}</code>
+                    <span>{commit.subject}</span>
+                    <small>{commit.author_name}</small>
+                  </div>
+                ))}
+              </div>
+              {status.commits_truncated && (
+                <button
+                  type="button"
+                  className="git-load-more-commits"
+                  onClick={() => void loadMoreCommits()}
+                  disabled={loadingMoreCommits}
+                >
+                  {loadingMoreCommits && <Loader2 size={11} className="git-spin" />}
+                  {t('git.loadMoreCommits')}
+                </button>
+              )}
+            </div>
           )}
           {status.files.length > 0 && (
             <>
@@ -842,7 +1020,7 @@ export function GitPanel({
       )}
 
       {/* Mini Terminal */}
-      {terminalEnabled && (
+      {terminalEnabled && !historicalWorkspace && (
         <div className="git-term-section">
           <button
             className="git-term-toggle"

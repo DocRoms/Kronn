@@ -36,6 +36,7 @@ const { projectsApi, discussionsApi, baseStatus } = vi.hoisted(() => {
     has_upstream: true,
     provider: 'github',
     pr_url: null as string | null,
+    workspace: null as { ownership: string; state: string; head_sha?: string | null } | null,
   });
   return {
     baseStatus,
@@ -215,6 +216,62 @@ describe('GitPanel — discussion workspace selection', () => {
     });
     expect(discussionsApi.gitStatus).not.toHaveBeenCalledWith('d1');
     expect(await screen.findByText('Error: Workspace is missing')).toBeInTheDocument();
+  });
+
+  it('renders cleaned child-workspace provenance, commits and files read-only in the parent', async () => {
+    discussionsApi.workspaces.mockResolvedValue([{
+      id: 'workspace-cleaned',
+      disc_id: 'd-child',
+      session_pk: null,
+      session_agent_type: null,
+      task_id: 'task-451',
+      task_reference: 'KT-451',
+      project_id: 'p1',
+      workspace_path: '/tmp/removed-worker',
+      canonical_path: null,
+      branch: 'kronn/task/KT-451-worker',
+      head_sha: 'abcdef1234567890',
+      ownership: 'managed',
+      state: 'detached',
+      parent_discussion_id: 'd-parent',
+      base_sha: '0000000000000000',
+      task_execution_id: 'exec-451',
+      created_at: '2026-01-01',
+      updated_at: '2026-01-02',
+    }]);
+    discussionsApi.gitStatus.mockResolvedValue({
+      ...baseStatus(),
+      branch: 'kronn/task/KT-451-worker',
+      files: [],
+      committed_files: [{ path: 'src/provenance.rs', status: 'added', staged: true }],
+      commits: [{
+        sha: 'abcdef1234567890', short_sha: 'abcdef1',
+        subject: 'fix: preserve provenance', author_name: 'Ollama', author_time: 1,
+      }],
+      workspace: {
+        workspace_id: 'workspace-cleaned', ownership: 'managed', state: 'detached',
+        path: '/tmp/removed-worker', branch: 'kronn/task/KT-451-worker',
+        base_sha: '0000000000000000', head_sha: 'abcdef1234567890',
+        integrated_sha: 'fedcba9876543210', task_execution_id: 'exec-451',
+        task_reference: 'KT-451',
+      },
+    });
+
+    renderPanel({ discussionId: 'd-parent', terminalEnabled: true });
+
+    const picker = await screen.findByRole('combobox', { name: 'git.workspaceSelector' });
+    await waitFor(() => expect(picker).toHaveValue('workspace-cleaned'));
+    expect(await screen.findByText('/tmp/removed-worker')).toBeInTheDocument();
+    expect(screen.getByTestId('git-commit-history')).toHaveTextContent('fix: preserve provenance');
+    expect(screen.getByTestId('git-committed-section')).toHaveTextContent('src/provenance.rs');
+    expect(screen.queryByText('git.push')).toBeNull();
+    expect(screen.queryByText('git.createPr')).toBeNull();
+    expect(screen.queryByText('git.terminal')).toBeNull();
+
+    fireEvent.click(screen.getByText('src/provenance.rs'));
+    await waitFor(() => expect(discussionsApi.gitDiff).toHaveBeenCalledWith(
+      'd-parent', 'src/provenance.rs', true, 'workspace-cleaned',
+    ));
   });
 });
 
@@ -497,13 +554,32 @@ describe('GitPanel — create PR', () => {
 // ─── Diff view ────────────────────────────────────────────────────────────────
 
 describe('GitPanel — diff', () => {
-  it('expands into a split diff and file-list view', async () => {
+  it('expanding the list view (no file selected yet) does not jump into a diff', async () => {
     const { container } = renderPanel();
     await waitFor(() => expect(screen.getByText('src/main.rs')).toBeDefined());
 
     fireEvent.click(screen.getByLabelText('git.expandPanel'));
 
+    // The whole panel grows (list view, just bigger) — it must NOT swap onto
+    // the diff-viewer branch merely because it was expanded with nothing
+    // selected. That used to auto-open the first file's diff and hide the
+    // workspace recap + commit history, which only render in the list view.
+    await waitFor(() =>
+      expect(container.querySelector('.git-panel')?.getAttribute('data-expanded')).toBe('true'));
+    expect(projectsApi.gitDiff).not.toHaveBeenCalled();
+    expect(screen.queryByLabelText('git.back')).toBeNull();
+    expect(screen.getByText('src/main.rs')).toBeDefined();
+    expect(screen.getByText('src/lib.rs')).toBeDefined();
+  });
+
+  it('clicking a file then expanding shows the split diff and file-list view', async () => {
+    const { container } = renderPanel();
+    await waitFor(() => expect(screen.getByText('src/main.rs')).toBeDefined());
+    fireEvent.click(screen.getByText('src/main.rs'));
     await waitFor(() => expect(projectsApi.gitDiff).toHaveBeenCalledWith('p1', 'src/main.rs', false));
+
+    fireEvent.click(screen.getByLabelText('git.expandPanel'));
+
     expect(container.querySelector('.git-panel')?.getAttribute('data-expanded')).toBe('true');
     expect(screen.getByLabelText('git.changedFilesList')).toBeDefined();
     expect(screen.getByLabelText('git.collapsePanel')).toBeDefined();
@@ -521,6 +597,8 @@ describe('GitPanel — diff', () => {
     renderPanel();
 
     await waitFor(() => expect(screen.getByText('src/file-0.ts')).toBeDefined());
+    fireEvent.click(screen.getByText('src/file-0.ts'));
+    await waitFor(() => expect(screen.getByLabelText('git.back')).toBeDefined());
     fireEvent.click(screen.getByLabelText('git.expandPanel'));
     await waitFor(() => expect(screen.getByLabelText('git.changedFilesList')).toBeDefined());
 
@@ -576,6 +654,125 @@ describe('GitPanel — diff', () => {
     await waitFor(() => expect(screen.getByText('src/feature.rs')).toBeDefined());
     fireEvent.click(screen.getByText('src/feature.rs'));
     await waitFor(() => expect(projectsApi.gitDiff).toHaveBeenCalledWith('p1', 'src/feature.rs', true));
+  });
+});
+
+// ─── KT-453: "Talk about it in the discussion" from a diff selection ───────
+
+describe('GitPanel — diff comment reference (KT-453)', () => {
+  const REALISTIC_DIFF = [
+    '@@ -10,2 +10,2 @@',
+    '-old line',
+    '+new line',
+  ].join('\n');
+
+  it('is wired only when discussion-scoped — a project-only panel gets no comment affordance', async () => {
+    projectsApi.gitDiff.mockResolvedValue({ path: 'src/main.rs', diff: REALISTIC_DIFF });
+    renderPanel(); // project-only (no discussionId)
+    await waitFor(() => expect(screen.getByText('src/main.rs')).toBeDefined());
+    fireEvent.click(screen.getByText('src/main.rs'));
+    await waitFor(() => expect(screen.getByLabelText('git.back')).toBeDefined());
+    expect(screen.queryAllByLabelText('git.diffCommentLine')).toHaveLength(0);
+  });
+
+  it('builds a single-line reference with the workspace HEAD sha for a committed diff', async () => {
+    const dispatchSpy = vi.spyOn(window, 'dispatchEvent');
+    const withWorkspace = baseStatus();
+    withWorkspace.committed_files = [{ path: 'src/feature.rs', status: 'A', staged: true }];
+    withWorkspace.workspace = { ownership: 'managed', state: 'attached', head_sha: 'abc1234567890' };
+    discussionsApi.gitStatus.mockResolvedValue(withWorkspace);
+    discussionsApi.gitDiff.mockResolvedValue({ path: 'src/feature.rs', diff: REALISTIC_DIFF });
+
+    renderPanel({ projectId: undefined, discussionId: 'd1' });
+    await waitFor(() => expect(screen.getByText('src/feature.rs')).toBeDefined());
+    fireEvent.click(screen.getByText('src/feature.rs'));
+    await waitFor(() => expect(screen.getAllByLabelText('git.diffCommentLine')).toHaveLength(2));
+
+    // The `+new line` add — not the del — so this test stays about the sha,
+    // independent of the (old) disambiguation covered separately below.
+    fireEvent.click(screen.getAllByLabelText('git.diffCommentLine')[1]!);
+    fireEvent.click(screen.getByText('git.diffTalkAboutIt'));
+
+    const call = dispatchSpy.mock.calls.find(([event]) => (event as CustomEvent).type === 'kronn:composer-prefill');
+    expect(call).toBeDefined();
+    const detail = (call![0] as CustomEvent).detail;
+    expect(detail.discussionId).toBe('d1');
+    expect(detail.text).toContain('```diff\n+new line\n```');
+    expect(detail.text).toContain('git.diffCommentIntro(src/feature.rs:10 · HEAD abc1234567)');
+  });
+
+  it('builds a start-end range reference with no sha when the panel has no workspace at all', async () => {
+    // Line numbers must genuinely differ across the selection (context @10,
+    // an inserted line lands at new-line 11) to exercise the range branch —
+    // a 1-for-1 del/add pair at the same source line collapses to a single
+    // line number instead, which is correct there but not what this test
+    // wants to pin.
+    const rangeDiff = ['@@ -10,1 +10,2 @@', ' context', '+added'].join('\n');
+    const dispatchSpy = vi.spyOn(window, 'dispatchEvent');
+    discussionsApi.gitDiff.mockResolvedValue({ path: 'src/main.rs', diff: rangeDiff });
+
+    renderPanel({ projectId: undefined, discussionId: 'd1' });
+    await waitFor(() => expect(screen.getByText('src/main.rs')).toBeDefined());
+    fireEvent.click(screen.getByText('src/main.rs'));
+    await waitFor(() => expect(screen.getAllByLabelText('git.diffCommentLine')).toHaveLength(2));
+
+    const buttons = screen.getAllByLabelText('git.diffCommentLine');
+    fireEvent.click(buttons[0]!);
+    fireEvent.click(buttons[1]!);
+    fireEvent.click(screen.getByText('git.diffTalkAboutIt'));
+
+    const call = dispatchSpy.mock.calls.find(([event]) => (event as CustomEvent).type === 'kronn:composer-prefill');
+    const detail = (call![0] as CustomEvent).detail;
+    // No workspace at all (the fixture's default) → nothing to reference.
+    expect(detail.text).not.toContain('HEAD');
+    expect(detail.text).toContain('git.diffCommentIntro(src/main.rs:10-11)');
+  });
+
+  it('labels the workspace base HEAD as WORKTREE (not an exact commit) for an uncommitted diff', async () => {
+    const rangeDiff = ['@@ -10,1 +10,2 @@', ' context', '+added'].join('\n');
+    const withWorkspace = baseStatus();
+    withWorkspace.workspace = { ownership: 'managed', state: 'attached', head_sha: 'def9876543210' };
+    discussionsApi.gitStatus.mockResolvedValue(withWorkspace);
+    const dispatchSpy = vi.spyOn(window, 'dispatchEvent');
+    discussionsApi.gitDiff.mockResolvedValue({ path: 'src/main.rs', diff: rangeDiff });
+
+    renderPanel({ projectId: undefined, discussionId: 'd1' });
+    await waitFor(() => expect(screen.getByText('src/main.rs')).toBeDefined());
+    fireEvent.click(screen.getByText('src/main.rs'));
+    await waitFor(() => expect(screen.getAllByLabelText('git.diffCommentLine')).toHaveLength(2));
+
+    const buttons = screen.getAllByLabelText('git.diffCommentLine');
+    fireEvent.click(buttons[0]!);
+    fireEvent.click(buttons[1]!);
+    fireEvent.click(screen.getByText('git.diffTalkAboutIt'));
+
+    const call = dispatchSpy.mock.calls.find(([event]) => (event as CustomEvent).type === 'kronn:composer-prefill');
+    const detail = (call![0] as CustomEvent).detail;
+    expect(detail.text).toContain('git.diffCommentIntro(src/main.rs:10-11 · WORKTREE · base HEAD def9876543)');
+  });
+
+  it('flags a pure-deletion selection as (old) so its line number is never misread as post-image', async () => {
+    const withCommitted = baseStatus();
+    withCommitted.committed_files = [{ path: 'src/feature.rs', status: 'A', staged: true }];
+    withCommitted.workspace = { ownership: 'managed', state: 'attached', head_sha: 'abc1234567890' };
+    discussionsApi.gitStatus.mockResolvedValue(withCommitted);
+    const dispatchSpy = vi.spyOn(window, 'dispatchEvent');
+    const twoDeletions = ['@@ -10,2 +10,0 @@', '-old line one', '-old line two'].join('\n');
+    discussionsApi.gitDiff.mockResolvedValue({ path: 'src/feature.rs', diff: twoDeletions });
+
+    renderPanel({ projectId: undefined, discussionId: 'd1' });
+    await waitFor(() => expect(screen.getByText('src/feature.rs')).toBeDefined());
+    fireEvent.click(screen.getByText('src/feature.rs'));
+    await waitFor(() => expect(screen.getAllByLabelText('git.diffCommentLine')).toHaveLength(2));
+
+    const buttons = screen.getAllByLabelText('git.diffCommentLine');
+    fireEvent.click(buttons[0]!);
+    fireEvent.click(buttons[1]!);
+    fireEvent.click(screen.getByText('git.diffTalkAboutIt'));
+
+    const call = dispatchSpy.mock.calls.find(([event]) => (event as CustomEvent).type === 'kronn:composer-prefill');
+    const detail = (call![0] as CustomEvent).detail;
+    expect(detail.text).toContain('git.diffCommentIntro(src/feature.rs:10-11 (old) · HEAD abc1234567)');
   });
 });
 

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { promptNeedsFileAccess } from '../ollamaHints';
+import { promptNeedsFileAccess, promptNeedsUnboundWorkspace } from '../ollamaHints';
 
 describe('promptNeedsFileAccess', () => {
   it('flags prompts that rely on reading files / the worktree', () => {
@@ -15,7 +15,7 @@ describe('promptNeedsFileAccess', () => {
     }
   });
 
-  it('does NOT flag self-contained prompts (safe for a tool-less local model)', () => {
+  it('does NOT flag self-contained prompts (safe without a project workspace)', () => {
     for (const p of [
       'Classe ce ticket en un mot: bug ou feature',
       'Résume ce texte en une phrase',
@@ -29,5 +29,13 @@ describe('promptNeedsFileAccess', () => {
   it('handles null/undefined', () => {
     expect(promptNeedsFileAccess(null)).toBe(false);
     expect(promptNeedsFileAccess(undefined)).toBe(false);
+  });
+
+  it('warns about file-dependent prompts only when no project is bound', () => {
+    const prompt = 'Read the files in the repo';
+    expect(promptNeedsUnboundWorkspace(prompt, '')).toBe(true);
+    expect(promptNeedsUnboundWorkspace(prompt, null)).toBe(true);
+    expect(promptNeedsUnboundWorkspace(prompt, 'project-1')).toBe(false);
+    expect(promptNeedsUnboundWorkspace('Summarize this text', '')).toBe(false);
   });
 });

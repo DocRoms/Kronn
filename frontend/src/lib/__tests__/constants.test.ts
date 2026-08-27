@@ -54,6 +54,7 @@ describe('constants', () => {
         copilot_cli: {},
         ollama: {},
         lite_llm: {},
+        nvidia: {},
       };
 
       expect(modelForAgentTier('Codex', 'reasoning', modelTiers, 'Provider default'))
@@ -126,12 +127,13 @@ describe('constants', () => {
   });
 
   describe('ALL_AGENT_TYPES', () => {
-    it('contains the 8 real agent types — Custom is intentionally excluded', () => {
-      // ALL_AGENT_TYPES lists only the concrete, installable agent types.
-      // AgentType (from generated.ts) also includes "Custom" (an 8th variant)
-      // which is a generic escape-hatch type, not a selectable agent in the UI.
-      // Therefore ALL_AGENT_TYPES has 8 entries and Custom is excluded on purpose.
-      expect(ALL_AGENT_TYPES).toHaveLength(8);
+    it('contains the 9 real agent types — Custom is intentionally excluded', () => {
+      // ALL_AGENT_TYPES lists only the concrete, selectable agent types —
+      // installable CLIs plus the remote HTTP providers (Nvidia has no binary to
+      // install but is fully selectable, KT-337). AgentType (from generated.ts)
+      // also includes "Custom", a generic escape hatch that is never offered in
+      // the UI, so it stays excluded on purpose.
+      expect(ALL_AGENT_TYPES).toHaveLength(9);
       expect(ALL_AGENT_TYPES).toContain('ClaudeCode');
       expect(ALL_AGENT_TYPES).toContain('Codex');
       expect(ALL_AGENT_TYPES).toContain('Vibe');
@@ -140,6 +142,7 @@ describe('constants', () => {
       expect(ALL_AGENT_TYPES).toContain('CopilotCli');
       expect(ALL_AGENT_TYPES).toContain('Ollama');
       expect(ALL_AGENT_TYPES).toContain('LiteLlm');
+      expect(ALL_AGENT_TYPES).toContain('Nvidia');
       expect(ALL_AGENT_TYPES).not.toContain('Custom');
     });
   });
@@ -329,7 +332,7 @@ describe('constants', () => {
       // If a new agent is added to the Rust enum but not to ALL_AGENT_TYPES
       // in constants.ts, this test fails. The generated.ts union is the
       // source of truth from the backend.
-      const knownFromGenerated: string[] = ['ClaudeCode', 'Codex', 'Vibe', 'GeminiCli', 'Kiro', 'CopilotCli', 'Ollama', 'LiteLlm'];
+      const knownFromGenerated: string[] = ['ClaudeCode', 'Codex', 'Vibe', 'GeminiCli', 'Kiro', 'CopilotCli', 'Ollama', 'LiteLlm', 'Nvidia'];
       expect(ALL_AGENT_TYPES.sort()).toEqual(knownFromGenerated.sort());
     });
 

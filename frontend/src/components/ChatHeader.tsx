@@ -604,21 +604,23 @@ export function ChatHeader({
           )}
         </button>
 
-        {discussion.project_id && pendingFilesCount > 0 && (
-          <button
-            className="disc-icon-btn"
-            data-active={showGitPanel}
-            onClick={onToggleGitPanel}
-            title={t('git.pendingFilesTooltip', pendingFilesCount)}
-            aria-label={t('git.filesBtn')}
-            aria-expanded={showGitPanel}
-          >
-            <GitBranch size={13} />
+        <button
+          className="disc-icon-btn"
+          data-active={showGitPanel}
+          onClick={onToggleGitPanel}
+          title={pendingFilesCount > 0
+            ? t('git.pendingFilesTooltip', pendingFilesCount)
+            : t('git.filesBtn')}
+          aria-label={t('git.filesBtn')}
+          aria-expanded={showGitPanel}
+        >
+          <GitBranch size={13} />
+          {pendingFilesCount > 0 && (
             <span className="disc-icon-btn-badge" aria-label={t('git.pendingFilesTooltip', pendingFilesCount)}>
               {pendingFilesCount > 9 ? '9+' : pendingFilesCount}
             </span>
-          </button>
-        )}
+          )}
+        </button>
         <button
           className="disc-icon-btn" style={{ color: 'var(--kr-error)' }}
           onClick={() => onDelete(discussion.id)}

@@ -73,6 +73,13 @@ import type {
   WorkflowSummary,
   WorkflowRun,
   BatchRunSummary,
+  BatchCompareDetails,
+  CreateAdHocCompareRequest,
+  CreateAdHocCompareResponse,
+  StartBatchCompareJudgeRequest,
+  StartBatchCompareJudgeResponse,
+  StartBatchCompareImprovementRequest,
+  StartBatchCompareImprovementResponse,
   StepResult,
   CreateWorkflowRequest,
   UpdateWorkflowRequest,
@@ -130,7 +137,10 @@ import type {
   ImportQuickExecRequest,
   OllamaHealthResponse,
   OllamaModelsResponse,
+  SetOllamaContextOverrideResponse,
   LiteLlmHealthResponse,
+  NvidiaModelsResponse,
+  NvidiaProbeResponse,
   LiteLlmModelFailuresResponse,
   LiteLlmModelRetryResponse,
   LiteLlmModelsResponse,
@@ -178,6 +188,16 @@ import type {
   UpdateLivePageHtmlRequest,
   UpdateLivePageRequest,
   LinkLivePageDiscussionRequest,
+  CampaignTaskCandidate as GeneratedCampaignTaskCandidate,
+  CampaignWorkerSelection,
+  ExecutionDiscussionLink,
+  IntegrationStrategy,
+  OrchestrationRun,
+  PrincipalAttention as GeneratedPrincipalAttention,
+  TaskExecution,
+  TaskExecutionDetail,
+  TaskExecutionObservability,
+  ValidationSpec,
 } from '../types/generated';
 import type { DiscoverKeysResponse, TestModeEnterResult, TestModeExitResponse } from '../types/extensions';
 
@@ -643,6 +663,7 @@ export const config = {
   setScanDepth: (depth: number) => api<number>('POST', '/config/scan-depth', depth),
   getAgentAccess: () => api<AgentsConfig>('GET', '/config/agent-access'),
   setAgentAccess: (req: SetAgentAccessRequest) => api<void>('POST', '/config/agent-access', req),
+  setAgentConcurrency: (req: { agent: AgentType; concurrency: number | null }) => api<void>('POST', '/config/agent-concurrency', req),
   setAgentMentionColor: (req: SetAgentMentionColorRequest) =>
     api<void>('POST', '/config/agent-mention-color', req),
   getModelTiers: () => api<ModelTiersConfig>('GET', '/config/model-tiers'),
@@ -684,7 +705,7 @@ export const config = {
   restoreRecovery: (passphrase: string, recoveryCode?: string) =>
     api<void>('POST', '/config/recovery/restore', { passphrase, recovery_code: recoveryCode || null }),
   getServerConfig: () => api<ServerConfigPublic>('GET', '/config/server'),
-  setServerConfig: (req: { domain?: string; max_concurrent_agents?: number; agent_stall_timeout_min?: number; agent_global_timeout_min?: number; pseudo?: string; avatar_email?: string; bio?: string; debug_mode?: boolean; discussion_notes_enabled?: boolean; default_model_tier?: 'economy' | 'default' | 'reasoning'; default_summary_strategy?: 'Auto' | 'OnDemand' | 'Off'; agent_handoffs_enabled?: boolean; agent_handoff_paid_limit?: number; agent_handoff_paid_unlimited?: boolean; agent_handoff_blocked_agents?: AgentType[] }) => api<void>('POST', '/config/server', req),
+  setServerConfig: (req: { domain?: string; max_concurrent_agents?: number; agent_stall_timeout_min?: number; agent_global_timeout_min?: number; local_agent_global_timeout_min?: number; pseudo?: string; avatar_email?: string; bio?: string; debug_mode?: boolean; discussion_notes_enabled?: boolean; default_model_tier?: 'economy' | 'default' | 'reasoning'; default_summary_strategy?: 'Auto' | 'OnDemand' | 'Off'; agent_handoffs_enabled?: boolean; agent_handoff_paid_limit?: number; agent_handoff_paid_unlimited?: boolean; agent_handoff_blocked_agents?: AgentType[] }) => api<void>('POST', '/config/server', req),
   regenerateAuthToken: () => api<string>('POST', '/config/auth-token/regenerate'),
 };
 
@@ -938,8 +959,19 @@ export const projects = {
   gitBranches: (id: string) => api<GitBranchesResponse>('GET', `/projects/${id}/git-branches`),
   gitSwitchBranch: (id: string, branch: string) =>
     api<{ branch: string }>('POST', `/projects/${id}/git-switch`, { branch }),
-  gitStatus: (id: string, refreshLanguages = false) =>
-    api<GitStatusResponse>('GET', `/projects/${id}/git-status${refreshLanguages ? '?refresh=true' : ''}`),
+  gitStatus: (
+    id: string,
+    refreshLanguages = false,
+    commitOffset?: number,
+    commitLimit?: number,
+  ) => {
+    const query = new URLSearchParams();
+    if (refreshLanguages) query.set('refresh', 'true');
+    if (commitOffset != null) query.set('commit_offset', String(commitOffset));
+    if (commitLimit != null) query.set('commit_limit', String(commitLimit));
+    const suffix = query.size > 0 ? `?${query.toString()}` : '';
+    return api<GitStatusResponse>('GET', `/projects/${id}/git-status${suffix}`);
+  },
   dependencyUpdates: (id: string, refresh = false) =>
     api<DependencyUpdateSummary>('GET', `/projects/${id}/dependency-updates${refresh ? '?refresh=true' : ''}`),
   setDependencyMonitoring: (id: string, intervalDays: number | null) =>
@@ -1461,6 +1493,12 @@ export const discussions = {
   /** Abort the currently-running agent on this discussion. Backend kills the
    *  child process and saves a partial response with an "⏹️ Interrompu" footer. */
   stop: (id: string) => api<{ cancelled: boolean }>('POST', `/discussions/${id}/stop`, {}),
+  /** Stop one exact durable reply without cancelling its queued/running siblings. */
+  stopDispatch: (id: string, dispatchId: string) => api<{
+    cancelled: boolean;
+    dispatch_id: string;
+    still_awaiting: boolean;
+  }>('POST', `/discussions/${id}/agent-dispatches/${dispatchId}/stop`, {}),
   /** Force-recover a pending partial_response (the recovered Agent message
    *  is inserted with the in-flight start timestamp). Used by the "Dismiss
    *  partial" CTA when the user wants to retype on a still-recovering disc
@@ -1553,8 +1591,19 @@ export const discussions = {
   // ── Discussion-scoped git operations ──
   workspaces: (id: string) =>
     api<DiscussionWorkspace[]>('GET', `/discussions/${id}/workspaces`),
-  gitStatus: (id: string, workspaceId?: string) =>
-    api<GitStatusResponse>('GET', `/discussions/${id}/git-status${workspaceId ? `?workspace_id=${encodeURIComponent(workspaceId)}` : ''}`),
+  gitStatus: (
+    id: string,
+    workspaceId?: string,
+    commitOffset?: number,
+    commitLimit?: number,
+  ) => {
+    const query = new URLSearchParams();
+    if (workspaceId) query.set('workspace_id', workspaceId);
+    if (commitOffset != null) query.set('commit_offset', String(commitOffset));
+    if (commitLimit != null) query.set('commit_limit', String(commitLimit));
+    const suffix = query.size > 0 ? `?${query.toString()}` : '';
+    return api<GitStatusResponse>('GET', `/discussions/${id}/git-status${suffix}`);
+  },
   gitDiff: (id: string, path: string, committed = false, workspaceId?: string) => {
     const query = new URLSearchParams({ path });
     if (committed) query.set('committed', 'true');
@@ -2076,10 +2125,26 @@ export const workflows = {
   /** Batch runs with parent workflow meta (name + run sequence) — feeds the
    *  sidebar pastille that jumps from a batch group back to its spawning workflow. */
   listBatchRunSummaries: () => api<BatchRunSummary[]>('GET', '/workflow-runs/batch-summaries'),
+  /** Persist or reopen a free cross-run discussion comparison. */
+  createAdHocComparison: (request: CreateAdHocCompareRequest) =>
+    api<CreateAdHocCompareResponse>('POST', '/comparisons', request),
   /** Delete a batch workflow run AND all its child discussions atomically.
    *  Returns the count of discussions actually deleted. */
   deleteBatchRun: (runId: string) =>
     api<{ run_id: string; discussions_deleted: number }>('DELETE', `/workflow-runs/${runId}`),
+  /** Rankings + independent human/AI quality evaluations for a Compare run. */
+  getBatchCompareDetails: (runId: string) =>
+    api<BatchCompareDetails>('GET', `/workflow-runs/${runId}/compare-details`),
+  updateBatchCompareManualScore: (runId: string, discussionId: string, score: number | null) =>
+    api<BatchCompareDetails>(
+      'PUT',
+      `/workflow-runs/${runId}/compare-details/${discussionId}/manual`,
+      { score },
+    ),
+  startBatchCompareJudge: (runId: string, request: StartBatchCompareJudgeRequest) =>
+    api<StartBatchCompareJudgeResponse>('POST', `/workflow-runs/${runId}/compare-judge`, request),
+  startBatchCompareImprovement: (runId: string, request: StartBatchCompareImprovementRequest) =>
+    api<StartBatchCompareImprovementResponse>('POST', `/workflow-runs/${runId}/compare-improve`, request),
 
   /** Test a single step with mock context (SSE streaming, dry-run by default) */
   testStepStream: async (
@@ -2189,6 +2254,8 @@ export const quickPrompts = {
   list: () => api<QuickPrompt[]>('GET', '/quick-prompts'),
   create: (req: CreateQuickPromptRequest) => api<QuickPrompt>('POST', '/quick-prompts', req),
   update: (id: string, req: CreateQuickPromptRequest) => api<QuickPrompt>('PUT', `/quick-prompts/${id}`, req),
+  setPinned: (id: string, pinned: boolean) =>
+    api<QuickPrompt>('PATCH', `/quick-prompts/${id}`, { pinned }),
   delete: (id: string) => api<void>('DELETE', `/quick-prompts/${id}`),
   /**
    * Create N child discussions from a Quick Prompt + list of rendered prompts.
@@ -2248,6 +2315,8 @@ export const quickApis = {
   list: () => api<QuickApi[]>('GET', '/quick-apis'),
   create: (req: CreateQuickApiRequest) => api<QuickApi>('POST', '/quick-apis', req),
   update: (id: string, req: CreateQuickApiRequest) => api<QuickApi>('PUT', `/quick-apis/${id}`, req),
+  setPinned: (id: string, pinned: boolean) =>
+    api<QuickApi>('PATCH', `/quick-apis/${id}`, { pinned }),
   delete: (id: string) => api<void>('DELETE', `/quick-apis/${id}`),
   runQa: (id: string, req: RunQuickApiRequest) =>
     api<RunQuickApiResponse>('POST', `/quick-apis/${id}/run`, req),
@@ -2272,6 +2341,8 @@ export const quickExecs = {
   create: (req: CreateQuickExecRequest) => api<QuickExec>('POST', '/quick-execs', req),
   update: (id: string, req: CreateQuickExecRequest) =>
     api<QuickExec>('PUT', `/quick-execs/${id}`, req),
+  setPinned: (id: string, pinned: boolean) =>
+    api<QuickExec>('PATCH', `/quick-execs/${id}`, { pinned }),
   delete: (id: string) => api<void>('DELETE', `/quick-execs/${id}`),
   run: (id: string, req: RunQuickExecRequest) =>
     api<RunQuickExecResponse>('POST', `/quick-execs/${id}/run`, req),
@@ -2394,9 +2465,23 @@ export const usage = {
 export const ollama = {
   health: () => api<OllamaHealthResponse>('GET', '/ollama/health'),
   models: () => api<OllamaModelsResponse>('GET', '/ollama/models'),
+  setContextOverride: (model: string, numCtx: number | null) =>
+    api<SetOllamaContextOverrideResponse>('POST', '/ollama/context-override', {
+      model,
+      num_ctx: numCtx,
+    }),
 };
 
 // ─── LiteLLM (OpenAI-compatible proxy) ─────────────────────────────────────
+
+export const nvidia = {
+  /// The catalogue is public (it answers without a key), so `has_key` in the
+  /// response is what tells the card whether the setup is actually complete.
+  models: () => api<NvidiaModelsResponse>('GET', '/nvidia/models'),
+  /// A real minimal invocation — the only trustworthy availability signal for
+  /// this provider, since the catalogue lists models the account cannot call.
+  probe: (model: string) => api<NvidiaProbeResponse>('POST', '/nvidia/probe', { model }),
+};
 
 export const liteLlm = {
   health: () => api<LiteLlmHealthResponse>('GET', '/lite-llm/health'),
@@ -2440,6 +2525,102 @@ export interface ApiCallLogsFilter {
   limit?: number;
 }
 
+/** One plan task as the campaign sees it: launchable now, or the reasons it is
+ *  not. `reasons` is empty when `launchable` is true. */
+export type CampaignTaskCandidate = GeneratedCampaignTaskCandidate;
+
+/** What the principal currently owes — the coordinator made inspectable rather
+ *  than hidden behind an "active" badge. */
+export type PrincipalAttention = GeneratedPrincipalAttention;
+
+export interface CampaignView {
+  run: OrchestrationRun;
+  candidates: CampaignTaskCandidate[];
+  principal_attention: PrincipalAttention;
+}
+
+export interface CreateCampaignRequest {
+  discussion_id: string;
+  project_id?: string | null;
+  target_workspace_id?: string | null;
+  target_branch: string;
+  integration_strategy?: IntegrationStrategy;
+  max_review_rounds?: number;
+  max_concurrent_executions?: number;
+  max_cli_concurrent_executions?: number;
+  token_budget?: number | null;
+  timeout_secs?: number | null;
+  activity_timeout_secs?: number | null;
+  review_timeout_secs?: number | null;
+  human_wait_timeout_secs?: number | null;
+  cancellation_cleanup_policy?: 'preserve' | 'remove_if_clean';
+  validations?: ValidationSpec[];
+  allowed_agents?: AgentType[];
+  default_worker?: CampaignWorkerSelection | null;
+  auto_continue?: boolean;
+}
+
+export const orchestration = {
+  campaign: (runId: string) => api<CampaignView>('GET', `/orchestration/campaigns/${runId}`),
+  discussionCampaign: (discussionId: string) =>
+    api<CampaignView | null>('GET', `/orchestration/discussions/${discussionId}/campaign`),
+  createCampaign: (request: CreateCampaignRequest) =>
+    api<CampaignView>('POST', '/orchestration/campaigns', request),
+  launch: (
+    runId: string,
+    taskReference: string,
+    options?: { idempotencyKey?: string; worker?: CampaignWorkerSelection },
+  ) =>
+    api<{ execution: TaskExecution; worker_selection_reason: string }>(
+      'POST',
+      `/orchestration/campaigns/${runId}/launch`,
+      {
+        task_reference: taskReference,
+        idempotency_key: options?.idempotencyKey,
+        worker_override: options?.worker,
+      },
+    ),
+  control: (runId: string, state: string) =>
+    api<CampaignView>('POST', `/orchestration/campaigns/${runId}/control`, { state }),
+  discussionLinks: () =>
+    api<ExecutionDiscussionLink[]>('GET', '/orchestration/discussion-links'),
+  execution: (executionId: string) =>
+    api<TaskExecutionDetail>('GET', `/orchestration/executions/${executionId}`),
+  executionObservability: (executionId: string) =>
+    api<TaskExecutionObservability>(
+      'GET',
+      `/orchestration/executions/${executionId}/observability`,
+    ),
+  cancelExecution: (executionId: string, reason: string) =>
+    api<unknown>('POST', `/orchestration/executions/${executionId}/cancel`, {
+      reason,
+      cleanup_policy: 'preserve',
+    }),
+  reassignExecution: (
+    executionId: string,
+    worker: CampaignWorkerSelection,
+    reason: string,
+  ) => api<unknown>('POST', `/orchestration/executions/${executionId}/reassign`, {
+    worker,
+    reason,
+  }),
+  reviewExecution: (
+    executionId: string,
+    decision: {
+      version: '1';
+      task_ref: string;
+      decision: 'approve' | 'request_changes';
+      reviewed_head_sha?: string;
+      dod_verifications?: Array<{ dod_id: string; met: boolean; evidence: string }>;
+      comment?: string;
+    },
+  ) => api<{ verdict: string; execution: TaskExecution }>(
+    'POST',
+    `/orchestration/executions/${executionId}/review`,
+    { decision },
+  ),
+};
+
 export const apiCallLogs = {
   list: (filter?: ApiCallLogsFilter) => {
     const qs = filter ? '?' + new URLSearchParams(
@@ -2451,7 +2632,29 @@ export const apiCallLogs = {
   },
   get: (id: string) => api<ApiCallLogRow | null>('GET', `/api-call-logs/${id}`),
   purge: (days?: number) => api<number>('POST', '/api-call-logs/purge', { days }),
+  /** Endpoints whose calls keep failing — the spec may have drifted, or never
+   *  matched the API. `successes > 0` means it answers sometimes, so the fault
+   *  is in how it is called rather than in the endpoint existing. */
+  drift: (opts?: { days?: number; min_failures?: number }) => {
+    const qs = opts
+      ? '?' + new URLSearchParams(
+          Object.entries(opts)
+            .filter(([, v]) => v !== undefined)
+            .map(([k, v]) => [k, String(v)]),
+        ).toString()
+      : '';
+    return api<EndpointDrift[]>('GET', `/api-call-logs/drift${qs}`);
+  },
 };
+
+export interface EndpointDrift {
+  plugin_slug: string;
+  endpoint_path: string;
+  http_status: number;
+  failures: number;
+  successes: number;
+  last_seen: string;
+}
 
 /** KT-190 — how much of the CLI token spend Kronn can actually account for.
  *

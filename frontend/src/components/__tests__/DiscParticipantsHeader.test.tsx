@@ -425,6 +425,42 @@ describe('honest participant presence — 0.9.2 G', () => {
       .not.toContain('disc.presenceDormantSeconds');
   });
 
+  it('renders durable native resume reason/since and keeps stall/quota distinct', async () => {
+    (discussionsApi.participants as ReturnType<typeof vi.fn>).mockResolvedValue([
+      {
+        id: -1, agent_type: 'Ollama', session_id: null, role: 'native_resume', status: 'active',
+        presence_state: 'resume_expected', read_live: false, write_state: 'unknown',
+        wake_mode: 'native_dispatch', resume_reason: 'waiting for CI',
+        resume_since: '2026-08-21T12:00:00Z',
+      },
+      {
+        id: -2, agent_type: 'Codex', session_id: null, role: 'native_resume', status: 'active',
+        presence_state: 'stalled', read_live: false, write_state: 'unknown',
+        wake_mode: 'native_dispatch',
+      },
+      {
+        id: -3, agent_type: 'ClaudeCode', session_id: null, role: 'native_resume', status: 'active',
+        presence_state: 'quota_exhausted', read_live: false, write_state: 'unknown',
+        wake_mode: 'native_dispatch',
+      },
+    ]);
+    await act(async () => {
+      render(<DiscParticipantsHeader discId="d-resume" toast={toast} t={t} />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const chips = [...document.querySelectorAll('.disc-participant-chip')];
+    expect(chips.map(chip => chip.getAttribute('data-presence'))).toEqual([
+      'resume_expected', 'stalled', 'quota_exhausted',
+    ]);
+    fireEvent.click(chips[0] as HTMLButtonElement);
+    const details = document.querySelector('.disc-participant-details')?.textContent ?? '';
+    expect(details).toContain('disc.presenceResumeExpected');
+    expect(details).toContain('disc.targetNative');
+    expect(details).toContain('waiting for CI');
+    expect(details).toContain('disc.resumeSince');
+  });
+
   it('pins the invite button OUTSIDE the scrollable chip strip (3 offline peers)', async () => {
     // Regression: with 3+ offline "reconnexion requise" peers the chip strip
     // widens; the invite button must stay a pinned sibling of the scrollable

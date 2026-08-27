@@ -87,6 +87,7 @@ const defaultModelTiers = {
   copilot_cli: { economy: null, reasoning: null },
   ollama: { economy: null, reasoning: null },
   lite_llm: { economy: null, reasoning: null },
+  nvidia: { economy: null, reasoning: null },
 };
 
 const makeConfig = (overrides: Partial<Record<'claude' | 'codex' | 'gemini' | 'kiro' | 'vibe' | 'copilot', boolean>>): AgentsConfig => ({
@@ -98,6 +99,7 @@ const makeConfig = (overrides: Partial<Record<'claude' | 'codex' | 'gemini' | 'k
   copilot_cli: { path: null, installed: false, version: null, full_access: overrides.copilot ?? false },
   ollama: { path: null, installed: false, version: null, full_access: false },
   lite_llm: { path: null, installed: false, version: null, full_access: false },
+  nvidia: { path: null, installed: false, version: null, full_access: false },
   model_tiers: defaultModelTiers,
 });
 

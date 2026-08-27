@@ -14,25 +14,41 @@ import {
   Inbox,
   List,
   MessageCircle,
+  MessagesSquare,
   Plus,
   Target,
   X,
 } from 'lucide-react';
-import { planning } from '../lib/api';
+import {
+  discussions,
+  orchestration,
+  planning,
+  type CampaignView,
+} from '../lib/api';
 import { queueDiscussionWorkspaceTarget } from '../lib/discussion-navigation';
 import { useT } from '../lib/I18nContext';
 import { userError } from '../lib/userError';
+import { readPlanOrchestrationState, writePlanOrchestrationState } from '../lib/orch-panel-state';
 import { CopyIdPill } from './CopyIdPill';
 import { PlanAllTasksView } from './PlanAllTasksView';
 import { PlanningProposalReview } from './PlanningProposalReview';
+import { TaskCampaignPanel } from './TaskCampaignPanel';
+import { TaskExecutionCard } from './TaskExecutionCard';
+import { TaskLaunchDialog } from './TaskLaunchDialog';
+import { orchestrationResolution } from './taskLaunchResolution';
 import type {
+  AgentType,
+  Discussion,
   DiscussionPlan,
+  DiscussionWorkspace,
+  ExecutionDiscussionLink,
   PlanningDiscussionRelation,
   PlanningProposal,
   PlanningTaskDetail,
   PlanningTaskSummary,
   PlanningTaskStatus,
   ProposalListResponse,
+  TaskExecutionDetail,
 } from '../types/generated';
 import type { ToastFn } from '../hooks/useToast';
 import './DiscussionToolPanel.css';
@@ -58,6 +74,10 @@ export function DiscussionPlanPanel({
   toast,
 }: Props) {
   const { t } = useT();
+  const initialPanelState = useMemo(
+    () => readPlanOrchestrationState(discussionId),
+    [discussionId],
+  );
   const [plan, setPlan] = useState<DiscussionPlan | null>(null);
   const [proposalInbox, setProposalInbox] = useState<ProposalListResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -65,36 +85,79 @@ export function DiscussionPlanPanel({
   const [quickTitle, setQuickTitle] = useState('');
   const [creating, setCreating] = useState(false);
   const [primaryOpen, setPrimaryOpen] = useState(true);
-  const [viewMode, setViewMode] = useState<'focus' | 'all'>('focus');
+  const [viewMode, setViewMode] = useState<'focus' | 'all'>(initialPanelState.viewMode);
+  const [currentExpandedFor, setCurrentExpandedFor] = useState<string | null>(null);
+  const [upcomingExpandedFor, setUpcomingExpandedFor] = useState<string | null>(null);
   const [allQuery, setAllQuery] = useState('');
   const [planFilter, setPlanFilter] = useState<PlanFilter | null>(null);
   const [selectedTask, setSelectedTask] = useState<PlanningTaskDetail | null>(null);
+  const [selectedTaskPreference, setSelectedTaskPreference] = useState<string | null>(
+    initialPanelState.selectedTaskId,
+  );
   const [detailLoading, setDetailLoading] = useState(false);
   const [dodSavingIndex, setDodSavingIndex] = useState<number | null>(null);
-  const selectedTaskIdRef = useRef<string | null>(null);
+  const [campaign, setCampaign] = useState<CampaignView | null>(null);
+  const [executionLinks, setExecutionLinks] = useState<ExecutionDiscussionLink[]>([]);
+  const [executionDetail, setExecutionDetail] = useState<TaskExecutionDetail | null>(null);
+  const [discussion, setDiscussion] = useState<Discussion | null>(null);
+  const [workspaces, setWorkspaces] = useState<DiscussionWorkspace[]>([]);
+  const [launchTaskReference, setLaunchTaskReference] = useState<string | null>(null);
+  const [executionLoading, setExecutionLoading] = useState(false);
+  const [actionBusy, setActionBusy] = useState('');
+  const [actionError, setActionError] = useState('');
+  const [approveOpen, setApproveOpen] = useState(false);
+  const [approvalConfirmed, setApprovalConfirmed] = useState<Record<string, boolean>>({});
+  const [approvalEvidence, setApprovalEvidence] = useState<Record<string, string>>({});
+  const [requestChangesOpen, setRequestChangesOpen] = useState(false);
+  const [reviewComment, setReviewComment] = useState('');
+  const [confirmStop, setConfirmStop] = useState(false);
+  const [reassignOpen, setReassignOpen] = useState(false);
+  const [reassignAgent, setReassignAgent] = useState<AgentType>('Codex');
+  const [reassignModel, setReassignModel] = useState('');
+  const selectedTaskIdRef = useRef<string | null>(initialPanelState.selectedTaskId);
 
   useEffect(() => {
-    selectedTaskIdRef.current = selectedTask?.id ?? null;
-  }, [selectedTask?.id]);
+    writePlanOrchestrationState(discussionId, {
+      selectedTaskId: selectedTaskIdRef.current,
+      viewMode,
+    });
+  }, [discussionId, selectedTaskPreference, viewMode]);
 
   const readPlan = useCallback(async () => {
     const selectedId = selectedTaskIdRef.current;
-    const [next, nextDetail, nextProposals] = await Promise.all([
+    const [next, nextDetail, nextProposals, nextCampaign, nextLinks, nextDiscussion, nextWorkspaces] = await Promise.all([
       planning.discussionPlan(discussionId),
       selectedId ? planning.get(selectedId) : Promise.resolve(null),
       planning.proposals(discussionId),
+      orchestration.discussionCampaign(discussionId),
+      orchestration.discussionLinks(),
+      discussions.get(discussionId),
+      discussions.workspaces(discussionId),
     ]);
-    return { next, nextDetail, nextProposals, selectedId };
+    return {
+      next,
+      nextDetail,
+      nextProposals,
+      nextCampaign,
+      nextLinks,
+      nextDiscussion,
+      nextWorkspaces,
+      selectedId,
+    };
   }, [discussionId]);
 
   const applyPlan = useCallback((result: Awaited<ReturnType<typeof readPlan>>) => {
     setPlan(result.next);
     setProposalInbox(result.nextProposals);
+    setCampaign(result.nextCampaign);
+    setExecutionLinks(result.nextLinks.filter(link => link.parent_discussion_id === discussionId));
+    setDiscussion(result.nextDiscussion);
+    setWorkspaces(result.nextWorkspaces);
     if (result.nextDetail && selectedTaskIdRef.current === result.selectedId) {
       setSelectedTask(result.nextDetail);
     }
     onChanged?.(result.next);
-  }, [onChanged]);
+  }, [discussionId, onChanged]);
 
   const refresh = useCallback(async (silent = false) => {
     if (!silent) {
@@ -170,8 +233,10 @@ export function DiscussionPlanPanel({
     () => plan?.active.filter(item => item.actionable) ?? [],
     [plan],
   );
-  const visibleCurrent = current.slice(0, 3);
-  const visibleUpcoming = upcoming.slice(0, 5);
+  const currentExpanded = currentExpandedFor === discussionId;
+  const upcomingExpanded = upcomingExpandedFor === discussionId;
+  const visibleCurrent = currentExpanded ? current : current.slice(0, 3);
+  const visibleUpcoming = upcomingExpanded ? upcoming : upcoming.slice(0, 5);
   const linkedTaskIds = useMemo(
     () => new Set([
       ...(plan?.active ?? []).map(item => item.task.id),
@@ -189,6 +254,130 @@ export function DiscussionPlanPanel({
   const selectedRelation = selectedTask
     ? relationByTaskId.get(selectedTask.id) ?? null
     : null;
+  const selectedExecutionLink = useMemo(() => {
+    if (!selectedTask) return null;
+    return [...executionLinks].reverse().find(link => link.task_id === selectedTask.id) ?? null;
+  }, [executionLinks, selectedTask]);
+  const selectedCandidate = selectedTask
+    ? campaign?.candidates.find(candidate => candidate.task.id === selectedTask.id) ?? null
+    : null;
+  // Jumping to a worker's discussion used to require opening the execution
+  // detail first. The row itself is where someone scanning the plan asks the
+  // question, so the shortcut belongs there. Last link wins: a re-run leaves
+  // older links behind, and the current one is what "go see it" means.
+  const subDiscussionByTaskId = useMemo(() => {
+    const byTask = new Map<string, string>();
+    for (const link of executionLinks) {
+      if (link.sub_discussion_id) byTask.set(link.task_id, link.sub_discussion_id);
+    }
+    return byTask;
+  }, [executionLinks]);
+
+  useEffect(() => {
+    const executionId = selectedExecutionLink?.execution_id;
+    let active = true;
+    if (!executionId) {
+      queueMicrotask(() => {
+        if (active) {
+          setExecutionDetail(null);
+          setExecutionLoading(false);
+        }
+      });
+      return () => { active = false; };
+    }
+    queueMicrotask(() => {
+      if (active) setExecutionLoading(true);
+    });
+    orchestration.execution(executionId)
+      .then(detail => {
+        if (active) setExecutionDetail(detail);
+      })
+      .catch(cause => {
+        if (active) setActionError(userError(cause));
+      })
+      .finally(() => {
+        if (active) setExecutionLoading(false);
+      });
+    return () => { active = false; };
+  }, [selectedExecutionLink?.execution_id]);
+
+  const runExecutionAction = async (name: string, action: () => Promise<unknown>) => {
+    if (actionBusy) return;
+    setActionBusy(name);
+    setActionError('');
+    try {
+      await action();
+      setApproveOpen(false);
+      setApprovalConfirmed({});
+      setApprovalEvidence({});
+      setRequestChangesOpen(false);
+      setReviewComment('');
+      setConfirmStop(false);
+      setReassignOpen(false);
+      await refresh(true);
+    } catch (cause) {
+      setActionError(userError(cause));
+    } finally {
+      setActionBusy('');
+    }
+  };
+
+  const reviewSelectedExecution = (decision: 'approve' | 'request_changes') => {
+    const execution = executionDetail?.lineage.execution;
+    if (!execution || !selectedTask) return;
+    const delivery = executionDetail.attempts
+      .find(attempt => attempt.attempt_no === execution.attempt_no)
+      ?.delivery;
+    if (decision === 'approve' && !delivery) {
+      setActionError(t('orch.approveMissingDelivery'));
+      return;
+    }
+    void runExecutionAction(decision, () => orchestration.reviewExecution(execution.id, {
+      version: '1',
+      task_ref: selectedTask.reference,
+      decision,
+      reviewed_head_sha: decision === 'approve' ? delivery?.head_sha : undefined,
+      dod_verifications: decision === 'approve'
+        ? executionDetail.definition_of_done.map(item => ({
+          dod_id: item.id,
+          met: approvalConfirmed[item.id] === true,
+          evidence: approvalEvidence[item.id]?.trim() ?? '',
+        }))
+        : undefined,
+      comment: decision === 'request_changes' ? reviewComment.trim() : undefined,
+    }));
+  };
+
+  const openApproval = () => {
+    const items = executionDetail?.definition_of_done ?? [];
+    setApprovalConfirmed(Object.fromEntries(items.map(item => [item.id, false])));
+    setApprovalEvidence(Object.fromEntries(items.map(item => [item.id, ''])));
+    setApproveOpen(true);
+  };
+
+  const currentAttemptNo = executionDetail?.lineage.execution.attempt_no;
+  const currentDelivery = executionDetail?.attempts
+    .find(attempt => attempt.attempt_no === currentAttemptNo)
+    ?.delivery ?? null;
+  const approvalReady = Boolean(currentDelivery)
+    && (executionDetail?.definition_of_done ?? []).every(item => (
+      approvalConfirmed[item.id] === true
+      && Boolean(approvalEvidence[item.id]?.trim())
+    ));
+
+  const reassignSelectedExecution = () => {
+    const execution = executionDetail?.lineage.execution;
+    if (!execution) return;
+    void runExecutionAction('reassign', () => orchestration.reassignExecution(
+      execution.id,
+      {
+        target: { kind: 'agent', agent_type: reassignAgent },
+        model: reassignModel.trim() || null,
+        profile_id: null,
+      },
+      'Réassignation demandée depuis le panneau d’orchestration',
+    ));
+  };
   const filteredAllRelations = useMemo(() => {
     if (!plan) return { active: [], later: [] };
     if (planFilter === 'ready') {
@@ -257,8 +446,12 @@ export function DiscussionPlanPanel({
   const openDetail = async (taskId: string) => {
     if (selectedTask?.id === taskId) {
       setSelectedTask(null);
+      selectedTaskIdRef.current = null;
+      setSelectedTaskPreference(null);
       return;
     }
+    selectedTaskIdRef.current = taskId;
+    setSelectedTaskPreference(taskId);
     setDetailLoading(true);
     try {
       setSelectedTask(await planning.get(taskId));
@@ -267,6 +460,12 @@ export function DiscussionPlanPanel({
     } finally {
       setDetailLoading(false);
     }
+  };
+
+  const closeDetail = () => {
+    setSelectedTask(null);
+    selectedTaskIdRef.current = null;
+    setSelectedTaskPreference(null);
   };
 
   const updateRelation = async (
@@ -349,6 +548,20 @@ export function DiscussionPlanPanel({
             {blocked && <span className="plan-blocked">{t('planning.blocked')}</span>}
           </span>
         </div>
+        {subDiscussionByTaskId.get(relation.task.id) && onNavigateDiscussion && (
+          <button
+            type="button"
+            className="plan-task-action"
+            title={t('orch.openSubDiscussion')}
+            aria-label={t('orch.openSubDiscussion')}
+            onClick={() => {
+              const target = subDiscussionByTaskId.get(relation.task.id);
+              if (target) onNavigateDiscussion(target);
+            }}
+          >
+            <MessagesSquare size={11} />
+          </button>
+        )}
         <button
           type="button"
           className="plan-task-action"
@@ -526,6 +739,11 @@ export function DiscussionPlanPanel({
               ))}
             </section>
           )}
+          <TaskCampaignPanel
+            view={campaign}
+            onLaunch={setLaunchTaskReference}
+            busyTaskReference={launchTaskReference}
+          />
           {plan && plan.primary_objective && (
             <section className="plan-primary">
               <button type="button" onClick={() => setPrimaryOpen(value => !value)}>
@@ -640,10 +858,17 @@ export function DiscussionPlanPanel({
             <section className="plan-timeline-section" data-kind="current">
               <h3><Circle size={13} /> {t('planning.current')}</h3>
               {visibleCurrent.map(renderTask)}
-              {current.length > visibleCurrent.length && (
-                <div className="plan-focus-overflow">
-                  {t('planning.moreCurrent', current.length - visibleCurrent.length)}
-                </div>
+              {current.length > 3 && (
+                <button
+                  type="button"
+                  className="plan-focus-overflow"
+                  aria-expanded={currentExpanded}
+                  onClick={() => setCurrentExpandedFor(currentExpanded ? null : discussionId)}
+                >
+                  {currentExpanded
+                    ? t('planning.collapseCurrent')
+                    : t('planning.moreCurrent', current.length - visibleCurrent.length)}
+                </button>
               )}
             </section>
           )}
@@ -652,10 +877,17 @@ export function DiscussionPlanPanel({
             <section className="plan-timeline-section" data-kind="upcoming">
               <h3><Flag size={13} /> {t('planning.upcoming')}</h3>
               {visibleUpcoming.map(renderTask)}
-              {upcoming.length > visibleUpcoming.length && (
-                <div className="plan-focus-overflow">
-                  {t('planning.moreReady', upcoming.length - visibleUpcoming.length)}
-                </div>
+              {upcoming.length > 5 && (
+                <button
+                  type="button"
+                  className="plan-focus-overflow"
+                  aria-expanded={upcomingExpanded}
+                  onClick={() => setUpcomingExpandedFor(upcomingExpanded ? null : discussionId)}
+                >
+                  {upcomingExpanded
+                    ? t('planning.collapseReady')
+                    : t('planning.moreReady', upcoming.length - visibleUpcoming.length)}
+                </button>
               )}
             </section>
           )}
@@ -691,10 +923,159 @@ export function DiscussionPlanPanel({
                 label={selectedTask.reference}
                 title={t('planning.copyTaskId', selectedTask.reference)}
               />
-              <button type="button" onClick={() => setSelectedTask(null)}><X size={13} /></button>
+              <button type="button" onClick={closeDetail}><X size={13} /></button>
             </div>
             <h3>{selectedTask.title}</h3>
             {selectedTask.description && <p>{selectedTask.description}</p>}
+            {!selectedExecutionLink && (
+              <div className="plan-orch-launch">
+                {(selectedCandidate?.launchable || (!campaign && selectedRelation?.actionable)) && (
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    onClick={() => setLaunchTaskReference(selectedTask.reference)}
+                  >
+                    {t('orch.launch')}
+                  </button>
+                )}
+                {selectedCandidate && !selectedCandidate.launchable && (
+                  <ul className="orch-campaign-reasons" role="status">
+                    {selectedCandidate.reasons.map(reason => (
+                      <li key={reason.code}>{reason.detail}</li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            )}
+            {executionLoading && (
+              <div className="plan-panel-state"><Loader2 size={13} className="spin" /> {t('common.loading')}</div>
+            )}
+            <TaskExecutionCard
+              detail={executionDetail}
+              onOpen={onNavigateDiscussion}
+              onStop={() => setConfirmStop(true)}
+              onReassign={() => {
+                const execution = executionDetail?.lineage.execution;
+                setReassignAgent((execution?.worker_agent_type as AgentType | null) ?? discussion?.agent ?? 'Codex');
+                setReassignModel(execution?.worker_model ?? '');
+                setReassignOpen(true);
+              }}
+              onApprove={openApproval}
+              onRequestChanges={() => setRequestChangesOpen(true)}
+            />
+            {actionError && (
+              <div className="orch-action-error" role="alert">
+                <strong>{actionError}</strong>
+                <span>{t(`orch.resolution.${orchestrationResolution(actionError)}`)}</span>
+              </div>
+            )}
+            {confirmStop && executionDetail && (
+              <div className="orch-inline-action" role="alertdialog" aria-label={t('orch.exec.stop')}>
+                <p>{t('orch.stopConfirm')}</p>
+                <div>
+                  <button type="button" onClick={() => setConfirmStop(false)} disabled={Boolean(actionBusy)}>{t('common.cancel')}</button>
+                  <button
+                    type="button"
+                    className="btn btn-danger"
+                    disabled={Boolean(actionBusy)}
+                    onClick={() => void runExecutionAction('stop', () => orchestration.cancelExecution(
+                      executionDetail.lineage.execution.id,
+                      'Arrêt demandé depuis le panneau d’orchestration',
+                    ))}
+                  >
+                    {t('orch.exec.stop')}
+                  </button>
+                </div>
+              </div>
+            )}
+            {approveOpen && executionDetail && (
+              <div className="orch-inline-action" role="dialog" aria-label={t('orch.exec.approve')}>
+                <p>{t('orch.approveEvidenceIntro')}</p>
+                <code className="orch-approval-head">
+                  HEAD {currentDelivery?.head_sha ?? t('orch.approveMissingDelivery')}
+                </code>
+                <div className="orch-approval-dod-list">
+                  {executionDetail.definition_of_done.map(item => (
+                    <fieldset className="orch-approval-dod" key={item.id}>
+                      <label className="orch-approval-confirm">
+                        <input
+                          type="checkbox"
+                          checked={approvalConfirmed[item.id] === true}
+                          onChange={event => setApprovalConfirmed(previous => ({
+                            ...previous,
+                            [item.id]: event.target.checked,
+                          }))}
+                        />
+                        <span>{item.sentence}</span>
+                      </label>
+                      <label>
+                        <span>{t('orch.approveEvidence')}</span>
+                        <textarea
+                          value={approvalEvidence[item.id] ?? ''}
+                          onChange={event => setApprovalEvidence(previous => ({
+                            ...previous,
+                            [item.id]: event.target.value,
+                          }))}
+                        />
+                      </label>
+                    </fieldset>
+                  ))}
+                </div>
+                <div>
+                  <button type="button" onClick={() => setApproveOpen(false)} disabled={Boolean(actionBusy)}>{t('common.cancel')}</button>
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    disabled={Boolean(actionBusy) || !approvalReady}
+                    onClick={() => reviewSelectedExecution('approve')}
+                  >
+                    {t('orch.exec.approve')}
+                  </button>
+                </div>
+              </div>
+            )}
+            {requestChangesOpen && (
+              <div className="orch-inline-action" role="dialog" aria-label={t('orch.exec.requestChanges')}>
+                <label>
+                  <span>{t('orch.reviewComment')}</span>
+                  <textarea autoFocus value={reviewComment} onChange={event => setReviewComment(event.target.value)} />
+                </label>
+                <div>
+                  <button type="button" onClick={() => setRequestChangesOpen(false)} disabled={Boolean(actionBusy)}>{t('common.cancel')}</button>
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    disabled={Boolean(actionBusy) || !reviewComment.trim()}
+                    onClick={() => reviewSelectedExecution('request_changes')}
+                  >
+                    {t('orch.exec.requestChanges')}
+                  </button>
+                </div>
+              </div>
+            )}
+            {reassignOpen && (
+              <div className="orch-inline-action" role="dialog" aria-label={t('orch.exec.reassign')}>
+                <label>
+                  <span>{t('orch.config.agent')}</span>
+                  <select value={reassignAgent} onChange={event => setReassignAgent(event.target.value as AgentType)}>
+                    {Array.from(new Set([
+                      ...(campaign?.run.allowed_agents ?? []),
+                      discussion?.agent ?? 'Codex',
+                    ])).map(value => <option value={value} key={value}>{value}</option>)}
+                  </select>
+                </label>
+                <label>
+                  <span>{t('orch.config.model')}</span>
+                  <input value={reassignModel} onChange={event => setReassignModel(event.target.value)} />
+                </label>
+                <div>
+                  <button type="button" onClick={() => setReassignOpen(false)} disabled={Boolean(actionBusy)}>{t('common.cancel')}</button>
+                  <button type="button" className="btn btn-primary" disabled={Boolean(actionBusy)} onClick={reassignSelectedExecution}>
+                    {t('orch.exec.reassign')}
+                  </button>
+                </div>
+              </div>
+            )}
             {(selectedTask.workspaces?.length ?? 0) > 0 && (
               <div className="plan-task-workspaces">
                 <strong>{t('planning.workspaces')}</strong>
@@ -817,6 +1198,22 @@ export function DiscussionPlanPanel({
           </section>
         )}
       </div>
+      <TaskLaunchDialog
+        open={launchTaskReference !== null}
+        discussionId={discussionId}
+        projectId={discussion?.project_id ?? null}
+        taskReference={launchTaskReference ?? ''}
+        defaultAgent={discussion?.agent ?? 'Codex'}
+        defaultBranch={workspaces[0]?.branch ?? 'main'}
+        workspaces={workspaces}
+        campaign={campaign}
+        onClose={() => setLaunchTaskReference(null)}
+        onLaunched={(_executionId, nextCampaign) => {
+          setCampaign(nextCampaign);
+          setLaunchTaskReference(null);
+          void refresh(true);
+        }}
+      />
     </aside>
   );
 }

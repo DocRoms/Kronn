@@ -94,6 +94,16 @@
   min-width: 0;
 }
 
+/* KT-464 — visual identity (size/color/focus) lives in the shared
+   FavoriteToggle component; only page-specific spacing stays here. */
+.automation-resource-pin {
+  margin-right: 6px;
+}
+
+.automation-favorites-section > .automation-kind-button {
+  color: var(--kr-accent);
+}
+
 @media (max-width: 760px) {
   .automation-page {
     display: block;
@@ -158,18 +168,21 @@
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   gap: 0;
+  /* Grows with its content; `.automation-viewer` above is the scroller. */
   height: auto;
   min-height: 0;
   align-items: stretch;
 }
 
+/* One scroller, not two. `.automation-viewer` above already scrolls and wraps
+   both the page header and this workspace; giving the panes their own
+   `overflow-y: auto` put a second bar inside the first — visible as soon as the
+   workspace got a bounded height. The panes just need to not blow out the grid,
+   so the viewer keeps ownership of scrolling and the wheel works anywhere. */
 .wf-workflow-list-pane,
 .wf-workflow-detail-pane {
   min-width: 0;
   min-height: 0;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  scrollbar-gutter: stable;
 }
 
 .wf-workflow-list-pane {
@@ -187,7 +200,6 @@
 
 .wf-workspace[data-mobile="true"] .wf-workflow-list-pane,
 .wf-workspace[data-mobile="true"] .wf-workflow-detail-pane {
-  overflow-y: visible;
   padding-right: 0;
 }
 
@@ -3416,8 +3428,8 @@
   border: 1px solid var(--kr-border-light);
 }
 
-/* Info note shown in an Agent step when the selected agent is Ollama — warns
-   that a local, tool-less model has no file/repo/MCP access. */
+/* Capability note for HTTP agents: no host shell/arbitrary MCP bridge, with a
+   bounded workspace catalogue when the workflow is project-bound. */
 .wf-ollama-note {
   display: flex;
   align-items: flex-start;
@@ -4005,6 +4017,7 @@
 .wf-run-compact[data-status="Running"] .wf-run-compact-dot,
 .wf-run-compact[data-status="Pending"] .wf-run-compact-dot { color: var(--kr-accent); background: var(--kr-accent); }
 .wf-run-compact[data-status="WaitingApproval"] .wf-run-compact-dot,
+.wf-run-compact[data-status="Partial"] .wf-run-compact-dot,
 .wf-run-compact[data-status="StoppedByGuard"] .wf-run-compact-dot { color: var(--kr-warning); background: var(--kr-warning); }
 .wf-run-compact[data-status="Interrupted"] .wf-run-compact-dot { color: var(--kr-text-ghost); background: var(--kr-text-ghost); }
 /* keep the status text coloured but the dot uses background only */
@@ -5043,6 +5056,10 @@
 }
 
 .wf-run-status-chip[data-status='Pending'] {
+  color: var(--kr-warning);
+}
+
+.wf-run-status-chip[data-status='Partial'] {
   color: var(--kr-warning);
 }
 
@@ -6822,6 +6839,10 @@
 .qp-card-head-controls {
   flex: 0 0 auto;
   gap: var(--kr-sp-3);
+}
+
+.qp-card-head-controls .wf-icon-btn[data-active='true'] {
+  color: var(--kr-accent);
 }
 
 .qp-card-head-controls .kr-agent-switch-btn {

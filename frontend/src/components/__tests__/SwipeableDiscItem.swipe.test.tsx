@@ -62,8 +62,10 @@ function renderItem(props?: Partial<Parameters<typeof SwipeableDiscItem>[0]>) {
     />,
   );
   // The labelled open button owns keyboard selection + pointer gestures; row
-  // actions are sibling buttons and must never steal this query.
-  const row = screen.getByRole('button', { name: /DiscAlpha/ });
+  // actions (including the KT-464 favorite toggle, whose label also carries
+  // "DiscAlpha") are sibling buttons and must never steal this query — the
+  // open button's accessible name is the only one with the em dash + count.
+  const row = screen.getByRole('button', { name: /DiscAlpha — \d+ messages/ });
   return { onSelect, onArchive, onDelete, onStop, row };
 }
 
@@ -247,18 +249,40 @@ describe('SwipeableDiscItem — compact state cluster', () => {
 });
 
 describe('SwipeableDiscItem — row action menu', () => {
-  it('keeps actions outside the discussion-open button and toggles a favorite', () => {
+  it('keeps actions outside the discussion-open button and toggles a favorite (KT-464)', () => {
     const onTogglePin = vi.fn();
-    renderItem({ onTogglePin });
+    const { row: open } = renderItem({ onTogglePin });
 
-    const open = screen.getByRole('button', { name: /DiscAlpha/ });
+    // KT-464 — a visible star sits next to the "⋯" menu, same contract as
+    // the Automations/Pages row favorites; it's no longer a menu item.
+    const favorite = screen.getByRole('button', { name: 'disc.pin · DiscAlpha' });
     const actions = screen.getByRole('button', { name: 'disc.actions' });
+    expect(open.contains(favorite)).toBe(false);
     expect(open.contains(actions)).toBe(false);
+    expect(favorite.getAttribute('aria-pressed')).toBe('false');
 
-    fireEvent.click(actions);
-    fireEvent.click(screen.getByRole('menuitem', { name: 'disc.pin' }));
+    fireEvent.click(favorite);
     expect(onTogglePin).toHaveBeenCalledWith('disc-alpha', true);
-    expect(screen.queryByRole('menu')).toBeNull();
+
+    // The "⋯" menu no longer duplicates the favorite action.
+    fireEvent.click(actions);
+    expect(screen.queryByRole('menuitem', { name: /pin/i })).toBeNull();
+  });
+
+  it('renders no favorite toggle when onTogglePin is omitted', () => {
+    renderItem();
+    expect(screen.queryByRole('button', { name: /disc\.pin|disc\.unpin/ })).toBeNull();
+  });
+
+  it('reflects a pinned discussion as already-active and offers to unpin it', () => {
+    const onTogglePin = vi.fn();
+    renderItem({ onTogglePin, disc: disc({ pinned: true }) });
+
+    const favorite = screen.getByRole('button', { name: 'disc.unpin · DiscAlpha' });
+    expect(favorite.getAttribute('aria-pressed')).toBe('true');
+
+    fireEvent.click(favorite);
+    expect(onTogglePin).toHaveBeenCalledWith('disc-alpha', false);
   });
 
   it('archives from the explicit keyboard-accessible menu', () => {

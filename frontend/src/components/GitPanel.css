@@ -43,6 +43,124 @@
   letter-spacing: normal;
 }
 
+.git-workspace-provenance {
+  margin: 0 10px 8px;
+  padding: 9px 10px;
+  border: 1px solid var(--kr-border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--kr-bg-surface);
+  color: var(--kr-text-dim);
+  font-size: 11px;
+}
+
+.git-workspace-provenance[data-state='detached'],
+.git-workspace-provenance[data-state='missing'] {
+  border-color: color-mix(in srgb, var(--kr-warning) 35%, var(--kr-border-subtle));
+}
+
+.git-workspace-provenance-head,
+.git-workspace-provenance-facts {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+
+.git-workspace-provenance-head {
+  justify-content: space-between;
+  color: var(--kr-text-primary);
+}
+
+.git-workspace-provenance code {
+  display: block;
+  margin: 6px 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.git-workspace-provenance-facts span {
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: var(--kr-bg-raised);
+}
+
+.git-workspace-provenance p {
+  margin: 7px 0 0;
+  color: var(--kr-warning);
+}
+
+.git-commit-history {
+  border-top: 1px solid var(--kr-border-subtle);
+}
+
+.git-commit-history-list {
+  display: grid;
+  gap: 3px;
+  padding: 0 9px 8px;
+}
+
+.git-commit-history-progress {
+  color: var(--kr-text-faint);
+  font-size: 10px;
+}
+
+.git-commit-history-row {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr) max-content;
+  gap: 7px;
+  align-items: baseline;
+  min-width: 0;
+  font-size: 11px;
+}
+
+.git-commit-history-row code {
+  color: var(--kr-accent-ink);
+}
+
+.git-commit-history-row span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.git-commit-history-row small {
+  color: var(--kr-text-faint);
+}
+
+.git-load-more-commits {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: calc(100% - 18px);
+  min-height: 28px;
+  gap: 6px;
+  margin: 0 9px 9px;
+  border: 1px solid var(--kr-border-subtle);
+  border-radius: var(--kr-r-sm);
+  background: var(--kr-bg-raised);
+  color: var(--kr-text-secondary);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.git-load-more-commits:hover:not(:disabled),
+.git-load-more-commits:focus-visible {
+  border-color: var(--kr-accent-border);
+  color: var(--kr-accent);
+  outline: none;
+}
+
+.git-load-more-commits:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
+.git-load-more-commits .git-spin {
+  animation: spin 1s linear infinite;
+}
+
 .git-body {
   flex: 1;
   overflow-y: auto;
@@ -547,6 +665,64 @@
 .git-diff-content {
   flex: 1;
   min-width: 0;
+}
+
+/* ── KT-453: comment-on-line/-range affordance ───────────
+   Hidden until the row is hovered/focused, or the line is part of the
+   current selection — a permanently visible icon on every line would be
+   pure noise on a large diff. */
+.git-diff-comment-btn {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  border-radius: var(--kr-radius-sm);
+  background: transparent;
+  color: var(--kr-text-dim);
+  opacity: 0;
+  cursor: pointer;
+}
+.git-diff-line:hover .git-diff-comment-btn,
+.git-diff-line:focus-within .git-diff-comment-btn,
+.git-diff-comment-btn[data-selected="true"] {
+  opacity: 1;
+}
+.git-diff-comment-btn:hover,
+.git-diff-comment-btn[data-selected="true"] {
+  background: rgba(var(--kr-accent-rgb), 0.18);
+  color: var(--kr-accent-ink);
+}
+
+/* A line inside the current selection gets a left accent bar on top of
+   its normal add/del/context styling — never color-only: the bar and the
+   selection toolbar both carry the same information redundantly. */
+.git-diff-line[data-selected="true"] {
+  box-shadow: inset 2px 0 0 var(--kr-accent-ink);
+}
+
+.git-diff-selection-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--kr-border-subtle);
+  background: var(--kr-bg-elevated);
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-secondary);
+}
+
+/* KT-461 — visible in place of the selection bar until the first line is
+   picked; a hover-only tooltip on the 💬 button wasn't discoverable enough
+   on its own. */
+.git-diff-selection-tip {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--kr-border-subtle);
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-dim);
 }
 
 @media (max-width: 760px) {

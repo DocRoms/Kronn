@@ -168,23 +168,42 @@ export interface DiffLine {
   content: string;
   /** Original full line (prefix included) — kept for copy-paste / debug. */
   raw: string;
+  /** New-file line number for `add`/`context` lines (post-image). `null` for
+   *  `del`/`hunk`/`meta` — a deleted line has no post-image position. */
+  newLine: number | null;
+  /** Old-file line number for `del`/`context` lines (pre-image). `null` for
+   *  `add`/`hunk`/`meta` — an added line has no pre-image position. */
+  oldLine: number | null;
 }
+
+const HUNK_HEADER = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
 
 /**
  * Classify every line of a unified-diff string.
  *
  * `+++`, `---`, `diff --git`, `index `, `new file` etc. are tagged `meta`
  * so the renderer can style them as header chrome (dim grey) instead of
- * confusing them with actual add/delete content.
+ * confusing them with actual add/delete content. `newLine`/`oldLine` are
+ * tracked per hunk (from the `@@ -a,b +c,d @@` header) so callers can build
+ * a `path:start-end` reference for a line range — required by the diff
+ * "comment on this line" flow, which needs a stable anchor independent of
+ * the line's position in the rendered list.
  */
 export function parseDiffLines(diff: string): DiffLine[] {
   const rawLines = diff.split('\n');
+  let oldCursor = 0;
+  let newCursor = 0;
   return rawLines.map<DiffLine>(raw => {
     if (raw.startsWith('+++') || raw.startsWith('---')) {
-      return { kind: 'meta', content: raw, raw };
+      return { kind: 'meta', content: raw, raw, newLine: null, oldLine: null };
     }
+    const hunkMatch = raw.startsWith('@@') ? raw.match(HUNK_HEADER) : null;
     if (raw.startsWith('@@')) {
-      return { kind: 'hunk', content: raw, raw };
+      if (hunkMatch) {
+        oldCursor = Number(hunkMatch[1]);
+        newCursor = Number(hunkMatch[2]);
+      }
+      return { kind: 'hunk', content: raw, raw, newLine: null, oldLine: null };
     }
     if (
       raw.startsWith('diff ') ||
@@ -193,19 +212,30 @@ export function parseDiffLines(diff: string): DiffLine[] {
       raw.startsWith('deleted file') ||
       raw.startsWith('rename ') ||
       raw.startsWith('similarity ') ||
-      raw.startsWith('Binary files ')
+      raw.startsWith('Binary files ') ||
+      // Git's own marker, not a source line — must not consume a cursor slot
+      // or the next real line's number would be off by one, and it must not
+      // render as a commentable line either.
+      raw.startsWith('\\ No newline at end of file')
     ) {
-      return { kind: 'meta', content: raw, raw };
+      return { kind: 'meta', content: raw, raw, newLine: null, oldLine: null };
     }
     if (raw.startsWith('+')) {
-      return { kind: 'add', content: raw.slice(1), raw };
+      const line: DiffLine = { kind: 'add', content: raw.slice(1), raw, newLine: newCursor, oldLine: null };
+      newCursor += 1;
+      return line;
     }
     if (raw.startsWith('-')) {
-      return { kind: 'del', content: raw.slice(1), raw };
+      const line: DiffLine = { kind: 'del', content: raw.slice(1), raw, newLine: null, oldLine: oldCursor };
+      oldCursor += 1;
+      return line;
     }
     // Context line — may start with a leading space (standard unified
     // diff) or be empty (stripped terminator between hunks).
     const content = raw.startsWith(' ') ? raw.slice(1) : raw;
-    return { kind: 'context', content, raw };
+    const line: DiffLine = { kind: 'context', content, raw, newLine: newCursor, oldLine: oldCursor };
+    oldCursor += 1;
+    newCursor += 1;
+    return line;
   });
 }

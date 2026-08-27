@@ -51,6 +51,9 @@ describe('honestPresenceState (0.9.2 server contract + legacy fallback)', () => 
   it('trusts a known server state but always projects paused to offline', () => {
     expect(honestPresenceState('listening', 'active', null, stale, AWAY)).toBe('listening');
     expect(honestPresenceState('dormant', 'active', 'listening', recent, AWAY)).toBe('dormant');
+    expect(honestPresenceState('resume_expected', 'active', null, stale, AWAY)).toBe('resume_expected');
+    expect(honestPresenceState('stalled', 'active', null, recent, AWAY)).toBe('stalled');
+    expect(honestPresenceState('quota_exhausted', 'active', null, recent, AWAY)).toBe('quota_exhausted');
     expect(honestPresenceState('listening', 'paused', 'listening', recent, AWAY)).toBe('offline');
   });
 
@@ -65,6 +68,9 @@ describe('honestPresenceState (0.9.2 server contract + legacy fallback)', () => 
     expect(freshnessForPresence('running')).toBe('fresh');
     expect(freshnessForPresence('listening')).toBe('fresh');
     expect(freshnessForPresence('dormant')).toBe('idle');
+    expect(freshnessForPresence('resume_expected')).toBe('idle');
+    expect(freshnessForPresence('stalled')).toBe('away');
+    expect(freshnessForPresence('quota_exhausted')).toBe('away');
     expect(freshnessForPresence('offline')).toBe('away');
   });
 

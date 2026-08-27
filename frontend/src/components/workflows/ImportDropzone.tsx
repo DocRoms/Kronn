@@ -18,9 +18,12 @@ import { Upload, FileJson, X } from 'lucide-react';
 import { useT } from '../../lib/I18nContext';
 
 export interface ImportDropzoneProps {
-  /** Discriminator the file must contain (`"kronn.workflow"` or
-   *  `"kronn.quick_prompt"`). Empty = accept any kind (debug only). */
-  expectedKind: string;
+  /** Optional discriminator the file must contain (`"kronn.workflow"` or
+   *  `"kronn.quick_prompt"`). Generic hosts can validate via `validateParsed`. */
+  expectedKind?: string;
+  /** Optional host-level validation for generic importers. Return a localized
+   * error to keep the file in the dropzone, or null to accept it. */
+  validateParsed?: (parsed: { kind: string; [k: string]: unknown }) => string | null;
   /** Called once the file is parsed + kind-validated. Caller decides
    *  whether to show a preview drawer, ask for project_id, or POST
    *  directly. The full parsed envelope is passed back so the caller
@@ -35,6 +38,7 @@ export interface ImportDropzoneProps {
 
 export function ImportDropzone({
   expectedKind,
+  validateParsed,
   onFile,
   embedded = false,
   onCancel,
@@ -57,18 +61,28 @@ export function ImportDropzone({
       setError(t('imp.errorReadFailed'));
       return;
     }
-    let parsed: { kind?: string; [k: string]: unknown };
+    let parsed: unknown;
     try {
       parsed = JSON.parse(text);
     } catch {
       setError(t('imp.errorJsonParse'));
       return;
     }
-    if (expectedKind && parsed.kind !== expectedKind) {
-      setError(t('imp.errorWrongKind').replace('{expected}', expectedKind).replace('{got}', String(parsed.kind ?? '?')));
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      setError(t('imp.errorInvalidExport'));
       return;
     }
-    onFile(text, parsed as { kind: string; [k: string]: unknown });
+    const envelope = parsed as { kind?: string; [k: string]: unknown };
+    if (expectedKind && envelope.kind !== expectedKind) {
+      setError(t('imp.errorWrongKind').replace('{expected}', expectedKind).replace('{got}', String(envelope.kind ?? '?')));
+      return;
+    }
+    const validationError = validateParsed?.(envelope as { kind: string; [k: string]: unknown });
+    if (validationError) {
+      setError(validationError);
+      return;
+    }
+    onFile(text, envelope as { kind: string; [k: string]: unknown });
   };
 
   const onPickFile = () => fileInputRef.current?.click();

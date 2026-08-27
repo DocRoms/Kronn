@@ -51,8 +51,10 @@ export function useMatrixDecode(target: string, active: boolean): string {
 
   useEffect(() => {
     if (!active) {
-      setDisplay(target);
-      lastTargetRef.current = target;
+      // Inactive rendering returns `target` directly below. Leave the animated
+      // state alone so switching back on observes a target change and starts a
+      // fresh decode without mirroring props into state from an effect.
+      lastTargetRef.current = '';
       lastPulseRef.current = pulseTick;
       return;
     }
@@ -102,7 +104,7 @@ export function useMatrixDecode(target: string, active: boolean): string {
     return () => clearInterval(interval);
   }, [target, active, pulseTick]);
 
-  return display;
+  return active ? display : target;
 }
 
 /** Fisher-Yates shuffle of `[0, 1, ..., n-1]`. Deterministic output

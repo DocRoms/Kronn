@@ -64,7 +64,7 @@ for (const viewport of VIEWPORTS) {
     test.use({ viewport: { width: viewport.width, height: viewport.height } });
 
     // A full walk is inherently slow: each step that has to wait for its target
-    // spends up to 2 s in the provider's bounded wait before moving on.
+    // spends up to 15 s in the provider's bounded cross-page wait before moving on.
     test.setTimeout(240_000);
 
     test('every step keeps its card fully on screen and stays reachable', async ({ page }) => {
@@ -210,7 +210,7 @@ for (const viewport of VIEWPORTS) {
           // still never receive the click.
           await launchButton.evaluate(button => button.removeAttribute('disabled'));
           await launchButton.dispatchEvent('click');
-          await expect(counter).not.toHaveText(label, { timeout: 15_000 });
+          await expect(counter).not.toHaveText(label, { timeout: 25_000 });
           await expect(page.locator('.disc-new-overlay')).toBeHidden();
           await page.waitForTimeout(250);
           page.off('request', recordUnsafeRequest);
@@ -247,7 +247,22 @@ for (const viewport of VIEWPORTS) {
         // A step awaiting a real click drives the app; Next must still work so a
         // user is never trapped behind an interaction they cannot find.
         await nextBtn.click();
-        await expect(counter).not.toHaveText(label, { timeout: 15_000 });
+        try {
+          await expect(counter).not.toHaveText(label, { timeout: 15_000 });
+        } catch (error) {
+          const diagnostics = await page.evaluate(() => ({
+            progress: localStorage.getItem('kronn:tour-progress:v1'),
+            displayedStep: document.querySelector('.tour-tooltip')
+              ?.getAttribute('data-tour-step'),
+            newDiscussionTarget: Boolean(document.querySelector(
+              '[data-tour-id="new-disc-btn"]',
+            )),
+            settingsTarget: Boolean(document.querySelector(
+              '[data-tour-id="settings-agents"]',
+            )),
+          }));
+          throw new Error(`${String(error)}\nTour diagnostics: ${JSON.stringify(diagnostics)}`);
+        }
       }
 
       // Leaving the tour must not leave the app covered by the tour's own modal.

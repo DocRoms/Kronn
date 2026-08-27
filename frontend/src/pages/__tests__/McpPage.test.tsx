@@ -26,6 +26,9 @@ vi.mock('../../lib/api', () => ({
     getUiLanguage: vi.fn().mockResolvedValue('fr'),
     saveUiLanguage: vi.fn().mockResolvedValue(undefined),
   },
+  apiCallLogs: {
+    drift: vi.fn().mockResolvedValue([]),
+  },
 }));
 
 import { McpPage } from '../McpPage';
@@ -62,7 +65,7 @@ const makeConfig = (id: string, serverId: string, serverName: string, opts?: Par
   env_masked: [],
   args_override: null,
   is_global: opts?.is_global ?? false,
-  include_general: false,
+  include_general: opts?.include_general ?? true,
   config_hash: 'abc123',
   project_ids: opts?.project_ids ?? [],
   project_names: opts?.project_names ?? [],
@@ -93,6 +96,51 @@ describe('McpPage', () => {
     wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
     expect(screen.getByTestId('mcp-kronn-internal-card')).toHaveTextContent('Intégré');
     expect(document.body.textContent).not.toContain('Aucun plugin');
+  });
+
+  it('flags an endpoint that keeps failing, and says which kind of fault it is', async () => {
+    // A spec is written once and never re-checked. When it is wrong — or the
+    // API moves — the calls just keep failing and nothing surfaces it. The two
+    // cases need different words: an endpoint that NEVER answered is a spec
+    // that was wrong, one that also succeeds is a call that is.
+    const { apiCallLogs } = await import('../../lib/api');
+    vi.mocked(apiCallLogs.drift).mockResolvedValueOnce([
+      {
+        plugin_slug: 'github',
+        endpoint_path: '/v1/gone',
+        http_status: 404,
+        failures: 9,
+        successes: 0,
+        last_seen: '2026-08-20T10:00:00Z',
+      },
+    ]);
+    const overview: McpOverview = {
+      servers: [makeServer('github', 'GitHub')],
+      configs: [makeConfig('c1', 'github', 'GitHub')],
+      customized_contexts: [], incompatibilities: [], incomplete_configs: [],
+    };
+    wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
+    // Fake timers here: findBy* would poll on a clock that never advances.
+    await act(async () => {});
+
+    const badge = screen.getByTestId('mcp-endpoint-drift-github');
+    expect(badge.getAttribute('title')).toContain('/v1/gone');
+    expect(badge.getAttribute('title')).toContain('HTTP 404');
+    // "never succeeded" wording, not the "parameters do not match" one.
+    expect(badge.getAttribute('title')).toContain('aucun n\u2019a jamais abouti');
+  });
+
+  it('stays quiet when no endpoint is drifting', async () => {
+    // The badge must earn attention: if it appears on healthy plugins nobody
+    // reads it when it matters.
+    const overview: McpOverview = {
+      servers: [makeServer('github', 'GitHub')],
+      configs: [makeConfig('c1', 'github', 'GitHub')],
+      customized_contexts: [], incompatibilities: [], incomplete_configs: [],
+    };
+    wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
+    await act(async () => {});
+    expect(screen.queryByTestId('mcp-endpoint-drift-github')).toBeNull();
   });
 
   it('renders server names as group headers', () => {
@@ -459,6 +507,60 @@ describe('McpPage', () => {
 
     // Global badge should be rendered on the card
     expect(container.textContent).toContain('Global');
+  });
+
+  it('flags an orphan config and repairs it by enabling General scope', async () => {
+    vi.mocked(mcpsApi.updateConfig).mockClear();
+    const config = makeConfig('resend-config', 'resend', 'Resend', {
+      include_general: false,
+      project_ids: [],
+    });
+    vi.mocked(mcpsApi.updateConfig).mockResolvedValue({
+      ...config,
+      include_general: true,
+    });
+    const overview: McpOverview = {
+      servers: [makeServer('resend', 'Resend')],
+      configs: [config],
+      customized_contexts: [],
+      incompatibilities: [],
+      incomplete_configs: [],
+    };
+    wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
+
+    expect(screen.getByText('Invisible des agents')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Resend — Voir les détails' }));
+    expect(screen.getByRole('alert')).toHaveTextContent('Cette configuration n’est visible par aucun agent');
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Rendre visible dans Général' }));
+    });
+    expect(mcpsApi.updateConfig).toHaveBeenCalledWith('resend-config', {
+      include_general: true,
+    });
+  });
+
+  it('does not let the user remove the last agent scope', async () => {
+    vi.mocked(mcpsApi.updateConfig).mockClear();
+    const config = makeConfig('general-only', 'resend', 'Resend', {
+      include_general: true,
+      project_ids: [],
+    });
+    const overview: McpOverview = {
+      servers: [makeServer('resend', 'Resend')],
+      configs: [config],
+      customized_contexts: [],
+      incompatibilities: [],
+      incomplete_configs: [],
+    };
+    wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Resend — Voir les détails' }));
+
+    await act(async () => {
+      fireEvent.click(screen.getByTitle('Désactiver pour les discussions sans projet'));
+    });
+    expect(mcpsApi.updateConfig).not.toHaveBeenCalled();
+    expect(screen.getByText('Choisis au moins une portée avant de retirer la dernière.')).toBeInTheDocument();
   });
 
   it('"Add MCP" button opens the add form', () => {
