@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/screenshots/KronnLogo.jpg" alt="Kronn, Many agents. Zero chaos." width="720" />
+  <img src="site/screenshots/workflows.png" alt="Page Automatisation de Kronn montrant un workflow de revue de pull request multi-étapes avec des steps déterministes, agent, gate et notification." />
 </p>
 
 <p align="center">
@@ -17,10 +17,6 @@
 <p align="center">
   <a href="https://github.com/DocRoms/Kronn/stargazers"><img src="https://img.shields.io/github/stars/DocRoms/Kronn?style=social" alt="Étoiles GitHub" /></a>
   <a href="https://github.com/DocRoms/Kronn/commits/main"><img src="https://img.shields.io/github/last-commit/DocRoms/Kronn?label=dernier%20commit" alt="Dernier commit" /></a>
-</p>
-
-<p align="center">
-  <img src="docs/screenshots/kronn-projects.png" alt="Dashboard Kronn, nav (Projets, Discussions, Planification, Automatisation, Plugins, Config) et trois projets démo publics. Le projet sélectionné affiche la santé du contexte agent, les langages détectés, la fraîcheur des dépendances et le statut de documentation." />
 </p>
 
 **Pilote Claude Code, Codex, Gemini, Ollama (100 % local), LiteLLM et 3 autres agents IA depuis un seul dashboard self-hosted, avec des MCP partagés, des secrets chiffrés et des workflows répétables.**

@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/screenshots/KronnLogo.jpg" alt="Kronn, Many agents. Zero chaos." width="720" />
+  <img src="site/screenshots/workflows.png" alt="Kronn Automation page showing a multi-step pull-request review workflow with deterministic, agent, gate, and notification steps." />
 </p>
 
 <p align="center">
@@ -17,10 +17,6 @@
 <p align="center">
   <a href="https://github.com/DocRoms/Kronn/stargazers"><img src="https://img.shields.io/github/stars/DocRoms/Kronn?style=social" alt="GitHub stars" /></a>
   <a href="https://github.com/DocRoms/Kronn/commits/main"><img src="https://img.shields.io/github/last-commit/DocRoms/Kronn?label=last%20commit" alt="Last commit" /></a>
-</p>
-
-<p align="center">
-  <img src="docs/screenshots/kronn-projects.en.png" alt="Kronn dashboard, top nav (Projects, Discussions, Planning, Automation, Plugins, Config), and three public-safe demo projects. The selected project shows agent-context health, detected languages, dependency freshness and documentation status." />
 </p>
 
 **Run Claude Code, Codex, Gemini, Ollama (100% local), LiteLLM and 3 other AI coding agents from one self-hosted dashboard, with shared MCPs, secrets, and repeatable workflows.**
