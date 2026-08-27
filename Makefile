@@ -358,7 +358,7 @@ docs-setup:
 ## Build the desktop app for the current platform
 desktop:
 	@echo "$(CYAN)▸ Building desktop app...$(RESET)"
-	@cd desktop && pnpm build
+	@cd desktop && cargo tauri build
 	@echo "$(GREEN)✓ Desktop app built$(RESET)"
 	@echo "  Output: desktop/src-tauri/target/release/bundle/"
 
@@ -370,7 +370,7 @@ docs-bundle:
 ## Run the desktop app in dev mode (hot reload)
 desktop-dev:
 	@echo "$(CYAN)▸ Starting desktop app (dev)...$(RESET)"
-	@cd desktop && pnpm dev
+	@cd desktop && cargo tauri dev
 
 ## Build desktop app for a specific target (cross-compilation)
 ## Usage: make desktop-target T=x86_64-pc-windows-msvc

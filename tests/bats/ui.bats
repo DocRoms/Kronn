@@ -456,6 +456,60 @@ EOF
     assert_success
 }
 
+@test "dev backend supervisor serves the last successful binary while Cargo is blocked" {
+    local fake_bin="$BATS_TEST_TMPDIR/supervisor-warm-bin"
+    local fake_backend_dir="$BATS_TEST_TMPDIR/backend-warm"
+    local fake_backend="$BATS_TEST_TMPDIR/kronn-warm"
+    local starts="$BATS_TEST_TMPDIR/backend-warm-starts"
+    local cargo_done="$BATS_TEST_TMPDIR/cargo-done"
+    mkdir -p "$fake_bin" "$fake_backend_dir"
+
+    cat >"$fake_bin/cargo" <<'EOF'
+#!/usr/bin/env bash
+sleep 1
+touch "$KRONN_TEST_CARGO_DONE"
+EOF
+    printf '#!/usr/bin/env bash\nexit 0\n' >"$fake_bin/curl"
+    cat >"$fake_backend" <<'EOF'
+#!/usr/bin/env bash
+printf 'start\n' >>"$KRONN_TEST_BACKEND_STARTS"
+trap 'exit 0' TERM INT
+while true; do sleep 1; done
+EOF
+    cat >"$fake_bin/watchexec" <<'EOF'
+#!/usr/bin/env bash
+trap 'exit 0' TERM INT
+while true; do sleep 1; done
+EOF
+    chmod +x "$fake_bin/cargo" "$fake_bin/curl" "$fake_bin/watchexec" "$fake_backend"
+
+    run env \
+        PATH="$fake_bin:$PATH" \
+        KRONN_DEV_BACKEND_DIR="$fake_backend_dir" \
+        KRONN_DEV_BACKEND_BINARY="$fake_backend" \
+        KRONN_DEV_BACKEND_HEALTH_URL="http://test.invalid/health" \
+        KRONN_TEST_BACKEND_STARTS="$starts" \
+        KRONN_TEST_CARGO_DONE="$cargo_done" \
+        bash -c '
+            "$1" >/dev/null 2>&1 &
+            supervisor=$!
+            for _ in $(seq 1 40); do
+                [[ -s "$2" ]] && break
+                sleep 0.025
+            done
+            [[ -s "$2" ]]
+            [[ ! -e "$3" ]]
+            for _ in $(seq 1 80); do
+                [[ -e "$3" ]] && break
+                sleep 0.025
+            done
+            kill -TERM "$supervisor" 2>/dev/null || true
+            wait "$supervisor" 2>/dev/null || true
+        ' _ "$PROJECT_ROOT/scripts/dev-backend-supervisor.sh" "$starts" "$cargo_done"
+
+    assert_success
+}
+
 # ─── ask_yn EOF safety (must not loop forever on closed stdin) ─────────────────
 
 @test "ask_yn: returns 1 (no) on EOF instead of looping forever" {
