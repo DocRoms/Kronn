@@ -21,6 +21,8 @@ failure_file="${KRONN_DEV_BACKEND_FAILURE_FILE:-}"
 backend_pid=""
 watcher_pid=""
 reload_requested=0
+bootstrap_started=0
+bootstrap_fingerprint=""
 
 record_failure() {
     local status="${1:-1}"
@@ -73,13 +75,38 @@ trap cleanup EXIT
 
 [[ -n "$failure_file" ]] && rm -f "$failure_file"
 
-echo "  Building initial backend..."
-if ! (cd "$BACKEND_DIR" && cargo build); then
-    record_failure 101
-    exit 101
+# A repository-wide Cargo target is deliberately shared by the backend,
+# desktop shell, tests and clippy.  Another legitimate Cargo command can hold
+# that build lock for minutes.  Do not turn that contention into a Kronn
+# outage: boot the last successfully-built backend immediately, then let Cargo
+# finish in parallel with the already-serving process.  The checksum tells us
+# whether the initial build actually replaced the executable and therefore
+# needs one swap; an up-to-date build must not interrupt a run for no reason.
+if [[ -x "$BACKEND_BINARY" ]]; then
+    bootstrap_fingerprint="$(cksum <"$BACKEND_BINARY" 2>/dev/null || true)"
+    echo "  Starting the last successful backend while Cargo checks for updates..."
+    start_backend
+    bootstrap_started=1
 fi
 
-start_backend
+echo "  Building initial backend..."
+if ! (cd "$BACKEND_DIR" && cargo build); then
+    if (( bootstrap_started == 0 )) || ! kill -0 "$backend_pid" 2>/dev/null; then
+        record_failure 101
+        exit 101
+    fi
+    echo "  Initial backend build failed — keeping the last successful backend online." >&2
+elif (( bootstrap_started == 0 )); then
+    start_backend
+else
+    current_fingerprint="$(cksum <"$BACKEND_BINARY" 2>/dev/null || true)"
+    if [[ -z "$bootstrap_fingerprint" || "$current_fingerprint" != "$bootstrap_fingerprint" ]]; then
+        echo "  Initial backend build ready — swapping to the updated binary..."
+        stop_child "$backend_pid"
+        backend_pid=""
+        start_backend
+    fi
+fi
 
 # A successful watched build signals this supervisor with USR1. `--postpone`
 # avoids rebuilding immediately after the explicit initial build above.

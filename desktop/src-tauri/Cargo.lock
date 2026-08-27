@@ -2471,7 +2471,7 @@ dependencies = [
 
 [[package]]
 name = "kronn"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -2491,8 +2491,10 @@ dependencies = [
  "futures",
  "governor",
  "keyring",
+ "libc",
  "open",
  "pdf-extract",
+ "proc-macro2",
  "regex-lite",
  "reqwest",
  "rusqlite",
@@ -2501,6 +2503,7 @@ dependencies = [
  "serde_json",
  "serde_json_path",
  "sha2 0.11.0",
+ "syn 2.0.119",
  "thiserror 2.0.20",
  "tokio",
  "tokio-tungstenite",
@@ -2521,7 +2524,7 @@ dependencies = [
 
 [[package]]
 name = "kronn-desktop"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "axum",

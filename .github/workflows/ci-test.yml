@@ -665,3 +665,47 @@ jobs:
       - name: Run pnpm audit
         working-directory: frontend
         run: pnpm audit --audit-level=moderate
+
+  # ── KT-373 — portability of the disk-maintenance surface ────────────────────
+  #
+  # `test-backend` proves this code on Linux only. The guards it contains are
+  # path- and filesystem-shaped — symlinks vs. reparse points, permission
+  # semantics, free-space reporting — which is exactly the class of behaviour a
+  # single OS cannot vouch for. `desktop-build.yml` compiles for all three, but
+  # compiling is not executing, and after the 2026-08-21 disk incident this gate
+  # is not one to relax.
+  #
+  # Deliberately NOT the whole backend suite duplicated three times: only the
+  # modules whose behaviour actually differs per platform. Linux stays covered by
+  # `test-backend`; this adds the two hosts nothing else runs on.
+  test-backend-portability:
+    if: contains(github.event.pull_request.labels.*.name, 'ci-test')
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: portability-${{ matrix.os }}-${{ hashFiles('backend/Cargo.lock') }}
+          restore-keys: portability-${{ matrix.os }}-
+
+      - name: Worktree lifecycle and disk guards
+        run: cargo test --lib core::worktree
+
+      - name: Disk maintenance surface
+        run: cargo test --lib api::maintenance
+
+      - name: Cleanup authorisation from durable state
+        run: cargo test --lib db::orchestration
