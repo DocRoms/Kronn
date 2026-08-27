@@ -92,22 +92,6 @@
       pointer-events: none;
       z-index: 1;
     }
-    body::after {
-      content: '';
-      position: fixed;
-      inset: 0;
-      background: repeating-linear-gradient(
-        0deg,
-        transparent 0,
-        transparent 2px,
-        rgba(0, 0, 0, 0.22) 2px,
-        rgba(0, 0, 0, 0.22) 4px
-      );
-      pointer-events: none;
-      z-index: 200;
-      mix-blend-mode: multiply;
-    }
-
     .container { max-width: 1180px; margin: 0 auto; padding: 0 40px; position: relative; z-index: 2; }
 
     code {
