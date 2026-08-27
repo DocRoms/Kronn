@@ -1312,7 +1312,8 @@ async fn provision_task_execution_inner(
         // already have created it (resume): adopt it only after proving HEAD==base,
         // else create it fresh (fail-closed on any foreign/stale collision).
         let create_result = if worktree_path.exists() {
-            worktree::verify_worktree_head(&worktree_path, &base_sha).map(|_| ())
+            worktree::verify_worktree_head(&worktree_path, &base_sha)
+                .and_then(|_| worktree::materialize_task_submodules(&repo_path, &worktree_path))
         } else {
             worktree::create_task_worktree(
                 &repo_path,
@@ -1666,31 +1667,11 @@ pub async fn run_integration(
 
     // ── Validations: a failure sends the work back, it never blocks the parent ──
     checkpoint(db, exec_id, CheckpointStep::Validating).await?;
-    for spec in &run.validations {
-        let (code, ms, summary) = run_one_validation(spec, child).await;
-        let recorded = {
-            let (id, spec, merge) = (exec_id.to_string(), spec.clone(), merge_sha.clone());
-            let summary = summary.clone();
-            db.with_conn(move |conn| {
-                crate::db::orchestration::record_validation_run(
-                    conn,
-                    &id,
-                    Some(&merge),
-                    &spec,
-                    code,
-                    Some(ms),
-                    Some(&summary),
-                )
-            })
-            .await
-            .map_err(|e| internal(e.to_string()))?
-        };
-        if !recorded.passed() {
-            send_back(db, exec_id, format!("validation failed: {}", spec.command)).await?;
-            return Ok(IntegrationOutcome::SentBack {
-                reason: format!("validation failed: {}", spec.command),
-            });
-        }
+    if let Some(reason) =
+        run_pending_validations(db, exec_id, &run.validations, child, &merge_sha).await?
+    {
+        send_back(db, exec_id, reason.clone()).await?;
+        return Ok(IntegrationOutcome::SentBack { reason });
     }
 
     // ── Arm: the backup ref must exist and read back before the parent may move ──
@@ -1848,32 +1829,11 @@ async fn resume_recovered_integration(
         send_back(db, exec_id, reason.clone()).await?;
         return Ok(IntegrationOutcome::SentBack { reason });
     }
-    for spec in &run.validations {
-        let (code, duration, summary) = run_one_validation(spec, child).await;
-        let id = exec_id.to_string();
-        let spec = spec.clone();
-        let command = spec.command.clone();
-        let candidate = merge_sha.clone();
-        let summary_for_db = summary.clone();
-        let recorded = db
-            .with_conn(move |conn| {
-                crate::db::orchestration::record_validation_run(
-                    conn,
-                    &id,
-                    Some(&candidate),
-                    &spec,
-                    code,
-                    Some(duration),
-                    Some(&summary_for_db),
-                )
-            })
-            .await
-            .map_err(|error| internal(error.to_string()))?;
-        if !recorded.passed() {
-            let reason = format!("recovered validation failed: {command}");
-            send_back(db, exec_id, reason.clone()).await?;
-            return Ok(IntegrationOutcome::SentBack { reason });
-        }
+    if let Some(reason) =
+        run_pending_validations(db, exec_id, &run.validations, child, &merge_sha).await?
+    {
+        send_back(db, exec_id, reason.clone()).await?;
+        return Ok(IntegrationOutcome::SentBack { reason });
     }
     let target_sha = recovered_execution
         .candidate_target_sha
@@ -2388,6 +2348,62 @@ async fn send_back(db: &Database, exec_id: &str, reason: String) -> Result<(), P
     })
     .await
     .map_err(|e| ProvisionError::Internal(e.to_string()))
+}
+
+/// Execute only validations without an already-persisted success for this
+/// candidate. This makes a resumed `Validating` checkpoint idempotent even if
+/// the preceding process stopped between two validation commands.
+async fn run_pending_validations(
+    db: &Database,
+    exec_id: &str,
+    validations: &[crate::models::ValidationSpec],
+    child: &std::path::Path,
+    merge_sha: &str,
+) -> Result<Option<String>, ProvisionError> {
+    for spec in validations {
+        let id = exec_id.to_string();
+        let candidate = merge_sha.to_string();
+        let spec_for_lookup = spec.clone();
+        let already_passed = db
+            .with_conn(move |conn| {
+                crate::db::orchestration::has_passing_validation_run(
+                    conn,
+                    &id,
+                    &candidate,
+                    &spec_for_lookup,
+                )
+            })
+            .await
+            .map_err(|error| ProvisionError::Internal(error.to_string()))?;
+        if already_passed {
+            continue;
+        }
+
+        let (code, duration, summary) = run_one_validation(spec, child).await;
+        let id = exec_id.to_string();
+        let spec = spec.clone();
+        let command = spec.command.clone();
+        let candidate = merge_sha.to_string();
+        let summary_for_db = summary.clone();
+        let recorded = db
+            .with_conn(move |conn| {
+                crate::db::orchestration::record_validation_run(
+                    conn,
+                    &id,
+                    Some(&candidate),
+                    &spec,
+                    code,
+                    Some(duration),
+                    Some(&summary_for_db),
+                )
+            })
+            .await
+            .map_err(|error| ProvisionError::Internal(error.to_string()))?;
+        if !recorded.passed() {
+            return Ok(Some(format!("validation failed: {command}")));
+        }
+    }
+    Ok(None)
 }
 
 /// Run one declared validation inside the child worktree, through the same
@@ -4128,6 +4144,35 @@ pub(crate) async fn continue_approved_review(
         verdict: ReviewVerdict::Approve,
         execution: refreshed,
     })
+}
+
+/// Queue an approved checkpoint on a server-owned task. The execution and its
+/// integration checkpoints are the durable job record; boot reconciliation can
+/// resume them after a server stop. The spawned task is deliberately detached
+/// from the HTTP/MCP request, so dropping that transport cannot cancel a long
+/// validation command. Concurrent enqueues are safe: the first task commits
+/// the `Approved -> Integrating` candidate-anchor checkpoint, and every later
+/// task loses that durable status gate before it can build, validate, or apply.
+fn enqueue_approved_integration(state: &AppState, outcome: ReviewOutcome) -> ReviewOutcome {
+    let ReviewOutcome::Reviewed {
+        verdict: ReviewVerdict::Approve,
+        execution,
+    } = &outcome
+    else {
+        return outcome;
+    };
+    let db = state.db.clone();
+    let execution_id = execution.id.clone();
+    tokio::spawn(async move {
+        match run_integration(&db, &execution_id).await {
+            Ok(IntegrationOutcome::Refused { reason }) => {
+                tracing::warn!(execution_id, %reason, "protected integration was refused after approval")
+            }
+            Ok(_) => {}
+            Err(error) => tracing::error!(execution_id, ?error, "protected integration job failed"),
+        }
+    });
+    outcome
 }
 
 /// The DoD-5 approve guard. Returns `Some(reason)` if approve must be refused, `None` if the
@@ -8558,13 +8603,9 @@ pub async fn review(
     )
     .await
     {
-        Ok(outcome) => match continue_approved_review(&state.db, outcome).await {
-            Ok(outcome) => Json(review_outcome_to_response(outcome)),
-            Err(error) => {
-                let (code, message) = provision_error_parts(&error);
-                Json(ApiResponse::err_coded(code, message))
-            }
-        },
+        Ok(outcome) => Json(review_outcome_to_response(enqueue_approved_integration(
+            &state, outcome,
+        ))),
         Err(error) => {
             let (code, message) = provision_error_parts(&error);
             Json(ApiResponse::err_coded(code, message))
@@ -8613,13 +8654,9 @@ pub async fn human_review(
     };
     match decide_authorized_review(&state.db, execution, "Human", None, true, &decision_json).await
     {
-        Ok(outcome) => match continue_approved_review(&state.db, outcome).await {
-            Ok(outcome) => Json(review_outcome_to_response(outcome)),
-            Err(error) => {
-                let (code, message) = provision_error_parts(&error);
-                Json(ApiResponse::err_coded(code, message))
-            }
-        },
+        Ok(outcome) => Json(review_outcome_to_response(enqueue_approved_integration(
+            &state, outcome,
+        ))),
         Err(error) => {
             let (code, message) = provision_error_parts(&error);
             Json(ApiResponse::err_coded(code, message))
@@ -8636,6 +8673,9 @@ mod tests {
     };
     use std::path::Path;
     use std::process::Command;
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::sync::RwLock;
 
     #[test]
     fn recovered_apply_must_win_its_durable_claim_before_touching_git() {
@@ -10614,6 +10654,78 @@ mod tests {
             child.exists(),
             "failed validation preserves the worker checkout"
         );
+    }
+
+    #[tokio::test]
+    async fn resumed_validating_checkpoint_does_not_duplicate_a_persisted_validation() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let validation = ValidationSpec {
+            command: "false".into(),
+            quick_exec_id: None,
+            timeout_secs: Some(5),
+        };
+        let (execution, _task_ref, child) = approved_execution_with_commit(
+            &db,
+            repo.path(),
+            "validating-idempotence",
+            "worker.txt",
+            "done",
+            vec![validation.clone()],
+        )
+        .await;
+        let target_sha = git_rev(repo.path(), "main");
+        checkpoint(
+            &db,
+            &execution.id,
+            CheckpointStep::Anchored(target_sha.clone()),
+        )
+        .await
+        .unwrap();
+        let merge_sha = match worktree::build_candidate(&child, &target_sha).unwrap() {
+            worktree::CandidateOutcome::Built { sha } => sha,
+            other => panic!("expected a candidate, got {other:?}"),
+        };
+        checkpoint(&db, &execution.id, CheckpointStep::Built(merge_sha.clone()))
+            .await
+            .unwrap();
+        checkpoint(&db, &execution.id, CheckpointStep::Validating)
+            .await
+            .unwrap();
+        let (id, candidate, spec) = (execution.id.clone(), merge_sha.clone(), validation.clone());
+        db.with_conn(move |conn| {
+            crate::db::orchestration::record_validation_run(
+                conn,
+                &id,
+                Some(&candidate),
+                &spec,
+                Some(0),
+                Some(1),
+                Some("completed before transport loss"),
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let result = run_pending_validations(&db, &execution.id, &[validation], &child, &merge_sha)
+            .await
+            .unwrap();
+        assert_eq!(
+            result, None,
+            "the recorded checkpoint satisfies the command"
+        );
+        let id = execution.id.clone();
+        let rows = db
+            .with_conn(move |conn| crate::db::orchestration::list_validation_runs(conn, &id))
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.len(),
+            1,
+            "resume must not append a second validation row"
+        );
+        assert!(rows[0].passed());
     }
 
     /// An unpinned target is the case where the engine would have to guess which
@@ -13460,6 +13572,196 @@ mod tests {
         assert_eq!(
             exec_of(&db, &exec_id).await.status,
             TaskExecutionStatus::Done
+        );
+    }
+
+    async fn wait_for_execution_status(
+        db: &Database,
+        exec_id: &str,
+        expected: TaskExecutionStatus,
+    ) -> TaskExecution {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let execution = exec_of(db, exec_id).await;
+                if execution.status == expected {
+                    return execution;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("execution {exec_id} did not reach {}", expected.as_str()))
+    }
+
+    fn review_request(exec_id: &str, decision: &str) -> ReviewRequest {
+        ReviewRequest {
+            task_execution_id: exec_id.to_string(),
+            decision: serde_json::from_str(decision).expect("review decision JSON"),
+            source_agent: Some("ClaudeCode".to_string()),
+            source_session_id: Some("sess-b".to_string()),
+        }
+    }
+
+    /// A transport timeout after the handler has accepted an approval must not
+    /// own the validation process. Hold the request wrapper open until the
+    /// controlled validation is running, then abort it and prove the detached
+    /// job reaches its terminal checkpoint.
+    #[tokio::test]
+    async fn aborted_review_transport_does_not_orphan_validating_integration() {
+        let repo = init_repo();
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        let state = AppState::new_defaults(
+            Arc::new(RwLock::new(crate::core::config::default_config())),
+            db.clone(),
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        );
+        let (_parent, _child, exec_id, _head, _path) =
+            delivered_awaiting_review(&db, repo.path()).await;
+        let run_id = exec_of(&db, &exec_id).await.orchestration_run_id;
+        db.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE orchestration_runs SET validation_json = ?2 WHERE id = ?1",
+                rusqlite::params![
+                    run_id,
+                    serde_json::to_string(&vec![ValidationSpec {
+                        command: "sleep 1".to_string(),
+                        quick_exec_id: None,
+                        timeout_secs: Some(5),
+                    }])?
+                ],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let request = review_request(&exec_id, &review_approve(&db, &exec_id).await);
+        let response_task = tokio::spawn(async move {
+            let response = review(State(state), Json(request)).await;
+            // Model middleware/response serialization still owns this future;
+            // cancelling it models a caller disconnect after the handler has
+            // accepted the review but while the detached validation is active.
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            response
+        });
+
+        wait_for_execution_status(&db, &exec_id, TaskExecutionStatus::Validating).await;
+        response_task.abort();
+        assert!(
+            response_task.await.is_err(),
+            "the request transport was cancelled"
+        );
+
+        let terminal = wait_for_execution_status(&db, &exec_id, TaskExecutionStatus::Done).await;
+        assert!(terminal.integrated_sha.is_some());
+        let id = exec_id.clone();
+        let (reviews, validations): (i64, i64) = db
+            .with_conn(move |conn| {
+                Ok((
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM task_execution_reviews WHERE task_execution_id = ?1",
+                        [&id],
+                        |row| row.get(0),
+                    )?,
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM task_execution_validation_runs WHERE task_execution_id = ?1",
+                        [&id],
+                        |row| row.get(0),
+                    )?,
+                ))
+            })
+            .await
+            .unwrap();
+        assert_eq!(reviews, 1);
+        assert_eq!(validations, 1);
+    }
+
+    /// Two concurrent approve/retry transports can both enqueue work from the
+    /// same durable approval. The candidate-anchor status CAS lets exactly one
+    /// task cross into integration, so neither validation nor application is
+    /// duplicated.
+    #[tokio::test]
+    async fn concurrent_review_retries_share_one_durable_integration_claim() {
+        let repo = init_repo();
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        let state = AppState::new_defaults(
+            Arc::new(RwLock::new(crate::core::config::default_config())),
+            db.clone(),
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        );
+        let (_parent, _child, exec_id, _head, _path) =
+            delivered_awaiting_review(&db, repo.path()).await;
+        let run_id = exec_of(&db, &exec_id).await.orchestration_run_id;
+        db.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE orchestration_runs SET validation_json = ?2 WHERE id = ?1",
+                rusqlite::params![
+                    run_id,
+                    serde_json::to_string(&vec![ValidationSpec {
+                        command: "sleep 1".to_string(),
+                        quick_exec_id: None,
+                        timeout_secs: Some(5),
+                    }])?
+                ],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let decision = review_approve(&db, &exec_id).await;
+        let first = tokio::spawn(review(
+            State(state.clone()),
+            Json(review_request(&exec_id, &decision)),
+        ));
+        let second = tokio::spawn(review(
+            State(state),
+            Json(review_request(&exec_id, &decision)),
+        ));
+        let (first, second) = tokio::join!(first, second);
+        let first = first.unwrap().0;
+        let second = second.unwrap().0;
+        assert!(
+            first.success || second.success,
+            "one approval must be accepted"
+        );
+        assert!(
+            first.success || second.error_code.as_deref() == Some("conflict"),
+            "the competing retry must either win or observe the durable claim"
+        );
+
+        let terminal = wait_for_execution_status(&db, &exec_id, TaskExecutionStatus::Done).await;
+        assert!(terminal.integrated_sha.is_some());
+        let id = exec_id.clone();
+        let (reviews, validations, integrations): (i64, i64, i64) = db
+            .with_conn(move |conn| {
+                Ok((
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM task_execution_reviews WHERE task_execution_id = ?1",
+                        [&id],
+                        |row| row.get(0),
+                    )?,
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM task_execution_validation_runs WHERE task_execution_id = ?1",
+                        [&id],
+                        |row| row.get(0),
+                    )?,
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM task_execution_events \
+                         WHERE task_execution_id = ?1 \
+                           AND from_status = 'Approved' AND to_status = 'Integrating'",
+                        [&id],
+                        |row| row.get(0),
+                    )?,
+                ))
+            })
+            .await
+            .unwrap();
+        assert_eq!(reviews, 1, "the review decision remains idempotent");
+        assert_eq!(integrations, 1, "only one task wins the durable claim");
+        assert_eq!(
+            validations, 1,
+            "the losing task never records a duplicate validation"
         );
     }
 

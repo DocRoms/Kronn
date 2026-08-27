@@ -3431,6 +3431,30 @@ pub fn record_validation_run(
     })
 }
 
+/// A successful validation is immutable evidence for one exact candidate. A
+/// recovery may restart between two commands, so it must not append a second
+/// row for a command that already completed for that same candidate.
+pub fn has_passing_validation_run(
+    conn: &Connection,
+    exec_id: &str,
+    candidate_merge_sha: &str,
+    spec: &ValidationSpec,
+) -> Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM task_execution_validation_runs \
+         WHERE task_execution_id = ?1 AND candidate_merge_sha = ?2 \
+           AND command = ?3 AND quick_exec_id IS ?4 AND exit_code = 0)",
+        params![
+            exec_id,
+            candidate_merge_sha,
+            spec.command,
+            spec.quick_exec_id
+        ],
+        |row| row.get(0),
+    )
+    .map_err(Into::into)
+}
+
 pub fn list_validation_runs(
     conn: &Connection,
     exec_id: &str,

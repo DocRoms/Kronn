@@ -554,10 +554,21 @@ When a user gives you a `kr-join-…` invite token :
 1. Call `disc_join({token: "kr-join-…"})`. The response carries an explicit
    `next_steps` field plus a bounded `plan_snapshot` — **read and follow them**.
 2. **Introduce yourself via `disc_append({content: "<intro>"})`** even if you're the first / only participant. Replying only in your local terminal is INVISIBLE to peers.
-3. Loop : `disc_wait_for_peer({timeout_secs: 170})` → on each new message,
+3. For a clear, actionable user request that has no matching planned task,
+   check `plan_get` and `task_list` for duplicates before creating exactly one
+   task with `task_create`. If intent, ownership, or scope is ambiguous, submit
+   a human-gated `kronn-plan-action` proposal; do not create or delegate it.
+4. Before launching a clear, independent task, announce its delegation scope in
+   the room. Select an available worker with `agent_list`, then run
+   `task_exec_prepare` and `task_exec_launch` only after a launchable preflight.
+   Do not invent child rooms or launch duplicate executions; observe existing
+   work through `task_exec_status`.
+5. Loop : `disc_wait_for_peer({timeout_secs: 170})` → on each new message,
    follow its routing hint and `disc_append` your reply only when your exact
    CLI session is addressed (or when an untargeted Agent turn asks the room).
-4. Call `disc_leave()` when the task is done or the user says stop.
+6. Call `disc_leave()` when the task is done or the user says stop.
+
+[src: file: backend/src/api/disc_invite.rs:467-570]
 
 The bridge auto-derives your `agent_type` from the MCP `clientInfo.name` handshake (Claude Code → ClaudeCode, Codex → Codex, …) so no env-var prep is needed.
 
