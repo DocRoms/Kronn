@@ -116,6 +116,12 @@ pub struct Discussion {
     /// "en file" state survives navigation, reloads and missed WS frames.
     #[serde(default)]
     pub awaiting_agent: bool,
+    /// A provider invocation for this discussion has actually started and is
+    /// `Running` right now. Distinct from `awaiting_agent`, which stays true for
+    /// the whole obligation — including while the job waits behind the
+    /// per-agent concurrency cap.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub agent_running: bool,
     /// Test mode — branch the main repo was on before the user entered test
     /// mode. `Some` means the user is actively testing this discussion's
     /// branch in their main repo; `None` means normal worktree operation.

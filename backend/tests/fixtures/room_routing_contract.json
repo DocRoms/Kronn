@@ -1,0 +1,49 @@
+{
+  "_why": [
+    "KT-372 — the bridge resolves a mention into typed targets; the backend routes",
+    "on those targets. Both sides had green suites while the 2026-08-21 incident",
+    "happened between them: the bridge correctly resolved `@claude` to the native",
+    "agent, and the backend correctly delivered to the native agent. Nobody was",
+    "wrong, and the intended session never woke.",
+    "",
+    "This file is the contract they share. The Python suite asserts the bridge",
+    "EMITS exactly this for each case; the Rust integration test feeds the same",
+    "payload to the router and asserts who is woken. A change on either side that",
+    "does not match the other breaks a test rather than a room."
+  ],
+  "participants": [
+    { "id": 103, "agent_type": "ClaudeCode", "cli_ordinal": 1 },
+    { "id": 104, "agent_type": "ClaudeCode", "cli_ordinal": 2 }
+  ],
+  "room_agent": "ClaudeCode",
+  "cases": [
+    {
+      "name": "exact_cli_alias_reaches_one_session",
+      "mention": "@claude-cli-2 peux-tu relire ce commit ?",
+      "outcome": "delivers",
+      "emits": [{ "kind": "cli", "agent_type": "ClaudeCode", "cli_session_id": 104 }],
+      "wakes_session_pk": 104,
+      "never_wakes_session_pk": 103
+    },
+    {
+      "name": "first_session_is_reachable_without_a_rank",
+      "mention": "@claude-cli tu prends celui-ci ?",
+      "outcome": "delivers",
+      "emits": [{ "kind": "cli", "agent_type": "ClaudeCode", "cli_session_id": 103 }],
+      "wakes_session_pk": 103,
+      "never_wakes_session_pk": 104
+    },
+    {
+      "name": "bare_alias_is_refused_before_anyone_wakes",
+      "mention": "@claude peux-tu relire ?",
+      "outcome": "refuses",
+      "refusal_mentions": ["@claude-cli", "@claude-cli-2"]
+    },
+    {
+      "name": "an_unknown_rank_never_degrades_to_the_native_agent",
+      "mention": "@claude-cli-9 es-tu là ?",
+      "outcome": "refuses",
+      "refusal_mentions": ["does not identify a joined CLI"]
+    }
+  ]
+}

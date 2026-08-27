@@ -19,6 +19,7 @@ mod tests {
         let now = Utc::now();
         Discussion {
             awaiting_agent: false,
+            agent_running: false,
             id: id.into(),
             project_id: None,
             title: format!("Discussion {}", id),
@@ -114,6 +115,51 @@ mod tests {
         // d1 was updated more recently, should be first (ORDER BY updated_at DESC)
         assert_eq!(all[0].id, "d1");
         assert_eq!(all[1].id, "d2");
+    }
+
+    /// After a reload nothing live remains, so the list row is the only thing
+    /// left to tell a queued agent from a working one. The flag is read by
+    /// column position and a miss is swallowed as `false` — the very state that
+    /// used to show an hourglass over a running job — so pin both ends.
+    #[test]
+    fn list_tells_a_running_agent_from_a_queued_one() {
+        use crate::db::agent_dispatch::{self, NewAgentDispatchJob};
+
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("d1")).unwrap();
+        insert_message(&conn, "d1", &make_message("m1", MessageRole::User, None)).unwrap();
+
+        agent_dispatch::enqueue(
+            &conn,
+            NewAgentDispatchJob {
+                id: "job1",
+                discussion_id: "d1",
+                trigger_message_id: "m1",
+                trigger_sort_order: 1,
+                dedupe_key: "d1:m1",
+                agent_override: None,
+                chain_prompt_ids: &[],
+                batch_item: None,
+                group_id: None,
+                group_concurrency_limit: None,
+            },
+        )
+        .unwrap();
+
+        // Waiting for a slot: not working yet.
+        assert!(!list_discussions(&conn).unwrap()[0].agent_running);
+
+        agent_dispatch::claim(&conn, "job1").unwrap().unwrap();
+
+        // Claimed by a worker, but still waiting behind the provider capacity
+        // gate: it must remain queued in the UI.
+        assert!(!list_discussions(&conn).unwrap()[0].agent_running);
+
+        assert!(agent_dispatch::mark_agent_started(&conn, "job1").unwrap());
+
+        // Provider invocation started: the same row says so, with no stream
+        // or in-memory registry involved.
+        assert!(list_discussions(&conn).unwrap()[0].agent_running);
     }
 
     #[test]
@@ -462,7 +508,7 @@ mod tests {
     }
 
     #[test]
-    fn delete_last_agent_messages_no_user_messages_deletes_all() {
+    fn delete_last_agent_messages_no_user_messages_is_a_safe_noop() {
         let conn = test_conn();
         insert_discussion(&conn, &make_discussion("d1")).unwrap();
 
@@ -476,10 +522,91 @@ mod tests {
         insert_message(&conn, "d1", &make_message("m2", MessageRole::System, None)).unwrap();
 
         let deleted = delete_last_agent_messages(&conn, "d1").unwrap();
-        assert_eq!(deleted, 2);
+        assert_eq!(deleted, 0);
 
         let messages = list_messages(&conn, "d1").unwrap();
-        assert!(messages.is_empty());
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].id, "m1");
+        assert_eq!(messages[1].id, "m2");
+    }
+
+    #[test]
+    fn silent_crash_retry_deletes_only_its_reply_and_preserves_its_job() {
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("d-agent-room")).unwrap();
+
+        let trigger_order = insert_message(
+            &conn,
+            "d-agent-room",
+            &make_message("agent-trigger", MessageRole::Agent, Some(AgentType::Codex)),
+        )
+        .unwrap();
+        insert_message(
+            &conn,
+            "d-agent-room",
+            &make_message("room-context", MessageRole::System, None),
+        )
+        .unwrap();
+
+        crate::db::agent_dispatch::enqueue(
+            &conn,
+            crate::db::agent_dispatch::NewAgentDispatchJob {
+                id: "dispatch-1",
+                discussion_id: "d-agent-room",
+                trigger_message_id: "agent-trigger",
+                trigger_sort_order: trigger_order,
+                dedupe_key: "agent-room-dispatch-1",
+                agent_override: Some(&AgentType::ClaudeCode),
+                chain_prompt_ids: &[],
+                batch_item: None,
+                group_id: None,
+                group_concurrency_limit: None,
+            },
+        )
+        .unwrap();
+        crate::db::agent_dispatch::claim(&conn, "dispatch-1")
+            .unwrap()
+            .unwrap();
+
+        insert_message(
+            &conn,
+            "d-agent-room",
+            &make_message(
+                "failed-reply",
+                MessageRole::Agent,
+                Some(AgentType::ClaudeCode),
+            ),
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE messages SET agent_dispatch_job_id = 'dispatch-1' WHERE id = 'failed-reply'",
+            [],
+        )
+        .unwrap();
+
+        assert!(crate::db::agent_dispatch::retry_after(
+            &conn,
+            "dispatch-1",
+            5,
+            "silent_agent_crash"
+        )
+        .unwrap());
+        assert_eq!(
+            delete_dispatch_reply_messages(&conn, "d-agent-room", "dispatch-1").unwrap(),
+            1
+        );
+
+        let messages = list_messages(&conn, "d-agent-room").unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].id, "agent-trigger");
+        assert_eq!(messages[1].id, "room-context");
+        let job = crate::db::agent_dispatch::get(&conn, "dispatch-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            job.status,
+            crate::db::agent_dispatch::DispatchStatus::Pending
+        );
     }
 
     #[test]
@@ -536,6 +663,7 @@ mod tests {
         let first_dispatches = [UserDispatchSpec {
             job_id: "dispatch-revise-1",
             agent_override: Some(&AgentType::Codex),
+            dedupe_key: None,
         }];
         let first = revise_message_with_dispatch(
             &conn,
@@ -593,6 +721,7 @@ mod tests {
         let duplicate_dispatches = [UserDispatchSpec {
             job_id: "dispatch-revise-2",
             agent_override: Some(&AgentType::Codex),
+            dedupe_key: None,
         }];
         let duplicate = revise_message_with_dispatch(
             &conn,
@@ -743,10 +872,12 @@ mod tests {
             UserDispatchSpec {
                 job_id: "plural-revise-codex",
                 agent_override: Some(&AgentType::Codex),
+                dedupe_key: None,
             },
             UserDispatchSpec {
                 job_id: "plural-revise-claude",
                 agent_override: Some(&AgentType::ClaudeCode),
+                dedupe_key: None,
             },
         ];
 
@@ -810,6 +941,7 @@ mod tests {
         let dispatches = [UserDispatchSpec {
             job_id: "dispatch-disabled-revise",
             agent_override: Some(&AgentType::Codex),
+            dedupe_key: None,
         }];
         let revised = revise_message_with_dispatch(
             &conn,
@@ -2374,10 +2506,12 @@ mod tests {
             UserDispatchSpec {
                 job_id: "plural-codex",
                 agent_override: Some(&AgentType::Codex),
+                dedupe_key: None,
             },
             UserDispatchSpec {
                 job_id: "plural-claude",
                 agent_override: Some(&AgentType::ClaudeCode),
+                dedupe_key: None,
             },
         ];
 
@@ -2425,10 +2559,12 @@ mod tests {
                 UserDispatchSpec {
                     job_id: "plural-codex-retry",
                     agent_override: Some(&AgentType::Codex),
+                    dedupe_key: None,
                 },
                 UserDispatchSpec {
                     job_id: "plural-claude-retry",
                     agent_override: Some(&AgentType::ClaudeCode),
+                    dedupe_key: None,
                 },
             ],
             false,
@@ -2630,6 +2766,59 @@ mod tests {
             )
             .unwrap();
         assert_eq!(provenance, (1, Some("source-job".into())));
+    }
+
+    #[test]
+    fn native_agent_message_wakes_a_joined_cli_peer_it_mentions_by_alias() {
+        // KT-330 — the observed bug: a native principal that mentions a joined
+        // CLI peer by its room alias (`@claude-cli`) produced NO target, so the
+        // peer's disc_wait_for_peer never woke. Now the native path resolves the
+        // alias to a Cli target on the persisted message — no native dispatch,
+        // just a durable wake target the joined peer reads.
+        let conn = test_conn();
+        insert_discussion(&conn, &handoff_discussion("d-cli-wake")).unwrap();
+        let cli_pk = crate::db::discussion_sessions::create_session(
+            &conn,
+            "d-cli-wake",
+            "ClaudeCode",
+            Some("cli-sess-1"),
+            "peer",
+        )
+        .unwrap();
+        insert_message(
+            &conn,
+            "d-cli-wake",
+            &make_message("u-cli-wake", MessageRole::User, None),
+        )
+        .unwrap();
+        let mut response = agent_reply("a-cli-wake", AgentType::Codex, "u-cli-wake");
+        // Native Codex principal names the joined Claude CLI peer in prose; no
+        // handoff marker, so `candidate_agents` is empty — the mention is a CLI
+        // wake, never a native spawn.
+        response.content = "Merci @claude-cli, peux-tu relire ce diff ?".into();
+
+        let outcome = insert_native_agent_message_with_handoffs(
+            &conn,
+            "d-cli-wake",
+            &response,
+            true,
+            None,
+            &AgentType::Codex,
+            &[],
+            true,
+            Some(1),
+        )
+        .unwrap();
+
+        assert!(
+            outcome.dispatched_agents.is_empty(),
+            "a CLI mention must not spawn a native agent"
+        );
+        assert_eq!(
+            list_message_targets(&conn, "a-cli-wake").unwrap(),
+            vec![MessageTarget::cli(AgentType::ClaudeCode, cli_pk)],
+            "the joined CLI peer must get a durable Cli wake target"
+        );
     }
 
     #[test]
@@ -2951,5 +3140,129 @@ mod tests {
             Some("u-main-2".into())
         );
         assert_eq!(latest_main_user_message_id(&conn, "missing").unwrap(), None);
+    }
+
+    #[test]
+    fn within_tx_returns_each_job_once_and_respects_dedupe_key() {
+        // KT-318 T2 — the composable core returns the jobs it enqueues (so the
+        // orchestrator can bind their exact ids), enqueues each spec EXACTLY
+        // once, and an explicit orchestration key overrides the caller-scoped
+        // `peer:` scheme while `None` preserves it verbatim.
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("d-within-tx")).unwrap();
+        let message = make_message(
+            "m-within-tx",
+            MessageRole::Agent,
+            Some(AgentType::ClaudeCode),
+        );
+        let targets = [MessageTarget::agent(AgentType::ClaudeCode)];
+        let dispatches = [
+            UserDispatchSpec {
+                job_id: "orch-native",
+                agent_override: Some(&AgentType::ClaudeCode),
+                dedupe_key: Some("orch-dispatch:exec-1:0"),
+            },
+            UserDispatchSpec {
+                job_id: "peer-native",
+                agent_override: Some(&AgentType::Codex),
+                dedupe_key: None,
+            },
+        ];
+
+        let tx = conn.unchecked_transaction().unwrap();
+        let (_sort_order, jobs) = insert_message_with_targets_and_dispatches_within_tx(
+            &tx,
+            "d-within-tx",
+            &message,
+            &targets,
+            &dispatches,
+            None,
+        )
+        .unwrap();
+        tx.commit().unwrap();
+
+        // One job per spec, index-aligned — the caller can bind exact ids.
+        assert_eq!(
+            jobs.iter().map(|job| job.id.as_str()).collect::<Vec<_>>(),
+            vec!["orch-native", "peer-native"],
+        );
+        // Exactly one row per spec: no double-enqueue.
+        let job_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM agent_dispatch_jobs WHERE trigger_message_id = 'm-within-tx'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(job_count, 2, "no double-enqueue");
+        // Explicit orchestration key wins.
+        let orch_key: String = conn
+            .query_row(
+                "SELECT dedupe_key FROM agent_dispatch_jobs WHERE id = 'orch-native'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(orch_key, "orch-dispatch:exec-1:0");
+        // `None` preserves the historical caller-scoped scheme.
+        let peer_key: String = conn
+            .query_row(
+                "SELECT dedupe_key FROM agent_dispatch_jobs WHERE id = 'peer-native'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            peer_key.starts_with("peer:m-within-tx"),
+            "None keeps the peer scheme, got {peer_key}"
+        );
+    }
+
+    #[test]
+    fn within_tx_writes_are_invisible_until_commit() {
+        // KT-318 T2 — nothing the core writes is observable until the caller
+        // commits; a rolled-back provisioning attempt leaves no message and no
+        // dispatch, so the dispatcher and `wait_for_peer` never see a half-turn.
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("d-rollback")).unwrap();
+        let message = make_message(
+            "m-rollback",
+            MessageRole::Agent,
+            Some(AgentType::ClaudeCode),
+        );
+        let dispatches = [UserDispatchSpec {
+            job_id: "rollback-job",
+            agent_override: Some(&AgentType::ClaudeCode),
+            dedupe_key: Some("orch-dispatch:exec-2:0"),
+        }];
+
+        {
+            let tx = conn.unchecked_transaction().unwrap();
+            insert_message_with_targets_and_dispatches_within_tx(
+                &tx,
+                "d-rollback",
+                &message,
+                &[MessageTarget::agent(AgentType::ClaudeCode)],
+                &dispatches,
+                None,
+            )
+            .unwrap();
+            // `tx` dropped without commit → SQLite rolls the whole attempt back.
+        }
+
+        assert!(
+            crate::db::agent_dispatch::get(&conn, "rollback-job")
+                .unwrap()
+                .is_none(),
+            "rollback leaves no dispatch job"
+        );
+        let msg_exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM messages WHERE id = 'm-rollback')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!msg_exists, "rollback leaves no message");
     }
 }

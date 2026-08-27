@@ -49,6 +49,7 @@ import uuid
 
 MAX_DISC_APPEND_ATTACHMENTS = 8
 MAX_DISC_APPEND_ATTACHMENT_BYTES = 10 * 1024 * 1024
+BRIDGE_TOOL_SURFACE_VERSION = "0.3.8"
 
 
 # ─── Tool catalogue ────────────────────────────────────────────────────────
@@ -57,11 +58,26 @@ MAX_DISC_APPEND_ATTACHMENT_BYTES = 10 * 1024 * 1024
 # session start and never reloads it — a release can leave every live session
 # running an outdated bridge with no visible signal (tools missing, stale
 # descriptions). bridge_info compares these against the file's current mtime.
+def _bridge_script_snapshot():
+    """Return the on-disk (mtime, sha256), or an unverifiable sentinel.
+
+    mtime keeps bridge_info human-readable and preserves its historical signal;
+    the digest is authoritative so a rollback or a timestamp-preserving rewrite
+    cannot make a different tool contract look fresh.
+    """
+    try:
+        mtime = os.path.getmtime(__file__)
+        with open(__file__, "rb") as script:
+            digest = hashlib.sha256(script.read()).hexdigest()
+        return mtime, digest
+    except OSError:
+        return 0.0, None
+
+
 _BRIDGE_LOADED_AT = time.time()
-try:
-    _BRIDGE_SCRIPT_MTIME_AT_LOAD = os.path.getmtime(__file__)
-except OSError:
-    _BRIDGE_SCRIPT_MTIME_AT_LOAD = 0.0
+_BRIDGE_SCRIPT_MTIME_AT_LOAD, _BRIDGE_SCRIPT_SHA256_AT_LOAD = (
+    _bridge_script_snapshot()
+)
 
 TOOLS = [
     {
@@ -108,19 +124,17 @@ TOOLS = [
     {
         "name": "resolve_id",
         "description": (
-            "Resolve one opaque Kronn UUID without probing multiple tools. "
-            "Supports messages, discussions, projects, workflows, Planning "
-            "tasks, Quick Prompts and Quick APIs. Returns a compact kind, "
-            "copyable reference when one exists, title/summary, parent "
-            "context and the suggested object-specific MCP tool. Use this "
-            "FIRST when the user pastes an ID without saying what it is."
+            "Resolve any public MCP-addressable Kronn object id in one request. "
+            "Returns compact type, reference/title/summary, parent context and "
+            "the canonical reading tool; unknown or colliding ids fail explicitly. "
+            "Use FIRST when the user pastes an id without naming its type."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "id": {
                     "type": "string",
-                    "description": "Full opaque Kronn object UUID.",
+                    "description": "Full opaque Kronn object id.",
                 },
             },
             "required": ["id"],
@@ -131,9 +145,13 @@ TOOLS = [
         "description": (
             "Return metadata about the current discussion (message_count, "
             "agent, tier, has_cached_summary, msgs_since_last_summary, "
-            "summary_strategy, language, project_id). Call this FIRST "
-            "when you need to decide whether to fetch context. Cheap "
-            "(single DB read, no token cost)."
+            "summary_strategy, language, project_id), plus `addressable`: the "
+            "exact @mention for every identity reachable in this room, each with "
+            "its kind (`discussion_agent` = the room's own agent, `cli` = one "
+            "joined session). `ambiguous_aliases` names the providers present as "
+            "BOTH — for those, a bare @alias is refused, so read this BEFORE "
+            "writing a mention rather than discovering it in a refusal. Call this "
+            "FIRST when you need to decide whether to fetch context. Cheap."
         ),
         "inputSchema": {"type": "object", "properties": {}, "required": []},
     },
@@ -561,19 +579,14 @@ TOOLS = [
     {
         "name": "disc_append",
         "description": (
-            "Post to the bound discussion after `disc_join`; terminal-only replies "
-            "are invisible to peers. `content` is prose, never a tool name. SIMPLE "
-            "mode auto-fills identity and disc_id. Natural mentions become typed "
-            "targets; NEVER invent a pseudo. Native: `@claude`, `@codex`, `@vibe`, "
-            "`@gemini`, `@kiro`, `@copilot`, `@ollama`; the human is exactly `@user`; "
-            "joined CLIs use the shown `-cli` alias. Use `reply_to_message_id` for a "
-            "durable reply and `attachments` for local files (max 8 × 10 MB). "
-            "⚠ POSTING ALSO LISTENS unless `wait_for_reply:false`. BULK transcript "
-            "import uses `messages`; see `tool_manual({tool: \"disc_append\"})`. "
-            "Returns `{appended, skipped_as_duplicates, diverged, "
-            "last_sort_order, peer_messages_since_cursor, latest_peer_role}`; a "
-            "non-zero peer count means read/listen first. `last_sort_order` is a "
-            "write receipt, NEVER a read cursor."
+            "Post prose to the bound room. NEVER invent a pseudo: the human is `@user`; "
+            "native aliases are `@claude`, `@codex`, `@vibe`, `@gemini`, `@kiro`, "
+            "`@copilot`, `@ollama`; a joined CLI requires its exact `@…-cli[-N]` alias "
+            "from `disc_meta`. Ambiguous bare aliases are refused. Use "
+            "`reply_to_message_id` for a durable reply. POSTING ALSO LISTENS unless "
+            "`wait_for_reply:false`; `last_sort_order` is only a write receipt, never a "
+            "read cursor. Bulk import and dedup: "
+            "`tool_manual({tool: \"disc_append\"})`."
         ),
         "inputSchema": {
             "type": "object",
@@ -795,6 +808,227 @@ TOOLS = [
         },
     },
     {
+        "name": "agent_list",
+        "description": (
+            "List the worker identities this principal room can pass verbatim to "
+            "task_exec_prepare: native HTTP providers, host CLIs and exact joined CLI "
+            "sessions. Reports configured/reachable/available separately with stable, "
+            "secret-free reason codes. Call this before choosing a worker; then preflight "
+            "the selected `worker` object."
+        ),
+        "inputSchema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "task_exec_prepare",
+        "description": (
+            "Preflight a Todo from THIS principal room without mutation. Returns `launchable` "
+            "plus stable refusal codes after readiness/worker checks. Never bypass refusal. MUST read "
+            "tool_manual({tool: \"task_exec_prepare\"}) before authoring worker, scope or "
+            "validations."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_reference": {"type": "string", "description": "KT-### or task UUID."},
+                "worker": {
+                    "type": "object",
+                    "description": "Typed MessageTarget; exact transport shapes are in tool_manual.",
+                },
+                "worker_scope_intent": {
+                    "type": "string",
+                    "enum": ["generic", "scoped"],
+                    "description": (
+                        "Required contract sentinel. Use scoped with worker_scope, or "
+                        "generic only when no mechanical scope is intended."
+                    ),
+                },
+                "worker_scope": {
+                    "type": "object",
+                    "description": "Native-HTTP scope required when worker_scope_intent is scoped.",
+                },
+            },
+            "required": ["task_reference", "worker", "worker_scope_intent"],
+        },
+    },
+    {
+        "name": "task_exec_launch",
+        "description": (
+            "Launch the accepted preflight into its durable child room and SHA-pinned worktree. "
+            "Keep worker/scope unchanged; reuse idempotency_key on retry. MUST first read "
+            "tool_manual({tool: \"task_exec_prepare\"})."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_reference": {"type": "string"},
+                "worker": {
+                    "type": "object",
+                    "description": "Exact typed worker accepted by preflight.",
+                },
+                "worker_scope_intent": {
+                    "type": "string",
+                    "enum": ["generic", "scoped"],
+                    "description": "Must exactly match the preflighted scope intent.",
+                },
+                "worker_scope": {
+                    "type": "object",
+                    "description": "Exact scope accepted by preflight when intent is scoped.",
+                },
+                "base_rev": {"type": "string", "description": "Target/base branch; defaults to main."},
+                "idempotency_key": {"type": "string", "description": "Stable retry key."},
+                "validations": {
+                    "type": "array",
+                    "description": "Principal-owned gates; exact item shape is in tool_manual.",
+                    "items": {"type": "object"},
+                },
+            },
+            "required": ["task_reference", "worker", "worker_scope_intent"],
+        },
+    },
+    {
+        "name": "task_exec_status",
+        "description": (
+            "Read one TaskExecution you are a party to. Returns state, typed worker/model, "
+            "branch/SHAs/worktree, duration and honest token telemetry, DoD, delivery/review "
+            "attempts, validations and pending recovery. Use this after reconnect/resume; "
+            "if the execution id was lost, pass its KT task_reference to recover the active "
+            "or latest execution without replaying the launch. Do not infer state from chat."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_execution_id": {"type": "string"},
+                "task_reference": {"type": "string", "description": "KT-### or task UUID fallback."},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "task_exec_cancel",
+        "description": (
+            "Cancel a non-terminal TaskExecution as its principal. Kronn cancels due/live "
+            "dispatches; completed commits and audit history are preserved. The worktree is "
+            "kept by default; `remove_if_clean` removes only a proven-clean owned worktree "
+            "and refuses dirty or unproven paths."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_execution_id": {"type": "string"},
+                "reason": {"type": "string"},
+                "cleanup_policy": {"type": "string", "enum": ["preserve", "remove_if_clean"]},
+            },
+            "required": ["task_execution_id", "reason"],
+        },
+    },
+    {
+        "name": "task_exec_reassign",
+        "description": (
+            "Reassign an interrupted/blocked execution as principal, preserving its room, "
+            "worktree and evidence. Transport changes must change target.kind; invalid "
+            "pairs are refused before mutation."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_execution_id": {"type": "string"},
+                "worker": {"type": "object"},
+                "reason": {"type": "string"},
+            },
+            "required": ["task_execution_id", "worker", "reason"],
+        },
+    },
+    {
+        "name": "task_exec_accept_worker_offer",
+        "description": (
+            "Accept a task-execution worker control offer posted to THIS joined "
+            "CLI session and attach to the task's sub-discussion. Pass ONLY the "
+            "opaque `offer_id` from the offer message: the backend derives your "
+            "identity from this bridge's durable session and verifies you are the "
+            "EXACT session the offer targets (a different session — same provider "
+            "included — is refused). On success your session moves into the "
+            "sub-discussion, the work brief appears there, and this bridge rebinds "
+            "so subsequent calls and `disc_wait_for_peer` operate on the child "
+            "room. A refused offer surfaces an opaque reason (not found / not for "
+            "you) or a specific state (already accepted, expired)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "offer_id": {
+                    "type": "string",
+                    "description": "The opaque offer id from the control-offer message.",
+                },
+            },
+            "required": ["offer_id"],
+        },
+    },
+    {
+        "name": "task_exec_deliver",
+        "description": (
+            "Submit your DeliveryManifest v1 for review when the task's DoD is met "
+            "(KT-319). Pass your `task_execution_id` and the `manifest` object: the "
+            "backend derives your identity from this bridge's durable session and "
+            "verifies you are the execution's EXACT worker (a different session is "
+            "refused). On success the manifest is persisted, the execution flips to "
+            "AwaitingReview, and a review request wakes the principal in the parent "
+            "room — call this BEFORE announcing 'ready for review'. This does not "
+            "move your session; you stay in the sub-discussion. A malformed manifest "
+            "is refused, not silently accepted."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_execution_id": {
+                    "type": "string",
+                    "description": "The task execution you are the worker of (from your brief).",
+                },
+                "manifest": {
+                    "type": "object",
+                    "description": (
+                        "The DeliveryManifest v1 object: version, task_ref, head_sha, "
+                        "files_touched, tests, dod_status, docs, migrations, risks, "
+                        "limitations, summary (see the brief's delivery format)."
+                    ),
+                },
+            },
+            "required": ["task_execution_id", "manifest"],
+        },
+    },
+    {
+        "name": "task_exec_review",
+        "description": (
+            "Decide a delivered task attempt as the principal (KT-319). Pass the "
+            "`task_execution_id` and a ReviewDecision v1 `decision` object "
+            "(`decision`: 'approve' | 'request_changes'; `comment` is required for "
+            "request_changes; optional structured `findings`). The backend derives "
+            "your identity from this bridge's durable session and authorizes you as a "
+            "party to the execution — the parent-room principal, or the worker only if "
+            "the run explicitly enables self-review. approve is REFUSED if the manifest "
+            "is missing, the worktree HEAD drifted since delivery, or a DoD is unmet; "
+            "request_changes hands your findings to the worker in its sub-discussion "
+            "and keeps the worktree. A caller who is not a party gets one opaque refusal."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_execution_id": {
+                    "type": "string",
+                    "description": "The execution whose delivered attempt you are reviewing.",
+                },
+                "decision": {
+                    "type": "object",
+                    "description": (
+                        "The ReviewDecision v1 object: version, task_ref, decision "
+                        "('approve' | 'request_changes'), comment (required for "
+                        "request_changes), optional findings [{path?, line?, issue}]."
+                    ),
+                },
+            },
+            "required": ["task_execution_id", "decision"],
+        },
+    },
+    {
         "name": "disc_workspace_history_lease",
         "description": (
             "Advisory guard for destructive Git history rewrites in THIS "
@@ -1010,43 +1244,14 @@ TOOLS = [
     {
         "name": "disc_wait_for_peer",
         "description": (
-            "Wait for new messages from OTHER agents in the current Kronn "
-            "discussion. The bridge holds the wait OUTSIDE the model loop: "
-            "it chains server long-polls itself and returns only when a "
-            "real message arrives (newer than `since_sort_order`, and not "
-            "authored by this exact CLI session), when the call is "
-            "interrupted, or when an OPT-IN budget elapses "
-            "(`max_total_secs`/`KRONN_WAIT_TOTAL_SECS`; unbounded by "
-            "default). The bridge does not return merely because an inner "
-            "server poll was quiet. HOST CAVEAT: a client may background a "
-            "long MCP call and emit a model-visible task notification (Claude "
-            "Code, for example, does this after about two minutes). If the "
-            "host says this wait was moved to the background, DO NOT start "
-            "another wait: the original call "
-            "is still active. Wait for its terminal notification, then re-arm "
-            "only if that completed result is quiet. "
-            "Returns `{timed_out, messages, latest_sort_order, "
-            "withheld_by_routing, bridge_polls}`. "
-            "A message flagged `awareness: true` is room context attached to "
-            "your wake: an untargeted turn or one owned by another responder "
-            "— read it, do not answer it. "
-            "`withheld_by_routing` counts newer peer turns deliberately "
-            "omitted because they target another identity, so a moving cursor "
-            "cannot be mistaken for a lost message. **Omit `since_sort_order`** — the "
-            "bridge keeps a durable cursor. When you do override it, only ever reuse "
-            "`latest_sort_order` returned by a WAIT, never `last_sort_order` returned "
-            "by an append: that one is a different counter and skips turns. Every "
-            "delivered item carries a durable `message_id`; acknowledge or reply using "
-            "those exact ids (`reply_to_message_id` for one transcript message). "
-            "`tool_manual({tool: \"disc_wait_for_peer\"})` explains the cursor and "
-            "acknowledgement mechanics, and how typed `targets`/`reply_target` decide "
-            "who a turn wakes — read it before debugging a message you think you lost. "
-            "IMPORTANT: "
-            "`timed_out=true` now only happens at the safety cap or on an "
-            "interruption and is NORMAL in an active collaboration — re-arm "
-            "the wait when ready. A quiet return is NOT end-of-conversation; "
-            "only stop/`disc_leave()` when the task is done or the user says "
-            "stop."
+            "Wait outside the model loop for peer messages. Omit `since_sort_order`: the "
+            "bridge keeps a durable cursor. An override must reuse `latest_sort_order` "
+            "from a WAIT, never `last_sort_order` returned by an append. Each item has a "
+            "durable `message_id`; reply with its exact `reply_to_message_id`. Items are "
+            "context, not your turns. A wait moved to the background is still "
+            "active: DO NOT start another wait. Quiet is normal; re-arm until the "
+            "task is done, blocked on the human, or stopped. Routing and acknowledgement: "
+            "`tool_manual({tool: \"disc_wait_for_peer\"})`."
         ),
         "inputSchema": {
             "type": "object",
@@ -1416,28 +1621,10 @@ TOOLS = [
     {
         "name": "qp_create_draft",
         "description": (
-            "Create a Kronn Quick Prompt (QP) in the user's QP library. "
-            "QPs are manual-launch templates; there is no enabled flag "
-            "(every QP can be launched on demand) so this is roughly "
-            "the symmetric tool to `workflow_create_draft` but without "
-            "an auto-fire risk. Use when the conversation converged on "
-            "a reusable prompt template the user will want to launch "
-            "again later (e.g. recurring audit prompt, triage prompt). "
-            "For one-off improvements to an existing QP, prefer the "
-            "`KRONN:QP_IMPROVED` signal+button flow (`qp-improver` "
-            "skill) which targets an existing QP by id.\n\n"
-            "**⚠ Discovery first — DO NOT INVENT bindings.** "
-            "`skill_ids`, `profile_ids`, `directive_ids` and `agent` "
-            "must reference REAL Kronn ids. If you can't enumerate "
-            "them via `qp_list` (which echoes the user's existing "
-            "bindings catalog) or via the dedicated skills/profiles/"
-            "directives list endpoints, ASK the user — never guess a "
-            "UUID. A QP drafted with a fabricated `skill_id` silently "
-            "strips that binding at run time: the QP runs without "
-            "the skill, the user only notices via missing behaviour, "
-            "and the debug session blames the wrong layer.\n\n"
-            "Returns the created QP JSON (id, all fields) so the "
-            "agent can echo the id back to the user."
+            "Create a reusable, manual-launch Quick Prompt. Discover every agent, skill, "
+            "profile and directive id first; never invent a binding UUID. For improving "
+            "an existing QP, use its `qp-improver` flow. Authoring and binding contract: "
+            "`tool_manual({tool: \"qp_create_draft\"})`. Returns the complete created QP."
         ),
         "inputSchema": {
             "type": "object",
@@ -1987,48 +2174,14 @@ TOOLS = [
     {
         "name": "api_call",
         "description": (
-            "Invoke a Kronn-configured API plugin (registry or custom) "
-            "WITHOUT seeing the credentials. Kronn handles auth (Bearer, "
-            "API key in header/query, OAuth, etc.) per the plugin spec "
-            "and returns the canonical envelope `{data, status, summary}`.\n\n"
-            "**Reuse first (cheapest)**: before hand-building a call, run "
-            "`qa_list` — if a saved Quick API matches the action, run it via "
-            "`qa_run` (the HTTP call starts no model; same shape "
-            "across agents). Only fall through to a fresh `api_call` when no "
-            "QA fits.\n\n"
-            "**Discovery first**: call `mcp_list` to find available "
-            "plugins. Each entry has a `hint` field — `READY` plugins "
-            "are directly callable; `NEEDS_RESEARCH` ones need you to "
-            "fetch their `docs_url` first to identify endpoints (then "
-            "either ask the user to declare them in the Kronn UI, OR "
-            "hand-craft the path knowing allowlist validation may "
-            "fail).\n\n"
-            "**Plugin selection** — pass EITHER:\n"
-            "  (a) `api_plugin_slug` + `api_config_id` (from `mcp_list`)\n"
-            "  (b) `quick_api_id` (from `qa_list`) — for saved Quick APIs\n\n"
-            "**Auth happens server-side**: never put credentials in the "
-            "request body, headers, query, or path. Kronn injects them "
-            "from the encrypted DB config. If a plugin's auth scheme "
-            "doesn't seem to be applied, that's a plugin spec issue "
-            "(report it), not something to work around with hand-typed "
-            "Authorization headers.\n\n"
-            "Project scope is resolved server-side; pass `project_id` only to "
-            "override it. A plugin's NON-secret config values (an account_id, a "
-            "workspace_slug) are referenced as `${ENV.KEY}` and substituted "
-            "server-side. `tool_manual({tool: \"api_call\"})` has the resolution "
-            "order and where `${ENV.KEY}` is accepted — read it before passing "
-            "`project_id` by hand or hardcoding an identifier the config already "
-            "holds.\n\n"
-            "Returns `{success, data, status, summary, http_status, "
-            "error?}`. `data` is what downstream agent reasoning should "
-            "consume; `summary` is the one-liner suitable for echoing "
-            "back to the user.\n\n"
-            "**Persist after (close the loop)**: if you just hand-built a "
-            "call the user will likely run again, PROPOSE saving it as a "
-            "Quick API via `qa_create_draft` (PROBE-then-PERSIST) — next "
-            "time it's a `qa_run` at zero construction cost, deagentified, "
-            "and identical across agents. Don't silently rebuild the same "
-            "payload every session."
+            "Invoke a configured API without exposing credentials. Reuse a matching "
+            "`qa_list`/`qa_run` first; otherwise discover real plugin/config ids with "
+            "`mcp_list` and pass either `api_plugin_slug` + `api_config_id`, or a "
+            "`quick_api_id`. Never place auth in path, query, headers or body. Returns "
+            "`{success,data,status,summary,http_status,error?}`. Project scope, "
+            "`${ENV.KEY}`, time expressions and safe persistence are documented by "
+            "`tool_manual({tool: \"api_call\"})`. Suggest `qa_create_draft` for a useful "
+            "recurring call instead of rebuilding it."
         ),
         "inputSchema": {
             "type": "object",
@@ -2318,37 +2471,12 @@ TOOLS = [
     {
         "name": "qa_run",
         "description": (
-            "Execute a saved Quick API (QA) by id — fully synchronous. "
-            "Returns the parsed envelope `{success, duration_ms, "
-            "envelope: {data, status, summary}, error?}` inline. NO "
-            "`next_check` (QAs are fast, sub-second to a few seconds) "
-            "— just await the response.\n\n"
-            "**Why use this over `api_call`** :\n"
-            "  - The HTTP call itself starts no model. The agent turn "
-            "that invokes it and any result retained in context still "
-            "consume normal agent tokens. The QA already encodes endpoint, "
-            "method, headers, query, body, extract and pagination.\n"
-            "  - Same result across agents — Claude / Codex / Vibe / "
-            "Ollama all call the same QA → identical request shape, "
-            "identical result. Pure mechanical work, deagentified.\n"
-            "  - Maintenance centralised — if the endpoint changes, "
-            "the user updates the QA once ; every consumer benefits.\n"
-            "  - Audited — every call lands in `api_call_logs` with "
-            "the QA id as `caller_id`, so the user can mesure ROI.\n\n"
-            "**Discovery** : call `qa_list` to find the right `qa_id` "
-            "+ see required variable names. Pass values matching those "
-            "names via `vars`. Required variables that are missing or "
-            "empty → 400 with a clear error. A QA request template may use "
-            "the same vendor-neutral, server-side time grammar as workflows "
-            "(`{{time.now|shift:-24h|floor:hour|fmt:rfc3339}}`); one anchor "
-            "is captured for the complete QA call. Call `workflow_step_schema` "
-            "for the canonical filters/formats.\n\n"
-            "**vs `api_call`** : `api_call` is the low-level broker "
-            "for one-shot calls where no saved QA fits. `qa_run` is "
-            "the high-level wrapper for recurring patterns. Always "
-            "prefer `qa_run` when a matching QA exists ; fall back "
-            "to `api_call` only when the user has no QA for this "
-            "use case yet (and consider suggesting they save one)."
+            "Execute a saved Quick API synchronously. The HTTP call starts no model, "
+            "though this invocation and retained output consume normal agent tokens. "
+            "Returns `{success,duration_ms,envelope:{data,status,summary},error?}` inline: "
+            "NO `next_check`. Discover its id and required vars with `qa_list`; prefer this "
+            "repeatable, audited request over a hand-built `api_call`. Variables, time "
+            "templates and result semantics: `tool_manual({tool: \"qa_run\"})`."
         ),
         "inputSchema": {
             "type": "object",
@@ -2381,22 +2509,11 @@ TOOLS = [
     {
         "name": "learning_propose",
         "description": (
-            "0.10.0 — Propose a DURABLE learning Kronn should remember across "
-            "discussions (a project convention, a user preference, a verified "
-            "fact, a pitfall). Use when something emerges that future sessions "
-            "would otherwise re-learn.\n\n"
-            "Typed + evidence-mandatory by design: every learning MUST cite at "
-            "least one `evidence` source — there is no free-form path. The "
-            "server verifies the evidence resolves (Gate-1) and — when a "
-            "faithfulness backend is enabled (off by default) — scores whether "
-            "the claim follows from it (Gate-2), then a HUMAN validates before "
-            "anything is written to a truth file. So propose freely: a weak or "
-            "wrong candidate is caught downstream, never silently persisted.\n\n"
-            "`kind`: `fact` (mechanically verifiable — cite file:line or url), "
-            "`preference` (the user stated it — cite a user confirmation), "
-            "`inference` (you derived it — needs stronger validation). "
-            "Avoid absolutes (always/never) without a scope. "
-            "disc/project/agent are auto-inherited from the current discussion."
+            "Propose a durable, human-reviewed learning for future discussions. Evidence "
+            "is mandatory and server-verified; nothing reaches a truth file before human "
+            "validation. Use `fact`, `preference` or `inference`, scope the claim, and "
+            "avoid unsupported absolutes. Evidence rules and examples: "
+            "`tool_manual({tool: \"learning_propose\"})`."
         ),
         "inputSchema": {
             "type": "object",
@@ -2486,29 +2603,12 @@ TOOLS = [
     {
         "name": "audit_launch",
         "description": (
-            "0.8.12 — Launch a project audit (mode `full` or `partial`) and "
-            "return IMMEDIATELY with a correlation (project_id, mode, "
-            "started_at). The audit is driven by an SSE stream this bridge "
-            "keeps reading in a background thread.\n\n"
-            "⚠️ LIFECYCLE — NOT a detached execution: the audit lives only "
-            "as long as THIS MCP session lives. Reloading the MCP or "
-            "closing the CLI interrupts the audit mid-flight. Never assume "
-            "it survived a reload — call `audit_status` to observe the "
-            "truth, and relaunch consciously (an Interrupted FULL/specialized "
-            "run is resumable via resume_run_id; an interrupted PARTIAL is "
-            "not — relaunch it on its still-stale scope). One audit per "
-            "project at a time: launching while "
-            "one runs is an ERROR, not a silent no-op.\n\n"
-            "`full` creates a validation discussion at the end, and so does a "
-            "FULLY-successful `partial` (scoped to the refreshed sections) "
-            "— discussion_id lands in audit_status once done, null when the "
-            "run was interrupted. `partial` requires `steps` (1-based "
-            "indices of the analysis steps to re-run).\n\n"
-            "BRIEFING: the audit quality depends on user context (goals, "
-            "known pain points). `audit_prepare` reports whether a briefing "
-            "exists (`briefing.present`); when it doesn't, consider running "
-            "the project briefing in the UI first — the launch response "
-            "carries the same warning."
+            "Launch a `full` or `partial` project audit and return immediately. This is "
+            "NOT detached: closing/reloading this MCP interrupts its SSE-driven run. Check "
+            "`audit_status`; only interrupted full/specialized runs resume with "
+            "`resume_run_id`, while partial requires 1-based `steps` and is relaunched. "
+            "One audit per project. Run `audit_prepare` first. Lifecycle, briefing and "
+            "validation-discussion rules: `tool_manual({tool: \"audit_launch\"})`."
         ),
         "inputSchema": {
             "type": "object",
@@ -4054,7 +4154,63 @@ def _attach_files_to_appended_message(disc_id, message_id, paths, duplicate):
 # ─── Tool dispatch ─────────────────────────────────────────────────────────
 
 def call_disc_meta(_args):
-    return _unwrap(_http("GET", f"/api/discussions/{_disc_id()}/meta"))
+    """Room metadata, plus who can actually be addressed in it (KT-372 DoD-4).
+
+    The 2026-08-21 incident was not a resolution failure: `@claude` really is
+    the native agent and `@claude-cli-2` really is a joined session. The author
+    simply could not see, at the moment of writing, that both existed. Refusing
+    afterwards helps; showing the identities beforehand is what prevents it.
+
+    So the cheap call an agent already makes before acting now carries the exact
+    aliases — no second HTTP round trip, and no internal session pk to know.
+    """
+    disc_id = _disc_id()
+    meta = _unwrap(_http("GET", f"/api/discussions/{disc_id}/meta"))
+    if not isinstance(meta, dict):
+        return meta
+    try:
+        participants = _unwrap(
+            _http("GET", f"/api/discussions/{disc_id}/participants")
+        )
+    except Exception:  # noqa: BLE001
+        # Advisory field: metadata stays useful without it. Never fail the call
+        # a reader depends on for something that only enriches it.
+        return meta
+    if not isinstance(participants, list):
+        return meta
+
+    addressable = []
+    principal = meta.get("agent")
+    if principal:
+        alias = _ALIAS_BY_AGENT_TYPE.get(principal, str(principal).lower())
+        addressable.append({
+            "mention": f"@{alias}",
+            "kind": "discussion_agent",
+            "agent_type": principal,
+            "note": "the room's own agent — NOT a joined CLI session",
+        })
+    for participant in participants:
+        agent_type = participant.get("agent_type")
+        ordinal = participant.get("cli_ordinal")
+        if not agent_type or not ordinal:
+            continue
+        alias = _ALIAS_BY_AGENT_TYPE.get(agent_type, str(agent_type).lower())
+        suffix = "" if int(ordinal) == 1 else f"-{int(ordinal)}"
+        addressable.append({
+            "mention": f"@{alias}-cli{suffix}",
+            "kind": "cli",
+            "agent_type": agent_type,
+            "note": "a joined CLI session; the bare @alias would reach the native agent instead",
+        })
+    meta["addressable"] = addressable
+    # Named so it can be checked without scanning the list: this is the exact
+    # condition under which a bare alias is refused.
+    meta["ambiguous_aliases"] = sorted({
+        entry["agent_type"] for entry in addressable if entry["kind"] == "cli"
+    } & {
+        entry["agent_type"] for entry in addressable if entry["kind"] == "discussion_agent"
+    })
+    return meta
 
 
 def call_resolve_id(args):
@@ -4108,6 +4264,9 @@ def call_disc_summarize(args):
 
 def _planning_actor(args):
     actor = {"kind": "agent", "id": _agent_type_for_session()}
+    session_id = _durable_session_id()
+    if session_id:
+        actor["session_id"] = session_id
     source_message_id = args.get("source_message_id")
     if source_message_id:
         actor["source_message_id"] = source_message_id
@@ -4519,6 +4678,90 @@ def _structured_message_targets(content, disc_id):
 _ALIAS_BY_AGENT_TYPE = {value: key for key, value in _MENTION_TARGETS.items()}
 
 
+def _reject_ambiguous_short_alias(disc_id, targets):
+    """KT-372 — a bare `@provider` is ambiguous once that provider has joined.
+
+    `@claude` legitimately names the NATIVE identity, and a joined session is
+    `@claude-cli-2`. Both are real, so neither resolution is a bug — which is
+    exactly why the mistake is silent: the message is delivered, to somebody
+    else, and the intended session never wakes. Observed 2026-08-21, and the
+    KT-211 guard did not catch it because that one only fires inside a reply
+    to a CLI-authored message.
+
+    Refused only when ALL hold: the target came from prose (an explicit
+    `targets` argument is the author saying which identity they mean), a
+    native mention of provider P is present, P has at least one joined CLI in
+    this room, and no exact CLI of P is listed alongside. A deliberate fan-out
+    that names both passes untouched, as it already does in the reply guard.
+
+    The bulk `messages` path is deliberately out of scope: it never derives a
+    target from prose (`_structured_message_targets` runs only on the `content`
+    branch), so every target it carries was supplied explicitly — the same case
+    this guard exempts. There is no ambiguity to catch there, only an author
+    already naming an identity.
+    """
+    native = [
+        t for t in targets or []
+        if isinstance(t, dict) and t.get("kind") in ("agent", "discussion_agent")
+    ]
+    if not native:
+        return
+    try:
+        participants = _unwrap(
+            _http("GET", f"/api/discussions/{disc_id}/participants")
+        )
+    except Exception as exc:  # noqa: BLE001
+        # Cannot prove the alias is unambiguous → refuse rather than deliver to
+        # an identity we did not verify. Same posture as the reply guard.
+        raise RuntimeError(
+            "disc_append: cannot list this room's participants to check whether "
+            "a bare @mention is ambiguous; retry, or address the joined CLI with "
+            "its exact -cli alias"
+        ) from exc
+    if not isinstance(participants, list):
+        # A 200 with an unexpected shape is not "no participants": it is an
+        # answer we cannot read. Passing here would let the ambiguity through on
+        # the one path where the server replied — the exception branch above
+        # already refuses, and a successful-but-unreadable payload deserves the
+        # same treatment, not the opposite one.
+        raise RuntimeError(
+            "disc_append: this room's participant list came back in a shape this "
+            "bridge cannot read, so a bare @mention cannot be proven unambiguous; "
+            "reconnect the Kronn MCP, or address the joined CLI with its exact "
+            "-cli alias"
+        )
+    listed_cli = {
+        t.get("agent_type") for t in targets or []
+        if isinstance(t, dict) and t.get("kind") == "cli"
+    }
+    for mention in native:
+        agent_type = mention.get("agent_type")
+        if agent_type in listed_cli:
+            continue
+        joined = [p for p in participants if p.get("agent_type") == agent_type]
+        if not joined:
+            continue
+        alias = _ALIAS_BY_AGENT_TYPE.get(agent_type, str(agent_type).lower())
+        ordinals = sorted(int(p["cli_ordinal"]) for p in joined if p.get("cli_ordinal"))
+        if ordinals:
+            exact = ", ".join(
+                f"@{alias}-cli" + (f"-{o}" if o > 1 else "") for o in ordinals
+            )
+        else:
+            # Server predates stable ordinals. Refuse anyway rather than let the
+            # ambiguity through on an old backend, but never invent an ordinal:
+            # name the form, not a rank we cannot verify.
+            exact = f"@{alias}-cli[-N]"
+        raise RuntimeError(
+            f"disc_append: @{alias} names the NATIVE {agent_type} agent, but this "
+            f"room also has {len(joined)} joined {agent_type} CLI session(s): "
+            f"{exact}. Both are real identities, so this would be delivered — to "
+            "the wrong one, silently. Use the exact alias for a joined session, "
+            "name both for a deliberate fan-out, or pass `targets` explicitly to "
+            "mean the native agent."
+        )
+
+
 def _reject_short_alias_reply_to_cli_author(disc_id, reply_to_message_id, targets):
     """KT-211 reply-coherence guard — fail closed on the ONE unambiguous case.
 
@@ -4694,6 +4937,7 @@ def call_disc_append(args):
             raise RuntimeError("disc_append: channel must be 'main' or 'note'")
         target_agent = args.get("target_agent")
         targets = args.get("targets")
+        prose_derived = False
         if message["channel"] == "note":
             target_agent = None
             targets = []
@@ -4702,6 +4946,7 @@ def call_disc_append(args):
                 targets = [_legacy_agent_target(target_agent)]
             else:
                 targets = _structured_message_targets(message["content"], disc_id)
+                prose_derived = True
         if targets:
             message["targets"] = targets
             # Compatibility projection for pre-KT-116 servers/readers.
@@ -4713,6 +4958,11 @@ def call_disc_append(args):
             _reject_short_alias_reply_to_cli_author(
                 disc_id, message["reply_to_message_id"], message.get("targets")
             )
+        # After the reply guard on purpose: inside a reply it names the exact
+        # session that authored the replied message, which is a better answer
+        # than the list of candidates this one can give.
+        if prose_derived:
+            _reject_ambiguous_short_alias(disc_id, message.get("targets"))
         messages = [message]
 
     if not isinstance(messages, list) or not messages:
@@ -4879,6 +5129,515 @@ def call_disc_transfer_session(args):
             "disc_transfer_session: backend did not confirm the new durable binding"
         )
     return result
+
+
+def _task_exec_identity(tool_name):
+    source_agent = _agent_type_for_session()
+    # Task-execution authorization is party-scoped against
+    # `discussion_sessions`, whose session id is the live bridge identity used
+    # by peer-join/peer-resume. The separate `cli-*` durable identity only owns
+    # room recovery in `disc_source_history`; sending it here makes a perfectly
+    # resumed principal look absent because the active row still carries the
+    # `adhoc-*` identity. A resume updates/reuses the active session row before
+    # lifecycle tools run, so use the same live identity at both boundaries.
+    source_session_id = _session_id_for_caller()
+    if not source_agent or source_agent == "Unknown" or not source_session_id:
+        raise RuntimeError(
+            f"{tool_name}: no active session identity for this bridge — join or resume "
+            "the relevant room before using orchestration tools"
+        )
+    return source_agent, source_session_id
+
+
+_TASK_WORKER_CONTEXT_ENV = "KRONN_TASK_WORKER_CONTEXT"
+
+
+def _spawned_task_worker_context(required=False, tool_name="spawned task worker"):
+    """Read the runner-injected task capability.
+
+    This JSON is process environment owned by Kronn. It is deliberately absent
+    from every MCP input schema, so a model cannot choose an execution, room,
+    provider or dispatch trigger. Partial/malformed context fails closed.
+    """
+    raw = os.environ.get(_TASK_WORKER_CONTEXT_ENV)
+    if not raw:
+        if required:
+            raise RuntimeError(f"{tool_name}: spawned worker context is unavailable")
+        return None
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError) as error:
+        raise RuntimeError(
+            f"{tool_name}: spawned worker context is invalid"
+        ) from error
+    required_fields = (
+        "execution_id", "discussion_id", "agent_type", "source_message_id",
+    )
+    if not isinstance(value, dict) or any(
+        not isinstance(value.get(field), str) or not value[field].strip()
+        for field in required_fields
+    ):
+        raise RuntimeError(f"{tool_name}: spawned worker context is incomplete")
+    return {field: value[field].strip() for field in required_fields}
+
+
+def _spawned_task_worker_mode():
+    # Presence, rather than successful parsing, narrows the catalogue. A broken
+    # capability must fail closed instead of exposing the principal surface.
+    return bool(os.environ.get(_TASK_WORKER_CONTEXT_ENV))
+
+
+def _visible_tools():
+    if not _spawned_task_worker_mode():
+        return TOOLS
+    commit = {
+        "name": "task_exec_commit",
+        "description": (
+            "Commit ONLY the explicitly named files for THIS spawned task worker. "
+            "Kronn derives and revalidates the execution, child room, provider, "
+            "dispatch and attached managed worktree, then performs Git server-side. "
+            "Pass only relative `files` and a concise `message`; there is no amend, "
+            "push, branch, ref or repository-path capability. After success, call "
+            "`task_exec_deliver` with the semantic delivery assertions."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "files": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 100,
+                    "uniqueItems": True,
+                    "items": {"type": "string", "minLength": 1},
+                    "description": "Explicit relative paths changed for this task.",
+                },
+                "message": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500,
+                    "description": "Concise commit message.",
+                },
+            },
+            "required": ["files", "message"],
+        },
+    }
+    delivery = next(item for item in TOOLS if item["name"] == "task_exec_deliver")
+    semantic_manifest = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": [
+            "tests", "dod_status", "docs", "migrations", "risks",
+            "limitations", "summary",
+        ],
+        "properties": {
+            "tests": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["name", "status", "evidence"],
+                    "properties": {
+                        "name": {"type": "string", "minLength": 1},
+                        "status": {
+                            "type": "string",
+                            "enum": ["pass", "fail", "skipped"],
+                        },
+                        "evidence": {"type": "string", "minLength": 1},
+                    },
+                },
+            },
+            "dod_status": {
+                "type": "array",
+                "description": (
+                    "Exactly one semantic assertion per DoD, in brief order. "
+                    "Kronn injects the opaque dod_id."
+                ),
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["met", "evidence"],
+                    "properties": {
+                        "met": {"type": "boolean"},
+                        "evidence": {"type": "string", "minLength": 1},
+                    },
+                },
+            },
+            "docs": {"type": "array", "items": {"type": "string"}},
+            "migrations": {"type": "array", "items": {"type": "string"}},
+            "risks": {"type": "array", "items": {"type": "string"}},
+            "limitations": {"type": "array", "items": {"type": "string"}},
+            "summary": {"type": "string", "minLength": 1},
+        },
+    }
+    return [commit, {
+        **delivery,
+        "description": (
+            "Submit semantic delivery assertions for THIS spawned task worker. "
+            "Kronn derives the execution, child room, provider, dispatch, task, "
+            "clean committed HEAD, file inventory and ordered DoD ids; pass only "
+            "`manifest`. On success a complete DeliveryManifest v1 is persisted, "
+            "the execution moves to AwaitingReview and the principal is woken."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "manifest": semantic_manifest,
+            },
+            "required": ["manifest"],
+        },
+    }]
+
+
+_TASK_EXEC_MANUAL_HINT = (
+    'Read tool_manual({tool: "task_exec_prepare"}) for the exact worker, '
+    "worker_scope_intent, worker_scope and validations shapes."
+)
+
+
+def _task_exec_request(path, body):
+    """Keep compact schemas fail-closed while making shape errors self-repairing."""
+    try:
+        return _unwrap(_http("POST", path, body))
+    except RuntimeError as exc:
+        raise RuntimeError(f"{exc} {_TASK_EXEC_MANUAL_HINT}") from exc
+
+
+def _task_exec_scope_contract(args, tool_name):
+    """Prove that the host transported the current scope contract.
+
+    A current bridge process is not sufficient: some MCP hosts cache an older
+    tool schema and strip fields they do not know before invoking this process.
+    The required intent sentinel makes that loss observable and fail-closed.
+    """
+    intent = args.get("worker_scope_intent")
+    scope = args.get("worker_scope")
+    if intent not in ("generic", "scoped"):
+        raise RuntimeError(
+            f"{tool_name}: worker_scope_intent is required and must be generic or "
+            "scoped. The MCP host tool schema may be stale — reconnect the Kronn "
+            "MCP before retrying."
+        )
+    if intent == "scoped" and not isinstance(scope, dict):
+        raise RuntimeError(
+            f"{tool_name}: worker_scope_intent=scoped requires a worker_scope object. "
+            f"{_TASK_EXEC_MANUAL_HINT}"
+        )
+    if intent == "generic" and scope is not None:
+        raise RuntimeError(
+            f"{tool_name}: worker_scope_intent=generic forbids worker_scope; use "
+            "scoped or remove the scope."
+        )
+    return intent, scope
+
+
+def call_agent_list(_args):
+    _require_fresh_bridge("agent_list")
+    source_agent, source_session_id = _task_exec_identity("agent_list")
+    return _unwrap(_http(
+        "POST",
+        "/api/orchestration/tool/workers",
+        {
+            "parent_discussion_id": _disc_id(),
+            "source_agent": source_agent,
+            "source_session_id": source_session_id,
+        },
+    ))
+
+
+def call_task_exec_prepare(args):
+    _require_fresh_bridge("task_exec_prepare")
+    task_reference = (args.get("task_reference") or "").strip()
+    worker = args.get("worker")
+    if not task_reference or not isinstance(worker, dict):
+        raise RuntimeError(
+            "task_exec_prepare: task_reference and a typed worker object are required. "
+            f"{_TASK_EXEC_MANUAL_HINT}"
+        )
+    scope_intent, worker_scope = _task_exec_scope_contract(args, "task_exec_prepare")
+    source_agent, source_session_id = _task_exec_identity("task_exec_prepare")
+    body = {
+        "task_reference": task_reference,
+        "parent_discussion_id": _disc_id(),
+        "worker": worker,
+        "worker_scope_intent": scope_intent,
+        "source_agent": source_agent,
+        "source_session_id": source_session_id,
+    }
+    if worker_scope is not None:
+        body["worker_scope"] = worker_scope
+    return _task_exec_request("/api/orchestration/tool/prepare", body)
+
+
+def call_task_exec_launch(args):
+    _require_fresh_bridge("task_exec_launch")
+    task_reference = (args.get("task_reference") or "").strip()
+    worker = args.get("worker")
+    if not task_reference or not isinstance(worker, dict):
+        raise RuntimeError(
+            "task_exec_launch: task_reference and the preflighted typed worker are required. "
+            f"{_TASK_EXEC_MANUAL_HINT}"
+        )
+    scope_intent, worker_scope = _task_exec_scope_contract(args, "task_exec_launch")
+    source_agent, source_session_id = _task_exec_identity("task_exec_launch")
+    body = {
+        "task_reference": task_reference,
+        "parent_discussion_id": _disc_id(),
+        "worker": worker,
+        "worker_scope_intent": scope_intent,
+        "source_agent": source_agent,
+        "source_session_id": source_session_id,
+    }
+    for optional in ("base_rev", "idempotency_key", "validations"):
+        if args.get(optional) is not None:
+            body[optional] = args[optional]
+    if worker_scope is not None:
+        body["worker_scope"] = worker_scope
+    return _task_exec_request("/api/orchestration/tool/launch", body)
+
+
+def call_task_exec_status(args):
+    execution_id = (args.get("task_execution_id") or args.get("task_reference") or "").strip()
+    if not execution_id:
+        raise RuntimeError("task_exec_status: task_execution_id or task_reference is required")
+    source_agent, source_session_id = _task_exec_identity("task_exec_status")
+    return _unwrap(_http(
+        "POST",
+        f"/api/orchestration/tool/executions/{urllib.parse.quote(execution_id, safe='')}/status",
+        {"source_agent": source_agent, "source_session_id": source_session_id},
+    ))
+
+
+def call_task_exec_cancel(args):
+    execution_id = (args.get("task_execution_id") or "").strip()
+    reason = (args.get("reason") or "").strip()
+    if not execution_id or not reason:
+        raise RuntimeError("task_exec_cancel: task_execution_id and reason are required")
+    source_agent, source_session_id = _task_exec_identity("task_exec_cancel")
+    body = {
+        "source_agent": source_agent,
+        "source_session_id": source_session_id,
+        "reason": reason,
+    }
+    if args.get("cleanup_policy") is not None:
+        body["cleanup_policy"] = args["cleanup_policy"]
+    return _unwrap(_http(
+        "POST", f"/api/orchestration/tool/executions/{execution_id}/cancel", body
+    ))
+
+
+def call_task_exec_reassign(args):
+    _require_fresh_bridge("task_exec_reassign")
+    execution_id = (args.get("task_execution_id") or "").strip()
+    worker = args.get("worker")
+    reason = (args.get("reason") or "").strip()
+    if not execution_id or not isinstance(worker, dict) or not reason:
+        raise RuntimeError(
+            "task_exec_reassign: task_execution_id, typed worker and reason are required"
+        )
+    source_agent, source_session_id = _task_exec_identity("task_exec_reassign")
+    return _unwrap(_http(
+        "POST",
+        f"/api/orchestration/tool/executions/{execution_id}/reassign",
+        {
+            "source_agent": source_agent,
+            "source_session_id": source_session_id,
+            "worker": worker,
+            "reason": reason,
+        },
+    ))
+
+
+def call_task_exec_accept_worker_offer(args):
+    """Accept a task-execution worker control offer targeted at THIS session and
+    attach to its sub-discussion (KT-328 tranche 2). The caller passes ONLY the
+    opaque `offer_id`; both identities are DERIVED by this bridge, and the
+    backend verifies that the live session is the exact target before moving
+    its separate durable room binding.
+
+    On success the backend moves this session origin -> child (durable source
+    binding + `discussion_sessions` membership), posts the work brief in the child,
+    and flips the execution to `Working`. This tool then does the LOCAL half of the
+    move (DoD-3): follow the session into the child so subsequent calls and
+    `disc_wait_for_peer` operate there, and rewrite the durable resume credential to
+    the child so an MCP reload re-attaches. The session row is re-homed WITHOUT
+    rotating its resume credential, so the `resume_token` we already hold still
+    resolves to the session in the child — we reuse it rather than mint a new one."""
+    _require_fresh_bridge("task_exec_accept_worker_offer")
+    offer_id = (args.get("offer_id") or "").strip()
+    if not offer_id:
+        raise RuntimeError("task_exec_accept_worker_offer: offer_id is required")
+    # Offer acceptance crosses two deliberately distinct identity domains.
+    # `source_session_id` identifies the active `discussion_sessions` row and
+    # must match the exact target PK. `source_binding_session_id` identifies
+    # the reload-stable `disc_source_history` binding that follows that row to
+    # the child. Collapsing them made a real resumed CLI impossible to accept:
+    # its active identity is `adhoc-*`, while its durable binding is `cli-*`.
+    # Both values are bridge-derived and absent from the MCP input schema.
+    source_agent, source_session_id = _task_exec_identity(
+        "task_exec_accept_worker_offer"
+    )
+    source_binding_session_id = _durable_session_id()
+    if not source_binding_session_id:
+        raise RuntimeError(
+            "task_exec_accept_worker_offer: no durable room identity for this bridge — "
+            "join the origin room (disc_join) before accepting an offer"
+        )
+    prior_binding = _read_binding()
+    # `_unwrap` raises on a refused offer, preserving the backend's opaque message
+    # ("not found or not addressed to this session") so no rebind happens on refusal.
+    result = _unwrap(_http("POST", "/api/orchestration/accept-offer", {
+        "offer_id": offer_id,
+        "source_agent": source_agent,
+        "source_session_id": source_session_id,
+        "source_binding_session_id": source_binding_session_id,
+    }))
+    child_disc_id = (
+        result.get("child_discussion_id") if isinstance(result, dict) else None
+    )
+    if not child_disc_id:
+        raise RuntimeError(
+            "task_exec_accept_worker_offer: backend accepted but returned no child "
+            "discussion to attach to"
+        )
+    # ── Local rebind — follow the server-side move into the child room. ──
+    _set_current_disc_id(child_disc_id)
+    # Seed the child cursor at -1 so the work brief (just posted there, targeted at
+    # this session) is delivered on the next wait rather than skipped.
+    _set_read_cursor(child_disc_id, -1)
+    resume_token = (
+        prior_binding.get("resume_token") if isinstance(prior_binding, dict) else None
+    )
+    if resume_token:
+        _write_binding(
+            child_disc_id,
+            resume_token,
+            agent_type=source_agent,
+            last_read_sort_order=_read_cursor(child_disc_id),
+        )
+    result["local_rebound_to"] = child_disc_id
+    return result
+
+
+def call_task_exec_deliver(args):
+    """Submit delivery assertions for review (KT-319 tranche 2). Joined CLI
+    sessions pass a complete DeliveryManifest v1 plus
+    `task_execution_id` and the `manifest` object; identity is DERIVED SERVER-SIDE
+    from this bridge's active room session, and the backend verifies you are the
+    execution's EXACT worker (a different session is refused). On success the
+    manifest is persisted, the execution flips to `AwaitingReview`, and a review
+    request is posted to the principal in the parent room. This does NOT move your
+    session — you stay in the sub-discussion. A refused delivery surfaces an opaque
+    reason (not found / not addressed to you) or a specific state (not deliverable,
+    invalid manifest). A spawned host worker passes only the semantic projection;
+    Kronn derives the execution/task/Git/DoD mechanics from its runner capability."""
+    manifest = args.get("manifest")
+    if not isinstance(manifest, dict):
+        raise RuntimeError(
+            "task_exec_deliver: manifest (a DeliveryManifest v1 object) is required"
+        )
+    if _spawned_task_worker_mode():
+        context = _spawned_task_worker_context(
+            required=True, tool_name="task_exec_deliver"
+        )
+        # A spawned worker never selects its execution. Even if a client sends
+        # an out-of-schema task_execution_id, discard it and use only the
+        # runner-owned capability. The backend independently revalidates this
+        # child room + provider + dispatch trigger tuple.
+        return _unwrap(_http("POST", "/api/orchestration/deliver", {
+            "task_execution_id": context["execution_id"],
+            "manifest": manifest,
+            "spawned_agent": {
+                "discussion_id": context["discussion_id"],
+                "agent_type": context["agent_type"],
+                "source_message_id": context["source_message_id"],
+            },
+        }))
+
+    task_execution_id = (args.get("task_execution_id") or "").strip()
+    if not task_execution_id:
+        raise RuntimeError("task_exec_deliver: task_execution_id is required")
+    source_agent, source_session_id = _task_exec_identity("task_exec_deliver")
+    # `_unwrap` raises on a refused delivery, preserving the backend's opaque message
+    # ("not found or not addressed to this session") — the caller sends only the
+    # execution id + manifest; the bridge derives its active identity itself.
+    return _unwrap(_http("POST", "/api/orchestration/deliver", {
+        "task_execution_id": task_execution_id,
+        "manifest": manifest,
+        "source_agent": source_agent,
+        "source_session_id": source_session_id,
+    }))
+
+
+def call_task_exec_commit(args):
+    """Commit explicit spawned-worker paths through Kronn's trusted Git boundary.
+
+    The model-visible arguments intentionally contain no execution or workspace
+    selector. The runner capability supplies those out-of-band and the backend
+    independently authenticates the exact child/provider/dispatch tuple before
+    resolving its attached managed worktree.
+    """
+    if not _spawned_task_worker_mode():
+        raise RuntimeError(
+            "task_exec_commit: available only to a spawned Kronn task worker"
+        )
+    files = args.get("files")
+    if (
+        not isinstance(files, list)
+        or not files
+        or len(files) > 100
+        or any(not isinstance(path, str) or not path.strip() for path in files)
+    ):
+        raise RuntimeError(
+            "task_exec_commit: files must contain 1 to 100 non-empty relative paths"
+        )
+    message = args.get("message")
+    if not isinstance(message, str) or not message.strip():
+        raise RuntimeError("task_exec_commit: message is required")
+    context = _spawned_task_worker_context(
+        required=True, tool_name="task_exec_commit"
+    )
+    return _unwrap(_http("POST", "/api/orchestration/worker-commit", {
+        "task_execution_id": context["execution_id"],
+        "files": files,
+        "message": message,
+        "spawned_agent": {
+            "discussion_id": context["discussion_id"],
+            "agent_type": context["agent_type"],
+            "source_message_id": context["source_message_id"],
+        },
+    }))
+
+
+def call_task_exec_review(args):
+    """Decide a delivered attempt as the principal (KT-319 tranche 3a). Pass the
+    `task_execution_id` and a ReviewDecision v1 `decision` object; identity is
+    DERIVED SERVER-SIDE from this bridge's active room session, and the backend
+    authorizes you as a PARTY to the execution — the parent-room principal, or the
+    worker only when the run explicitly allows self-review. approve is refused if the
+    manifest is missing, the worktree HEAD drifted, or a DoD is unmet; request_changes
+    bumps the round and hands your findings to the worker in its sub-discussion,
+    keeping the worktree. A refused decision surfaces an opaque reason (not found /
+    not addressed to you) or a specific state (not reviewable, self-review forbidden,
+    approve refused, invalid decision)."""
+    task_execution_id = (args.get("task_execution_id") or "").strip()
+    if not task_execution_id:
+        raise RuntimeError("task_exec_review: task_execution_id is required")
+    decision = args.get("decision")
+    if not isinstance(decision, dict):
+        raise RuntimeError(
+            "task_exec_review: decision (a ReviewDecision v1 object) is required"
+        )
+    source_agent, source_session_id = _task_exec_identity("task_exec_review")
+    # `_unwrap` raises on a refused decision, preserving the backend's message. The
+    # caller sends only the execution id + decision; the bridge derives its active
+    # identity itself, so the model can never name a session id.
+    return _unwrap(_http("POST", "/api/orchestration/review", {
+        "task_execution_id": task_execution_id,
+        "decision": decision,
+        "source_agent": source_agent,
+        "source_session_id": source_session_id,
+    }))
 
 
 def call_disc_unlink(args):
@@ -5443,11 +6202,7 @@ def _wait_once(args):
             _commit_read_cursor(disc_id, result.get("latest_sort_order"))
         withheld = result.get("withheld_by_routing")
         if isinstance(withheld, int) and withheld > 0:
-            result["routing_visibility"] = (
-                f"{withheld} newer peer turn(s) were intentionally withheld "
-                "because they target another identity. The read cursor moved "
-                "past them by design; do not claim to have read their content."
-            )
+            result["routing_visibility"] = _routing_visibility_hint(withheld)
         # KT-189 — awareness turns are room CONTEXT attached to this wake:
         # untargeted traffic or turns owned by another responder. The agent
         # reads them silently and never answers them individually.
@@ -5791,6 +6546,30 @@ def _maybe_report_telemetry():
         print(f"kronn-internal: telemetry trigger failed: {error}", file=sys.stderr)
 
 
+def _routing_visibility_hint(withheld):
+    """The caller-facing note explaining a read-cursor jump caused by routing.
+    Shared by `_wait_once` (a single poll) and the bridge loop's accumulated
+    total so the count and its prose can never disagree."""
+    return (
+        f"{withheld} newer peer turn(s) were intentionally withheld "
+        "because they target another identity. The read cursor moved "
+        "past them by design; do not claim to have read their content."
+    )
+
+
+def _carry_withheld_total(result, total):
+    """KT-330 DoD-3 — accumulate-until-report. A quiet inner poll that saw peer
+    turns withheld by routing advances the read cursor past them and is then
+    discarded by the bridge loop; without this its count would vanish on "an
+    internal poll the caller never sees". Stamp the running total (and matching
+    prose) onto whatever result the caller actually receives, so a withheld
+    count is reported at least once and never silently dropped."""
+    if isinstance(result, dict) and total > 0:
+        result["withheld_by_routing"] = total
+        result["routing_visibility"] = _routing_visibility_hint(total)
+    return result
+
+
 def call_disc_wait_for_peer(args):
     """KT-189 — wait OUTSIDE the LLM loop.
 
@@ -5809,6 +6588,10 @@ def call_disc_wait_for_peer(args):
     deadline = started + budget if budget is not None else None
     poll_args = dict(args)
     polls = 0
+    # Running total of peer turns withheld by routing across every inner poll
+    # of this one logical wait (KT-330 DoD-3). Each quiet poll's own result is
+    # discarded, so the count must be carried here, not left on the poll.
+    withheld_total = 0
     interrupted_hint = (
         "Wait interrupted: another request reached the bridge. The room "
         "stayed quiet; re-arm disc_wait_for_peer after handling the new "
@@ -5823,12 +6606,12 @@ def call_disc_wait_for_peer(args):
         if deadline is not None:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                return {
+                return _carry_withheld_total({
                     "timed_out": True,
                     "messages": [],
                     "bridge_polls": polls,
                     "hint": _wait_budget_hint(started, polls),
-                }
+                }, withheld_total)
             poll_secs = max(1, min(poll_secs, int(remaining)))
         _emit_wait_progress(polls, int(time.monotonic() - started))
         poll_args["timeout_secs"] = poll_secs
@@ -5841,11 +6624,19 @@ def call_disc_wait_for_peer(args):
                 quiet["hint"] = _wait_budget_hint(started, polls + 1)
             elif aborted.reason != "cancelled":
                 quiet["hint"] = interrupted_hint
-            return quiet
+            return _carry_withheld_total(quiet, withheld_total)
         polls += 1
         if not isinstance(result, dict):
             return result
+        withheld = result.get("withheld_by_routing")
+        if isinstance(withheld, int) and withheld > 0:
+            withheld_total += withheld
         result["bridge_polls"] = polls
+        # Carry the accumulated withheld total onto every dict the caller can
+        # receive — the delivered poll below AND each interrupt/quiet exit that
+        # returns `result` further down — so an intermediate poll's count is
+        # reported, never dropped on a cursor advance (KT-330 DoD-3).
+        _carry_withheld_total(result, withheld_total)
         if result.get("messages") or not result.get("timed_out"):
             return result
         # Quiet poll — keep waiting bridge-side unless something changed.
@@ -8152,6 +8943,72 @@ def call_kronn_intro(_args):
 # always. What stays in a tool's own description is what fails at RUN time if
 # guessed — traps, closed sets, binding rules — never the methodology.
 TOOL_MANUALS = {
+    "agent_list": (
+        "Use `agent_list()` before `task_exec_prepare` when the worker identity is not "
+        "already known. Copy one entry's `worker` object unchanged; it is the same typed "
+        "MessageTarget accepted by preflight. Native HTTP providers use "
+        "`kind: discussion_agent`, punctual host processes use `kind: agent`, and an "
+        "already joined CLI uses `kind: cli` plus its exact `cli_session_id`. Joined CLI "
+        "tiers are empty because that transport ignores per-turn tier overrides.\n\n"
+        "`configured` and `reachable` are independent observations. The strict invariant is "
+        "`available => configured && reachable`; a configured provider can be temporarily "
+        "down, while a public endpoint such as NVIDIA's catalogue can answer before an "
+        "account key is configured. `available` proves only that Kronn's transport is ready "
+        "for preflight — never that the selected model is entitled, that the task fits the "
+        "worker, or that execution will succeed. NVIDIA is not completion-probed by this "
+        "read-only discovery call. For Ollama, discovery also does not prove that the exact "
+        "resolved tag is already pulled locally; a missing tag fails explicitly at `/api/chat`, "
+        "so treat catalogue availability and model presence as separate facts.\n\n"
+        "Unavailable entries remain visible with stable `reasons[].code`; details are fixed "
+        "backend phrases and never contain keys, endpoints, hostnames or raw upstream errors. "
+        "Provider probes run in parallel under a short global bound. After choosing an "
+        "available identity, call `task_exec_prepare` and obey its task-specific refusal "
+        "codes before `task_exec_launch`."
+    ),
+    "task_exec_prepare": (
+        "**One durable lifecycle, two roles.** A principal starts by reading the room plan, "
+        "selecting one Todo task and a typed worker. Native HTTP providers use "
+        "`{kind: \"discussion_agent\", agent_type: \"Ollama\"|\"LiteLlm\"|\"Nvidia\", "
+        "tier?: ...}`; a punctual host process uses `{kind: \"agent\", "
+        "agent_type: \"ClaudeCode\"|\"Codex\"|...}`; an already joined CLI uses "
+        "`{kind: \"cli\", agent_type, cli_session_id}` with the exact active id. Provider "
+        "equality is not identity, and a transport fallback MUST change `kind`.\n\n"
+        "**Local-worker contract.** Ollama preflight proves transport readiness, not task "
+        "fitness. Use it only for one atomic, prelocalised mutation with principal-owned checks. "
+        "For replacement use `worker_scope: {mode: \"prelocalized_edit\", path, start_line, "
+        "end_line}`. For a pure insertion, prefer "
+        "`{mode: \"prelocalized_insert_after\", path, anchor_line}`: Kronn exposes only the "
+        "new text and preserves the anchor mechanically. Always choose the narrowest verified "
+        "anchor (`start_line == end_line` for a one-line replacement). Kronn validates the "
+        "closed shape against the SHA-pinned worktree and gives the worker one bounded read "
+        "followed by one CAS mutation. Use a stronger worker immediately for trust or "
+        "protocol boundaries, concurrency, migrations, architecture or cross-layer parity.\n\n"
+        "Every prepare and launch MUST pass `worker_scope_intent: \"scoped\"` together with "
+        "that exact `worker_scope`, or `worker_scope_intent: \"generic\"` with no scope when a "
+        "general worker is deliberately intended. The sentinel proves the MCP host transported "
+        "the current schema; omitting it fails closed with a reconnect diagnostic instead of "
+        "silently launching a generic worker. Only `launchable:true` permits a matching launch; "
+        "never create the child by hand or alter the worker, intent or scope without preflighting again. "
+        "Launch may persist principal-owned `validations: [{command, quick_exec_id?, "
+        "timeout_secs?}]`; never copy gates from the worker manifest. Reuse one idempotency key "
+        "if the launch response is lost.\n\n"
+        "**Worker handoff.** The child room contains the immutable brief, execution id, pinned "
+        "worktree/branch and DeliveryManifest v1 shape. Work only in that checkout. The worker "
+        "does not merge, approve or close the Planning task. When the DoD is evidenced, call "
+        "`task_exec_deliver({task_execution_id, manifest})`; prose saying 'done' is not a durable "
+        "delivery. The principal reads `task_exec_status`, then calls `task_exec_review` with a "
+        "ReviewDecision v1. `request_changes` needs a non-empty actionable comment and preserves "
+        "the same execution/worktree. An Ollama result is never its own quality gate: the "
+        "principal reviews the exact SHA and runs the persisted validations. Allow at most one "
+        "targeted local rework; structural misunderstanding or missing durable delivery keeps "
+        "the trace and is reassigned to a stronger worker.\n\n"
+        "**Reconnect and recovery.** After an MCP reload, restore the room with "
+        "`disc_find_by_session({})`, refresh `plan_get`, and call `task_exec_status` on the known "
+        "execution. Do not launch again merely because chat history is incomplete. Status is "
+        "party-scoped; cancel/reassign are parent-principal-only; delivery is exact-worker-only. "
+        "If a joined runtime lacks these tools after reconnect, reconnect the Kronn MCP and report "
+        "the capability gap instead of fabricating a handoff."
+    ),
     "disc_append": (
         "**BULK transcript import** (cross-agent memory, since 0.8.4) — pass "
         "`messages: [{source_msg_id, role, content, agent_type}, …]` to push a "
@@ -8230,6 +9087,16 @@ TOOL_MANUALS = {
         "Every referenced plugin, binding, Quick API, Quick Exec and Page must come from its "
         "current list tool; unresolved bindings require asking the user, never guessing."
     ),
+    "qp_create_draft": (
+        "Quick Prompts are reusable manual-launch templates and have no enabled flag. Create "
+        "one only after the conversation has converged on a prompt worth keeping. Variables "
+        "use `{{name}}`; declare each name and whether it is required. Return the created id "
+        "to the user so the QP can be opened or compared.\n\n"
+        "Bindings are durable ids, not labels. Read the current QP/binding catalog first and "
+        "use only real agent, skill, profile and directive ids. If a requested binding cannot "
+        "be enumerated, ask instead of fabricating a UUID: unknown ids may be stripped at run "
+        "time. Use the qp-improver flow for an existing QP rather than creating a duplicate."
+    ),
     "api_call": (
         "**Project scope** — resolved server-side from three sources, in "
         "priority order: (1) an explicit `project_id` argument, (2) the disc "
@@ -8290,6 +9157,37 @@ TOOL_MANUALS = {
         "param, wrong extract path — all fixable without sending the user through "
         "the UI."
     ),
+    "qa_run": (
+        "Resolve a saved Quick API with `qa_list`, including its exact variable names. Pass "
+        "only those values in the flat `vars` object; missing required values are rejected. "
+        "The saved QA owns endpoint, method, query, headers, body, extraction and pagination, "
+        "so every agent executes the same mechanical request.\n\n"
+        "Execution is synchronous and audited in `api_call_logs`. Time templates are expanded "
+        "server-side from one run anchor. Use `workflow_step_schema` for the canonical time "
+        "grammar. If no QA matches, fall back to `api_call`, probe the response shape, and "
+        "suggest persisting a reusable call with `qa_create_draft`."
+    ),
+    "learning_propose": (
+        "A learning is a candidate, never an immediate truth-file write. State one scoped claim "
+        "and classify it as `fact`, `preference` or `inference`. Supply at least one resolvable "
+        "evidence item: file refs should include a line, URLs identify a source, discussion refs "
+        "identify the relevant room, commands identify reproducible output, and user evidence "
+        "records an explicit confirmation. A short quote should expose the premise.\n\n"
+        "The server checks evidence resolution and may run a faithfulness gate; a human still "
+        "accepts or rejects the candidate. Avoid `always`/`never` unless the evidence truly "
+        "supports that scope. Discussion, project and agent provenance are inherited."
+    ),
+    "audit_launch": (
+        "Call `audit_prepare` first and read its briefing status. A full audit runs the complete "
+        "pipeline; a partial audit requires explicit 1-based step indices. The bridge consumes "
+        "the SSE in a background thread, but the execution remains owned by this MCP process: "
+        "closing or reloading it interrupts the run. Only one audit may run per project.\n\n"
+        "Observe durable truth with `audit_status`. An interrupted full or specialized run may "
+        "resume by its reported `resume_run_id`; an interrupted partial is relaunched for its "
+        "stale scope. Successful full audits and fully successful partial audits create a "
+        "validation discussion. Missing briefing context lowers audit quality and should be "
+        "addressed in the UI when relevant."
+    ),
     "qe_create_draft": (
         "**DISCOVER → TEST → PERSIST.** Call `qe_list` first. A Quick Exec is a "
         "saved CLI data collector, not a shell script: `command` is one bare binary "
@@ -8306,6 +9204,10 @@ TOOL_MANUALS = {
         "workflow uses its own run/worktree cwd, which makes the saved command portable."
     ),
 }
+
+# Launch deliberately shares the prepare guide: both calls form one typed,
+# preflight-bound contract and duplicating the text would invite drift.
+TOOL_MANUALS["task_exec_launch"] = TOOL_MANUALS["task_exec_prepare"]
 
 
 def call_tool_manual(args):
@@ -8332,19 +9234,44 @@ def call_tool_manual(args):
     return {"tool": name, "manual": manual}
 
 
+def _bridge_freshness():
+    mtime_now, sha256_now = _bridge_script_snapshot()
+    stale = (
+        _BRIDGE_SCRIPT_SHA256_AT_LOAD is None
+        or sha256_now is None
+        or sha256_now != _BRIDGE_SCRIPT_SHA256_AT_LOAD
+    )
+    return {
+        "mtime_now": mtime_now,
+        "sha256_now": sha256_now,
+        "stale": stale,
+    }
+
+
+def _require_fresh_bridge(tool_name):
+    freshness = _bridge_freshness()
+    if freshness["stale"]:
+        raise RuntimeError(
+            f"{tool_name}: refused before changing orchestration state because this "
+            "kronn-internal bridge is stale; its loaded tool contract differs from "
+            "the script on disk. Reconnect the Kronn MCP, recover the task with "
+            "task_exec_status, then retry once with the same idempotency key."
+        )
+
+
 def call_bridge_info(_args):
-    try:
-        mtime_now = os.path.getmtime(__file__)
-    except OSError:
-        mtime_now = 0.0
+    freshness = _bridge_freshness()
+    mtime_now = freshness["mtime_now"]
     return {
         "script_path": os.path.abspath(__file__),
         "loaded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(_BRIDGE_LOADED_AT)),
         "script_mtime_at_load": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(_BRIDGE_SCRIPT_MTIME_AT_LOAD)),
         "script_mtime_now": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(mtime_now)),
-        "stale": mtime_now > _BRIDGE_SCRIPT_MTIME_AT_LOAD + 1.0,
+        "script_sha256_at_load": _BRIDGE_SCRIPT_SHA256_AT_LOAD,
+        "script_sha256_now": freshness["sha256_now"],
+        "stale": freshness["stale"],
         "hint": (
-            "stale=true: the on-disk bridge is newer than this process — ask "
+            "stale=true: the on-disk bridge differs from this process — ask "
             "the user to reconnect the MCP before launching session-bound work."
         ),
     }
@@ -8518,6 +9445,163 @@ def call_audit_status(args):
     return out
 
 
+# ─── KT-374 — the room reaches the agent, instead of waiting to be asked ────
+#
+# `disc_wait_for_peer` has to be CALLED. An agent three minutes into a
+# `cargo test` does not call it, and that is not a discipline problem: the
+# instruction was written into this very file and its author kept failing it
+# the same day. So the room is attached to the return value of whatever tool
+# the agent was already using — it arrives instead of having to be fetched.
+
+# Tools that already put the room in front of the agent. Peeking on top of
+# these would fetch what they just delivered, or re-ask what they are about
+# to ask better.
+_TOOLS_THAT_ALREADY_SHOW_THE_ROOM = frozenset({
+    "disc_wait_for_peer",  # its whole job, and it waits properly
+    "disc_join",           # hands back recent_messages on the way in
+    "disc_leave",          # leaving; the room is no longer the agent's problem
+})
+
+# A burst of tool calls must not become a burst of requests. The peek is a
+# single indexed query against a local backend, but "cheap" is not "free" and
+# an agent can call ten tools in one turn. One peek per window is enough to
+# make a peer's message visible within seconds.
+_ROOM_PEEK_MIN_INTERVAL_SECS = 5.0
+_LAST_ROOM_PEEK_AT = {"monotonic": None}
+
+# An agent that was away for an hour can come back to a dozen turns. Attaching
+# all of them to a `task_get` would bury the answer it asked for, so the batch
+# is capped and the rest is announced as `remaining`.
+#
+# The cap is applied in SORT ORDER, never by priority, and that is a
+# correctness constraint rather than a style choice: the read cursor is a
+# single position. Showing a late addressed turn while hiding an earlier one
+# would push the cursor past a message the agent never saw, and the next wait
+# would consider it read. Oldest-first keeps "what was shown" and "what the
+# cursor covers" the same set.
+_ROOM_PEEK_MAX_MESSAGES = 8
+
+
+def _hold_cursor_at_what_was_actually_shown(disc_id, shown_upto):
+    """Never let the staged cursor cover a message that was withheld.
+
+    `_wait_once` stages everything the server returned. When the batch is
+    capped, that stage is a lie by exactly the messages left out — and a lie in
+    the one direction that loses them. Pulling the stage back down is always
+    safe: the worst case is re-delivering a turn, which costs a few tokens,
+    against dropping one, which is the whole incident this ticket exists for.
+    """
+    pending = _PENDING_READ_SORT_ORDER_BY_DISC.get(disc_id)
+    if pending is None:
+        return
+    if not isinstance(shown_upto, int) or isinstance(shown_upto, bool):
+        _PENDING_READ_SORT_ORDER_BY_DISC.pop(disc_id, None)
+        return
+    if pending["sort_order"] > shown_upto:
+        pending["sort_order"] = shown_upto
+
+
+def _room_peek_for_tool_result(tool_name):
+    """Unread room messages to attach to an unrelated tool's result, or None.
+
+    Returns None far more often than not, and that is the point: nothing is
+    injected when nothing is new (a peek that comes back quiet adds no key at
+    all), when the caller is not in a room, or when a peek already ran inside
+    the current window.
+
+    This never raises. A peek is a courtesy attached to someone else's call;
+    a room that cannot be reached must not turn `task_get` into a failure.
+    """
+    if tool_name in _TOOLS_THAT_ALREADY_SHOW_THE_ROOM:
+        return None
+    try:
+        disc_id = _disc_id()
+    except Exception:  # noqa: BLE001 — no room bound is the normal case here
+        return None
+    if not disc_id:
+        return None
+
+    now = time.monotonic()
+    last = _LAST_ROOM_PEEK_AT["monotonic"]
+    if last is not None and (now - last) < _ROOM_PEEK_MIN_INTERVAL_SECS:
+        return None
+    _LAST_ROOM_PEEK_AT["monotonic"] = now
+
+    try:
+        peek_args = {"_disc_id": disc_id, "timeout_secs": 0}
+        cursor = _read_cursor(disc_id)
+        if cursor is not None:
+            peek_args["since_sort_order"] = cursor
+        # `_wait_once` stages the read cursor for whatever it delivers, exactly
+        # as an explicit wait does. That is what keeps this from duplicating:
+        # the durable cursor stays the single source of truth, so a message
+        # surfaced here is not surfaced again by the next `disc_wait_for_peer`,
+        # and a cancelled turn un-stages it rather than losing it.
+        waited = _wait_once(peek_args)
+    except Exception:  # noqa: BLE001 — see docstring: never break the host call
+        return None
+
+    if not isinstance(waited, dict):
+        return None
+    messages = waited.get("messages")
+    if not isinstance(messages, list) or not messages:
+        return None
+
+    shown = messages[:_ROOM_PEEK_MAX_MESSAGES]
+    remaining = len(messages) - len(shown)
+    if remaining:
+        shown_orders = [
+            message.get("sort_order") for message in shown
+            if isinstance(message, dict) and isinstance(message.get("sort_order"), int)
+        ]
+        _hold_cursor_at_what_was_actually_shown(
+            disc_id, max(shown_orders) if shown_orders else None,
+        )
+
+    # Two lists, not one list and a counter. A turn addressed to THIS session is
+    # a debt someone is waiting on; ambient room traffic is background. Merging
+    # them into a homogeneous array leaves the agent to re-derive that
+    # distinction on every read, which is exactly the step it skips when busy.
+    attention_required = [
+        message for message in shown
+        if isinstance(message, dict) and message.get("addressed_to_caller")
+    ]
+    context = [
+        message for message in shown
+        if not (isinstance(message, dict) and message.get("addressed_to_caller"))
+    ]
+    room = {"unread": len(messages)}
+    if attention_required:
+        room["attention_required"] = attention_required
+    if context:
+        room["context"] = context
+    if remaining:
+        room["remaining"] = remaining
+    withheld = waited.get("withheld_by_routing")
+    if isinstance(withheld, int) and withheld > 0:
+        room["withheld_by_routing"] = withheld
+
+    if attention_required:
+        room["hint"] = (
+            f"{len(attention_required)} message(s) in `attention_required` are addressed to "
+            "YOU and arrived while you were working; they rode along on this result because "
+            "you did not ask for them. Read them BEFORE continuing — a peer routinely "
+            "announces a scope you are about to duplicate. Answer with disc_append."
+        )
+    else:
+        room["hint"] = (
+            "Room context that arrived while you were working, attached to this result. "
+            "Nothing here is addressed to you specifically: read it, do not answer it turn "
+            "by turn."
+        )
+    if remaining:
+        room["hint"] += (
+            f" {remaining} older turn(s) are held back to keep this batch small; they are "
+            "still unread and come back on your next call."
+        )
+    return room
+
+
 DISPATCH = {
     # 0.8.12 PR A — audit surface
     "audit_prepare": call_audit_prepare,
@@ -8550,6 +9634,16 @@ DISPATCH = {
     "disc_append": call_disc_append,
     "disc_link": call_disc_link,
     "disc_transfer_session": call_disc_transfer_session,
+    "agent_list": call_agent_list,
+    "task_exec_prepare": call_task_exec_prepare,
+    "task_exec_launch": call_task_exec_launch,
+    "task_exec_status": call_task_exec_status,
+    "task_exec_cancel": call_task_exec_cancel,
+    "task_exec_reassign": call_task_exec_reassign,
+    "task_exec_accept_worker_offer": call_task_exec_accept_worker_offer,
+    "task_exec_commit": call_task_exec_commit,
+    "task_exec_deliver": call_task_exec_deliver,
+    "task_exec_review": call_task_exec_review,
     "disc_unlink": call_disc_unlink,
     "disc_workspace_get": call_disc_workspace_get,
     "disc_workspace_set": call_disc_workspace_set,
@@ -8802,6 +9896,32 @@ def _handle(req):
         if isinstance(client_info, dict):
             _CLIENT_INFO["name"] = client_info.get("name")
             _CLIENT_INFO["version"] = client_info.get("version")
+        if _spawned_task_worker_mode():
+            return {
+                "jsonrpc": "2.0",
+                "id": rid,
+                "result": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {
+                        "name": "kronn-internal",
+                        "version": BRIDGE_TOOL_SURFACE_VERSION,
+                    },
+                    "instructions": (
+                        "You are a spawned Kronn task worker. Use your native CLI "
+                        "file and shell tools to complete the bounded task in the "
+                        "current worktree. Do not run `git commit`: shared Git storage "
+                        "is outside your sandbox by design. Call `task_exec_commit` with "
+                        "only the explicit changed files and message; Kronn commits them "
+                        "through its authenticated server boundary. Then call "
+                        "`task_exec_deliver` with semantic `manifest` assertions only "
+                        "(tests, ordered DoD "
+                        "evidence, docs/migrations/risks/limitations and summary). "
+                        "Kronn injects and verifies execution/task identity, clean HEAD, "
+                        "file inventory and opaque DoD ids; never invent them."
+                    ),
+                },
+            }
         client_name = (_CLIENT_INFO.get("name") or "unknown").strip() or "unknown"
         first_contact = "" if _onboarding_done_for(client_name) else (
             "🎉 **FIRST CONTACT** — this is the first Kronn session for this "
@@ -8822,7 +9942,10 @@ def _handle(req):
                 # Tool-surface version, intentionally distinct from the Kronn
                 # app release. Bumping it tells clients that cache tools/list
                 # to refresh after the Planning contract was added.
-                "serverInfo": {"name": "kronn-internal", "version": "0.3.2"},
+                "serverInfo": {
+                    "name": "kronn-internal",
+                    "version": BRIDGE_TOOL_SURFACE_VERSION,
+                },
                 # Top-level orientation the client surfaces to the model: WHAT
                 # Kronn is + a MAP of the tool surface by area + how to navigate
                 # it, so an agent doesn't have to reverse-engineer capabilities
@@ -8840,6 +9963,7 @@ def _handle(req):
                     "Your tools, by area:\n"
                     "• Opaque IDs: when the user pastes an ID without naming its type, call `resolve_id` FIRST; it returns compact routing context and the object-specific tool to use next.\n"
                     "• Discussions (multi-agent threads): `disc_meta`/`disc_get_message`/`disc_search`/`disc_load_other`/`disc_create`/`disc_append`/`disc_join`/`disc_invite_peer`…\n"
+                    "• **Working in a room:** a room is not a mailbox you empty at the end. After each real step — a commit, a green test run, a background task that finished, a milestone — call `disc_wait_for_peer` BEFORE starting the next one. Its cursor is durable, so re-checking never re-delivers what you already read, and a quiet return costs nothing. A peer's message routinely changes what you are about to build: a design review of the choice you just made, a file boundary, a decision the human already took. Long silent stretches of work are how two agents duplicate each other, or how one keeps building on a choice the other has already overturned. Messages flagged `awareness: true` are context to read, never turns to answer. Any tool result may also carry a `kronn_room` block: turns that arrived while you were working, attached to an answer you asked for. `attention_required` holds turns addressed to YOU — read them before continuing, because a peer announcing a scope is how duplicate work gets prevented; `context` is background you read without answering turn by turn. Seeing it does not replace calling `disc_wait_for_peer`: it appears only when you happen to call something else.\n"
                     "• Rich room output: messages are Markdown. A `mermaid` fence renders a diagram; `kronn-doc-preview` renders sandboxed HTML with PDF/DOCX actions (a plain `html` fence is only code); `kronn-doc-data` exposes CSV/XLSX/PPTX export. Use visual output only when it materially helps.\n"
                     "• Planning: a discussion may have a shared plan made of prioritized, editable tasks. The user may refer to it naturally as “the plan”, “the tasks”, “what remains”, “the priority”, and similar wording. Use `plan_get` (compact current objective/plan) · `task_list` (compact filtered backlog) · `task_get` (FULL task) · `task_changes` (deltas) · `proposal_list`/`proposal_get` (durable proposals, read-only) · narrow writes `task_create`/`task_update`/`task_update_dod`/`task_link_discussion`/`task_add_blocker`/`task_remove_blocker`. Read the relevant plan first. Immediately before any direct `task_create`, call `plan_get` again so a peer's recent write is visible. Apply unambiguous intent directly; otherwise propose a human-gated `kronn-plan-action` fence (`create`, `create_many`, `status`, `complete`, `unblock`, `open`). You may read and propose, but only a human accepts, rejects or decides a durable proposal. Never replace a requested plan update with a prose-only summary. Whenever tracked work starts or materially changes, keep its status, DoD and priority honest in the plan. Write only on a real change: never reload or rewrite an unchanged task merely to report progress. If the announced Planning tools are missing from your MCP surface, use the read-only `plan_snapshot` from `disc_join`, ask @user to reconnect the Kronn MCP, and never fabricate an update.\n"
                     "• Workflows (multi-step pipelines): `workflow_list` (compact) · `workflow_get` (FULL, every step) · `workflow_step_schema` (CANONICAL step schema as an untruncatable result — the closed 12 `step_type`s, per-type fields, runtime contracts; call before authoring) · `workflow_create_draft` · `workflow_clone`/`workflow_update`/`workflow_set_enabled` · `workflow_trigger`/`workflow_run_status` · run history `workflow_runs`/`workflow_run_get` · `workflow_active_runs`/`workflow_cancel_run`. Agent-step bindings (full CRUD): `skills_list`/`profiles_list`/`directives_list` enumerate valid ids; `skill_get`/`profile_get`/`directive_get` read FULL bodies; `skill_create`/`skill_update`/`skill_delete` (+ `profile_*`/`directive_*`) author & edit custom ones.\n"
@@ -8863,11 +9987,22 @@ def _handle(req):
         # MCP liveness probe — answered inline even mid-wait (KT-189).
         return {"jsonrpc": "2.0", "id": rid, "result": {}}
     if method == "tools/list":
-        return {"jsonrpc": "2.0", "id": rid, "result": {"tools": TOOLS}}
+        return {"jsonrpc": "2.0", "id": rid, "result": {"tools": _visible_tools()}}
     if method == "tools/call":
         params = req.get("params") or {}
         name = params.get("name") or ""
         args = params.get("arguments") or {}
+        if _spawned_task_worker_mode() and name not in {
+            "task_exec_commit", "task_exec_deliver",
+        }:
+            return {
+                "jsonrpc": "2.0",
+                "id": rid,
+                "error": {
+                    "code": -32601,
+                    "message": f"Tool unavailable in spawned task-worker mode: {name}",
+                },
+            }
         fn = DISPATCH.get(name)
         if not fn:
             return {
@@ -8913,6 +10048,15 @@ def _handle(req):
                     _discard_pending_read_cursors(this_call_sequence)
             if was_cancelled and suppress_response_on_cancel:
                 return None
+            # KT-374 — every tool result passes through here, so this is the one
+            # place where the room can reach an agent that never thought to ask
+            # for it. Attached only to a dict result: wrapping a list or a
+            # string would change a shape callers already parse, and a silent
+            # room adds no key at all.
+            if isinstance(data, dict) and "kronn_room" not in data:
+                room = _room_peek_for_tool_result(name)
+                if room:
+                    data["kronn_room"] = room
             return {
                 "jsonrpc": "2.0",
                 "id": rid,

@@ -322,14 +322,16 @@ fn insert_event(
     validate_actor(actor)?;
     conn.execute(
         "INSERT INTO planning_task_events
-         (id, task_id, action, actor_kind, actor_id, changes_json, source_message_id, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+         (id, task_id, action, actor_kind, actor_id, actor_session_id, changes_json,
+          source_message_id, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             Uuid::new_v4().to_string(),
             task_id,
             action,
             actor.kind.as_str(),
             actor.id,
+            actor.session_id,
             serde_json::to_string(&changes)?,
             actor.source_message_id,
             Utc::now().to_rfc3339(),
@@ -969,25 +971,23 @@ pub fn get_task(conn: &Connection, task_id: &str) -> Result<Option<PlanningTaskD
     }
     let events = {
         let mut statement = conn.prepare(
-            "SELECT id, action, actor_kind, actor_id, changes_json, source_message_id, created_at
+            "SELECT id, action, actor_kind, actor_id, actor_session_id, changes_json,
+                    source_message_id, created_at
              FROM planning_task_events WHERE task_id = ?1 ORDER BY created_at DESC, rowid DESC",
         )?;
         let items = statement
             .query_map([task_id], |row| {
                 let actor_kind: String = row.get(2)?;
-                let changes: String = row.get(4)?;
+                let changes: String = row.get(5)?;
                 Ok(PlanningTaskEvent {
                     id: row.get(0)?,
                     action: row.get(1)?,
-                    actor_kind: if actor_kind == "agent" {
-                        PlanningActorKind::Agent
-                    } else {
-                        PlanningActorKind::Human
-                    },
+                    actor_kind: actor_kind.parse().unwrap_or(PlanningActorKind::Human),
                     actor_id: row.get(3)?,
+                    actor_session_id: row.get(4)?,
                     changes: serde_json::from_str(&changes).unwrap_or(serde_json::Value::Null),
-                    source_message_id: row.get(5)?,
-                    created_at: parse_dt(row.get(6)?),
+                    source_message_id: row.get(6)?,
+                    created_at: parse_dt(row.get(7)?),
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1129,6 +1129,127 @@ pub fn update_task(
     )?;
     transaction.commit()?;
     get_task(conn, task_id)?.context("Updated planning task disappeared")
+}
+
+/// KT-318 — outcome of the final-checkpoint task CAS. Neither refusal is a hard
+/// error: both mean "not durably launchable", so the orchestrator rolls back
+/// its whole provisioning commit rather than leaving a task InProgress while
+/// its execution is not yet launchable (DoD-8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartTaskCheckpoint {
+    /// Exactly one row flipped Todo → InProgress; the caller may commit.
+    Started,
+    /// The task was not `todo` (already advanced, or a concurrent change).
+    NotTodo,
+    /// A non-terminal blocker appeared between the read-only pre-check and this
+    /// checkpoint.
+    BlockedByActive,
+}
+
+/// KT-318 — flip a task Todo → InProgress as the FINAL anti-race checkpoint of
+/// atomic provisioning. Unlike [`update_task`] it opens NO transaction of its
+/// own (it composes inside the orchestrator's single provisioning commit), it
+/// is a real compare-and-set (`WHERE status = 'todo'`, exactly one row), and it
+/// revalidates in the SAME transaction that no ACTIVE blocker (one whose status
+/// is not `done`/`archived`) remains. The transition is journalled with the
+/// given backend/system actor. A non-`Started` outcome MUST make the caller
+/// roll the whole commit back.
+pub fn mark_task_in_progress_within_tx(
+    tx: &Connection,
+    task_reference: &str,
+    actor: &PlanningActor,
+) -> Result<StartTaskCheckpoint> {
+    validate_actor(actor)?;
+    let task_id = resolve_task_id(tx, task_reference)?;
+    let active_blockers: i64 = tx.query_row(
+        "SELECT COUNT(*)
+           FROM planning_task_blockers b
+           JOIN planning_tasks blocker ON blocker.id = b.blocker_task_id
+          WHERE b.task_id = ?1
+            AND blocker.status NOT IN ('done', 'archived')",
+        [task_id.as_str()],
+        |row| row.get(0),
+    )?;
+    if active_blockers > 0 {
+        return Ok(StartTaskCheckpoint::BlockedByActive);
+    }
+    let changed = tx.execute(
+        "UPDATE planning_tasks
+            SET status = 'in_progress', updated_at = ?2
+          WHERE id = ?1 AND status = 'todo'",
+        params![task_id, Utc::now().to_rfc3339()],
+    )?;
+    if changed == 0 {
+        return Ok(StartTaskCheckpoint::NotTodo);
+    }
+    insert_event(
+        tx,
+        task_id.as_str(),
+        "status",
+        actor,
+        serde_json::json!({ "status": "in_progress", "via": "orchestration_checkpoint" }),
+    )?;
+    Ok(StartTaskCheckpoint::Started)
+}
+
+/// KT-320 — complete the plan task in the SAME transaction that commits the
+/// execution's integrated SHA and `Applying → Done` transition. This is a CAS,
+/// not a broad task update: if the task is no longer `in_progress`, the caller
+/// must roll the integration checkpoint back rather than leave execution/task
+/// states disagreeing about completion.
+pub fn mark_task_done_within_tx(
+    tx: &Connection,
+    task_id: &str,
+    actor: &PlanningActor,
+) -> Result<bool> {
+    validate_actor(actor)?;
+    let changed = tx.execute(
+        "UPDATE planning_tasks
+            SET status = 'done', blocked_reason = NULL, updated_at = ?2
+          WHERE id = ?1 AND status = 'in_progress'",
+        params![task_id, Utc::now().to_rfc3339()],
+    )?;
+    if changed == 0 {
+        return Ok(false);
+    }
+    insert_event(
+        tx,
+        task_id,
+        "status",
+        actor,
+        serde_json::json!({ "status": "done", "via": "orchestration_integration" }),
+    )?;
+    Ok(true)
+}
+
+/// Return a task owned by a cancelled orchestration execution to the ready
+/// queue. The caller has already made that execution terminal in the same
+/// transaction; the anti-race predicate refuses while any other active
+/// execution still owns the task.
+pub fn restore_task_todo_after_cancellation(
+    tx: &Connection,
+    task_id: &str,
+    actor: &PlanningActor,
+) -> Result<bool> {
+    validate_actor(actor)?;
+    let changed = tx.execute(
+        "UPDATE planning_tasks SET status = 'todo', updated_at = ?2 \
+         WHERE id = ?1 AND status = 'in_progress' \
+           AND NOT EXISTS (SELECT 1 FROM task_executions e \
+                           WHERE e.task_id = planning_tasks.id \
+                             AND e.status NOT IN ('Done', 'Failed', 'Cancelled'))",
+        params![task_id, Utc::now().to_rfc3339()],
+    )?;
+    if changed > 0 {
+        insert_event(
+            tx,
+            task_id,
+            "status",
+            actor,
+            serde_json::json!({ "status": "todo", "via": "orchestration_cancel" }),
+        )?;
+    }
+    Ok(changed > 0)
 }
 
 pub fn update_dod_item(
@@ -1328,7 +1449,7 @@ pub fn task_changes(
     DateTime::parse_from_rfc3339(since).context("since must be an RFC 3339 timestamp")?;
     let mut statement = conn.prepare(
         "SELECT e.id, e.task_id, t.task_number, t.title, e.action, e.actor_kind,
-                e.actor_id, e.changes_json, e.source_message_id, e.created_at
+                e.actor_id, e.actor_session_id, e.changes_json, e.source_message_id, e.created_at
          FROM planning_task_events e
          JOIN planning_tasks t ON t.id = e.task_id
          JOIN planning_task_discussions d ON d.task_id = e.task_id
@@ -1340,7 +1461,7 @@ pub fn task_changes(
     let rows = statement.query_map(params![discussion_id, since], |row| {
         let task_number: i64 = row.get(2)?;
         let actor_kind: String = row.get(5)?;
-        let changes: String = row.get(7)?;
+        let changes: String = row.get(8)?;
         Ok(PlanningTaskChange {
             task_id: row.get(1)?,
             task_reference: format!("KT-{task_number}"),
@@ -1348,15 +1469,12 @@ pub fn task_changes(
             event: PlanningTaskEvent {
                 id: row.get(0)?,
                 action: row.get(4)?,
-                actor_kind: if actor_kind == "agent" {
-                    PlanningActorKind::Agent
-                } else {
-                    PlanningActorKind::Human
-                },
+                actor_kind: actor_kind.parse().unwrap_or(PlanningActorKind::Human),
                 actor_id: row.get(6)?,
+                actor_session_id: row.get(7)?,
                 changes: serde_json::from_str(&changes).unwrap_or(serde_json::Value::Null),
-                source_message_id: row.get(8)?,
-                created_at: parse_dt(row.get(9)?),
+                source_message_id: row.get(9)?,
+                created_at: parse_dt(row.get(10)?),
             },
         })
     })?;
@@ -1832,6 +1950,38 @@ mod tests {
     }
 
     #[test]
+    fn planning_events_distinguish_sessions_of_the_same_provider() {
+        let connection = connection();
+        let mut first = request("First session");
+        first.actor = PlanningActor {
+            kind: PlanningActorKind::Agent,
+            id: Some("ClaudeCode".into()),
+            session_id: Some("session-a".into()),
+            source_message_id: None,
+        };
+        let mut second = request("Second session");
+        second.actor = PlanningActor {
+            kind: PlanningActorKind::Agent,
+            id: Some("ClaudeCode".into()),
+            session_id: Some("session-b".into()),
+            source_message_id: None,
+        };
+
+        let first = create_task(&connection, &first).unwrap();
+        let second = create_task(&connection, &second).unwrap();
+        assert_eq!(first.events[0].actor_id.as_deref(), Some("ClaudeCode"));
+        assert_eq!(second.events[0].actor_id.as_deref(), Some("ClaudeCode"));
+        assert_eq!(
+            first.events[0].actor_session_id.as_deref(),
+            Some("session-a")
+        );
+        assert_eq!(
+            second.events[0].actor_session_id.as_deref(),
+            Some("session-b")
+        );
+    }
+
+    #[test]
     fn create_fingerprint_stays_compatible_when_discussion_target_is_absent() {
         let create = request("Legacy retry");
         let fingerprint = create_request_fingerprint(&create, None, &[], None).unwrap();
@@ -2014,6 +2164,7 @@ mod tests {
         let actor = PlanningActor {
             kind: PlanningActorKind::Agent,
             id: Some("Codex".into()),
+            session_id: None,
             source_message_id: None,
         };
         add_blocker(
@@ -2887,6 +3038,137 @@ mod tests {
         assert_eq!(
             small_stmts, large_stmts,
             "statement count must not grow with plan size (N+1 guard): small={small_stmts} large={large_stmts}"
+        );
+    }
+
+    fn backend_actor() -> PlanningActor {
+        PlanningActor {
+            kind: PlanningActorKind::Backend,
+            id: Some("orchestrator".into()),
+            session_id: None,
+            source_message_id: None,
+        }
+    }
+
+    #[test]
+    fn start_checkpoint_flips_a_ready_todo_and_journals_the_backend_transition() {
+        // KT-318 T2 — the final checkpoint flips a launchable Todo → InProgress
+        // in the caller's transaction and journals the transition with the
+        // backend actor (no anonymous audit hole).
+        let conn = connection();
+        let task = create_task(&conn, &request("Launchable")).unwrap();
+
+        let tx = conn.unchecked_transaction().unwrap();
+        let outcome =
+            mark_task_in_progress_within_tx(&tx, &task.summary.reference, &backend_actor())
+                .unwrap();
+        assert_eq!(outcome, StartTaskCheckpoint::Started);
+        tx.commit().unwrap();
+
+        assert_eq!(
+            get_task(&conn, &task.summary.reference)
+                .unwrap()
+                .unwrap()
+                .summary
+                .status,
+            PlanningTaskStatus::InProgress,
+        );
+        let backend_status_events: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM planning_task_events
+                  WHERE task_id = ?1 AND action = 'status' AND actor_kind = 'backend'",
+                [task.summary.id.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(backend_status_events, 1);
+    }
+
+    #[test]
+    fn start_checkpoint_refuses_a_non_todo_and_the_whole_commit_rolls_back() {
+        // KT-318 T2 — DoD-8 anti-race: a task already advanced yields NotTodo
+        // (zero rows flipped), and because the caller must roll back on any
+        // non-Started outcome, even an unrelated co-transactional write in the
+        // same final commit is discarded.
+        let conn = connection();
+        let task = create_task(&conn, &request("Already moving")).unwrap();
+        let mut to_progress = update_request();
+        to_progress.status = Some(PlanningTaskStatus::InProgress);
+        update_task(&conn, &task.summary.reference, &to_progress).unwrap();
+
+        let tx = conn.unchecked_transaction().unwrap();
+        // A side write the saga would have made in the same final commit.
+        tx.execute(
+            "UPDATE planning_tasks SET description = 'saga-side-write' WHERE id = ?1",
+            [task.summary.id.as_str()],
+        )
+        .unwrap();
+        let outcome =
+            mark_task_in_progress_within_tx(&tx, &task.summary.reference, &backend_actor())
+                .unwrap();
+        assert_eq!(outcome, StartTaskCheckpoint::NotTodo);
+        drop(tx); // non-Started ⇒ the caller rolls the WHOLE commit back.
+
+        let reloaded = get_task(&conn, &task.summary.reference).unwrap().unwrap();
+        assert_eq!(reloaded.summary.status, PlanningTaskStatus::InProgress);
+        assert!(
+            reloaded.description.is_empty(),
+            "the co-transactional side write must roll back too",
+        );
+    }
+
+    #[test]
+    fn start_checkpoint_revalidates_active_blockers_in_the_same_transaction() {
+        // KT-318 T2 — a blocker that became active between the read-only
+        // pre-check and this checkpoint is caught HERE (the anti-race authority);
+        // satisfying it later lets the very same checkpoint start the task.
+        let conn = connection();
+        let task = create_task(&conn, &request("Blocked launch")).unwrap();
+        let blocker = create_task(&conn, &request("Prerequisite")).unwrap();
+        add_blocker(
+            &conn,
+            &task.summary.reference,
+            &AddPlanningBlockerRequest {
+                blocker_task_id: blocker.summary.id.clone(),
+                actor: PlanningActor::default(),
+            },
+        )
+        .unwrap();
+
+        let tx = conn.unchecked_transaction().unwrap();
+        let blocked =
+            mark_task_in_progress_within_tx(&tx, &task.summary.reference, &backend_actor())
+                .unwrap();
+        assert_eq!(blocked, StartTaskCheckpoint::BlockedByActive);
+        drop(tx);
+        assert_eq!(
+            get_task(&conn, &task.summary.reference)
+                .unwrap()
+                .unwrap()
+                .summary
+                .status,
+            PlanningTaskStatus::Todo,
+            "a refused checkpoint leaves the task Todo",
+        );
+
+        // Satisfy the blocker → the identical checkpoint now starts the task.
+        let mut done = update_request();
+        done.status = Some(PlanningTaskStatus::Done);
+        update_task(&conn, &blocker.summary.reference, &done).unwrap();
+
+        let tx = conn.unchecked_transaction().unwrap();
+        let started =
+            mark_task_in_progress_within_tx(&tx, &task.summary.reference, &backend_actor())
+                .unwrap();
+        assert_eq!(started, StartTaskCheckpoint::Started);
+        tx.commit().unwrap();
+        assert_eq!(
+            get_task(&conn, &task.summary.reference)
+                .unwrap()
+                .unwrap()
+                .summary
+                .status,
+            PlanningTaskStatus::InProgress,
         );
     }
 }

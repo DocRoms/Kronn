@@ -16,7 +16,7 @@
 //!
 //! See `docs/operations/deagent-apicall.md` for scope + decisions.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::error::Error as _;
 use std::time::{Duration, Instant};
 
@@ -223,8 +223,9 @@ pub async fn execute_api_call_step_core(
     // Substitute `{key}` path-segment params (e.g. /repos/{owner}/{repo}).
     // Values are rendered through TemplateContext FIRST so a previous
     // step's output can drive a segment (`{owner}` = `{{steps.X.data}}`).
-    // Tokens with no entry stay literal — the request will then 404,
-    // which is much more actionable than silently dropping the segment.
+    // The resolver validates the declared and supplied keys in both
+    // directions before any HTTP request, so a typo or missing segment
+    // produces an actionable local error instead of an opaque vendor 404.
     let resolved_path = match resolve_path_params(&templated_endpoint, &step.api_path_params, ctx) {
         Ok(p) => p,
         Err(e) => return fail(step, start, format!("Path param render error: {e}")),
@@ -510,16 +511,12 @@ async fn execute_api_call_step_with_db_inner(
         );
     };
 
-    // Project resolution. The plugin env is decrypted per-project in
-    // `collect_active_api_plugins`, so we need a project_id even if the
-    // workflow itself isn't bound to one. The runner now mirrors the
-    // wizard's "Test the call" behaviour: if the workflow has no project,
-    // fall back to the first project the picked config is linked to
-    // (Settings → APIs always wires at least one — global or specific).
-    // Only when the config exists in no project at all do we surface the
-    // actionable error pointing the user to the API config screen.
-    let resolved_pid: String = match project_id {
-        Some(p) => p.to_string(),
+    // Scope resolution. A projectless call really is a General-discussion
+    // scope: it may use global configs and the explicit `include_general`
+    // opt-in. Project-linked configs keep the historical first-project
+    // fallback for standalone Quick API runs that carry no discussion.
+    let resolved_scope: Option<String> = match project_id {
+        Some(p) => Some(p.to_string()),
         None => {
             let cid = config_id.clone();
             let cfg = state
@@ -529,14 +526,8 @@ async fn execute_api_call_step_with_db_inner(
                 .ok()
                 .flatten();
             match cfg {
-                Some(c) if c.is_global => {
-                    // Global configs aren't filtered by project — passing
-                    // any string would work since `is_global || …` short-
-                    // circuits. Empty marker keeps the failure mode obvious
-                    // if a future refactor breaks the invariant.
-                    String::new()
-                }
-                Some(c) if !c.project_ids.is_empty() => c.project_ids[0].clone(),
+                Some(c) if c.is_global || c.include_general => None,
+                Some(c) if !c.project_ids.is_empty() => Some(c.project_ids[0].clone()),
                 _ => {
                     return fail(
                         step,
@@ -552,12 +543,16 @@ async fn execute_api_call_step_with_db_inner(
         }
     };
 
-    let pid_owned = resolved_pid.clone();
+    let scope_owned = resolved_scope.clone();
     let secret_owned = secret.clone();
     let plugins = state
         .db
         .with_conn(move |conn| {
-            crate::core::mcp_scanner::collect_active_api_plugins(conn, &pid_owned, &secret_owned)
+            crate::core::mcp_scanner::collect_active_api_plugins_for_scope(
+                conn,
+                scope_owned.as_deref(),
+                &secret_owned,
+            )
         })
         .await
         .unwrap_or_default();
@@ -572,14 +567,13 @@ async fn execute_api_call_step_with_db_inner(
         .into_iter()
         .find(|(server, cid, _env)| server.id == *slug && cid == config_id);
     let Some((plugin, _cid, mut env)) = found else {
-        let pid_label = if resolved_pid.is_empty() {
-            "(global)".to_string()
-        } else {
-            resolved_pid.clone()
-        };
+        let pid_label = resolved_scope
+            .clone()
+            .unwrap_or_else(|| "(general)".to_string());
         let diagnostic_config_id = config_id.to_string();
         let diagnostic_slug = slug.to_string();
-        let diagnostic_pid = resolved_pid.clone();
+        let diagnostic_scope = resolved_scope.clone();
+        let diagnostic_scope_label = pid_label.clone();
         let diagnostic_secret = secret.clone();
         let diagnostic = state
             .db
@@ -595,17 +589,20 @@ async fn execute_api_call_step_with_db_inner(
                         config.server_id
                     ));
                 }
-                if !config.is_global
-                    && !config.project_ids.iter().any(|project_id| project_id == &diagnostic_pid)
-                {
+                let in_scope = match diagnostic_scope.as_deref() {
+                    Some(project_id) => {
+                        config.is_global || config.project_ids.iter().any(|pid| pid == project_id)
+                    }
+                    None => config.is_global || config.include_general,
+                };
+                if !in_scope {
                     let scopes = if config.project_ids.is_empty() {
                         "no project".to_string()
                     } else {
                         config.project_ids.join(", ")
                     };
                     return Ok(format!(
-                        "config `{diagnostic_config_id}` is scoped to [{scopes}], not project `{}`; link it to the workflow project or make it global",
-                        if diagnostic_pid.is_empty() { "(global)" } else { &diagnostic_pid }
+                        "config `{diagnostic_config_id}` is scoped to [{scopes}], not `{diagnostic_scope_label}`; link it to the workflow project, enable General, or make it global"
                     ));
                 }
                 let servers = crate::db::mcps::list_servers(conn)?;
@@ -634,7 +631,7 @@ async fn execute_api_call_step_with_db_inner(
             step,
             start,
             format!(
-                "API plugin `{slug}` / config `{config_id}` unavailable on project `{pid_label}`: {diagnostic}"
+                "API plugin `{slug}` / config `{config_id}` unavailable in scope `{pid_label}`: {diagnostic}"
             ),
         );
     };
@@ -1041,9 +1038,9 @@ fn render_body(body: &Option<Value>, ctx: &TemplateContext) -> anyhow::Result<Op
 /// Substitute path-segment placeholders (`{key}`) in `endpoint_path` with
 /// values from `path_params`. Each value is first rendered through the
 /// template engine (so `{{steps.X.data}}` inside a value works) and then
-/// percent-encoded for path-segment safety. Tokens with no matching key
-/// stay literal — the request will then 404, which is more actionable
-/// than silently dropping the segment and producing a different URL.
+/// percent-encoded for path-segment safety. Declared placeholders and
+/// supplied keys must match exactly: missing or unknown parameters fail
+/// before the HTTP request and name the valid keys.
 ///
 /// Disambiguating `{key}` from the existing `{{var}}` template syntax:
 /// the regex `\{(\w+)\}` only matches single-brace tokens. Inside `{{x}}`,
@@ -1055,12 +1052,6 @@ pub(crate) fn resolve_path_params(
     path_params: &Option<HashMap<String, String>>,
     ctx: &TemplateContext,
 ) -> anyhow::Result<String> {
-    // Fast path: no params → no scan needed unless the path has tokens.
-    if path_params.as_ref().is_none_or(|m| m.is_empty()) {
-        return Ok(endpoint_path.to_string());
-    }
-    let path_params = path_params.as_ref().expect("checked just above");
-
     // Mask `{{` / `}}` so we don't accidentally substitute inside a
     // template var. We use form-feed (\u{000C}) and vertical-tab
     // (\u{000B}) — neither is valid in URLs nor in our existing path
@@ -1070,6 +1061,58 @@ pub(crate) fn resolve_path_params(
     let masked = endpoint_path
         .replace("{{", &MASK_OPEN.to_string().repeat(2))
         .replace("}}", &MASK_CLOSE.to_string().repeat(2));
+
+    // Validate the contract before rendering any value. BTreeSet keeps
+    // diagnostics deterministic, which matters both to users and tests.
+    let mut expected = BTreeSet::new();
+    let mut scan = masked.as_str();
+    while let Some(open) = scan.find('{') {
+        let after = &scan[open + 1..];
+        let Some(close_rel) = after.find('}') else {
+            break;
+        };
+        let key = &after[..close_rel];
+        let is_clean = !key.is_empty()
+            && key
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+        if is_clean {
+            expected.insert(key);
+        }
+        scan = &after[close_rel + 1..];
+    }
+
+    let provided: BTreeSet<&str> = path_params
+        .iter()
+        .flat_map(|params| params.keys().map(String::as_str))
+        .collect();
+    let unknown: Vec<_> = provided.difference(&expected).copied().collect();
+    let missing: Vec<_> = expected.difference(&provided).copied().collect();
+    if !unknown.is_empty() || !missing.is_empty() {
+        let expected_label = if expected.is_empty() {
+            "none".to_string()
+        } else {
+            expected.iter().copied().collect::<Vec<_>>().join(", ")
+        };
+        let mut problems = Vec::new();
+        if !unknown.is_empty() {
+            problems.push(format!("unknown: {}", unknown.join(", ")));
+        }
+        if !missing.is_empty() {
+            problems.push(format!("missing: {}", missing.join(", ")));
+        }
+        anyhow::bail!(
+            "invalid path parameters ({}); expected: {expected_label}",
+            problems.join("; ")
+        );
+    }
+
+    if expected.is_empty() {
+        return Ok(endpoint_path.to_string());
+    }
+    let path_params = path_params
+        .as_ref()
+        .expect("validated non-empty path parameters above");
 
     // Substitute single-brace placeholders. 2026-06-10 — rewritten to be
     // UTF-8 SAFE: the previous version did `out.push(bytes[i] as char)` on a
@@ -1998,6 +2041,7 @@ mod tests {
             exec_setup_args: vec![],
             exec_stdin: None,
             quick_prompt_id: None,
+            quick_prompt_variables: std::collections::HashMap::new(),
             json_data_payload: None,
             collect_api_data: None,
             transform_data: None,
@@ -2396,14 +2440,27 @@ mod tests {
     }
 
     #[test]
-    fn path_params_left_literal_when_no_value_provided() {
-        // Missing value → leave the placeholder; the request will 404,
-        // which is much more diagnostic than dropping the segment.
+    fn path_params_reject_missing_value_before_http() {
         let ctx = TemplateContext::new();
         let mut params = HashMap::new();
         params.insert("owner".to_string(), "x".to_string());
-        let out = resolve_path_params("/repos/{owner}/{repo}", &Some(params), &ctx).unwrap();
-        assert_eq!(out, "/repos/x/{repo}");
+        let error = resolve_path_params("/repos/{owner}/{repo}", &Some(params), &ctx)
+            .expect_err("a missing path parameter must fail closed");
+        assert_eq!(
+            error.to_string(),
+            "invalid path parameters (missing: repo); expected: owner, repo"
+        );
+    }
+
+    #[test]
+    fn path_params_reject_missing_map_before_http() {
+        let ctx = TemplateContext::new();
+        let error = resolve_path_params("/repos/{owner}/{repo}", &None, &ctx)
+            .expect_err("all declared path parameters are required");
+        assert_eq!(
+            error.to_string(),
+            "invalid path parameters (missing: owner, repo); expected: owner, repo"
+        );
     }
 
     // ─── 0.8.5 regression — `{{var}}` MUST resolve in endpoint path ──
@@ -2467,17 +2524,19 @@ mod tests {
     }
 
     #[test]
-    fn path_params_dont_match_double_brace_template_vars() {
+    fn path_params_dont_treat_double_brace_template_vars_as_expected_keys() {
         // `{{steps.X.data}}` is the template-var syntax, not a path
         // placeholder. resolve_path_params must leave it untouched —
         // single-brace `{key}` is the only thing that gets substituted.
         let ctx = TemplateContext::new();
         let mut params = HashMap::new();
         params.insert("steps".to_string(), "evil".to_string());
-        let out = resolve_path_params("/items/{{steps.X.data}}/sub", &Some(params), &ctx).unwrap();
-        // The template var is preserved verbatim — TemplateContext will
-        // expand it (or leave it) at the next layer.
-        assert_eq!(out, "/items/{{steps.X.data}}/sub");
+        let error = resolve_path_params("/items/{{steps.X.data}}/sub", &Some(params), &ctx)
+            .expect_err("a supplied key cannot target double-brace syntax");
+        assert_eq!(
+            error.to_string(),
+            "invalid path parameters (unknown: steps); expected: none"
+        );
     }
 
     #[test]
@@ -2492,11 +2551,37 @@ mod tests {
     }
 
     #[test]
-    fn path_params_no_op_when_path_has_no_tokens() {
+    fn path_params_no_op_when_path_and_map_have_no_tokens() {
         let ctx = TemplateContext::new();
         let params: HashMap<String, String> = HashMap::new();
         let out = resolve_path_params("/user", &Some(params), &ctx).unwrap();
         assert_eq!(out, "/user");
+    }
+
+    #[test]
+    fn path_params_reject_unknown_key_when_path_has_no_tokens() {
+        let ctx = TemplateContext::new();
+        let mut params = HashMap::new();
+        params.insert("owner".to_string(), "x".to_string());
+        let error = resolve_path_params("/user", &Some(params), &ctx)
+            .expect_err("an unknown path parameter must fail closed");
+        assert_eq!(
+            error.to_string(),
+            "invalid path parameters (unknown: owner); expected: none"
+        );
+    }
+
+    #[test]
+    fn path_params_report_unknown_and_missing_keys_together() {
+        let ctx = TemplateContext::new();
+        let mut params = HashMap::new();
+        params.insert("organisation".to_string(), "acme".to_string());
+        let error = resolve_path_params("/orgs/{organization}/repos", &Some(params), &ctx)
+            .expect_err("a misspelled path parameter must name both sides");
+        assert_eq!(
+            error.to_string(),
+            "invalid path parameters (unknown: organisation; missing: organization); expected: organization"
+        );
     }
 
     #[test]
@@ -4150,6 +4235,67 @@ mod tests {
             .output
             .contains("config `missing-config` does not exist"));
         assert!(outcome.result.output.contains("call mcp_list again"));
+    }
+
+    #[tokio::test]
+    async fn general_discussion_can_execute_include_general_api_config() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/domains"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": [{"id": "domain-1", "name": "example.com"}]
+            })))
+            .mount(&server)
+            .await;
+
+        let state = test_app_state();
+        let secret = crate::core::crypto::generate_secret();
+        state.config.write().await.encryption_secret = Some(secret.clone());
+        let plugin = mk_plugin(
+            &server.uri(),
+            ApiAuthKind::None,
+            vec![mk_endpoint("GET", "/domains")],
+        );
+        let encrypted = crate::db::mcps::encrypt_env(&HashMap::new(), &secret).unwrap();
+        state
+            .db
+            .with_conn(move |conn| -> anyhow::Result<()> {
+                crate::db::mcps::upsert_server(conn, &plugin)?;
+                crate::db::mcps::insert_config(
+                    conn,
+                    &McpConfig {
+                        id: "cfg-1".into(),
+                        server_id: "fake-plugin".into(),
+                        label: "General only".into(),
+                        env_keys: Vec::new(),
+                        env_encrypted: encrypted,
+                        args_override: None,
+                        is_global: false,
+                        include_general: true,
+                        config_hash: "general-only-config".into(),
+                        project_ids: Vec::new(),
+                        host_sync: HostSyncMode::None,
+                    },
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let outcome = execute_api_call_step_with_db(
+            &mk_step("/domains"),
+            None,
+            &state,
+            &TemplateContext::new(),
+            SecurityPolicy::allow_loopback_for_tests(),
+        )
+        .await;
+
+        assert_eq!(outcome.result.status, RunStatus::Success);
+        assert_eq!(
+            extract_envelope(&outcome.result.output)["data"]["data"][0]["name"],
+            "example.com"
+        );
     }
 
     // ── api_body typed injection (whole-placeholder) ────────────────────

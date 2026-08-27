@@ -345,7 +345,11 @@ const DISC_SELECT_COLS: &str =
                 d.model,
                 (SELECT COUNT(*) FROM messages m
                    WHERE m.discussion_id = d.id AND m.role != 'System') AS non_system_count,
-                d.awaiting_agent";
+                d.awaiting_agent,
+                EXISTS(SELECT 1 FROM agent_dispatch_jobs j
+                        WHERE j.discussion_id = d.id
+                          AND j.status = 'Running'
+                          AND j.agent_started_at IS NOT NULL) AS agent_running";
 
 /// Map one `discussions` row (selected via [`DISC_SELECT_COLS`]) into a
 /// [`Discussion`] without its messages (those are loaded separately).
@@ -369,6 +373,11 @@ fn map_discussion_row(row: &rusqlite::Row) -> rusqlite::Result<Discussion> {
         // counting non-System messages), now after d.model at 32. Used by the
         // unread badge so tool breadcrumbs don't inflate the "à lire" counter.
         non_system_message_count: row.get::<_, u32>(33).unwrap_or(0),
+        // Index 35 — `awaiting_agent` (34) stays set for the WHOLE run, so it
+        // cannot tell "queued behind the concurrency cap" from "computing right
+        // now". This one reads the durable provider-start boundary, which is
+        // what the sidebar needs to show a spinner rather than an hourglass.
+        agent_running: row.get::<_, i32>(35).unwrap_or(0) != 0,
         skill_ids: serde_json::from_str(&skill_ids_str).unwrap_or_default(),
         profile_ids: serde_json::from_str(&profile_ids_str).unwrap_or_default(),
         directive_ids: serde_json::from_str(&directive_ids_str).unwrap_or_default(),
@@ -530,6 +539,7 @@ pub fn get_discussion(conn: &Connection, id: &str) -> Result<Option<Discussion>>
                 .unwrap_or_default(),
                 workflow_run_id: row.get::<_, Option<String>>(21).unwrap_or(None),
                 awaiting_agent: row.get::<_, i32>(32).unwrap_or(0) != 0,
+                agent_running: false,
                 test_mode_restore_branch: row.get::<_, Option<String>>(23).unwrap_or(None),
                 test_mode_stash_ref: row.get::<_, Option<String>>(24).unwrap_or(None),
                 summary_strategy: parse_summary_strategy(
@@ -616,6 +626,7 @@ pub fn ensure_mirror_by_shared_id(
     let now = Utc::now();
     let disc = Discussion {
         awaiting_agent: false,
+        agent_running: false,
         id: uuid::Uuid::new_v4().to_string(),
         project_id: None,
         title: format!("{title} (shared by {from_pseudo})"),
@@ -819,6 +830,44 @@ pub fn update_discussion_tier(conn: &Connection, id: &str, tier: &ModelTier) -> 
     Ok(affected > 0)
 }
 
+/// Keep a durable task child room aligned with a reassigned worker.
+///
+/// The dispatch job stores only the provider. Runtime model/profile resolution
+/// comes from the discussion, so updating only `task_executions.worker_*`
+/// silently launches the previous model after reassignment. Update the room in
+/// the same orchestration transaction and invalidate its provider-specific
+/// summary cache.
+pub fn update_task_worker_assignment(
+    conn: &Connection,
+    id: &str,
+    agent: &AgentType,
+    tier: &ModelTier,
+    model: Option<&str>,
+    profile_id: Option<&str>,
+) -> Result<bool> {
+    let participants = serde_json::to_string(&[agent])?;
+    let profiles = serde_json::to_string(&profile_id.into_iter().collect::<Vec<_>>())?;
+    let affected = conn.execute(
+        "UPDATE discussions
+            SET agent = ?2, participants_json = ?3, model_tier = ?4, model = ?5,
+                profile_ids_json = ?6, summary_cache = NULL,
+                summary_up_to_msg_idx = NULL, pending_agent_handoff_from = NULL,
+                pin_first_message = 1,
+                updated_at = ?7
+          WHERE id = ?1",
+        params![
+            id,
+            format_agent_type(agent),
+            participants,
+            format_model_tier(tier),
+            model,
+            profiles,
+            Utc::now().to_rfc3339(),
+        ],
+    )?;
+    Ok(affected > 0)
+}
+
 pub fn update_discussion_agent(conn: &Connection, id: &str, agent: &AgentType) -> Result<bool> {
     let tx = conn.unchecked_transaction()?;
     let current = tx
@@ -892,6 +941,11 @@ pub fn insert_user_message_with_agent_handoff(
 pub struct UserDispatchSpec<'a> {
     pub job_id: &'a str,
     pub agent_override: Option<&'a AgentType>,
+    /// KT-318 — an explicit attempt-scoped dedupe key
+    /// (`orch-dispatch:{exec}:{attempt}`) so a re-dispatch of the same execution
+    /// attempt is idempotent. `None` keeps the historical caller-scoped
+    /// `peer:{msg}` scheme, so every non-orchestration caller stays unchanged.
+    pub dedupe_key: Option<&'a str>,
 }
 
 /// Same acceptance transaction as [`insert_user_message_with_agent_handoff`],
@@ -914,6 +968,7 @@ pub fn insert_user_message_with_dispatch(
     let dispatches = [UserDispatchSpec {
         job_id: dispatch_job_id,
         agent_override,
+        dedupe_key: None,
     }];
     insert_user_message_with_agent_handoff_inner(
         conn,
@@ -1106,35 +1161,47 @@ pub fn insert_cli_message_with_targets_and_dispatches(
     )
 }
 
-fn insert_message_with_targets_dispatches_and_cli_author(
-    conn: &Connection,
+/// KT-318 — transactional core of a live peer/agent turn, composable inside a
+/// larger provisioning commit. Performs message → optional CLI-author → typed
+/// targets → the UNIQUE native enqueue per dispatch spec → `awaiting_agent`,
+/// and RETURNS the enqueued jobs (index-aligned with `dispatches`) so a caller
+/// can bind their exact ids to a `TaskExecution`. It opens NO transaction and
+/// commits nothing: the standalone wrappers own the BEGIN/COMMIT and discard
+/// the returned jobs, so every existing caller stays behaviourally unchanged.
+pub fn insert_message_with_targets_and_dispatches_within_tx(
+    tx: &Connection,
     discussion_id: &str,
     msg: &DiscussionMessage,
     targets: &[MessageTarget],
     dispatches: &[UserDispatchSpec<'_>],
     author_cli_session_id: Option<i64>,
-) -> Result<i64> {
-    let tx = conn.unchecked_transaction()?;
-    let sort_order = insert_message(&tx, discussion_id, msg)?;
+) -> Result<(i64, Vec<super::agent_dispatch::AgentDispatchJob>)> {
+    let sort_order = insert_message(tx, discussion_id, msg)?;
     if let Some(cli_session_id) = author_cli_session_id {
-        set_message_cli_author(&tx, &msg.id, cli_session_id)?;
+        set_message_cli_author(tx, &msg.id, cli_session_id)?;
     }
     // An empty typed list may still carry a legacy `target_agent`
     // compatibility projection on the freshly inserted message. Replacing it
     // with an empty list would erase that projection. With typed targets, the
     // plural table remains authoritative and updates the projection normally.
     if !targets.is_empty() {
-        replace_message_targets(&tx, &msg.id, targets)?;
+        replace_message_targets(tx, &msg.id, targets)?;
     }
+    let mut jobs = Vec::with_capacity(dispatches.len());
     if !dispatches.is_empty() {
         let empty_chain = Vec::new();
         for dispatch in dispatches {
-            let dedupe_key = dispatch
-                .agent_override
-                .map(|agent| format!("peer:{}:{}", msg.id, format_agent_type(agent)))
-                .unwrap_or_else(|| format!("peer:{}", msg.id));
-            super::agent_dispatch::enqueue(
-                &tx,
+            // An explicit orchestration key wins; otherwise the historical
+            // caller-scoped `peer:` scheme is preserved verbatim.
+            let dedupe_key = match dispatch.dedupe_key {
+                Some(explicit) => explicit.to_string(),
+                None => dispatch
+                    .agent_override
+                    .map(|agent| format!("peer:{}:{}", msg.id, format_agent_type(agent)))
+                    .unwrap_or_else(|| format!("peer:{}", msg.id)),
+            };
+            let job = super::agent_dispatch::enqueue(
+                tx,
                 super::agent_dispatch::NewAgentDispatchJob {
                     id: dispatch.job_id,
                     discussion_id,
@@ -1148,9 +1215,30 @@ fn insert_message_with_targets_dispatches_and_cli_author(
                     group_concurrency_limit: None,
                 },
             )?;
+            jobs.push(job);
         }
-        set_awaiting_agent(&tx, discussion_id, true)?;
+        set_awaiting_agent(tx, discussion_id, true)?;
     }
+    Ok((sort_order, jobs))
+}
+
+fn insert_message_with_targets_dispatches_and_cli_author(
+    conn: &Connection,
+    discussion_id: &str,
+    msg: &DiscussionMessage,
+    targets: &[MessageTarget],
+    dispatches: &[UserDispatchSpec<'_>],
+    author_cli_session_id: Option<i64>,
+) -> Result<i64> {
+    let tx = conn.unchecked_transaction()?;
+    let (sort_order, _jobs) = insert_message_with_targets_and_dispatches_within_tx(
+        &tx,
+        discussion_id,
+        msg,
+        targets,
+        dispatches,
+        author_cli_session_id,
+    )?;
     tx.commit()?;
     Ok(sort_order)
 }
@@ -1323,6 +1411,38 @@ pub fn insert_native_agent_message_with_handoffs(
         attached_agents.push(primary_agent);
     }
 
+    // KT-330 — a native reply that names a joined CLI peer by its room alias
+    // (`@claude-cli`, `@codex-cli-2`) must wake that exact peer. Resolve those
+    // aliases to Cli targets and persist them regardless of the handoff branch
+    // below: a bare provider mention stays inert (marker-gated), but naming a
+    // joined session is an explicit wake even when native handoffs are off.
+    let cli_mention_targets: Vec<MessageTarget> =
+        if crate::db::discussion_sessions::count_cli_sessions(&transaction, discussion_id)? > 0 {
+            let views = crate::db::discussion_sessions::list_participant_views(
+                &transaction,
+                discussion_id,
+            )?;
+            let joined: Vec<crate::db::discussion_sessions::JoinedCliSession> = views
+                .iter()
+                .map(|v| crate::db::discussion_sessions::JoinedCliSession {
+                    agent_type: v.agent_type.clone(),
+                    ordinal: v.cli_ordinal,
+                    session_pk: v.id,
+                })
+                .collect();
+            crate::db::discussion_sessions::resolve_cli_session_mentions(&msg.content, &joined)
+                .into_iter()
+                .filter_map(|pk| {
+                    views
+                        .iter()
+                        .find(|v| v.id == pk)
+                        .map(|v| MessageTarget::cli(parse_agent_type(&v.agent_type), pk))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
     let mut allowed = Vec::new();
     let root =
         if child_run_was_success && globally_enabled && no_agent == 0 && discussion_disabled == 0 {
@@ -1375,13 +1495,18 @@ pub fn insert_native_agent_message_with_handoffs(
              WHERE id = ?1",
             params![msg.id, child_run_was_success as i64, dispatch_job_id],
         )?;
-        if !allowed.is_empty() {
-            let targets = allowed
-                .iter()
-                .cloned()
-                .map(MessageTarget::agent)
-                .collect::<Vec<_>>();
+        let mut targets = allowed
+            .iter()
+            .cloned()
+            .map(MessageTarget::agent)
+            .collect::<Vec<_>>();
+        // CLI wake targets ride the same message but never trigger a native
+        // dispatch or `awaiting_agent`: the joined peer wakes via wait_for_peer.
+        targets.extend(cli_mention_targets.iter().cloned());
+        if !targets.is_empty() {
             replace_message_targets(&transaction, &msg.id, &targets)?;
+        }
+        if !allowed.is_empty() {
             let empty_chain = Vec::new();
             for agent in &allowed {
                 let dedupe_key = format!(
@@ -1422,6 +1547,9 @@ pub fn insert_native_agent_message_with_handoffs(
          WHERE id = ?1",
         params![msg.id, child_run_was_success as i64, dispatch_job_id],
     )?;
+    if !cli_mention_targets.is_empty() {
+        replace_message_targets(&transaction, &msg.id, &cli_mention_targets)?;
+    }
     transaction.commit()?;
     Ok(NativeAgentMessageOutcome {
         sort_order,
@@ -1582,6 +1710,19 @@ pub fn update_discussion_workspace(
     let affected = conn.execute(
         "UPDATE discussions SET workspace_path = ?1, worktree_branch = ?2, updated_at = ?3 WHERE id = ?4",
         params![workspace_path, worktree_branch, Utc::now().to_rfc3339(), id],
+    )?;
+    Ok(affected > 0)
+}
+
+/// Clear a child discussion's checkout pointer after KT-320 has physically
+/// removed its confirmed managed worktree. The discussion and transcript stay;
+/// only the now-invalid filesystem coordinates are retired.
+pub fn clear_discussion_workspace(conn: &Connection, id: &str) -> Result<bool> {
+    let affected = conn.execute(
+        "UPDATE discussions
+            SET workspace_path = NULL, worktree_branch = NULL, updated_at = ?2
+          WHERE id = ?1",
+        params![id, Utc::now().to_rfc3339()],
     )?;
     Ok(affected > 0)
 }
@@ -2324,7 +2465,12 @@ pub fn update_discussion_sharing(
 pub fn delete_last_agent_messages(conn: &Connection, discussion_id: &str) -> Result<u64> {
     // Delete trailing non-User messages (Agent + System) from the end
     let affected = conn.execute(
-        "DELETE FROM messages WHERE discussion_id = ?1 AND sort_order > (
+        "DELETE FROM messages WHERE discussion_id = ?1
+         AND EXISTS (
+            SELECT 1 FROM messages
+            WHERE discussion_id = ?1 AND role = 'User'
+         )
+         AND sort_order > (
             SELECT COALESCE(MAX(sort_order), -1) FROM messages
             WHERE discussion_id = ?1 AND role = 'User'
         )",
@@ -2332,6 +2478,30 @@ pub fn delete_last_agent_messages(conn: &Connection, discussion_id: &str) -> Res
     )?;
 
     // Recount to keep message_count accurate after bulk delete
+    conn.execute(
+        "UPDATE discussions SET message_count = (
+            SELECT COUNT(*) FROM messages WHERE discussion_id = ?1
+         ) WHERE id = ?1",
+        params![discussion_id],
+    )?;
+
+    update_discussion_timestamp(conn, discussion_id)?;
+    Ok(affected as u64)
+}
+
+pub fn delete_dispatch_reply_messages(
+    conn: &Connection,
+    discussion_id: &str,
+    dispatch_job_id: &str,
+) -> Result<u64> {
+    let affected = conn.execute(
+        "DELETE FROM messages
+         WHERE discussion_id = ?1
+           AND agent_dispatch_job_id = ?2
+           AND role IN ('Agent', 'System')",
+        params![discussion_id, dispatch_job_id],
+    )?;
+
     conn.execute(
         "UPDATE discussions SET message_count = (
             SELECT COUNT(*) FROM messages WHERE discussion_id = ?1
@@ -2989,6 +3159,7 @@ pub(crate) fn parse_agent_type(s: &str) -> AgentType {
         "CopilotCli" => AgentType::CopilotCli,
         "Ollama" => AgentType::Ollama,
         "LiteLlm" => AgentType::LiteLlm,
+        "Nvidia" => AgentType::Nvidia,
         _ => AgentType::Custom,
     }
 }
@@ -3003,6 +3174,7 @@ fn format_agent_type(a: &AgentType) -> String {
         AgentType::CopilotCli => "CopilotCli".into(),
         AgentType::Ollama => "Ollama".into(),
         AgentType::LiteLlm => "LiteLlm".into(),
+        AgentType::Nvidia => "Nvidia".into(),
         AgentType::Custom => "Custom".into(),
     }
 }

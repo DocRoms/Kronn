@@ -693,6 +693,40 @@ pub async fn set_agent_access(
     }
 }
 
+/// POST /api/config/agent-concurrency
+/// How many runs of this agent may execute at once. `None` restores the family
+/// default. The dispatcher reads it at admission, so a change applies to the
+/// next job claimed — no restart.
+pub async fn set_agent_concurrency(
+    State(state): State<AppState>,
+    Json(req): Json<SetAgentConcurrencyRequest>,
+) -> Json<ApiResponse<()>> {
+    // 0 would mean "never run this agent", which is what disabling it is for.
+    let concurrency = req.concurrency.map(|value| value.max(1));
+    let mut config = state.config.write().await;
+    let agent = match req.agent {
+        AgentType::ClaudeCode => &mut config.agents.claude_code,
+        AgentType::Codex => &mut config.agents.codex,
+        AgentType::GeminiCli => &mut config.agents.gemini_cli,
+        AgentType::Kiro => &mut config.agents.kiro,
+        AgentType::Vibe => &mut config.agents.vibe,
+        AgentType::CopilotCli => &mut config.agents.copilot_cli,
+        AgentType::Ollama => &mut config.agents.ollama,
+        AgentType::LiteLlm => &mut config.agents.lite_llm,
+        AgentType::Nvidia => &mut config.agents.nvidia,
+        AgentType::Custom => {
+            return Json(ApiResponse::err(
+                "Custom agents do not have a configurable concurrency",
+            ))
+        }
+    };
+    agent.concurrency = concurrency;
+    match config::save(&config).await {
+        Ok(_) => Json(ApiResponse::ok(())),
+        Err(error) => Json(ApiResponse::err(format!("Failed to save: {error}"))),
+    }
+}
+
 fn normalize_mention_color(color: Option<&str>) -> Result<Option<String>, &'static str> {
     let Some(color) = color.map(str::trim).filter(|color| !color.is_empty()) else {
         return Ok(None);
@@ -726,6 +760,7 @@ pub async fn set_agent_mention_color(
         AgentType::CopilotCli => &mut config.agents.copilot_cli,
         AgentType::Ollama => &mut config.agents.ollama,
         AgentType::LiteLlm => &mut config.agents.lite_llm,
+        AgentType::Nvidia => &mut config.agents.nvidia,
         AgentType::Custom => {
             return Json(ApiResponse::err(
                 "Custom agents do not have a configurable mention color",
@@ -770,6 +805,7 @@ pub async fn get_server_config(
         max_concurrent_agents: config.server.max_concurrent_agents,
         agent_stall_timeout_min: config.server.agent_stall_timeout_min,
         agent_global_timeout_min: config.server.agent_global_timeout_min,
+        local_agent_global_timeout_min: config.server.local_agent_global_timeout_min,
         auth_enabled: config.server.auth_enabled && config.server.auth_token.is_some(),
         pseudo: config.server.pseudo.clone(),
         avatar_email: config.server.avatar_email.clone(),
@@ -806,6 +842,10 @@ pub async fn set_server_config(
     }
     if let Some(timeout) = req.agent_global_timeout_min {
         config.server.agent_global_timeout_min =
+            crate::models::clamp_agent_global_timeout_min(timeout);
+    }
+    if let Some(timeout) = req.local_agent_global_timeout_min {
+        config.server.local_agent_global_timeout_min =
             crate::models::clamp_agent_global_timeout_min(timeout);
     }
     if let Some(pseudo) = req.pseudo {
@@ -2514,7 +2554,11 @@ mod tests {
         assert_eq!(crate::models::clamp_agent_global_timeout_min(0), 1);
         assert_eq!(crate::models::clamp_agent_global_timeout_min(30), 30);
         assert_eq!(crate::models::clamp_agent_global_timeout_min(120), 120);
-        assert_eq!(crate::models::clamp_agent_global_timeout_min(121), 120);
+        // 240, raised from 120 (KT-403): a hard local-model task measured at
+        // ~2 h 40; abandoned loops now halt themselves, so a long window no
+        // longer keeps a dead run alive.
+        assert_eq!(crate::models::clamp_agent_global_timeout_min(240), 240);
+        assert_eq!(crate::models::clamp_agent_global_timeout_min(241), 240);
     }
 
     #[test]
@@ -2630,6 +2674,7 @@ mod tests {
     fn sample_quick_api(id: &str) -> QuickApi {
         QuickApi {
             id: id.into(),
+            pinned: false,
             name: "Daily Top Articles".into(),
             icon: "🌐".into(),
             description: "Chartbeat top 5".into(),
@@ -2693,6 +2738,7 @@ mod tests {
         let now = Utc::now();
         let qe = crate::models::QuickExec {
             id: "qe-1".into(),
+            pinned: false,
             name: "AWS inventory".into(),
             icon: "⌘".into(),
             description: "Portable CLI collector".into(),

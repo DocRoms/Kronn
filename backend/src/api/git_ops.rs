@@ -6,6 +6,8 @@ use rusqlite::Connection;
 use std::path::Path;
 
 const PROJECT_GIT_GRAPH_LIMIT: usize = 80;
+pub(crate) const GIT_COMMIT_PAGE_DEFAULT: u32 = 40;
+pub(crate) const GIT_COMMIT_PAGE_MAX: u32 = 100;
 
 /// Resolve a GitHub token from MCP configs in the database.
 /// Looks for configs with server_id "mcp-github" and extracts GITHUB_PERSONAL_ACCESS_TOKEN.
@@ -57,8 +59,158 @@ pub(crate) fn parse_committed_diff(diff_output: &str) -> Vec<GitFileStatus> {
         .collect()
 }
 
+fn parse_commit_summaries(output: &str) -> Vec<GitCommitSummary> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split('\x1f');
+            let sha = fields.next()?.to_string();
+            let short_sha = fields.next()?.to_string();
+            let author_name = fields.next()?.to_string();
+            let author_time = fields.next()?.parse().ok()?;
+            let subject = fields.next()?.to_string();
+            Some(GitCommitSummary {
+                sha,
+                short_sha,
+                subject,
+                author_name,
+                author_time,
+            })
+        })
+        .collect()
+}
+
+fn normalized_commit_page(offset: u32, limit: u32) -> (u32, u32) {
+    (offset, limit.clamp(1, GIT_COMMIT_PAGE_MAX))
+}
+
+/// Read one newest-first page without ever materializing the whole history in
+/// the backend. The independent count keeps the UI honest about the total and
+/// lets it distinguish an empty history from a bounded response.
+fn run_git_commit_page(
+    repo_path: &Path,
+    range: &str,
+    offset: u32,
+    limit: u32,
+) -> Result<(Vec<GitCommitSummary>, u32, bool), String> {
+    let (offset, limit) = normalized_commit_page(offset, limit);
+    let count = sync_cmd("git")
+        .args(["rev-list", "--count", range, "--"])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|error| format!("Failed to count git commits: {error}"))?;
+    if !count.status.success() {
+        return Err(String::from_utf8_lossy(&count.stderr).trim().to_string());
+    }
+    let total = String::from_utf8_lossy(&count.stdout)
+        .trim()
+        .parse::<u32>()
+        .map_err(|error| format!("Invalid git commit count: {error}"))?;
+    if offset >= total {
+        return Ok((Vec::new(), total, false));
+    }
+
+    let skip = format!("--skip={offset}");
+    let max_count = format!("--max-count={limit}");
+    let log = sync_cmd("git")
+        .args([
+            "log",
+            "--format=%H%x1f%h%x1f%an%x1f%at%x1f%s",
+            skip.as_str(),
+            max_count.as_str(),
+            range,
+            "--",
+        ])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|error| format!("Failed to run git log: {error}"))?;
+    if !log.status.success() {
+        return Err(String::from_utf8_lossy(&log.stderr).trim().to_string());
+    }
+    let commits = parse_commit_summaries(&String::from_utf8_lossy(&log.stdout));
+    let returned = u32::try_from(commits.len()).unwrap_or(u32::MAX);
+    let truncated = offset.saturating_add(returned) < total;
+    Ok((commits, total, truncated))
+}
+
+/// Read the exact committed evidence between two durable SHAs.
+pub fn run_git_range_page(
+    repo_path: &Path,
+    base_sha: &str,
+    head_sha: &str,
+    commit_offset: u32,
+    commit_limit: u32,
+) -> Result<(Vec<GitFileStatus>, Vec<GitCommitSummary>, u32, bool), String> {
+    let range = format!("{base_sha}..{head_sha}");
+    let diff = sync_cmd("git")
+        .args(["diff", "--name-status", &range, "--"])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|error| format!("Failed to run git diff: {error}"))?;
+    if !diff.status.success() {
+        return Err(String::from_utf8_lossy(&diff.stderr).trim().to_string());
+    }
+    let (commits, total, truncated) =
+        run_git_commit_page(repo_path, &range, commit_offset, commit_limit)?;
+    Ok((
+        parse_committed_diff(&String::from_utf8_lossy(&diff.stdout)),
+        commits,
+        total,
+        truncated,
+    ))
+}
+
+pub fn run_git_diff_range(
+    repo_path: &Path,
+    base_sha: &str,
+    head_sha: &str,
+    file_path: &str,
+) -> Result<GitDiffResponse, String> {
+    let range = format!("{base_sha}..{head_sha}");
+    let output = sync_cmd("git")
+        .args(["diff", &range, "--", file_path])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|error| format!("Failed to run git diff: {error}"))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    Ok(GitDiffResponse {
+        path: file_path.to_string(),
+        diff: String::from_utf8_lossy(&output.stdout).to_string(),
+    })
+}
+
 /// Run `git status` in the given repo directory and return structured status.
 pub fn run_git_status(repo_path: &Path) -> Result<GitStatusResponse, String> {
+    run_git_status_page(repo_path, 0, GIT_COMMIT_PAGE_DEFAULT)
+}
+
+/// Run `git status` with an explicitly bounded commit-history page. File
+/// status remains complete and independent from commit pagination.
+pub fn run_git_status_page(
+    repo_path: &Path,
+    commit_offset: u32,
+    commit_limit: u32,
+) -> Result<GitStatusResponse, String> {
+    run_git_status_impl(repo_path, commit_offset, commit_limit, true)
+}
+
+/// Selected discussion workspaces replace branch-relative evidence with their
+/// durable base..head range. Skip the redundant branch diff/count/log while
+/// still collecting the independent working-tree and repository metadata.
+pub(crate) fn run_git_status_without_commit_evidence(
+    repo_path: &Path,
+) -> Result<GitStatusResponse, String> {
+    run_git_status_impl(repo_path, 0, GIT_COMMIT_PAGE_DEFAULT, false)
+}
+
+fn run_git_status_impl(
+    repo_path: &Path,
+    commit_offset: u32,
+    commit_limit: u32,
+    include_commit_evidence: bool,
+) -> Result<GitStatusResponse, String> {
     let run = |args: &[&str]| -> Result<String, String> {
         let output = sync_cmd("git")
             .args(args)
@@ -159,17 +311,20 @@ pub fn run_git_status(repo_path: &Path) -> Result<GitStatusResponse, String> {
     // we couldn't resolve a default branch. Use `<default>...HEAD` triple-dot
     // to compare against the merge-base, so unrelated commits on default don't
     // appear as "deleted" here.
-    let committed_files = if !is_default_branch && !default_branch.is_empty() {
-        let range = format!("{}...HEAD", default_branch);
-        let (diff_out, ok) = run_with_status(&["diff", "--name-status", &range]);
-        if ok {
-            parse_committed_diff(&diff_out)
+    let (committed_files, commits, commits_total, commits_truncated) =
+        if include_commit_evidence && !is_default_branch && !default_branch.is_empty() {
+            let range = format!("{}...HEAD", default_branch);
+            let (diff_out, ok) = run_with_status(&["diff", "--name-status", &range]);
+            if ok {
+                let (commits, total, truncated) =
+                    run_git_commit_page(repo_path, &range, commit_offset, commit_limit)?;
+                (parse_committed_diff(&diff_out), commits, total, truncated)
+            } else {
+                (Vec::new(), Vec::new(), 0, false)
+            }
         } else {
-            Vec::new()
-        }
-    } else {
-        Vec::new()
-    };
+            (Vec::new(), Vec::new(), 0, false)
+        };
 
     // Ahead/behind upstream
     let (ahead, behind) = {
@@ -242,6 +397,12 @@ pub fn run_git_status(repo_path: &Path) -> Result<GitStatusResponse, String> {
         is_default_branch,
         files,
         committed_files,
+        commits,
+        commits_total,
+        commits_offset: commit_offset,
+        commits_truncated,
+        workspace: None,
+        empty_reason: None,
         ahead,
         behind,
         has_upstream,
@@ -928,8 +1089,11 @@ pub fn run_git_commit(
 ) -> Result<GitCommitResponse, String> {
     // git add each file individually, skip missing files gracefully
     let mut added = 0;
-    for file in files {
-        let clean_file = file.trim_matches('"');
+    let clean_files = files
+        .iter()
+        .map(|file| file.trim_matches('"'))
+        .collect::<Vec<_>>();
+    for &clean_file in &clean_files {
         let file_abs = repo_path.join(clean_file);
 
         if file_abs.exists() {
@@ -991,6 +1155,13 @@ pub fn run_git_commit(
     }
     commit_args.push("-m");
     commit_args.push(message);
+    // The index may contain unrelated entries staged earlier by a CLI worker.
+    // `--only -- <paths>` makes the explicit inventory authoritative: Git
+    // commits those working-tree paths and cannot smuggle another staged file
+    // into the mediated commit.
+    commit_args.push("--only");
+    commit_args.push("--");
+    commit_args.extend(clean_files);
 
     let commit_output = sync_cmd("git")
         .args(&commit_args)
@@ -1848,6 +2019,11 @@ filename src/main.rs
             "expected added.txt in {:?}",
             paths
         );
+        assert_eq!(status.commits.len(), 1);
+        assert_eq!(status.commits_total, 1);
+        assert_eq!(status.commits_offset, 0);
+        assert!(!status.commits_truncated);
+        assert_eq!(status.commits[0].subject, "feature changes");
         assert!(
             paths.contains(&"init.txt"),
             "expected init.txt in {:?}",
@@ -1856,6 +2032,47 @@ filename src/main.rs
         for f in &status.committed_files {
             assert!(f.staged, "committed files should be marked staged: {:?}", f);
         }
+    }
+
+    #[test]
+    fn run_git_status_pages_a_300_plus_commit_branch_without_materializing_it() {
+        let repo = make_test_repo("commit-pages");
+        std::process::Command::new("git")
+            .args(["checkout", "-b", "feature/history"])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        for index in 0..305 {
+            let output = std::process::Command::new("git")
+                .args(["commit", "--allow-empty", "-m", &format!("history {index}")])
+                .current_dir(repo.path())
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+        }
+
+        let first = run_git_status_page(repo.path(), 0, 40).unwrap();
+        assert_eq!(first.commits_total, 305);
+        assert_eq!(first.commits_offset, 0);
+        assert_eq!(first.commits.len(), 40);
+        assert!(first.commits_truncated);
+        assert_eq!(first.commits[0].subject, "history 304");
+        assert_eq!(first.commits[39].subject, "history 265");
+
+        let second = run_git_status_page(repo.path(), 40, 40).unwrap();
+        assert_eq!(second.commits_total, 305);
+        assert_eq!(second.commits_offset, 40);
+        assert_eq!(second.commits.len(), 40);
+        assert!(second.commits_truncated);
+        assert_eq!(second.commits[0].subject, "history 264");
+
+        let last = run_git_status_page(repo.path(), 300, 1_000).unwrap();
+        assert_eq!(last.commits_total, 305);
+        assert_eq!(last.commits_offset, 300);
+        assert_eq!(last.commits.len(), 5);
+        assert!(!last.commits_truncated);
+        assert_eq!(last.commits[0].subject, "history 4");
+        assert_eq!(last.commits[4].subject, "history 0");
     }
 
     #[test]

@@ -400,6 +400,13 @@ fn full_access_for_returns_per_agent_setting() {
             full_access: false,
             ..Default::default()
         },
+        // KT-337 — set here so the assertion below is differential: before the
+        // `full_access_for` arm existed, the `_ => false` catch-all answered
+        // false for a granted NVIDIA config and nothing failed.
+        nvidia: AgentConfig {
+            full_access: true,
+            ..Default::default()
+        },
         model_tiers: Default::default(),
     };
     assert!(config.full_access_for(&AgentType::ClaudeCode));
@@ -408,6 +415,7 @@ fn full_access_for_returns_per_agent_setting() {
     assert!(config.full_access_for(&AgentType::Vibe));
     assert!(config.full_access_for(&AgentType::Ollama));
     assert!(!config.full_access_for(&AgentType::LiteLlm));
+    assert!(config.full_access_for(&AgentType::Nvidia));
     assert!(!config.full_access_for(&AgentType::CopilotCli));
     assert!(!config.full_access_for(&AgentType::Custom));
 }
@@ -734,6 +742,7 @@ fn workflow_step_api_call_roundtrip() {
         exec_setup_args: vec![],
         exec_stdin: None,
         quick_prompt_id: None,
+        quick_prompt_variables: std::collections::HashMap::new(),
         json_data_payload: None,
         collect_api_data: None,
         transform_data: None,

@@ -11,7 +11,8 @@ use super::*;
 fn budget() -> SessionBudget {
     SessionBudget {
         max_traffic_tokens: 1_000,
-        max_age_hours: 10,
+        max_active_hours: 10,
+        max_inactive_gap_minutes: 30,
         max_turns: 100,
         soft_ratio: 0.75,
     }
@@ -19,7 +20,7 @@ fn budget() -> SessionBudget {
 
 #[test]
 fn a_quiet_session_is_ok() {
-    let out = assess(&budget(), Some(10), Some(1), Some(2));
+    let out = assess(&budget(), Some(10), Some(1.0), Some(2));
     assert_eq!(out.verdict, BudgetVerdict::Ok);
     assert_eq!(out.axes.len(), 3);
 }
@@ -29,7 +30,7 @@ fn the_soft_ratio_warns_before_the_ceiling() {
     // The whole reason there are two thresholds: a warning leaves a turn to
     // write the resume bundle. A hard cap alone cuts the session off mid-thought
     // with nothing prepared.
-    let out = assess(&budget(), Some(800), Some(1), Some(2));
+    let out = assess(&budget(), Some(800), Some(1.0), Some(2));
     assert_eq!(out.verdict, BudgetVerdict::Warn);
     assert!(out.reason.contains("resume bundle"), "{}", out.reason);
 }
@@ -38,7 +39,7 @@ fn the_soft_ratio_warns_before_the_ceiling() {
 fn exactly_at_the_soft_ratio_warns() {
     // 750/1000 with soft_ratio 0.75 — a boundary that must not fall through.
     assert_eq!(
-        assess(&budget(), Some(750), Some(1), Some(2)).verdict,
+        assess(&budget(), Some(750), Some(1.0), Some(2)).verdict,
         BudgetVerdict::Warn
     );
 }
@@ -46,7 +47,7 @@ fn exactly_at_the_soft_ratio_warns() {
 #[test]
 fn just_below_the_soft_ratio_is_still_ok() {
     assert_eq!(
-        assess(&budget(), Some(749), Some(1), Some(2)).verdict,
+        assess(&budget(), Some(749), Some(1.0), Some(2)).verdict,
         BudgetVerdict::Ok
     );
 }
@@ -54,7 +55,7 @@ fn just_below_the_soft_ratio_is_still_ok() {
 #[test]
 fn exactly_at_the_ceiling_rotates() {
     assert_eq!(
-        assess(&budget(), Some(1_000), Some(1), Some(2)).verdict,
+        assess(&budget(), Some(1_000), Some(1.0), Some(2)).verdict,
         BudgetVerdict::Rotate
     );
 }
@@ -64,23 +65,21 @@ fn the_worst_axis_decides() {
     // Being inside two ceilings does not offset breaking the third. A verdict
     // that averaged the axes would let a runaway traffic figure hide behind a
     // young session.
-    let out = assess(&budget(), Some(5_000), Some(1), Some(1));
+    let out = assess(&budget(), Some(5_000), Some(1.0), Some(1));
     assert_eq!(out.verdict, BudgetVerdict::Rotate);
     assert!(out.reason.contains("traffic_tokens"), "{}", out.reason);
 }
 
 #[test]
-fn age_alone_can_trigger_a_rotation() {
-    // A session can be cheap and still stale: it carries context it will never
-    // use again, and every future read pays for it.
-    let out = assess(&budget(), Some(1), Some(99), Some(1));
+fn active_time_alone_can_trigger_a_rotation() {
+    let out = assess(&budget(), Some(1), Some(99.0), Some(1));
     assert_eq!(out.verdict, BudgetVerdict::Rotate);
-    assert!(out.reason.contains("age_hours"), "{}", out.reason);
+    assert!(out.reason.contains("active_hours"), "{}", out.reason);
 }
 
 #[test]
 fn turns_alone_can_trigger_a_rotation() {
-    let out = assess(&budget(), Some(1), Some(1), Some(500));
+    let out = assess(&budget(), Some(1), Some(1.0), Some(500));
     assert_eq!(out.verdict, BudgetVerdict::Rotate);
     assert!(out.reason.contains("turns"), "{}", out.reason);
 }
@@ -89,7 +88,7 @@ fn turns_alone_can_trigger_a_rotation() {
 fn an_unmeasured_axis_is_unknown_not_ok() {
     // THE test. A vendor with no collector must not be exempt from the budget:
     // an unmeasured session is not known to be cheap, only unwatched.
-    let out = assess(&budget(), None, Some(1), Some(1));
+    let out = assess(&budget(), None, Some(1.0), Some(1));
     assert_eq!(out.verdict, BudgetVerdict::Unknown);
     assert!(out.reason.contains("not measured"), "{}", out.reason);
     assert!(out.reason.contains("unwatched"), "{}", out.reason);
@@ -107,13 +106,13 @@ fn an_unmeasured_axis_is_unknown_not_ok() {
 fn a_real_breach_outranks_an_unmeasured_axis() {
     // Unknown must be visible, but it must not drown out a ceiling that is
     // genuinely broken — that would be the worst of both.
-    let out = assess(&budget(), None, Some(99), Some(1));
+    let out = assess(&budget(), None, Some(99.0), Some(1));
     assert_eq!(out.verdict, BudgetVerdict::Rotate);
 }
 
 #[test]
 fn a_warning_outranks_an_unmeasured_axis() {
-    let out = assess(&budget(), None, Some(8), Some(1));
+    let out = assess(&budget(), None, Some(8.0), Some(1));
     assert_eq!(out.verdict, BudgetVerdict::Warn);
 }
 
@@ -121,9 +120,9 @@ fn a_warning_outranks_an_unmeasured_axis() {
 fn every_axis_is_reported_even_when_ok() {
     // A report that only listed the offending axis would give no sense of how
     // close the others are.
-    let out = assess(&budget(), Some(10), Some(1), Some(2));
+    let out = assess(&budget(), Some(10), Some(1.0), Some(2));
     let names: Vec<&str> = out.axes.iter().map(|axis| axis.name.as_str()).collect();
-    assert_eq!(names, vec!["traffic_tokens", "age_hours", "turns"]);
+    assert_eq!(names, vec!["traffic_tokens", "active_hours", "turns"]);
     for axis in &out.axes {
         assert!(axis.ratio.is_some());
     }
@@ -137,7 +136,7 @@ fn a_zero_ceiling_does_not_divide_by_zero() {
             ..budget()
         },
         Some(5),
-        Some(1),
+        Some(1.0),
         Some(1),
     );
     // No ratio is derivable, so the axis is unknown rather than infinitely bad.
@@ -157,7 +156,7 @@ fn the_defaults_would_have_flagged_the_measured_session() {
     let out = assess(
         &SessionBudget::default(),
         Some(4_143_787_451),
-        Some(9 * 24),
+        Some((9 * 24) as f64),
         Some(300),
     );
     assert_eq!(out.verdict, BudgetVerdict::Rotate);
@@ -170,7 +169,7 @@ fn the_defaults_leave_ordinary_work_alone() {
     let out = assess(
         &SessionBudget::default(),
         Some(50_000_000),
-        Some(4),
+        Some(4.0),
         Some(30),
     );
     assert_eq!(out.verdict, BudgetVerdict::Ok);

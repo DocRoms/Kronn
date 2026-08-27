@@ -162,6 +162,7 @@ mod tests {
             exec_setup_args: vec![],
             exec_stdin: None,
             quick_prompt_id: None,
+            quick_prompt_variables: std::collections::HashMap::new(),
             json_data_payload: None,
             collect_api_data: None,
             transform_data: None,
@@ -184,6 +185,7 @@ mod tests {
     fn make_qa(id: &str) -> QuickApi {
         QuickApi {
             id: id.to_string(),
+            pinned: false,
             name: "Test QA".to_string(),
             icon: "P".to_string(),
             description: String::new(),

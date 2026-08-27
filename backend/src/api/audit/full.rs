@@ -1027,6 +1027,11 @@ pub async fn full_audit(
             match runner::start_agent_with_config(runner::AgentStartConfig {
                 full_access: true,
                 tier: crate::models::ModelTier::Reasoning,
+                // Audit admission currently accepts CLI providers only. The
+                // auditor already has its bounded source/citation prompt; keep
+                // native HTTP tools explicitly absent so a future provider
+                // expansion cannot inherit mutation capabilities by omission.
+                tools: None,
                 ..runner::AgentStartConfig::new(&agent_type, &project_path_str, &attempt_prompt, &tokens)
             }).await {
                 Ok(mut process) => {
@@ -1150,6 +1155,7 @@ pub async fn full_audit(
                                     );
                                 }
                                 runner::StreamJsonEvent::Text(_)
+                                | runner::StreamJsonEvent::TerminalError(_)
                                 | runner::StreamJsonEvent::ToolInputDelta(_)
                                 | runner::StreamJsonEvent::ToolEnd
                                 | runner::StreamJsonEvent::Skip => {}
@@ -1859,6 +1865,7 @@ pub async fn full_audit(
         };
         let discussion = Discussion {
             awaiting_agent: false,
+            agent_running: false,
             id: discussion_id.clone(),
             project_id: Some(project_id.clone()),
             title: disc_title,

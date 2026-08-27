@@ -262,6 +262,7 @@ pub async fn bootstrap(
 
     let discussion = Discussion {
         awaiting_agent: false,
+        agent_running: false,
         id: discussion_id.clone(),
         project_id: Some(project_id.clone()),
         title: format!("Bootstrap: {}", project_name),

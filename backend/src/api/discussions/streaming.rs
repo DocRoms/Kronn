@@ -19,7 +19,7 @@ use chrono::Utc;
 use futures::StreamExt;
 use uuid::Uuid;
 
-use crate::agents::runner;
+use crate::agents::runner::{self, AgentIo};
 use crate::models::*;
 use crate::AppState;
 
@@ -30,11 +30,408 @@ use super::{
     NON_STREAMING_STALL_TIMEOUT,
 };
 use crate::api::disc_helpers::{
-    agent_alias, agent_display_name, agent_handoff_budget_instruction,
-    agent_handoff_target_is_allowed, auth_mode_for, estimate_extra_context_len,
-    extract_agent_handoff_markers,
+    agent_alias, agent_handoff_budget_instruction, agent_handoff_target_is_allowed, auth_mode_for,
+    estimate_extra_context_len, extract_agent_handoff_markers,
 };
 use crate::api::disc_prompts::build_agent_prompt;
+
+/// Build the native HTTP tool executor from durable discussion lineage.
+///
+/// The ordinary discussion path and the task-dispatch SSE path both end up in
+/// `make_agent_stream_inner`. Resolving the worker scope here prevents those
+/// entry points from drifting into different catalogues. A database error is
+/// deliberately propagated: silently falling back to the broader principal
+/// catalogue would give a worker tools and budgets it must not receive.
+pub(crate) async fn native_http_tools_for_discussion(
+    state: &AppState,
+    discussion_id: &str,
+    agent_type: &AgentType,
+    source_message_id: Option<String>,
+    source_dispatch_job_id: Option<String>,
+    tool_free_judge: bool,
+) -> anyhow::Result<Option<std::sync::Arc<dyn crate::agents::tools::ToolExecutor>>> {
+    if tool_free_judge || !runner::is_http_chat_agent(agent_type) {
+        return Ok(None);
+    }
+
+    let room = discussion_id.to_string();
+    let worker_execution = state
+        .db
+        .with_read_conn(move |conn| {
+            crate::db::orchestration::get_execution_for_sub_discussion(conn, &room)
+        })
+        .await?;
+    let is_worker_room = worker_execution.is_some();
+    tracing::info!(
+        discussion_id,
+        agent = ?agent_type,
+        is_worker_room,
+        "Resolved native HTTP tool scope from durable discussion lineage"
+    );
+
+    let disc_id = Some(discussion_id.to_string());
+    let tools = if is_worker_room {
+        crate::api::agent_tools::KronnToolExecutor::arc_for_worker_room(
+            state.clone(),
+            disc_id,
+            agent_type.clone(),
+            source_message_id,
+            source_dispatch_job_id,
+            worker_execution.and_then(|execution| execution.worker_scope),
+        )
+    } else {
+        crate::api::agent_tools::KronnToolExecutor::arc(
+            state.clone(),
+            disc_id,
+            agent_type.clone(),
+            source_message_id,
+            source_dispatch_job_id,
+        )
+    };
+    Ok(Some(tools))
+}
+
+/// Resolve the opaque delivery capability for a CLI-backed `kind=agent`
+/// worker. Ordinary discussion turns and exact joined-CLI workers return
+/// `None`; a task dispatch must match the durable child room, provider and
+/// trigger before any context reaches the spawned process.
+async fn cli_task_worker_context(
+    state: &AppState,
+    discussion_id: &str,
+    agent_type: &AgentType,
+    dispatch_job_id: Option<&str>,
+) -> anyhow::Result<Option<runner::TaskWorkerBridgeContext>> {
+    if runner::is_http_chat_agent(agent_type) {
+        return Ok(None);
+    }
+    let Some(dispatch_job_id) = dispatch_job_id else {
+        return Ok(None);
+    };
+    let lineage = state
+        .db
+        .with_read_conn({
+            let dispatch_job_id = dispatch_job_id.to_string();
+            move |conn| {
+                let execution =
+                    crate::db::orchestration::get_execution_for_dispatch(conn, &dispatch_job_id)?;
+                let dispatch = crate::db::agent_dispatch::get(conn, &dispatch_job_id)?;
+                Ok(execution.zip(dispatch))
+            }
+        })
+        .await?;
+    let Some((execution, dispatch)) = lineage else {
+        return Ok(None);
+    };
+
+    anyhow::ensure!(
+        execution.worker_target_kind == Some(MessageTargetKind::Agent),
+        "task dispatch is not owned by a launched discussion agent"
+    );
+    anyhow::ensure!(
+        execution.sub_discussion_id.as_deref() == Some(discussion_id),
+        "task dispatch child discussion does not match the spawned room"
+    );
+    anyhow::ensure!(
+        dispatch.discussion_id == discussion_id,
+        "task dispatch job does not belong to the spawned room"
+    );
+    let persisted_agent = execution
+        .worker_agent_type
+        .as_deref()
+        .map(crate::db::orchestration::agent_type_from_db)
+        .transpose()?;
+    anyhow::ensure!(
+        persisted_agent.as_ref() == Some(agent_type),
+        "task dispatch provider does not match the spawned agent"
+    );
+    anyhow::ensure!(
+        !dispatch.trigger_message_id.trim().is_empty(),
+        "task dispatch has no trigger message"
+    );
+
+    Ok(Some(runner::TaskWorkerBridgeContext {
+        execution_id: execution.id,
+        discussion_id: discussion_id.to_string(),
+        agent_type: crate::db::orchestration::agent_type_to_db(agent_type),
+        source_message_id: dispatch.trigger_message_id,
+    }))
+}
+
+#[cfg(test)]
+mod native_http_tools_scope_tests {
+    use super::{cli_task_worker_context, native_http_tools_for_discussion};
+    use crate::agents::tools::ToolRunMode;
+    use crate::db::agent_dispatch::NewAgentDispatchJob;
+    use crate::models::{
+        AgentType, LaunchSingleTaskInput, MessageTargetKind, OrchestrationActor, PlanningActorKind,
+        TaskWorkerScope,
+    };
+    use crate::{AppState, DEFAULT_MAX_CONCURRENT_AGENTS};
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    fn test_state() -> AppState {
+        let db = Arc::new(crate::db::Database::open_in_memory().expect("in-memory DB"));
+        let config = Arc::new(RwLock::new(crate::core::config::default_config()));
+        AppState::new_defaults(config, db, DEFAULT_MAX_CONCURRENT_AGENTS)
+    }
+
+    fn backend_actor() -> OrchestrationActor {
+        OrchestrationActor {
+            kind: PlanningActorKind::Backend,
+            id: Some("streaming-scope-test".into()),
+            session_id: None,
+            source_message_id: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn task_dispatch_sse_uses_worker_tools_while_an_ordinary_room_stays_general() {
+        let state = test_state();
+        state
+            .db
+            .with_conn(|conn| {
+                let now = "2026-08-24T00:00:00Z";
+                conn.execute(
+                    "INSERT INTO discussions (id, title, created_at, updated_at)
+                     VALUES ('d-parent', 'Parent', ?1, ?1),
+                            ('d-worker', 'Worker', ?1, ?1)",
+                    [now],
+                )?;
+                conn.execute(
+                    "INSERT INTO planning_tasks
+                     (id, task_number, title, created_at, updated_at)
+                     VALUES ('t-worker', 1, 'Worker task', ?1, ?1)",
+                    [now],
+                )?;
+                let scope = TaskWorkerScope::PrelocalizedEdit {
+                    path: "backend/src/lib.rs".into(),
+                    start_line: 40,
+                    end_line: 44,
+                };
+                let mut launch = LaunchSingleTaskInput::new("t-worker", "d-parent");
+                launch.worker_scope = Some(scope);
+                let execution =
+                    crate::db::orchestration::launch_single_task(conn, &launch, &backend_actor())?
+                        .execution;
+                crate::db::orchestration::set_execution_sub_discussion(
+                    conn,
+                    &execution.id,
+                    "d-worker",
+                )?;
+                Ok(())
+            })
+            .await
+            .expect("seed execution lineage");
+
+        let worker = native_http_tools_for_discussion(
+            &state,
+            "d-worker",
+            &AgentType::Ollama,
+            Some("worker-trigger".into()),
+            Some("worker-dispatch".into()),
+            false,
+        )
+        .await
+        .expect("resolve worker scope")
+        .expect("Ollama receives native tools");
+        assert_eq!(worker.run_mode(), ToolRunMode::Worker);
+        assert_eq!(
+            worker.worker_scope(),
+            Some(TaskWorkerScope::PrelocalizedEdit {
+                path: "backend/src/lib.rs".into(),
+                start_line: 40,
+                end_line: 44,
+            })
+        );
+        let worker_names = worker
+            .catalogue()
+            .into_iter()
+            .filter_map(|tool| tool["function"]["name"].as_str().map(str::to_string))
+            .collect::<Vec<_>>();
+        assert!(worker_names.iter().any(|name| name == "task_exec_deliver"));
+        assert!(!worker_names.iter().any(|name| name == "task_list"));
+
+        let principal = native_http_tools_for_discussion(
+            &state,
+            "d-parent",
+            &AgentType::Ollama,
+            Some("principal-trigger".into()),
+            Some("principal-dispatch".into()),
+            false,
+        )
+        .await
+        .expect("resolve principal scope")
+        .expect("Ollama receives native tools");
+        assert_eq!(principal.run_mode(), ToolRunMode::General);
+        assert!(principal.catalogue().iter().any(|tool| {
+            tool["function"]["name"]
+                .as_str()
+                .is_some_and(|name| name == "task_list")
+        }));
+    }
+
+    #[tokio::test]
+    async fn cli_task_worker_context_is_derived_from_exact_dispatch_lineage() {
+        let state = test_state();
+        let execution_id = state
+            .db
+            .with_conn(|conn| {
+                let now = "2026-08-24T00:00:00Z";
+                conn.execute(
+                    "INSERT INTO discussions (id, title, created_at, updated_at)
+                     VALUES ('d-parent', 'Parent', ?1, ?1),
+                            ('d-worker', 'Worker', ?1, ?1),
+                            ('d-foreign', 'Foreign', ?1, ?1)",
+                    [now],
+                )?;
+                conn.execute(
+                    "INSERT INTO planning_tasks
+                     (id, task_number, title, created_at, updated_at)
+                     VALUES ('t-cli-worker', 2, 'CLI worker task', ?1, ?1)",
+                    [now],
+                )?;
+                let mut input = LaunchSingleTaskInput::new("t-cli-worker", "d-parent");
+                input.worker_target_kind = Some(MessageTargetKind::Agent);
+                input.worker_agent_type = Some(crate::db::orchestration::agent_type_to_db(
+                    &AgentType::Codex,
+                ));
+                let execution =
+                    crate::db::orchestration::launch_single_task(conn, &input, &backend_actor())?
+                        .execution;
+                crate::db::orchestration::set_execution_sub_discussion(
+                    conn,
+                    &execution.id,
+                    "d-worker",
+                )?;
+                crate::db::discussions::insert_message(
+                    conn,
+                    "d-worker",
+                    &crate::models::DiscussionMessage {
+                        recovered_partial: false,
+                        session_tokens_at_message: None,
+                        author_cli_ordinal: None,
+                        model: None,
+                        lint_report: None,
+                        id: "trigger-a".into(),
+                        role: crate::models::MessageRole::User,
+                        channel: crate::models::MessageChannel::Main,
+                        content: "bounded work".into(),
+                        agent_type: None,
+                        timestamp: chrono::Utc::now(),
+                        tokens_used: 0,
+                        auth_mode: None,
+                        model_tier: None,
+                        cost_usd: None,
+                        author_pseudo: None,
+                        author_avatar_email: None,
+                        source_msg_id: None,
+                        duration_ms: None,
+                        target_agent: None,
+                        reply_to_message_id: None,
+                    },
+                )?;
+                crate::db::agent_dispatch::enqueue(
+                    conn,
+                    NewAgentDispatchJob {
+                        id: "dispatch-a",
+                        discussion_id: "d-worker",
+                        trigger_message_id: "trigger-a",
+                        trigger_sort_order: 1,
+                        dedupe_key: "dispatch-a",
+                        agent_override: Some(&AgentType::Codex),
+                        chain_prompt_ids: &[],
+                        batch_item: None,
+                        group_id: None,
+                        group_concurrency_limit: None,
+                    },
+                )?;
+                crate::db::orchestration::attach_execution_dispatch(
+                    conn,
+                    &execution.id,
+                    "dispatch-a",
+                )?;
+                Ok(execution.id)
+            })
+            .await
+            .expect("seed exact CLI worker lineage");
+
+        let context =
+            cli_task_worker_context(&state, "d-worker", &AgentType::Codex, Some("dispatch-a"))
+                .await
+                .expect("resolve exact lineage")
+                .expect("CLI task worker receives a delivery capability");
+        assert_eq!(context.execution_id, execution_id);
+        assert_eq!(context.discussion_id, "d-worker");
+        assert_eq!(context.agent_type, "Codex");
+        assert_eq!(context.source_message_id, "trigger-a");
+
+        assert!(cli_task_worker_context(
+            &state,
+            "d-foreign",
+            &AgentType::Codex,
+            Some("dispatch-a"),
+        )
+        .await
+        .is_err());
+        assert!(cli_task_worker_context(
+            &state,
+            "d-worker",
+            &AgentType::ClaudeCode,
+            Some("dispatch-a"),
+        )
+        .await
+        .is_err());
+        assert!(cli_task_worker_context(
+            &state,
+            "d-worker",
+            &AgentType::Ollama,
+            Some("dispatch-a"),
+        )
+        .await
+        .expect("HTTP providers do not use the CLI bridge")
+        .is_none());
+        assert!(cli_task_worker_context(
+            &state,
+            "d-worker",
+            &AgentType::Codex,
+            Some("unknown-dispatch"),
+        )
+        .await
+        .expect("ordinary dispatch is not a worker capability")
+        .is_none());
+    }
+
+    #[tokio::test]
+    async fn unreadable_execution_lineage_returns_no_http_executor() {
+        let state = test_state();
+        state
+            .db
+            .with_conn(|conn| {
+                // Corrupt only this disposable in-memory fixture so the real
+                // lookup takes its database-error path rather than the valid
+                // "ordinary room" (`Ok(false)`) path.
+                conn.execute_batch("PRAGMA foreign_keys=OFF; DROP TABLE task_executions;")?;
+                Ok(())
+            })
+            .await
+            .expect("make execution lineage unreadable");
+
+        let result = native_http_tools_for_discussion(
+            &state,
+            "d-unknown",
+            &AgentType::Ollama,
+            Some("trigger".into()),
+            Some("dispatch".into()),
+            false,
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "an unreadable lineage must refuse the run, never return General tools"
+        );
+    }
+}
 
 // ── Decoder-loop detector (shared by make_agent_stream + run_agent_streaming) ──
 //
@@ -90,6 +487,21 @@ pub(super) fn effective_stall_timeout(
     } else {
         configured.max(non_streaming_floor)
     }
+}
+
+/// Select the explicit wall-clock budget for this provider. Keeping the
+/// choice pure prevents an Ollama-only multiplier from drifting back into the
+/// runtime while Settings continues to display a different number.
+fn effective_global_timeout(
+    agent_type: &AgentType,
+    hosted_minutes: u32,
+    local_minutes: u32,
+) -> Duration {
+    configured_agent_global_timeout(if *agent_type == AgentType::Ollama {
+        local_minutes
+    } else {
+        hosted_minutes
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -184,7 +596,10 @@ pub(super) fn classify_tool_call(tool: &str, input: &str) -> ToolRecord {
 /// counters in one transaction. Keeping the broadcast separate lets that path
 /// notify the UI after commit without incrementing the counters a second time.
 pub(crate) fn broadcast_batch_progress(state: &AppState, disc_id: &str, updated_run: &WorkflowRun) {
-    let is_final = matches!(updated_run.status, RunStatus::Success | RunStatus::Failed);
+    let is_final = matches!(
+        updated_run.status,
+        RunStatus::Success | RunStatus::Partial | RunStatus::Failed
+    );
     let event = if is_final {
         WsMessage::BatchRunFinished {
             run_id: updated_run.id.clone(),
@@ -776,8 +1191,82 @@ async fn make_agent_stream_inner(
     let skill_ids = disc.skill_ids.clone();
     let directive_ids = disc.directive_ids.clone();
     let profile_ids = disc.profile_ids.clone();
-    let mut workspace_path = disc.workspace_path.clone();
-    let project_path = if let Some(ref pid) = disc.project_id {
+    let tool_free_judge = {
+        let did = discussion_id.clone();
+        state
+            .db
+            .with_read_conn(move |conn| crate::db::compare::is_judge_discussion(conn, &did))
+            .await
+            .unwrap_or(false)
+    };
+    let native_http_tools = match native_http_tools_for_discussion(
+        &state,
+        &discussion_id,
+        &agent_type,
+        dispatch_trigger_message_id.clone(),
+        dispatch_job_id.clone(),
+        tool_free_judge,
+    )
+    .await
+    {
+        Ok(tools) => tools,
+        Err(error) => {
+            tracing::error!(
+                discussion_id,
+                agent = ?agent_type,
+                "Unable to resolve native HTTP tool scope: {error}"
+            );
+            finish_tracked_preflight(&mut completion_tx);
+            let stream: SseStream = Box::pin(futures::stream::once(async move {
+                Ok::<_, Infallible>(
+                    Event::default().event("error").data(
+                        serde_json::json!({
+                            "error": "Unable to verify the agent execution scope; the run was not started"
+                        })
+                        .to_string(),
+                    ),
+                )
+            }));
+            return Sse::new(prepend_initial_event(stream, initial_event.take()));
+        }
+    };
+    let cli_task_worker_context = match cli_task_worker_context(
+        &state,
+        &discussion_id,
+        &agent_type,
+        dispatch_job_id.as_deref(),
+    )
+    .await
+    {
+        Ok(context) => context,
+        Err(error) => {
+            tracing::error!(
+                discussion_id,
+                agent = ?agent_type,
+                "Unable to resolve CLI task-worker delivery scope: {error}"
+            );
+            finish_tracked_preflight(&mut completion_tx);
+            let stream: SseStream = Box::pin(futures::stream::once(async move {
+                Ok::<_, Infallible>(
+                    Event::default().event("error").data(
+                        serde_json::json!({
+                            "error": "Unable to verify the agent execution scope; the run was not started"
+                        })
+                        .to_string(),
+                    ),
+                )
+            }));
+            return Sse::new(prepend_initial_event(stream, initial_event.take()));
+        }
+    };
+    let mut workspace_path = if tool_free_judge {
+        None
+    } else {
+        disc.workspace_path.clone()
+    };
+    let project_path = if tool_free_judge {
+        String::new()
+    } else if let Some(ref pid) = disc.project_id {
         let pid = pid.clone();
         state
             .db
@@ -1033,7 +1522,11 @@ async fn make_agent_stream_inner(
     // For general discussions (no project), write .mcp.json + build MCP context.
     // For project discussions, also ensure the .mcp.json is fresh on disk
     // (covers the case where MCPs were added/toggled since the last sync).
-    let global_mcp_context = if project_path.is_empty() {
+    let global_mcp_context = if tool_free_judge {
+        // The verdict must be reproducible from the captured payload alone.
+        // `Some("")` explicitly overrides both project and global MCP config.
+        Some(String::new())
+    } else if project_path.is_empty() {
         tracing::debug!(target: "kronn::mcp", disc_id = %discussion_id, "no project — loading global MCPs only");
         crate::api::disc_git::prepare_general_mcp(&state, &workspace_path).await
     } else {
@@ -1217,7 +1710,7 @@ async fn make_agent_stream_inner(
         tokens,
         full_access,
         model_tiers_config,
-        lite_llm_base_url,
+        http_endpoints,
         user_bio,
         global_context,
         handoffs_enabled,
@@ -1248,7 +1741,7 @@ async fn make_agent_stream_inner(
             config.tokens.clone(),
             fa,
             config.agents.model_tiers.clone(),
-            config.agents.lite_llm.base_url.clone(),
+            crate::models::setup::HttpEndpoints::from_agents(&config.agents),
             bio,
             gc,
             config.server.agent_handoffs_enabled,
@@ -1472,11 +1965,12 @@ async fn make_agent_stream_inner(
         }
     }
 
-    // Register a cancellation token keyed by the disc id so the "⏹ Arrêter"
-    // UI (POST /api/discussions/:id/stop) can trigger it. The CancelGuard
-    // removes the entry from the registry when this task's scope exits —
-    // either on normal completion or via panic/early return.
-    let cancel_guard = crate::CancelGuard::insert(&state.cancel_registry, disc_id.clone());
+    // Durable responses use their dispatch id as the cancellation key. This
+    // lets the UI stop one queued/running reply without killing a sibling from
+    // another turn in the same discussion. Legacy non-dispatch streams keep
+    // the discussion id key used by the global Stop action.
+    let cancel_key = dispatch_job_id.clone().unwrap_or_else(|| disc_id.clone());
+    let cancel_guard = crate::CancelGuard::insert(&state.cancel_registry, cancel_key);
     let cancel_token = cancel_guard.token.clone();
 
     // Spawn background task — always saves to DB even if client disconnects
@@ -1485,28 +1979,34 @@ async fn make_agent_stream_inner(
         // Keep the guard alive for the lifetime of this task. Dropping it at
         // the end of the move closure removes the token from the registry.
         let _cancel_guard = cancel_guard;
-        // Acquire semaphore permit — limits concurrent agent processes
-        let _permit = match semaphore.acquire_owned().await {
-            Ok(p) => p,
-            Err(_) => {
-                let _ = tx
-                    .send(AgentStreamEvent::Error {
-                        data: serde_json::json!({ "error": "Server shutting down" }),
-                    })
-                    .await;
-                if let Some(sender) = completion_tx.take() {
-                    let _ = sender.send(AgentExecutionOutcome::RuntimeUnavailable {
-                        reason: "server_shutting_down".to_string(),
-                    });
+        // Only processes and inference running on this machine consume the
+        // machine-wide pool. Remote HTTP providers own their capacity and are
+        // admitted independently by the dispatch scheduler.
+        let _permit = if crate::agents::runner::is_local_agent(&agent_type) {
+            match semaphore.acquire_owned().await {
+                Ok(p) => Some(p),
+                Err(_) => {
+                    let _ = tx
+                        .send(AgentStreamEvent::Error {
+                            data: serde_json::json!({ "error": "Server shutting down" }),
+                        })
+                        .await;
+                    if let Some(sender) = completion_tx.take() {
+                        let _ = sender.send(AgentExecutionOutcome::RuntimeUnavailable {
+                            reason: "server_shutting_down".to_string(),
+                        });
+                    }
+                    return;
                 }
-                return;
             }
+        } else {
+            None
         };
 
         // Durable execution boundary: `claimed_at` means the dispatcher owns
         // the job, while `agent_started_at` means queueing is over and a paid
-        // or local provider call is about to begin. Persist it only after the
-        // global semaphore permit is held so capacity wait is measurable.
+        // or local provider call is about to begin. Persist it only after any
+        // required local-capacity permit is held so capacity wait is measurable.
         if let Some(job_id) = dispatch_job_id.as_ref() {
             let started_id = job_id.clone();
             match state
@@ -1554,6 +2054,19 @@ async fn make_agent_stream_inner(
             .await;
 
         let mut tracked_execution_succeeded = false;
+        // KT-405 — cloned out of the lock (never held across an await), so
+        // an HTTP run can honour a persistent per-model context override.
+        let (ollama_context_overrides, http_request_timeout) = {
+            let cfg = state.config.read().await;
+            (
+                cfg.server.ollama_context_overrides.clone(),
+                effective_global_timeout(
+                    &agent_type,
+                    cfg.server.agent_global_timeout_min,
+                    cfg.server.local_agent_global_timeout_min,
+                ),
+            )
+        };
         match runner::start_agent_with_config(runner::AgentStartConfig {
             work_dir: workspace_path.as_deref(),
             full_access,
@@ -1563,23 +2076,20 @@ async fn make_agent_stream_inner(
             mcp_context_override: global_mcp_context.as_deref(),
             tier: disc_tier,
             model_tiers: Some(&model_tiers_config),
-            lite_llm_base_url: lite_llm_base_url.as_deref(),
+            http_endpoints: Some(&http_endpoints),
+            ollama_context_overrides: Some(&ollama_context_overrides),
+            http_request_timeout: Some(http_request_timeout),
+            cancel_token: Some(cancel_token.clone()),
             model_override: disc_model.as_deref(),
             context_files_prompt: &context_files_prompt,
             // Forward to the agent process env so the kronn-internal MCP
             // bridge knows which discussion to introspect when called.
             discussion_id: Some(&discussion_id),
+            task_worker_context: cli_task_worker_context.as_ref(),
             // Only HTTP agents consume this: CLI agents already reach the same
             // primitives through the stdio bridge, and handing them a second
             // channel would duplicate the surface for no gain.
-            tools: crate::agents::runner::is_http_chat_agent(&agent_type).then(|| {
-                crate::api::agent_tools::KronnToolExecutor::arc(
-                    state.clone(),
-                    Some(discussion_id.clone()),
-                    agent_display_name(&agent_type),
-                    dispatch_trigger_message_id.clone(),
-                )
-            }),
+            tools: native_http_tools,
             ..runner::AgentStartConfig::new(&agent_type, &project_path, &prompt, &tokens)
         })
         .await
@@ -1588,6 +2098,7 @@ async fn make_agent_stream_inner(
                 let mut full_response = String::new();
                 let mut stream_json_tokens: u64 = 0;
                 let mut stream_json_cost: Option<f64> = None;
+                let mut stream_json_failure: Option<runner::StreamJsonFailure> = None;
                 let is_stream_json = process.output_mode == runner::OutputMode::StreamJson;
                 // Track current tool for rich log messages
                 let mut current_tool: Option<String> = None;
@@ -1607,17 +2118,18 @@ async fn make_agent_stream_inner(
                 // disappears when the stream ends, leaving no trace for
                 // post-hoc debug. Persisting them keeps the audit trail.
                 let mut native_tool_calls: Vec<String> = Vec::new();
-                let (global_timeout, stall_timeout_min) = {
+                let stall_timeout_min = {
                     let cfg = state.config.read().await;
-                    (
-                        configured_agent_global_timeout(cfg.server.agent_global_timeout_min),
-                        if cfg.server.agent_stall_timeout_min > 0 {
-                            cfg.server.agent_stall_timeout_min
-                        } else {
-                            DEFAULT_STALL_TIMEOUT_MIN
-                        },
-                    )
+                    if cfg.server.agent_stall_timeout_min > 0 {
+                        cfg.server.agent_stall_timeout_min
+                    } else {
+                        DEFAULT_STALL_TIMEOUT_MIN
+                    }
                 };
+                let global_timeout = http_request_timeout;
+                // KT-403 — no hidden Ollama multiplier. The effective value is
+                // the explicit local-agent budget shown in Settings (240 min by
+                // default), so the UI and the runtime report the same policy.
                 let global_deadline = tokio::time::Instant::now() + global_timeout;
 
                 // Periodic checkpoint of full_response → discussions.partial_response
@@ -1831,6 +2343,14 @@ async fn make_agent_stream_inner(
                                     stream_json_cost = Some(c);
                                 }
                             }
+                            runner::StreamJsonEvent::TerminalError(failure) => {
+                                stream_json_tokens = stream_json_tokens
+                                    .max(failure.input_tokens + failure.output_tokens);
+                                if let Some(cost) = failure.cost_usd {
+                                    stream_json_cost = Some(cost);
+                                }
+                                stream_json_failure = Some(failure);
+                            }
                             runner::StreamJsonEvent::ToolStart(name) => {
                                 current_tool = Some(name);
                                 current_tool_input.clear();
@@ -1920,7 +2440,7 @@ async fn make_agent_stream_inner(
                     || stopped_on_cancel
                     || stopped_on_loop
                 {
-                    let _ = process.child.kill().await;
+                    process.kill().await;
                 }
 
                 let status = process.child.wait().await;
@@ -1954,6 +2474,12 @@ async fn make_agent_stream_inner(
                 } else {
                     !was_interrupted && status.map(|s| s.success()).unwrap_or(false)
                 };
+                // A structured failed `result` is authoritative even if a CLI
+                // wrapper happens to return exit 0. Preserve its provider text
+                // before the generic empty-output fallback can overwrite it.
+                if stream_json_failure.is_some() {
+                    success = false;
+                }
 
                 // A failed post-agent sweep invalidates every terminal signal.
                 // Replace the response so VALIDATION_COMPLETE cannot be
@@ -1968,7 +2494,61 @@ async fn make_agent_stream_inner(
                 }
 
                 let stderr_lines = process.captured_stderr_flushed().await;
-                let stderr_text = stderr_lines.join("\n");
+                // `ollama_tokens:prompt:eval` is an internal accounting marker the
+                // token parser reads out of stderr. It has no meaning for a reader,
+                // and it leaked verbatim into the failure bubble (seen in the room:
+                // "ollama_tokens:9019:14" printed twice above a real error). Drop it
+                // here, at the one place stderr becomes user-facing, rather than
+                // renaming the marker and breaking the parser that consumes it.
+                let stderr_text = stderr_lines
+                    .iter()
+                    .filter(|line| {
+                        let line = line.trim_start();
+                        !line.starts_with("ollama_tokens:")
+                            && !line.starts_with("kronn_http_turn:")
+                            && !line.starts_with("kronn_http_tool_exec:")
+                            && !line.starts_with("[provider-retry:")
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                // Provider retries are operational facts, not part of the
+                // model's answer. Keep them out of the failure body/QP result,
+                // but preserve them durably as one compact System trace below.
+                let provider_retry_trace = stderr_lines
+                    .iter()
+                    .filter_map(|line| {
+                        line.trim()
+                            .strip_prefix("[provider-retry: ")
+                            .and_then(|line| line.strip_suffix(']'))
+                            .map(str::to_string)
+                    })
+                    .collect::<Vec<_>>();
+                let http_turn_telemetry = runner::parse_http_turn_telemetry(&stderr_lines);
+                if let Some(dispatch_id) = dispatch_job_id
+                    .as_deref()
+                    .filter(|_| !http_turn_telemetry.is_empty())
+                {
+                    let dispatch_id = dispatch_id.to_string();
+                    let turns = http_turn_telemetry.clone();
+                    if let Err(error) = state
+                        .db
+                        .with_conn(move |conn| {
+                            crate::db::orchestration::record_http_turn_telemetry_for_dispatch(
+                                conn,
+                                &dispatch_id,
+                                &turns,
+                            )
+                        })
+                        .await
+                    {
+                        tracing::warn!(
+                            target: "kronn::orchestration",
+                            error = %error,
+                            "failed to persist HTTP turn telemetry"
+                        );
+                    }
+                }
 
                 // A timeout must be explicit even when the agent produced no
                 // stdout. Previously that exact case fell through to
@@ -2000,11 +2580,24 @@ async fn make_agent_stream_inner(
                     ));
                 }
                 if stopped_on_cancel {
-                    let footer = "\n\n---\n⏹️ **Interrompu par l'utilisateur.** Le process de l'agent a été tué.";
+                    // The cancel token carries no reason, so this covers a human
+                    // pressing stop AND the batch budget cancelling the run.
+                    // Naming only the first sent people looking for a stop they
+                    // never made; state the fact, list what causes it.
+                    let footer = "\n\n---\n⏹️ **Exécution interrompue.** Le process de l'agent a été arrêté — soit par un stop manuel, soit parce que la durée maximale d'exécution configurée a été atteinte.";
                     if full_response.is_empty() {
                         full_response = footer.trim_start_matches('\n').to_string();
                     } else {
                         full_response.push_str(footer);
+                    }
+                }
+
+                if let Some(failure) = stream_json_failure.as_ref() {
+                    let notice = failure.user_message();
+                    if full_response.is_empty() {
+                        full_response = notice;
+                    } else {
+                        full_response.push_str(&format!("\n\n---\n{notice}"));
                     }
                 }
 
@@ -2169,6 +2762,59 @@ async fn make_agent_stream_inner(
                 // below — reused by the batch-progress hook so an empty-but-
                 // clean-exit child isn't mis-counted as a batch success.
                 let child_run_was_success = child_run_counts_as_success(success, &full_response);
+                // An agent message must never be BLANK. Observed in production: a
+                // reasoning model behind LiteLLM burnt 15 526 tokens in 9 s and
+                // persisted an empty message — the run was correctly marked failed,
+                // but the room showed nothing at all, so the failure was
+                // indistinguishable from an agent with nothing to say.
+                //
+                // Two known paths lead here, and the reader cannot tell them apart
+                // from the outside: a private reasoning block that never closed (the
+                // leading-thinking filter drops it wholesale, on purpose — we do not
+                // leak scratchpads), and a stream cut before its terminal chunk. So
+                // state what IS known — no visible output, the model, the tokens
+                // spent — instead of leaving a blank.
+                if full_response.trim().is_empty() {
+                    let spent = if tokens_used > 0 {
+                        format!(" après {tokens_used} tokens")
+                    } else {
+                        String::new()
+                    };
+                    let model_note = attempted_model
+                        .as_deref()
+                        .map(|model| format!(" (`{model}`)"))
+                        .unwrap_or_default();
+                    // If the provider said WHY it stopped, that is the diagnosis; the
+                    // generic causes below are only for when it said nothing.
+                    let stop_reason = stderr_lines
+                        .iter()
+                        .find_map(|line| line.split("finish_reason: ").nth(1))
+                        .map(str::trim)
+                        .filter(|reason| !reason.is_empty());
+                    full_response = match stop_reason {
+                        Some("length") => format!(
+                            "⚠️ **Aucune sortie visible**{model_note}{spent} — le modèle a épuisé \
+                             son budget de sortie avant d'écrire une réponse.\n\n\
+                             C'est le comportement typique d'un modèle de raisonnement : il a \
+                             consommé ses tokens en réfléchissant. Relancer ne changera rien. \
+                             Choisis un modèle non-raisonnant pour ce tier, ou une question plus \
+                             étroite."
+                        ),
+                        Some(reason) => format!(
+                            "⚠️ **Aucune sortie visible**{model_note}{spent} — le fournisseur a \
+                             arrêté la génération (`{reason}`) sans produire de texte.\n\n\
+                             Le run est enregistré comme échoué."
+                        ),
+                        None => format!(
+                            "⚠️ **Aucune sortie visible**{model_note}{spent}.\n\n\
+                             Le run est enregistré comme échoué et le fournisseur n'a pas dit \
+                             pourquoi il s'est arrêté. Deux causes connues : un bloc de \
+                             raisonnement privé jamais refermé (supprimé volontairement, jamais \
+                             affiché) ou un flux coupé avant sa fin. Relancer suffit le plus \
+                             souvent ; si cela se répète sur le même modèle, change de modèle."
+                        ),
+                    };
+                }
                 tracked_execution_succeeded = child_run_was_success;
 
                 // Concrete model this reply ran on — resolved once before spawn
@@ -2370,6 +3016,49 @@ async fn make_agent_stream_inner(
                         markers.len(),
                         disc_id
                     );
+                }
+
+                // ── HTTP provider retry trace ──────────────────────────
+                if !provider_retry_trace.is_empty() {
+                    let sys_msg = DiscussionMessage {
+                        recovered_partial: false,
+                        session_tokens_at_message: None,
+                        author_cli_ordinal: None,
+                        model: None,
+                        lint_report: None,
+                        id: Uuid::new_v4().to_string(),
+                        role: MessageRole::System,
+                        channel: MessageChannel::Main,
+                        content: format!(
+                            "↻ **Provider retry**\n\n{}",
+                            provider_retry_trace.join("\n")
+                        ),
+                        agent_type: None,
+                        timestamp: Utc::now(),
+                        tokens_used: 0,
+                        auth_mode: None,
+                        model_tier: None,
+                        cost_usd: None,
+                        author_pseudo: None,
+                        author_avatar_email: None,
+                        source_msg_id: None,
+                        duration_ms: None,
+                        target_agent: None,
+                        reply_to_message_id: dispatch_trigger_message_id.clone(),
+                    };
+                    let did_sys = disc_id.clone();
+                    let m = sys_msg.clone();
+                    if let Err(e) = state
+                        .db
+                        .with_conn(move |conn| {
+                            crate::db::discussions::insert_message(conn, &did_sys, &m)
+                        })
+                        .await
+                    {
+                        tracing::warn!("Failed to persist provider retry trace: {e}");
+                    } else {
+                        crate::api::federation::federate_message(&state, &disc_id, &sys_msg).await;
+                    }
                 }
 
                 // ── kronn-internal MCP tool-call trace ─────────────────
@@ -2633,6 +3322,21 @@ async fn make_agent_stream_inner(
                 let _ = tx.send(AgentStreamEvent::Done { data: done }).await;
             }
             Err(e) => {
+                // The caller token can now win while the initial HTTP request
+                // is still waiting for headers, before an AgentProcess exists.
+                // That is an intentional stop, not a provider/preflight
+                // failure: do not persist an error bubble or make the dispatch
+                // observer requeue it. The durable job is already Cancelled.
+                if cancel_token.is_cancelled() {
+                    tracing::info!(
+                        "Agent start for disc {} cancelled before provider acceptance",
+                        disc_id
+                    );
+                    if let Some(sender) = completion_tx.take() {
+                        let _ = sender.send(AgentExecutionOutcome::Finished { success: false });
+                    }
+                    return;
+                }
                 tracing::error!("Agent start failed: {}", e);
 
                 let tracked_outcome = completion_tx
@@ -2668,7 +3372,7 @@ async fn make_agent_stream_inner(
                     {
                         if matches!(status, 400 | 404 | 422) {
                             let endpoint = crate::api::lite_llm::resolve_base_url_pub(
-                                lite_llm_base_url.as_deref(),
+                                http_endpoints.lite_llm.as_deref(),
                             );
                             let model = model.to_string();
                             let raw_error = e.clone();
@@ -2878,6 +3582,7 @@ pub(super) async fn run_agent_streaming(
 ) -> AgentRunResult {
     let mut full_response = String::new();
     let mut stream_tokens: u64 = 0;
+    let mut stream_json_failure: Option<runner::StreamJsonFailure> = None;
     let mut current_tool: Option<String> = None;
     let mut tool_input = String::new();
     let is_stream_json = process.output_mode() == runner::OutputMode::StreamJson;
@@ -2924,6 +3629,12 @@ pub(super) async fn run_agent_streaming(
                                 }
                                 runner::StreamJsonEvent::Usage { input_tokens, output_tokens, .. } => {
                                     stream_tokens = stream_tokens.max(input_tokens + output_tokens);
+                                }
+                                runner::StreamJsonEvent::TerminalError(failure) => {
+                                    stream_tokens = stream_tokens.max(
+                                        failure.input_tokens + failure.output_tokens,
+                                    );
+                                    stream_json_failure = Some(failure);
                                 }
                                 runner::StreamJsonEvent::ToolStart(name) => {
                                     current_tool = Some(name);
@@ -2986,6 +3697,15 @@ pub(super) async fn run_agent_streaming(
     let success = status.map(|s| s.success).unwrap_or(false);
     let stderr = process.captured_stderr_flushed().await;
     let stderr_text = stderr.join("\n");
+
+    if let Some(failure) = stream_json_failure.as_ref() {
+        let notice = failure.user_message();
+        if full_response.is_empty() {
+            full_response = notice;
+        } else {
+            full_response.push_str(&format!("\n\n---\n{notice}"));
+        }
+    }
 
     // KT-80 — a deliberate kill at the deadline is explained first: an exit code
     // of `None` describes the signal, not the cause, and the reader cannot tell
@@ -3068,8 +3788,15 @@ pub(super) async fn run_agent_collect(
                 match line {
                     Some(l) => {
                         if is_json {
-                            if let runner::StreamJsonEvent::Text(text) = runner::parse_claude_stream_line(&l) {
-                                output.push_str(&text);
+                            match runner::parse_claude_stream_line(&l) {
+                                runner::StreamJsonEvent::Text(text) => output.push_str(&text),
+                                runner::StreamJsonEvent::TerminalError(failure) => {
+                                    if !output.is_empty() {
+                                        output.push_str("\n\n---\n");
+                                    }
+                                    output.push_str(&failure.user_message());
+                                }
+                                _ => {}
                             }
                         } else {
                             if !output.is_empty() { output.push('\n'); }
@@ -3232,7 +3959,8 @@ mod agent_lifecycle_tests {
     use super::{
         agent_start_error_content, agent_start_failure_outcome, auth_required_system_message,
         cap_agent_response, child_run_counts_as_success, configured_agent_global_timeout,
-        effective_stall_timeout, AgentExecutionOutcome, NON_STREAMING_STALL_TIMEOUT,
+        effective_global_timeout, effective_stall_timeout, AgentExecutionOutcome,
+        NON_STREAMING_STALL_TIMEOUT,
     };
     use crate::models::{AgentType, MessageRole};
     use std::time::Duration;
@@ -3285,13 +4013,25 @@ mod agent_lifecycle_tests {
     #[test]
     fn configured_global_timeout_accepts_the_full_ui_range() {
         assert_eq!(
-            configured_agent_global_timeout(120),
-            Duration::from_secs(120 * 60),
+            configured_agent_global_timeout(240),
+            Duration::from_secs(240 * 60),
         );
         assert_eq!(
             configured_agent_global_timeout(0),
             Duration::from_secs(60),
             "manually edited zero values must still retain a safety deadline",
+        );
+    }
+
+    #[test]
+    fn ollama_uses_the_explicit_local_budget_without_a_multiplier() {
+        assert_eq!(
+            effective_global_timeout(&AgentType::Ollama, 30, 137),
+            Duration::from_secs(137 * 60),
+        );
+        assert_eq!(
+            effective_global_timeout(&AgentType::ClaudeCode, 30, 137),
+            Duration::from_secs(30 * 60),
         );
     }
 
@@ -3775,6 +4515,40 @@ mod run_agent_streaming_tests {
             res.response.contains("Decoder loop detected"),
             "expected decoder-loop abort marker, got: {:?}",
             res.response.chars().rev().take(80).collect::<String>()
+        );
+        let _ = drain(rx);
+    }
+
+    #[tokio::test]
+    async fn failed_fable_result_surfaces_structured_quota_instead_of_no_output() {
+        let fable_429 = r#"{"type":"result","subtype":"error_during_execution","is_error":true,"result":"You've hit your org's monthly spend limit · run /usage-credits to manage your plan.","api_error_status":429,"terminal_reason":"api_error","cost_usd":0,"usage":{"input_tokens":0,"output_tokens":0}}"#;
+        let (tx, rx) = tokio::sync::mpsc::channel(10);
+        let proc = ScriptedProcess::stream_json([fable_429]).with_exit(false, Some(1));
+        let res = run_agent_streaming(
+            proc,
+            &tx,
+            &meta(),
+            &AgentType::ClaudeCode,
+            TEST_GLOBAL_TIMEOUT,
+        )
+        .await;
+        drop(tx);
+
+        assert!(
+            res.response.contains("monthly spend limit"),
+            "got: {:?}",
+            res.response
+        );
+        assert!(res.response.contains("HTTP 429"), "got: {:?}", res.response);
+        assert!(
+            res.response.contains("terminal_reason=api_error"),
+            "got: {:?}",
+            res.response
+        );
+        assert!(
+            !res.response.contains("No output captured"),
+            "got: {:?}",
+            res.response
         );
         let _ = drain(rx);
     }

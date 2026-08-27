@@ -18,6 +18,27 @@ pub struct GitStatusResponse {
     /// (what would land in the next merge), not just the uncommitted slice.
     #[serde(default)]
     pub committed_files: Vec<GitFileStatus>,
+    /// Bounded page of commits attributable to the selected workspace/range,
+    /// newest first. Empty is an honest value: a Direct main checkout without
+    /// a declared baseline cannot be retroactively attributed to one discussion.
+    #[serde(default)]
+    pub commits: Vec<GitCommitSummary>,
+    /// Total number of attributable commits in the range, independently of
+    /// the bounded page returned in `commits`.
+    #[serde(default)]
+    pub commits_total: u32,
+    /// Zero-based offset of the bounded page returned in `commits`.
+    #[serde(default)]
+    pub commits_offset: u32,
+    /// True when at least one later page remains after `commits`.
+    #[serde(default)]
+    pub commits_truncated: bool,
+    /// Effective workspace provenance for discussion-scoped requests.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<GitWorkspaceProvenance>,
+    /// Human-readable explanation when no file/commit can be shown.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub empty_reason: Option<String>,
     pub ahead: u32,
     pub behind: u32,
     pub has_upstream: bool,
@@ -47,6 +68,31 @@ pub struct GitStatusResponse {
     /// True when `languages` came from the bounded in-memory project cache.
     #[serde(default)]
     pub languages_cached: bool,
+}
+
+#[derive(Debug, Clone, Serialize, TS, PartialEq, Eq)]
+#[ts(export)]
+pub struct GitCommitSummary {
+    pub sha: String,
+    pub short_sha: String,
+    pub subject: String,
+    pub author_name: String,
+    pub author_time: i64,
+}
+
+#[derive(Debug, Clone, Serialize, TS, PartialEq, Eq)]
+#[ts(export)]
+pub struct GitWorkspaceProvenance {
+    pub workspace_id: Option<String>,
+    pub ownership: String,
+    pub state: String,
+    pub path: Option<String>,
+    pub branch: String,
+    pub base_sha: Option<String>,
+    pub head_sha: Option<String>,
+    pub integrated_sha: Option<String>,
+    pub task_execution_id: Option<String>,
+    pub task_reference: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, TS, PartialEq, Eq)]

@@ -503,6 +503,7 @@ pub async fn send_message(
                 .map(|(job_id, agent)| crate::db::discussions::UserDispatchSpec {
                     job_id,
                     agent_override: agent.as_ref(),
+                    dedupe_key: None,
                 })
                 .collect::<Vec<_>>();
             let outcome = crate::db::discussions::insert_user_message_with_dispatches(
@@ -749,6 +750,7 @@ pub async fn revise_message(
                 .map(|(job_id, agent)| crate::db::discussions::UserDispatchSpec {
                     job_id,
                     agent_override: agent.as_ref(),
+                    dedupe_key: None,
                 })
                 .collect::<Vec<_>>();
             Ok(crate::db::discussions::revise_message_with_dispatch(
@@ -1055,8 +1057,9 @@ pub async fn dismiss_partial(
 
 /// POST /api/discussions/:id/stop
 ///
-/// Abort the currently-running agent for this discussion. Triggers the
-/// disc's cancellation token if one is registered in `state.cancel_registry`.
+/// Abort the currently-running agent for this discussion. Triggers the active
+/// dispatch token (or the discussion token for a legacy stream) when one is
+/// registered in `state.cancel_registry`.
 /// The agent task's `select!` picks up the cancellation, kills the spawned
 /// child process, saves a partial response with an "⏹️ Interrompu" footer,
 /// and broadcasts `batch_run_progress` if the disc was part of a batch.
@@ -1069,7 +1072,8 @@ pub async fn stop_agent(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Json<ApiResponse<serde_json::Value>> {
-    let cancelled_process = {
+    // Legacy streams without a durable dispatch remain discussion-keyed.
+    let cancelled_legacy_process = {
         let mut map = match state.cancel_registry.lock() {
             Ok(m) => m,
             Err(_) => return Json(ApiResponse::err("Cancel registry poisoned")),
@@ -1089,15 +1093,13 @@ pub async fn stop_agent(
             let active =
                 crate::db::agent_dispatch::find_active_for_discussion(&transaction, &cancel_id)?;
             let count = crate::db::agent_dispatch::cancel_for_discussion(&transaction, &cancel_id)?;
+            let resume_job_ids =
+                crate::db::agent_jobs::cancel_for_discussion(&transaction, &cancel_id)?;
+            let still_awaiting =
+                crate::db::agent_dispatch::has_active_for_discussion(&transaction, &cancel_id)?;
+            crate::db::discussions::set_awaiting_agent(&transaction, &cancel_id, still_awaiting)?;
             let mut batch_run = None;
             if count > 0 {
-                let still_awaiting =
-                    crate::db::agent_dispatch::has_active_for_discussion(&transaction, &cancel_id)?;
-                crate::db::discussions::set_awaiting_agent(
-                    &transaction,
-                    &cancel_id,
-                    still_awaiting,
-                )?;
                 if let Some(run_id) = active.as_ref().and_then(|job| job.group_id.as_deref()) {
                     batch_run = crate::db::workflows::increment_batch_progress(
                         &transaction,
@@ -1107,21 +1109,143 @@ pub async fn stop_agent(
                 }
             }
             transaction.commit()?;
-            Ok((count, batch_run))
+            Ok((active.map(|job| job.id), count, resume_job_ids, batch_run))
         })
         .await;
-    let (cancelled_jobs, batch_run) = cancelled_job.unwrap_or_else(|error| {
-        tracing::error!("Failed to cancel durable dispatch for {id}: {error}");
-        (0, None)
+    let (active_dispatch_id, cancelled_jobs, resume_job_ids, batch_run) = cancelled_job
+        .unwrap_or_else(|error| {
+            tracing::error!("Failed to cancel durable dispatch for {id}: {error}");
+            (None, 0, Vec::new(), None)
+        });
+    let cancelled_dispatch_process = active_dispatch_id.is_some_and(|dispatch_id| {
+        let token = state
+            .cancel_registry
+            .lock()
+            .ok()
+            .and_then(|mut map| map.remove(&dispatch_id));
+        if let Some(token) = token {
+            token.cancel();
+            true
+        } else {
+            false
+        }
     });
+    let cancelled_resume_process = if let Ok(mut registry) = state.cancel_registry.lock() {
+        let mut cancelled = false;
+        for job_id in &resume_job_ids {
+            if let Some(token) = registry.remove(&format!("agent-job:{job_id}")) {
+                token.cancel();
+                cancelled = true;
+            }
+        }
+        cancelled
+    } else {
+        false
+    };
     if let Some(updated_run) = batch_run {
         super::streaming::broadcast_batch_progress(&state, &id, &updated_run);
     }
-    let cancelled = cancelled_process || cancelled_jobs > 0;
+    let cancelled = cancelled_legacy_process
+        || cancelled_dispatch_process
+        || cancelled_resume_process
+        || cancelled_jobs > 0
+        || !resume_job_ids.is_empty();
     state.agent_dispatch_notify.notify_waiters();
     Json(ApiResponse::ok(
         serde_json::json!({ "cancelled": cancelled }),
     ))
+}
+
+/// POST /api/discussions/:id/agent-dispatches/:dispatch_id/stop
+///
+/// Stop one exact pending/running response while preserving every sibling
+/// dispatch in the discussion. A running provider process is keyed by the
+/// durable dispatch id, so cancelling an older reply cannot hit the newer one
+/// that may start immediately afterwards.
+pub async fn stop_agent_dispatch(
+    State(state): State<AppState>,
+    Path((id, dispatch_id)): Path<(String, String)>,
+) -> Json<ApiResponse<serde_json::Value>> {
+    let cancel_discussion_id = id.clone();
+    let cancel_dispatch_id = dispatch_id.clone();
+    let cancelled_job = state
+        .db
+        .with_conn(move |conn| {
+            let transaction = conn.unchecked_transaction()?;
+            let job = crate::db::agent_dispatch::get(&transaction, &cancel_dispatch_id)?;
+            let Some(job) = job else {
+                return Ok(None);
+            };
+            if job.discussion_id != cancel_discussion_id {
+                return Ok(None);
+            }
+            let changed = crate::db::agent_dispatch::cancel_for_discussion_by_id(
+                &transaction,
+                &cancel_discussion_id,
+                &cancel_dispatch_id,
+            )?;
+            let still_awaiting = crate::db::agent_dispatch::has_active_for_discussion(
+                &transaction,
+                &cancel_discussion_id,
+            )?;
+            crate::db::discussions::set_awaiting_agent(
+                &transaction,
+                &cancel_discussion_id,
+                still_awaiting,
+            )?;
+            let batch_run = if changed {
+                if let Some(run_id) = job.group_id.as_deref() {
+                    crate::db::workflows::increment_batch_progress(&transaction, run_id, false)?
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            transaction.commit()?;
+            Ok(Some((changed, still_awaiting, batch_run)))
+        })
+        .await;
+
+    let Some((cancelled, still_awaiting, batch_run)) = (match cancelled_job {
+        Ok(result) => result,
+        Err(error) => {
+            return Json(ApiResponse::err(format!(
+                "Failed to stop agent response: {error}"
+            )))
+        }
+    }) else {
+        return Json(ApiResponse::err(
+            "Agent response not found in this discussion",
+        ));
+    };
+
+    if cancelled {
+        // Annuler le token retourné par remove() : un job réclamé Running après
+        // l'entrée du handler enregistre un token vivant qu'un snapshot perdrait.
+        match state.cancel_registry.lock() {
+            Ok(mut registry) => {
+                if let Some(token) = registry.remove(&dispatch_id) {
+                    token.cancel();
+                }
+            }
+            // Mutex empoisonné : le job est déjà Cancelled en base, mais le process
+            // ne peut plus être arrêté. Le signaler (comme `delete`) plutôt que sauter.
+            Err(_) => tracing::warn!(
+                "Cancel registry poisoned while stopping dispatch {dispatch_id}; \
+                 process token left running"
+            ),
+        }
+    }
+    if let Some(updated_run) = batch_run {
+        super::streaming::broadcast_batch_progress(&state, &id, &updated_run);
+    }
+    state.agent_dispatch_notify.notify_waiters();
+    Json(ApiResponse::ok(serde_json::json!({
+        "cancelled": cancelled,
+        "dispatch_id": dispatch_id,
+        "still_awaiting": still_awaiting,
+    })))
 }
 
 #[cfg(test)]
@@ -1316,6 +1440,130 @@ mod tests {
             jobs,
             vec![(Some("\"LiteLlm\"".into()), "u-targeted-retry".into())]
         );
+    }
+
+    /// Orphan subcase: a dispatch claimed Running with its live token registered
+    /// between handler entry and the cancel commit must have that token actually
+    /// cancelled — not merely removed from the registry, which left the process
+    /// running with no way to stop it.
+    #[tokio::test]
+    async fn stop_agent_dispatch_cancels_the_live_token_not_a_stale_snapshot() {
+        let disc = "d-stop-orphan";
+        let state = make_state_with_disc(disc).await;
+        let claimed = state
+            .db
+            .with_conn(move |conn| {
+                let now = chrono::Utc::now().to_rfc3339();
+                conn.execute(
+                    "INSERT INTO messages (id, discussion_id, role, channel, content,
+                                           timestamp, sort_order, received_at)
+                     VALUES ('u-orphan', ?1, 'User', 'main', 'go', ?2, 0, ?2)",
+                    rusqlite::params![disc, now],
+                )?;
+                crate::db::agent_dispatch::enqueue(
+                    conn,
+                    crate::db::agent_dispatch::NewAgentDispatchJob {
+                        id: "j-orphan",
+                        discussion_id: disc,
+                        trigger_message_id: "u-orphan",
+                        trigger_sort_order: 0,
+                        dedupe_key: "turn:orphan",
+                        agent_override: None,
+                        chain_prompt_ids: &[],
+                        batch_item: None,
+                        group_id: None,
+                        group_concurrency_limit: None,
+                    },
+                )?;
+                Ok(crate::db::agent_dispatch::claim(conn, "j-orphan")?.is_some())
+            })
+            .await
+            .unwrap();
+        assert!(claimed, "job must reach Running before the stop");
+
+        // The worker registered its live cancellation token under the dispatch id.
+        let token = tokio_util::sync::CancellationToken::new();
+        state
+            .cancel_registry
+            .lock()
+            .unwrap()
+            .insert("j-orphan".to_string(), token.clone());
+        assert!(!token.is_cancelled());
+
+        let _ =
+            stop_agent_dispatch(State(state.clone()), Path((disc.into(), "j-orphan".into()))).await;
+
+        // Core assertion: the live process token is actually cancelled, and the
+        // DB row is Cancelled (proving the cancel branch ran).
+        assert!(
+            token.is_cancelled(),
+            "the removed token must be cancelled, not orphaned"
+        );
+        let status = state
+            .db
+            .with_conn(|conn| {
+                Ok(conn.query_row(
+                    "SELECT status FROM agent_dispatch_jobs WHERE id = 'j-orphan'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(status, "Cancelled");
+    }
+
+    /// Gate subcase: a job Cancelled before the worker reaches
+    /// `mark_agent_started` must fail the start gate (no provider launched), and
+    /// the worker's `CancelGuard` must clean its registry entry on scope exit.
+    #[tokio::test]
+    async fn cancel_before_mark_agent_started_fails_the_start_gate_and_guard_cleans_up() {
+        let disc = "d-stop-gate";
+        let state = make_state_with_disc(disc).await;
+        {
+            let _guard = crate::CancelGuard::insert(&state.cancel_registry, "j-gate".to_string());
+            assert!(state.cancel_registry.lock().unwrap().contains_key("j-gate"));
+
+            let started = state
+                .db
+                .with_conn(move |conn| {
+                    let now = chrono::Utc::now().to_rfc3339();
+                    conn.execute(
+                        "INSERT INTO messages (id, discussion_id, role, channel, content,
+                                               timestamp, sort_order, received_at)
+                         VALUES ('u-gate', ?1, 'User', 'main', 'go', ?2, 0, ?2)",
+                        rusqlite::params![disc, now],
+                    )?;
+                    crate::db::agent_dispatch::enqueue(
+                        conn,
+                        crate::db::agent_dispatch::NewAgentDispatchJob {
+                            id: "j-gate",
+                            discussion_id: disc,
+                            trigger_message_id: "u-gate",
+                            trigger_sort_order: 0,
+                            dedupe_key: "turn:gate",
+                            agent_override: None,
+                            chain_prompt_ids: &[],
+                            batch_item: None,
+                            group_id: None,
+                            group_concurrency_limit: None,
+                        },
+                    )?;
+                    crate::db::agent_dispatch::claim(conn, "j-gate")?; // Pending -> Running
+                                                                       // A stop lands before the provider starts.
+                    crate::db::agent_dispatch::cancel_for_discussion_by_id(conn, disc, "j-gate")?;
+                    // The gate the worker checks before launching the provider.
+                    crate::db::agent_dispatch::mark_agent_started(conn, "j-gate")
+                })
+                .await
+                .unwrap();
+            assert!(
+                !started,
+                "a cancelled job must not pass the start gate — no provider launched"
+            );
+        }
+        // CancelGuard removed its entry on drop — nothing dangling in the registry.
+        assert!(!state.cancel_registry.lock().unwrap().contains_key("j-gate"));
     }
 
     #[tokio::test]
@@ -1959,6 +2207,7 @@ mod tests {
                         batch_total: 2,
                         batch_completed: 0,
                         batch_failed: 0,
+                        batch_no_response: 0,
                         batch_name: Some("Stop batch".into()),
                         parent_run_id: None,
                         state: std::collections::HashMap::new(),
@@ -2050,6 +2299,120 @@ mod tests {
         assert!(awaiting, "the queued follow-up is still owed");
         assert_eq!(batch.batch_failed, 1);
         assert_eq!(batch.status, crate::models::RunStatus::Running);
+    }
+
+    #[tokio::test]
+    async fn stop_repairs_stale_awaiting_marker_without_an_active_job() {
+        let disc = "d-stale-awaiting";
+        let state = make_state_with_disc(disc).await;
+        state
+            .db
+            .with_conn(move |conn| crate::db::discussions::set_awaiting_agent(conn, disc, true))
+            .await
+            .unwrap();
+
+        let response = stop_agent(State(state.clone()), Path(disc.into())).await;
+        assert_eq!(
+            response.0.data.unwrap()["cancelled"],
+            serde_json::Value::Bool(false)
+        );
+
+        let awaiting = state
+            .db
+            .with_conn(move |conn| {
+                conn.query_row(
+                    "SELECT awaiting_agent FROM discussions WHERE id = ?1",
+                    [disc],
+                    |row| row.get::<_, bool>(0),
+                )
+                .map_err(anyhow::Error::from)
+            })
+            .await
+            .unwrap();
+        assert!(!awaiting);
+    }
+
+    #[tokio::test]
+    async fn targeted_stop_cancels_only_the_selected_reply_and_its_process() {
+        let disc = "d-targeted-stop";
+        let state = make_state_with_disc(disc).await;
+        state
+            .db
+            .with_conn(move |conn| {
+                let now = Utc::now();
+                for (sort_order, (message_id, job_id)) in
+                    [(1, ("u-old", "j-old")), (2, ("u-new", "j-new"))]
+                {
+                    conn.execute(
+                        "INSERT INTO messages
+                         (id, discussion_id, role, channel, content, timestamp, sort_order)
+                         VALUES (?1, ?2, 'User', 'main', ?1, ?3, ?4)",
+                        rusqlite::params![message_id, disc, now.to_rfc3339(), sort_order],
+                    )?;
+                    crate::db::agent_dispatch::enqueue(
+                        conn,
+                        crate::db::agent_dispatch::NewAgentDispatchJob {
+                            id: job_id,
+                            discussion_id: disc,
+                            trigger_message_id: message_id,
+                            trigger_sort_order: sort_order,
+                            dedupe_key: job_id,
+                            agent_override: Some(&AgentType::ClaudeCode),
+                            chain_prompt_ids: &[],
+                            batch_item: None,
+                            group_id: None,
+                            group_concurrency_limit: None,
+                        },
+                    )?;
+                }
+                crate::db::discussions::set_awaiting_agent(conn, disc, true)?;
+                crate::db::agent_dispatch::claim(conn, "j-old")?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let old_token = tokio_util::sync::CancellationToken::new();
+        let new_token = tokio_util::sync::CancellationToken::new();
+        {
+            let mut registry = state.cancel_registry.lock().unwrap();
+            registry.insert("j-old".into(), old_token.clone());
+            registry.insert("j-new".into(), new_token.clone());
+        }
+
+        let response =
+            stop_agent_dispatch(State(state.clone()), Path((disc.into(), "j-old".into()))).await;
+        let data = response.0.data.unwrap();
+        assert_eq!(data["cancelled"], true);
+        assert_eq!(data["still_awaiting"], true);
+        assert!(old_token.is_cancelled());
+        assert!(
+            !new_token.is_cancelled(),
+            "the newer sibling must keep running"
+        );
+
+        state
+            .db
+            .with_conn(move |conn| {
+                assert_eq!(
+                    crate::db::agent_dispatch::get(conn, "j-old")?
+                        .unwrap()
+                        .status,
+                    crate::db::agent_dispatch::DispatchStatus::Cancelled,
+                );
+                assert_eq!(
+                    crate::db::agent_dispatch::get(conn, "j-new")?
+                        .unwrap()
+                        .status,
+                    crate::db::agent_dispatch::DispatchStatus::Pending,
+                );
+                assert!(crate::db::agent_dispatch::has_active_for_discussion(
+                    conn, disc
+                )?);
+                Ok(())
+            })
+            .await
+            .unwrap();
     }
 
     /// A `paused` session is NOT a live responder, so send_message must

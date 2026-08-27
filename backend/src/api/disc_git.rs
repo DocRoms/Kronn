@@ -32,6 +32,35 @@ async fn resolve_discussion_work_dir(
     discussion_id: &str,
     workspace_id: Option<&str>,
 ) -> Result<(std::path::PathBuf, String), String> {
+    if let Some(workspace_id) = workspace_id {
+        let did = discussion_id.to_string();
+        let wid = workspace_id.to_string();
+        let (workspace, project) = state
+            .db
+            .with_read_conn(move |conn| {
+                let workspace =
+                    crate::db::discussion_workspaces::get_visible_for_discussion(conn, &did, &wid)?
+                        .ok_or_else(|| anyhow::anyhow!("Workspace not found in this discussion"))?;
+                let project = crate::db::projects::get_project(conn, &workspace.project_id)?
+                    .ok_or_else(|| anyhow::anyhow!("Project not found"))?;
+                Ok((workspace, project))
+            })
+            .await
+            .map_err(|error| format!("DB error: {error}"))?;
+        if workspace.state != "attached" {
+            return Err(format!("Workspace is {}", workspace.state));
+        }
+        let path = workspace
+            .canonical_path
+            .or(workspace.workspace_path)
+            .ok_or_else(|| "Workspace has no attached path".to_string())?;
+        let resolved = crate::core::scanner::resolve_host_path(&path);
+        if !resolved.exists() {
+            return Err(format!("Worktree path not found: {}", resolved.display()));
+        }
+        return Ok((resolved, project.path));
+    }
+
     let did = discussion_id.to_string();
     let disc = state
         .db
@@ -52,45 +81,6 @@ async fn resolve_discussion_work_dir(
         .map_err(|e| format!("DB error: {}", e))?;
     let project = project.ok_or_else(|| "Project not found".to_string())?;
 
-    if let Some(workspace_id) = workspace_id {
-        let did = discussion_id.to_string();
-        let wid = workspace_id.to_string();
-        let workspace = state
-            .db
-            .with_read_conn(move |conn| {
-                Ok(
-                    crate::db::discussion_workspaces::list_for_discussion(conn, &did)?
-                        .into_iter()
-                        .find(|workspace| workspace.id == wid),
-                )
-            })
-            .await
-            .map_err(|error| format!("DB error: {error}"))?
-            .ok_or_else(|| "Workspace not found in this discussion".to_string())?;
-        if workspace.state != "attached" {
-            return Err(format!("Workspace is {}", workspace.state));
-        }
-        let path = workspace
-            .canonical_path
-            .or(workspace.workspace_path)
-            .ok_or_else(|| "Workspace has no attached path".to_string())?;
-        let resolved = crate::core::scanner::resolve_host_path(&path);
-        if !resolved.exists() {
-            let did = discussion_id.to_string();
-            let session_pk = workspace.session_pk;
-            if let Some(session_pk) = session_pk {
-                let _ = state
-                    .db
-                    .with_conn(move |conn| {
-                        crate::db::discussion_workspaces::mark_missing(conn, &did, session_pk)
-                    })
-                    .await;
-            }
-            return Err(format!("Worktree path not found: {}", resolved.display()));
-        }
-        return Ok((resolved, project.path));
-    }
-
     if let Some(ref wp) = disc.workspace_path {
         let resolved = crate::core::scanner::resolve_host_path(wp);
         if !resolved.exists() {
@@ -106,10 +96,165 @@ async fn resolve_discussion_work_dir(
     }
 }
 
+async fn selected_workspace_context(
+    state: &AppState,
+    discussion_id: &str,
+    workspace_id: &str,
+) -> Result<
+    (
+        crate::db::discussion_workspaces::DiscussionWorkspace,
+        Project,
+        Option<TaskExecution>,
+        Option<TaskExecutionDelivery>,
+    ),
+    String,
+> {
+    let did = discussion_id.to_string();
+    let wid = workspace_id.to_string();
+    state
+        .db
+        .with_read_conn(move |conn| {
+            let workspace =
+                crate::db::discussion_workspaces::get_visible_for_discussion(conn, &did, &wid)?
+                    .ok_or_else(|| anyhow::anyhow!("Workspace not found in this discussion"))?;
+            let project = crate::db::projects::get_project(conn, &workspace.project_id)?
+                .ok_or_else(|| anyhow::anyhow!("Project not found"))?;
+            let execution = workspace
+                .task_execution_id
+                .as_deref()
+                .map(|id| crate::db::orchestration::get_task_execution(conn, id))
+                .transpose()?
+                .flatten();
+            let delivery = workspace
+                .task_execution_id
+                .as_deref()
+                .map(|id| crate::db::worker_deliveries::list_deliveries(conn, id))
+                .transpose()?
+                .and_then(|items| items.into_iter().last());
+            Ok((workspace, project, execution, delivery))
+        })
+        .await
+        .map_err(|error| format!("DB error: {error}"))
+}
+
+fn workspace_provenance(
+    workspace: &crate::db::discussion_workspaces::DiscussionWorkspace,
+    execution: Option<&TaskExecution>,
+    state: &str,
+) -> GitWorkspaceProvenance {
+    GitWorkspaceProvenance {
+        workspace_id: Some(workspace.id.clone()),
+        ownership: workspace.ownership.clone(),
+        state: state.to_string(),
+        path: workspace.workspace_path.clone(),
+        branch: workspace.branch.clone(),
+        base_sha: workspace.base_sha.clone(),
+        head_sha: execution
+            .and_then(|item| item.candidate_target_sha.clone())
+            .or_else(|| workspace.head_sha.clone()),
+        integrated_sha: execution.and_then(|item| item.integrated_sha.clone()),
+        task_execution_id: workspace.task_execution_id.clone(),
+        task_reference: workspace.task_reference.clone(),
+    }
+}
+
+async fn status_for_selected_workspace(
+    state: &AppState,
+    discussion_id: &str,
+    workspace_id: &str,
+    commit_offset: u32,
+    commit_limit: u32,
+) -> Result<GitStatusResponse, String> {
+    let (workspace, project, execution, delivery) =
+        selected_workspace_context(state, discussion_id, workspace_id).await?;
+    let checkout = workspace
+        .canonical_path
+        .as_deref()
+        .map(crate::core::scanner::resolve_host_path);
+    let attached =
+        workspace.state == "attached" && checkout.as_ref().is_some_and(|path| path.exists());
+    let effective_state = if attached {
+        "attached"
+    } else if workspace.state == "attached" {
+        "missing"
+    } else {
+        workspace.state.as_str()
+    };
+    let repo = if attached {
+        checkout.expect("attached workspace checked above")
+    } else {
+        crate::core::scanner::resolve_host_path(&project.path)
+    };
+    if !repo.exists() {
+        return Err(format!("Project path not found: {}", repo.display()));
+    }
+
+    let live_head = attached
+        .then(|| crate::core::worktree::resolve_commit(&repo, "HEAD").ok())
+        .flatten();
+    let head = delivery
+        .as_ref()
+        .map(|item| item.head_sha.clone())
+        .or(live_head)
+        .or_else(|| workspace.head_sha.clone());
+    let has_durable_range = workspace.base_sha.is_some() && head.is_some();
+    let mut status = if has_durable_range {
+        super::git_ops::run_git_status_without_commit_evidence(&repo)?
+    } else {
+        super::git_ops::run_git_status_page(&repo, commit_offset, commit_limit)?
+    };
+    status.workspace = Some(workspace_provenance(
+        &workspace,
+        execution.as_ref(),
+        effective_state,
+    ));
+    if let Some(provenance) = status.workspace.as_mut() {
+        provenance.head_sha = head.clone();
+    }
+    status.branch = workspace.branch.clone();
+    status.is_default_branch = status.branch == status.default_branch;
+
+    if let (Some(base), Some(head)) = (workspace.base_sha.as_deref(), head.as_deref()) {
+        let (files, commits, total, truncated) =
+            super::git_ops::run_git_range_page(&repo, base, head, commit_offset, commit_limit)?;
+        status.committed_files = files;
+        status.commits = commits;
+        status.commits_total = total;
+        status.commits_offset = commit_offset;
+        status.commits_truncated = truncated;
+        status.ahead = total;
+    }
+    if !attached {
+        status.files.clear();
+        status.behind = 0;
+        status.has_upstream = false;
+        status.upstream = None;
+        status.pr_url = None;
+    }
+    if status.files.is_empty() && status.committed_files.is_empty() {
+        status.empty_reason = Some(if effective_state == "attached" {
+            "Workspace clean: no discussion-attributable file change.".to_string()
+        } else {
+            format!(
+                "Workspace {effective_state}: the checkout is no longer available and its durable commit range contains no file change."
+            )
+        });
+    }
+    Ok(status)
+}
+
 #[derive(Debug, Default, serde::Deserialize)]
 pub struct DiscWorkspaceSelection {
     #[serde(default)]
     pub workspace_id: Option<String>,
+    #[serde(default)]
+    pub commit_offset: u32,
+    #[serde(default = "default_disc_git_commit_limit")]
+    pub commit_limit: u32,
+}
+
+fn default_disc_git_commit_limit() -> u32 {
+    super::git_ops::GIT_COMMIT_PAGE_DEFAULT
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -161,18 +306,59 @@ pub async fn disc_git_status(
     Path(id): Path<String>,
     Query(query): Query<DiscWorkspaceSelection>,
 ) -> Json<ApiResponse<GitStatusResponse>> {
+    if let Some(workspace_id) = query.workspace_id.as_deref() {
+        return match status_for_selected_workspace(
+            &state,
+            &id,
+            workspace_id,
+            query.commit_offset,
+            query.commit_limit,
+        )
+        .await
+        {
+            Ok(status) => Json(ApiResponse::ok(status)),
+            Err(error) => Json(ApiResponse::err(error)),
+        };
+    }
     let (work_dir, _) =
         match resolve_discussion_work_dir(&state, &id, query.workspace_id.as_deref()).await {
             Ok(v) => v,
             Err(e) => return Json(ApiResponse::err(e)),
         };
+    let display_path = work_dir.to_string_lossy().to_string();
+    let status_dir = work_dir.clone();
+    let commit_offset = query.commit_offset;
+    let commit_limit = query.commit_limit;
 
-    let result = tokio::task::spawn_blocking(move || super::git_ops::run_git_status(&work_dir))
-        .await
-        .unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
+    let result = tokio::task::spawn_blocking(move || {
+        super::git_ops::run_git_status_page(&status_dir, commit_offset, commit_limit)
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
 
     match result {
-        Ok(status) => Json(ApiResponse::ok(status)),
+        Ok(mut status) => {
+            let head = crate::core::worktree::resolve_commit(&work_dir, "HEAD").ok();
+            status.workspace = Some(GitWorkspaceProvenance {
+                workspace_id: None,
+                ownership: "direct".to_string(),
+                state: "attached".to_string(),
+                path: Some(display_path),
+                branch: status.branch.clone(),
+                base_sha: None,
+                head_sha: head,
+                integrated_sha: None,
+                task_execution_id: None,
+                task_reference: None,
+            });
+            if status.files.is_empty() && status.committed_files.is_empty() {
+                status.empty_reason = Some(
+                    "Direct workspace clean. No declared baseline exists to attribute earlier commits to this discussion."
+                        .to_string(),
+                );
+            }
+            Json(ApiResponse::ok(status))
+        }
         Err(e) => Json(ApiResponse::err(e)),
     }
 }
@@ -185,6 +371,27 @@ pub async fn disc_git_diff(
 ) -> Json<ApiResponse<GitDiffResponse>> {
     if query.path.contains("..") {
         return Json(ApiResponse::err("Invalid path"));
+    }
+
+    if query.committed.unwrap_or(false) {
+        if let Some(workspace_id) = query.workspace_id.as_deref() {
+            let context = selected_workspace_context(&state, &id, workspace_id).await;
+            let (workspace, project, _execution, delivery) = match context {
+                Ok(context) => context,
+                Err(error) => return Json(ApiResponse::err(error)),
+            };
+            let head = delivery
+                .as_ref()
+                .map(|item| item.head_sha.as_str())
+                .or(workspace.head_sha.as_deref());
+            if let (Some(base), Some(head)) = (workspace.base_sha.as_deref(), head) {
+                let repo = crate::core::scanner::resolve_host_path(&project.path);
+                return match super::git_ops::run_git_diff_range(&repo, base, head, &query.path) {
+                    Ok(diff) => Json(ApiResponse::ok(diff)),
+                    Err(error) => Json(ApiResponse::err(error)),
+                };
+            }
+        }
     }
 
     let (work_dir, _) =
@@ -1128,6 +1335,201 @@ pub(crate) fn format_tool_log(tool: &str, input_json: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::config::default_config;
+    use crate::db::Database;
+    use crate::DEFAULT_MAX_CONCURRENT_AGENTS;
+    use std::process::Command;
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    fn scoped_disc_commit_repo() -> tempfile::TempDir {
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(repo.path())
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "git {args:?} failed");
+        };
+        git(&["init", "-b", "main"]);
+        git(&["config", "user.name", "Kronn Test"]);
+        git(&["config", "user.email", "kronn@example.test"]);
+        std::fs::write(repo.path().join("a.txt"), "base a\n").unwrap();
+        std::fs::write(repo.path().join("b.txt"), "base b\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-m", "initial"]);
+        std::fs::write(repo.path().join("a.txt"), "changed a\n").unwrap();
+        std::fs::write(repo.path().join("b.txt"), "changed b\n").unwrap();
+        git(&["add", "b.txt"]);
+        repo
+    }
+
+    fn disc_git_names(repo: &std::path::Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "git {args:?} failed");
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    #[tokio::test]
+    async fn discussion_commit_endpoint_commits_only_requested_paths() {
+        let repo = scoped_disc_commit_repo();
+        let state = AppState::new_defaults(
+            Arc::new(RwLock::new(default_config())),
+            Arc::new(Database::open_in_memory().expect("in-memory DB")),
+            DEFAULT_MAX_CONCURRENT_AGENTS,
+        );
+        let path = repo.path().to_string_lossy().to_string();
+        state
+            .db
+            .with_conn(move |connection| {
+                connection.execute(
+                    "INSERT INTO projects
+                     (id, name, path, ai_config_json, created_at, updated_at)
+                     VALUES ('project-disc-commit', 'Project', ?1, '{}', 'now', 'now')",
+                    [&path],
+                )?;
+                connection.execute(
+                    "INSERT INTO discussions
+                     (id, project_id, title, agent, language, created_at, updated_at)
+                     VALUES ('disc-scoped-commit', 'project-disc-commit', 'Disc',
+                             'Codex', 'en', 'now', 'now')",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let response = disc_git_commit(
+            State(state),
+            Path("disc-scoped-commit".into()),
+            Json(DiscGitCommitRequest {
+                files: vec!["a.txt".into()],
+                message: "test: scoped discussion commit".into(),
+                amend: false,
+                sign: false,
+                workspace_id: None,
+            }),
+        )
+        .await
+        .0;
+        assert!(response.success, "discussion commit endpoint must succeed");
+        assert_eq!(
+            disc_git_names(repo.path(), &["diff", "HEAD^", "HEAD", "--name-only"]),
+            "a.txt"
+        );
+        assert_eq!(
+            disc_git_names(repo.path(), &["diff", "--cached", "--name-only"]),
+            "b.txt",
+            "an unrelated staged file must remain staged"
+        );
+    }
+
+    #[tokio::test]
+    async fn detached_child_workspace_keeps_commits_files_and_diff_visible_from_parent() {
+        let repo = scoped_disc_commit_repo();
+        // Start from a clean base, then create the exact one-commit range whose
+        // checkout will be considered physically cleaned.
+        Command::new("git")
+            .args(["reset", "--hard", "HEAD"])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        let base = disc_git_names(repo.path(), &["rev-parse", "HEAD"]);
+        std::fs::write(repo.path().join("agent.txt"), "durable evidence\n").unwrap();
+        Command::new("git")
+            .args(["add", "agent.txt"])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "agent: durable change"])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        let head = disc_git_names(repo.path(), &["rev-parse", "HEAD"]);
+
+        let state = AppState::new_defaults(
+            Arc::new(RwLock::new(default_config())),
+            Arc::new(Database::open_in_memory().expect("in-memory DB")),
+            DEFAULT_MAX_CONCURRENT_AGENTS,
+        );
+        let path = repo.path().to_string_lossy().to_string();
+        let base_db = base.clone();
+        let head_db = head.clone();
+        state
+            .db
+            .with_conn(move |connection| {
+                connection.execute(
+                    "INSERT INTO projects
+                     (id, name, path, ai_config_json, created_at, updated_at)
+                     VALUES ('p-code-history', 'Project', ?1, '{}', 'now', 'now')",
+                    [&path],
+                )?;
+                for (id, title) in [("d-parent-code", "Parent"), ("d-child-code", "Child")] {
+                    connection.execute(
+                        "INSERT INTO discussions
+                         (id, project_id, title, agent, language, created_at, updated_at)
+                         VALUES (?1, 'p-code-history', ?2, 'Codex', 'en', 'now', 'now')",
+                        rusqlite::params![id, title],
+                    )?;
+                }
+                connection.execute(
+                    "INSERT INTO discussion_workspaces
+                     (id, disc_id, project_id, workspace_path, canonical_path,
+                      branch, head_sha, ownership, state, created_at, updated_at,
+                      parent_discussion_id, base_sha)
+                     VALUES ('ws-cleaned', 'd-child-code', 'p-code-history', '/gone/worktree', NULL,
+                             'kronn/task/KT-451-test', ?1, 'managed', 'detached', 'now', 'now',
+                             'd-parent-code', ?2)",
+                    rusqlite::params![head_db, base_db],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let response = disc_git_status(
+            State(state.clone()),
+            Path("d-parent-code".into()),
+            Query(DiscWorkspaceSelection {
+                workspace_id: Some("ws-cleaned".into()),
+                ..DiscWorkspaceSelection::default()
+            }),
+        )
+        .await
+        .0;
+        assert!(response.success, "historical status must succeed");
+        let status = response.data.expect("status payload");
+        assert_eq!(status.workspace.as_ref().unwrap().state, "detached");
+        assert_eq!(
+            status.workspace.as_ref().unwrap().head_sha.as_deref(),
+            Some(head.as_str())
+        );
+        assert_eq!(status.commits.len(), 1);
+        assert_eq!(status.commits[0].subject, "agent: durable change");
+        assert_eq!(status.committed_files.len(), 1);
+        assert_eq!(status.committed_files[0].path, "agent.txt");
+
+        let diff = disc_git_diff(
+            State(state),
+            Path("d-parent-code".into()),
+            Query(DiscGitDiffQuery {
+                path: "agent.txt".into(),
+                committed: Some(true),
+                workspace_id: Some("ws-cleaned".into()),
+            }),
+        )
+        .await
+        .0;
+        assert!(diff.success, "historical diff must succeed");
+        assert!(diff.data.unwrap().diff.contains("durable evidence"));
+    }
 
     #[test]
     fn format_tool_log_read() {

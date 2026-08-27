@@ -93,7 +93,6 @@ mod tests {
             })
             .await
             .unwrap();
-
         let request = Request::builder()
             .uri("/api/resolve/message-resolve")
             .body(Body::empty())
@@ -119,6 +118,86 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["success"], false);
         assert_eq!(json["error_code"], "not_found");
+    }
+
+    #[tokio::test]
+    async fn resolve_id_routes_agent_library_ids_without_exposing_prompt_bodies() {
+        let cases = [
+            ("security", "skill", "skill_get"),
+            ("architect", "profile", "profile_get"),
+            ("token-saver", "directive", "directive_get"),
+        ];
+
+        for (id, kind, suggested_tool) in cases {
+            let request = Request::builder()
+                .uri(format!("/api/resolve/{id}"))
+                .body(Body::empty())
+                .unwrap();
+            let (status, json) = send(test_state(), false, request).await;
+
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(json["success"], true, "failed to resolve {id}");
+            assert_eq!(json["data"]["kind"], kind);
+            assert_eq!(json["data"]["suggested_tool"], suggested_tool);
+            let wire = json["data"].to_string();
+            assert!(!wire.contains("persona_prompt"));
+            assert!(!wire.contains("content"));
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_id_does_not_reveal_a_locked_secret_profile() {
+        let locked_request = Request::builder()
+            .uri("/api/resolve/batman")
+            .body(Body::empty())
+            .unwrap();
+        let (_, locked_json) = send(test_state(), false, locked_request).await;
+        assert_eq!(locked_json["success"], false);
+        assert_eq!(locked_json["error_code"], "not_found");
+
+        let unlocked_state = test_state();
+        unlocked_state
+            .config
+            .write()
+            .await
+            .unlocked_profiles
+            .push("batman".into());
+        let unlocked_request = Request::builder()
+            .uri("/api/resolve/batman")
+            .body(Body::empty())
+            .unwrap();
+        let (_, unlocked_json) = send(unlocked_state, false, unlocked_request).await;
+        assert_eq!(unlocked_json["success"], true);
+        assert_eq!(unlocked_json["data"]["kind"], "profile");
+        assert_eq!(unlocked_json["data"]["suggested_tool"], "profile_get");
+    }
+
+    #[tokio::test]
+    async fn resolve_id_returns_typed_conflict_for_cross_registry_collision() {
+        let state = test_state();
+        state
+            .db
+            .with_conn(|connection| {
+                connection.execute(
+                    "INSERT INTO projects
+                     (id, name, path, created_at, updated_at)
+                     VALUES ('security', 'Collision', '/tmp/collision', 'now', 'now')",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let request = Request::builder()
+            .uri("/api/resolve/security")
+            .body(Body::empty())
+            .unwrap();
+        let (status, json) = send(state, false, request).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["success"], false);
+        assert_eq!(json["error_code"], "conflict");
+        assert!(json["error"].as_str().unwrap().contains("project, skill"));
     }
 
     #[tokio::test]
@@ -1209,6 +1288,7 @@ mod tests {
                 let now = chrono::Utc::now();
                 let disc = crate::models::Discussion {
                     awaiting_agent: false,
+                    agent_running: false,
                     id: "disc-1".into(),
                     project_id: None,
                     title: "Original Title".into(),
@@ -1380,6 +1460,7 @@ mod tests {
                 let now = chrono::Utc::now();
                 let disc = crate::models::Discussion {
                     awaiting_agent: false,
+                    agent_running: false,
                     id: "disc-del".into(),
                     project_id: None,
                     title: "To Delete".into(),
@@ -2268,6 +2349,7 @@ mod tests {
                     let now = chrono::Utc::now();
                     let disc = crate::models::Discussion {
                         awaiting_agent: false,
+                        agent_running: false,
                         id: id.clone(),
                         project_id: None,
                         title,
@@ -3253,6 +3335,7 @@ mod tests {
                 let now = chrono::Utc::now();
                 let disc = crate::models::Discussion {
                     awaiting_agent: false,
+                    agent_running: false,
                     id: "disc-pin".into(),
                     project_id: None,
                     title: "Validation audit AI".into(),
@@ -4692,6 +4775,205 @@ mod tests {
             .contains("ghost"));
     }
 
+    /// KT-407 — Qwen emitted valid line numbers as JSON strings during a real
+    /// worker repair. `read_file` already normalized that representation; the
+    /// edit boundary must do the same or a correct CAS edit is refused forever.
+    #[tokio::test]
+    async fn http_agent_edit_lines_accepts_quoted_decimal_line_numbers() {
+        use crate::agents::tools::ToolCall;
+        use crate::api::agent_tools::KronnToolExecutor;
+
+        let state = test_state();
+        let project_dir = tempfile::TempDir::new().expect("temporary project directory");
+        std::fs::write(project_dir.path().join("answer.txt"), "first\nold\nthird\n")
+            .expect("seed editable file");
+        let project_path = project_dir.path().to_string_lossy().into_owned();
+        state
+            .db
+            .with_conn(move |connection| {
+                connection.execute(
+                    "INSERT INTO projects
+                     (id, name, path, ai_config_json, created_at, updated_at)
+                     VALUES ('project-quoted-edit-lines', 'Quoted edit lines', ?1, '{}', 'now', 'now')",
+                    [&project_path],
+                )?;
+                Ok(())
+            })
+            .await
+            .expect("seed project");
+
+        let exec = KronnToolExecutor::workflow_arc(
+            state,
+            Some("project-quoted-edit-lines".into()),
+            "run-quoted-edit-lines".into(),
+            "edit".into(),
+        );
+        let call = |name: &str, arguments: serde_json::Value| ToolCall {
+            id: format!("call-{name}"),
+            name: name.into(),
+            arguments,
+        };
+        let read = exec
+            .execute(&call(
+                "read_file",
+                serde_json::json!({"path": "answer.txt"}),
+            ))
+            .await;
+        assert!(read.ok, "read_file failed: {:?}", read.content);
+        let expected_sha256 = read.content["content_sha256"]
+            .as_str()
+            .expect("read receipt must include its SHA-256");
+
+        let missing_start = exec
+            .execute(&call(
+                "edit_lines",
+                serde_json::json!({
+                    "path": "answer.txt",
+                    "end_line": "2",
+                    "new_string": "new",
+                    "expected_sha256": expected_sha256,
+                }),
+            ))
+            .await;
+        assert!(!missing_start.ok);
+        assert_eq!(
+            missing_start.content["error"],
+            "missing required field `start_line`"
+        );
+
+        let invalid_start = exec
+            .execute(&call(
+                "edit_lines",
+                serde_json::json!({
+                    "path": "answer.txt",
+                    "start_line": "first",
+                    "end_line": "2",
+                    "new_string": "new",
+                    "expected_sha256": expected_sha256,
+                }),
+            ))
+            .await;
+        assert!(!invalid_start.ok);
+        assert_eq!(
+            invalid_start.content["error"],
+            "`start_line` must be a positive integer"
+        );
+
+        let edited = exec
+            .execute(&call(
+                "edit_lines",
+                serde_json::json!({
+                    "path": "answer.txt",
+                    "start_line": "2",
+                    "end_line": " 2 ",
+                    "new_string": "new",
+                    "expected_sha256": expected_sha256,
+                }),
+            ))
+            .await;
+        assert!(
+            edited.ok,
+            "quoted line numbers were refused: {:?}",
+            edited.content
+        );
+        assert_eq!(
+            std::fs::read_to_string(project_dir.path().join("answer.txt")).unwrap(),
+            "first\nnew\nthird\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn http_agent_insert_after_line_preserves_the_anchor_and_uses_cas() {
+        use crate::agents::tools::ToolCall;
+        use crate::api::agent_tools::KronnToolExecutor;
+
+        let state = test_state();
+        let project_dir = tempfile::TempDir::new().expect("temporary project directory");
+        std::fs::write(
+            project_dir.path().join("guide.md"),
+            "before\nANCHOR\nafter\n",
+        )
+        .expect("seed insertion target");
+        let project_path = project_dir.path().to_string_lossy().into_owned();
+        state
+            .db
+            .with_conn(move |connection| {
+                connection.execute(
+                    "INSERT INTO projects
+                     (id, name, path, ai_config_json, created_at, updated_at)
+                     VALUES ('project-insert-after-line', 'Insert after line', ?1, '{}', 'now', 'now')",
+                    [&project_path],
+                )?;
+                Ok(())
+            })
+            .await
+            .expect("seed project");
+
+        let exec = KronnToolExecutor::workflow_arc(
+            state,
+            Some("project-insert-after-line".into()),
+            "run-insert-after-line".into(),
+            "insert".into(),
+        );
+        let call = |name: &str, arguments: serde_json::Value| ToolCall {
+            id: format!("call-{name}"),
+            name: name.into(),
+            arguments,
+        };
+        assert!(exec
+            .catalogue()
+            .iter()
+            .any(|tool| tool["function"]["name"] == "insert_after_line"));
+        let read = exec
+            .execute(&call(
+                "read_file",
+                serde_json::json!({"path": "guide.md", "offset": 2, "limit": 1}),
+            ))
+            .await;
+        assert!(read.ok, "read_file failed: {:?}", read.content);
+        let receipt = read.content["content_sha256"]
+            .as_str()
+            .expect("read receipt")
+            .to_string();
+
+        let missing_anchor = exec
+            .execute(&call(
+                "insert_after_line",
+                serde_json::json!({
+                    "path": "guide.md",
+                    "new_string": "new paragraph",
+                    "expected_sha256": receipt,
+                }),
+            ))
+            .await;
+        assert!(!missing_anchor.ok);
+        assert_eq!(
+            missing_anchor.content["error"],
+            "missing required field `anchor_line`"
+        );
+
+        let inserted = exec
+            .execute(&call(
+                "insert_after_line",
+                serde_json::json!({
+                    "path": "guide.md",
+                    "anchor_line": " 2 ",
+                    "new_string": "new paragraph",
+                    "expected_sha256": receipt,
+                }),
+            ))
+            .await;
+        assert!(inserted.ok, "insertion failed: {:?}", inserted.content);
+        assert_eq!(
+            inserted.content["anchor_preserved"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            std::fs::read_to_string(project_dir.path().join("guide.md")).unwrap(),
+            "before\nANCHOR\nnew paragraph\nafter\n"
+        );
+    }
+
     #[tokio::test]
     async fn http_agent_planning_tools_create_idempotently_in_the_current_discussion() {
         use crate::agents::tools::ToolCall;
@@ -4701,6 +4983,7 @@ mod tests {
         let discussion_id = "http-agent-planning-disc";
         let disc = crate::models::Discussion {
             awaiting_agent: false,
+            agent_running: false,
             id: discussion_id.into(),
             project_id: None,
             title: "Planning from Ollama".into(),
@@ -4773,14 +5056,74 @@ mod tests {
         let exec = KronnToolExecutor::arc(
             state.clone(),
             Some(discussion_id.into()),
-            "Ollama".into(),
+            crate::models::AgentType::Ollama,
             Some("user-message-1".into()),
+            None,
         );
         let call = |name: &str, args: serde_json::Value| ToolCall {
             id: format!("call-{name}"),
             name: name.into(),
             arguments: args,
         };
+
+        let native_catalogue = exec.catalogue();
+        let native_names: Vec<&str> = native_catalogue
+            .iter()
+            .filter_map(|tool| tool["function"]["name"].as_str())
+            .collect();
+        for lifecycle in [
+            "agent_list",
+            "task_exec_prepare",
+            "task_exec_launch",
+            "task_exec_status",
+            "task_exec_deliver",
+            "task_exec_review",
+            "task_exec_cancel",
+            "task_exec_reassign",
+        ] {
+            assert!(
+                native_names.contains(&lifecycle),
+                "native discussion catalogue is missing {lifecycle}: {native_names:?}"
+            );
+        }
+        for continuation in [
+            "agent_job_start",
+            "agent_schedule_wake",
+            "agent_resume_status",
+            "agent_resume_cancel",
+        ] {
+            assert!(
+                native_names.contains(&continuation),
+                "native discussion catalogue is missing {continuation}: {native_names:?}"
+            );
+        }
+
+        let wake_args = serde_json::json!({
+            "delay_seconds": 60,
+            "reason": "wait for external CI",
+            "dedupe_key": "external-ci-42"
+        });
+        let wake = exec
+            .execute(&call("agent_schedule_wake", wake_args.clone()))
+            .await;
+        assert!(wake.ok, "schedule wake failed: {:?}", wake.content);
+        let wake_id = wake.content["id"].as_str().unwrap().to_string();
+        let replay = exec.execute(&call("agent_schedule_wake", wake_args)).await;
+        assert_eq!(replay.content["id"], wake_id, "wake must dedupe");
+        let status = exec
+            .execute(&call(
+                "agent_resume_status",
+                serde_json::json!({"job_id": wake_id}),
+            ))
+            .await;
+        assert_eq!(status.content["jobs"][0]["status"], "pending");
+        let cancelled = exec
+            .execute(&call(
+                "agent_resume_cancel",
+                serde_json::json!({"job_id": wake_id}),
+            ))
+            .await;
+        assert_eq!(cancelled.content["cancelled"], true);
 
         let initial = exec.execute(&call("plan_get", serde_json::json!({}))).await;
         assert!(initial.ok, "plan_get failed: {:?}", initial.content);
@@ -4831,6 +5174,10 @@ mod tests {
         assert_eq!(detail.content["events"][0]["actor_kind"], "agent");
         assert_eq!(detail.content["events"][0]["actor_id"], "Ollama");
         assert_eq!(
+            detail.content["events"][0]["actor_session_id"],
+            format!("native:{discussion_id}:user-message-1")
+        );
+        assert_eq!(
             detail.content["events"][0]["source_message_id"],
             "user-message-1"
         );
@@ -4838,6 +5185,256 @@ mod tests {
     /// `api_call` needs a config id, and asking the MODEL to carry it proved
     /// unreliable (a 4B paired `api-speedcurve` with Resend's id, 2026-08-09).
     /// Kronn resolves it from the slug instead — so that mapping must be right.
+    #[tokio::test]
+    async fn a_worker_room_is_not_offered_the_backlog_it_has_no_business_touching() {
+        // KT-398, found by delegating a real task to a local model. The worker
+        // got 22 tools, nine of them planning-management. Its first call failed
+        // on a missing argument and it fell back to what was on offer:
+        // `task_list`, twelve times, until the per-tool budget cut it off. It
+        // never opened a file. Removing those tools is not a guard against a bad
+        // model — it is refusing to offer a wrong turn.
+        let state = test_state();
+        let discussion_id = "disc-worker-room";
+        state
+            .db
+            .with_conn(move |conn| {
+                let now = chrono::Utc::now().to_rfc3339();
+                conn.execute(
+                    "INSERT INTO discussions (id, title, created_at, updated_at)
+                     VALUES (?1, 'Worker room', ?2, ?2)",
+                    rusqlite::params![discussion_id, now],
+                )?;
+                Ok(())
+            })
+            .await
+            .expect("seed worker room");
+
+        let worker = crate::api::agent_tools::KronnToolExecutor::arc_for_worker_room(
+            state.clone(),
+            Some(discussion_id.into()),
+            crate::models::AgentType::Ollama,
+            None,
+            None,
+            None,
+        );
+        let names: Vec<String> = worker
+            .catalogue()
+            .iter()
+            .filter_map(|tool| tool["function"]["name"].as_str().map(str::to_string))
+            .collect();
+
+        for absent in [
+            "task_list",
+            "task_create",
+            "plan_get",
+            "task_update",
+            "task_update_dod",
+            "task_link_discussion",
+            "task_add_blocker",
+            "task_remove_blocker",
+            "task_exec_launch",
+            "task_exec_review",
+            "agent_job_start",
+            "agent_schedule_wake",
+            "agent_resume_status",
+            "agent_resume_cancel",
+        ] {
+            assert!(
+                !names.iter().any(|name| name == absent),
+                "a worker must not be offered {absent}: {names:?}"
+            );
+        }
+        for present in ["read_file", "write_file", "task_exec_deliver", "task_get"] {
+            assert!(
+                names.iter().any(|name| name == present),
+                "a worker still needs {present}: {names:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn worker_delivery_ignores_a_forged_valid_execution_id_and_uses_its_dispatch() {
+        use crate::agents::tools::ToolCall;
+        use crate::db::agent_dispatch::NewAgentDispatchJob;
+        use crate::models::{AgentType, MessageTargetKind, OrchestrationActor, PlanningActorKind};
+
+        let state = test_state();
+        let (execution_a, execution_b) = state
+            .db
+            .with_conn(|conn| {
+                let now = "2026-08-24T00:00:00Z";
+                conn.execute(
+                    "INSERT INTO discussions (id, title, created_at, updated_at)
+                     VALUES ('principal-ab', 'Principal', ?1, ?1),
+                            ('worker-a', 'Worker A', ?1, ?1),
+                            ('worker-b', 'Worker B', ?1, ?1)",
+                    [now],
+                )?;
+                conn.execute(
+                    "INSERT INTO planning_tasks
+                     (id, task_number, title, created_at, updated_at)
+                     VALUES ('task-a', 901, 'Task A', ?1, ?1),
+                            ('task-b', 902, 'Task B', ?1, ?1)",
+                    [now],
+                )?;
+                let actor = OrchestrationActor {
+                    kind: PlanningActorKind::Backend,
+                    id: Some("test-orchestrator".into()),
+                    session_id: None,
+                    source_message_id: None,
+                };
+                let worker_agent = AgentType::Ollama;
+                let mut execution_ids = Vec::new();
+                for suffix in ["a", "b"] {
+                    let task_id = format!("task-{suffix}");
+                    let child_id = format!("worker-{suffix}");
+                    let trigger_id = format!("trigger-{suffix}");
+                    let dispatch_id = format!("dispatch-{suffix}");
+                    let mut input =
+                        crate::models::LaunchSingleTaskInput::new(&task_id, "principal-ab");
+                    input.worker_target_kind = Some(MessageTargetKind::Agent);
+                    input.worker_agent_type = Some(crate::db::orchestration::agent_type_to_db(
+                        &AgentType::Ollama,
+                    ));
+                    let execution =
+                        crate::db::orchestration::launch_single_task(conn, &input, &actor)?
+                            .execution;
+                    crate::db::orchestration::set_execution_sub_discussion(
+                        conn,
+                        &execution.id,
+                        &child_id,
+                    )?;
+                    conn.execute(
+                        "INSERT INTO messages
+                         (id, discussion_id, role, content, timestamp, sort_order)
+                         VALUES (?1, ?2, 'User', 'bounded task', ?3, 1)",
+                        rusqlite::params![trigger_id, child_id, now],
+                    )?;
+                    crate::db::agent_dispatch::enqueue(
+                        conn,
+                        NewAgentDispatchJob {
+                            id: &dispatch_id,
+                            discussion_id: &child_id,
+                            trigger_message_id: &trigger_id,
+                            trigger_sort_order: 1,
+                            dedupe_key: &dispatch_id,
+                            agent_override: Some(&worker_agent),
+                            chain_prompt_ids: &[],
+                            batch_item: None,
+                            group_id: None,
+                            group_concurrency_limit: None,
+                        },
+                    )?;
+                    crate::db::orchestration::attach_execution_dispatch(
+                        conn,
+                        &execution.id,
+                        &dispatch_id,
+                    )?;
+                    // This fixture targets authorization before manifest parsing;
+                    // provisioning normally performs the guarded transitions.
+                    conn.execute(
+                        "UPDATE task_executions SET status = 'Working' WHERE id = ?1",
+                        [&execution.id],
+                    )?;
+                    execution_ids.push(execution.id);
+                }
+                Ok((execution_ids.remove(0), execution_ids.remove(0)))
+            })
+            .await
+            .expect("seed two concurrent native worker executions");
+
+        let worker = crate::api::agent_tools::KronnToolExecutor::arc_for_worker_room(
+            state.clone(),
+            Some("worker-a".into()),
+            AgentType::Ollama,
+            Some("trigger-a".into()),
+            Some("dispatch-a".into()),
+            None,
+        );
+        let outcome = worker
+            .execute(&ToolCall {
+                id: "deliver-a".into(),
+                name: "task_exec_deliver".into(),
+                arguments: serde_json::json!({
+                    // B is a real concurrent execution. A worker-supplied id
+                    // must have no influence over the server-derived target A.
+                    "task_execution_id": execution_b,
+                    "manifest": {}
+                }),
+            })
+            .await;
+        assert!(!outcome.ok);
+        assert!(
+            outcome.content["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("DeliveryManifest v1 invalide")),
+            "authorized execution A must reach manifest validation; a forged B would fail opaquely: {:?}",
+            outcome.content
+        );
+
+        let principal = crate::api::agent_tools::KronnToolExecutor::arc(
+            state,
+            Some("principal-ab".into()),
+            AgentType::Ollama,
+            Some("principal-trigger".into()),
+            Some("principal-dispatch".into()),
+        );
+        let missing_id = principal
+            .execute(&ToolCall {
+                id: "principal-deliver".into(),
+                name: "task_exec_deliver".into(),
+                arguments: serde_json::json!({"manifest": {}}),
+            })
+            .await;
+        assert_eq!(
+            missing_id.content["error"],
+            "missing required field `task_execution_id`"
+        );
+        assert_ne!(execution_a, execution_b);
+    }
+
+    #[tokio::test]
+    async fn an_ordinary_discussion_keeps_the_planning_tools() {
+        // The narrowing is scoped to worker rooms. An HTTP agent helping with
+        // the plan in a normal discussion legitimately reads and shapes the
+        // backlog; taking those away would trade one bug for a worse one.
+        let state = test_state();
+        let discussion_id = "disc-ordinary-room";
+        state
+            .db
+            .with_conn(move |conn| {
+                let now = chrono::Utc::now().to_rfc3339();
+                conn.execute(
+                    "INSERT INTO discussions (id, title, created_at, updated_at)
+                     VALUES (?1, 'Ordinary', ?2, ?2)",
+                    rusqlite::params![discussion_id, now],
+                )?;
+                Ok(())
+            })
+            .await
+            .expect("seed ordinary room");
+
+        let agent = crate::api::agent_tools::KronnToolExecutor::arc(
+            state.clone(),
+            Some(discussion_id.into()),
+            crate::models::AgentType::Ollama,
+            None,
+            None,
+        );
+        let names: Vec<String> = agent
+            .catalogue()
+            .iter()
+            .filter_map(|tool| tool["function"]["name"].as_str().map(str::to_string))
+            .collect();
+
+        for present in ["task_list", "plan_get", "task_exec_launch"] {
+            assert!(
+                names.iter().any(|name| name == present),
+                "an ordinary discussion keeps {present}: {names:?}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn tool_executor_resolves_the_config_id_belonging_to_the_slug() {
         use crate::api::agent_tools::KronnToolExecutor;
@@ -4902,5 +5499,100 @@ mod tests {
         // An unwired plugin has no config: that is a real answer, and api_call
         // reports it rather than silently calling something else.
         assert_eq!(exec.resolve_config_id_pub("api-ghost").await, None);
+    }
+
+    #[tokio::test]
+    async fn agent_resume_jobs_are_readable_and_cancellable_by_discussion() {
+        let state = test_state();
+        state
+            .db
+            .with_conn(|connection| {
+                connection.execute(
+                    "INSERT INTO discussions
+                     (id, title, agent, language, created_at, updated_at)
+                     VALUES ('disc-resume-api', 'Durable resume', 'Ollama', 'fr', 'now', 'now')",
+                    [],
+                )?;
+                connection.execute(
+                    "INSERT INTO agent_resume_jobs (
+                         id, discussion_id, target_agent_json, kind, status, dedupe_key,
+                         reason, scheduled_at, created_at, updated_at
+                     ) VALUES ('resume-api-1', 'disc-resume-api', '\"Ollama\"',
+                               'Wake', 'Pending', 'resume:api:one', 'waiting for CI',
+                               '2099-01-01T00:00:00Z', 'now', 'now')",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let live_token = tokio_util::sync::CancellationToken::new();
+        state
+            .cancel_registry
+            .lock()
+            .unwrap()
+            .insert("agent-job:resume-api-1".into(), live_token.clone());
+
+        let request = Request::builder()
+            .uri("/api/discussions/disc-resume-api/agent-resume-jobs")
+            .body(Body::empty())
+            .unwrap();
+        let (status, json) = send(state.clone(), false, request).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["success"], true);
+        assert_eq!(json["data"][0]["id"], "resume-api-1");
+        assert_eq!(json["data"][0]["status"], "pending");
+        assert_eq!(json["data"][0]["reason"], "waiting for CI");
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/discussions/disc-resume-api/agent-resume-jobs/resume-api-1/cancel")
+            .body(Body::empty())
+            .unwrap();
+        let (status, json) = send(state.clone(), false, request).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["success"], true);
+        assert_eq!(json["data"]["status"], "cancelled");
+        assert!(live_token.is_cancelled());
+        assert!(!state
+            .cancel_registry
+            .lock()
+            .unwrap()
+            .contains_key("agent-job:resume-api-1"));
+
+        state
+            .db
+            .with_conn(|connection| {
+                connection.execute(
+                    "INSERT INTO agent_resume_jobs (
+                         id, discussion_id, target_agent_json, kind, status, dedupe_key,
+                         reason, scheduled_at, created_at, updated_at
+                     ) VALUES ('resume-api-2', 'disc-resume-api', '\"Ollama\"',
+                               'Wake', 'Pending', 'resume:api:two', 'wait for deploy',
+                               '2099-01-01T00:00:00Z', 'now', 'now')",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/discussions/disc-resume-api/stop")
+            .body(Body::empty())
+            .unwrap();
+        let (status, json) = send(state.clone(), false, request).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["cancelled"], true);
+        let stopped = state
+            .db
+            .with_conn(|connection| crate::db::agent_jobs::get(connection, "resume-api-2"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            stopped.view.status,
+            crate::models::AgentResumeJobStatus::Cancelled
+        );
     }
 }

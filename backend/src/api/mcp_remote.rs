@@ -41,7 +41,7 @@ use crate::AppState;
 // ─── Helpers ────────────────────────────────────────────────────────────
 
 /// Average `total_duration_ms` over the last `LIMIT` completed (status
-/// = Success | Failed | Cancelled | StoppedByGuard) runs of a workflow.
+/// = Success | Partial | Failed | Cancelled | StoppedByGuard) runs of a workflow.
 /// Returns `(avg_ms, sample_count)` ; sample_count of 0 means no history.
 ///
 /// Used by the smart-polling hint — only `finished_at - started_at` for
@@ -60,6 +60,7 @@ fn avg_workflow_duration_ms(runs: &[WorkflowRun]) -> (Option<u64>, u32) {
             matches!(
                 r.status,
                 RunStatus::Success
+                    | RunStatus::Partial
                     | RunStatus::Failed
                     | RunStatus::Cancelled
                     | RunStatus::StoppedByGuard
@@ -188,6 +189,7 @@ pub async fn workflow_trigger(
         batch_total: 0,
         batch_completed: 0,
         batch_failed: 0,
+        batch_no_response: 0,
         batch_name: None,
         parent_run_id: None,
         state: ::std::collections::HashMap::new(),
@@ -1083,6 +1085,7 @@ mod tests {
             batch_total: 0,
             batch_completed: 0,
             batch_failed: 0,
+            batch_no_response: 0,
             batch_name: None,
             parent_run_id: None,
             state: ::std::collections::HashMap::new(),

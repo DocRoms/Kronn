@@ -1201,7 +1201,11 @@ pub(crate) fn agent_can_audit(agent: &crate::models::AgentType) -> bool {
         | AgentType::CopilotCli => true,
         // LiteLLM joins Ollama here: an audit needs a filesystem and a tool
         // loop, and the HTTP path has neither.
-        AgentType::Vibe | AgentType::Ollama | AgentType::LiteLlm | AgentType::Custom => false,
+        AgentType::Vibe
+        | AgentType::Ollama
+        | AgentType::LiteLlm
+        | AgentType::Nvidia
+        | AgentType::Custom => false,
     }
 }
 

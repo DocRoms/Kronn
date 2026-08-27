@@ -29,9 +29,15 @@ pub struct SessionBudget {
     /// included. It is the right axis because cache reads ARE the cost of a long
     /// thread: they were 98.4% of that 4.1 billion.
     pub max_traffic_tokens: i64,
-    /// Wall-clock age. A session open for days accumulates context it will
-    /// never use again.
-    pub max_age_hours: i64,
+    /// Observed active time, in hours. Long gaps between this session's turns
+    /// are treated as inactivity rather than work.
+    #[serde(alias = "max_age_hours")]
+    pub max_active_hours: i64,
+    /// Maximum gap counted as continuous work between two turns. The default
+    /// is 30 minutes: enough to cover a normal edit/test cycle, while a longer
+    /// gap is more plausibly a pause than active context accumulation.
+    #[serde(default = "default_inactivity_threshold_minutes")]
+    pub max_inactive_gap_minutes: i64,
     /// Messages this session posted to rooms.
     pub max_turns: i64,
     /// Fraction of each ceiling at which a WARNING fires, leaving room to
@@ -46,13 +52,20 @@ impl Default for SessionBudget {
             // lands while the thread is still workable rather than after the
             // damage.
             max_traffic_tokens: 1_000_000_000,
-            // Two days. Long enough for a real piece of work, short enough that
-            // a forgotten session does not run all week.
-            max_age_hours: 48,
+            // Two days of observed active work. Long enough for a real piece of
+            // work, short enough that a forgotten session does not run all week.
+            max_active_hours: 48,
+            // A half-hour is a pragmatic compromise: it preserves short pauses
+            // inside a work block without charging nights or other long stops.
+            max_inactive_gap_minutes: default_inactivity_threshold_minutes(),
             max_turns: 400,
             soft_ratio: 0.75,
         }
     }
+}
+
+fn default_inactivity_threshold_minutes() -> i64 {
+    30
 }
 
 /// Which ceiling a session is closest to, and how close.
@@ -80,19 +93,19 @@ pub enum BudgetVerdict {
 pub struct BudgetAxis {
     pub name: String,
     /// `None` when unmeasured — never 0, which would read as "cost nothing".
-    pub current: Option<i64>,
+    pub current: Option<f64>,
     pub ceiling: i64,
     /// Share of the ceiling used. `None` when unmeasured.
     pub ratio: Option<f64>,
 }
 
 impl BudgetAxis {
-    fn new(name: &str, current: Option<i64>, ceiling: i64) -> Self {
+    fn new(name: &str, current: Option<f64>, ceiling: i64) -> Self {
         Self {
             name: name.to_string(),
             current,
             ceiling,
-            ratio: current.and_then(|value| (ceiling > 0).then(|| value as f64 / ceiling as f64)),
+            ratio: current.and_then(|value| (ceiling > 0).then(|| value / ceiling as f64)),
         }
     }
 
@@ -120,17 +133,23 @@ pub struct BudgetAssessment {
 ///
 /// `traffic_tokens` is `None` for a vendor with no collector — and that case
 /// yields `Unknown`, not `Ok`. Treating unmeasured as fine would exempt from the
-/// budget precisely the sessions nobody is watching.
+/// budget precisely the sessions nobody is watching. `active_hours` is derived
+/// from this session's posted turns, with each inter-turn gap already capped by
+/// the configured inactivity threshold.
 pub fn assess(
     budget: &SessionBudget,
     traffic_tokens: Option<i64>,
-    age_hours: Option<i64>,
+    active_hours: Option<f64>,
     turns: Option<i64>,
 ) -> BudgetAssessment {
     let axes = vec![
-        BudgetAxis::new("traffic_tokens", traffic_tokens, budget.max_traffic_tokens),
-        BudgetAxis::new("age_hours", age_hours, budget.max_age_hours),
-        BudgetAxis::new("turns", turns, budget.max_turns),
+        BudgetAxis::new(
+            "traffic_tokens",
+            traffic_tokens.map(|value| value as f64),
+            budget.max_traffic_tokens,
+        ),
+        BudgetAxis::new("active_hours", active_hours, budget.max_active_hours),
+        BudgetAxis::new("turns", turns.map(|value| value as f64), budget.max_turns),
     ];
 
     // The WORST axis decides: being inside two ceilings does not offset breaking
@@ -169,7 +188,7 @@ pub fn assess(
         (BudgetVerdict::Rotate, Some(axis)) => format!(
             "{} past its ceiling ({} of {}) — rotate this session",
             axis.name,
-            axis.current.unwrap_or(0),
+            axis.current.unwrap_or(0.0),
             axis.ceiling
         ),
         (verdict, None) => format!("{verdict:?} with no axis to explain it"),

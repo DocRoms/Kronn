@@ -106,12 +106,26 @@ async fn reads_are_not_blocked_by_a_busy_writer() {
     // holds the mutex — a fixed sleep can't guarantee scheduling under CI
     // load. The closure signals once it's inside (lock held), and only
     // then does the read race begin.
+    //
+    // KT-332: the assertion is the WRITER'S state, not a stopwatch. The
+    // property is "the read finished while the writer still held the lock",
+    // and a wall-clock deadline is only a proxy for it — one that a loaded
+    // machine breaks without anything being wrong. Comparing against the
+    // writer measures the real thing and removes the flake at the same time:
+    // the budget is now the writer's whole hold, not an arbitrary fraction
+    // of it.
     let (locked_tx, locked_rx) = tokio::sync::oneshot::channel::<()>();
+    let releasing = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let releasing_w = releasing.clone();
     let db_w = db.clone();
     let writer = tokio::spawn(async move {
         db_w.with_conn(move |_conn| {
             let _ = locked_tx.send(());
             std::thread::sleep(std::time::Duration::from_millis(1500));
+            // Set INSIDE the closure, before `with_conn` can release the
+            // mutex: a reader that observes `false` provably finished while
+            // the lock was still held.
+            releasing_w.store(true, std::sync::atomic::Ordering::SeqCst);
             Ok(())
         })
         .await
@@ -120,7 +134,6 @@ async fn reads_are_not_blocked_by_a_busy_writer() {
         .await
         .expect("writer must signal lock acquisition");
 
-    let started = std::time::Instant::now();
     let n: i64 = db
         .with_read_conn(|conn| {
             conn.query_row("SELECT COUNT(*) FROM projects", [], |r| r.get(0))
@@ -128,12 +141,13 @@ async fn reads_are_not_blocked_by_a_busy_writer() {
         })
         .await
         .unwrap();
-    let elapsed = started.elapsed();
+    let writer_still_holding = !releasing.load(std::sync::atomic::Ordering::SeqCst);
 
     assert_eq!(n, 0);
     assert!(
-        elapsed < std::time::Duration::from_millis(1000),
-        "read must complete while the writer still holds its lock (took {elapsed:?})"
+        writer_still_holding,
+        "the read only completed after the writer released — reads ARE being \
+         blocked by a busy writer"
     );
     writer.await.unwrap().unwrap();
 }
@@ -213,6 +227,7 @@ fn sample_discussion(id: &str, project_id: Option<&str>) -> Discussion {
     let now = Utc::now();
     Discussion {
         awaiting_agent: false,
+        agent_running: false,
         id: id.into(),
         project_id: project_id.map(|s| s.into()),
         title: "Test Discussion".into(),
@@ -271,6 +286,84 @@ fn sample_message(id: &str, role: MessageRole) -> DiscussionMessage {
         target_agent: None,
         reply_to_message_id: None,
     }
+}
+
+fn insert_discussion_with_user_prompt(conn: &Connection, id: &str, prompt: &str) {
+    let discussion = sample_discussion(id, None);
+    crate::db::discussions::insert_discussion(conn, &discussion).unwrap();
+    let mut message = sample_message(&format!("msg-{id}"), MessageRole::User);
+    message.content = prompt.into();
+    crate::db::discussions::insert_message(conn, id, &message).unwrap();
+}
+
+#[test]
+fn ad_hoc_compare_scope_is_durable_ordered_and_reused_for_the_same_set() {
+    let conn = test_db();
+    insert_discussion_with_user_prompt(&conn, "compare-a", "Same prompt\r\n");
+    insert_discussion_with_user_prompt(&conn, "compare-b", " Same prompt ");
+
+    let run_id = crate::db::compare::create_ad_hoc_compare_run(
+        &conn,
+        &["compare-b".into(), "compare-a".into()],
+    )
+    .unwrap();
+    let reopened = crate::db::compare::create_ad_hoc_compare_run(
+        &conn,
+        &["compare-a".into(), "compare-b".into()],
+    )
+    .unwrap();
+    assert_eq!(reopened, run_id);
+
+    let discussions = crate::db::compare::list_batch_discussions(&conn, &run_id).unwrap();
+    assert_eq!(
+        discussions
+            .iter()
+            .map(|discussion| discussion.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["compare-b", "compare-a"]
+    );
+    let details = crate::db::compare::compare_details(&conn, &run_id).unwrap();
+    assert_eq!(
+        details.prompt_compatibility,
+        crate::models::ComparePromptCompatibility::Identical
+    );
+    assert_eq!(
+        details.improvement_availability,
+        crate::models::CompareImprovementAvailability::NoSharedQuickPrompt
+    );
+
+    crate::db::compare::set_manual_score(&conn, &run_id, "compare-a", Some(4)).unwrap();
+    let details = crate::db::compare::compare_details(&conn, &run_id).unwrap();
+    assert_eq!(
+        details
+            .evaluations
+            .iter()
+            .find(|evaluation| evaluation.discussion_id == "compare-a")
+            .and_then(|evaluation| evaluation.manual_score),
+        Some(4)
+    );
+}
+
+#[test]
+fn ad_hoc_compare_marks_different_prompts_as_not_judgeable_or_improvable() {
+    let conn = test_db();
+    insert_discussion_with_user_prompt(&conn, "compare-prompt-a", "Question A");
+    insert_discussion_with_user_prompt(&conn, "compare-prompt-b", "Question B");
+    let run_id = crate::db::compare::create_ad_hoc_compare_run(
+        &conn,
+        &["compare-prompt-a".into(), "compare-prompt-b".into()],
+    )
+    .unwrap();
+
+    let details = crate::db::compare::compare_details(&conn, &run_id).unwrap();
+    assert_eq!(
+        details.prompt_compatibility,
+        crate::models::ComparePromptCompatibility::Different
+    );
+    assert_eq!(
+        details.improvement_availability,
+        crate::models::CompareImprovementAvailability::DifferentPrompts
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1784,6 +1877,7 @@ fn sample_workflow(id: &str) -> Workflow {
             exec_setup_args: vec![],
             exec_stdin: None,
             quick_prompt_id: None,
+            quick_prompt_variables: std::collections::HashMap::new(),
             json_data_payload: None,
             collect_api_data: None,
             transform_data: None,
@@ -1904,6 +1998,7 @@ fn sample_run(id: &str, workflow_id: &str) -> WorkflowRun {
         batch_total: 0,
         batch_completed: 0,
         batch_failed: 0,
+        batch_no_response: 0,
         batch_name: None,
         parent_run_id: None,
         state: ::std::collections::HashMap::new(),
@@ -2878,6 +2973,7 @@ fn sample_batch_run(id: &str, qp_id: &str, total: u32) -> WorkflowRun {
         batch_total: total,
         batch_completed: 0,
         batch_failed: 0,
+        batch_no_response: 0,
         batch_name: Some(format!("Cadrage — {}", id)),
         parent_run_id: None,
         state: ::std::collections::HashMap::new(),
@@ -2981,7 +3077,7 @@ fn batch_progress_marks_failed_if_all_children_fail() {
 }
 
 #[test]
-fn batch_progress_marks_success_if_at_least_one_child_succeeds() {
+fn batch_progress_marks_partial_when_successes_and_failures_mix() {
     let conn = test_db();
     insert_batch_run_with_placeholder(&conn, "br4", "qp-br4", 3);
 
@@ -2992,8 +3088,40 @@ fn batch_progress_marks_success_if_at_least_one_child_succeeds() {
         .unwrap();
     assert_eq!(final_run.batch_completed, 1);
     assert_eq!(final_run.batch_failed, 2);
-    // Mixed result — one success is enough to count as "the batch did something"
-    assert_eq!(final_run.status, RunStatus::Success);
+    assert_eq!(final_run.status, RunStatus::Partial);
+}
+
+#[test]
+fn batch_progress_exposes_four_successes_one_error_and_one_missing_response() {
+    use crate::db::workflows::{increment_batch_progress_with_outcome, BatchChildOutcome};
+
+    let conn = test_db();
+    insert_batch_run_with_placeholder(&conn, "br-4-1-1", "qp-br-4-1-1", 6);
+
+    for _ in 0..4 {
+        increment_batch_progress_with_outcome(&conn, "br-4-1-1", BatchChildOutcome::Success)
+            .unwrap();
+    }
+    increment_batch_progress_with_outcome(&conn, "br-4-1-1", BatchChildOutcome::Failed).unwrap();
+    let final_run =
+        increment_batch_progress_with_outcome(&conn, "br-4-1-1", BatchChildOutcome::NoResponse)
+            .unwrap()
+            .unwrap();
+
+    assert_eq!(final_run.status, RunStatus::Partial);
+    assert_eq!(final_run.batch_completed, 4);
+    assert_eq!(final_run.batch_failed, 2);
+    assert_eq!(final_run.batch_no_response, 1);
+
+    let summary = crate::db::workflows::list_batch_run_summaries(&conn)
+        .unwrap()
+        .into_iter()
+        .find(|summary| summary.run_id == "br-4-1-1")
+        .unwrap();
+    assert_eq!(summary.status, RunStatus::Partial);
+    assert_eq!(summary.batch_completed, 4);
+    assert_eq!(summary.batch_failed, 2);
+    assert_eq!(summary.batch_no_response, 1);
 }
 
 #[test]
@@ -3140,6 +3268,7 @@ fn sample_qp_for_batch(id: &str) -> QuickPrompt {
     let now = Utc::now();
     QuickPrompt {
         id: id.into(),
+        pinned: false,
         name: format!("BatchQP {}", id),
         icon: "🎯".into(),
         prompt_template: "Analyse le ticket {{ticket}} en profondeur".into(),
@@ -3223,6 +3352,12 @@ fn create_batch_run_pure_fn_roundtrip_toplevel() {
     assert_eq!(run.batch_name.as_deref(), Some("Cadrage hebdo"));
     assert_eq!(run.parent_run_id, None);
     assert_eq!(run.status, RunStatus::Running);
+    assert_eq!(
+        run.trigger_context
+            .as_ref()
+            .and_then(|value| value["quick_prompt_version"].as_u64()),
+        Some(1)
+    );
 
     // All three child discussions exist and link back via workflow_run_id
     for (i, disc_id) in outcome.discussion_ids.iter().enumerate() {
@@ -3327,6 +3462,115 @@ fn create_batch_run_persists_each_compare_target_tier() {
 }
 
 #[test]
+fn compare_human_and_ai_scores_are_persisted_independently() {
+    let conn = test_db();
+    let qp = sample_qp_for_batch("qp-compare-quality");
+    crate::db::quick_prompts::insert_quick_prompt(&conn, &qp).unwrap();
+    let outcome = crate::db::workflows::create_batch_run(
+        &conn,
+        crate::db::workflows::CreateBatchRunInput {
+            quick_prompt: &qp,
+            items: vec![crate::db::workflows::BatchItemInput {
+                title: "Codex".into(),
+                prompt: "same prompt".into(),
+                agent_override: Some(crate::db::workflows::BatchAgentOverride {
+                    agent: crate::models::AgentType::Codex,
+                    tier: crate::models::ModelTier::Default,
+                }),
+            }],
+            batch_name: Some("Quality comparison".into()),
+            project_id: None,
+            parent_run_id: None,
+            author_pseudo: None,
+            author_avatar_email: None,
+            language: "fr".into(),
+            workspace_mode: "Direct".into(),
+            chain_prompt_ids: Vec::new(),
+            chain_batch_items: Vec::new(),
+            group_concurrency_limit: None,
+        },
+    )
+    .unwrap();
+    let discussion_id = &outcome.discussion_ids[0];
+
+    crate::db::compare::set_manual_score(&conn, &outcome.run_id, discussion_id, Some(5)).unwrap();
+    assert!(!crate::db::compare::is_judge_discussion(&conn, discussion_id).unwrap());
+    conn.execute(
+        "INSERT INTO batch_compare_judge_runs
+         (id, run_id, judge_discussion_id, judge_agent_json, judge_tier_json, rubric_version,
+          labels_json, status, started_at)
+         VALUES ('judge-1', ?1, ?2, '\"Codex\"', '\"reasoning\"',
+                'compare-quality-v2', ?3, 'Running', ?4)",
+        rusqlite::params![
+            outcome.run_id,
+            discussion_id,
+            serde_json::to_string(&vec![crate::db::compare::CompareJudgeLabel {
+                label: "A".into(),
+                discussion_id: discussion_id.clone(),
+            }])
+            .unwrap(),
+            chrono::Utc::now().to_rfc3339(),
+        ],
+    )
+    .unwrap();
+    assert!(crate::db::compare::is_judge_discussion(&conn, discussion_id).unwrap());
+    crate::db::compare::finalize_judge_run(
+        &conn,
+        "judge-1",
+        &[crate::db::compare::CompareAiVerdictInput {
+            discussion_id: discussion_id.clone(),
+            score: 2,
+            confidence: 0.75,
+            positives: vec!["factuel".into()],
+            negatives: vec!["incomplet".into()],
+            contract_violations: vec![],
+        }],
+        &crate::models::BatchComparePromptReview {
+            worth_improving: true,
+            strengths: vec!["cadré".into()],
+            weaknesses: vec![crate::models::BatchComparePromptFinding {
+                text: "format ambigu".into(),
+                affects: crate::models::BatchComparePromptImpact::All,
+            }],
+            recommendations: vec![crate::models::BatchComparePromptFinding {
+                text: "imposer le schéma".into(),
+                affects: crate::models::BatchComparePromptImpact::All,
+            }],
+        },
+        321,
+        Some(1_250),
+        Some("gpt-test"),
+    )
+    .unwrap();
+
+    crate::db::compare::set_manual_score(&conn, &outcome.run_id, discussion_id, Some(4)).unwrap();
+    let details = crate::db::compare::compare_details(&conn, &outcome.run_id).unwrap();
+    assert_eq!(details.evaluations[0].manual_score, Some(4));
+    let ai = details.evaluations[0].ai.as_ref().expect("AI score");
+    assert_eq!(ai.score, 2);
+    assert_eq!(ai.judge_tokens_used, Some(321));
+    assert_eq!(ai.judge_model.as_deref(), Some("gpt-test"));
+    assert!(details
+        .latest_judge_run
+        .and_then(|run| run.prompt_review)
+        .is_some_and(|review| review.worth_improving));
+
+    conn.execute(
+        "UPDATE batch_compare_judge_runs
+         SET rubric_version = 'compare-quality-v1', prompt_review_json = NULL
+         WHERE id = 'judge-1'",
+        [],
+    )
+    .unwrap();
+    let legacy = crate::db::compare::compare_details(&conn, &outcome.run_id).unwrap();
+    let legacy_judge = legacy
+        .latest_judge_run
+        .expect("legacy judge remains readable");
+    assert_eq!(legacy_judge.rubric_version, "compare-quality-v1");
+    assert!(legacy_judge.prompt_review.is_none());
+}
+
+#[test]
 fn create_batch_run_chained_from_linear_parent() {
     let conn = test_db();
 
@@ -3401,6 +3645,7 @@ fn partial_response_set_then_recover_inserts_agent_message() {
     let now = chrono::Utc::now();
     let disc = Discussion {
         awaiting_agent: false,
+        agent_running: false,
         id: "disc-pr-1".into(),
         project_id: None,
         title: "Test".into(),
@@ -3525,6 +3770,7 @@ fn partial_response_preserves_started_at_across_checkpoints() {
     let now = chrono::Utc::now();
     let disc = Discussion {
         awaiting_agent: false,
+        agent_running: false,
         id: "disc-ts".into(),
         project_id: None,
         title: "X".into(),
@@ -3655,6 +3901,7 @@ fn has_pending_partial_returns_true_when_set() {
     let now = chrono::Utc::now();
     let disc = Discussion {
         awaiting_agent: false,
+        agent_running: false,
         id: "disc-pending".into(),
         project_id: None,
         title: "X".into(),
@@ -3701,6 +3948,7 @@ fn partial_response_clear_with_none_wipes_column() {
     let now = chrono::Utc::now();
     let disc = Discussion {
         awaiting_agent: false,
+        agent_running: false,
         id: "disc-clear".into(),
         project_id: None,
         title: "X".into(),
@@ -4077,6 +4325,7 @@ fn workflow_multi_step_roundtrip() {
                 exec_setup_args: vec![],
                 exec_stdin: None,
                 quick_prompt_id: None,
+                quick_prompt_variables: std::collections::HashMap::new(),
                 json_data_payload: None,
                 collect_api_data: None,
                 transform_data: None,
@@ -4141,6 +4390,7 @@ fn workflow_multi_step_roundtrip() {
                 exec_setup_args: vec![],
                 exec_stdin: None,
                 quick_prompt_id: None,
+                quick_prompt_variables: std::collections::HashMap::new(),
                 json_data_payload: None,
                 collect_api_data: None,
                 transform_data: None,
@@ -4202,6 +4452,7 @@ fn workflow_multi_step_roundtrip() {
                 exec_setup_args: vec![],
                 exec_stdin: None,
                 quick_prompt_id: None,
+                quick_prompt_variables: std::collections::HashMap::new(),
                 json_data_payload: None,
                 collect_api_data: None,
                 transform_data: None,
@@ -4317,6 +4568,7 @@ fn workflow_update_steps_count() {
         exec_setup_args: vec![],
         exec_stdin: None,
         quick_prompt_id: None,
+        quick_prompt_variables: std::collections::HashMap::new(),
         json_data_payload: None,
         collect_api_data: None,
         transform_data: None,
@@ -4621,6 +4873,7 @@ fn quick_prompt_crud() {
     // Insert
     let qp = QuickPrompt {
         id: "qp1".into(),
+        pinned: false,
         name: "Analyse ticket".into(),
         icon: "🔍".into(),
         prompt_template: "Analyse le ticket {{ticket}} sur le projet {{project}}".into(),
@@ -4711,6 +4964,7 @@ fn quick_prompt_insert_seeds_version_v1() {
     let now = Utc::now();
     let qp = crate::models::QuickPrompt {
         id: "qp-versions-1".into(),
+        pinned: false,
         name: "QP V1".into(),
         icon: "⚡".into(),
         prompt_template: "Initial body".into(),
@@ -4743,6 +4997,7 @@ fn quick_prompt_update_snapshots_v2_v3() {
     let now = Utc::now();
     let mut qp = crate::models::QuickPrompt {
         id: "qp-versions-2".into(),
+        pinned: false,
         name: "Init".into(),
         icon: "⚡".into(),
         prompt_template: "v1 body".into(),
@@ -4793,6 +5048,7 @@ fn quick_prompt_metrics_aggregates_first_agent_reply_per_version() {
     let now = Utc::now();
     let mut qp = crate::models::QuickPrompt {
         id: "qp-metrics".into(),
+        pinned: false,
         name: "Metrics QP".into(),
         icon: "⚡".into(),
         prompt_template: "v1".into(),
@@ -4819,6 +5075,7 @@ fn quick_prompt_metrics_aggregates_first_agent_reply_per_version() {
     let seed_disc = |disc_id: &str, v: u32, agent_tokens: u64, agent_dur: u64| {
         let d = Discussion {
             awaiting_agent: false,
+            agent_running: false,
             id: disc_id.into(),
             project_id: None,
             title: format!("Disc {}", disc_id),
@@ -4927,6 +5184,7 @@ fn quick_prompt_metrics_empty_for_qp_without_launches() {
     let now = Utc::now();
     let qp = crate::models::QuickPrompt {
         id: "qp-no-launches".into(),
+        pinned: false,
         name: "Solo".into(),
         icon: "⚡".into(),
         prompt_template: "...".into(),
@@ -4955,6 +5213,7 @@ fn quick_prompt_delete_version_refuses_current_and_succeeds_on_older() {
     let now = Utc::now();
     let mut qp = crate::models::QuickPrompt {
         id: "qp-del".into(),
+        pinned: false,
         name: "Del".into(),
         icon: "⚡".into(),
         prompt_template: "v1".into(),
@@ -5007,6 +5266,7 @@ fn quick_prompt_delete_version_clears_discussion_lineage() {
     let now = Utc::now();
     let mut qp = crate::models::QuickPrompt {
         id: "qp-cascade".into(),
+        pinned: false,
         name: "C".into(),
         icon: "⚡".into(),
         prompt_template: "v1".into(),
@@ -5030,6 +5290,7 @@ fn quick_prompt_delete_version_clears_discussion_lineage() {
     // Seed a discussion stamped with v1 (the version we'll delete).
     let d = Discussion {
         awaiting_agent: false,
+        agent_running: false,
         id: "d-orphan".into(),
         project_id: None,
         title: "T".into(),
@@ -5095,6 +5356,7 @@ fn quick_prompt_metrics_ignores_non_first_agent_replies() {
     let now = Utc::now();
     let qp = crate::models::QuickPrompt {
         id: "qp-first-only".into(),
+        pinned: false,
         name: "F".into(),
         icon: "⚡".into(),
         prompt_template: "v1".into(),
@@ -5113,6 +5375,7 @@ fn quick_prompt_metrics_ignores_non_first_agent_replies() {
     crate::db::quick_prompts::insert_quick_prompt(&conn, &qp).unwrap();
     let d = Discussion {
         awaiting_agent: false,
+        agent_running: false,
         id: "d-multi".into(),
         project_id: None,
         title: "T".into(),
@@ -5230,6 +5493,7 @@ fn quick_prompt_variables_roundtrip() {
     let now = Utc::now();
     let qp = QuickPrompt {
         id: "qp-vars".into(),
+        pinned: false,
         name: "Test vars".into(),
         icon: "🔍".into(),
         prompt_template: "{{#jira}}Ticket {{jira}}, {{/jira}}{{#pr}}PR #{{pr}}{{/pr}}".into(),
@@ -5304,6 +5568,7 @@ fn cross_agent_db_round_trip_all_types() {
         let now = chrono::Utc::now();
         let disc = Discussion {
             awaiting_agent: false,
+            agent_running: false,
             id: disc_id.clone(),
             project_id: None,
             title: format!("Test {:?}", agent_type),

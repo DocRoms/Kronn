@@ -42,6 +42,39 @@ fn parse_status(s: &str) -> Option<ApiCallStatus> {
     }
 }
 
+/// GET /api/api-call-logs/drift
+///
+/// Endpoints whose calls keep failing the same way. A plugin spec is written
+/// once and never re-checked against the API, so when it is wrong — or the API
+/// moves — nothing says so and every agent using it pays. The call log already
+/// held that answer; this reads it.
+pub async fn api_call_drift(
+    State(state): State<AppState>,
+    Query(q): Query<DriftQuery>,
+) -> Json<ApiResponse<Vec<api_call_logs::EndpointDrift>>> {
+    // Three failures over a month is enough to rule out a one-off outage while
+    // still catching an endpoint only used occasionally.
+    let days = q.days.unwrap_or(30).clamp(1, 365);
+    let min_failures = q.min_failures.unwrap_or(3).max(1);
+    match state
+        .db
+        .with_conn(move |conn| {
+            api_call_logs::endpoint_drift(conn, days, min_failures)
+                .map_err(|e| anyhow::anyhow!("endpoint_drift: {e}"))
+        })
+        .await
+    {
+        Ok(rows) => Json(ApiResponse::ok(rows)),
+        Err(error) => Json(ApiResponse::err(format!("{error}"))),
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct DriftQuery {
+    pub days: Option<u32>,
+    pub min_failures: Option<u32>,
+}
+
 pub async fn list_api_call_logs(
     State(state): State<AppState>,
     Query(q): Query<ListQuery>,

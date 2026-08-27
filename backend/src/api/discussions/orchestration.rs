@@ -47,6 +47,16 @@ fn tier_label(tier: ModelTier) -> &'static str {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SpawnToolPolicy {
+    AgentWork,
+    ToolFreeSummary,
+}
+
+fn spawn_uses_native_tools(policy: SpawnToolPolicy, agent: &AgentType) -> bool {
+    policy == SpawnToolPolicy::AgentWork && runner::is_http_chat_agent(agent)
+}
+
 pub async fn orchestrate(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -105,6 +115,20 @@ pub async fn orchestrate(
         }
     };
     let orch_workspace_path = disc.workspace_path.clone();
+    // KT-398 — a worker running in its own execution room gets a narrowed tool
+    // catalogue. Resolved once here because the catalogue is built synchronously
+    // and only the durable lineage can answer. Unreadable lineage keeps the full
+    // catalogue: losing a tool is worse than offering one too many.
+    let is_worker_room = {
+        let room = id.clone();
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::orchestration::discussion_is_execution_room(conn, &room)
+            })
+            .await
+            .unwrap_or(false)
+    };
     let original_question = disc
         .messages
         .iter()
@@ -134,10 +158,13 @@ pub async fn orchestrate(
         .rev()
         .find(|message| matches!(message.role, MessageRole::User))
         .map(|message| message.id.clone());
-    let initial_targets = match initial_message_id {
+    let initial_targets = match initial_message_id.as_ref() {
         Some(message_id) => state
             .db
-            .with_conn(move |conn| crate::db::discussions::list_message_targets(conn, &message_id))
+            .with_conn({
+                let message_id = message_id.clone();
+                move |conn| crate::db::discussions::list_message_targets(conn, &message_id)
+            })
             .await
             .unwrap_or_default(),
         None => Vec::new(),
@@ -241,7 +268,15 @@ pub async fn orchestrate(
         None
     };
 
-    let (tokens, agent_access, model_tiers_config, lite_llm_base_url, global_timeout) = {
+    let (
+        tokens,
+        agent_access,
+        model_tiers_config,
+        http_endpoints,
+        global_timeout,
+        local_global_timeout,
+        ollama_context_overrides,
+    ) = {
         let config = state.config.read().await;
         let access_map: std::collections::HashMap<String, bool> = agents
             .iter()
@@ -251,9 +286,18 @@ pub async fn orchestrate(
             config.tokens.clone(),
             access_map,
             config.agents.model_tiers.clone(),
-            config.agents.lite_llm.base_url.clone(),
+            crate::models::setup::HttpEndpoints::from_agents(&config.agents),
             configured_agent_global_timeout(config.server.agent_global_timeout_min),
+            configured_agent_global_timeout(config.server.local_agent_global_timeout_min),
+            config.server.ollama_context_overrides.clone(),
         )
+    };
+    let timeout_for_agent = move |agent: &AgentType| {
+        if *agent == AgentType::Ollama {
+            local_global_timeout
+        } else {
+            global_timeout
+        }
     };
 
     // Update participants
@@ -393,13 +437,23 @@ pub async fn orchestrate(
             let fa = *agent_access
                 .get(&format!("{:?}", primary_agent_type))
                 .unwrap_or(&false);
+            debug_assert!(!spawn_uses_native_tools(
+                SpawnToolPolicy::ToolFreeSummary,
+                &primary_agent_type
+            ));
             match runner::start_agent_with_config(runner::AgentStartConfig {
                 work_dir: orch_workspace_path.as_deref(),
                 full_access: fa,
                 mcp_context_override: global_mcp_context.as_deref(),
                 tier: primary_tier,
                 model_tiers: Some(&model_tiers_config),
-                lite_llm_base_url: lite_llm_base_url.as_deref(),
+                ollama_context_overrides: Some(&ollama_context_overrides),
+                http_request_timeout: Some(timeout_for_agent(&primary_agent_type)),
+                http_endpoints: Some(&http_endpoints),
+                // This pass only compresses already-loaded transcript text.
+                // Giving it room tools would permit mutation and recursive
+                // summarisation with no relevance to its bounded job.
+                tools: None,
                 // Internal summarisation pass — keep disc_id off to avoid
                 // recursion (agent shouldn't call disc_summarize on itself
                 // while running this very prompt).
@@ -413,7 +467,8 @@ pub async fn orchestrate(
             .await
             {
                 Ok(process) => {
-                    let summary = run_agent_collect(process, global_timeout).await;
+                    let summary =
+                        run_agent_collect(process, timeout_for_agent(&primary_agent_type)).await;
                     if summary.is_empty() {
                         String::new()
                     } else {
@@ -485,9 +540,33 @@ pub async fn orchestrate(
                     mcp_context_override: global_mcp_context.as_deref(),
                     tier: agent_tier,
                     model_tiers: Some(&model_tiers_config),
-                    lite_llm_base_url: lite_llm_base_url.as_deref(),
+                    ollama_context_overrides: Some(&ollama_context_overrides),
+                    http_request_timeout: Some(timeout_for_agent(agent_type)),
+                    http_endpoints: Some(&http_endpoints),
                     context_files_prompt: &companion_context,
                     discussion_id: Some(&id),
+                    tools: spawn_uses_native_tools(SpawnToolPolicy::AgentWork, agent_type).then(
+                        || {
+                            if is_worker_room {
+                                crate::api::agent_tools::KronnToolExecutor::arc_for_worker_room(
+                                    state.clone(),
+                                    Some(id.clone()),
+                                    agent_type.clone(),
+                                    initial_message_id.clone(),
+                                    None,
+                                    None,
+                                )
+                            } else {
+                                crate::api::agent_tools::KronnToolExecutor::arc(
+                                    state.clone(),
+                                    Some(id.clone()),
+                                    agent_type.clone(),
+                                    initial_message_id.clone(),
+                                    None,
+                                )
+                            }
+                        },
+                    ),
                     ..runner::AgentStartConfig::new(agent_type, &project_path, &prompt, &tokens)
                 })
                 .await
@@ -498,9 +577,14 @@ pub async fn orchestrate(
                             agent_type: agent_type.clone(),
                             round_label: serde_json::json!(round),
                         };
-                        let result =
-                            run_agent_streaming(process, &tx, &meta, agent_type, global_timeout)
-                                .await;
+                        let result = run_agent_streaming(
+                            process,
+                            &tx,
+                            &meta,
+                            agent_type,
+                            timeout_for_agent(agent_type),
+                        )
+                        .await;
 
                         // Empty-response detection — when a CLI exits cleanly but
                         // produces no output, `run_agent_streaming` substitutes
@@ -640,9 +724,32 @@ pub async fn orchestrate(
                 mcp_context_override: global_mcp_context.as_deref(),
                 tier: primary_tier,
                 model_tiers: Some(&model_tiers_config),
-                lite_llm_base_url: lite_llm_base_url.as_deref(),
+                ollama_context_overrides: Some(&ollama_context_overrides),
+                http_request_timeout: Some(timeout_for_agent(&primary_agent_type)),
+                http_endpoints: Some(&http_endpoints),
                 context_files_prompt: &companion_context,
                 discussion_id: Some(&id),
+                tools: spawn_uses_native_tools(SpawnToolPolicy::AgentWork, &primary_agent_type)
+                    .then(|| {
+                        if is_worker_room {
+                            crate::api::agent_tools::KronnToolExecutor::arc_for_worker_room(
+                                state.clone(),
+                                Some(id.clone()),
+                                primary_agent_type.clone(),
+                                initial_message_id.clone(),
+                                None,
+                                None,
+                            )
+                        } else {
+                            crate::api::agent_tools::KronnToolExecutor::arc(
+                                state.clone(),
+                                Some(id.clone()),
+                                primary_agent_type.clone(),
+                                initial_message_id.clone(),
+                                None,
+                            )
+                        }
+                    }),
                 ..runner::AgentStartConfig::new(
                     &primary_agent_type,
                     &project_path,
@@ -663,7 +770,7 @@ pub async fn orchestrate(
                         &tx,
                         &meta,
                         &primary_agent_type,
-                        global_timeout,
+                        timeout_for_agent(&primary_agent_type),
                     )
                     .await;
 
@@ -774,6 +881,26 @@ pub async fn orchestrate(
     });
 
     Sse::new(crate::core::sse_limits::bounded(stream))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn orchestration_spawn_policy_equips_every_http_worker_but_not_summaries() {
+        for agent in [AgentType::Ollama, AgentType::LiteLlm, AgentType::Nvidia] {
+            assert!(spawn_uses_native_tools(SpawnToolPolicy::AgentWork, &agent));
+            assert!(!spawn_uses_native_tools(
+                SpawnToolPolicy::ToolFreeSummary,
+                &agent
+            ));
+        }
+        assert!(!spawn_uses_native_tools(
+            SpawnToolPolicy::AgentWork,
+            &AgentType::ClaudeCode
+        ));
+    }
 }
 
 /// Summary generation threshold: min messages before first summary.
@@ -949,11 +1076,17 @@ pub(super) async fn maybe_generate_summary(
     };
 
     // Use the discussion's own agent in Economy tier
-    let (model_tiers, lite_llm_base_url) = {
+    let (model_tiers, http_endpoints, ollama_context_overrides, http_request_timeout) = {
         let config = state.config.read().await;
         (
             config.agents.model_tiers.clone(),
-            config.agents.lite_llm.base_url.clone(),
+            crate::models::setup::HttpEndpoints::from_agents(&config.agents),
+            config.server.ollama_context_overrides.clone(),
+            configured_agent_global_timeout(if *agent_type == AgentType::Ollama {
+                config.server.local_agent_global_timeout_min
+            } else {
+                config.server.agent_global_timeout_min
+            }),
         )
     };
 
@@ -961,7 +1094,12 @@ pub(super) async fn maybe_generate_summary(
         mcp_context_override: Some(""),
         tier: crate::models::ModelTier::Economy,
         model_tiers: Some(&model_tiers),
-        lite_llm_base_url: lite_llm_base_url.as_deref(),
+        ollama_context_overrides: Some(&ollama_context_overrides),
+        http_request_timeout: Some(http_request_timeout),
+        http_endpoints: Some(&http_endpoints),
+        // Automatic cache refresh is a bounded, untrusted summarisation pass;
+        // it must not mutate the room or recurse through native tools.
+        tools: None,
         ..runner::AgentStartConfig::new(agent_type, "", &summary_prompt, tokens)
     })
     .await
@@ -1169,18 +1307,29 @@ pub async fn generate_summary_on_demand(
             block_truncated
         ),
     };
-    let (model_tiers, lite_llm_base_url) = {
+    let (model_tiers, http_endpoints, ollama_context_overrides, http_request_timeout) = {
         let cfg = state.config.read().await;
         (
             cfg.agents.model_tiers.clone(),
-            cfg.agents.lite_llm.base_url.clone(),
+            crate::models::setup::HttpEndpoints::from_agents(&cfg.agents),
+            cfg.server.ollama_context_overrides.clone(),
+            configured_agent_global_timeout(if disc.agent == AgentType::Ollama {
+                cfg.server.local_agent_global_timeout_min
+            } else {
+                cfg.server.agent_global_timeout_min
+            }),
         )
     };
     let mut process = runner::start_agent_with_config(runner::AgentStartConfig {
         mcp_context_override: Some(""),
         tier: ModelTier::Economy,
+        ollama_context_overrides: Some(&ollama_context_overrides),
+        http_request_timeout: Some(http_request_timeout),
         model_tiers: Some(&model_tiers),
-        lite_llm_base_url: lite_llm_base_url.as_deref(),
+        http_endpoints: Some(&http_endpoints),
+        // Same boundary as automatic summarisation: the requested message
+        // slice is already in the prompt, so tools add risk but no capability.
+        tools: None,
         ..runner::AgentStartConfig::new(&disc.agent, "", &summary_prompt, tokens)
     })
     .await
@@ -1259,6 +1408,16 @@ fn provider_status_line(agent_type: &crate::models::AgentType) -> String {
         AgentType::Ollama => {
             return "Local Ollama server — check `ollama serve` is running.".to_string()
         }
+        // A hosted endpoint has a real status page; falling through to the generic
+        // "custom agent" line described NVIDIA as an unknown configuration in its own
+        // saturation notice, which is where the user most needs a place to look.
+        AgentType::Nvidia => "https://status.nvidia.com",
+        // LiteLLM is a proxy the operator runs: the upstream that matters is
+        // whatever it fronts, so point at the thing they can actually check.
+        AgentType::LiteLlm => {
+            return "LiteLLM proxy — check the proxy is running and its upstream provider's status."
+                .to_string()
+        }
         // Custom agents have no canonical status page — punt to a generic
         // hint. Better than guessing a URL the operator can't act on.
         _ => {
@@ -1273,6 +1432,38 @@ fn provider_status_line(agent_type: &crate::models::AgentType) -> String {
 /// `agent_type` is used to point error messages at the right provider
 /// status page (Anthropic / OpenAI / Google / GitHub / …) — see
 /// [`provider_status_line`].
+pub(crate) fn is_hard_quota_exhausted(output: &str) -> bool {
+    let lower = output.to_lowercase();
+    // NVIDIA's hosted NIM uses ResourceExhausted for shared worker saturation;
+    // that is transient capacity, not the user's plan. Check it first.
+    if lower.contains("resourceexhausted")
+        || lower.contains("worker local total request limit")
+        || lower.contains("request limit reached")
+    {
+        return false;
+    }
+    [
+        "insufficient_quota",
+        "payment required",
+        "usage limit",
+        "session limit",
+        "hit your limit",
+        "purchase more credits",
+        "upgrade to pro",
+        "out of credits",
+        "quota exhausted",
+        "quota exceeded",
+        "monthly spend limit",
+        "monthly credit limit",
+        "organization spend limit",
+        "org spend limit",
+    ]
+    .iter()
+    .any(|pattern| lower.contains(pattern))
+        || lower.contains("api error: 402")
+        || lower.contains("http 402")
+}
+
 pub(crate) fn detect_agent_error_hint(
     output: &str,
     agent_type: &crate::models::AgentType,
@@ -1310,6 +1501,29 @@ pub(crate) fn detect_agent_error_hint(
         );
     }
 
+    // Credit / billing / usage-limit must win over the generic HTTP 429
+    // classification below. Claude/Fable reports an exhausted monthly spend
+    // allowance as `api_error_status: 429`; treating that as a transient rate
+    // limit causes pointless retries that can never succeed before a reset.
+    if is_hard_quota_exhausted(output) || lower.contains("billing limit") {
+        let retry_at = output
+            .lines()
+            .find(|l| l.to_lowercase().contains("try again at"))
+            .and_then(|l| {
+                l.split_once("try again at")
+                    .or_else(|| l.split_once("réessaie"))
+                    .map(|(_, t)| t.trim().trim_end_matches('.').to_string())
+            })
+            .filter(|s| !s.is_empty() && s.len() < 40);
+        let when = retry_at
+            .map(|t| format!(" Réessaie après **{t}**."))
+            .unwrap_or_default();
+        return Some(format!(
+            "⛔ **Limite du plan atteinte.** Le quota/les crédits de cet agent sont épuisés.{when}\n\
+             Recharge des crédits ou attends le reset, puis relance.",
+        ));
+    }
+
     // Rate limiting / overloaded
     if lower.contains("rate_limit")
         || lower.contains("rate limit")
@@ -1324,15 +1538,26 @@ pub(crate) fn detect_agent_error_hint(
         ));
     }
 
-    // Server overloaded
+    // Server overloaded. `resourceexhausted` and "request limit reached" are how a
+    // hosted NIM worker refuses concurrency (observed on NVIDIA: "ResourceExhausted:
+    // Worker local total request limit reached (16/16)"). It reads like a quota
+    // problem but is not one — the pod serving that model is momentarily full,
+    // often for other tenants — so it must not be classified as "buy more credits",
+    // and retrying really does work: the same model answered on the next attempt.
     if lower.contains("overloaded")
         || lower.contains("529")
         || lower.contains("capacity")
         || lower.contains("server_busy")
+        || lower.contains("resourceexhausted")
+        || lower.contains("request limit reached")
     {
         return Some(format!(
             "⚠️ **Servers overloaded.**\n\
-             The API servers are temporarily at capacity. Retry in a few minutes.\n\
+             The provider is at capacity for this model. This is usually brief and \
+             shared with other tenants, not a limit on your account: measured on \
+             NVIDIA, the same request failed once and succeeded on the next two \
+             attempts seconds later. Send it again; if it fails repeatedly, switch \
+             the tier to another model.\n\
              {}",
             provider_status_line(agent_type)
         ));
@@ -1349,39 +1574,6 @@ pub(crate) fn detect_agent_error_hint(
              The service is temporarily unavailable. Retry in a few minutes.\n\
              {}",
             provider_status_line(agent_type)
-        ));
-    }
-
-    // Credit / billing / usage-limit. Codex (ChatGPT plan) phrases it
-    // "You've hit your usage limit … purchase more credits … try again at <time>";
-    // OpenAI API says "insufficient_quota"; others "billing"/"402". Catch all.
-    if lower.contains("insufficient_quota")
-        || lower.contains("billing")
-        || lower.contains("payment required")
-        || lower.contains("402")
-        || lower.contains("usage limit")
-        || lower.contains("hit your limit")
-        || lower.contains("purchase more credits")
-        || lower.contains("upgrade to pro")
-        || lower.contains("quota")
-        || lower.contains("out of credits")
-    {
-        // Surface the "try again at <time>" the provider gives, if present.
-        let retry_at = output
-            .lines()
-            .find(|l| l.to_lowercase().contains("try again at"))
-            .and_then(|l| {
-                l.split_once("try again at")
-                    .or_else(|| l.split_once("réessaie"))
-                    .map(|(_, t)| t.trim().trim_end_matches('.').to_string())
-            })
-            .filter(|s| !s.is_empty() && s.len() < 40);
-        let when = retry_at
-            .map(|t| format!(" Réessaie après **{t}**."))
-            .unwrap_or_default();
-        return Some(format!(
-            "⛔ **Limite du plan atteinte.** Le quota/les crédits de cet agent sont épuisés.{when}\n\
-             Recharge des crédits ou attends le reset, puis relance.",
         ));
     }
 
@@ -1560,8 +1752,21 @@ mod orchestrate_validation_tests {
 
 #[cfg(test)]
 mod error_hint_tests {
-    use super::detect_agent_error_hint;
+    use super::{detect_agent_error_hint, is_hard_quota_exhausted};
     use crate::models::AgentType;
+
+    #[test]
+    fn fable_monthly_spend_429_is_hard_quota_not_transient_rate_limit() {
+        let out = "[Agent provider error]\n\nYou've hit your org's monthly spend limit · run /usage-credits to manage your plan.\n\n(HTTP 429; terminal_reason=api_error)";
+        assert!(is_hard_quota_exhausted(out));
+        let hint = detect_agent_error_hint(out, &AgentType::ClaudeCode)
+            .expect("monthly spend limit must be actionable");
+        assert!(hint.contains("Limite du plan atteinte"), "got: {hint}");
+        assert!(
+            !hint.contains("Wait a few minutes"),
+            "must not advise a futile retry: {hint}"
+        );
+    }
 
     #[test]
     fn rate_limit_for_gemini_points_at_google_status() {
@@ -1735,6 +1940,32 @@ mod error_hint_tests {
         );
         // The "try again at <time>" is surfaced so the user knows when.
         assert!(hint.contains("5:04 PM"), "retry time surfaced, got: {hint}");
+        assert!(is_hard_quota_exhausted(out));
+    }
+
+    #[test]
+    fn nvidia_worker_saturation_is_overload_not_a_quota_problem() {
+        // Observed in a room: "NVIDIA error: ResourceExhausted: Worker local total
+        // request limit reached (16/16)". It reads like a billing problem and is
+        // not one — the pod serving that model was momentarily full (a retry a
+        // minute later succeeded on the same model). Classifying it as a quota
+        // issue would send the user to buy credits they already have.
+        let out = "[Agent exited with error] (exit code: Some(1))\n\nNVIDIA error: \
+                   ResourceExhausted: Worker local total request limit reached (16/16)";
+        let hint = detect_agent_error_hint(out, &AgentType::Nvidia)
+            .expect("worker saturation must be recognised");
+        assert!(
+            hint.contains("Servers overloaded") || hint.contains("capacity"),
+            "must read as transient saturation: {hint}"
+        );
+        assert!(
+            !hint.to_lowercase().contains("credit") && !hint.to_lowercase().contains("quota"),
+            "must NOT be presented as a billing problem: {hint}"
+        );
+        assert!(
+            !is_hard_quota_exhausted(out),
+            "shared NVIDIA worker saturation must remain retryable"
+        );
     }
 
     #[test]

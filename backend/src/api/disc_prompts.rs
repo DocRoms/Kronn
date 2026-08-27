@@ -271,6 +271,17 @@ pub fn build_synthesis_prompt(
 /// explicitly and asks for a final commit, which gets the default behavior
 /// right in ~80% of runs. The UI badge on the git-panel icon is the safety
 /// net for the remaining cases.
+/// Which runtimes have the native plan/task tools declared with their request.
+/// Extracted so the prompt and the tests read the SAME predicate: telling a model it
+/// has these tools when it does not makes it hallucinate calls, and not telling it
+/// when it does makes it refuse to use them — both have shipped once.
+pub(crate) fn agent_has_native_planning(agent_type: &AgentType) -> bool {
+    matches!(
+        agent_type,
+        AgentType::Ollama | AgentType::LiteLlm | AgentType::Nvidia
+    )
+}
+
 fn isolated_worktree_notice(disc: &Discussion) -> String {
     if disc.workspace_mode != "Isolated" {
         return String::new();
@@ -385,7 +396,7 @@ pub fn build_agent_prompt(
             | AgentType::Kiro
             | AgentType::CopilotCli
     );
-    let agent_has_native_planning = matches!(agent_type, AgentType::Ollama | AgentType::LiteLlm);
+    let agent_has_native_planning = agent_has_native_planning(agent_type);
 
     // This is the compact room-rendering contract, not the document authoring
     // manual. Keep it visible to every runtime; exact payload shapes remain in
@@ -427,6 +438,42 @@ pub fn build_agent_prompt(
         ("es", _, _) => "Planificación de Kronn — este runtime no puede llamar directamente a las herramientas de Planning. Si la solicitud trata del plan o las tareas, no respondas solo con Markdown: emite un bloque `kronn-plan-action` que se someterá a validación humana en Kronn.\n\n".into(),
         ("zh", _, _) => "Kronn 计划 — 此运行时无法直接调用计划工具。如果请求涉及计划或任务，请不要只回复 Markdown；请输出 `kronn-plan-action` 代码块，由用户在 Kronn 中确认。\n\n".into(),
         (_, _, _) => "Kronn Planning — this runtime cannot call Planning tools directly. If the request concerns the plan or tasks, do not reply with Markdown alone: emit a `kronn-plan-action` fence for human validation in Kronn.\n\n".into(),
+    };
+
+    // Spell the fence out. Saying "emit a `kronn-plan-action` fence" left the shape
+    // to be guessed, and a smaller model guessed wrong: it emitted
+    // `{kronn-plan-action}` around the JSON, braces and all, which the renderer does
+    // not match — so the user saw raw JSON instead of a proposal to accept. The
+    // syntax is code, not prose, so it is stated once here in every language rather
+    // than translated eight times.
+    let planning_notice = if planning_notice.is_empty() {
+        planning_notice
+    } else {
+        format!(
+            "{planning_notice}Exact syntax of that fence — an opening line of three \
+             backticks immediately followed by `kronn-plan-action`, then the JSON object, \
+             then a closing line of three backticks. Braces around the name are NOT \
+             recognised, and neither is an inline mention.\n\n"
+        )
+    };
+
+    let has_task_execution_tools = agent_speaks_mcp || agent_has_native_planning;
+    let task_execution_notice = if has_task_execution_tools {
+        match disc.language.as_str() {
+            "fr" => "Délégation de tâches Kronn — utilise `task_exec_prepare` puis `task_exec_launch` ; n'improvise jamais une sous-discussion. Un worker local convient à une tâche petite, bornée et vérifiable ; ne lui délègue pas une refonte transversale ambiguë. Chaque affirmation du brief coûte de l'exploration : n'y mets que des faits vérifiés. Observe l'état durable avec `task_exec_status`. Worker : suis le brief, ne fusionne/clôture rien, puis soumets `task_exec_deliver` ; sans shell, marque honnêtement les commandes `skipped` pour le principal. Principal : relis le diff et le HEAD livrés, exécute les validations manquantes, puis appelle `task_exec_review` avec `reviewed_head_sha` et les preuves DoD nécessaires ; demande des changements ou réaffecte à un agent plus fort après des échecs structurels répétés. Annule/réaffecte seulement depuis la room parente. Après reconnexion, récupère l'exécution au lieu de la relancer. Continue les tâches prêtes jusqu'à ce que le plan soit terminé ou réellement bloqué par l'humain.\n\n",
+            "es" => "Delegación de tareas de Kronn — usa `task_exec_prepare` y después `task_exec_launch`; nunca improvises otra conversación. Un worker local sirve para una tarea pequeña, acotada y verificable, no para una refactorización transversal ambigua. Incluye en el brief solo hechos comprobados. Observa el estado durable con `task_exec_status`. Worker: sigue el brief, no fusiones ni cierres, entrega con `task_exec_deliver`; si no tienes shell, marca honestamente las pruebas como `skipped` para el principal. Principal: revisa el diff y el HEAD entregados, ejecuta las validaciones pendientes y llama `task_exec_review` con `reviewed_head_sha` y las pruebas DoD necesarias; pide cambios o reasigna a un agente más fuerte tras fallos estructurales repetidos. Tras reconectar, recupera la ejecución en vez de lanzarla de nuevo. Continúa con las tareas listas hasta terminar el plan o quedar realmente bloqueado por una decisión humana.\n\n",
+            _ => "Kronn task delegation — call `task_exec_prepare` then `task_exec_launch`; never improvise a child room. A local worker fits a small, bounded, verifiable task, not an ambiguous cross-cutting refactor. Put only verified facts in its brief. Observe durable state through `task_exec_status`. Worker: follow the brief, never merge or close the task, then call `task_exec_deliver`; without a shell, report command checks honestly as `skipped` for the principal. Principal: inspect the delivered diff and HEAD, run missing validations, then call `task_exec_review` with `reviewed_head_sha` and any required DoD evidence; request changes or reassign to a stronger agent after repeated structural failures. Cancel or reassign only from the parent room. After reconnect, recover the execution instead of relaunching it. Continue ready tasks until the plan is complete or genuinely human-blocked.\n\n",
+        }
+    } else {
+        ""
+    };
+    let continuation_notice = match (disc.language.as_str(), agent_has_native_planning) {
+        ("fr", true) => "Continuité des runs — les processus et tâches de fond lancés par ton runtime ne survivent pas à la fin de ce tour. Ne termine jamais sur une promesse de revenir. Pour une commande longue enregistrée par l'utilisateur, utilise `agent_job_start`; pour un état externe non notifiable, utilise `agent_schedule_wake`. Sinon garde le run vivant jusqu'au verdict, ou poste exactement ton état et rends explicitement la main.\n\n",
+        ("fr", false) => "Continuité des runs — les processus et tâches de fond lancés par ton runtime ne survivent pas à la fin de ce tour. Ne termine jamais sur une promesse de revenir : garde le run vivant jusqu'au verdict, ou poste exactement ton état et rends explicitement la main.\n\n",
+        ("es", true) => "Continuidad de ejecución — los procesos y tareas en segundo plano de tu runtime no sobreviven al final de este turno. Nunca termines prometiendo volver. Usa `agent_job_start` para un Quick Exec guardado y `agent_schedule_wake` para estado externo sin notificación; de lo contrario mantén el run vivo o publica el estado exacto y devuelve explícitamente el control.\n\n",
+        ("es", false) => "Continuidad de ejecución — los procesos y tareas en segundo plano de tu runtime no sobreviven al final de este turno. Nunca termines prometiendo volver: mantén el run vivo hasta el veredicto o publica el estado exacto y devuelve explícitamente el control.\n\n",
+        (_, true) => "Run continuity — processes and background tasks started by your runtime do not survive the end of this turn. Never end by promising to return. Use `agent_job_start` for a user-saved long command and `agent_schedule_wake` for non-notifiable external state; otherwise keep the run alive through the verdict, or post exact state and explicitly hand control back.\n\n",
+        (_, false) => "Run continuity — processes and background tasks started by your runtime do not survive the end of this turn. Never end by promising to return: keep the run alive through the verdict, or post exact state and explicitly hand control back.\n\n",
     };
 
     // History heads-up stays delayed: unlike the Planning capability pointer,
@@ -516,8 +563,15 @@ pub fn build_agent_prompt(
         // Language instruction at end only — LLMs weight recent text more heavily,
         // and MCP context is injected via --append-system-prompt (separate from prompt).
         return format!(
-            "{}{}{}{}{}\n\n{}",
-            title_ctx, worktree_notice, planning_notice, rich_output_notice, content, lang_instr
+            "{}{}{}{}{}{}{}\n\n{}",
+            title_ctx,
+            worktree_notice,
+            planning_notice,
+            task_execution_notice,
+            continuation_notice,
+            rich_output_notice,
+            content,
+            lang_instr
         );
     }
 
@@ -575,10 +629,12 @@ pub fn build_agent_prompt(
         ""
     };
     let header = format!(
-        "{}{}{}{}{}{}{}",
+        "{}{}{}{}{}{}{}{}{}",
         title_ctx,
         worktree_notice,
         planning_notice,
+        task_execution_notice,
+        continuation_notice,
         rich_output_notice,
         intro_block,
         interactive_hint,
@@ -761,6 +817,7 @@ mod tests {
     fn disc_with_messages(messages: Vec<DiscussionMessage>, language: &str) -> Discussion {
         Discussion {
             awaiting_agent: false,
+            agent_running: false,
             id: "d-test".into(),
             project_id: None,
             title: "Test discussion".into(),
@@ -878,14 +935,50 @@ mod tests {
 
     #[test]
     fn first_turn_http_agent_gets_native_planning_instructions() {
-        for agent in [AgentType::Ollama, AgentType::LiteLlm] {
+        for agent in [AgentType::Ollama, AgentType::LiteLlm, AgentType::Nvidia] {
             let disc = disc_with_messages(vec![user_msg("Track this in the plan")], "en");
             let prompt = build_agent_prompt(&disc, &agent, 0);
 
             assert!(prompt.contains("native `plan_get` and `task_*` tools"));
             assert!(prompt.contains("scoped to this discussion"));
+            assert!(prompt.contains("background tasks started by your runtime do not survive"));
+            assert!(prompt.contains("Never end by promising to return"));
+            assert!(prompt.contains("`agent_job_start`"));
+            assert!(prompt.contains("`agent_schedule_wake`"));
             assert!(!prompt.contains("no disc bound"));
         }
+    }
+
+    #[test]
+    fn cli_and_http_agents_receive_the_same_task_execution_role_contract() {
+        for agent in [
+            AgentType::Codex,
+            AgentType::ClaudeCode,
+            AgentType::Ollama,
+            AgentType::LiteLlm,
+            AgentType::Nvidia,
+        ] {
+            let disc = disc_with_messages(vec![user_msg("Assign and run KT-324")], "en");
+            let prompt = build_agent_prompt(&disc, &agent, 0);
+            for invariant in [
+                "task_exec_prepare",
+                "task_exec_launch",
+                "task_exec_status",
+                "task_exec_deliver",
+                "task_exec_review",
+                "never merge or close the task",
+                "After reconnect",
+            ] {
+                assert!(
+                    prompt.contains(invariant),
+                    "{agent:?} is missing task execution invariant {invariant}: {prompt}"
+                );
+            }
+        }
+
+        let disc = disc_with_messages(vec![user_msg("Assign and run KT-324")], "en");
+        let vibe = build_agent_prompt(&disc, &AgentType::Vibe, 0);
+        assert!(!vibe.contains("task_exec_launch"));
     }
 
     #[test]
@@ -899,6 +992,7 @@ mod tests {
             AgentType::CopilotCli,
             AgentType::Ollama,
             AgentType::LiteLlm,
+            AgentType::Nvidia,
             AgentType::Custom,
         ] {
             let disc = disc_with_messages(vec![user_msg("Show the architecture")], "en");

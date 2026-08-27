@@ -23,6 +23,7 @@ use crate::models::{
 //   12 profile_ids_json      ← added in 056
 //   13 directive_ids_json    ← added in 056
 //   14 agent_settings_json   ← added in 070 (nullable)
+//   15 pinned               ← added in 143
 fn row_to_quick_prompt(row: &rusqlite::Row) -> QuickPrompt {
     let variables_json: String = row.get(4).unwrap_or_default();
     let agent_str: String = row.get(5).unwrap_or_default();
@@ -55,12 +56,13 @@ fn row_to_quick_prompt(row: &rusqlite::Row) -> QuickPrompt {
         tier: serde_json::from_str(&format!("\"{}\"", tier_str)).unwrap_or(ModelTier::Default),
         agent_settings,
         description,
+        pinned: row.get::<_, i32>(15).unwrap_or(0) != 0,
         created_at: parse_dt(row.get::<_, String>(9).unwrap_or_default()),
         updated_at: parse_dt(row.get::<_, String>(10).unwrap_or_default()),
     }
 }
 
-const SELECT_COLUMNS: &str = "id, name, icon, prompt_template, variables_json, agent, project_id, skill_ids_json, tier, created_at, updated_at, description, profile_ids_json, directive_ids_json, agent_settings_json";
+const SELECT_COLUMNS: &str = "id, name, icon, prompt_template, variables_json, agent, project_id, skill_ids_json, tier, created_at, updated_at, description, profile_ids_json, directive_ids_json, agent_settings_json, pinned";
 
 pub fn list_quick_prompts(conn: &Connection) -> Result<Vec<QuickPrompt>> {
     let sql = format!(
@@ -146,6 +148,13 @@ pub fn update_quick_prompt(conn: &Connection, qp: &QuickPrompt) -> Result<()> {
         ],
     )?;
     Ok(())
+}
+
+pub fn update_quick_prompt_pinned(conn: &Connection, id: &str, pinned: bool) -> Result<bool> {
+    Ok(conn.execute(
+        "UPDATE quick_prompts SET pinned = ?2 WHERE id = ?1",
+        params![id, pinned as i32],
+    )? > 0)
 }
 
 /// Append a new version snapshot for the given QP. `version_index` is
@@ -402,6 +411,7 @@ mod tests {
     fn mk_qp(id: &str, name: &str) -> QuickPrompt {
         QuickPrompt {
             id: id.into(),
+            pinned: false,
             name: name.into(),
             icon: "✨".into(),
             prompt_template: format!("template-for-{name}"),

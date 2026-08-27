@@ -20,6 +20,426 @@ use kronn::models::WsMessage;
 use kronn::{build_router_with_auth, AppState, DEFAULT_MAX_CONCURRENT_AGENTS};
 
 #[tokio::test]
+async fn orchestration_recovery_routes_return_structured_missing_execution_errors() {
+    let app = test_app();
+    let missing = "00000000-0000-0000-0000-000000000000";
+
+    let (status, detail) = get_json(
+        app.clone(),
+        &format!("/api/orchestration/executions/{missing}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(detail["success"], false, "{detail}");
+    assert!(detail["error"]
+        .as_str()
+        .is_some_and(|error| error.contains("not found")));
+
+    let (status, observability) = get_json(
+        app.clone(),
+        &format!("/api/orchestration/executions/{missing}/observability"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(observability["success"], false, "{observability}");
+    assert!(observability["error"]
+        .as_str()
+        .is_some_and(|error| error.contains("not found")));
+
+    let (status, recovery) = get_json(
+        app.clone(),
+        &format!("/api/orchestration/executions/{missing}/recovery"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(recovery["success"], false, "{recovery}");
+    assert!(recovery["error"]
+        .as_str()
+        .is_some_and(|error| error.contains("not found")));
+
+    let (status, resume) = post_json(
+        app.clone(),
+        &format!("/api/orchestration/executions/{missing}/resume"),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(resume["success"], false, "{resume}");
+    assert!(resume["error"]
+        .as_str()
+        .is_some_and(|error| error.contains("not found")));
+
+    let (status, cancel) = post_json(
+        app.clone(),
+        &format!("/api/orchestration/executions/{missing}/cancel"),
+        serde_json::json!({ "reason": "operator cancellation" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(cancel["success"], false, "{cancel}");
+    assert!(cancel["error"]
+        .as_str()
+        .is_some_and(|error| error.contains("not found")));
+
+    let (status, reassign) = post_json(
+        app,
+        &format!("/api/orchestration/executions/{missing}/reassign"),
+        serde_json::json!({
+            "worker": {
+                "target": { "kind": "agent", "agent_type": "ClaudeCode" }
+            },
+            "reason": "provider unavailable"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(reassign["success"], false, "{reassign}");
+    assert!(reassign["error"].as_str().is_some());
+
+    let (status, review) = post_json(
+        test_app(),
+        &format!("/api/orchestration/executions/{missing}/review"),
+        serde_json::json!({
+            "decision": {
+                "version": "1",
+                "task_ref": "KT-1",
+                "decision": "approve"
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(review["success"], false, "{review}");
+    assert_eq!(review["error_code"], "not_found", "{review}");
+}
+
+#[tokio::test]
+async fn orchestration_discussion_campaign_round_trips_the_active_policy() {
+    let state = test_state();
+    let app = build_router_with_auth(state, false);
+    let (_, created_discussion) = post_json(
+        app.clone(),
+        "/api/discussions",
+        serde_json::json!({
+            "title": "Principal campaign",
+            "agent": "Codex",
+            "language": "fr",
+            "initial_prompt": "Drive the plan"
+        }),
+    )
+    .await;
+    assert_eq!(created_discussion["success"], true, "{created_discussion}");
+    let discussion_id = created_discussion["data"]["id"].as_str().unwrap();
+
+    let (_, created_campaign) = post_json(
+        app.clone(),
+        "/api/orchestration/campaigns",
+        serde_json::json!({
+            "discussion_id": discussion_id,
+            "target_branch": "release/0.11.0",
+            "integration_strategy": "two_phase_ff_only",
+            "allowed_agents": ["Codex", "Ollama"],
+            "max_review_rounds": 4,
+            "auto_continue": true
+        }),
+    )
+    .await;
+    assert_eq!(created_campaign["success"], true, "{created_campaign}");
+    let run_id = created_campaign["data"]["run"]["id"].as_str().unwrap();
+
+    let (_, active) = get_json(
+        app.clone(),
+        &format!("/api/orchestration/discussions/{discussion_id}/campaign"),
+    )
+    .await;
+    assert_eq!(active["success"], true, "{active}");
+    assert_eq!(active["data"]["run"]["id"], run_id);
+    assert_eq!(active["data"]["run"]["target_branch"], "release/0.11.0");
+    assert_eq!(active["data"]["run"]["max_review_rounds"], 4);
+    assert_eq!(active["data"]["run"]["auto_continue"], true);
+
+    let (_, cancelled) = post_json(
+        app.clone(),
+        &format!("/api/orchestration/campaigns/{run_id}/control"),
+        serde_json::json!({ "state": "cancelled" }),
+    )
+    .await;
+    assert_eq!(cancelled["success"], true, "{cancelled}");
+    let (_, inactive) = get_json(
+        app,
+        &format!("/api/orchestration/discussions/{discussion_id}/campaign"),
+    )
+    .await;
+    assert_eq!(inactive["success"], true, "{inactive}");
+    assert!(inactive["data"].is_null(), "{inactive}");
+}
+
+#[tokio::test]
+async fn orchestration_cli_tool_routes_require_server_verifiable_identity() {
+    let app = test_app();
+    let missing_execution = "00000000-0000-0000-0000-000000000000";
+    let calls = [
+        (
+            "/api/orchestration/tool/prepare".to_string(),
+            serde_json::json!({
+                "task_reference": "KT-1",
+                "parent_discussion_id": "disc-parent",
+                "worker": {"kind": "agent", "agent_type": "Ollama"},
+                "worker_scope_intent": "generic",
+                "source_agent": "",
+                "source_session_id": ""
+            }),
+        ),
+        (
+            "/api/orchestration/tool/launch".to_string(),
+            serde_json::json!({
+                "task_reference": "KT-1",
+                "parent_discussion_id": "disc-parent",
+                "worker": {"kind": "agent", "agent_type": "Ollama"},
+                "worker_scope_intent": "generic",
+                "source_agent": "",
+                "source_session_id": ""
+            }),
+        ),
+        (
+            format!("/api/orchestration/tool/executions/{missing_execution}/status"),
+            serde_json::json!({"source_agent": "", "source_session_id": ""}),
+        ),
+        (
+            format!("/api/orchestration/tool/executions/{missing_execution}/cancel"),
+            serde_json::json!({
+                "source_agent": "",
+                "source_session_id": "",
+                "reason": "test"
+            }),
+        ),
+        (
+            format!("/api/orchestration/tool/executions/{missing_execution}/reassign"),
+            serde_json::json!({
+                "source_agent": "",
+                "source_session_id": "",
+                "worker": {"target": {"kind": "agent", "agent_type": "Ollama"}},
+                "reason": "test"
+            }),
+        ),
+    ];
+
+    for (path, body) in calls {
+        let (status, response) = post_json(app.clone(), &path, body).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "route missing for {path}: {response}"
+        );
+        assert_eq!(response["success"], false, "{path}: {response}");
+        assert_eq!(response["error_code"], "validation", "{path}: {response}");
+        assert!(response["error"].as_str().is_some_and(
+            |error| error.contains("source_agent") && error.contains("source_session_id")
+        ));
+    }
+}
+
+#[tokio::test]
+async fn orchestration_tool_routes_refuse_a_stale_host_scope_schema_before_provisioning() {
+    let state = test_state();
+    let app = build_router_with_auth(state.clone(), false);
+    let request = serde_json::json!({
+        "task_reference": "KT-466",
+        "parent_discussion_id": "disc-parent",
+        "worker": {"kind": "agent", "agent_type": "Ollama"},
+        "worker_scope": {
+            "mode": "prelocalized_insert_after",
+            "path": "docs/operations/ollama-local-models.md",
+            "anchor_line": 168
+        },
+        "source_agent": "Codex",
+        "source_session_id": "fresh-process-stale-host-schema"
+    });
+    for route in [
+        "/api/orchestration/tool/prepare",
+        "/api/orchestration/tool/launch",
+    ] {
+        let (_, response) = post_json(app.clone(), route, request.clone()).await;
+        assert_eq!(response["success"], false, "{route}: {response}");
+        assert_eq!(response["error_code"], "validation", "{route}: {response}");
+        assert!(response["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("worker_scope_intent_missing")));
+        assert!(response["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("reconnect")));
+    }
+
+    let counts = state
+        .db
+        .with_conn(|conn| {
+            Ok((
+                conn.query_row("SELECT COUNT(*) FROM orchestration_runs", [], |row| {
+                    row.get::<_, i64>(0)
+                })?,
+                conn.query_row("SELECT COUNT(*) FROM task_executions", [], |row| {
+                    row.get::<_, i64>(0)
+                })?,
+                conn.query_row("SELECT COUNT(*) FROM discussion_workspaces", [], |row| {
+                    row.get::<_, i64>(0)
+                })?,
+                conn.query_row("SELECT COUNT(*) FROM agent_dispatch_jobs", [], |row| {
+                    row.get::<_, i64>(0)
+                })?,
+            ))
+        })
+        .await
+        .unwrap();
+    assert_eq!(counts, (0, 0, 0, 0));
+}
+
+#[tokio::test]
+async fn orchestration_launch_fails_closed_when_the_exact_cli_is_unavailable() {
+    let repo = tempfile::tempdir().unwrap();
+    for args in [
+        vec!["init", "-b", "main"],
+        vec!["config", "user.email", "orchestration@test.invalid"],
+        vec!["config", "user.name", "Orchestration Test"],
+    ] {
+        assert!(std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo.path())
+            .status()
+            .unwrap()
+            .success());
+    }
+    std::fs::write(repo.path().join("README.md"), "# orchestration e2e\n").unwrap();
+    for args in [vec!["add", "."], vec!["commit", "-m", "initial"]] {
+        assert!(std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo.path())
+            .status()
+            .unwrap()
+            .success());
+    }
+
+    let state = test_state();
+    let app = build_router_with_auth(state.clone(), false);
+    let (_, project) = post_json(
+        app.clone(),
+        "/api/projects",
+        serde_json::json!({
+            "path": repo.path().to_string_lossy(),
+            "name": "Orchestration E2E",
+            "remote_url": null,
+            "branch": "main",
+            "ai_configs": [],
+            "has_project": false,
+            "hidden": false
+        }),
+    )
+    .await;
+    assert_eq!(project["success"], true, "{project}");
+    let project_id = project["data"]["id"].as_str().unwrap().to_string();
+
+    let (_, discussion) = post_json(
+        app.clone(),
+        "/api/discussions",
+        serde_json::json!({
+            "project_id": project_id,
+            "title": "Orchestration principal",
+            "agent": "Codex",
+            "language": "en",
+            "initial_prompt": "Drive the plan"
+        }),
+    )
+    .await;
+    assert_eq!(discussion["success"], true, "{discussion}");
+    let discussion_id = discussion["data"]["id"].as_str().unwrap().to_string();
+
+    let (_, task) = post_json(
+        app.clone(),
+        "/api/planning/tasks",
+        serde_json::json!({
+            "title": "Unavailable exact CLI",
+            "description": "The launch boundary must fail closed.",
+            "status": "todo",
+            "project_ids": [project_id],
+            "discussion_id": discussion_id,
+            "definition_of_done": [
+                {"sentence": "No fallback worker is started", "completed": false}
+            ]
+        }),
+    )
+    .await;
+    assert_eq!(task["success"], true, "{task}");
+    let task_reference = task["data"]["reference"].as_str().unwrap().to_string();
+
+    let principal_discussion = discussion_id.clone();
+    state
+        .db
+        .with_conn(move |conn| {
+            kronn::db::discussion_sessions::create_session(
+                conn,
+                &principal_discussion,
+                "Codex",
+                Some("principal-orchestration-e2e"),
+                "peer",
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let request = serde_json::json!({
+        "task_reference": task_reference,
+        "parent_discussion_id": discussion_id,
+        "worker": {
+            "kind": "cli",
+            "agent_type": "ClaudeCode",
+            "cli_session_id": 404
+        },
+        "source_agent": "Codex",
+        "source_session_id": "principal-orchestration-e2e",
+        "worker_scope_intent": "generic",
+        "base_rev": "main",
+        "idempotency_key": "unavailable-cli-e2e"
+    });
+    let (_, prepared) = post_json(
+        app.clone(),
+        "/api/orchestration/tool/prepare",
+        request.clone(),
+    )
+    .await;
+    assert_eq!(prepared["success"], true, "{prepared}");
+    assert_eq!(prepared["data"]["launchable"], false, "{prepared}");
+    assert!(prepared["data"]["reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|reason| reason["code"] == "worker_unavailable"));
+
+    let (_, launched) = post_json(app, "/api/orchestration/tool/launch", request).await;
+    assert_eq!(launched["success"], false, "{launched}");
+    assert_eq!(launched["error_code"], "validation", "{launched}");
+    assert!(launched["error"]
+        .as_str()
+        .is_some_and(|error| error.contains("worker_unavailable")));
+
+    let execution_count = state
+        .db
+        .with_conn(|conn| {
+            Ok(
+                conn.query_row("SELECT COUNT(*) FROM task_executions", [], |row| {
+                    row.get::<_, i64>(0)
+                })?,
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(execution_count, 0, "HTTP refusal created an execution");
+    assert!(
+        !repo.path().join(".kronn/worktrees").exists(),
+        "HTTP refusal created a worktree directory"
+    );
+}
+
+#[tokio::test]
 async fn quick_exec_crud_and_csv_run_round_trip() {
     let app = test_app();
     let (create_status, created) = post_json(
@@ -60,6 +480,75 @@ async fn quick_exec_crud_and_csv_run_round_trip() {
     assert_eq!(deleted["success"], true);
     let (_, empty) = get_json(app, "/api/quick-execs").await;
     assert!(empty["data"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn automation_quick_items_share_a_persistent_favorite_patch() {
+    let app = test_app();
+
+    let (_, prompt) = post_json(
+        app.clone(),
+        "/api/quick-prompts",
+        serde_json::json!({
+            "name": "Favorite prompt",
+            "prompt_template": "Summarize this",
+            "variables": []
+        }),
+    )
+    .await;
+    let prompt_id = prompt["data"]["id"].as_str().unwrap();
+
+    let (_, api) = post_json(
+        app.clone(),
+        "/api/quick-apis",
+        serde_json::json!({
+            "name": "Favorite API",
+            "api_plugin_slug": "demo",
+            "api_config_id": "cfg",
+            "api_endpoint_path": "/items",
+            "variables": []
+        }),
+    )
+    .await;
+    let api_id = api["data"]["id"].as_str().unwrap();
+
+    let (_, exec) = post_json(
+        app.clone(),
+        "/api/quick-execs",
+        serde_json::json!({
+            "name": "Favorite exec",
+            "command": "echo",
+            "args": ["ok"],
+            "output_format": "text",
+            "variables": []
+        }),
+    )
+    .await;
+    let exec_id = exec["data"]["id"].as_str().unwrap();
+
+    for (kind, id) in [
+        ("quick-prompts", prompt_id),
+        ("quick-apis", api_id),
+        ("quick-execs", exec_id),
+    ] {
+        let (status, response) = patch_json(
+            app.clone(),
+            &format!("/api/{kind}/{id}"),
+            serde_json::json!({"pinned": true}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{kind}: {response}");
+        assert_eq!(response["success"], true, "{kind}: {response}");
+        assert_eq!(response["data"]["pinned"], true, "{kind}: {response}");
+
+        let (_, listed) = get_json(app.clone(), &format!("/api/{kind}")).await;
+        assert_eq!(listed["data"][0]["pinned"], true, "{kind}: {listed}");
+    }
+
+    // Favorite metadata is not prompt content and must not create a fake QP
+    // version. The initial insert remains the only snapshot after pinning.
+    let (_, history) = get_json(app, &format!("/api/quick-prompts/{prompt_id}/history")).await;
+    assert_eq!(history["data"].as_array().unwrap().len(), 1, "{history}");
 }
 
 #[tokio::test]
@@ -155,6 +644,7 @@ async fn workflow_export_import_bundles_quick_prompt_quick_api_and_page() {
         .with_conn(move |connection| {
             let quick_prompt = kronn::models::QuickPrompt {
                 id: "qp-portable".into(),
+                pinned: false,
                 name: "Portable analysis".into(),
                 icon: "✨".into(),
                 prompt_template: "Analyse the collected data".into(),
@@ -173,6 +663,7 @@ async fn workflow_export_import_bundles_quick_prompt_quick_api_and_page() {
             kronn::db::quick_prompts::insert_quick_prompt(connection, &quick_prompt)?;
             let quick_api = kronn::models::QuickApi {
                 id: "qa-portable".into(),
+                pinned: false,
                 name: "Portable API".into(),
                 icon: "🔌".into(),
                 description: "Bundled API".into(),
@@ -198,6 +689,7 @@ async fn workflow_export_import_bundles_quick_prompt_quick_api_and_page() {
             kronn::db::quick_apis::insert_quick_api(connection, &quick_api)?;
             let quick_exec = kronn::models::QuickExec {
                 id: "qe-portable".into(),
+                pinned: false,
                 name: "Portable CLI".into(),
                 icon: "⌘".into(),
                 description: "Bundled CLI".into(),
@@ -258,6 +750,7 @@ async fn workflow_export_import_bundles_quick_prompt_quick_api_and_page() {
                         name: "analyse".into(),
                         step_type: kronn::models::StepType::Agent,
                         quick_prompt_id: Some("qp-portable".into()),
+                        quick_prompt_variables: std::collections::HashMap::new(),
                         prompt_template: "Fallback analysis".into(),
                         ..Default::default()
                     },
@@ -2741,6 +3234,88 @@ async fn discussions_stop_triggers_registered_token() {
     assert_eq!(json2["data"]["cancelled"], false);
 }
 
+#[tokio::test]
+async fn discussions_targeted_stop_preserves_a_sibling_dispatch() {
+    let state = test_state();
+    state
+        .db
+        .with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO discussions (id, title, agent, created_at, updated_at, awaiting_agent)
+                 VALUES ('target-disc', 'Targeted stop', 'ClaudeCode', datetime('now'), datetime('now'), 1)",
+                [],
+            )?;
+            for (sort_order, (message_id, job_id)) in
+                [(1, ("target-old", "target-job-old")), (2, ("target-new", "target-job-new"))]
+            {
+                conn.execute(
+                    "INSERT INTO messages
+                     (id, discussion_id, role, channel, content, timestamp, sort_order)
+                     VALUES (?1, 'target-disc', 'User', 'main', ?1, datetime('now'), ?2)",
+                    rusqlite::params![message_id, sort_order],
+                )?;
+                kronn::db::agent_dispatch::enqueue(
+                    conn,
+                    kronn::db::agent_dispatch::NewAgentDispatchJob {
+                        id: job_id,
+                        discussion_id: "target-disc",
+                        trigger_message_id: message_id,
+                        trigger_sort_order: sort_order,
+                        dedupe_key: job_id,
+                        agent_override: Some(&kronn::models::AgentType::ClaudeCode),
+                        chain_prompt_ids: &[],
+                        batch_item: None,
+                        group_id: None,
+                        group_concurrency_limit: None,
+                    },
+                )?;
+            }
+            kronn::db::agent_dispatch::claim(conn, "target-job-old")?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let token = tokio_util::sync::CancellationToken::new();
+    state
+        .cancel_registry
+        .lock()
+        .unwrap()
+        .insert("target-job-old".into(), token.clone());
+
+    let (status, json) = post_json(
+        build_router_with_auth(state.clone(), false),
+        "/api/discussions/target-disc/agent-dispatches/target-job-old/stop",
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], true);
+    assert_eq!(json["data"]["cancelled"], true);
+    assert_eq!(json["data"]["still_awaiting"], true);
+    assert!(token.is_cancelled());
+
+    state
+        .db
+        .with_conn(|conn| {
+            assert_eq!(
+                kronn::db::agent_dispatch::get(conn, "target-job-old")?
+                    .unwrap()
+                    .status,
+                kronn::db::agent_dispatch::DispatchStatus::Cancelled,
+            );
+            assert_eq!(
+                kronn::db::agent_dispatch::get(conn, "target-job-new")?
+                    .unwrap()
+                    .status,
+                kronn::db::agent_dispatch::DispatchStatus::Pending,
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
 // ─── Partial response recovery — HTTP layer ─────────────────────────────────
 // DB-level behavior is covered in backend/src/db/tests.rs. These tests cover
 // the HTTP contract: dismiss-partial endpoint, WS broadcast, and the
@@ -4453,6 +5028,7 @@ async fn server_config_returns_defaults() {
     assert!(json["data"]["port"].is_number());
     assert!(json["data"]["max_concurrent_agents"].is_number());
     assert_eq!(json["data"]["agent_global_timeout_min"], 30);
+    assert_eq!(json["data"]["local_agent_global_timeout_min"], 240);
     assert!(json["data"]["auth_enabled"].is_boolean());
     assert_eq!(json["data"]["agent_handoffs_enabled"], false);
     assert_eq!(json["data"]["agent_handoff_paid_limit"], 1);
@@ -4464,27 +5040,35 @@ async fn server_config_returns_defaults() {
 }
 
 #[tokio::test]
-async fn server_config_persists_and_clamps_global_agent_timeout() {
+async fn server_config_persists_and_clamps_agent_timeouts_independently() {
     let app = test_app();
     let (_, updated) = post_json(
         app.clone(),
         "/api/config/server",
-        serde_json::json!({ "agent_global_timeout_min": 120 }),
+        serde_json::json!({
+            "agent_global_timeout_min": 45,
+            "local_agent_global_timeout_min": 180
+        }),
     )
     .await;
     assert_eq!(updated["success"], true);
 
     let (_, persisted) = get_json(app.clone(), "/api/config/server").await;
-    assert_eq!(persisted["data"]["agent_global_timeout_min"], 120);
+    assert_eq!(persisted["data"]["agent_global_timeout_min"], 45);
+    assert_eq!(persisted["data"]["local_agent_global_timeout_min"], 180);
 
     let _ = post_json(
         app.clone(),
         "/api/config/server",
-        serde_json::json!({ "agent_global_timeout_min": 999 }),
+        serde_json::json!({
+            "agent_global_timeout_min": 999,
+            "local_agent_global_timeout_min": 999
+        }),
     )
     .await;
     let (_, clamped) = get_json(app, "/api/config/server").await;
-    assert_eq!(clamped["data"]["agent_global_timeout_min"], 120);
+    assert_eq!(clamped["data"]["agent_global_timeout_min"], 240);
+    assert_eq!(clamped["data"]["local_agent_global_timeout_min"], 240);
 }
 
 #[tokio::test]
@@ -5334,6 +5918,100 @@ async fn ollama_models_returns_valid_response() {
     assert_eq!(json["success"], true);
     // Models array: empty if Ollama offline, populated if online
     assert!(json["data"]["models"].is_array());
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn ollama_context_override_route_set_reset_and_model_projection() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/tags"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "models": [{
+                "name": "qwen-test:latest",
+                "size": 4_000_000_000u64,
+                "modified_at": "2026-08-24T00:00:00Z"
+            }]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/show"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "model_info": { "qwen3.context_length": 131_072u64 }
+        })))
+        .mount(&server)
+        .await;
+
+    let previous_host = std::env::var("OLLAMA_HOST").ok();
+    let previous_cap = std::env::var("KRONN_OLLAMA_NUM_CTX_CAP").ok();
+    std::env::set_var("OLLAMA_HOST", server.uri());
+    std::env::remove_var("KRONN_OLLAMA_NUM_CTX_CAP");
+
+    let state = test_state();
+    let app = build_router_with_auth(state, false);
+    let (_, set) = post_json(
+        app.clone(),
+        "/api/ollama/context-override",
+        serde_json::json!({
+            "model": "  qwen-test:latest  ",
+            "num_ctx": 65_536u64
+        }),
+    )
+    .await;
+    let (_, listed_with_override) = get_json(app.clone(), "/api/ollama/models").await;
+    let (_, below_floor) = post_json(
+        app.clone(),
+        "/api/ollama/context-override",
+        serde_json::json!({"model": "qwen-test:latest", "num_ctx": 512u64}),
+    )
+    .await;
+    let (_, above_max) = post_json(
+        app.clone(),
+        "/api/ollama/context-override",
+        serde_json::json!({"model": "qwen-test:latest", "num_ctx": 50_000_000u64}),
+    )
+    .await;
+    let (_, reset) = post_json(
+        app.clone(),
+        "/api/ollama/context-override",
+        serde_json::json!({"model": "qwen-test:latest", "num_ctx": null}),
+    )
+    .await;
+    let (_, listed_after_reset) = get_json(app, "/api/ollama/models").await;
+
+    match previous_host {
+        Some(value) => std::env::set_var("OLLAMA_HOST", value),
+        None => std::env::remove_var("OLLAMA_HOST"),
+    }
+    match previous_cap {
+        Some(value) => std::env::set_var("KRONN_OLLAMA_NUM_CTX_CAP", value),
+        None => std::env::remove_var("KRONN_OLLAMA_NUM_CTX_CAP"),
+    }
+
+    assert_eq!(set["success"], true, "{set}");
+    assert_eq!(set["data"]["model"], "qwen-test:latest");
+    assert_eq!(set["data"]["num_ctx"], 65_536u64);
+    assert!(set["data"]["warnings"].is_array(), "{set}");
+    let projected = &listed_with_override["data"]["models"][0];
+    assert_eq!(projected["advertised_context"], 131_072u64);
+    assert_eq!(projected["context_override"], 65_536u64);
+    assert_eq!(projected["context_ceiling"], 65_536u64);
+    assert_eq!(projected["context_origin"], "model_override");
+    assert_eq!(below_floor["success"], false, "{below_floor}");
+    assert_eq!(above_max["success"], false, "{above_max}");
+    assert_eq!(reset["success"], true, "{reset}");
+    assert!(
+        listed_after_reset["data"]["models"][0]["context_override"].is_null(),
+        "{listed_after_reset}"
+    );
+    assert_ne!(
+        listed_after_reset["data"]["models"][0]["context_origin"],
+        "model_override"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -6299,6 +6977,7 @@ async fn ws_chat_message_inserts_into_shared_discussion() {
     let now = chrono::Utc::now();
     let disc = kronn::models::Discussion {
         awaiting_agent: false,
+        agent_running: false,
         id: "disc-chat-test".into(),
         project_id: None,
         title: "Shared Chat".into(),
@@ -6901,6 +7580,7 @@ async fn ws_chat_message_idempotent() {
     let now = chrono::Utc::now();
     let disc = kronn::models::Discussion {
         awaiting_agent: false,
+        agent_running: false,
         id: "disc-idempotent".into(),
         project_id: None,
         title: "Idempotent Test".into(),
@@ -8265,6 +8945,7 @@ async fn insert_test_mode_discussion(
     let now = chrono::Utc::now();
     let disc = kronn::models::Discussion {
         awaiting_agent: false,
+        agent_running: false,
         id: id.into(),
         project_id: None,
         title: "TestMode disc".into(),
@@ -10531,6 +11212,7 @@ mod cold_api_handlers_tests {
         let disc_id = format!("disc-{}", uuid::Uuid::new_v4());
         let disc = kronn::models::Discussion {
             awaiting_agent: false,
+            agent_running: false,
             id: disc_id.clone(),
             project_id: Some(project_id),
             title: "Disc on test repo".into(),
@@ -12421,6 +13103,7 @@ mod cold_api_handlers_tests {
         let qp_id = format!("qp-{}", uuid::Uuid::new_v4());
         let qp = kronn::models::QuickPrompt {
             id: qp_id.clone(),
+            pinned: false,
             name: "TestQP".into(),
             icon: "✨".into(),
             prompt_template: "Analyse: {{topic}}".into(),
@@ -12839,6 +13522,7 @@ mod cold_api_handlers_tests {
             batch_total: 0,
             batch_completed: 0,
             batch_failed: 0,
+            batch_no_response: 0,
             batch_name: None,
             parent_run_id: None,
             state: std::collections::HashMap::new(),

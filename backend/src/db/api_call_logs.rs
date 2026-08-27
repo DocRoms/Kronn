@@ -240,6 +240,74 @@ pub fn list(conn: &Connection, filter: ListFilter<'_>) -> rusqlite::Result<Vec<A
     Ok(rows)
 }
 
+/// One endpoint that keeps failing the same way, for the plugin's spec health.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ts_rs::TS)]
+#[ts(export)]
+pub struct EndpointDrift {
+    pub plugin_slug: String,
+    pub endpoint_path: String,
+    /// The HTTP status it keeps returning — 404 reads as "declared but gone",
+    /// 422 as "the parameters in the spec are not the ones it wants".
+    pub http_status: u16,
+    pub failures: u32,
+    /// Successes on the same endpoint over the window. Zero means the spec has
+    /// never been right about it; non-zero means it works SOMETIMES, so the
+    /// fault is in how it is being called rather than in its existence.
+    pub successes: u32,
+    pub last_seen: String,
+}
+
+/// Endpoints whose calls fail consistently, newest-heaviest first.
+///
+/// A plugin spec is written once — from documentation, or from a model's guess
+/// — and then never checked against the API again. When the API moves, or the
+/// spec was wrong from the start, nothing says so: the calls just keep failing
+/// and every agent using that plugin pays for it. This is the signal that was
+/// already being recorded and never read.
+///
+/// Templated paths (`/issue/{{key}}`) are counted as written: they identify the
+/// declared endpoint, which is what a spec warning is about.
+pub fn endpoint_drift(
+    conn: &Connection,
+    days: u32,
+    min_failures: u32,
+) -> rusqlite::Result<Vec<EndpointDrift>> {
+    let mut statement = conn.prepare(
+        "SELECT failing.plugin_slug,
+                failing.endpoint_path,
+                failing.http_status,
+                COUNT(*) AS failures,
+                (SELECT COUNT(*) FROM api_call_logs ok
+                  WHERE ok.plugin_slug = failing.plugin_slug
+                    AND ok.endpoint_path = failing.endpoint_path
+                    AND ok.http_status < 400
+                    AND ok.called_at >= datetime('now', ?1)) AS successes,
+                MAX(failing.called_at) AS last_seen
+           FROM api_call_logs failing
+          WHERE failing.http_status >= 400
+            AND failing.called_at >= datetime('now', ?1)
+            AND failing.plugin_slug IS NOT NULL
+            AND failing.plugin_slug != ''
+            AND failing.plugin_slug != 'unknown'
+            AND failing.endpoint_path IS NOT NULL
+            AND failing.endpoint_path != ''
+          GROUP BY failing.plugin_slug, failing.endpoint_path, failing.http_status
+         HAVING failures >= ?2
+          ORDER BY failures DESC, last_seen DESC",
+    )?;
+    let rows = statement.query_map(params![format!("-{} days", days), min_failures], |row| {
+        Ok(EndpointDrift {
+            plugin_slug: row.get(0)?,
+            endpoint_path: row.get(1)?,
+            http_status: row.get::<_, i64>(2)? as u16,
+            failures: row.get::<_, i64>(3)? as u32,
+            successes: row.get::<_, i64>(4)? as u32,
+            last_seen: row.get(5)?,
+        })
+    })?;
+    rows.collect()
+}
+
 /// Delete rows older than N days. Returns the count deleted.
 pub fn purge_older_than(conn: &Connection, days: u32) -> rusqlite::Result<usize> {
     conn.execute(
@@ -311,6 +379,61 @@ mod tests {
             response_excerpt: Some(r#"{"ok": true}"#),
             error_message: None,
         }
+    }
+
+    #[test]
+    fn drift_separates_a_dead_endpoint_from_a_badly_called_one() {
+        // The two findings need different words in the UI: an endpoint that has
+        // NEVER answered is a spec that was wrong from the start, while one that
+        // also succeeds is a spec whose parameters are wrong — the SpeedCurve
+        // case, where `/v1/tests` returned 422 sixteen times because the spec
+        // named `since` where the API wants `start_timestamp`.
+        let conn = mkconn();
+        let failing = |plugin: &str, path: &str, status: u16| {
+            let mut row = sample(plugin);
+            row.endpoint_path = path;
+            row.http_status = Some(status);
+            row.status = ApiCallStatus::Error;
+            record(&conn, row).unwrap();
+        };
+        for _ in 0..4 {
+            failing("api-x", "/v1/gone", 404);
+            failing("api-x", "/v1/tests", 422);
+        }
+        let mut ok_row = sample("api-x");
+        ok_row.endpoint_path = "/v1/tests";
+        record(&conn, ok_row).unwrap();
+
+        let rows = endpoint_drift(&conn, 30, 3).unwrap();
+        let gone = rows.iter().find(|r| r.endpoint_path == "/v1/gone").unwrap();
+        let miscalled = rows
+            .iter()
+            .find(|r| r.endpoint_path == "/v1/tests")
+            .unwrap();
+
+        assert_eq!(gone.failures, 4);
+        assert_eq!(
+            gone.successes, 0,
+            "never answered: the endpoint itself is wrong"
+        );
+        assert_eq!(miscalled.failures, 4);
+        assert_eq!(
+            miscalled.successes, 1,
+            "answers sometimes: the endpoint exists, the call is malformed"
+        );
+    }
+
+    #[test]
+    fn drift_ignores_noise_below_the_threshold() {
+        // A single outage must not be reported as a broken spec.
+        let conn = mkconn();
+        let mut row = sample("api-x");
+        row.endpoint_path = "/v1/blip";
+        row.http_status = Some(503);
+        row.status = ApiCallStatus::Error;
+        record(&conn, row).unwrap();
+
+        assert!(endpoint_drift(&conn, 30, 3).unwrap().is_empty());
     }
 
     #[test]

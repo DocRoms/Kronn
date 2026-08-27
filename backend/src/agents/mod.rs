@@ -1,7 +1,7 @@
 use crate::core::cmd::async_cmd;
 #[cfg(target_os = "windows")]
 use crate::core::cmd::sync_cmd;
-use crate::models::{AgentDetection, AgentType, AppConfig, TokensConfig};
+use crate::models::{AgentDetection, AgentType, AppConfig};
 use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -102,6 +102,16 @@ const KNOWN_AGENTS: &[AgentDef] = &[
         binary: "litellm",
         origin: "US",
         install_cmd: "uv tool install 'litellm[proxy]' --with 'fastapi<0.140'",
+    },
+    // NVIDIA is reached over HTTPS with an API key: there is nothing to install
+    // and no binary to resolve. `binary` and `install_cmd` are empty on purpose
+    // so the detector reports it as remote rather than "missing" (KT-337).
+    AgentDef {
+        name: "NVIDIA",
+        agent_type: AgentType::Nvidia,
+        binary: "",
+        origin: "US",
+        install_cmd: "",
     },
 ];
 
@@ -313,9 +323,41 @@ pub fn invalidate_detect_cache() {
     }
 }
 
+/// A provider reached over HTTP with a credential, with no local binary and
+/// nothing to install (KT-337). An empty `binary` is the marker: `find_binary("")`
+/// can only ever fail, so such an agent must never go through local detection —
+/// it would be reported as "missing" forever.
+fn is_remote_provider(def: &AgentDef) -> bool {
+    def.binary.is_empty()
+}
+
 /// Detect a single agent by checking if its binary exists in PATH or host bin dirs.
 /// If no local binary is found but the agent has an npx package, probe runtime availability.
 async fn detect_agent(def: &AgentDef) -> AgentDetection {
+    // A remote provider has nothing to detect locally. `installed: true` is the
+    // honest answer: the code is not what can be missing — the API key is, and
+    // that is surfaced by its own settings card, not by binary detection.
+    if is_remote_provider(def) {
+        return AgentDetection {
+            name: def.name.to_string(),
+            agent_type: def.agent_type.clone(),
+            installed: true,
+            enabled: true,
+            path: None,
+            version: None,
+            latest_version: None,
+            origin: def.origin.to_string(),
+            install_command: None,
+            host_managed: false,
+            host_label: None,
+            runtime_available: true,
+            auth_ready: None,
+            auth_setup_command: None,
+            rtk_available: false,
+            rtk_hook_configured: false,
+            runtime_warning: None,
+        };
+    }
     // Check standard PATH first, then host-mounted bin directories
     let found = find_binary(def.binary);
 
@@ -401,34 +443,19 @@ pub struct AgentAuthStatus {
     pub setup_command: Option<&'static str>,
 }
 
-fn vibe_auth_ready(tokens: &TokensConfig, env_key_present: bool, file_key_present: bool) -> bool {
-    let kronn_key_enabled = !tokens
-        .disabled_overrides
-        .iter()
-        .any(|provider| provider == "mistral")
-        && tokens
-            .active_key_for("mistral")
-            .is_some_and(|key| !key.trim().is_empty());
-    kronn_key_enabled || env_key_present || file_key_present
-}
-
 /// Report whether the selected runner can authenticate before Kronn queues it.
 ///
-/// Most CLI agents own a local login session that Kronn cannot inspect
-/// reliably. Vibe is different: both its SDK path and direct API fallback
-/// require `MISTRAL_API_KEY`, so readiness is deterministic.
-pub fn agent_auth_status(agent_type: &AgentType, config: &AppConfig) -> AgentAuthStatus {
+/// CLI agents own local login state that Kronn must not second-guess. Recent
+/// Vibe versions store `MISTRAL_API_KEY` in the OS keyring and intentionally
+/// remove the old plaintext `~/.vibe/.env`; checking only env/files therefore
+/// rejects a working CLI. Let Vibe resolve its own keyring and surface a real
+/// runtime auth error if that lookup fails.
+pub fn agent_auth_status(agent_type: &AgentType, _config: &AppConfig) -> AgentAuthStatus {
     match agent_type {
-        AgentType::Vibe => {
-            let env_key_present = std::env::var("MISTRAL_API_KEY")
-                .ok()
-                .is_some_and(|key| !key.trim().is_empty());
-            let file_key_present = crate::core::key_discovery::read_vibe_key().is_some();
-            AgentAuthStatus {
-                ready: vibe_auth_ready(&config.tokens, env_key_present, file_key_present),
-                setup_command: Some("vibe --setup"),
-            }
-        }
+        AgentType::Vibe => AgentAuthStatus {
+            ready: true,
+            setup_command: Some("vibe --setup"),
+        },
         _ => AgentAuthStatus {
             ready: true,
             setup_command: None,
@@ -509,7 +536,9 @@ async fn probe_runtime(def: &AgentDef) -> bool {
         AgentType::Codex => Some("@openai/codex"),
         AgentType::GeminiCli => Some("@google/gemini-cli"),
         AgentType::CopilotCli => Some("@github/copilot"),
-        AgentType::Vibe => None,    // uvx, handled differently
+        AgentType::Vibe => None, // uvx, handled differently
+        // Remote HTTP endpoint: nothing to run locally (KT-337).
+        AgentType::Nvidia => None,
         AgentType::Kiro => None,    // Native binary, no npx package
         AgentType::Ollama => None,  // Native binary, own installer
         AgentType::LiteLlm => None, // uv tool, not npx
@@ -827,7 +856,8 @@ fn install_prerequisite(agent_type: &AgentType) -> Option<(&'static str, &'stati
             "uv",
             "uv is required. Install it from https://docs.astral.sh/uv",
         )),
-        AgentType::Kiro | AgentType::Ollama | AgentType::Custom => None,
+        // Nvidia is a remote endpoint: no local prerequisite to install.
+        AgentType::Kiro | AgentType::Ollama | AgentType::Nvidia | AgentType::Custom => None,
     }
 }
 
@@ -881,6 +911,8 @@ pub async fn uninstall_agent(agent_type: &AgentType) -> Result<String> {
         #[cfg(windows)]
         AgentType::Ollama => "winget uninstall Ollama.Ollama",
         AgentType::LiteLlm => "uv tool uninstall litellm",
+        // Nothing is installed locally for a remote endpoint (KT-337).
+        AgentType::Nvidia => anyhow::bail!("NVIDIA is a remote endpoint: nothing to uninstall"),
         AgentType::Custom => anyhow::bail!("Cannot uninstall custom agents"),
     };
 
@@ -902,30 +934,11 @@ mod tests {
     use serial_test::serial;
 
     #[test]
-    fn vibe_auth_requires_one_effective_source() {
-        let mut config = crate::core::config::default_config();
-        assert!(!vibe_auth_ready(&config.tokens, false, false));
-        assert!(vibe_auth_ready(&config.tokens, true, false));
-        assert!(vibe_auth_ready(&config.tokens, false, true));
-
-        config.tokens.keys.push(crate::models::ApiKey {
-            id: "mistral-test".into(),
-            name: "test".into(),
-            provider: "mistral".into(),
-            value: "secret".into(),
-            active: true,
-        });
-        assert!(vibe_auth_ready(&config.tokens, false, false));
-
-        config.tokens.disabled_overrides.push("mistral".into());
-        assert!(
-            !vibe_auth_ready(&config.tokens, false, false),
-            "a disabled Kronn override is not effective auth"
-        );
-        assert!(
-            vibe_auth_ready(&config.tokens, true, false),
-            "local environment auth remains valid when the override is disabled"
-        );
+    fn vibe_auth_is_delegated_to_the_cli_keyring() {
+        let config = crate::core::config::default_config();
+        let status = agent_auth_status(&AgentType::Vibe, &config);
+        assert!(status.ready);
+        assert_eq!(status.setup_command, Some("vibe --setup"));
     }
 
     #[test]
@@ -1243,6 +1256,7 @@ mod tests {
             AgentType::CopilotCli,
             AgentType::Ollama,
             AgentType::LiteLlm,
+            AgentType::Nvidia,
         ];
         for agent_type in &all_types {
             let found = KNOWN_AGENTS.iter().any(|a| {
@@ -1264,10 +1278,21 @@ mod tests {
         );
     }
 
-    /// Every KNOWN_AGENTS entry must have a non-empty binary name and install command.
+    /// Every LOCAL KNOWN_AGENTS entry must have a non-empty binary name and
+    /// install command. A remote provider (KT-337) legitimately has neither: it
+    /// is reached over HTTP with a key, so demanding a binary would force a
+    /// fictitious one and make detection report it as permanently missing.
     #[test]
     fn cross_agent_definitions_are_complete() {
         for def in KNOWN_AGENTS {
+            if is_remote_provider(def) {
+                assert!(
+                    def.install_cmd.is_empty(),
+                    "{:?} is remote (no binary) but carries an install_cmd",
+                    def.agent_type
+                );
+                continue;
+            }
             assert!(
                 !def.binary.is_empty(),
                 "{:?} has empty binary name",

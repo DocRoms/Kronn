@@ -255,6 +255,7 @@ pub async fn create(
 
     let discussion = Discussion {
         awaiting_agent: false,
+        agent_running: false,
         id: Uuid::new_v4().to_string(),
         project_id: req.project_id,
         title: req.title,
@@ -514,11 +515,32 @@ pub async fn delete(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Json<ApiResponse<()>> {
+    let resume_job_ids = state
+        .db
+        .with_conn({
+            let did = id.clone();
+            move |conn| crate::db::agent_jobs::cancel_for_discussion(conn, &did)
+        })
+        .await
+        .unwrap_or_else(|error| {
+            tracing::warn!("delete discussion {id}: could not cancel resume jobs: {error}");
+            Vec::new()
+        });
+    let dispatch_id = state
+        .db
+        .with_conn({
+            let did = id.clone();
+            move |conn| crate::db::agent_dispatch::find_active_for_discussion(conn, &did)
+        })
+        .await
+        .ok()
+        .flatten()
+        .map(|job| job.id);
     // Cancel a live agent on this disc BEFORE deleting it, or
     // the running agent finishes writing into a row that no longer exists
     // (FOREIGN KEY constraint failed) and keeps its semaphore permit. The
-    // token is disc-keyed in the registry (streaming.rs); its agent-task
-    // finally path saves the partial + releases the permit. Best-effort.
+    // Durable tokens are dispatch-keyed; legacy streams remain disc-keyed.
+    // The agent-task finally path saves the partial + releases the permit.
     if let Ok(mut map) = state.cancel_registry.lock() {
         if let Some(token) = map.remove(&id) {
             token.cancel();
@@ -526,6 +548,26 @@ pub async fn delete(
                 "delete discussion {}: cancelled live agent before delete",
                 id
             );
+        }
+        if let Some(dispatch_id) = dispatch_id {
+            if let Some(token) = map.remove(&dispatch_id) {
+                token.cancel();
+                tracing::info!(
+                    "delete discussion {}: cancelled durable dispatch {} before delete",
+                    id,
+                    dispatch_id,
+                );
+            }
+        }
+        for job_id in &resume_job_ids {
+            if let Some(token) = map.remove(&format!("agent-job:{job_id}")) {
+                token.cancel();
+                tracing::info!(
+                    "delete discussion {}: cancelled backend-owned job {} before delete",
+                    id,
+                    job_id,
+                );
+            }
         }
     } else {
         tracing::warn!(
@@ -729,6 +771,51 @@ mod tests {
             state.cancel_registry.lock().unwrap().is_empty(),
             "the cancelled token must be removed from the registry",
         );
+    }
+
+    #[tokio::test]
+    async fn delete_discussion_cancels_a_dispatch_keyed_agent() {
+        let state = state_with_disc("d-dispatch-live").await;
+        state
+            .db
+            .with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO messages
+                     (id, discussion_id, role, channel, content, timestamp, sort_order)
+                     VALUES ('u-dispatch-live', 'd-dispatch-live', 'User', 'main', 'run', 'now', 1)",
+                    [],
+                )?;
+                crate::db::agent_dispatch::enqueue(
+                    conn,
+                    crate::db::agent_dispatch::NewAgentDispatchJob {
+                        id: "j-dispatch-live",
+                        discussion_id: "d-dispatch-live",
+                        trigger_message_id: "u-dispatch-live",
+                        trigger_sort_order: 1,
+                        dedupe_key: "j-dispatch-live",
+                        agent_override: Some(&crate::models::AgentType::ClaudeCode),
+                        chain_prompt_ids: &[],
+                        batch_item: None,
+                        group_id: None,
+                        group_concurrency_limit: None,
+                    },
+                )?;
+                crate::db::agent_dispatch::claim(conn, "j-dispatch-live")?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let token = tokio_util::sync::CancellationToken::new();
+        state
+            .cancel_registry
+            .lock()
+            .unwrap()
+            .insert("j-dispatch-live".into(), token.clone());
+
+        let response = delete(State(state.clone()), Path("d-dispatch-live".to_string())).await;
+        assert!(response.0.success);
+        assert!(token.is_cancelled());
+        assert!(state.cancel_registry.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

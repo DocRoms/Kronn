@@ -22,6 +22,16 @@ pub struct GitStatusQuery {
     /// Recompute source-language statistics while keeping Git status live.
     #[serde(default)]
     pub refresh: bool,
+    /// Zero-based page offset for the bounded commit history.
+    #[serde(default)]
+    pub commit_offset: u32,
+    /// Requested page size. The git layer clamps it to its hard maximum.
+    #[serde(default = "default_git_commit_limit")]
+    pub commit_limit: u32,
+}
+
+fn default_git_commit_limit() -> u32 {
+    crate::api::git_ops::GIT_COMMIT_PAGE_DEFAULT
 }
 
 /// Resolve GitHub token from MCP configs for git operations (push, PR creation).
@@ -81,14 +91,24 @@ async fn running_direct_discussions(
         .db
         .with_read_conn(move |conn| {
             let mut discussions = Vec::new();
-            for discussion_id in running_ids {
-                let Some(discussion) =
-                    crate::db::discussions::get_discussion(conn, &discussion_id)?
-                else {
-                    continue;
+            for registry_id in running_ids {
+                let discussion = match crate::db::discussions::get_discussion(conn, &registry_id)? {
+                    Some(discussion) => discussion,
+                    None => {
+                        let Some(job) = crate::db::agent_dispatch::get(conn, &registry_id)? else {
+                            continue;
+                        };
+                        let Some(discussion) =
+                            crate::db::discussions::get_discussion(conn, &job.discussion_id)?
+                        else {
+                            continue;
+                        };
+                        discussion
+                    }
                 };
                 if discussion.project_id.as_deref() == Some(project_id.as_str())
                     && discussion.workspace_mode == "Direct"
+                    && !discussions.iter().any(|(id, _)| id == &discussion.id)
                 {
                     discussions.push((discussion.id, discussion.title));
                 }
@@ -190,8 +210,11 @@ pub async fn git_status(
     if query.refresh {
         // Explicit re-check: compute inline, as before.
         let exclusions_for_compute = exclusions.clone();
+        let commit_offset = query.commit_offset;
+        let commit_limit = query.commit_limit;
         let result = tokio::task::spawn_blocking(move || {
-            let mut status = crate::api::git_ops::run_git_status(&repo_path)?;
+            let mut status =
+                crate::api::git_ops::run_git_status_page(&repo_path, commit_offset, commit_limit)?;
             status.languages = crate::api::ai_docs::compute_source_language_stats(
                 &repo_path,
                 &exclusions_for_compute,
@@ -221,8 +244,10 @@ pub async fn git_status(
     }
 
     let repo_path_for_status = repo_path.clone();
+    let commit_offset = query.commit_offset;
+    let commit_limit = query.commit_limit;
     let result = tokio::task::spawn_blocking(move || {
-        crate::api::git_ops::run_git_status(&repo_path_for_status)
+        crate::api::git_ops::run_git_status_page(&repo_path_for_status, commit_offset, commit_limit)
     })
     .await
     .unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
@@ -726,7 +751,88 @@ mod tests {
     use crate::db::Database;
     use crate::{CancelGuard, DEFAULT_MAX_CONCURRENT_AGENTS};
     use std::sync::Arc;
+    use std::{path::Path as FsPath, process::Command};
     use tokio::sync::RwLock;
+
+    fn scoped_commit_repo() -> tempfile::TempDir {
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(repo.path())
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "git {args:?} failed");
+        };
+        git(&["init", "-b", "main"]);
+        git(&["config", "user.name", "Kronn Test"]);
+        git(&["config", "user.email", "kronn@example.test"]);
+        std::fs::write(repo.path().join("a.txt"), "base a\n").unwrap();
+        std::fs::write(repo.path().join("b.txt"), "base b\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-m", "initial"]);
+        std::fs::write(repo.path().join("a.txt"), "changed a\n").unwrap();
+        std::fs::write(repo.path().join("b.txt"), "changed b\n").unwrap();
+        git(&["add", "b.txt"]);
+        repo
+    }
+
+    fn git_names(repo: &FsPath, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "git {args:?} failed");
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    #[tokio::test]
+    async fn project_commit_endpoint_commits_only_requested_paths() {
+        let repo = scoped_commit_repo();
+        let state = AppState::new_defaults(
+            Arc::new(RwLock::new(default_config())),
+            Arc::new(Database::open_in_memory().expect("in-memory DB")),
+            DEFAULT_MAX_CONCURRENT_AGENTS,
+        );
+        let path = repo.path().to_string_lossy().to_string();
+        state
+            .db
+            .with_conn(move |connection| {
+                connection.execute(
+                    "INSERT INTO projects
+                     (id, name, path, ai_config_json, created_at, updated_at)
+                     VALUES ('project-scoped-commit', 'Project', ?1, '{}', 'now', 'now')",
+                    [&path],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let response = git_commit(
+            State(state),
+            Path("project-scoped-commit".into()),
+            Json(GitCommitRequest {
+                files: vec!["a.txt".into()],
+                message: "test: scoped project commit".into(),
+                amend: false,
+                sign: false,
+            }),
+        )
+        .await
+        .0;
+        assert!(response.success, "project commit endpoint must succeed");
+        assert_eq!(
+            git_names(repo.path(), &["diff", "HEAD^", "HEAD", "--name-only"]),
+            "a.txt"
+        );
+        assert_eq!(
+            git_names(repo.path(), &["diff", "--cached", "--name-only"]),
+            "b.txt",
+            "an unrelated staged file must remain staged"
+        );
+    }
 
     #[tokio::test]
     async fn running_direct_discussions_ignores_workflow_keys_isolated_and_other_projects() {
@@ -762,12 +868,34 @@ mod tests {
                         [id, project_id, title, workspace_mode],
                     )?;
                 }
+                connection.execute(
+                    "INSERT INTO messages
+                     (id, discussion_id, role, channel, content, timestamp, sort_order)
+                     VALUES ('u-direct-a', 'direct-a', 'User', 'main', 'run', 'now', 1)",
+                    [],
+                )?;
+                crate::db::agent_dispatch::enqueue(
+                    connection,
+                    crate::db::agent_dispatch::NewAgentDispatchJob {
+                        id: "dispatch-direct-a",
+                        discussion_id: "direct-a",
+                        trigger_message_id: "u-direct-a",
+                        trigger_sort_order: 1,
+                        dedupe_key: "dispatch-direct-a",
+                        agent_override: Some(&crate::models::AgentType::Codex),
+                        chain_prompt_ids: &[],
+                        batch_item: None,
+                        group_id: None,
+                        group_concurrency_limit: None,
+                    },
+                )?;
                 Ok(())
             })
             .await
             .expect("seed projects and discussions");
 
         let _direct = CancelGuard::insert(&state.cancel_registry, "direct-a".to_string());
+        let _durable = CancelGuard::insert(&state.cancel_registry, "dispatch-direct-a".to_string());
         let _isolated = CancelGuard::insert(&state.cancel_registry, "isolated-a".to_string());
         let _other = CancelGuard::insert(&state.cancel_registry, "direct-b".to_string());
         let _workflow = CancelGuard::insert(&state.cancel_registry, "workflow-run-123".to_string());

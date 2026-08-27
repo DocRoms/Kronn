@@ -495,6 +495,7 @@ fn portable_task_request(
         actor: PlanningActor {
             kind: PlanningActorKind::Agent,
             id: Some("discussion-import".into()),
+            session_id: None,
             source_message_id: None,
         },
     }
@@ -703,6 +704,7 @@ fn import_bundle(
     let actor = PlanningActor {
         kind: PlanningActorKind::Agent,
         id: Some("discussion-import".into()),
+        session_id: None,
         source_message_id: None,
     };
     let mut task_ids = HashMap::new();
@@ -798,15 +800,16 @@ fn import_bundle(
                 .and_then(|source| message_ids.get(source));
             transaction.execute(
                 "INSERT INTO planning_task_events
-                 (id, task_id, action, actor_kind, actor_id, changes_json,
-                  source_message_id, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                 (id, task_id, action, actor_kind, actor_id, actor_session_id,
+                  changes_json, source_message_id, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
                     Uuid::new_v4().to_string(),
                     imported_task_id,
                     format!("imported_source:{}", event.action),
                     event.actor_kind.as_str(),
                     event.actor_id,
+                    event.actor_session_id,
                     serde_json::to_string(&event.changes)?,
                     source_message_id,
                     event.created_at.to_rfc3339(),
@@ -955,6 +958,7 @@ fn tour_demo_envelope(ui_language: &str) -> DiscussionExportEnvelope {
             shared_with: vec![],
             workflow_run_id: None,
             awaiting_agent: false,
+            agent_running: false,
             test_mode_restore_branch: None,
             test_mode_stash_ref: None,
             created_at,
@@ -1252,6 +1256,7 @@ mod tests {
             shared_with: vec![],
             workflow_run_id: None,
             awaiting_agent: false,
+            agent_running: false,
             test_mode_restore_branch: None,
             test_mode_stash_ref: None,
             created_at: Utc::now(),
@@ -1450,6 +1455,7 @@ mod tests {
                         actor: PlanningActor {
                             kind: PlanningActorKind::Human,
                             id: Some("tester".into()),
+                            session_id: None,
                             source_message_id: Some(source_message.id.clone()),
                         },
                     },

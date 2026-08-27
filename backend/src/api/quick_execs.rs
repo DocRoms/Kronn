@@ -47,6 +47,7 @@ pub async fn create(
         timeout_secs: request.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS),
         output_format: request.output_format,
         variables: request.variables,
+        pinned: false,
         created_at: now,
         updated_at: now,
     };
@@ -90,6 +91,7 @@ pub async fn update(
         timeout_secs: request.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS),
         output_format: request.output_format,
         variables: request.variables,
+        pinned: existing.pinned,
         created_at: existing.created_at,
         updated_at: Utc::now(),
     };
@@ -100,6 +102,30 @@ pub async fn update(
         .await
     {
         Ok(()) => Json(ApiResponse::ok(updated)),
+        Err(error) => Json(ApiResponse::err(format!("DB error: {error}"))),
+    }
+}
+
+/// PATCH /api/quick-execs/:id — favorite-only partial update.
+pub async fn update_pinned(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<UpdateQuickFavoriteRequest>,
+) -> Json<ApiResponse<QuickExec>> {
+    let update_id = id.clone();
+    match state
+        .db
+        .with_conn(move |conn| {
+            if !crate::db::quick_execs::update_quick_exec_pinned(conn, &update_id, request.pinned)?
+            {
+                return Ok(None);
+            }
+            crate::db::quick_execs::get_quick_exec(conn, &update_id)
+        })
+        .await
+    {
+        Ok(Some(item)) => Json(ApiResponse::ok(item)),
+        Ok(None) => Json(ApiResponse::err("Quick Exec not found")),
         Err(error) => Json(ApiResponse::err(format!("DB error: {error}"))),
     }
 }
@@ -343,7 +369,7 @@ fn validate_request(request: &CreateQuickExecRequest) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_variables(
+pub(crate) fn validate_variables(
     declarations: &[PromptVariable],
     values: &std::collections::HashMap<String, String>,
 ) -> Result<(), String> {

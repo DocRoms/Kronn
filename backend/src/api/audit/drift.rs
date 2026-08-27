@@ -481,6 +481,10 @@ pub async fn partial_audit(
             match runner::start_agent_with_config(runner::AgentStartConfig {
                 full_access: true,
                 tier: crate::models::ModelTier::Reasoning,
+                // Drift audit is deliberately CLI-only and consumes the
+                // prepared evidence in its prompt. Native tools stay explicit
+                // here so no future HTTP enablement silently broadens scope.
+                tools: None,
                 ..runner::AgentStartConfig::new(&agent_type, &project_path_str, &attempt_prompt, &tokens)
             }).await {
                 Ok(mut process) => {
@@ -826,6 +830,7 @@ pub async fn partial_audit(
             };
             let disc = Discussion {
                 awaiting_agent: false,
+                agent_running: false,
                 id: disc_id,
                 project_id: Some(project_id_for_progress.clone()),
                 title: format!("Validation audit partiel ({} section{})",
@@ -1109,6 +1114,7 @@ mod partial_finalize_tests {
         };
         let disc = Discussion {
             awaiting_agent: false,
+            agent_running: false,
             id: id.into(),
             project_id: Some(project.into()),
             title: "Validation audit partiel (1 section)".into(),

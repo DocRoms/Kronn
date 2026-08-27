@@ -190,6 +190,7 @@ fn revise_dispatch_survives_restart() {
     let dispatches = [discussions::UserDispatchSpec {
         job_id: "jr1",
         agent_override: None,
+        dedupe_key: None,
     }];
     discussions::revise_message_with_dispatch(
         &conn,

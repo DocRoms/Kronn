@@ -93,6 +93,10 @@ struct CodexMcpEntry {
     args: Vec<String>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     env: HashMap<String, String>,
+    /// Parent-process variables Codex is allowed to forward to this stdio
+    /// server. Values stay dynamic per Codex run and never enter config.toml.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    env_vars: Vec<String>,
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     enabled: bool,
     /// Codex default is 10s which is too short when many MCPs start in parallel.
@@ -238,6 +242,10 @@ fn inject_kronn_internal_codex(entries: &mut HashMap<String, CodexMcpEntry>) -> 
             command: "python3".into(),
             args: vec![script],
             env: HashMap::new(),
+            env_vars: crate::agents::runner::KRONN_INTERNAL_CODEX_ENV_VARS
+                .iter()
+                .map(|value| (*value).to_string())
+                .collect(),
             enabled: true,
             startup_timeout_sec: default_startup_timeout(),
         },
@@ -1914,6 +1922,7 @@ impl HostMcpSync for CodexSync {
                     command,
                     args,
                     env,
+                    env_vars: Vec::new(),
                     enabled: true,
                     startup_timeout_sec: timeout,
                 },

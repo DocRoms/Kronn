@@ -24,19 +24,33 @@ const BATCH_TARGET_ACTIVE: Duration = Duration::from_secs(10 * 60);
 const BATCH_MAX_ACTIVE: Duration = Duration::from_secs(15 * 60);
 const BATCH_HARD_ACTIVE_BUDGET: Duration = Duration::from_secs(20 * 60);
 
+/// The hard budget an actual run gets: the operator's "maximum agent execution
+/// duration". A batch item is one agent run, so the ceiling the user set for a
+/// run is the ceiling it should get here too — a local model that legitimately
+/// needs 40 minutes of tool rounds was being cut at a fixed twenty.
+///
+/// Still a guard, not a knob: `clamp_agent_global_timeout_min` bounds the
+/// setting to 1..=120 minutes, so a malformed value cannot disable it, and the
+/// constant above remains the fallback when no config is readable.
+fn hard_active_budget(minutes: u32) -> Duration {
+    let minutes = crate::models::clamp_agent_global_timeout_min(u64::from(minutes));
+    Duration::from_secs(u64::from(minutes) * 60)
+}
+
 /// Default cap on number of items when `batch_max_items` is unset. Matches
 /// the same 50-item hard cap enforced by `create_batch_run` for manual batches.
 const DEFAULT_MAX_ITEMS: u32 = 50;
 
 /// Default per-batch concurrent agent cap when `batch_concurrent_limit` is
-/// unset. The global `max_concurrent_agents` semaphore already throttles the
-/// system as a whole, but on a single big batch (17+ Jira tickets) the
-/// global cap stays saturated for the whole run — that creates auth file
+/// unset. The provider-aware admission policy already throttles local agents,
+/// but on a single big batch (17+ Jira tickets) one family can otherwise keep
+/// its share saturated for the whole run — that creates auth file
 /// contention (multiple `claude` processes writing `~/.claude/state.json`),
 /// network pool pressure, and amplifies the silent-CLI-crash failure mode.
 /// 5 in flight at once is a sweet spot: the agents finish the batch in
-/// ~⌈N/5⌉ waves, errors stay isolated, the global pool has room left for a
-/// concurrent linear workflow. Operators can override per-step.
+/// ~⌈N/5⌉ waves and errors stay isolated. The local aggregate/family caps may
+/// lower actual parallelism; remote HTTP providers remain outside that pool.
+/// Operators can override this per-step fan-out ceiling.
 const DEFAULT_BATCH_CONCURRENT_LIMIT: u32 = 5;
 /// Hard ceiling regardless of operator override. Matches the `batch_apicall`
 /// hard cap and keeps a single batch from owning every agent slot.
@@ -233,14 +247,11 @@ pub async fn execute_batch_quick_prompt_step(
     state: AppState,
     ctx: &TemplateContext,
 ) -> StepOutcome {
-    execute_batch_quick_prompt_step_with_budget(
-        step,
-        parent_run_id,
-        state,
-        ctx,
-        BATCH_HARD_ACTIVE_BUDGET,
-    )
-    .await
+    let budget = {
+        let config = state.config.read().await;
+        hard_active_budget(config.server.agent_global_timeout_min)
+    };
+    execute_batch_quick_prompt_step_with_budget(step, parent_run_id, state, ctx, budget).await
 }
 
 /// Internal seam kept explicit so the production budget remains fixed at
@@ -422,6 +433,11 @@ async fn execute_batch_quick_prompt_step_with_budget(
             .and_then(|(_, _, workspace_path)| workspace_path.as_deref())
             .is_some()
     {
+        // Deliberately broad: a parent-owned worktree may disappear as soon as
+        // the parent returns, regardless of whether children use Direct or
+        // Isolated mode. KT-343 keeps this fail-closed rule and fixes the
+        // regression at its source: read-only parents no longer acquire a
+        // worktree unless their workflow explicitly requests one.
         return fail(
             step,
             start,
@@ -613,6 +629,7 @@ async fn execute_batch_quick_prompt_step_with_budget(
                         if matches!(
                             child.status,
                             crate::models::RunStatus::Success
+                                | crate::models::RunStatus::Partial
                                 | crate::models::RunStatus::Failed
                                 | crate::models::RunStatus::Cancelled
                                 | crate::models::RunStatus::StoppedByGuard
@@ -1190,6 +1207,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn hard_budget_follows_the_configured_agent_timeout() {
+        // A batch item IS an agent run, so the ceiling the operator set for a
+        // run applies here. A local model doing many tool rounds legitimately
+        // outlives the old fixed twenty minutes.
+        assert_eq!(hard_active_budget(120), Duration::from_secs(120 * 60));
+        assert_eq!(hard_active_budget(45), Duration::from_secs(45 * 60));
+
+        // Still a guard: the clamp bounds it to 1..=240 minutes (raised with
+        // KT-403 for hard local-model tasks), so neither a zero nor an absurd
+        // value can disable the cut-off.
+        assert_eq!(hard_active_budget(0), Duration::from_secs(60));
+        assert_eq!(hard_active_budget(9_999), Duration::from_secs(240 * 60));
+    }
+
+    #[test]
     fn parse_items_json_string_array() {
         let out = parse_items(r#"["EW-1", "EW-2", "EW-3"]"#);
         assert_eq!(out, vec!["EW-1", "EW-2", "EW-3"]);
@@ -1682,6 +1714,7 @@ mod tests {
         use chrono::Utc;
         let qp = QuickPrompt {
             id: "qp-e2e".into(),
+            pinned: false,
             name: "Analyse ticket".into(),
             icon: "🎯".into(),
             prompt_template: "Analyse le ticket {{ticket}} en profondeur.".into(),
@@ -1760,6 +1793,7 @@ mod tests {
             batch_total: 0,
             batch_completed: 0,
             batch_failed: 0,
+            batch_no_response: 0,
             batch_name: None,
             parent_run_id: None,
             state: std::collections::HashMap::new(),
@@ -1851,6 +1885,7 @@ mod tests {
             exec_setup_args: vec![],
             exec_stdin: None,
             quick_prompt_id: None,
+            quick_prompt_variables: std::collections::HashMap::new(),
             json_data_payload: None,
             collect_api_data: None,
             transform_data: None,

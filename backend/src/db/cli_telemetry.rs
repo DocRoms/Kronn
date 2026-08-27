@@ -6,7 +6,7 @@
 //! field nobody measured. Every accessor here preserves it.
 
 use anyhow::Result;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -561,8 +561,8 @@ mod cli_telemetry_test;
 ///
 /// Reads the three axes from what Kronn actually knows: traffic from the
 /// telemetry row (`None` when the vendor has no collector, which yields
-/// `Unknown` rather than a comfortable `Ok`), age from `joined_at`, turns from
-/// the messages this exact session authored.
+/// `Unknown` rather than a comfortable `Ok`), active time from the timestamps
+/// of this exact session's authored messages, and turns from those messages.
 pub fn assess_session(
     conn: &Connection,
     cli_session_pk: i64,
@@ -570,16 +570,8 @@ pub fn assess_session(
 ) -> Result<crate::core::session_budget::BudgetAssessment> {
     let traffic = get(conn, cli_session_pk)?.and_then(|row| row.traffic_tokens());
 
-    let joined: Option<String> = conn
-        .query_row(
-            "SELECT joined_at FROM discussion_sessions WHERE id = ?1",
-            params![cli_session_pk],
-            |row| row.get(0),
-        )
-        .optional()?;
-    let age_hours = joined
-        .and_then(|stamp| chrono::DateTime::parse_from_rfc3339(&stamp).ok())
-        .map(|when| (Utc::now() - when.with_timezone(&Utc)).num_hours());
+    let active_hours =
+        active_hours_for_session(conn, cli_session_pk, budget.max_inactive_gap_minutes)?;
 
     // Turns this session POSTED, via the durable author link — not messages in
     // the room, which would count everyone else's.
@@ -592,9 +584,65 @@ pub fn assess_session(
     Ok(crate::core::session_budget::assess(
         budget,
         traffic,
-        age_hours,
+        active_hours,
         Some(turns),
     ))
+}
+
+/// Estimate active time from the turns this exact CLI session authored.
+///
+/// A gap between turns is counted as work only up to the configured inactivity
+/// threshold. This deliberately underestimates work done between messages
+/// (for example, a long compilation), but it prevents an overnight shutdown
+/// from becoming phantom work while retaining a useful signal when no vendor
+/// traffic collector exists.
+fn active_hours_for_session(
+    conn: &Connection,
+    cli_session_pk: i64,
+    max_inactive_gap_minutes: i64,
+) -> Result<Option<f64>> {
+    let mut statement = conn.prepare(
+        "SELECT m.timestamp
+           FROM messages m
+           JOIN message_cli_authors mca ON mca.message_id = m.id
+          WHERE mca.cli_session_id = ?1",
+    )?;
+    let raw_timestamps: Vec<String> = statement
+        .query_map(params![cli_session_pk], |row| row.get(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    if raw_timestamps.is_empty() {
+        return Ok(Some(0.0));
+    }
+
+    let Some(mut timestamps) = raw_timestamps
+        .into_iter()
+        .map(|stamp| {
+            DateTime::parse_from_rfc3339(&stamp)
+                .ok()
+                .map(|when| when.with_timezone(&Utc))
+        })
+        .collect::<Option<Vec<_>>>()
+    else {
+        return Ok(None);
+    };
+    // `sort_order` is local to a discussion, so order parsed instants globally
+    // before calculating gaps for a session that spans multiple discussions.
+    timestamps.sort_unstable();
+
+    let max_gap_seconds = max_inactive_gap_minutes.max(0).saturating_mul(60);
+    let active_seconds = timestamps
+        .windows(2)
+        .map(|pair| {
+            pair[1]
+                .signed_duration_since(pair[0])
+                .num_seconds()
+                .max(0)
+                .min(max_gap_seconds)
+        })
+        .fold(0_i64, i64::saturating_add);
+
+    Ok(Some(active_seconds as f64 / 3_600.0))
 }
 
 /// Rotation metrics — KT-193 DoD 6.
