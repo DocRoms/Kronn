@@ -2774,6 +2774,15 @@ fn external_worker_connection_round_trips_and_unknown_id_is_rejected_on_reload()
     assert_eq!(reread.worker_agent_type.as_deref(), Some("LiteLlm"));
     assert_eq!(reread.worker_connection_id.as_deref(), Some("conn-known"));
 
+    conn.execute(
+        "INSERT INTO discussions (id, title, created_at, updated_at) \
+         VALUES ('d-connection-worker', 'Connection worker', '2026-01-01T00:00:00Z', \
+                 '2026-01-01T00:00:00Z')",
+        [],
+    )
+    .unwrap();
+    set_execution_sub_discussion(&conn, &launched.id, "d-connection-worker").unwrap();
+
     conn.pragma_update(None, "foreign_keys", false).unwrap();
     conn.execute(
         "UPDATE task_executions SET worker_connection_id = 'conn-missing' WHERE id = ?1",
@@ -2786,6 +2795,37 @@ fn external_worker_connection_round_trips_and_unknown_id_is_rejected_on_reload()
             .to_string()
             .contains("unknown worker connection identifier: conn-missing"),
         "unknown connection must be an explicit reload error: {error:#}"
+    );
+
+    for (path, result) in [
+        (
+            "worker room",
+            get_execution_for_sub_discussion(&conn, "d-connection-worker"),
+        ),
+        (
+            "active task reconnect",
+            get_active_execution_for_task(&conn, "t-connection"),
+        ),
+        (
+            "latest task reconnect",
+            get_latest_execution_for_task(&conn, "t-connection"),
+        ),
+    ] {
+        let error = result.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("unknown worker connection identifier: conn-missing"),
+            "{path} must reject the unknown connection: {error:#}"
+        );
+    }
+
+    let error = get_execution_lineage(&conn, &launched.id).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("unknown worker connection identifier: conn-missing"),
+        "lineage reload must reject the unknown connection: {error:#}"
     );
 }
 

@@ -551,13 +551,17 @@ pub fn get_execution_for_sub_discussion(
     conn: &Connection,
     discussion_id: &str,
 ) -> Result<Option<TaskExecution>> {
-    conn.query_row(
-        &format!("SELECT {EXEC_COLS} FROM task_executions WHERE sub_discussion_id = ?1 LIMIT 1"),
-        params![discussion_id],
-        row_to_execution,
-    )
-    .optional()
-    .map_err(Into::into)
+    let execution = conn
+        .query_row(
+            &format!(
+                "SELECT {EXEC_COLS} FROM task_executions WHERE sub_discussion_id = ?1 LIMIT 1"
+            ),
+            params![discussion_id],
+            row_to_execution,
+        )
+        .optional()
+        .map_err(anyhow::Error::from)?;
+    validate_loaded_execution(conn, execution)
 }
 
 /// Resolve the active execution that durably owns a native worker's worktree.
@@ -1147,6 +1151,13 @@ pub fn get_task_execution(conn: &Connection, id: &str) -> Result<Option<TaskExec
         )
         .optional()
         .map_err(anyhow::Error::from)?;
+    validate_loaded_execution(conn, execution)
+}
+
+fn validate_loaded_execution(
+    conn: &Connection,
+    execution: Option<TaskExecution>,
+) -> Result<Option<TaskExecution>> {
     if let Some(execution) = execution.as_ref() {
         validate_worker_connection(conn, execution)?;
     }
@@ -1202,16 +1213,18 @@ pub fn get_active_execution_for_task(
     conn: &Connection,
     task_id: &str,
 ) -> Result<Option<TaskExecution>> {
-    conn.query_row(
-        &format!(
-            "SELECT {EXEC_COLS} FROM task_executions \
+    let execution = conn
+        .query_row(
+            &format!(
+                "SELECT {EXEC_COLS} FROM task_executions \
              WHERE task_id = ?1 AND status NOT IN ('Done', 'Failed', 'Cancelled') LIMIT 1"
-        ),
-        params![task_id],
-        row_to_execution,
-    )
-    .optional()
-    .map_err(Into::into)
+            ),
+            params![task_id],
+            row_to_execution,
+        )
+        .optional()
+        .map_err(anyhow::Error::from)?;
+    validate_loaded_execution(conn, execution)
 }
 
 /// Latest execution for a task, including terminal history. Used by reconnecting
@@ -1220,16 +1233,18 @@ pub fn get_latest_execution_for_task(
     conn: &Connection,
     task_id: &str,
 ) -> Result<Option<TaskExecution>> {
-    conn.query_row(
-        &format!(
-            "SELECT {EXEC_COLS} FROM task_executions \
+    let execution = conn
+        .query_row(
+            &format!(
+                "SELECT {EXEC_COLS} FROM task_executions \
              WHERE task_id = ?1 ORDER BY created_at DESC, id DESC LIMIT 1"
-        ),
-        params![task_id],
-        row_to_execution,
-    )
-    .optional()
-    .map_err(Into::into)
+            ),
+            params![task_id],
+            row_to_execution,
+        )
+        .optional()
+        .map_err(anyhow::Error::from)?;
+    validate_loaded_execution(conn, execution)
 }
 
 /// Launch a single task: create the implicit `single_task` OrchestrationRun and
@@ -3545,25 +3560,30 @@ pub fn get_execution_lineage(
             .collect::<Vec<_>>()
             .join(", ")
     );
-    conn.query_row(&sql, params![exec_id], |row| {
-        let execution = row_to_execution(row)?;
-        // EXEC_COLS spans indices 0..=34 (35 columns); the JOIN columns follow.
-        let kind: String = row.get(35)?;
-        let task_number: i64 = row.get(36)?;
-        let task_title: String = row.get(37)?;
-        let workspace_canonical_path: Option<String> = row.get(38)?;
-        Ok(TaskExecutionLineage {
-            parent_discussion_id: execution.parent_discussion_id.clone(),
-            sub_discussion_id: execution.sub_discussion_id.clone(),
-            orchestration_run_kind: OrchestrationRunKind::from_str(&kind).unwrap_or_default(),
-            task_reference: format!("KT-{task_number}"),
-            task_title,
-            workspace_canonical_path,
-            execution,
+    let lineage = conn
+        .query_row(&sql, params![exec_id], |row| {
+            let execution = row_to_execution(row)?;
+            // EXEC_COLS spans indices 0..=34 (35 columns); the JOIN columns follow.
+            let kind: String = row.get(35)?;
+            let task_number: i64 = row.get(36)?;
+            let task_title: String = row.get(37)?;
+            let workspace_canonical_path: Option<String> = row.get(38)?;
+            Ok(TaskExecutionLineage {
+                parent_discussion_id: execution.parent_discussion_id.clone(),
+                sub_discussion_id: execution.sub_discussion_id.clone(),
+                orchestration_run_kind: OrchestrationRunKind::from_str(&kind).unwrap_or_default(),
+                task_reference: format!("KT-{task_number}"),
+                task_title,
+                workspace_canonical_path,
+                execution,
+            })
         })
-    })
-    .optional()
-    .map_err(Into::into)
+        .optional()
+        .map_err(anyhow::Error::from)?;
+    if let Some(lineage) = lineage.as_ref() {
+        validate_worker_connection(conn, &lineage.execution)?;
+    }
+    Ok(lineage)
 }
 
 /// Compact execution-to-discussion edges for sidebar grouping. The relation is
