@@ -1271,6 +1271,223 @@ pub fn verify_worktree_head(worktree_path: &Path, expected_sha: &str) -> Result<
     Ok(())
 }
 
+fn task_submodule_head(path: &Path) -> Result<Option<String>, String> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let top_level = sync_cmd("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(path)
+        .output()
+        .map_err(|error| format!("cannot inspect task submodule {}: {error}", path.display()))?;
+    let is_root = top_level.status.success()
+        && Path::new(String::from_utf8_lossy(&top_level.stdout).trim())
+            .canonicalize()
+            .ok()
+            == path.canonicalize().ok();
+    if is_root {
+        return git_head(path).map(Some);
+    }
+    let mut entries = std::fs::read_dir(path)
+        .map_err(|error| format!("cannot inspect task submodule {}: {error}", path.display()))?;
+    if entries.next().is_none() {
+        std::fs::remove_dir(path).map_err(|error| {
+            format!(
+                "cannot remove empty task submodule placeholder {}: {error}",
+                path.display()
+            )
+        })?;
+        return Ok(None);
+    }
+    Err(format!(
+        "task submodule {} exists but is not an isolated Git checkout",
+        path.display()
+    ))
+}
+
+/// Materialize every submodule required by a task checkout from the source
+/// checkout, without consulting a remote.
+///
+/// A Git worktree copies gitlinks but not their working directories.  Running
+/// `git submodule update --init` here would fill them by cloning each configured
+/// URL, which can turn task provisioning into an implicit network operation.
+/// Instead, each already-materialized source submodule is cloned directly from
+/// its local Git directory with `--no-local`, then checked out at the gitlink's
+/// exact SHA. `--no-local` prevents Git from sharing hard-linked object files
+/// or a mutable checkout between concurrent task worktrees.
+pub fn materialize_task_submodules(source_root: &Path, worktree_root: &Path) -> Result<(), String> {
+    let output = sync_cmd("git")
+        .args(["ls-files", "--stage", "-z"])
+        .current_dir(source_root)
+        .output()
+        .map_err(|error| {
+            format!(
+                "cannot inspect source submodules at {}: {error}",
+                source_root.display()
+            )
+        })?;
+    if !output.status.success() {
+        return Err(format!(
+            "cannot inspect source submodules at {}: {}",
+            source_root.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+
+    for entry in output.stdout.split(|byte| *byte == b'\0') {
+        if entry.is_empty() {
+            continue;
+        }
+        let entry = std::str::from_utf8(entry).map_err(|_| {
+            format!(
+                "source submodule path at {} is not valid UTF-8",
+                source_root.display()
+            )
+        })?;
+        let (metadata, relative_path) = entry.split_once('\t').ok_or_else(|| {
+            format!(
+                "cannot parse source Git index entry at {}",
+                source_root.display()
+            )
+        })?;
+        let mut fields = metadata.split_whitespace();
+        if fields.next() != Some("160000") {
+            continue;
+        }
+        let expected_sha = fields.next().ok_or_else(|| {
+            format!(
+                "cannot parse source submodule SHA at {}",
+                source_root.display()
+            )
+        })?;
+        if fields.next() != Some("0") || fields.next().is_some() {
+            return Err(format!(
+                "cannot parse source submodule index entry at {}",
+                source_root.display()
+            ));
+        }
+        let relative_path = Path::new(relative_path);
+        if relative_path.as_os_str().is_empty()
+            || relative_path.is_absolute()
+            || relative_path.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::ParentDir
+                        | std::path::Component::RootDir
+                        | std::path::Component::Prefix(_)
+                )
+            })
+        {
+            return Err(format!(
+                "source submodule path {:?} is unsafe",
+                relative_path.display()
+            ));
+        }
+
+        let source_submodule = source_root.join(relative_path);
+        let target_submodule = worktree_root.join(relative_path);
+        let source_head = git_head(&source_submodule).map_err(|error| {
+            format!(
+                "required source submodule {} is not materialized at pinned {expected_sha}: {error}",
+                source_submodule.display()
+            )
+        })?;
+        if source_head != expected_sha {
+            return Err(format!(
+                "required source submodule {} is at {source_head}, not pinned {expected_sha}",
+                source_submodule.display()
+            ));
+        }
+        if let Some(target_head) = task_submodule_head(&target_submodule)? {
+            if target_head == expected_sha {
+                materialize_task_submodules(&source_submodule, &target_submodule)?;
+                continue;
+            }
+            return Err(format!(
+                "task submodule {} is at {target_head}, not pinned {expected_sha}",
+                target_submodule.display()
+            ));
+        }
+
+        let source_git_dir = sync_cmd("git")
+            .args(["rev-parse", "--absolute-git-dir"])
+            .current_dir(&source_submodule)
+            .output()
+            .map_err(|error| {
+                format!(
+                    "cannot locate source submodule Git directory {}: {error}",
+                    source_submodule.display()
+                )
+            })?;
+        if !source_git_dir.status.success() {
+            return Err(format!(
+                "cannot locate source submodule Git directory {}: {}",
+                source_submodule.display(),
+                String::from_utf8_lossy(&source_git_dir.stderr).trim()
+            ));
+        }
+        let source_git_dir = String::from_utf8_lossy(&source_git_dir.stdout)
+            .trim()
+            .to_string();
+        if source_git_dir.is_empty() {
+            return Err(format!(
+                "source submodule {} returned an empty Git directory",
+                source_submodule.display()
+            ));
+        }
+        let parent = target_submodule.parent().ok_or_else(|| {
+            format!(
+                "task submodule {} has no parent",
+                target_submodule.display()
+            )
+        })?;
+        std::fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "cannot create task submodule parent {}: {error}",
+                parent.display()
+            )
+        })?;
+
+        let clone = sync_cmd("git")
+            .args(["clone", "--no-local", "--no-checkout", &source_git_dir])
+            .arg(&target_submodule)
+            .current_dir(worktree_root)
+            .output()
+            .map_err(|error| {
+                format!(
+                    "cannot copy required source submodule {}: {error}",
+                    source_submodule.display()
+                )
+            })?;
+        if !clone.status.success() {
+            return Err(format!(
+                "cannot copy required source submodule {} without network access: {}",
+                source_submodule.display(),
+                String::from_utf8_lossy(&clone.stderr).trim()
+            ));
+        }
+        let checkout = sync_cmd("git")
+            .args(["checkout", "--detach", expected_sha])
+            .current_dir(&target_submodule)
+            .output()
+            .map_err(|error| {
+                format!(
+                    "cannot check out task submodule {} at {expected_sha}: {error}",
+                    target_submodule.display()
+                )
+            })?;
+        if !checkout.status.success() {
+            return Err(format!(
+                "cannot check out task submodule {} at {expected_sha}: {}",
+                target_submodule.display(),
+                String::from_utf8_lossy(&checkout.stderr).trim()
+            ));
+        }
+        materialize_task_submodules(&source_submodule, &target_submodule)?;
+    }
+    Ok(())
+}
+
 /// The deterministic `(worktree path, branch)` for a task execution — the single
 /// source of truth shared by [`create_task_worktree`] (which materializes it) and
 /// the KT-318 provisioning saga (which records this exact path as the managed
@@ -1467,6 +1684,10 @@ pub fn create_task_worktree(
     // Defense-in-depth: confirm HEAD landed on the pinned base. On mismatch,
     // undo our own just-created (unique-branch) resource so no orphan remains.
     if let Err(e) = verify_worktree_head(&worktree_path, base_sha) {
+        let _ = remove_discussion_worktree(repo_path, &worktree_path.to_string_lossy(), true);
+        return Err(e);
+    }
+    if let Err(e) = materialize_task_submodules(repo_path, &worktree_path) {
         let _ = remove_discussion_worktree(repo_path, &worktree_path.to_string_lossy(), true);
         return Err(e);
     }
@@ -3119,6 +3340,101 @@ mod tests {
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     }
 
+    fn add_materialized_test_submodule(repo: &Path) -> tempfile::TempDir {
+        let submodule = tempfile::Builder::new()
+            .prefix("kronn-wt-submodule-source-")
+            .tempdir()
+            .unwrap();
+        let init = std::process::Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(submodule.path())
+            .output()
+            .unwrap();
+        assert!(init.status.success());
+        for (key, value) in [("user.email", "test@test.com"), ("user.name", "Test")] {
+            let output = std::process::Command::new("git")
+                .args(["config", key, value])
+                .current_dir(submodule.path())
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+        }
+        fs::create_dir_all(submodule.path().join("bin")).unwrap();
+        fs::write(
+            submodule.path().join("bin/bats"),
+            "#!/bin/sh\necho bats fixture\n",
+        )
+        .unwrap();
+        let commit = std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(submodule.path())
+            .output()
+            .unwrap();
+        assert!(commit.status.success());
+        let executable = std::process::Command::new("git")
+            .args(["update-index", "--chmod=+x", "bin/bats"])
+            .current_dir(submodule.path())
+            .output()
+            .unwrap();
+        assert!(executable.status.success());
+        let commit = std::process::Command::new("git")
+            .args(["commit", "-m", "submodule source"])
+            .current_dir(submodule.path())
+            .output()
+            .unwrap();
+        assert!(commit.status.success());
+
+        fs::write(
+            repo.join("Makefile"),
+            "test-shell:\n\t./deps/required/bin/bats --version\n",
+        )
+        .unwrap();
+        let add = std::process::Command::new("git")
+            .args([
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                &submodule.path().to_string_lossy(),
+                "deps/required",
+            ])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(
+            add.status.success(),
+            "submodule add failed: {}",
+            String::from_utf8_lossy(&add.stderr)
+        );
+        let stage_makefile = std::process::Command::new("git")
+            .args(["add", "Makefile"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(stage_makefile.status.success());
+        let commit = std::process::Command::new("git")
+            .args(["commit", "-m", "add required submodule"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(
+            commit.status.success(),
+            "submodule commit failed: {}",
+            String::from_utf8_lossy(&commit.stderr)
+        );
+        let unreachable_remote = std::process::Command::new("git")
+            .args([
+                "config",
+                "submodule.deps/required.url",
+                "https://invalid.example/required.git",
+            ])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(unreachable_remote.status.success());
+        submodule
+    }
+
     #[test]
     fn task_worktree_pins_exact_sha_and_names_deterministically() {
         let repo = make_test_repo("task-pin");
@@ -3143,6 +3459,92 @@ mod tests {
         assert!(!repo.path().join(".gitignore").exists());
         let exclude = fs::read_to_string(repo.path().join(".git/info/exclude")).unwrap();
         assert!(exclude.lines().any(|line| line.trim() == ".kronn/"));
+    }
+
+    #[test]
+    fn task_worktree_materializes_pinned_submodules_without_sharing_checkouts() {
+        let repo = make_test_repo("task-submodule");
+        let _source = add_materialized_test_submodule(repo.path());
+        let base = head_sha(repo.path());
+        let source_submodule = repo.path().join("deps/required");
+        let source_gitlink = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD:deps/required"])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        assert!(source_gitlink.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&source_gitlink.stdout).trim(),
+            head_sha(&source_submodule),
+            "the test source checkout must match its committed gitlink"
+        );
+
+        let info = create_task_worktree(repo.path(), "KT-478", "submodule", &base).unwrap();
+        let worktree = Path::new(&info.path);
+        let task_submodule = worktree.join("deps/required");
+        assert_eq!(head_sha(&task_submodule), head_sha(&source_submodule));
+        assert!(task_submodule.join("bin/bats").is_file());
+        #[cfg(unix)]
+        {
+            let shell_tests = std::process::Command::new("make")
+                .arg("test-shell")
+                .current_dir(worktree)
+                .output()
+                .unwrap();
+            assert!(
+                shell_tests.status.success(),
+                "make test-shell failed: {}",
+                String::from_utf8_lossy(&shell_tests.stderr)
+            );
+        }
+
+        let source_git_dir = std::process::Command::new("git")
+            .args(["rev-parse", "--absolute-git-dir"])
+            .current_dir(&source_submodule)
+            .output()
+            .unwrap();
+        let task_git_dir = std::process::Command::new("git")
+            .args(["rev-parse", "--absolute-git-dir"])
+            .current_dir(&task_submodule)
+            .output()
+            .unwrap();
+        assert_ne!(
+            String::from_utf8_lossy(&source_git_dir.stdout).trim(),
+            String::from_utf8_lossy(&task_git_dir.stdout).trim(),
+            "task worktree must not share the source submodule Git directory"
+        );
+
+        // Resume reconstructs only the missing task checkout from the already
+        // materialized source; cleanup then remains ownership-safe.
+        fs::remove_dir_all(&task_submodule).unwrap();
+        materialize_task_submodules(repo.path(), worktree).unwrap();
+        assert_eq!(head_sha(&task_submodule), head_sha(&source_submodule));
+        remove_task_worktree(repo.path(), &info.path, &info.branch, &base).unwrap();
+        assert!(!worktree.exists());
+    }
+
+    #[test]
+    fn task_worktree_refuses_when_a_required_source_submodule_is_missing() {
+        let repo = make_test_repo("task-submodule-missing");
+        let _source = add_materialized_test_submodule(repo.path());
+        let base = head_sha(repo.path());
+        let deinit = std::process::Command::new("git")
+            .args(["submodule", "deinit", "-f", "deps/required"])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        assert!(deinit.status.success());
+
+        let (worktree_path, branch) =
+            task_worktree_layout(repo.path(), "KT-478", "missing-source").unwrap();
+        let error = create_task_worktree(repo.path(), "KT-478", "missing-source", &base)
+            .expect_err("a task checkout must not fetch a missing source submodule");
+        assert!(error.contains("required source submodule"), "{error}");
+        assert!(
+            !worktree_path.exists(),
+            "failed provisioning is compensated"
+        );
+        assert!(branch_commit(repo.path(), &branch).is_none());
     }
 
     #[test]

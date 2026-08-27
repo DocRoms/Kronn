@@ -232,6 +232,10 @@ async fn main() -> anyhow::Result<()> {
         Err(e) => tracing::error!("Key reconcile failed (booting locked): {e}"),
     }
 
+    if let Err(e) = kronn::bootstrap_external_api_connections(&database, &app_config).await {
+        tracing::error!("External API connection backfill failed: {e}");
+    }
+
     // Build state via the shared factory — keep both mains in sync when
     // new runtime fields are added to AppState (see lib.rs doc).
     let config_arc = Arc::new(RwLock::new(app_config));
