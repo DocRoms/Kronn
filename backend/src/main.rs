@@ -232,18 +232,7 @@ async fn main() -> anyhow::Result<()> {
         Err(e) => tracing::error!("Key reconcile failed (booting locked): {e}"),
     }
 
-    // KT-484 — preserve the existing LiteLLM and NVIDIA setup as named API
-    // connections before later runtime routing starts reading this table.
-    let legacy_connection_config = app_config.clone();
-    if let Err(e) = database
-        .with_conn(move |conn| {
-            kronn::db::external_api_connections::backfill_legacy_config(
-                conn,
-                &legacy_connection_config,
-            )
-        })
-        .await
-    {
+    if let Err(e) = kronn::bootstrap_external_api_connections(&database, &app_config).await {
         tracing::error!("External API connection backfill failed: {e}");
     }
 

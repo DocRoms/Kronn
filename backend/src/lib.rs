@@ -28,6 +28,24 @@ pub use crate::db::Database;
 pub use crate::models::AppConfig;
 pub use crate::workflows::WorkflowEngine;
 
+/// Persist named connections for legacy provider configuration before runtime
+/// state is constructed. Both standalone and embedded startup paths call this
+/// shared bootstrap after key reconciliation.
+pub async fn bootstrap_external_api_connections(
+    database: &Database,
+    config: &AppConfig,
+) -> anyhow::Result<()> {
+    let legacy_connection_config = config.clone();
+    database
+        .with_conn(move |conn| {
+            crate::db::external_api_connections::backfill_legacy_config(
+                conn,
+                &legacy_connection_config,
+            )
+        })
+        .await
+}
+
 // ─── Application State ──────────────────────────────────────────────────────
 
 /// Default maximum concurrent agent processes.

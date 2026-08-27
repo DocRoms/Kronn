@@ -138,10 +138,9 @@ mod tests {
     use crate::models::ApiKey;
     use chrono::Utc;
 
-    #[test]
-    fn legacy_litellm_and_nvidia_configurations_backfill_without_losing_keys_or_tiers() {
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::run_through(&conn, "143_quick_items_pinned").unwrap();
+    #[tokio::test]
+    async fn shared_bootstrap_backfills_legacy_connections_idempotently_without_secrets() {
+        let database = crate::db::Database::open_in_memory().unwrap();
 
         let mut config = default_config();
         config.agents.lite_llm.base_url = Some("https://proxy.example.test".into());
@@ -173,10 +172,14 @@ mod tests {
             },
         ];
 
-        crate::db::migrations::run(&conn).unwrap();
-        backfill_legacy_config(&conn, &config).unwrap();
+        crate::bootstrap_external_api_connections(&database, &config)
+            .await
+            .unwrap();
+        crate::bootstrap_external_api_connections(&database, &config)
+            .await
+            .unwrap();
 
-        let connections = list(&conn).unwrap();
+        let connections = database.with_conn(list).await.unwrap();
         assert_eq!(connections.len(), 2);
         let lite = connections
             .iter()
@@ -204,6 +207,24 @@ mod tests {
             config.tokens.active_key_for(&nvidia.credential_slug),
             Some("nvidia-secret")
         );
+        let persisted_secret_count = database
+            .with_conn(|conn| {
+                Ok(conn.query_row(
+                    "SELECT COUNT(*) FROM external_api_connections
+                     WHERE display_name IN (?1, ?2)
+                        OR mention_alias IN (?1, ?2)
+                        OR endpoint IN (?1, ?2)
+                        OR credential_slug IN (?1, ?2)
+                        OR economy_model IN (?1, ?2)
+                        OR default_model IN (?1, ?2)
+                        OR reasoning_model IN (?1, ?2)",
+                    params!["lite-secret", "nvidia-secret"],
+                    |row| row.get::<_, i64>(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(persisted_secret_count, 0);
     }
 
     #[test]
