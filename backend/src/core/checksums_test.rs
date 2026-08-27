@@ -430,6 +430,7 @@ fn source_tree_fingerprint_ignores_kronn_output_commits_but_not_source() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+#[cfg(unix)]
 #[test]
 fn source_tree_fingerprint_survives_hostile_paths_and_tracks_mode() {
     // Codex round 3 — byte-safety: a path containing a newline must neither

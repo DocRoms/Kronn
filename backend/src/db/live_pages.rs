@@ -497,6 +497,137 @@ pub fn get_live_page(conn: &Connection, page_id: &str) -> Result<Option<LivePage
     }))
 }
 
+/// Attach one dataset to an already-created Page. `create_live_page` only
+/// declares datasets at Page creation; agents that forget one (or need to
+/// grow a Page after the fact) had no way to unblock `publish_live_page`'s
+/// "Unknown dataset" refusal without this.
+///
+/// Idempotent on `(page_id, name, kind)`: a repeat call with the same kind
+/// is a no-op that returns the existing dataset untouched, so a workflow can
+/// call this defensively before every publish. A repeat call with a
+/// DIFFERENT kind is a `Conflict`-worthy error instead of silently
+/// reinterpreting the dataset's semantics.
+pub fn add_live_page_dataset(
+    conn: &Connection,
+    page_id: &str,
+    dataset: &CreateLivePageDataset,
+) -> Result<LivePageDataset> {
+    validate_dataset_name(&dataset.name)?;
+    let max_points = dataset.max_points.unwrap_or(50_000);
+    if max_points == 0 {
+        bail!(
+            "Dataset '{}' max_points must be greater than zero",
+            dataset.name
+        );
+    }
+    if dataset.max_age_days == Some(0) {
+        bail!(
+            "Dataset '{}' max_age_days must be greater than zero",
+            dataset.name
+        );
+    }
+
+    let tx = conn.unchecked_transaction()?;
+    let canonical_page_id: String = tx
+        .query_row(
+            "SELECT id FROM live_pages WHERE id = ?1 OR slug = ?1",
+            [page_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .ok_or_else(|| anyhow!("Page not found"))?;
+
+    let existing = tx
+        .query_row(
+            "SELECT id, page_id, name, kind, current_json, schema_json,
+                    max_points, max_age_days, updated_at
+               FROM live_page_datasets WHERE page_id = ?1 AND name = ?2",
+            params![canonical_page_id, dataset.name],
+            map_dataset,
+        )
+        .optional()?;
+    if let Some(existing) = existing {
+        if existing.kind == dataset.kind {
+            return Ok(existing);
+        }
+        bail!(
+            "Dataset '{}' already exists with kind '{}', cannot redeclare as '{}'",
+            dataset.name,
+            existing.kind.as_str(),
+            dataset.kind.as_str(),
+        );
+    }
+
+    let now = Utc::now();
+    let dataset_id = Uuid::new_v4().to_string();
+    let current = if dataset.kind == LivePageDatasetKind::TimeSeries {
+        None
+    } else {
+        dataset
+            .initial
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?
+    };
+    tx.execute(
+        "INSERT INTO live_page_datasets (
+             id, page_id, name, kind, current_json, schema_json,
+             max_points, max_age_days, updated_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            dataset_id,
+            canonical_page_id,
+            dataset.name,
+            dataset.kind.as_str(),
+            current,
+            dataset
+                .schema
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?,
+            max_points,
+            dataset.max_age_days,
+            now.to_rfc3339(),
+        ],
+    )?;
+    if dataset.kind == LivePageDatasetKind::TimeSeries {
+        let values = match dataset.initial.as_ref() {
+            Some(serde_json::Value::Array(values)) => values.as_slice(),
+            Some(value) => std::slice::from_ref(value),
+            None => &[],
+        };
+        for (index, value) in values.iter().enumerate() {
+            tx.execute(
+                "INSERT INTO live_page_dataset_points (
+                     id, dataset_id, observed_at, payload_json, dedupe_key, created_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?3)",
+                params![
+                    Uuid::new_v4().to_string(),
+                    dataset_id,
+                    (now + chrono::Duration::milliseconds(index as i64)).to_rfc3339(),
+                    serde_json::to_string(value)?,
+                    format!("seed:{index}"),
+                ],
+            )?;
+        }
+    }
+    tx.commit()?;
+
+    Ok(LivePageDataset {
+        id: dataset_id,
+        page_id: canonical_page_id,
+        name: dataset.name.clone(),
+        kind: dataset.kind,
+        current: current
+            .map(|value| serde_json::from_str(&value))
+            .transpose()?,
+        schema: dataset.schema.clone(),
+        max_points,
+        max_age_days: dataset.max_age_days,
+        updated_at: now,
+    })
+}
+
 pub fn pages_capability(conn: &Connection) -> Result<LivePagesCapability> {
     let activated_at: Option<String> = conn
         .query_row(
@@ -1316,5 +1447,169 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![2, 3]
         );
+    }
+
+    fn fixture_without_datasets(conn: &Connection) -> LivePage {
+        let now = Utc::now();
+        let page = LivePage {
+            id: "page-bare".into(),
+            project_id: None,
+            title: "Bare page".into(),
+            slug: "bare-page".into(),
+            current_revision_id: "rev-bare".into(),
+            data_revision: 0,
+            created_at: now,
+            updated_at: now,
+            last_published_at: None,
+            pinned: false,
+            archived: false,
+        };
+        let revision = LivePageRevision {
+            id: "rev-bare".into(),
+            page_id: page.id.clone(),
+            revision: 1,
+            html: "<!doctype html><h1>Bare</h1>".into(),
+            created_by_agent: None,
+            created_at: now,
+        };
+        create_live_page(conn, &page, &revision, &[], None).unwrap();
+        page
+    }
+
+    #[test]
+    fn add_live_page_dataset_unblocks_a_publish_that_previously_failed() {
+        let conn = test_connection();
+        let page = fixture_without_datasets(&conn);
+
+        let before = publish_live_page(
+            &conn,
+            &page.id,
+            &PublishLivePageRequest {
+                workflow_id: None,
+                workflow_run_id: None,
+                writes: vec![LivePageWrite {
+                    dataset: "auto_reviews".into(),
+                    operation: LivePageWriteOperation::Replace,
+                    value: serde_json::json!({"count": 1}),
+                    observed_at: None,
+                    dedupe_key: None,
+                    key_field: None,
+                }],
+            },
+        );
+        assert!(before.unwrap_err().to_string().contains("Unknown dataset"));
+
+        let created = add_live_page_dataset(
+            &conn,
+            &page.id,
+            &CreateLivePageDataset {
+                name: "auto_reviews".into(),
+                kind: LivePageDatasetKind::Snapshot,
+                initial: None,
+                schema: None,
+                max_points: None,
+                max_age_days: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(created.name, "auto_reviews");
+        assert_eq!(created.kind, LivePageDatasetKind::Snapshot);
+        assert_eq!(created.max_points, 50_000);
+
+        let after = publish_live_page(
+            &conn,
+            &page.id,
+            &PublishLivePageRequest {
+                workflow_id: None,
+                workflow_run_id: None,
+                writes: vec![LivePageWrite {
+                    dataset: "auto_reviews".into(),
+                    operation: LivePageWriteOperation::Replace,
+                    value: serde_json::json!({"count": 1}),
+                    observed_at: None,
+                    dedupe_key: None,
+                    key_field: None,
+                }],
+            },
+        )
+        .unwrap();
+        assert_eq!(after.changed_datasets, vec!["auto_reviews"]);
+    }
+
+    #[test]
+    fn add_live_page_dataset_is_idempotent_and_never_mutates_an_existing_dataset() {
+        let conn = test_connection();
+        let page = fixture(&conn);
+
+        let repeat = add_live_page_dataset(
+            &conn,
+            &page.id,
+            &CreateLivePageDataset {
+                name: "traffic".into(),
+                kind: LivePageDatasetKind::TimeSeries,
+                initial: None,
+                schema: None,
+                // A second call carrying a different max_points must not
+                // silently change the retention policy of a live dataset.
+                max_points: Some(99_999),
+                max_age_days: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(repeat.max_points, 2, "existing dataset must stay untouched");
+
+        let loaded = get_live_page(&conn, &page.id).unwrap().unwrap();
+        assert_eq!(
+            loaded
+                .datasets
+                .iter()
+                .filter(|view| view.dataset.name == "traffic")
+                .count(),
+            1,
+            "must not create a duplicate row"
+        );
+    }
+
+    #[test]
+    fn add_live_page_dataset_refuses_to_silently_reinterpret_an_existing_name() {
+        let conn = test_connection();
+        let page = fixture(&conn);
+
+        let error = add_live_page_dataset(
+            &conn,
+            &page.id,
+            &CreateLivePageDataset {
+                name: "summary".into(),
+                kind: LivePageDatasetKind::TimeSeries,
+                initial: None,
+                schema: None,
+                max_points: None,
+                max_age_days: None,
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("already exists with kind 'snapshot'"));
+        assert!(error.contains("'time_series'"));
+    }
+
+    #[test]
+    fn add_live_page_dataset_rejects_an_unknown_page() {
+        let conn = test_connection();
+        let error = add_live_page_dataset(
+            &conn,
+            "missing-page",
+            &CreateLivePageDataset {
+                name: "auto_reviews".into(),
+                kind: LivePageDatasetKind::Snapshot,
+                initial: None,
+                schema: None,
+                max_points: None,
+                max_age_days: None,
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("Page not found"));
     }
 }

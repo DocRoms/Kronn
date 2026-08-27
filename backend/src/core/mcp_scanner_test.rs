@@ -2839,6 +2839,7 @@ args = ["@example/old-mcp"]
     // so we can drive it from this test module.
     use crate::core::mcp_scanner::{CodexSync, CopilotSync, HostMcpSync};
 
+    #[cfg(unix)]
     #[test]
     #[serial]
     fn host_mcp_command_available_respects_the_host_container_boundary() {
@@ -2889,6 +2890,7 @@ args = ["@example/old-mcp"]
         }
     }
 
+    #[cfg(unix)]
     #[test]
     #[serial]
     fn docker_host_bin_uvx_survives_the_codex_plan() {

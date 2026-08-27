@@ -5661,7 +5661,10 @@ class LivePageToolTests(unittest.TestCase):
 
     def test_page_tools_are_registered_and_advertised(self):
         names = [tool["name"] for tool in self.mod.TOOLS]
-        for name in ["page_list", "page_get", "page_create", "page_update_html"]:
+        for name in [
+            "page_list", "page_get", "page_create", "page_update_html",
+            "page_add_dataset",
+        ]:
             self.assertIn(name, names)
             self.assertIn(name, self.mod.DISPATCH)
         response = self.mod._handle({
@@ -5673,6 +5676,7 @@ class LivePageToolTests(unittest.TestCase):
         instructions = response["result"]["instructions"]
         self.assertIn("Live Pages", instructions)
         self.assertIn("page_list", instructions)
+        self.assertIn("page_add_dataset", instructions)
         self.assertIn("closed 12", instructions)
         self.assertNotIn("closed 9", instructions)
 
@@ -5778,6 +5782,40 @@ class LivePageToolTests(unittest.TestCase):
                 "created_by_agent": "ClaudeCode",
             },
         )
+
+    def test_page_add_dataset_sends_the_full_contract(self):
+        with mock.patch.object(
+            self.mod, "_http",
+            return_value=self._env({"id": "ds-1", "name": "auto_reviews"}),
+        ) as http:
+            result = self.mod.call_page_add_dataset({
+                "page_id": "page/one",
+                "name": "auto_reviews",
+                "kind": "snapshot",
+                "initial": {"count": 0},
+                "max_points": 500,
+            })
+        self.assertEqual(result["name"], "auto_reviews")
+        http.assert_called_once_with(
+            "POST",
+            "/api/pages/page%2Fone/datasets",
+            {
+                "name": "auto_reviews",
+                "kind": "snapshot",
+                "initial": {"count": 0},
+                "max_points": 500,
+            },
+        )
+
+    def test_page_add_dataset_requires_page_id_name_and_a_valid_kind(self):
+        with self.assertRaisesRegex(RuntimeError, "page_id"):
+            self.mod.call_page_add_dataset({"name": "auto_reviews", "kind": "snapshot"})
+        with self.assertRaisesRegex(RuntimeError, "name"):
+            self.mod.call_page_add_dataset({"page_id": "page-1", "kind": "snapshot"})
+        with self.assertRaisesRegex(RuntimeError, "kind"):
+            self.mod.call_page_add_dataset({
+                "page_id": "page-1", "name": "auto_reviews", "kind": "bogus",
+            })
 
 
 class WorkflowRunHistoryTests(unittest.TestCase):

@@ -3255,6 +3255,7 @@ mod tests {
         assert_eq!(shallow["count"], json!(1));
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_workspace_reached_through_a_symlink_still_reports_relative_paths() {
         // The defect this pins: `resolve_in_workspace` canonicalises, the caller's

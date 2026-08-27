@@ -5,6 +5,7 @@ import {
   clearDraft,
   purgeExpiredDrafts,
   CHAT_DRAFT_CONFIG,
+  NEW_DISCUSSION_DRAFT_ID,
 } from '../chat-drafts';
 
 describe('chat-drafts', () => {
@@ -153,6 +154,12 @@ describe('chat-drafts', () => {
     purgeExpiredDrafts(new Set(['alive']));
     expect(loadDraft('alive')).not.toBeNull();
     expect(loadDraft('deleted')).toBeNull();
+  });
+
+  it('keeps the fresh new-discussion draft when purging deleted discussion ids', () => {
+    saveDraft(NEW_DISCUSSION_DRAFT_ID, 'brief not sent yet');
+    purgeExpiredDrafts(new Set());
+    expect(loadDraft(NEW_DISCUSSION_DRAFT_ID)?.text).toBe('brief not sent yet');
   });
 
   it('purgeExpiredDrafts does not touch non-draft keys', () => {

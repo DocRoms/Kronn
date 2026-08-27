@@ -275,12 +275,11 @@ describe('GitPanel', () => {
     expect(screen.queryByText('git.noChanges')).toBeNull();
   });
 
-  it('does not show terminal by default', async () => {
+  it('does not embed the terminal inside the Git panel', async () => {
     render(<GitPanel projectId="p1" onClose={onClose} />);
     await waitFor(() => {
       expect(screen.getByText('feat/new-feature')).toBeDefined();
     });
-    // Terminal input should not be visible initially
-    expect(screen.queryByPlaceholderText(/command|terminal/i)).toBeNull();
+    expect(screen.queryByText('git.terminal')).toBeNull();
   });
 });

@@ -7,7 +7,7 @@ import './GitPanel.css';
 import {
   GitBranch, GitCommit, GitPullRequest, Upload, RefreshCw, ChevronLeft,
   FileEdit, FilePlus, FileMinus, FileX, AlertTriangle, ExternalLink,
-  Loader2, Check, X, Terminal, Maximize2, Minimize2,
+  Loader2, Check, X, Maximize2, Minimize2,
 } from 'lucide-react';
 import { GitDiffViewer } from './GitDiffViewer';
 import type { DiffLine } from '../lib/diff-syntax';
@@ -65,7 +65,6 @@ interface Props {
   initialWorkspaceId?: string;
   onClose: () => void;
   onExpandedChange?: (expanded: boolean) => void;
-  terminalEnabled?: boolean;
 }
 
 const STATUS_ICONS: Record<string, typeof FileEdit> = {
@@ -121,7 +120,6 @@ export function GitPanel({
   initialWorkspaceId,
   onClose,
   onExpandedChange,
-  terminalEnabled = false,
 }: Props) {
   const { t } = useT();
   const [status, setStatus] = useState<GitStatus | null>(null);
@@ -134,7 +132,10 @@ export function GitPanel({
   );
   const statusScopeKey = `${projectId ?? ''}:${discussionId ?? ''}:${selectedWorkspaceId ?? ''}`;
   const statusScopeRef = useRef(statusScopeKey);
-  statusScopeRef.current = statusScopeKey;
+
+  useEffect(() => {
+    statusScopeRef.current = statusScopeKey;
+  }, [statusScopeKey]);
 
   // Diff view
   const [diffPath, setDiffPath] = useState<string | null>(null);
@@ -167,13 +168,6 @@ export function GitPanel({
   const [prPreview, setPrPreview] = useState(false);
   const [prTemplateSource, setPrTemplateSource] = useState('');
   const [prLoading, setPrLoading] = useState(false);
-
-  // Terminal
-  const [showTerminal, setShowTerminal] = useState(false);
-  const [termInput, setTermInput] = useState('');
-  const [termHistory, setTermHistory] = useState<{ cmd: string; stdout: string; stderr: string; code: number }[]>([]);
-  const [termLoading, setTermLoading] = useState(false);
-  const termEndRef = useRef<HTMLDivElement>(null);
 
   const fetchStatus = useCallback(async () => {
     const requestScope = statusScopeKey;
@@ -500,31 +494,6 @@ export function GitPanel({
       setSelectedFiles([]);
     } else {
       setSelectedFiles(status.files.map(f => f.path));
-    }
-  };
-
-  const handleExec = async () => {
-    const cmd = termInput.trim();
-    if (!cmd || termLoading) return;
-    setTermLoading(true);
-    setTermInput('');
-    try {
-      let res;
-      if (discussionId) {
-        res = selectedWorkspaceId
-          ? await discussionsApi.exec(discussionId, cmd, selectedWorkspaceId)
-          : await discussionsApi.exec(discussionId, cmd);
-      } else if (projectId) {
-        res = await projectsApi.exec(projectId, cmd);
-      } else {
-        return;
-      }
-      setTermHistory(prev => [...prev, { cmd, stdout: res.stdout, stderr: res.stderr, code: res.exit_code }]);
-    } catch (e) {
-      setTermHistory(prev => [...prev, { cmd, stdout: '', stderr: String(e), code: 1 }]);
-    } finally {
-      setTermLoading(false);
-      setTimeout(() => termEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 50);
     }
   };
 
@@ -1019,45 +988,6 @@ export function GitPanel({
         </div>
       )}
 
-      {/* Mini Terminal */}
-      {terminalEnabled && !historicalWorkspace && (
-        <div className="git-term-section">
-          <button
-            className="git-term-toggle"
-            onClick={() => setShowTerminal(prev => !prev)}
-          >
-            <Terminal size={11} />
-            <span>{t('git.terminal')}</span>
-          </button>
-          {showTerminal && (
-            <div className="git-term-body">
-              <div className="git-term-output">
-                {termHistory.map((entry, i) => (
-                  <div key={i}>
-                    <div className="git-term-cmd">$ {entry.cmd}</div>
-                    {entry.stdout && <pre className="git-term-pre">{entry.stdout}</pre>}
-                    {entry.stderr && <pre className={`git-term-pre ${entry.code !== 0 ? 'git-term-pre-error' : 'git-term-pre-warning'}`}>{entry.stderr}</pre>}
-                  </div>
-                ))}
-                <div ref={termEndRef} />
-              </div>
-              <div className="git-term-input-row">
-                <span className="git-term-prompt">$</span>
-                <input
-                  className="git-term-input"
-                  value={termInput}
-                  onChange={e => setTermInput(e.target.value)}
-                  onKeyDown={e => e.key === 'Enter' && handleExec()}
-                  placeholder={t('git.terminalPlaceholder')}
-                  disabled={termLoading}
-                  autoFocus
-                />
-                {termLoading && <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} className="text-dim" />}
-              </div>
-            </div>
-          )}
-        </div>
-      )}
     </aside>
   );
 }

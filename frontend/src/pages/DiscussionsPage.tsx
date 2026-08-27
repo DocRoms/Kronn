@@ -10,6 +10,7 @@ import { localCalendarDayKey } from '../lib/discussionDates';
 import { ChatInput } from '../components/ChatInput';
 import { discussions as discussionsApi, projects as projectsApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi, contacts as contactsApi, workflows as workflowsApi, quickPrompts as quickPromptsApi, planning as planningApi, orchestration as orchestrationApi } from '../lib/api';
 import { GitPanel } from '../components/GitPanel';
+import { TerminalPanel } from '../components/TerminalPanel';
 import { DiscussionPlanPanel } from '../components/DiscussionPlanPanel';
 import { DiscussionSettingsPanel } from '../components/DiscussionSettingsPanel';
 import { DiscussionAssetsPanel } from '../components/DiscussionAssetsPanel';
@@ -29,7 +30,7 @@ import { sanitizeQpImproverPayload } from '../lib/qp-improver-sanitize';
 import type { Project, AgentDetection, Discussion, DiscussionDetail, DiscussionMessage, MessageChannel, AgentType, AgentsConfig, Skill, AgentProfile, Directive, McpConfigDisplay, McpIncompatibility, Contact, WsMessage, ContextFile, BatchRunSummary, DiscussionPlan, ProposalListResponse, ExecutionDiscussionLink, MessageSearchHit, MessageTarget, ParticipantView } from '../types/generated';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { useQpChain } from '../hooks/useQpChain';
-import { useMessageQueue } from '../hooks/useMessageQueue';
+import { useMessageQueue, type QueuedMessage } from '../hooks/useMessageQueue';
 import { useRafBatchedStream } from '../hooks/useRafBatchedStream';
 import { buildStreamingFlush } from '../lib/stream-flush';
 import { findLastAgentMessage } from '../lib/discussionHelpers';
@@ -392,6 +393,7 @@ export function DiscussionsPage({
   const [activeDiscussionId, setActiveDiscussionId] = useState<string | null>(initialActiveDiscussionId ?? null);
   const [showNewDiscussion, setShowNewDiscussion] = useState(false);
   const [showGitPanel, setShowGitPanel] = useState(false);
+  const [showTerminalPanel, setShowTerminalPanel] = useState(false);
   const [initialGitWorkspaceId, setInitialGitWorkspaceId] = useState<string | undefined>();
   const [gitPanelExpanded, setGitPanelExpanded] = useState(false);
   const [showPlanPanel, setShowPlanPanel] = useState(false);
@@ -444,17 +446,18 @@ export function DiscussionsPage({
   }, [allDiscussions.length, refreshExecutionDiscussionLinks]);
 
   useEffect(() => {
-    if (!showGitPanel && !showPlanPanel && !showSettingsPanel && !showAssetsPanel) return;
+    if (!showGitPanel && !showTerminalPanel && !showPlanPanel && !showSettingsPanel && !showAssetsPanel) return;
     const closePanel = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return;
       setShowGitPanel(false);
+      setShowTerminalPanel(false);
       setShowPlanPanel(false);
       setShowSettingsPanel(false);
       setShowAssetsPanel(false);
     };
     window.addEventListener('keydown', closePanel);
     return () => window.removeEventListener('keydown', closePanel);
-  }, [showGitPanel, showPlanPanel, showSettingsPanel, showAssetsPanel]);
+  }, [showGitPanel, showTerminalPanel, showPlanPanel, showSettingsPanel, showAssetsPanel]);
 
   useEffect(() => {
     setInitialGitWorkspaceId(undefined);
@@ -465,6 +468,7 @@ export function DiscussionsPage({
     setShowPlanPanel(false);
     setShowSettingsPanel(false);
     setShowAssetsPanel(false);
+    setShowTerminalPanel(false);
     setShowGitPanel(true);
   }, [activeDiscussionId]);
 
@@ -989,6 +993,7 @@ export function DiscussionsPage({
       const discussionId = (event as CustomEvent<{ discussionId?: string }>).detail?.discussionId;
       if (discussionId !== activeDiscussionId) return;
       setShowGitPanel(false);
+      setShowTerminalPanel(false);
       setShowSettingsPanel(false);
       setShowAssetsPanel(false);
       setShowPlanPanel(true);
@@ -2050,12 +2055,19 @@ export function DiscussionsPage({
     // synchronously, so a fast second click within the same tick enqueues
     // rather than launching a parallel run.
     if (sendingMap[discId] || abortControllers.current[discId]) {
-      enqueueMessage(msg, targets, targetAll, replyTargetId);
+      const queued = enqueueMessage(msg, targets, targetAll, replyTargetId);
       setReplyToMessageId(null);
       clearReplyDraft(discId);
-      // The in-memory queue now owns this submission. It is not a backend
-      // receipt, but the composer may safely advance to the next draft.
-      publishMessageSendSettled(discId, msg, 'accepted');
+      // `enqueueMessage` reports success only after localStorage owns the
+      // stable UUID. The composer may clear at that durable client boundary;
+      // the outbox keeps retrying until the backend returns an accepted (or
+      // duplicate) receipt for the same identity.
+      if (queued) {
+        publishMessageSendSettled(discId, msg, 'accepted');
+      } else {
+        publishMessageSendSettled(discId, msg, 'refused');
+        toast(t('disc.queuedPersistFailed'), 'error');
+      }
       return;
     }
     stopTts();
@@ -2253,19 +2265,59 @@ export function DiscussionsPage({
     onFire: handleSendMessage,
   });
 
-  // CLI-style message queue — type follow-up messages while the agent is still
-  // streaming; they auto-fire one-by-one as each response completes. Handled at
-  // Kronn's orchestration layer (never concurrent sends), so it works for EVERY
-  // agent type regardless of whether the underlying CLI supports queueing.
+  // Persist one outbox entry without attaching its SSE lifecycle to the
+  // currently rendered stream. `defer_dispatch` commits the User row and
+  // Pending dispatch atomically; the backend scheduler starts it only after
+  // the discussion's current runner releases its claim.
+  const persistQueuedMessage = useCallback((discId: string, queued: QueuedMessage) => (
+    new Promise<void>((resolve, reject) => {
+      let accepted = false;
+      const refuseBeforeReceipt = (error: string) => {
+        if (!accepted) reject(new Error(userError(error)));
+      };
+      void discussionsApi.sendMessageStream(
+        discId,
+        {
+          content: queued.content,
+          channel: 'main',
+          targets: queued.targets ?? [],
+          target_all: queued.targetAll ?? false,
+          target_agents: (queued.targets ?? []).map(target => target.agent_type),
+          target_agent: queued.targets?.[0]?.agent_type,
+          client_message_id: queued.id,
+          defer_dispatch: true,
+          reply_to_message_id: queued.replyToMessageId,
+        },
+        () => undefined,
+        () => {
+          if (!accepted) refuseBeforeReceipt('Message stream closed before persistence receipt');
+        },
+        refuseBeforeReceipt,
+        undefined,
+        undefined,
+        undefined,
+        () => {
+          accepted = true;
+          resolve();
+          refetchDiscussions();
+          reloadDiscussion(discId);
+          loadContextFiles(discId);
+        },
+      ).catch(error => refuseBeforeReceipt(error instanceof Error ? error.message : String(error)));
+    })
+  ), [loadContextFiles, refetchDiscussions, reloadDiscussion]);
+
+  // Durable CLI-style outbox — entries are written locally before acceptance,
+  // then reconciled against the backend with a stable client_message_id.
   const {
     queue: queuedMessages,
     enqueue: enqueueMessage,
     removeQueued: removeQueuedMessage,
+    retryQueued: retryQueuedMessage,
     clearQueue: clearMessageQueue,
   } = useMessageQueue({
     discId: activeDiscussionId,
-    sending,
-    onFire: handleSendMessage,
+    onPersist: persistQueuedMessage,
   });
 
   // Queued follow-ups now live inside the scrollable transcript. Keep the
@@ -2299,11 +2351,13 @@ export function DiscussionsPage({
     const controller = abortControllers.current[discId];
     if (controller) controller.abort();
     cleanupStream(discId);
-    // Stop means stop: drop any messages the user queued during this run
-    // rather than auto-firing them on the (now cancelled) completion edge.
-    clearMessageQueue();
+    // Stop cancels this exact running response. Durable follow-ups remain in
+    // the outbox: silently deleting already-accepted human input here would
+    // recreate the data-loss bug KT-469 closes. The outbox has its own remove
+    // and clear controls when the human explicitly wants to discard it.
   };
 
+  const visibleStreamingReplyId = visibleStreamingReply?.id;
   const handleStopDispatch = useCallback(async (dispatchId: string) => {
     if (!activeDiscussionId) return;
     const discId = activeDiscussionId;
@@ -2324,7 +2378,7 @@ export function DiscussionsPage({
             },
           };
         });
-        if (visibleStreamingReply?.id === dispatchId) {
+        if (visibleStreamingReplyId === dispatchId) {
           abortControllers.current[discId]?.abort();
           cleanupStream(discId);
         }
@@ -2344,7 +2398,7 @@ export function DiscussionsPage({
       });
     }
   }, [abortControllers, activeDiscussionId, cleanupStream, refetchDiscussions, reloadDiscussion,
-    t, toast, visibleStreamingReply?.id]);
+    setLoadedDiscussions, t, toast, visibleStreamingReplyId]);
 
   const handleTtsToggle = useCallback(() => {
     setTtsEnabled(prev => {
@@ -3138,6 +3192,7 @@ export function DiscussionsPage({
               setShowPlanPanel(false);
               setShowSettingsPanel(false);
               setShowAssetsPanel(false);
+              setShowTerminalPanel(false);
               setShowGitPanel(true);
             }}
             onCancel={() => { setTestModeBlocker(null); setTestModePendingDiscId(null); }}
@@ -3268,6 +3323,15 @@ export function DiscussionsPage({
               agents={agents}
               modelTiers={agentAccess?.model_tiers}
               showGitPanel={showGitPanel}
+              showTerminalPanel={showTerminalPanel}
+              terminalEnabled={agentAccess != null && [
+                agentAccess.claude_code,
+                agentAccess.codex,
+                agentAccess.gemini_cli,
+                agentAccess.kiro,
+                agentAccess.vibe,
+                agentAccess.copilot_cli,
+              ].some(config => config?.full_access)}
               showPlanPanel={showPlanPanel}
               showSettingsPanel={showSettingsPanel}
               showAssetsPanel={showAssetsPanel}
@@ -3290,22 +3354,35 @@ export function DiscussionsPage({
                 setShowPlanPanel(false);
                 setShowSettingsPanel(false);
                 setShowAssetsPanel(false);
+                setShowTerminalPanel(false);
                 setShowGitPanel(prev => !prev);
+              }}
+              onToggleTerminalPanel={() => {
+                setGitPanelExpanded(false);
+                setInitialGitWorkspaceId(undefined);
+                setShowGitPanel(false);
+                setShowPlanPanel(false);
+                setShowSettingsPanel(false);
+                setShowAssetsPanel(false);
+                setShowTerminalPanel(prev => !prev);
               }}
               onTogglePlanPanel={() => {
                 setShowGitPanel(false);
+                setShowTerminalPanel(false);
                 setShowSettingsPanel(false);
                 setShowAssetsPanel(false);
                 setShowPlanPanel(prev => !prev);
               }}
               onToggleSettingsPanel={() => {
                 setShowGitPanel(false);
+                setShowTerminalPanel(false);
                 setShowPlanPanel(false);
                 setShowAssetsPanel(false);
                 setShowSettingsPanel(prev => !prev);
               }}
               onToggleAssetsPanel={() => {
                 setShowGitPanel(false);
+                setShowTerminalPanel(false);
                 setShowPlanPanel(false);
                 setShowSettingsPanel(false);
                 setShowAssetsPanel(prev => !prev);
@@ -4318,7 +4395,7 @@ export function DiscussionsPage({
                       )}
                     </div>
                     {queuedMessages.map(qm => (
-                      <div key={qm.id} className="disc-queued-line">
+                      <div key={qm.id} className="disc-queued-line" data-status={qm.status}>
                         {qm.targets?.map(target => (
                           <span
                             key={`${target.kind}:${target.agent_type}:${target.cli_session_id ?? ''}`}
@@ -4333,10 +4410,26 @@ export function DiscussionsPage({
                           </span>
                         )}
                         <span className="disc-queued-text">{qm.content}</span>
+                        <span className="disc-queued-status">
+                          {qm.status === 'sending' && <Loader2 size={10} className="spin" />}
+                          {t(`disc.queuedStatus.${qm.status}`)}
+                        </span>
+                        {qm.status === 'failed' && (
+                          <button
+                            type="button"
+                            className="disc-queued-retry"
+                            onClick={() => retryQueuedMessage(qm.id)}
+                            aria-label={t('disc.queuedRetry')}
+                            title={qm.error || t('disc.queuedRetry')}
+                          >
+                            <Play size={10} /> {t('disc.queuedRetry')}
+                          </button>
+                        )}
                         <button
                           type="button"
                           className="disc-queued-cancel"
                           onClick={() => removeQueuedMessage(qm.id)}
+                          disabled={qm.status === 'sending'}
                           aria-label={t('disc.queuedCancel')}
                           title={t('disc.queuedCancel')}
                         >
@@ -4522,7 +4615,14 @@ export function DiscussionsPage({
                   setShowGitPanel(false);
                 }}
                 onExpandedChange={setGitPanelExpanded}
-                terminalEnabled={agentAccess ? Object.values(agentAccess).some(v => (v as { full_access?: boolean } | undefined)?.full_access) : false}
+              />
+            )}
+
+            {showTerminalPanel && (
+              <TerminalPanel
+                key={activeDiscussion.id}
+                discussionId={activeDiscussion.id}
+                onClose={() => setShowTerminalPanel(false)}
               />
             )}
 

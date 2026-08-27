@@ -1,4 +1,4 @@
-/* Shared chrome for the discussion utility panels (Plan, Code and Settings).
+/* Shared chrome for the discussion utility panels (Plan, Git, Terminal and Settings).
  * Panel contents keep their own component classes; this file owns only the
  * shell so every tool behaves the same across themes and breakpoints. */
 .disc-tool-panel {

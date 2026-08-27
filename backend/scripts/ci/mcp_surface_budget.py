@@ -31,12 +31,11 @@ BRIDGE = "backend/scripts/disc-introspection-mcp.py"
 # The measurement serialises with `ensure_ascii=True`, exactly like the wire:
 # every accented character in a French description travels as a 6-byte
 # `\uXXXX` escape, not as its 2 bytes of UTF-8. The ceiling is pinned to this
-# tree's 103-tool payload after moving the bounded Ollama worker policy to an
-# on-demand manual and replacing resolve_id's drifting family enumeration with
-# one stable public-object contract.
+# tree's 105-tool payload after moving Quick Prompt launch/tracking reference
+# material behind `tool_manual`, alongside the bounded Ollama worker policy.
 # It carries no slack: lower it whenever the catalogue shrinks, never raise it
 # to make a build pass.
-CATALOGUE_MAX_BYTES = 88_808
+CATALOGUE_MAX_BYTES = 88_151
 
 # Per-declaration ceiling. The five heaviest tools were 29% of the catalogue for
 # 6% of the tools; their descriptions had grown into manuals. A per-tool cap is
@@ -45,7 +44,7 @@ CATALOGUE_MAX_BYTES = 88_808
 # Also corrected: this used to add raw `description` bytes to a separately
 # serialised schema, which counted neither the JSON envelope nor the escaping. It
 # now measures the whole declaration exactly as sent.
-DECLARATION_MAX_BYTES = 3_401
+DECLARATION_MAX_BYTES = 3_259
 
 # Tools allowed above DECLARATION_MAX_BYTES, with the reason. An entry here is a
 # debt acknowledged in writing, not an exemption to forget: shrink the tool and

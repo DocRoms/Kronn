@@ -1,7 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { LivePageDetail } from '../types/generated';
 import { pages as pagesApi } from '../lib/api';
-import { buildSandboxDocument, runtimeData } from '../lib/live-page-sandbox';
+import {
+  buildSandboxDocument,
+  createLivePageOpenLinkRelay,
+  runtimeData,
+} from '../lib/live-page-sandbox';
 import { useT } from '../lib/I18nContext';
 import { userError } from '../lib/userError';
 import './StandaloneLivePage.css';
@@ -16,6 +20,7 @@ export function StandaloneLivePage({ pageId }: { pageId: string }) {
   const [error, setError] = useState<string | null>(null);
   const [bridgeChannel] = useState(channelId);
   const iframeRef = useRef<HTMLIFrameElement>(null);
+  const linkRelayRef = useRef<ReturnType<typeof createLivePageOpenLinkRelay> | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -43,13 +48,24 @@ export function StandaloneLivePage({ pageId }: { pageId: string }) {
   );
   const publishToFrame = useCallback(() => {
     if (!detail) return;
-    iframeRef.current?.contentWindow?.postMessage({
+    const target = iframeRef.current?.contentWindow ?? null;
+    if (!target) return;
+    linkRelayRef.current?.connect(target);
+    target.postMessage({
       type: 'kronn:page-data',
       version: 1,
       channel_id: bridgeChannel,
       data: runtimeData(detail),
     }, '*');
   }, [bridgeChannel, detail]);
+  useEffect(() => {
+    const relay = createLivePageOpenLinkRelay(bridgeChannel);
+    linkRelayRef.current = relay;
+    return () => {
+      if (linkRelayRef.current === relay) linkRelayRef.current = null;
+      relay.dispose();
+    };
+  }, [bridgeChannel]);
   useEffect(() => { publishToFrame(); }, [publishToFrame]);
 
   if (error) {

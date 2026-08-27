@@ -186,7 +186,14 @@ export const agentColor = (
   return isRgbHex(override) ? override : AGENT_COLORS[agentType ?? ''] ?? '#8b5cf6';
 };
 
-/** Check if an agent has full_access disabled (restricted mode). */
+/**
+ * Check if an agent has full_access disabled (restricted mode).
+ *
+ * HTTP agents do not expose Kronn's host-filesystem full-access toggle: their
+ * access boundary is the HTTP tool/runtime contract instead. Treating their
+ * defaulted `full_access: false` as a restriction produced a permanent warning
+ * whose Config CTA could never be satisfied.
+ */
 export function isAgentRestricted(agentAccess: AgentsConfig | undefined, agentType: AgentType): boolean {
   if (!agentAccess) return false;
   const map: Record<string, boolean | undefined> = {
@@ -196,9 +203,9 @@ export function isAgentRestricted(agentAccess: AgentsConfig | undefined, agentTy
     Vibe: agentAccess.vibe?.full_access,
     Kiro: undefined,
     CopilotCli: agentAccess.copilot_cli?.full_access,
-    Ollama: agentAccess.ollama?.full_access,
-    LiteLlm: agentAccess.lite_llm?.full_access,
-    Nvidia: agentAccess.nvidia?.full_access,
+    Ollama: undefined,
+    LiteLlm: undefined,
+    Nvidia: undefined,
   };
   return map[agentType] === false;
 }
@@ -254,9 +261,9 @@ export function hasAgentFullAccess(agentAccess: AgentsConfig | undefined, agentT
     Vibe: agentAccess.vibe?.full_access,
     Kiro: undefined,
     CopilotCli: agentAccess.copilot_cli?.full_access,
-    Ollama: agentAccess.ollama?.full_access,
-    LiteLlm: agentAccess.lite_llm?.full_access,
-    Nvidia: agentAccess.nvidia?.full_access,
+    Ollama: undefined,
+    LiteLlm: undefined,
+    Nvidia: undefined,
   };
   return map[agentType] === true;
 }

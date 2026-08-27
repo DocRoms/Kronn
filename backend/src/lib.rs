@@ -590,6 +590,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             delete(api::live_pages::unlink_discussion),
         )
         .route("/api/pages/{id}/html", put(api::live_pages::update_html))
+        .route(
+            "/api/pages/{id}/datasets",
+            post(api::live_pages::add_dataset),
+        )
         .route("/api/pages/{id}/publish", post(api::live_pages::publish))
         // ── OpenAPI / Swagger UI ──
         // Spec served at `/api/openapi.json` by SwaggerUi (its `.url()`

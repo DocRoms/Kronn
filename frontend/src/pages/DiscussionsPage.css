@@ -1619,6 +1619,9 @@
   gap: 6px;
   padding-left: 16px; /* aligns text under the header label, past the clock */
 }
+.disc-queued-line[data-status='failed'] {
+  color: var(--kr-error-soft);
+}
 .disc-queued-agent {
   flex-shrink: 0;
   color: var(--kr-accent);
@@ -1631,6 +1634,31 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.disc-queued-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex-shrink: 0;
+  color: var(--kr-text-ghost);
+  font-size: var(--kr-fs-xs);
+}
+.disc-queued-line[data-status='failed'] .disc-queued-status {
+  color: var(--kr-error-soft);
+}
+.disc-queued-retry {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex-shrink: 0;
+  border: 0;
+  background: transparent;
+  color: var(--kr-accent);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--kr-fs-xs);
+  padding: 2px 3px;
+}
+.disc-queued-retry:hover { text-decoration: underline; }
 .disc-queued-cancel {
   flex-shrink: 0;
   display: inline-flex;
@@ -1649,6 +1677,10 @@
 .disc-queued-cancel:hover {
   color: var(--kr-error-soft);
   background: rgba(var(--kr-error-rgb), 0.12);
+}
+.disc-queued-cancel:disabled {
+  cursor: default;
+  opacity: 0;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -5591,6 +5623,37 @@ button.disc-contact-open {
 .disc-select-styled[data-locked="true"] {
   opacity: 0.5;
   pointer-events: none;
+}
+
+.disc-project-picker {
+  display: grid;
+  gap: 6px;
+}
+
+.disc-project-search {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.disc-project-search > svg {
+  position: absolute;
+  left: 10px;
+  color: var(--kr-text-muted);
+  pointer-events: none;
+}
+
+.disc-project-search .disc-input-styled {
+  padding-left: 30px;
+}
+
+.disc-project-default {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--kr-text-muted);
+  font-size: var(--kr-fs-xs);
+  cursor: pointer;
 }
 
 .disc-input-styled {

@@ -136,7 +136,7 @@ describe('typed composer targets', () => {
     ]);
   });
 
-  it('keeps all unanswered native models visible for a general group turn', () => {
+  it('keeps only the principal pending for a general turn', () => {
     const discussion = {
       id: 'disc-general', agent: 'LiteLlm', participants: ['LiteLlm', 'Ollama'],
       awaiting_agent: true,
@@ -147,7 +147,7 @@ describe('typed composer targets', () => {
       }],
     } as Discussion;
 
-    expect(pendingAgentReplies(discussion).map(reply => reply.agent)).toEqual(['LiteLlm', 'Ollama']);
+    expect(pendingAgentReplies(discussion).map(reply => reply.agent)).toEqual(['LiteLlm']);
   });
 
   it('does not mistake an alias shown in code for the only pending model', () => {
@@ -161,7 +161,7 @@ describe('typed composer targets', () => {
       }],
     } as Discussion;
 
-    expect(pendingAgentReplies(discussion).map(reply => reply.agent)).toEqual(['LiteLlm', 'Ollama']);
+    expect(pendingAgentReplies(discussion).map(reply => reply.agent)).toEqual(['LiteLlm']);
   });
 
   it('keeps duplicate agents separate when two turns both have active jobs', () => {
@@ -266,6 +266,29 @@ describe('typed composer targets', () => {
     );
     const result = targetsFromComposerText(
       'Explique `@codex` puis ```md\n@codex-cli\n@all\n``` à @vibe.',
+      mentions,
+    );
+
+    expect(result.targetAll).toBe(false);
+    expect(result.targets).toEqual([
+      expect.objectContaining({ kind: 'agent', agent_type: 'Vibe' }),
+    ]);
+  });
+
+  it('treats quoted aliases and Markdown quotations as documentation', () => {
+    const mentions = composerMentions(
+      'ClaudeCode',
+      ['ClaudeCode', 'Codex', 'Ollama', 'Vibe'],
+      [],
+      labels,
+    );
+    const result = targetsFromComposerText(
+      [
+        'Le popup affiche "@ollama&" mais je ne le sélectionne pas.',
+        '« Routage demandé : @codex »',
+        '> badge copié : @all',
+        'La vraie demande va à @vibe.',
+      ].join('\n'),
       mentions,
     );
 

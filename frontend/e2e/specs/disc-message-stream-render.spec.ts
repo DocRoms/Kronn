@@ -137,7 +137,9 @@ test.describe('Discussion chat — streamed agent reply renders in the browser',
 
     // Open the disc from the sidebar. The row's aria-label is a plain
     // attribute (not MatrixText-animated) so it matches immediately.
-    await page.getByRole('button', { name: /E2E Stream Render/ }).click();
+    await page
+      .locator('button.disc-item-open[aria-label^="E2E Stream Render —"]')
+      .click();
 
     // The disc loaded: the seed user message is on screen.
     await expect(

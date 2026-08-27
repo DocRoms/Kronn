@@ -1523,6 +1523,26 @@ TOOLS = [
         },
     },
     {
+        "name": "page_add_dataset",
+        "description": (
+            "Attach a dataset to an existing Page so PublishPageData can write "
+            "to it. Idempotent on name+kind; reusing a name with another kind conflicts."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "page_id": {"type": "string"},
+                "name": {"type": "string"},
+                "kind": {"type": "string", "enum": ["snapshot", "time_series", "collection"]},
+                "initial": {},
+                "schema": {},
+                "max_points": {"type": "integer"},
+                "max_age_days": {"type": "integer"},
+            },
+            "required": ["page_id", "name", "kind"],
+        },
+    },
+    {
         "name": "mcp_list",
         "description": (
             "List the current MCP/API configs, REST endpoints, `config_keys` and "
@@ -2070,12 +2090,12 @@ TOOLS = [
                 "api_headers": {"type": "object", "description": "Extra request headers. NEVER pass auth — Kronn injects per the plugin spec."},
                 "api_body": {"description": "JSON body for POST/PUT/PATCH (object/array). String leaves can contain `{{var}}` placeholders."},
                 "api_extract": {"type": "object", "description": "Optional JSONPath extract spec: `{path: \"$.items\", fail_on_empty: false}`."},
-                "api_pagination": {"type": "object", "description": "Optional pagination spec — internally tagged `{\"type\": ...}`: Auto | Offset | Cursor | Page | LinkHeader (GitHub-style bare array + `Link: rel=next` header; fields page_size_param/page_size/max_pages)."},
+                "api_pagination": {"type": "object", "description": "Optional pagination spec (Auto | Offset | Cursor | Page | LinkHeader); shape in tool_manual."},
                 "api_timeout_ms": {"type": "integer", "description": "Optional per-call timeout in ms. Defaults to plugin default."},
                 "api_max_retries": {"type": "integer", "description": "Optional retry count on transient HTTP errors."},
                 "variables": {
                     "type": "array",
-                    "description": "Variable definitions (each `{ name, label?, placeholder?, required?, description? }`).",
+                    "description": "Variable definitions; exact shape documented in tool_manual.",
                 },
                 "description": {"type": "string", "description": "Optional one-line description shown on the QA card."},
                 "icon": {"type": "string", "description": "Optional single-emoji prefix (e.g. `🎫` / `📧` / `🔍`)."},
@@ -2142,14 +2162,14 @@ TOOLS = [
             "properties": {
                 "qa_id": {"type": "string", "description": "Quick API id (from `qa_list`)."},
                 # Every QA field can be patched. None required beyond qa_id.
-                "name": {"type": "string", "description": "New name. Omit to keep existing."},
-                "icon": {"type": "string", "description": "New icon. Omit to keep existing."},
-                "description": {"type": "string", "description": "New description. Omit to keep existing."},
+                "name": {"type": "string"},
+                "icon": {"type": "string"},
+                "description": {"type": "string"},
                 "api_plugin_slug": {"type": "string", "description": "Re-target to a different plugin (rare)."},
-                "api_config_id": {"type": "string", "description": "Re-target to a different config id."},
-                "api_endpoint_path": {"type": "string", "description": "Change the endpoint."},
+                "api_config_id": {"type": "string"},
+                "api_endpoint_path": {"type": "string"},
                 "api_method": {"type": "string"},
-                "api_query": {"type": "object", "description": "Replace the query map. Pass `{}` to clear."},
+                "api_query": {"type": "object"},
                 "api_path_params": {"type": "object"},
                 "api_headers": {"type": "object"},
                 "api_body": {"description": "Replace the body JSON."},
@@ -2157,10 +2177,10 @@ TOOLS = [
                 "api_pagination": {"type": "object"},
                 "api_timeout_ms": {"type": "integer"},
                 "api_max_retries": {"type": "integer"},
-                "variables": {"type": "array", "description": "Replace the variables list. Pass `[]` to clear all."},
+                "variables": {"type": "array"},
                 "profile_ids": {"type": "array", "items": {"type": "string"}},
                 "directive_ids": {"type": "array", "items": {"type": "string"}},
-                "project_id": {"type": "string", "description": "Re-bind to a different project. Omit to keep existing."},
+                "project_id": {"type": "string", "description": "Re-bind to a different project."},
             },
             "required": ["qa_id"],
         },
@@ -2317,25 +2337,11 @@ TOOLS = [
     {
         "name": "qp_run",
         "description": (
-            "Launch a Quick Prompt as a fresh disc — one-shot mode. "
-            "Returns `{disc_id, qp_id, qp_name, agent, "
-            "expected_duration_ms?, samples, next_check}`. The QP's "
-            "default agent is used unless `agent` is overridden.\n\n"
-            "**Discovery first** : call `qp_list` to find the right "
-            "`qp_id` + see required variables. Pass them as "
-            "`vars: {name: value, ...}` — same `{{var}}` substitution "
-            "as the UI form. Required vars must be non-empty.\n\n"
-            "**Track the run** : the agent is kicked off automatically "
-            "in the background. After `next_check.wait_seconds`, read "
-            "the result via `disc_load_other(disc_id)` — same tool used "
-            "for any other disc. `next_check` here uses the QP's "
-            "weighted-average first-reply duration across all versions "
-            "(`qp_versions` metrics).\n\n"
-            "**Optional project scope** : if you don't pass "
-            "`project_id`, the QP's declared project (or no project) "
-            "is used. Pass `project_id` explicitly to override.\n\n"
-            "**vs `qp_create_draft`** : draft creates a NEW QP "
-            "definition ; `qp_run` LAUNCHES an existing QP."
+            "Launch an existing Quick Prompt as one fresh background discussion. "
+            "Resolve its id and required variables with `qp_list`; every required "
+            "value must be non-empty. The response includes `disc_id` and "
+            "`next_check`; read the result with `disc_load_other`. Agent and project "
+            "overrides are optional. Tracking details: `tool_manual({tool: \"qp_run\"})`."
         ),
         "inputSchema": {
             "type": "object",
@@ -2347,7 +2353,7 @@ TOOLS = [
                 },
                 "agent": {
                     "type": "string",
-                    "description": "Optional agent override : `ClaudeCode | Codex | Vibe | GeminiCli | Kiro | CopilotCli | Ollama | Custom`. Defaults to the QP's declared agent.",
+                    "description": "Optional agent override. Defaults to the QP's declared agent.",
                 },
                 "project_id": {
                     "type": "string",
@@ -2364,27 +2370,11 @@ TOOLS = [
     {
         "name": "qp_batch_run",
         "description": (
-            "Fan a Quick Prompt out to N discussions in ONE call — the "
-            "batch twin of `qp_run`. Returns `{run_id, qp_id, qp_name, "
-            "disc_ids[], batch_total, expected_duration_ms?, samples, "
-            "next_check}`.\n\n"
-            "**Items** : pass `items: [{title?, vars?}, ...]` — one entry "
-            "per child disc. Each item's `vars` render the QP `{{var}}` "
-            "placeholders independently, so you can run the same prompt "
-            "over a list (10 tickets, 5 hosts, 3 regions…). `title` is "
-            "optional (defaults to `<qp_name> #<n>`). Required QP vars must "
-            "be non-empty on EVERY item. Max 50 items.\n\n"
-            "**Discovery first** : `qp_list` for the `qp_id` + its required "
-            "vars.\n\n"
-            "**Track progress** : all children link under one batch "
-            "`run_id`. Poll it with `workflow_run_status({run_id})` "
-            "(batch_completed / batch_total) or list the children with "
-            "`workflow_run_discussions({run_id})`, then `disc_load_other` "
-            "the ones you care about. `next_check` is a per-item baseline "
-            "(single-launch avg) — the batch finishes when all items do, "
-            "so treat it as a floor.\n\n"
-            "**vs `qp_run`** : `qp_run` = 1 disc ; `qp_batch_run` = N discs "
-            "under one trackable batch."
+            "Launch an existing Quick Prompt into 1–50 child discussions under one "
+            "trackable batch. Resolve the id and variables with `qp_list`; each item's "
+            "required values must be non-empty. Returns `run_id`, `disc_ids` and "
+            "`next_check`; use workflow run tools for progress, then `disc_load_other`. "
+            "Full item and timing contract: `tool_manual({tool: \"qp_batch_run\"})`."
         ),
         "inputSchema": {
             "type": "object",
@@ -6916,6 +6906,24 @@ def call_page_update_html(args):
     return _unwrap(_http("PUT", f"/api/pages/{encoded}/html", body))
 
 
+def call_page_add_dataset(args):
+    """Attach one dataset to an already-created Page (idempotent on name+kind)."""
+    encoded = _page_selector(args, "page_add_dataset")
+    name = args.get("name")
+    kind = args.get("kind")
+    if not isinstance(name, str) or not name.strip():
+        raise RuntimeError("page_add_dataset: missing required 'name'")
+    if kind not in ("snapshot", "time_series", "collection"):
+        raise RuntimeError(
+            "page_add_dataset: 'kind' must be snapshot, time_series or collection"
+        )
+    body = {"name": name, "kind": kind}
+    for field in ("initial", "schema", "max_points", "max_age_days"):
+        if field in args:
+            body[field] = args[field]
+    return _unwrap(_http("POST", f"/api/pages/{encoded}/datasets", body))
+
+
 def call_mcp_list(_args):
     # 0.8.5 — wired MCP configs (the API plugin slug + config id the
     # workflow ApiCall steps need). Drops env values (secrets) and
@@ -9087,6 +9095,28 @@ TOOL_MANUALS = {
         "Every referenced plugin, binding, Quick API, Quick Exec and Page must come from its "
         "current list tool; unresolved bindings require asking the user, never guessing."
     ),
+    "qp_run": (
+        "Call `qp_list` first to resolve the QP id and its required variables. Pass values "
+        "as `vars: {name: value}`; rendering uses the same `{{var}}` substitution as the UI "
+        "and every required value must be non-empty. `qp_run` launches an existing QP — it "
+        "does not create or update the definition.\n\n"
+        "The QP's declared agent and project are used by default. `agent` and `project_id` "
+        "are explicit overrides; omitting project scope preserves the QP's project or no "
+        "project. The returned `next_check` is based on the QP's weighted-average first-reply "
+        "duration across versions. After that delay, read the fresh discussion through "
+        "`disc_load_other(disc_id)`; the agent already runs in the background."
+    ),
+    "qp_batch_run": (
+        "Call `qp_list` first, then pass `items: [{title?, vars?}, ...]`. Each item renders "
+        "the QP's `{{var}}` placeholders independently; every required variable must be "
+        "non-empty on every item. Titles default to `<qp_name> #<n>` and the batch is capped "
+        "at 50 children.\n\n"
+        "All children share the returned `run_id`. Poll `workflow_run_status({run_id})` for "
+        "`batch_completed / batch_total`, or enumerate them with "
+        "`workflow_run_discussions({run_id})`, then read selected results with "
+        "`disc_load_other`. `next_check` is the single-launch per-item baseline, so it is a "
+        "floor for the whole batch. Use `qp_run` when exactly one discussion is needed."
+    ),
     "qp_create_draft": (
         "Quick Prompts are reusable manual-launch templates and have no enabled flag. Create "
         "one only after the conversation has converged on a prompt worth keeping. Variables "
@@ -9144,6 +9174,9 @@ TOOL_MANUALS = {
         "**Variables**: each entry is `{name, label?, placeholder?, required?, "
         "description?}`; `required` defaults to true. `name` must be a snake_case "
         "or UPPER_SNAKE_CASE identifier matching the `{{var_name}}` placeholders.\n\n"
+        "**Pagination**: `api_pagination` is internally tagged `{\"type\": ...}`; "
+        "Auto | Offset | Cursor | Page | LinkHeader (LinkHeader = GitHub-style bare "
+        "array + `Link: rel=next` header; fields page_size_param/page_size/max_pages).\n\n"
         "**Rolling windows**: endpoint/query/header/body string leaves may also "
         "embed the server-side `{{time.now|...}}` grammar documented by "
         "`workflow_step_schema`. For an existing variable-based QA used by "
@@ -9684,6 +9717,7 @@ DISPATCH = {
     "page_get": call_page_get,
     "page_create": call_page_create,
     "page_update_html": call_page_update_html,
+    "page_add_dataset": call_page_add_dataset,
     "mcp_list": call_mcp_list,
     # 0.8.7 — fetch a Kronn doc convention spec on demand (cheap if not
     # called; lets agents about to author AGENTS.md sections pull the
@@ -9969,7 +10003,7 @@ def _handle(req):
                     "• Workflows (multi-step pipelines): `workflow_list` (compact) · `workflow_get` (FULL, every step) · `workflow_step_schema` (CANONICAL step schema as an untruncatable result — the closed 12 `step_type`s, per-type fields, runtime contracts; call before authoring) · `workflow_create_draft` · `workflow_clone`/`workflow_update`/`workflow_set_enabled` · `workflow_trigger`/`workflow_run_status` · run history `workflow_runs`/`workflow_run_get` · `workflow_active_runs`/`workflow_cancel_run`. Agent-step bindings (full CRUD): `skills_list`/`profiles_list`/`directives_list` enumerate valid ids; `skill_get`/`profile_get`/`directive_get` read FULL bodies; `skill_create`/`skill_update`/`skill_delete` (+ `profile_*`/`directive_*`) author & edit custom ones.\n"
                     "• Quick Prompts (reusable prompt templates): `qp_list` (no body) · `qp_get` (FULL incl `prompt_template` — read this to know what a QP does, or to run it yourself) · `qp_create_draft`/`qp_update`/`qp_delete` · `qp_run`/`qp_batch_run`.\n"
                     "• Quick APIs + API broker: `qa_list`/`qa_run`/`qa_create_draft`/`qa_update` · `mcp_list` → `api_call` (configured plugins, auth injected). Quick Execs: `qe_list`/`qe_run`/`qe_create_draft`/`qe_update` for saved shell-free CLI collectors.\n"
-                    "• Live Pages (shared HTML reports): `page_list` · `page_get` · `page_create` · `page_update_html`. Resolve or create the Page before authoring a `PublishPageData` step.\n"
+                    "• Live Pages (shared HTML reports): `page_list` · `page_get` · `page_create` · `page_update_html` · `page_add_dataset`. Resolve or create the Page before authoring a `PublishPageData` step.\n"
                     "• Docs/conventions: `convention_get`. Continual learning: `learning_propose`.\n"
                     "**Navigation rule:** to understand a CAPABILITY, read the relevant tool's description AND `*_get` a REAL, rich example — never infer what the system can do from a single workflow/QP you happened to open.\n\n"
                     "**API actions — order to avoid burning tokens:** "

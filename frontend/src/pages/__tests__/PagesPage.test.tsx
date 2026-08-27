@@ -33,6 +33,7 @@ const publications: LivePagePublication[] = [3, 2, 1].map(dataRevision => ({
   points_removed: 0,
   published_at: `2026-08-13T0${dataRevision}:00:00Z`,
 }));
+const linkRelay = vi.hoisted(() => ({ connect: vi.fn(), dispose: vi.fn() }));
 
 vi.mock('../../lib/api', () => ({
   docs: { generatePdf: vi.fn(), generateDocx: vi.fn(), generateCsv: vi.fn() },
@@ -50,6 +51,7 @@ vi.mock('../../lib/I18nContext', () => ({
 }));
 vi.mock('../../lib/live-page-sandbox', async importOriginal => ({
   ...await importOriginal<Record<string, unknown>>(),
+  createLivePageOpenLinkRelay: vi.fn(() => linkRelay),
   requestRenderedPageHtml: vi.fn(),
 }));
 
@@ -60,6 +62,8 @@ import { PagesPage } from '../PagesPage';
 beforeEach(() => {
   localStorage.removeItem('kronn:pageNavigation');
   localStorage.removeItem('kronn:pageCollapsedSections');
+  linkRelay.connect.mockClear();
+  linkRelay.dispose.mockClear();
   vi.mocked(pagesApi.list).mockResolvedValue([page]);
   vi.mocked(pagesApi.get).mockResolvedValue(detail);
   vi.mocked(pagesApi.revisions).mockResolvedValue([
@@ -104,6 +108,7 @@ describe('PagesPage', () => {
     expect(frame).not.toHaveAttribute('allow-same-origin');
     expect(frame.getAttribute('srcdoc')).toContain("connect-src 'none'");
     expect(frame.getAttribute('srcdoc')).toContain('<h1>Adobe</h1>');
+    expect(linkRelay.connect).toHaveBeenCalledWith((frame as HTMLIFrameElement).contentWindow);
     const standaloneLink = screen.getByRole('link', { name: 'pages.openInNewTab:Adobe Signals' });
     expect(standaloneLink).toHaveAttribute('href', `${window.location.origin}${window.location.pathname}#page/page-1`);
     expect(standaloneLink).toHaveAttribute('target', '_blank');

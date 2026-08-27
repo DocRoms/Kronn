@@ -2,6 +2,8 @@ import { render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { LivePageDetail } from '../../types/generated';
 
+const linkRelay = vi.hoisted(() => ({ connect: vi.fn(), dispose: vi.fn() }));
+
 const detail: LivePageDetail = {
   id: 'page-1', project_id: null, title: 'Production health', slug: 'production-health',
   current_revision_id: 'rev-1', data_revision: 2,
@@ -19,11 +21,17 @@ vi.mock('../../lib/api', () => ({ pages: { get: vi.fn() } }));
 vi.mock('../../lib/I18nContext', () => ({
   useT: () => ({ t: (key: string, ...args: string[]) => args.length ? `${key}:${args.join(',')}` : key }),
 }));
+vi.mock('../../lib/live-page-sandbox', async importOriginal => ({
+  ...await importOriginal<Record<string, unknown>>(),
+  createLivePageOpenLinkRelay: vi.fn(() => linkRelay),
+}));
 
 import { pages as pagesApi } from '../../lib/api';
 import { StandaloneLivePage } from '../StandaloneLivePage';
 
 beforeEach(() => {
+  linkRelay.connect.mockClear();
+  linkRelay.dispose.mockClear();
   vi.mocked(pagesApi.get).mockResolvedValue(detail);
 });
 
@@ -40,6 +48,7 @@ describe('StandaloneLivePage', () => {
     expect(frame).not.toHaveAttribute('allow-same-origin');
     expect(frame.getAttribute('srcdoc')).toContain("connect-src 'none'");
     expect(frame.getAttribute('srcdoc')).toContain('<h1>Production health</h1>');
+    expect(linkRelay.connect).toHaveBeenCalledWith((frame as HTMLIFrameElement).contentWindow);
     await waitFor(() => expect(document.title).toBe('Production health · Kronn'));
 
     view.unmount();

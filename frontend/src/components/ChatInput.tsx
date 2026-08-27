@@ -58,7 +58,6 @@ import { useIsMobile } from '../hooks/useMediaQuery';
 import { MarkdownEditor } from './MarkdownComposerTools';
 import {
   composerMentions,
-  nativeDiscussionTargets,
   targetsFromComposerText,
 } from '../lib/messageTargets';
 import { findAgentMentionQuery, type AgentMentionQuery } from '../lib/mention-autocomplete';
@@ -804,14 +803,10 @@ export function ChatInput({
     const parsedTargets = channel === 'main'
       ? targetsFromComposerText(msg, AGENT_MENTIONS)
       : { targets: [], targetAll: false };
-    const attachedNativeTargets = nativeDiscussionTargets(discussion);
-    const defaultTargets = channel === 'main'
-      && parsedTargets.targets.length === 0
-      && !parsedTargets.targetAll
-      && attachedNativeTargets.length > 1
-      ? attachedNativeTargets
-      : parsedTargets.targets;
-    const targets = defaultTargets.map(target => {
+    // Empty targets intentionally let the backend route to the configured
+    // discussion agent. Historical punctual participants must never become an
+    // implicit fan-out: only an explicit mention or @all can address them.
+    const targets = parsedTargets.targets.map(target => {
       if (target.kind === 'cli') return target;
       const tier = mentionTierOverridesRef.current[target.agent_type]
         ?? preferredTiersRef.current[target.agent_type];

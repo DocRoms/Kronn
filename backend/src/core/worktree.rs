@@ -47,14 +47,31 @@ pub enum DiskHeadroom {
 /// refusing on no evidence would break every user to protect none.
 pub fn disk_headroom(path: &Path, warning_gib: u64, critical_gib: u64) -> DiskHeadroom {
     let available = match fs2::available_space(path) {
-        Ok(bytes) => bytes,
+        Ok(bytes) => Some(bytes),
         Err(error) => {
             tracing::debug!(
                 "disk headroom unreadable at {}: {error} — provisioning proceeds",
                 path.display()
             );
-            return DiskHeadroom::Ok;
+            None
         }
+    };
+    classify_disk_headroom(available, warning_gib, critical_gib)
+}
+
+/// Apply the provisioning policy independently from the host filesystem probe.
+///
+/// Windows may report the containing volume's free space for a missing child
+/// path while Unix `statvfs` rejects the same shape. Keeping the policy pure
+/// lets the unreadable case stay testable without pretending those APIs have
+/// identical path-resolution semantics.
+fn classify_disk_headroom(
+    available: Option<u64>,
+    warning_gib: u64,
+    critical_gib: u64,
+) -> DiskHeadroom {
+    let Some(available) = available else {
+        return DiskHeadroom::Ok;
     };
     let available_gib = available / BYTES_PER_GIB;
     // A warning below the critical mark could never fire, and would read as a
@@ -1822,7 +1839,9 @@ pub fn committed_file_changes(
         return Err("git diff returned an incomplete name-status record".into());
     }
     fields
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|record| {
             let status = std::str::from_utf8(record[0])
                 .map_err(|error| format!("git diff status is not UTF-8: {error}"))?;
@@ -2456,10 +2475,11 @@ mod tests {
         // Deliberately the opposite of fail-closed. This guard exists to stop a
         // disk from filling, not to become a new way for provisioning to fail:
         // a path we cannot measure is not evidence of a problem, and refusing
-        // on no evidence would break every user to protect none.
-        let missing = std::env::temp_dir().join("kronn-no-such-path-for-disk-probe");
+        // on no evidence would break every user to protect none. Inject the
+        // failed probe directly: Windows reports its containing volume for a
+        // missing child path, whereas Unix rejects that same path.
         assert_eq!(
-            disk_headroom(&missing, u64::MAX, u64::MAX),
+            classify_disk_headroom(None, u64::MAX, u64::MAX),
             DiskHeadroom::Ok
         );
     }
@@ -3109,10 +3129,10 @@ mod tests {
         let info = create_task_worktree(repo.path(), "KT-142", "a1b2c3d4", &base).unwrap();
         // Domain-scoped deterministic naming (ADR-002: kronn/task/...), not the ticket.
         assert_eq!(info.branch, "kronn/task/kt-142-a1b2c3d4");
-        assert!(
-            info.path.contains(".kronn/worktrees/task-kt-142-a1b2c3d4"),
-            "unexpected path: {}",
-            info.path
+        assert_eq!(
+            PathBuf::from(&info.path),
+            worktree_base_dir(repo.path()).join("task-kt-142-a1b2c3d4"),
+            "task worktree path must use native separators and the managed layout"
         );
         // HEAD is the PINNED base, not main's tip — a concurrent push cannot move it.
         assert_eq!(head_sha(Path::new(&info.path)), base);

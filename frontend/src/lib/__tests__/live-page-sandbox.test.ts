@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   buildSandboxDocument,
+  createLivePageOpenLinkRelay,
   LIVE_PAGE_CSP,
   requestRenderedPageHtml,
   runtimeData,
@@ -40,9 +41,105 @@ describe('Live Page sandbox', () => {
     expect(output).toContain('viewport_width:width');
     expect(output).toContain('content_height:totalHeight');
     expect(output).toContain("root.querySelectorAll('script').forEach(script=>script.remove())");
+    expect(output).toContain("type:'kronn:page-open-link'");
+    expect(output).toContain("message.type==='kronn:page-link-port'");
+    expect(output).toContain('stopImmediate.call(event)');
+    expect(output).toContain('portPost.call(linkPort');
+    expect(output).toContain("element.closest('a[href]')");
+    expect(output).toContain("anchor.target.toLowerCase()!=='_blank'");
+    expect(output).toContain('userActivation&&!userActivation.isActive');
+    expect(output).toContain("Object.defineProperty(window,'open'");
     const script = output.match(/<script>([\s\S]*?)<\/script>/)?.[1];
     expect(script).toBeDefined();
     expect(() => new Function(script!)).not.toThrow();
+  });
+
+  it('opens only an HTTP(S) link received through the private port', async () => {
+    const postMessage = vi.fn();
+    const target = { postMessage } as unknown as Window;
+    const openExternal = vi.fn();
+    const relay = createLivePageOpenLinkRelay('channel-1', openExternal);
+    relay.connect(target);
+    const port = (postMessage.mock.calls[0][2] as MessagePort[])[0];
+    port.postMessage({
+      type: 'kronn:page-open-link',
+      version: 1,
+      channel_id: 'channel-1',
+      url: 'https://example.com/report?period=7d',
+    });
+
+    await vi.waitFor(() => expect(openExternal).toHaveBeenCalledWith(
+      'https://example.com/report?period=7d',
+      '_blank',
+      'noopener,noreferrer',
+    ));
+    relay.dispose();
+  });
+
+  it('rejects forged, active-scheme, credentialed and oversized link requests', async () => {
+    const postMessage = vi.fn();
+    const target = { postMessage } as unknown as Window;
+    const openExternal = vi.fn();
+    const relay = createLivePageOpenLinkRelay('channel-1', openExternal);
+    relay.connect(target);
+    const port = (postMessage.mock.calls[0][2] as MessagePort[])[0];
+    const valid = {
+      type: 'kronn:page-open-link',
+      version: 1,
+      channel_id: 'channel-1',
+      url: 'https://example.com/report',
+    };
+
+    window.dispatchEvent(new MessageEvent('message', { source: window, data: valid }));
+    port.postMessage({ ...valid, channel_id: 'forged' });
+    port.postMessage({ ...valid, type: 'kronn:page-export' });
+    port.postMessage({ ...valid, version: 2 });
+    port.postMessage({ ...valid, url: 'javascript:alert(1)' });
+    port.postMessage({ ...valid, url: 'data:text/html,boom' });
+    port.postMessage({ ...valid, url: 'https://user:secret@example.com/' });
+    port.postMessage({ ...valid, url: `https://example.com/${'x'.repeat(9 * 1024)}` });
+    port.postMessage({ ...valid, url: '/relative' });
+
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(openExternal).not.toHaveBeenCalled();
+    relay.dispose();
+    port.postMessage(valid);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(openExternal).not.toHaveBeenCalled();
+  });
+
+  it('rejects a valid private-port request without active user activation', async () => {
+    const activationDescriptor = Object.getOwnPropertyDescriptor(navigator, 'userActivation');
+    Object.defineProperty(navigator, 'userActivation', {
+      configurable: true,
+      value: { isActive: false },
+    });
+    const postMessage = vi.fn();
+    const openExternal = vi.fn();
+    const relay = createLivePageOpenLinkRelay(
+      'channel-1',
+      openExternal,
+    );
+    try {
+      relay.connect({ postMessage } as unknown as Window);
+      const port = (postMessage.mock.calls[0][2] as MessagePort[])[0];
+      port.postMessage({
+        type: 'kronn:page-open-link',
+        version: 1,
+        channel_id: 'channel-1',
+        url: 'https://example.com/background',
+      });
+
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(openExternal).not.toHaveBeenCalled();
+    } finally {
+      relay.dispose();
+      if (activationDescriptor) {
+        Object.defineProperty(navigator, 'userActivation', activationDescriptor);
+      } else {
+        Reflect.deleteProperty(navigator, 'userActivation');
+      }
+    }
   });
 
   it('accepts only the matching rendered document from the opaque frame', async () => {

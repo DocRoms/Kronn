@@ -176,7 +176,7 @@ test.describe('Discussion chat — multi-model reply lifecycle', () => {
     await expect(receipt).toContainText('@codex · ⚡ Éco');
   });
 
-  test('a general turn targets both models and keeps Ollama visible after LiteLLM settles', async ({ page }) => {
+  test('an explicit multi-model turn keeps Ollama visible after LiteLLM settles', async ({ page }) => {
     let sentAt = 0;
     let sentBody: SendMessageRequest | null = null;
 
@@ -250,18 +250,30 @@ test.describe('Discussion chat — multi-model reply lifecycle', () => {
     await page.route(`**/api/discussions/${DISC_ID}`, route => {
       if (route.request().method() !== 'GET') return route.continue();
       const elapsed = sentAt === 0 ? 0 : Date.now() - sentAt;
+      const triggerId = sentBody?.client_message_id ?? null;
       const messages = [message('seed', 'User', 'Départ')];
-      if (sentAt > 0) messages.push(message('user-general', 'User', USER_TEXT));
+      if (triggerId) messages.push(message(triggerId, 'User', USER_TEXT));
       if (elapsed >= 1_200) {
-        messages.push(message('lite-reply', 'Agent', LITE_REPLY, 'LiteLlm'));
+        messages.push(message('lite-reply', 'Agent', LITE_REPLY, 'LiteLlm', triggerId));
       }
       if (elapsed >= 5_500) {
-        messages.push(message('ollama-reply', 'Agent', OLLAMA_REPLY, 'Ollama'));
+        messages.push(message('ollama-reply', 'Agent', OLLAMA_REPLY, 'Ollama', triggerId));
       }
+      const activeAgentDispatches = !triggerId || elapsed >= 5_500
+        ? []
+        : [
+            ...(elapsed < 1_200
+              ? [{ id: 'lite-job', trigger_message_id: triggerId, agent_type: 'LiteLlm', status: 'Running' }]
+              : []),
+            { id: 'ollama-job', trigger_message_id: triggerId, agent_type: 'Ollama', status: 'Pending' },
+          ];
       return route.fulfill({
         status: 200,
         contentType: 'application/json',
-        body: envelope(discussion(messages, sentAt > 0 && elapsed < 5_500)),
+        body: envelope({
+          ...discussion(messages, sentAt > 0 && elapsed < 5_500),
+          active_agent_dispatches: activeAgentDispatches,
+        }),
       });
     });
 
@@ -270,7 +282,7 @@ test.describe('Discussion chat — multi-model reply lifecycle', () => {
     await dashboard.openDiscussion(DISC_ID);
     await expect(page.getByText('Départ')).toBeVisible();
 
-    await page.locator('.disc-composer-textarea').fill(USER_TEXT);
+    await page.locator('.disc-composer-textarea').fill(`@litellm @ollama ${USER_TEXT}`);
     await page.locator('.disc-send-btn').click();
 
     await expect(page.getByTestId('streaming-agent-LiteLlm')).toBeVisible();
@@ -395,7 +407,8 @@ test.describe('Discussion chat — multi-model reply lifecycle', () => {
     await expect(page.locator('[data-testid="pending-agent-Ollama"][data-reply-trigger="user-old"]'))
       .toBeVisible();
 
-    await page.locator('.disc-composer-textarea').fill(newUserText);
+    await page.locator('.disc-composer-textarea')
+      .fill(`@litellm @ollama @codex ${newUserText}`);
     await page.locator('.disc-send-btn').click();
     await expect.poll(() => secondBody).not.toBeNull();
     expect(secondBody?.targets).toEqual([
