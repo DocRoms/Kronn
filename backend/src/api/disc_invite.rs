@@ -531,13 +531,23 @@ fn join_next_steps(
          external action, call `disc_append` with a concise \
          \"task / scope / next action\" update. Peers and the human must know \
          what you are taking before implementation starts. Pure context reads \
-         do not need a noisy announcement. For a clear, independent task, \
-         announce the delegation scope before launch, call `agent_list`, then \
-         use `task_exec_prepare` followed by `task_exec_launch` only when the \
-         selected worker is available and the preflight is launchable. Never \
-         invent a child room or launch a duplicate execution; use \
-         `task_exec_status` to observe the existing execution. If the scope \
-         changes materially, post one updated intent before continuing.\n\n\
+         do not need a noisy announcement. For clear, independent tasks, use \
+         PARALLEL LANES when suitable workers are available: tasks that have \
+         no overlapping files, dependencies, or unresolved decisions CAN and \
+         MUST be launched simultaneously. Before any launch, make one readable \
+         `disc_append` allocation listing every lane's task, worker, scope, and \
+         why the lanes do not overlap. Refuse parallelism when files, \
+         dependencies, or decisions overlap; keep that work in one lane or \
+         resolve the overlap first. For every lane separately, call \
+         `agent_list`, then use `task_exec_prepare` followed by \
+         `task_exec_launch` only when its selected worker is available and its \
+         preflight is launchable. Respect the available worker capacity, and do \
+         not wait for one ready lane to finish before launching another ready \
+         lane. For example, two independent ready tasks use two separate \
+         prepare/launch pairs, then each keeps its own `task_exec_status` and \
+         `task_exec_review`. Never invent a child room or launch a duplicate \
+         execution. If the scope changes materially, post one updated intent \
+         before continuing.\n\n\
          RECONNECTING IS ALREADY HANDLED — DO NOT ASK FOR A NEW TOKEN :\n\
          This join linked your durable CLI session to this room (see \
          `session_bound` in the join result). After an MCP reload, call \
@@ -6468,12 +6478,21 @@ mod tests {
             "ambiguous requests must remain human-gated",
         );
         for contract in [
-            "announce the delegation scope before launch",
+            "PARALLEL LANES",
+            "CAN and MUST be launched simultaneously",
+            "one readable `disc_append` allocation",
+            "every lane's task, worker, scope",
+            "files, dependencies, or unresolved decisions",
+            "Refuse parallelism",
+            "Respect the available worker capacity",
+            "do not wait for one ready lane to finish before launching another ready lane",
+            "two independent ready tasks use two separate prepare/launch pairs",
             "agent_list",
             "task_exec_prepare",
             "task_exec_launch",
             "selected worker is available",
             "preflight is launchable",
+            "task_exec_review",
             "Never invent a child room",
             "duplicate execution",
             "task_exec_status",
@@ -6513,6 +6532,28 @@ mod tests {
         assert!(
             steps.contains("indistinguishable from having left"),
             "must state why silence is not acceptable",
+        );
+    }
+
+    #[test]
+    fn join_protocol_requires_two_independent_lanes_to_launch_in_parallel() {
+        let steps = join_next_steps("d-1", "Room", 2, None);
+
+        assert!(
+            steps.contains("no overlapping files, dependencies, or unresolved decisions")
+                && steps.contains("MUST be launched simultaneously"),
+            "only independent lanes may launch in parallel",
+        );
+        assert!(
+            steps.contains("two independent ready tasks use two separate prepare/launch pairs")
+                && steps.contains(
+                    "do not wait for one ready lane to finish before launching another ready lane"
+                ),
+            "two ready lanes must launch independently rather than sequentially",
+        );
+        assert!(
+            steps.contains("each keeps its own `task_exec_status` and `task_exec_review`"),
+            "each parallel lane must retain its own durable execution lifecycle",
         );
     }
 
