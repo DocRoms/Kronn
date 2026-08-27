@@ -494,6 +494,7 @@ pub async fn send_message(
         .into_iter()
         .map(|agent| (Uuid::new_v4().to_string(), agent))
         .collect::<Vec<_>>();
+    let defer_dispatch = req.defer_dispatch;
 
     let insert_outcome = match state
         .db
@@ -506,14 +507,25 @@ pub async fn send_message(
                     dedupe_key: None,
                 })
                 .collect::<Vec<_>>();
-            let outcome = crate::db::discussions::insert_user_message_with_dispatches(
-                conn,
-                &disc_id,
-                &msg,
-                &targets_clone,
-                &dispatch_specs,
-                mark_native_fallback,
-            )?;
+            let outcome = if defer_dispatch {
+                crate::db::discussions::insert_user_message_with_pending_dispatches(
+                    conn,
+                    &disc_id,
+                    &msg,
+                    &targets_clone,
+                    &dispatch_specs,
+                    mark_native_fallback,
+                )?
+            } else {
+                crate::db::discussions::insert_user_message_with_dispatches(
+                    conn,
+                    &disc_id,
+                    &msg,
+                    &targets_clone,
+                    &dispatch_specs,
+                    mark_native_fallback,
+                )?
+            };
             if matches!(
                 &outcome,
                 crate::db::discussions::InsertUserMessageOutcome::Inserted { .. }
@@ -1691,6 +1703,7 @@ mod tests {
                 target_agents: vec![],
                 target_agent: None,
                 client_message_id: Some("5fa2fc3c-4b92-4472-9729-faba80bf0525".into()),
+                defer_dispatch: false,
                 reply_to_message_id: None,
             }),
         )
@@ -1761,6 +1774,7 @@ mod tests {
                 target_agents: vec![],
                 target_agent: None,
                 client_message_id: Some(client_message_id.into()),
+                defer_dispatch: false,
                 reply_to_message_id: None,
             }),
         )
@@ -1780,6 +1794,7 @@ mod tests {
                 target_agents: vec![],
                 target_agent: None,
                 client_message_id: Some(client_message_id.into()),
+                defer_dispatch: false,
                 reply_to_message_id: None,
             }),
         )
@@ -1799,6 +1814,86 @@ mod tests {
             .unwrap();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].id, client_message_id);
+    }
+
+    #[tokio::test]
+    async fn deferred_message_receipt_commits_one_pending_dispatch() {
+        let disc = "d-durable-outbox";
+        let state = make_state_with_disc(disc).await;
+        let client_message_id = "4bebde44-bab4-4c86-a14d-8d9cf60e0fa1";
+
+        let response = send_message(
+            State(state.clone()),
+            Path(disc.to_string()),
+            Json(SendMessageRequest {
+                content: "persist this follow-up".into(),
+                channel: MessageChannel::Main,
+                targets: vec![],
+                target_all: false,
+                target_agents: vec![],
+                target_agent: None,
+                client_message_id: Some(client_message_id.into()),
+                defer_dispatch: true,
+                reply_to_message_id: None,
+            }),
+        )
+        .await;
+        let body = sse_body_to_string(response).await;
+        assert!(body.contains("event: accepted"));
+        assert!(body.contains(r#""duplicate":false"#));
+
+        let active = state
+            .db
+            .with_conn(move |conn| {
+                crate::db::agent_dispatch::list_active_for_discussion(
+                    conn,
+                    disc,
+                    &AgentType::ClaudeCode,
+                )
+            })
+            .await
+            .unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].trigger_message_id, client_message_id);
+        assert_eq!(active[0].status, "Pending");
+
+        let retry = send_message(
+            State(state.clone()),
+            Path(disc.to_string()),
+            Json(SendMessageRequest {
+                content: "persist this follow-up".into(),
+                channel: MessageChannel::Main,
+                targets: vec![],
+                target_all: false,
+                target_agents: vec![],
+                target_agent: None,
+                client_message_id: Some(client_message_id.into()),
+                defer_dispatch: true,
+                reply_to_message_id: None,
+            }),
+        )
+        .await;
+        let retry_body = sse_body_to_string(retry).await;
+        assert!(retry_body.contains(r#""duplicate":true"#));
+
+        let counts = state
+            .db
+            .with_conn(move |conn| {
+                let messages: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM messages WHERE id = ?1",
+                    [client_message_id],
+                    |row| row.get(0),
+                )?;
+                let jobs: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM agent_dispatch_jobs WHERE trigger_message_id = ?1",
+                    [client_message_id],
+                    |row| row.get(0),
+                )?;
+                Ok((messages, jobs))
+            })
+            .await
+            .unwrap();
+        assert_eq!(counts, (1, 1));
     }
 
     #[tokio::test]
@@ -1936,6 +2031,7 @@ mod tests {
                 target_agents: vec![],
                 target_agent: None,
                 client_message_id: Some("6661b620-162d-4a8a-9552-33f0896c6835".into()),
+                defer_dispatch: false,
                 reply_to_message_id: None,
             }),
         )
@@ -1977,6 +2073,7 @@ mod tests {
                 target_agents: vec![],
                 target_agent: Some(AgentType::Codex),
                 client_message_id: Some("c4a768c8-48b5-4d64-9fe4-121ebf9c36ac".into()),
+                defer_dispatch: false,
                 reply_to_message_id: None,
             }),
         )
@@ -2034,6 +2131,7 @@ mod tests {
                 target_agents: vec![],
                 target_agent: None,
                 client_message_id: Some("not-a-uuid".into()),
+                defer_dispatch: false,
                 reply_to_message_id: None,
             }),
         )
@@ -2088,6 +2186,7 @@ mod tests {
                 target_agents: vec![],
                 target_agent: None,
                 client_message_id: Some("22222222-2222-4222-8222-222222222222".into()),
+                defer_dispatch: false,
                 reply_to_message_id: Some(source_id.into()),
             }),
         )
@@ -2120,6 +2219,7 @@ mod tests {
                 target_agents: vec![],
                 target_agent: None,
                 client_message_id: Some("33333333-3333-4333-8333-333333333333".into()),
+                defer_dispatch: false,
                 reply_to_message_id: Some("44444444-4444-4444-8444-444444444444".into()),
             }),
         )

@@ -11,6 +11,216 @@ Release notes for 0.9.3 and earlier are available in the
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-08-22
+
+### Added
+
+- Planning tasks can now be delegated through a durable orchestration lifecycle:
+  one selected worker receives a child discussion and isolated managed worktree,
+  while the parent discussion follows progress, reviews typed delivery evidence,
+  requests bounded changes, reassigns on provider failure and integrates only
+  through validated fast-forward with target-SHA and backup-ref guards. See the
+  [operator guide](docs/guides/task-orchestration.md).
+
+- Quick Prompt comparisons now include reorderable result columns, model,
+  duration and token metrics, independent human and blind AI quality ratings,
+  rankings over weighted/AI/human quality, time or tokens, and a reasoning-agent
+  path that opens a contextual discussion to improve the source prompt.
+
+- Ollama, LiteLLM and NVIDIA HTTP agents can use Kronn's native tool catalogue,
+  preserve honest partial evidence when a tool/context limit is reached and act
+  as lower-cost or local fallbacks when hosted CLI providers are unavailable.
+
+- Kronn can now tell you which of a plugin's endpoints keep failing. A plugin
+  whose endpoints fail repeatedly carries a "spec to check" badge on its card,
+  naming the endpoint and the status behind it. It reads the call log Kronn
+  already keeps (`GET /api/api-call-logs/drift`), and separates an endpoint that
+  has never answered — a spec that was wrong from the start — from one that also
+  succeeds, where the endpoint exists and the call is malformed. The two need
+  different fixes, so they read differently. The badge stays out of the way until
+  failures accumulate: an alarm raised on healthy plugins is one nobody reads.
+
+### Changed
+
+- The Custom API builder must verify an endpoint before declaring it. It used to
+  read the documentation and write down what that implied; documentation goes
+  stale, and the resulting spec sent agents chasing endpoints that answer 404 or
+  parameters the API ignores. It now tests each endpoint with a real call when it
+  can, marks anything unverified as such instead of asserting it, and records the
+  response shape and the parameter names that actually work.
+
+### Fixed
+
+- The orchestration bridge no longer makes every principal session pay for the
+  full Ollama worker methodology and duplicated scope schemas in its MCP
+  catalogue. Selection-time contracts stay visible; exact transport, bounded
+  scope, validation and fallback examples now load through `tool_manual` only
+  when a principal delegates. This restores the ratcheted catalogue budget while
+  keeping spawned local workers on their dedicated two-tool surface.
+
+- The `kronn-internal` bridge now fingerprints the script it actually loaded and
+  refuses orchestration mutations whose optional security fields could otherwise
+  disappear through a stale MCP schema. After upgrading to 0.11.0, reconnect
+  every already-running `kronn-internal` MCP process once and verify
+  `bridge_info` reports `stale: false`; a pre-0.11.0 bridge cannot protect the
+  transition that made this guard available. Recovery and completion reads stay
+  available while a bridge is stale, so an existing execution can be inspected,
+  cancelled, reviewed or delivered without replaying its launch.
+
+- Spawned host task workers no longer need write access to a linked worktree's
+  shared Git objects or refs. Codex and Claude remain confined to the managed
+  worktree and commit through an execution-bound Kronn tool before delivery.
+  Git commit endpoints now also treat their explicit file list as authoritative:
+  unrelated paths already staged in the index are left staged and cannot be
+  included accidentally.
+
+- Native `kronn start` no longer leaves the UI and API offline while another
+  Cargo command owns the repository's shared build lock. The supervisor serves
+  the last successfully-built backend during the wait and only swaps it when
+  the completed build actually produced a different binary.
+
+- API calls from General discussions now execute configurations explicitly
+  enabled for General instead of advertising them through `mcp_list` and then
+  rejecting them for having no project. The shared API executor also rejects
+  unknown or missing path parameters before the network call and names the
+  exact parameters expected, replacing opaque vendor 404s with an actionable
+  broker error.
+
+- Plugin configurations that are global to nothing, available to no general
+  discussion, and linked to no project no longer look healthy while remaining
+  invisible to every agent. The Plugins page flags the orphan scope, offers a
+  one-click repair through General discussions, and prevents the UI from
+  removing a configuration's last remaining scope.
+
+- Live Pages workflow Sync now distinguishes its three outcomes at the action
+  itself: a spinner while running, a green check on success, and a red cross
+  with the returned error message on failure. A successful run no longer looks
+  like a failed validation.
+
+- The discussion plan's compact “+N more in progress” and “+N more ready”
+  indicators are now controls: they reveal the remaining tasks in rank order
+  and can collapse the list again. Their state resets when switching
+  discussions.
+
+- A tool result that had to be trimmed no longer lets an agent report a cut list
+  as a whole one. Trimming a document loses text and it shows; trimming a
+  collection changes its meaning — one entry out of forty-three reads as "there
+  is one", which an agent then states as fact. Kronn now keeps every entry as a
+  compact identifier record when that fits; otherwise it emits valid JSON for
+  the retained prefix, says exactly how many items it kept out of the total, and
+  warns that the count is not final. The Fastly service endpoint also tells
+  agents to project `id`, `name`, and `version` instead of loading every
+  service's full version history.
+
+- A discussion whose agent is actually working now shows as working, even when
+  this browser never opened its stream — a run started from the API, from
+  another tab, or before a reload used to sit under the queued hourglass
+  alongside the ones genuinely waiting. The sidebar reads the dispatch's real
+  status instead of relying on a live-stream flag it may never have received.
+
+- The SpeedCurve plugin describes its API as it actually behaves. Its spec named
+  `site` and `since`/`until` where the API wants `site_id` and
+  `start_timestamp`/`end_timestamp` — and an unknown filter is accepted and
+  silently ignored, so agents analysed another site's data believing they had
+  filtered. Four LUX endpoints that answer 404 were removed, pagination is
+  documented, and the guidance no longer points at them.
+
+- A model whose tool budget is spent is now made to answer rather than asked to.
+  Refusing the call left the declarations in place, so it simply asked again —
+  eleven more times, until the round cap. The declarations are withdrawn once a
+  whole turn has been refused, which is what the "you used tools but wrote
+  nothing" retry already did.
+- The workflow detail pane no longer shows a second scrollbar inside the page's
+  own. The panes declared `overflow-y: auto` with `overscroll-behavior: contain`
+  while having nothing to scroll, which swallowed the wheel; the surrounding
+  viewer is the single scroller again.
+
+- A model circling the same tool is stopped after twelve calls to it, instead of
+  running until the round cap. The existing guard only caught a call repeated
+  argument for argument, so varying one parameter each time slipped past it —
+  observed as 47 `api_call`s over 47 minutes, ending with nothing. Kronn now
+  refuses the thirteenth and tells the model to answer from what it already has.
+- Tool traces name the route an API call took — which plugin, which endpoint,
+  which method — instead of a bare `api_call() → ok`. Query strings and bodies
+  are still never shown: the route identifies a call, the values are the part
+  worth protecting.
+
+- A short question to a local agent no longer dies on its first tool call. The
+  context window was sized from the prompt alone, so a one-line question got a
+  near-floor window that the first tool result blew past — and since Ollama fixes
+  that window when it loads the model, raising it afterwards bought nothing. A
+  turn that declares tools now asks for the full ceiling up front, and oversized
+  results are trimmed against the window actually granted rather than the one
+  that was theoretically available.
+
+- An agent working through tool calls no longer looks dead. A batch progress
+  tick was clearing the per-discussion "running" state, which unmounted the
+  streaming bubble mid-run — taking the live tool traces and the elapsed counter
+  with it — and flipped the sidebar card back to the queued hourglass while the
+  job was still running. A progress tick means the batch advanced, not that this
+  discussion finished.
+- The workflow detail pane scrolls with the wheel again. Its container had an
+  automatic height, so the pane grew with its content instead of overflowing:
+  nothing scrolled inside it and reaching the bottom meant dragging the page
+  scrollbar.
+
+### Changed
+
+- An agent exploring a repository is no longer cut off after eight tool rounds.
+  That ceiling was written for an agent calling one API — "list, then call, then
+  maybe retry once" — and never revisited when HTTP agents gained file and git
+  tools: finding files costs two or three rounds before the first read, so a
+  triage that was genuinely working died with its report unwritten. The
+  configured execution duration is now the real limit; the round cap remains as
+  the anti-runaway backstop underneath it.
+- Tool traces name what they did: `find_files({"pattern": "..."})` rather than
+  `find_files()`. Only the workspace tools, whose arguments are paths and globs
+  in your own repo — `api_call` and friends stay name-only, since their
+  arguments can carry secrets. Eight identical-looking `find_files() → ok` lines
+  said nothing about what was actually searched.
+
+- A batch item now gets the execution ceiling the operator configured, instead
+  of a fixed twenty minutes. A batch item is one agent run, so "maximum agent
+  execution duration" applies to it too — a local model legitimately spending
+  many tool rounds was being cut off well before that setting. It remains a
+  guard, not a switch: the value stays clamped to 1–120 minutes.
+- A run stopped by that ceiling no longer claims the user interrupted it. The
+  cancel signal carries no reason, so the message states what happened and names
+  both causes rather than asserting one it cannot know.
+
+### Added
+
+- Each agent now carries its own concurrency limit, set on its card in Settings.
+  A local agent is capped because the machine is the limit — Ollama defaults to
+  1, since it serves a single inference slot and a second run only queues and
+  discards the KV cache the first one warmed; a CLI agent defaults to 5. Remote
+  providers stay unlimited: LiteLLM and NVIDIA are endpoints someone else
+  scales, and a cap there is about spend, not this machine. Admission is atomic,
+  so a job whose agent is at its limit stays queued and no request is sent.
+
+### Fixed
+
+- An Ollama agent that read a large file or diff no longer fails with a bare
+  "API server error". The context window was sized once from the system context
+  and the user prompt, then never re-sized as the tool loop appended results, so
+  Ollama truncated the history until the user turn itself was gone and rejected
+  the request. The window is now re-sized from the messages actually being sent,
+  and the truncation failure reports what happened instead of pointing at tool
+  calling. A single result too big for the window at its widest is trimmed rather
+  than dropped, and says how many bytes went missing so the model does not reason
+  on a silent truncation.
+
+- Local Ollama steps no longer pay for reasoning tokens they discard. Kronn sent
+  qwen3 models the `/no_think` control token, which recent Ollama runtimes have
+  made nearly inert; the request now also carries `think:false`, which they do
+  honor. On a classification prompt the generated-token count drops from 240 to
+  2 (`qwen3:8b`), 226 to 1 (`qwen3.6`) and 82 to 1 (`qwen3.8`) for the same
+  answer. The flag is only ever sent to turn reasoning off, so a model Kronn
+  makes no claim about keeps its own default.
+- The agent freshness pill works again. Every latest-known-version constant had
+  fallen behind — Ollama was pinned to 0.4.7 against a current 0.32.14 — so no
+  agent was ever reported as out of date.
+
 ## [0.10.0] - 2026-08-14
 
 Kronn can now turn scheduled API collection into a readable, continuously

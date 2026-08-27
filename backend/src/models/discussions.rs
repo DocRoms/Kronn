@@ -518,6 +518,11 @@ pub struct SendMessageRequest {
     pub target_agent: Option<AgentType>,
     #[serde(default)]
     pub client_message_id: Option<String>,
+    /// Persist the User turn and its dispatch obligations without claiming a
+    /// runner for this HTTP/SSE request. Used by the durable composer outbox:
+    /// the scheduler starts it only after the discussion's current run ends.
+    #[serde(default)]
+    pub defer_dispatch: bool,
     #[serde(default)]
     pub reply_to_message_id: Option<String>,
 }

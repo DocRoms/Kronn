@@ -934,7 +934,15 @@ pub fn insert_user_message_with_agent_handoff(
         .cloned()
         .map(MessageTarget::agent)
         .collect::<Vec<_>>();
-    insert_user_message_with_agent_handoff_inner(conn, discussion_id, msg, &targets, &[], false)
+    insert_user_message_with_agent_handoff_inner(
+        conn,
+        discussion_id,
+        msg,
+        &targets,
+        &[],
+        false,
+        true,
+    )
 }
 
 #[derive(Debug)]
@@ -977,6 +985,7 @@ pub fn insert_user_message_with_dispatch(
         &targets,
         &dispatches,
         false,
+        true,
     )
 }
 
@@ -998,6 +1007,30 @@ pub fn insert_user_message_with_dispatches(
         targets,
         dispatches,
         native_fallback_candidate,
+        true,
+    )
+}
+
+/// Same atomic acceptance contract as [`insert_user_message_with_dispatches`],
+/// but leave every dispatch Pending for the scheduler. This is the durable
+/// follow-up path: accepting a second human turn while the first is running
+/// must never start a concurrent responder for the same discussion.
+pub fn insert_user_message_with_pending_dispatches(
+    conn: &Connection,
+    discussion_id: &str,
+    msg: &DiscussionMessage,
+    targets: &[MessageTarget],
+    dispatches: &[UserDispatchSpec<'_>],
+    native_fallback_candidate: bool,
+) -> Result<InsertUserMessageOutcome> {
+    insert_user_message_with_agent_handoff_inner(
+        conn,
+        discussion_id,
+        msg,
+        targets,
+        dispatches,
+        native_fallback_candidate,
+        false,
     )
 }
 
@@ -1564,6 +1597,7 @@ fn insert_user_message_with_agent_handoff_inner(
     targets: &[MessageTarget],
     dispatches: &[UserDispatchSpec<'_>],
     native_fallback_candidate: bool,
+    claim_first_dispatch: bool,
 ) -> Result<InsertUserMessageOutcome> {
     let tx = conn.unchecked_transaction()?;
 
@@ -1654,7 +1688,11 @@ fn insert_user_message_with_agent_handoff_inner(
             )?;
         }
         set_awaiting_agent(&tx, discussion_id, true)?;
-        super::agent_dispatch::claim(&tx, dispatches[0].job_id)?.map(Box::new)
+        if claim_first_dispatch {
+            super::agent_dispatch::claim(&tx, dispatches[0].job_id)?.map(Box::new)
+        } else {
+            None
+        }
     } else {
         None
     };

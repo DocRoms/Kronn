@@ -112,7 +112,9 @@ test.describe('Discussion — a message renders its pinned attachments', () => {
     const dashboard = new DashboardPage(page);
     await dashboard.goto();
     await dashboard.navDiscussions.click();
-    await page.getByRole('button', { name: /E2E Attachment Render/ }).click();
+    await page
+      .locator('button.disc-item-open[aria-label^="E2E Attachment Render —"]')
+      .click();
 
     // The message bubble is on screen.
     await expect(

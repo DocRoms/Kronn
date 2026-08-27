@@ -10,13 +10,12 @@
  *  - handleCreateBranch (success + rejected)
  *  - openPrForm + handleCreatePr (template fetch, auto-push when no upstream)
  *  - openDiff on file-button click (success + rejected → "Error:" content)
- *  - handleExec mini-terminal (success + rejected)
  *  - toggleFile / selectAll selection logic
  *  - loading spinners / disabled states
  *  - on-default-branch warning + create-branch shortcut
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, waitFor, cleanup, act } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/react';
 import { readFileSync } from 'node:fs';
 
 // ─── Mock API (vi.hoisted, DebugSection gold-standard pattern) ────────────────
@@ -257,7 +256,7 @@ describe('GitPanel — discussion workspace selection', () => {
       },
     });
 
-    renderPanel({ discussionId: 'd-parent', terminalEnabled: true });
+    renderPanel({ discussionId: 'd-parent' });
 
     const picker = await screen.findByRole('combobox', { name: 'git.workspaceSelector' });
     await waitFor(() => expect(picker).toHaveValue('workspace-cleaned'));
@@ -266,7 +265,6 @@ describe('GitPanel — discussion workspace selection', () => {
     expect(screen.getByTestId('git-committed-section')).toHaveTextContent('src/provenance.rs');
     expect(screen.queryByText('git.push')).toBeNull();
     expect(screen.queryByText('git.createPr')).toBeNull();
-    expect(screen.queryByText('git.terminal')).toBeNull();
 
     fireEvent.click(screen.getByText('src/provenance.rs'));
     await waitFor(() => expect(discussionsApi.gitDiff).toHaveBeenCalledWith(
@@ -773,48 +771,6 @@ describe('GitPanel — diff comment reference (KT-453)', () => {
     const call = dispatchSpy.mock.calls.find(([event]) => (event as CustomEvent).type === 'kronn:composer-prefill');
     const detail = (call![0] as CustomEvent).detail;
     expect(detail.text).toContain('git.diffCommentIntro(src/feature.rs:10-11 (old) · HEAD abc1234567)');
-  });
-});
-
-// ─── Mini terminal ──────────────────────────────────────────────────────────
-
-describe('GitPanel — terminal', () => {
-  it('runs a command via projects.exec and renders stdout', async () => {
-    renderPanel({ terminalEnabled: true });
-    await waitFor(() => expect(screen.getByText('git.terminal')).toBeDefined());
-    fireEvent.click(screen.getByText('git.terminal'));
-    const input = await screen.findByPlaceholderText('git.terminalPlaceholder');
-    fireEvent.change(input, { target: { value: 'ls -la' } });
-    await act(async () => { fireEvent.keyDown(input, { key: 'Enter' }); });
-    await waitFor(() => expect(projectsApi.exec).toHaveBeenCalledWith('p1', 'ls -la'));
-    await waitFor(() => expect(screen.getByText(/ok-out/)).toBeDefined());
-    expect(screen.getByText('$ ls -la')).toBeDefined();
-  });
-
-  it('renders stderr from a failed exec (catch branch)', async () => {
-    projectsApi.exec.mockRejectedValueOnce(new Error('exec boom'));
-    renderPanel({ terminalEnabled: true });
-    await waitFor(() => expect(screen.getByText('git.terminal')).toBeDefined());
-    fireEvent.click(screen.getByText('git.terminal'));
-    const input = await screen.findByPlaceholderText('git.terminalPlaceholder');
-    fireEvent.change(input, { target: { value: 'boom' } });
-    await act(async () => { fireEvent.keyDown(input, { key: 'Enter' }); });
-    await waitFor(() => expect(screen.getByText(/exec boom/)).toBeDefined());
-  });
-
-  it('no-ops exec on empty input', async () => {
-    renderPanel({ terminalEnabled: true });
-    await waitFor(() => expect(screen.getByText('git.terminal')).toBeDefined());
-    fireEvent.click(screen.getByText('git.terminal'));
-    const input = await screen.findByPlaceholderText('git.terminalPlaceholder');
-    await act(async () => { fireEvent.keyDown(input, { key: 'Enter' }); });
-    expect(projectsApi.exec).not.toHaveBeenCalled();
-  });
-
-  it('terminal section absent when terminalEnabled is false', async () => {
-    renderPanel({ terminalEnabled: false });
-    await waitFor(() => expect(screen.getByText('feat/new-feature')).toBeDefined());
-    expect(screen.queryByText('git.terminal')).toBeNull();
   });
 });
 

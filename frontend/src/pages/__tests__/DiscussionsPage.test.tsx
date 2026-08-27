@@ -163,7 +163,7 @@ import {
 } from '../../lib/api';
 import { DiscussionsPage } from '../DiscussionsPage';
 import { findRenderedTextRanges } from '../../lib/discussionMessageSearch';
-import type { AgentDetection, AgentType, AiAuditStatus, ContextFile, Discussion, Project } from '../../types/generated';
+import type { AgentDetection, AgentType, AgentsConfig, AiAuditStatus, ContextFile, Discussion, Project } from '../../types/generated';
 import type { ToastFn } from '../../hooks/useToast';
 
 const noop = () => {};
@@ -284,6 +284,47 @@ describe('DiscussionsPage', () => {
     // The prefill prompt content should appear in the new-discussion form
     const body = document.body.textContent ?? '';
     expect(body).toContain('Hello');
+  });
+
+  it('opens and closes the dedicated terminal panel from the discussion header', async () => {
+    const discussion = makeListDiscussion('d-terminal', 0);
+    vi.mocked(discussionsApi.get).mockResolvedValue(discussion);
+
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[discussion]}
+        configLanguage="fr"
+        agentAccess={{
+          claude_code: { full_access: true },
+        } as unknown as AgentsConfig}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        initialActiveDiscussionId="d-terminal"
+        {...liftedProps()}
+      />,
+    );
+
+    const terminalButton = await screen.findByRole('button', { name: 'Terminal' });
+    expect(terminalButton).toHaveAttribute('aria-expanded', 'false');
+    fireEvent.click(terminalButton);
+    expect(screen.getByRole('complementary', { name: 'Terminal' })).toBeInTheDocument();
+    expect(terminalButton).toHaveAttribute('aria-expanded', 'true');
+
+    const gitButton = screen.getByRole('button', { name: 'Fichiers' });
+    fireEvent.click(gitButton);
+    expect(screen.queryByRole('complementary', { name: 'Terminal' })).not.toBeInTheDocument();
+    expect(gitButton).toHaveAttribute('aria-expanded', 'true');
+
+    fireEvent.click(terminalButton);
+    expect(screen.getByRole('complementary', { name: 'Terminal' })).toBeInTheDocument();
+    expect(gitButton).toHaveAttribute('aria-expanded', 'false');
+
+    fireEvent.click(terminalButton);
+    expect(screen.queryByRole('complementary', { name: 'Terminal' })).not.toBeInTheDocument();
   });
 
   it('sidebar shows message_count not messages.length', async () => {
@@ -421,7 +462,7 @@ describe('DiscussionsPage', () => {
     expect(body).toContain('ClaudeCode');
   });
 
-  it('renders a queued follow-up in the transcript after the live agent reply', async () => {
+  it('persists a queued follow-up immediately and reconciles its receipt once', async () => {
     const fullDisc = {
       ...makeListDiscussion('d-queued-inline', 1),
       awaiting_agent: true,
@@ -459,6 +500,7 @@ describe('DiscussionsPage', () => {
     let currentRunFinished = false;
     let queuedRunFinished = false;
     let sentPayload: Parameters<typeof discussionsApi.sendMessageStream>[1] | undefined;
+    let acceptQueued: (() => void) | undefined;
     vi.mocked(discussionsApi.get).mockImplementation(async () => {
       if (!currentRunFinished) return fullDisc;
       if (!sentPayload?.client_message_id) return completedDisc;
@@ -495,13 +537,14 @@ describe('DiscussionsPage', () => {
       async (_discId, payload, _onText, onDone, _onError, _signal, onStart, _onLog, onAccepted) => {
         sentPayload = payload;
         onStart?.();
-        onAccepted?.({
-          message_id: payload.client_message_id ?? 'u-queued',
-          sort_order: 3,
-          duplicate: false,
-        });
-        queuedRunFinished = true;
-        onDone?.();
+        acceptQueued = () => {
+          onAccepted?.({
+            message_id: payload.client_message_id ?? 'u-queued',
+            sort_order: 3,
+            duplicate: false,
+          });
+          onDone?.();
+        };
       },
     );
 
@@ -509,7 +552,7 @@ describe('DiscussionsPage', () => {
     lifted.sendingMap = { 'd-queued-inline': true };
     lifted.streamingMap = { 'd-queued-inline': 'Réponse partielle' };
 
-    const { rerender } = await wrap(
+    await wrap(
       <DiscussionsPage
         projects={[]}
         agents={[]}
@@ -529,6 +572,12 @@ describe('DiscussionsPage', () => {
     fireEvent.change(textarea, { target: { value: 'Mon prochain message' } });
     fireEvent.click(screen.getByRole('button', { name: /Ajouter à la file/ }));
 
+    await waitFor(() => expect(sentPayload?.content).toBe('Mon prochain message'));
+    expect(sentPayload).toEqual(expect.objectContaining({
+      defer_dispatch: true,
+      client_message_id: expect.stringMatching(/^[0-9a-f-]{36}$/i),
+    }));
+
     const transcript = document.querySelector('.disc-messages');
     const liveReply = screen.getByTestId('streaming-agent-ClaudeCode');
     const queued = screen.getByLabelText("Messages en file d'attente");
@@ -538,40 +587,23 @@ describe('DiscussionsPage', () => {
     // The queue is the chronological tail immediately before the scroll anchor.
     expect(queued.nextElementSibling).toBe(transcript?.lastElementChild);
 
-    // Completion drains the queue into one durable turn. The backend reloads
-    // first with the completed current answer, then with the accepted queued
-    // user row and its final agent reply. The ghost must disappear and the
-    // persisted user content must occur exactly once.
+    expect(queued).toHaveTextContent('persistance…');
+
+    // The durable receipt removes the local outbox entry. Replaying the same
+    // client_message_id would be duplicate=true server-side, so a lost receipt
+    // cannot create a second User row or dispatch.
     currentRunFinished = true;
+    queuedRunFinished = true;
     await act(async () => {
-      rerender(
-        <I18nProvider>
-          <DiscussionsPage
-            projects={[]}
-            agents={[]}
-            allDiscussions={[completedDisc]}
-            configLanguage="fr"
-            agentAccess={null}
-            refetchDiscussions={noop}
-            refetchProjects={noop}
-            onNavigate={noop}
-            toast={toastFn}
-            initialActiveDiscussionId="d-queued-inline"
-            {...lifted}
-            sendingMap={{ 'd-queued-inline': false }}
-            streamingMap={{ 'd-queued-inline': '' }}
-          />
-        </I18nProvider>,
-      );
+      acceptQueued?.();
     });
 
-    await waitFor(() => expect(sentPayload?.content).toBe('Mon prochain message'));
     await waitFor(() => expect(screen.queryByLabelText("Messages en file d'attente")).toBeNull());
     await waitFor(() => expect(screen.getByText('Réponse au message en queue')).toBeInTheDocument());
     expect(screen.getAllByText('Mon prochain message')).toHaveLength(1);
   });
 
-  it('shows one live placeholder for every agent in a general multi-model turn', async () => {
+  it('shows only the principal placeholder for a general turn', async () => {
     const fullDisc: Discussion = {
       ...makeListDiscussion('d-plural', 1),
       agent: 'LiteLlm',
@@ -607,9 +639,9 @@ describe('DiscussionsPage', () => {
     );
 
     expect(screen.getByTestId('streaming-agent-LiteLlm')).toHaveTextContent('LiteLLM');
-    expect(screen.getByTestId('pending-agent-Ollama')).toHaveTextContent('Ollama');
+    expect(screen.queryByTestId('pending-agent-Ollama')).toBeNull();
     expect(screen.getAllByText("Agent en cours d'exécution...")).toHaveLength(1);
-    expect(screen.getByText("En file — en attente d'un créneau agent")).toBeInTheDocument();
+    expect(screen.queryByText("En file — en attente d'un créneau agent")).toBeNull();
   });
 
   it('keeps overlapping reply slots attached to their own turns and reorders a late reply', async () => {

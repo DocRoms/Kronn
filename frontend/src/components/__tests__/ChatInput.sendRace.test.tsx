@@ -398,7 +398,7 @@ describe('ChatInput — send-race guard (P0-10)', () => {
     );
   });
 
-  it('routes a general turn to every native model attached to the discussion', async () => {
+  it('routes a general turn only to the configured principal', async () => {
     const onSend = vi.fn();
     const groupDiscussion = {
       ...disc,
@@ -416,15 +416,66 @@ describe('ChatInput — send-race guard (P0-10)', () => {
 
     expect(onSend).toHaveBeenCalledWith(
       'Vous devriez connaître vos points forts et faibles.',
-      [
-        {
-          kind: 'discussion_agent', agent_type: 'LiteLlm', cli_session_id: null, tier: null,
-        },
-        { kind: 'agent', agent_type: 'Ollama', cli_session_id: null, tier: 'default' },
-      ],
+      undefined,
       false,
       undefined,
     );
+  });
+
+  it('does not route an agent alias copied inside a quotation', async () => {
+    const onSend = vi.fn();
+    const groupDiscussion = {
+      ...disc,
+      participants: ['ClaudeCode', 'Ollama'],
+    } as Discussion;
+    const agents = [
+      { agent_type: 'ClaudeCode', installed: true, runtime_available: true, enabled: true },
+      { agent_type: 'Ollama', installed: true, runtime_available: true, enabled: true },
+    ] as AgentDetection[];
+    await mount(onSend, false, agents, groupDiscussion);
+    typeText('Le badge affiche "@ollama&" sans que je le sélectionne.');
+
+    fireEvent.click(sendButton());
+
+    expect(onSend).toHaveBeenCalledWith(
+      'Le badge affiche "@ollama&" sans que je le sélectionne.',
+      undefined,
+      false,
+      undefined,
+    );
+  });
+
+  it('does not retain a punctual target after the next composer message clears it', async () => {
+    const onSend = vi.fn();
+    const groupDiscussion = {
+      ...disc,
+      participants: ['ClaudeCode', 'Ollama'],
+    } as Discussion;
+    const agents = [
+      { agent_type: 'ClaudeCode', installed: true, runtime_available: true, enabled: true },
+      { agent_type: 'Ollama', installed: true, runtime_available: true, enabled: true },
+    ] as AgentDetection[];
+    await mount(onSend, false, agents, groupDiscussion);
+
+    typeText('@ollama analyse ce premier point.');
+    fireEvent.click(sendButton());
+    await act(async () => { await Promise.resolve(); });
+
+    typeText('Puis réponds uniquement avec le principal.');
+    fireEvent.click(sendButton());
+
+    expect(onSend.mock.calls[0]).toEqual([
+      '@ollama analyse ce premier point.',
+      [{ kind: 'agent', agent_type: 'Ollama', cli_session_id: null, tier: 'default' }],
+      false,
+      undefined,
+    ]);
+    expect(onSend.mock.calls[1]).toEqual([
+      'Puis réponds uniquement avec le principal.',
+      undefined,
+      false,
+      undefined,
+    ]);
   });
 
   it('two synchronous clicks fire onSend only ONCE', async () => {

@@ -6,6 +6,8 @@ import { MarkdownEditor } from './MarkdownComposerTools';
 import { skills as skillsApi, profiles as profilesApi, directives as directivesApi, config as configApi } from '../lib/api';
 import type { Project, AgentDetection, AgentType, AgentsConfig, Skill, AgentProfile, Directive, ModelTier } from '../types/generated';
 import { AGENT_LABELS, AGENT_MENTIONS, MODEL_TIER_ICONS, agentColor, mentionedAgents, modelForAgentTier, isAgentRestricted as isAgentRestrictedUtil, isUsable, isHiddenPath, RTK_APPLICABLE, isRtkActive } from '../lib/constants';
+import { clearDraft, loadDraft, NEW_DISCUSSION_DRAFT_ID, saveDraft } from '../lib/chat-drafts';
+import { loadDefaultDiscussionProject, saveDefaultDiscussionProject } from '../lib/new-discussion-preferences';
 import { findAgentMentionQuery, type AgentMentionQuery } from '../lib/mention-autocomplete';
 import {
   applyEmojiReplacement,
@@ -19,6 +21,7 @@ import {
   MessageSquare, X, AlertTriangle,
   Settings, Check, Zap, UserCircle, FileText, Paperclip, Image,
   Cpu,
+  Search,
 } from 'lucide-react';
 
 // ─── Public types ────────────────────────────────────────────────────────────
@@ -75,11 +78,14 @@ export function NewDiscussionForm({
   t,
 }: NewDiscussionFormProps) {
   // ─── Internal state ──────────────────────────────────────────────────────
+  const [initialDraft] = useState(() => loadDraft(NEW_DISCUSSION_DRAFT_ID));
   const [newDiscTitle, setNewDiscTitle] = useState('');
   const [newDiscAgent, setNewDiscAgent] = useState<AgentType | ''>('');
   const [agentLaunchMode, setAgentLaunchMode] = useState<'selected' | 'prompt'>('selected');
   const [newDiscProjectId, setNewDiscProjectId] = useState<string>('');
-  const [newDiscPrompt, setNewDiscPrompt] = useState('');
+  const [defaultProjectId, setDefaultProjectId] = useState(loadDefaultDiscussionProject);
+  const [projectSearch, setProjectSearch] = useState('');
+  const [newDiscPrompt, setNewDiscPrompt] = useState(() => initialDraft?.text ?? '');
   const [newDiscPrefilled, setNewDiscPrefilled] = useState(false);
   const [showAdvancedOptions, setShowAdvancedOptions] = useState(false);
   const [expandedAdvanced, setExpandedAdvanced] = useState<'skills' | 'profiles' | 'directives' | null>(null);
@@ -95,7 +101,7 @@ export function NewDiscussionForm({
   // with the user's `ServerConfig.default_model_tier` on mount (0.8.6 phase 4).
   // Strict semantic — only applied at form-open time, never retroactively.
   const [newDiscTier, setNewDiscTier] = useState<'economy' | 'default' | 'reasoning'>('default');
-  const [promptAgentTiers, setPromptAgentTiers] = useState<Partial<Record<AgentType, ModelTier>>>({});
+  const [promptAgentTiers, setPromptAgentTiers] = useState<Partial<Record<AgentType, ModelTier>>>(() => initialDraft?.routingTiers ?? {});
   const [agentHandoffsEnabled, setAgentHandoffsEnabled] = useState<boolean | null>(null);
   // 0.8.6 phase 2 — disc-first refactor. When `false`, the disc is
   // created without launching a CLI ; the user invites agents later
@@ -114,9 +120,24 @@ export function NewDiscussionForm({
   const [emojiSuggestions, setEmojiSuggestions] = useState<EmojiSuggestion[]>([]);
   const [emojiIndex, setEmojiIndex] = useState(0);
   const previousPromptAgentsRef = useRef('');
+  const defaultProjectAppliedRef = useRef(false);
 
   // ─── Derived ─────────────────────────────────────────────────────────────
   const installedAgentsList = useMemo(() => agents.filter(isUsable), [agents]);
+  const selectableProjects = useMemo(
+    () => projects.filter(project => !isHiddenPath(project.path)),
+    [projects],
+  );
+  const visibleProjects = useMemo(() => {
+    const query = projectSearch.trim().toLocaleLowerCase();
+    if (!query) return selectableProjects;
+    return selectableProjects.filter(project => (
+      project.id === newDiscProjectId
+      || project.name.toLocaleLowerCase().includes(query)
+      || project.path.toLocaleLowerCase().includes(query)
+      || project.repo_url?.toLocaleLowerCase().includes(query)
+    ));
+  }, [newDiscProjectId, projectSearch, selectableProjects]);
   const promptMentionedAgents = useMemo(
     () => mentionedAgents(newDiscPrompt),
     [newDiscPrompt],
@@ -153,6 +174,35 @@ export function NewDiscussionForm({
     window.addEventListener('kronn:profiles-changed', refetchProfiles);
     return () => window.removeEventListener('kronn:profiles-changed', refetchProfiles);
   }, []);
+
+  // Restore the explicitly chosen default once projects are available. The ref
+  // makes this a one-shot initial preference: manually choosing "no project"
+  // later in the same form must not immediately re-select the stored default.
+  useEffect(() => {
+    if (defaultProjectAppliedRef.current || prefill || selectableProjects.length === 0) return;
+    if (!defaultProjectId) {
+      defaultProjectAppliedRef.current = true;
+      return;
+    }
+    const project = selectableProjects.find(candidate => candidate.id === defaultProjectId);
+    if (!project) {
+      defaultProjectAppliedRef.current = true;
+      saveDefaultDiscussionProject(null);
+      return;
+    }
+    const frame = requestAnimationFrame(() => {
+      defaultProjectAppliedRef.current = true;
+      setNewDiscProjectId(project.id);
+      if (project.default_skill_ids?.length) setNewDiscSkillIds(project.default_skill_ids);
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [defaultProjectId, prefill, selectableProjects]);
+
+  // The creation form has no discussion id yet, so it shares the mature draft
+  // storage through a reserved id. Empty text removes the record automatically.
+  useEffect(() => {
+    saveDraft(NEW_DISCUSSION_DRAFT_ID, newDiscPrompt, promptAgentTiers);
+  }, [newDiscPrompt, promptAgentTiers]);
 
   // Auto-select first installed agent if current selection is invalid
   useEffect(() => {
@@ -348,6 +398,7 @@ export function NewDiscussionForm({
         targetTiers: agentLaunchMode === 'prompt' ? targetTiers : {},
         launchAgentNow,
       }));
+      clearDraft(NEW_DISCUSSION_DRAFT_ID);
     } catch (e) {
       // Parent (`handleCreateDiscussion` in DiscussionsPage) already toasts
       // its own errors. We swallow here only to keep the form unwedged —
@@ -677,8 +728,21 @@ export function NewDiscussionForm({
         })()}
 
         <div className="disc-new-grid">
-          <div>
+          <div className="disc-project-picker">
             <label className="disc-form-label">{t('disc.project')}</label>
+            <label className="disc-project-search">
+              <Search size={13} aria-hidden="true" />
+              <input
+                className="disc-input-styled"
+                type="search"
+                value={projectSearch}
+                onChange={event => setProjectSearch(event.target.value)}
+                placeholder={t('disc.searchProjects')}
+                aria-label={t('disc.searchProjects')}
+                disabled={newDiscPrefilled}
+                data-locked={newDiscPrefilled}
+              />
+            </label>
             <select className="disc-select-styled" aria-label={t('disc.project')} data-locked={newDiscPrefilled} value={newDiscProjectId} onChange={e => {
               const pid = e.target.value;
               setNewDiscProjectId(pid);
@@ -689,10 +753,24 @@ export function NewDiscussionForm({
               setNewDiscBaseBranch('main');
             }} disabled={newDiscPrefilled}>
               <option value="">{t('disc.noProject')}</option>
-              {projects.filter(p => !isHiddenPath(p.path)).map(p => (
+              {visibleProjects.map(p => (
                 <option key={p.id} value={p.id}>{p.name}</option>
               ))}
             </select>
+            {newDiscProjectId && !newDiscPrefilled && (
+              <label className="disc-project-default">
+                <input
+                  type="checkbox"
+                  checked={defaultProjectId === newDiscProjectId}
+                  onChange={event => {
+                    const next = event.target.checked ? newDiscProjectId : '';
+                    saveDefaultDiscussionProject(next || null);
+                    setDefaultProjectId(next);
+                  }}
+                />
+                <span>{t('disc.defaultProject')}</span>
+              </label>
+            )}
           </div>
           <div>
             <label className="disc-form-label disc-launch-control">

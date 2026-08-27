@@ -24,6 +24,7 @@ import {
   PowerOff,
   Search,
   Images,
+  Terminal,
 } from 'lucide-react';
 import { MatrixText } from './MatrixText';
 import { LearningsBadge } from './LearningsBadge';
@@ -40,6 +41,8 @@ export interface ChatHeaderProps {
   agents: AgentDetection[];
   modelTiers?: ModelTiersConfig | null;
   showGitPanel: boolean;
+  showTerminalPanel?: boolean;
+  terminalEnabled?: boolean;
   showPlanPanel?: boolean;
   showSettingsPanel?: boolean;
   showMessageSearch?: boolean;
@@ -60,6 +63,7 @@ export interface ChatHeaderProps {
   /// can open the preflight modal if the server returns a blocker.
   onRequestTestMode: () => void;
   onToggleGitPanel: () => void;
+  onToggleTerminalPanel?: () => void;
   onTogglePlanPanel?: () => void;
   onToggleSettingsPanel?: () => void;
   onToggleMessageSearch?: () => void;
@@ -78,6 +82,8 @@ export function ChatHeader({
   agents,
   modelTiers = null,
   showGitPanel,
+  showTerminalPanel = false,
+  terminalEnabled = false,
   showPlanPanel = false,
   showSettingsPanel = false,
   showMessageSearch = false,
@@ -93,6 +99,7 @@ export function ChatHeader({
   pendingFilesCount,
   onRequestTestMode,
   onToggleGitPanel,
+  onToggleTerminalPanel,
   onTogglePlanPanel,
   onToggleSettingsPanel,
   onToggleMessageSearch,
@@ -621,6 +628,19 @@ export function ChatHeader({
             </span>
           )}
         </button>
+        {terminalEnabled && onToggleTerminalPanel && (
+          <button
+            type="button"
+            className="disc-icon-btn"
+            data-active={showTerminalPanel}
+            onClick={onToggleTerminalPanel}
+            title={t('git.terminal')}
+            aria-label={t('git.terminal')}
+            aria-expanded={showTerminalPanel}
+          >
+            <Terminal size={13} />
+          </button>
+        )}
         <button
           className="disc-icon-btn" style={{ color: 'var(--kr-error)' }}
           onClick={() => onDelete(discussion.id)}

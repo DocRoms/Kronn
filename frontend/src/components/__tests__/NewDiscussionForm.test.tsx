@@ -1,7 +1,8 @@
-import { describe, it, expect, vi } from 'vitest';
+import { beforeEach, describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent, act, waitFor } from '@testing-library/react';
 import { NewDiscussionForm } from '../NewDiscussionForm';
 import type { Project, AgentDetection } from '../../types/generated';
+import { loadDraft, NEW_DISCUSSION_DRAFT_ID } from '../../lib/chat-drafts';
 
 vi.mock('../../lib/api', () => ({
   skills: { list: vi.fn().mockResolvedValue([]) },
@@ -79,7 +80,83 @@ const mount = (projects: Project[]) => {
   );
 };
 
+beforeEach(() => {
+  localStorage.clear();
+});
+
 describe('NewDiscussionForm — creation flow layout', () => {
+  it('restores an unsent starting brief after the form remounts', () => {
+    const first = mount([PROJECT_WITH_REPO]);
+    fireEvent.change(screen.getByRole('textbox', { name: 'disc.prompt' }), {
+      target: { value: 'Ne perds pas ce brief.' },
+    });
+    first.unmount();
+
+    mount([PROJECT_WITH_REPO]);
+    expect(screen.getByRole('textbox', { name: 'disc.prompt' })).toHaveValue(
+      'Ne perds pas ce brief.',
+    );
+  });
+
+  it('clears the stored starting brief after a successful creation', async () => {
+    const onSubmit = vi.fn();
+    render(
+      <NewDiscussionForm
+        projects={[]}
+        agents={[AGENT]}
+        configLanguage="fr"
+        agentAccess={null}
+        onSubmit={onSubmit}
+        onClose={vi.fn()}
+        onNavigate={vi.fn()}
+        t={(key: string) => key}
+      />,
+    );
+    fireEvent.change(screen.getByRole('textbox', { name: 'disc.prompt' }), {
+      target: { value: 'Créer cette discussion.' },
+    });
+    await act(async () => {
+      fireEvent.click(document.querySelector('.disc-create-btn') as HTMLButtonElement);
+    });
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(loadDraft(NEW_DISCUSSION_DRAFT_ID)).toBeNull();
+  });
+
+  it('searches a large project list without replacing the native picker contract', () => {
+    const manyProjects = Array.from({ length: 250 }, (_, index) => ({
+      ...PROJECT_WITH_REPO,
+      id: `project-${index}`,
+      name: `Project ${index}`,
+      path: `/repos/project-${index}`,
+    }));
+    mount(manyProjects);
+
+    fireEvent.change(screen.getByRole('searchbox', { name: 'disc.searchProjects' }), {
+      target: { value: 'Project 249' },
+    });
+
+    expect(screen.getByRole('option', { name: 'Project 249' })).toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: 'Project 17' })).toBeNull();
+    expect(screen.getByRole('combobox', { name: 'disc.project' })).toHaveAttribute('data-locked');
+  });
+
+  it('persists an explicitly selected default project across form mounts', async () => {
+    const first = mount([PROJECT_WITH_REPO, PROJECT_WITHOUT_REPO]);
+    fireEvent.change(screen.getByRole('combobox', { name: 'disc.project' }), {
+      target: { value: PROJECT_WITHOUT_REPO.id },
+    });
+    fireEvent.click(screen.getByRole('checkbox', { name: 'disc.defaultProject' }));
+    first.unmount();
+
+    mount([PROJECT_WITH_REPO, PROJECT_WITHOUT_REPO]);
+    await waitFor(() => {
+      expect(screen.getByRole('combobox', { name: 'disc.project' })).toHaveValue(
+        PROJECT_WITHOUT_REPO.id,
+      );
+      expect(screen.getByRole('checkbox', { name: 'disc.defaultProject' })).toBeChecked();
+    });
+  });
+
   it('separates the starting brief from launch configuration', () => {
     mount([PROJECT_WITH_REPO]);
 

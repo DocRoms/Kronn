@@ -101,7 +101,9 @@ test.describe('Discussion chat — durable send receipt', () => {
     const dashboard = new DashboardPage(page);
     await dashboard.goto();
     await dashboard.navDiscussions.click();
-    await page.getByRole('button', { name: /E2E durable send receipt/ }).click();
+    await page
+      .locator('button.disc-item-open[aria-label^="E2E durable send receipt —"]')
+      .click();
 
     const composer = page.locator('.disc-composer-textarea');
     await expect(composer).toBeEnabled();

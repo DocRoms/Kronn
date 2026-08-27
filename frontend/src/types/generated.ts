@@ -4499,7 +4499,13 @@ target_all?: boolean,
  * Every explicit `@agent` addressee, deduplicated in textual order.
  * `target_agent` below remains accepted for older clients.
  */
-target_agents?: Array<AgentType>, target_agent?: AgentType | null, client_message_id?: string | null, reply_to_message_id?: string | null, };
+target_agents?: Array<AgentType>, target_agent?: AgentType | null, client_message_id?: string | null,
+/**
+ * Persist the User turn and its dispatch obligations without claiming a
+ * runner for this HTTP/SSE request. Used by the durable composer outbox:
+ * the scheduler starts it only after the discussion's current run ends.
+ */
+defer_dispatch?: boolean, reply_to_message_id?: string | null, };
 
 export type ServerConfig = { host: string, port: number,
 /**

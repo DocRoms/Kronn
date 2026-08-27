@@ -11,7 +11,12 @@ import type {
 } from '../types/generated';
 import { docs as docsApi, pages as pagesApi, workflows as workflowsApi } from '../lib/api';
 import { datasetRecords, recordsToRows } from '../lib/live-page-csv';
-import { buildSandboxDocument, requestRenderedPageHtml, runtimeData } from '../lib/live-page-sandbox';
+import {
+  buildSandboxDocument,
+  createLivePageOpenLinkRelay,
+  requestRenderedPageHtml,
+  runtimeData,
+} from '../lib/live-page-sandbox';
 import { formatRelativeTime } from '../lib/relativeTime';
 import { CopyIdPill } from '../components/CopyIdPill';
 import { FavoriteToggle } from '../components/FavoriteToggle';
@@ -153,6 +158,7 @@ export function PagesPage({
   const [selectedDatasetId, setSelectedDatasetId] = useState<string | null>(null);
   const [datasetExportBusy, setDatasetExportBusy] = useState(false);
   const iframeRef = useRef<HTMLIFrameElement>(null);
+  const linkRelayRef = useRef<ReturnType<typeof createLivePageOpenLinkRelay> | null>(null);
   const [bridgeChannel] = useState(channelId);
   const requestedPageIdRef = useRef(initialSelectedPageId);
   const selectionConsumedRef = useRef(onInitialSelectionConsumed);
@@ -533,13 +539,24 @@ export function PagesPage({
   );
   const publishToFrame = useCallback(() => {
     if (!detail) return;
-    iframeRef.current?.contentWindow?.postMessage({
+    const target = iframeRef.current?.contentWindow ?? null;
+    if (!target) return;
+    linkRelayRef.current?.connect(target);
+    target.postMessage({
       type: 'kronn:page-data',
       version: 1,
       channel_id: bridgeChannel,
       data: runtimeData(detail),
     }, '*');
   }, [bridgeChannel, detail]);
+  useEffect(() => {
+    const relay = createLivePageOpenLinkRelay(bridgeChannel);
+    linkRelayRef.current = relay;
+    return () => {
+      if (linkRelayRef.current === relay) linkRelayRef.current = null;
+      relay.dispose();
+    };
+  }, [bridgeChannel]);
   useEffect(() => { publishToFrame(); }, [publishToFrame]);
 
   return (

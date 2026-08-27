@@ -2586,6 +2586,69 @@ mod tests {
     }
 
     #[test]
+    fn deferred_human_turn_is_durable_pending_and_idempotent() {
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("d-deferred-turn")).unwrap();
+        let message = make_message("u-deferred-turn", MessageRole::User, None);
+        let dispatches = [UserDispatchSpec {
+            job_id: "deferred-job",
+            agent_override: None,
+            dedupe_key: None,
+        }];
+
+        let inserted = insert_user_message_with_pending_dispatches(
+            &conn,
+            "d-deferred-turn",
+            &message,
+            &[],
+            &dispatches,
+            false,
+        )
+        .unwrap();
+        let InsertUserMessageOutcome::Inserted { dispatch_job, .. } = inserted else {
+            panic!("first deferred acceptance must insert");
+        };
+        assert!(
+            dispatch_job.is_none(),
+            "the request must not claim a runner"
+        );
+        assert_eq!(
+            crate::db::agent_dispatch::get(&conn, "deferred-job")
+                .unwrap()
+                .unwrap()
+                .status,
+            crate::db::agent_dispatch::DispatchStatus::Pending,
+        );
+
+        let duplicate = insert_user_message_with_pending_dispatches(
+            &conn,
+            "d-deferred-turn",
+            &message,
+            &[],
+            &[UserDispatchSpec {
+                job_id: "deferred-job-retry",
+                agent_override: None,
+                dedupe_key: None,
+            }],
+            false,
+        )
+        .unwrap();
+        assert!(matches!(
+            duplicate,
+            InsertUserMessageOutcome::Duplicate { .. }
+        ));
+        let job_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM agent_dispatch_jobs
+                 WHERE trigger_message_id = 'u-deferred-turn'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(job_count, 1, "retrying the UUID must not duplicate the job");
+    }
+
+    #[test]
     fn discussion_targets_preserve_message_scope_order_and_tiers() {
         let conn = test_conn();
         insert_discussion(&conn, &make_discussion("d-routing-receipts")).unwrap();

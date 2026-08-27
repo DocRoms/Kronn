@@ -101,11 +101,19 @@ function escaped(value: string): string {
 
 function proseOnly(text: string): string {
   // Keep offsets stable so textual target ordering still reflects the original
-  // message. Mention examples in inline/fenced code are documentation, never a
-  // dispatch request.
+  // message. Mention examples in code, quotations and Markdown blockquotes are
+  // documentation, never a dispatch request. This is deliberately handled at
+  // the routing boundary: copied UI labels such as `"@ollama"` must not be able
+  // to attach a provider to the discussion merely because their text contains
+  // a valid alias.
   return text
     .replace(/```[\s\S]*?(?:```|$)/g, match => ' '.repeat(match.length))
-    .replace(/`[^`\n]*`/g, match => ' '.repeat(match.length));
+    .replace(/`[^`\n]*`/g, match => ' '.repeat(match.length))
+    .replace(/^[ \t]*>[^\n]*(?:\n|$)/gm, match => ' '.repeat(match.length))
+    .replace(/"[\s\S]*?(?:"|$)/g, match => ' '.repeat(match.length))
+    .replace(/“[\s\S]*?(?:”|$)/g, match => ' '.repeat(match.length))
+    .replace(/«[\s\S]*?(?:»|$)/g, match => ' '.repeat(match.length))
+    .replace(/(^|[\s([{,:;])'[\s\S]*?(?:'|$)/g, match => ' '.repeat(match.length));
 }
 
 export function targetsFromComposerText(
@@ -208,10 +216,10 @@ export function pendingAgentReplies(
   if (/(^|[^\p{L}\p{N}_-])@all(?=$|[^\p{L}\p{N}_-])/iu.test(routingText)) {
     requested = [discussion.agent, ...discussion.participants];
   } else if (requested.length === 0) {
-    const nativeParticipants = nativeDiscussionTargets(discussion).map(target => target.agent_type);
-    requested = nativeParticipants.length > 1
-      ? nativeParticipants
-      : [latestUser.target_agent ?? discussion.agent];
+    // Participants are historical capabilities, not an implicit recipient
+    // list. A general turn always belongs to the configured principal unless
+    // the human explicitly names another target (or uses @all).
+    requested = [latestUser.target_agent ?? discussion.agent];
   }
 
   const answered = new Set<AgentType>();

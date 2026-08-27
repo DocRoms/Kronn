@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { AGENT_COLORS, AGENT_LABELS, AGENT_MENTIONS, ALL_AGENT_TYPES, MODEL_TIER_ICONS, agentColor, agentMentionColors, mentionedAgents, getProjectGroup, isHiddenPath, isUsable, isValidationDisc, isBriefingDisc, isBootstrapDisc, agentSupportsIntrospection, isTrackerMcp, TRACKER_MCP_NEEDLES, parseRepoUrl, buildOldestIssueRequest, inferTrackerSlugFromRepoUrl, RTK_APPLICABLE, isRtkActive, modelForAgentTier } from '../constants';
+import { AGENT_COLORS, AGENT_LABELS, AGENT_MENTIONS, ALL_AGENT_TYPES, MODEL_TIER_ICONS, agentColor, agentMentionColors, mentionedAgents, getProjectGroup, isHiddenPath, isUsable, isValidationDisc, isBriefingDisc, isBootstrapDisc, agentSupportsIntrospection, isTrackerMcp, TRACKER_MCP_NEEDLES, parseRepoUrl, buildOldestIssueRequest, inferTrackerSlugFromRepoUrl, RTK_APPLICABLE, isRtkActive, modelForAgentTier, isAgentRestricted, hasAgentFullAccess } from '../constants';
 
 describe('constants', () => {
   describe('agent registry completeness', () => {
@@ -197,6 +197,28 @@ describe('constants', () => {
         claude_code: { path: null, installed: true, version: null, full_access: false, mention_color: 'red' },
       } as never)).toEqual({ Codex: '#123abc' });
     });
+  });
+
+  describe('full-access capability', () => {
+    const access = {
+      claude_code: { full_access: false },
+      ollama: { full_access: false },
+      lite_llm: { full_access: false },
+      nvidia: { full_access: false },
+    } as never;
+
+    it('keeps the restricted warning for agents that expose the toggle', () => {
+      expect(isAgentRestricted(access, 'ClaudeCode')).toBe(true);
+      expect(hasAgentFullAccess(access, 'ClaudeCode')).toBe(false);
+    });
+
+    it.each(['Ollama', 'LiteLlm', 'Nvidia'] as const)(
+      'does not advertise an impossible full-access setting for %s',
+      agentType => {
+        expect(isAgentRestricted(access, agentType)).toBe(false);
+        expect(hasAgentFullAccess(access, agentType)).toBe(false);
+      },
+    );
   });
 
   describe('getProjectGroup()', () => {

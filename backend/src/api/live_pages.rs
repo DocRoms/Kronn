@@ -6,9 +6,9 @@ use chrono::Utc;
 use uuid::Uuid;
 
 use crate::models::{
-    ApiErrorCode, ApiResponse, CreateLivePageRequest, LinkLivePageDiscussionRequest, LivePage,
-    LivePageDiscussionRelation, LivePageRevision, PublishLivePageRequest,
-    UpdateLivePageHtmlRequest, UpdateLivePageRequest,
+    ApiErrorCode, ApiResponse, CreateLivePageDataset, CreateLivePageRequest,
+    LinkLivePageDiscussionRequest, LivePage, LivePageDataset, LivePageDiscussionRelation,
+    LivePageRevision, PublishLivePageRequest, UpdateLivePageHtmlRequest, UpdateLivePageRequest,
 };
 use crate::AppState;
 
@@ -407,6 +407,43 @@ pub async fn create(
             ApiErrorCode::Internal,
             format!("Page was created but could not be reloaded: {error}"),
         )),
+    }
+}
+
+pub async fn add_dataset(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(dataset): Json<CreateLivePageDataset>,
+) -> Json<ApiResponse<LivePageDataset>> {
+    match state
+        .db
+        .with_conn(move |conn| crate::db::live_pages::add_live_page_dataset(conn, &id, &dataset))
+        .await
+    {
+        Ok(dataset) => Json(ApiResponse::ok(dataset)),
+        Err(error) if error.to_string().contains("Page not found") => Json(ApiResponse::err_coded(
+            ApiErrorCode::NotFound,
+            "Page not found",
+        )),
+        Err(error) => {
+            let message = error.to_string();
+            let code = if message.contains("already exists with kind")
+                || message.contains("UNIQUE constraint")
+            {
+                ApiErrorCode::Conflict
+            } else if message.contains("Dataset names")
+                || message.contains("max_points")
+                || message.contains("max_age_days")
+            {
+                ApiErrorCode::Validation
+            } else {
+                ApiErrorCode::Internal
+            };
+            Json(ApiResponse::err_coded(
+                code,
+                format!("Unable to add dataset: {error}"),
+            ))
+        }
     }
 }
 

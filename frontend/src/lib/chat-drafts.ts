@@ -25,6 +25,9 @@ const DRAFT_KEY_PREFIX = 'kronn:draft:';
 const MAX_DRAFT_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 const DRAFT_SCHEMA_VERSION = 2;
 
+/** Stable pseudo-discussion used by the creation form before a disc has an id. */
+export const NEW_DISCUSSION_DRAFT_ID = '__new-discussion__';
+
 export type DraftRoutingTiers = Partial<Record<AgentType, ModelTier>>;
 
 export interface DraftRecord {
@@ -155,7 +158,13 @@ export function purgeExpiredDrafts(liveIds?: ReadonlySet<string>, now: Date = ne
       const discussionId = key.slice(DRAFT_KEY_PREFIX.length);
       let drop = false;
 
-      if (liveIds && !liveIds.has(discussionId)) {
+      // The creation form has no real discussion id yet. Keep its draft under
+      // the reserved id while still applying the normal seven-day expiry.
+      if (
+        liveIds
+        && discussionId !== NEW_DISCUSSION_DRAFT_ID
+        && !liveIds.has(discussionId)
+      ) {
         drop = true;
       } else {
         // Read + check expiry (cheap — one JSON parse per draft).

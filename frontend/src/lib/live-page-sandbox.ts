@@ -43,6 +43,15 @@ interface LivePageExportResponse {
   error?: string;
 }
 
+interface LivePageOpenLinkRequest {
+  type: 'kronn:page-open-link';
+  version: 1;
+  channel_id: string;
+  url: string;
+}
+
+const MAX_LIVE_PAGE_LINK_CHARS = 8 * 1024;
+
 export function runtimeData(detail: LivePageDetail): LivePageRuntimeData {
   return {
     version: 1,
@@ -73,7 +82,12 @@ export function buildSandboxDocument(html: string, channelId: string): string {
   const head = `<meta http-equiv="Content-Security-Policy" content="${LIVE_PAGE_CSP}">`;
   const bridge = `<script>(()=>{
     const channel=${safeChannel};
+    const userActivation=navigator.userActivation;
+    const stopImmediate=Event.prototype.stopImmediatePropagation;
+    const portPost=MessagePort.prototype.postMessage;
+    const portStart=MessagePort.prototype.start;
     let latest=null;
+    let linkPort=null;
     Object.defineProperty(window,'KronnPageData',{configurable:false,get:()=>latest});
     const materializedRoot=()=>{
       const root=document.documentElement.cloneNode(true);
@@ -103,9 +117,35 @@ export function buildSandboxDocument(html: string, channelId: string): string {
       const totalHeight=Math.max(1,Math.ceil(document.documentElement.scrollHeight,document.body?document.body.scrollHeight:0,innerHeight));
       return {html:'<!doctype html>'+root.outerHTML,viewport_width:width,content_height:totalHeight};
     };
+    const relayOpenLink=url=>{
+      if(url==null||String(url).trim()==='')return null;
+      if(!linkPort||(userActivation&&!userActivation.isActive))return null;
+      let resolved;
+      try{resolved=new URL(String(url),document.baseURI).href;}catch(_error){return null;}
+      portPost.call(linkPort,{type:'kronn:page-open-link',version:1,channel_id:channel,url:resolved});
+      return null;
+    };
+    addEventListener('click',event=>{
+      if(event.defaultPrevented||event.button!==0)return;
+      const element=event.target instanceof Element?event.target:event.target&&event.target.parentElement;
+      const anchor=element&&element.closest?element.closest('a[href]'):null;
+      if(!anchor||anchor.target.toLowerCase()!=='_blank')return;
+      event.preventDefault();
+      relayOpenLink(anchor.href);
+    },true);
+    try{
+      Object.defineProperty(window,'open',{configurable:false,writable:false,value:url=>relayOpenLink(url)});
+    }catch(_error){}
     addEventListener('message',event=>{
       const message=event.data;
       if(!message||message.version!==1||message.channel_id!==channel)return;
+      if(message.type==='kronn:page-link-port'){
+        if(event.ports.length!==1)return;
+        stopImmediate.call(event);
+        linkPort=event.ports[0];
+        portStart.call(linkPort);
+        return;
+      }
       if(message.type==='kronn:page-data'){
         latest=message.data;
         dispatchEvent(new CustomEvent('kronn:page-data',{detail:latest}));
@@ -131,6 +171,73 @@ export function buildSandboxDocument(html: string, channelId: string): string {
     return `${html.slice(0, offset)}${injection}${html.slice(offset)}`;
   }
   return `<!doctype html><html><head>${injection}</head><body>${html}</body></html>`;
+}
+
+function safeLivePageLink(value: unknown): string | null {
+  if (typeof value !== 'string' || value.length === 0 || value.length > MAX_LIVE_PAGE_LINK_CHARS) {
+    return null;
+  }
+  try {
+    const url = new URL(value);
+    if ((url.protocol !== 'http:' && url.protocol !== 'https:') || url.username || url.password) {
+      return null;
+    }
+    return url.href;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Let a sandboxed Live Page request one browser-controlled external tab.
+ * The parent transfers a private MessagePort to the injected bridge. Its
+ * initialization event is stopped before Page-authored listeners can observe
+ * the port, so arbitrary authored postMessage calls never reach this handler.
+ * User activation and URL validation provide separate defense-in-depth. The
+ * sandbox intentionally remains `allow-scripts` without broad `allow-popups`.
+ */
+export interface LivePageOpenLinkRelay {
+  connect(target: Window | null): void;
+  dispose(): void;
+}
+
+export function createLivePageOpenLinkRelay(
+  channelId: string,
+  openExternal: (url: string, target: string, features: string) => unknown = window.open.bind(window),
+): LivePageOpenLinkRelay {
+  let activePort: MessagePort | null = null;
+  const onMessage = (message: LivePageOpenLinkRequest) => {
+    if (
+      !message
+      || message.type !== 'kronn:page-open-link'
+      || message.version !== 1
+      || message.channel_id !== channelId
+    ) return;
+    if (navigator.userActivation && !navigator.userActivation.isActive) return;
+    const url = safeLivePageLink(message.url);
+    if (!url) return;
+    openExternal(url, '_blank', 'noopener,noreferrer');
+  };
+  return {
+    connect(target) {
+      activePort?.close();
+      activePort = null;
+      if (!target) return;
+      const linkChannel = new MessageChannel();
+      activePort = linkChannel.port1;
+      activePort.onmessage = event => onMessage(event.data as LivePageOpenLinkRequest);
+      activePort.start();
+      target.postMessage({
+        type: 'kronn:page-link-port',
+        version: 1,
+        channel_id: channelId,
+      }, '*', [linkChannel.port2]);
+    },
+    dispose() {
+      activePort?.close();
+      activePort = null;
+    },
+  };
 }
 
 /**
