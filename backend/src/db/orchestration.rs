@@ -44,7 +44,8 @@ type TerminalWorkerContext = (
 // Columns 0..=26 are the KT-317 shape; 27..=29 append attempt_no + the typed worker
 // identity (KT-318); 30 appends blocked_reason_code (KT-328); 31 appends the
 // exact worker profile (KT-321); 32 appends the principal-authored worker scope;
-// 33 appends the launch-time ordered DoD id snapshot.
+// 33 appends the launch-time ordered DoD id snapshot; 34 appends the stable
+// external API connection identity used by configured HTTP runtimes.
 // New columns are appended so no existing index shifts.
 const EXEC_COLS: &str = "id, orchestration_run_id, task_id, parent_discussion_id, \
     sub_discussion_id, workspace_id, dispatch_job_id, base_sha, child_branch, \
@@ -53,7 +54,7 @@ const EXEC_COLS: &str = "id, orchestration_run_id, task_id, parent_discussion_id
     backup_ref, blocked_reason, outcome_reason, idempotency_key, created_at, \
     updated_at, finished_at, blocked_from_status, interrupted_from_status, \
     attempt_no, worker_target_kind, worker_cli_session_id, blocked_reason_code, \
-    worker_profile_id, worker_scope_json, worker_dod_ids_json";
+    worker_profile_id, worker_scope_json, worker_dod_ids_json, worker_connection_id";
 
 const RUN_COLS: &str = "id, kind, discussion_id, project_id, target_workspace_id, \
     target_branch, max_review_rounds, max_concurrent_executions, token_budget, \
@@ -275,6 +276,7 @@ fn row_to_execution(row: &Row) -> rusqlite::Result<TaskExecution> {
         child_branch: row.get(8)?,
         worker_target_kind: parse_target_kind(28, row.get(28)?)?,
         worker_cli_session_id: row.get(29)?,
+        worker_connection_id: row.get::<_, Option<String>>(34)?,
         worker_agent_type: row.get(9)?,
         worker_model: row.get(10)?,
         worker_model_tier: row.get(11)?,
@@ -1137,13 +1139,61 @@ pub fn principal_attention(conn: &Connection, run_id: &str) -> Result<PrincipalA
 // ─── TaskExecution ───────────────────────────────────────────────────────────
 
 pub fn get_task_execution(conn: &Connection, id: &str) -> Result<Option<TaskExecution>> {
-    conn.query_row(
-        &format!("SELECT {EXEC_COLS} FROM task_executions WHERE id = ?1"),
-        params![id],
-        row_to_execution,
-    )
-    .optional()
-    .map_err(Into::into)
+    let execution = conn
+        .query_row(
+            &format!("SELECT {EXEC_COLS} FROM task_executions WHERE id = ?1"),
+            params![id],
+            row_to_execution,
+        )
+        .optional()
+        .map_err(anyhow::Error::from)?;
+    if let Some(execution) = execution.as_ref() {
+        validate_worker_connection(conn, execution)?;
+    }
+    Ok(execution)
+}
+
+fn validate_worker_connection(conn: &Connection, execution: &TaskExecution) -> Result<()> {
+    let persisted_agent = execution
+        .worker_agent_type
+        .as_deref()
+        .map(agent_type_from_db)
+        .transpose()?;
+    let requires_connection = execution.worker_target_kind.is_some()
+        && matches!(
+            persisted_agent,
+            Some(AgentType::LiteLlm | AgentType::Nvidia | AgentType::Custom)
+        );
+    let Some(raw_connection_id) = execution.worker_connection_id.as_deref() else {
+        if requires_connection {
+            bail!("external worker target has no connection identifier");
+        }
+        return Ok(());
+    };
+    let connection_id = raw_connection_id.trim();
+    if connection_id.is_empty() {
+        bail!("worker connection identifier is empty");
+    }
+    let preset: Option<String> = conn
+        .query_row(
+            "SELECT origin_preset FROM external_api_connections WHERE id = ?1",
+            [connection_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let expected = match preset.as_deref() {
+        Some("litellm") => AgentType::LiteLlm,
+        Some("nvidia") => AgentType::Nvidia,
+        Some("other") => AgentType::Custom,
+        Some(other) => bail!("unknown external connection preset: {other}"),
+        None => bail!("unknown worker connection identifier: {connection_id}"),
+    };
+    let persisted = persisted_agent
+        .ok_or_else(|| anyhow::anyhow!("execution connection has no worker_agent_type"))?;
+    if persisted != expected {
+        bail!("worker connection does not match persisted provider");
+    }
+    Ok(())
 }
 
 /// The single active (non-terminal) execution for a task, if any. The partial
@@ -1239,7 +1289,7 @@ pub fn launch_single_task(
                 "INSERT INTO task_executions ({EXEC_COLS}) VALUES \
                  (?1, ?2, ?3, ?4, NULL, NULL, NULL, ?5, ?6, ?7, ?8, ?9, ?10, 0, ?11, \
                   NULL, NULL, NULL, NULL, NULL, NULL, ?12, ?13, ?13, NULL, NULL, NULL, \
-                  0, ?14, ?15, NULL, ?16, ?17, ?18)"
+                  0, ?14, ?15, NULL, ?16, ?17, ?18, ?19)"
             ),
             params![
                 id,
@@ -1268,6 +1318,7 @@ pub fn launch_single_task(
                     .as_ref()
                     .map(serde_json::to_string)
                     .transpose()?,
+                input.worker_connection_id,
             ],
         )?;
 
@@ -1363,7 +1414,7 @@ pub fn launch_task_in_run(
                 "INSERT INTO task_executions ({EXEC_COLS}) VALUES \
                  (?1, ?2, ?3, ?4, NULL, NULL, NULL, ?5, ?6, ?7, ?8, ?9, ?10, 0, ?11, \
                   NULL, NULL, NULL, NULL, NULL, NULL, ?12, ?13, ?13, NULL, NULL, NULL, \
-                  0, ?14, ?15, NULL, ?16, ?17, ?18)"
+                  0, ?14, ?15, NULL, ?16, ?17, ?18, ?19)"
             ),
             params![
                 id,
@@ -1392,6 +1443,7 @@ pub fn launch_task_in_run(
                     .as_ref()
                     .map(serde_json::to_string)
                     .transpose()?,
+                input.worker_connection_id,
             ],
         )?;
         record_execution_event(
@@ -3495,11 +3547,11 @@ pub fn get_execution_lineage(
     );
     conn.query_row(&sql, params![exec_id], |row| {
         let execution = row_to_execution(row)?;
-        // EXEC_COLS spans indices 0..=33 (34 columns); the JOIN columns follow.
-        let kind: String = row.get(34)?;
-        let task_number: i64 = row.get(35)?;
-        let task_title: String = row.get(36)?;
-        let workspace_canonical_path: Option<String> = row.get(37)?;
+        // EXEC_COLS spans indices 0..=34 (35 columns); the JOIN columns follow.
+        let kind: String = row.get(35)?;
+        let task_number: i64 = row.get(36)?;
+        let task_title: String = row.get(37)?;
+        let workspace_canonical_path: Option<String> = row.get(38)?;
         Ok(TaskExecutionLineage {
             parent_discussion_id: execution.parent_discussion_id.clone(),
             sub_discussion_id: execution.sub_discussion_id.clone(),
@@ -4147,7 +4199,8 @@ pub fn reassign_execution_worker(
         conn.execute(
             "UPDATE task_executions SET worker_target_kind = ?2, worker_cli_session_id = ?3, \
                     worker_agent_type = ?4, worker_model = ?5, worker_model_tier = ?6, \
-                    worker_profile_id = ?7, dispatch_job_id = NULL, updated_at = ?8 \
+                    worker_profile_id = ?7, dispatch_job_id = NULL, updated_at = ?8, \
+                    worker_connection_id = ?9 \
              WHERE id = ?1",
             params![
                 exec_id,
@@ -4158,6 +4211,7 @@ pub fn reassign_execution_worker(
                 selection.target.tier.as_ref().map(model_tier_to_db),
                 selection.profile_id,
                 now,
+                selection.target.connection_id,
             ],
         )?;
         conn.execute(

@@ -1373,6 +1373,7 @@ pub async fn wait_for_peer(
                                             _ => None,
                                         };
                                         Some(MessageTarget {
+                                            connection_id: None,
                                             kind,
                                             agent_type,
                                             cli_session_id,
@@ -1848,6 +1849,7 @@ fn load_awareness_batch(
                                 _ => None,
                             };
                             Some(MessageTarget {
+                                connection_id: None,
                                 kind,
                                 agent_type,
                                 cli_session_id,

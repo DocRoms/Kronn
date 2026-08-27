@@ -4569,6 +4569,7 @@ fn begin_provisioning(
     launch.validations = validations.to_vec();
     launch.worker_target_kind = Some(worker.kind);
     launch.worker_cli_session_id = worker.cli_session_id;
+    launch.worker_connection_id = worker.connection_id.clone();
     launch.worker_agent_type = Some(crate::db::orchestration::agent_type_to_db(
         &worker.agent_type,
     ));
@@ -4731,6 +4732,18 @@ fn worker_target_from_execution(execution: &TaskExecution) -> Result<MessageTarg
             .as_deref()
             .context("execution has no worker_agent_type")?,
     )?;
+    let connection_id = execution
+        .worker_connection_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let requires_connection = matches!(
+        agent_type,
+        AgentType::LiteLlm | AgentType::Nvidia | AgentType::Custom
+    );
+    if requires_connection && connection_id.is_none() {
+        anyhow::bail!("execution external worker has no connection identifier");
+    }
     let tier = execution
         .worker_model_tier
         .as_deref()
@@ -4738,6 +4751,7 @@ fn worker_target_from_execution(execution: &TaskExecution) -> Result<MessageTarg
     Ok(MessageTarget {
         kind,
         agent_type,
+        connection_id: connection_id.map(str::to_string),
         cli_session_id: execution.worker_cli_session_id,
         tier,
     })

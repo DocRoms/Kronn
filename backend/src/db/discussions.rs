@@ -2347,6 +2347,7 @@ pub fn list_message_targets(conn: &Connection, message_id: &str) -> Result<Vec<M
             Ok(MessageTarget {
                 kind,
                 agent_type: parse_agent_type(&row.get::<_, String>(1)?),
+                connection_id: None,
                 cli_session_id: row.get(2)?,
                 tier: match row.get::<_, Option<String>>(3)?.as_deref() {
                     Some("economy") => Some(crate::models::ModelTier::Economy),
@@ -2384,6 +2385,7 @@ pub fn list_discussion_message_targets(
         let target = MessageTarget {
             kind,
             agent_type: parse_agent_type(&row.get::<_, String>(2)?),
+            connection_id: None,
             cli_session_id: row.get(3)?,
             tier: match row.get::<_, Option<String>>(4)?.as_deref() {
                 Some("economy") => Some(crate::models::ModelTier::Economy),

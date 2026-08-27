@@ -727,6 +727,8 @@ pub struct TaskExecution {
     pub worker_target_kind: Option<MessageTargetKind>,
     #[serde(default)]
     pub worker_cli_session_id: Option<i64>,
+    #[serde(default)]
+    pub worker_connection_id: Option<String>,
     pub worker_agent_type: Option<String>,
     pub worker_model: Option<String>,
     pub worker_model_tier: Option<String>,
@@ -1049,6 +1051,7 @@ pub struct LaunchSingleTaskInput {
     /// exact typed identity. For a `Cli` kind, `worker_cli_session_id` is required.
     pub worker_target_kind: Option<MessageTargetKind>,
     pub worker_cli_session_id: Option<i64>,
+    pub worker_connection_id: Option<String>,
     pub worker_agent_type: Option<String>,
     pub worker_model: Option<String>,
     pub worker_model_tier: Option<String>,
@@ -1075,6 +1078,7 @@ impl LaunchSingleTaskInput {
             child_branch: None,
             worker_target_kind: None,
             worker_cli_session_id: None,
+            worker_connection_id: None,
             worker_agent_type: None,
             worker_model: None,
             worker_model_tier: None,
