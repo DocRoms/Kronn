@@ -3359,13 +3359,24 @@ mod tests {
                 .unwrap();
             assert!(output.status.success());
         }
-        fs::write(submodule.path().join("required.txt"), "available locally\n").unwrap();
+        fs::create_dir_all(submodule.path().join("bin")).unwrap();
+        fs::write(
+            submodule.path().join("bin/bats"),
+            "#!/bin/sh\necho bats fixture\n",
+        )
+        .unwrap();
         let commit = std::process::Command::new("git")
             .args(["add", "."])
             .current_dir(submodule.path())
             .output()
             .unwrap();
         assert!(commit.status.success());
+        let executable = std::process::Command::new("git")
+            .args(["update-index", "--chmod=+x", "bin/bats"])
+            .current_dir(submodule.path())
+            .output()
+            .unwrap();
+        assert!(executable.status.success());
         let commit = std::process::Command::new("git")
             .args(["commit", "-m", "submodule source"])
             .current_dir(submodule.path())
@@ -3373,6 +3384,11 @@ mod tests {
             .unwrap();
         assert!(commit.status.success());
 
+        fs::write(
+            repo.join("Makefile"),
+            "test-shell:\n\t./deps/required/bin/bats --version\n",
+        )
+        .unwrap();
         let add = std::process::Command::new("git")
             .args([
                 "-c",
@@ -3390,6 +3406,12 @@ mod tests {
             "submodule add failed: {}",
             String::from_utf8_lossy(&add.stderr)
         );
+        let stage_makefile = std::process::Command::new("git")
+            .args(["add", "Makefile"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(stage_makefile.status.success());
         let commit = std::process::Command::new("git")
             .args(["commit", "-m", "add required submodule"])
             .current_dir(repo)
@@ -3461,7 +3483,20 @@ mod tests {
         let worktree = Path::new(&info.path);
         let task_submodule = worktree.join("deps/required");
         assert_eq!(head_sha(&task_submodule), head_sha(&source_submodule));
-        assert!(task_submodule.join("required.txt").is_file());
+        assert!(task_submodule.join("bin/bats").is_file());
+        #[cfg(unix)]
+        {
+            let shell_tests = std::process::Command::new("make")
+                .arg("test-shell")
+                .current_dir(worktree)
+                .output()
+                .unwrap();
+            assert!(
+                shell_tests.status.success(),
+                "make test-shell failed: {}",
+                String::from_utf8_lossy(&shell_tests.stderr)
+            );
+        }
 
         let source_git_dir = std::process::Command::new("git")
             .args(["rev-parse", "--absolute-git-dir"])
