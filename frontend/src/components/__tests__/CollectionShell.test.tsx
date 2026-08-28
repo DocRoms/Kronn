@@ -1,0 +1,69 @@
+import { describe, expect, it } from 'vitest';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { useState } from 'react';
+import { CollectionShell } from '../CollectionShell';
+
+type Item = { id: string; name: string; favorite: boolean; archived?: boolean };
+const items: Item[] = [{ id: 'one', name: 'One', favorite: true }, { id: 'two', name: 'Two', favorite: false, archived: true }];
+const labels = { search: 'Search', favorites: 'Favorites', clearFilters: 'Clear filters', moreActions: 'More actions', openCollection: 'Open collection', closeCollection: 'Close collection', selectItem: 'selected' };
+
+function Fixture({ mobile = false }: { mobile?: boolean }) {
+  const [query, setQuery] = useState('');
+  const [favoritesOnly, setFavoritesOnly] = useState(false);
+  const [filter, setFilter] = useState<string | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>('one');
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  return <CollectionShell<Item>
+    ariaLabel="Test collection" items={items} getId={item => item.id} getLabel={item => item.name} isFavorite={item => item.favorite}
+    filters={[{ id: 'archived', label: 'Archived', matches: item => !!item.archived }]}
+    persistence={{ query, onQueryChange: setQuery, favoritesOnly, onFavoritesOnlyChange: setFavoritesOnly, activeFilterId: filter, onActiveFilterIdChange: setFilter }}
+    selectedId={selectedId} onSelect={setSelectedId} selectedIds={selectedIds} onSelectedIdsChange={setSelectedIds}
+    actions={[{ id: 'archive', label: 'Archive selected', onSelect: selected => setSelectedId(selected.map(item => item.id).join(',')) }]}
+    isMobile={mobile} sidebarOpen={sidebarOpen} onSidebarOpenChange={setSidebarOpen} labels={labels}
+    slots={{ renderDetail: item => <p>Detail: {item?.name ?? 'none'}</p>, renderEmpty: () => <>Nothing found</> }}
+  />;
+}
+
+describe('CollectionShell', () => {
+  it('filters, favorites, and renders the shared empty state', () => {
+    render(<Fixture />);
+    fireEvent.click(screen.getByRole('button', { name: 'Favorites' }));
+    expect(screen.getByRole('button', { name: 'One' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Two' })).toBeNull();
+    fireEvent.change(screen.getByRole('textbox', { name: 'Search' }), { target: { value: 'none' } });
+    expect(screen.getByText('Nothing found')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Clear filters' }));
+    expect(screen.getByRole('button', { name: 'Two' })).toBeInTheDocument();
+  });
+
+  it('supports multi-selection and restores menu-trigger focus after Escape', async () => {
+    render(<Fixture />);
+    fireEvent.click(screen.getByRole('checkbox', { name: 'One selected' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Two selected' }));
+    const trigger = screen.getByRole('button', { name: 'More actions' });
+    fireEvent.click(trigger);
+    expect(screen.getByRole('menuitem', { name: 'Archive selected' })).toHaveFocus();
+    fireEvent.keyDown(window, { key: 'Escape' });
+    await waitFor(() => expect(trigger).toHaveFocus());
+  });
+
+  it('supports the shared slash and arrow-key sidebar shortcuts', () => {
+    render(<Fixture />);
+    const sidebar = screen.getByRole('complementary', { name: 'Test collection' });
+    fireEvent.keyDown(sidebar, { key: '/' });
+    expect(screen.getByRole('textbox', { name: 'Search' })).toHaveFocus();
+    fireEvent.keyDown(sidebar, { key: 'ArrowDown' });
+    expect(screen.getByRole('button', { name: 'One' })).toHaveFocus();
+    fireEvent.keyDown(sidebar, { key: 'ArrowDown' });
+    expect(screen.getByRole('button', { name: 'Two' })).toHaveFocus();
+  });
+
+  it('closes the mobile sidebar after selecting an item and lets it reopen', () => {
+    render(<Fixture mobile />);
+    fireEvent.click(screen.getByRole('button', { name: 'Two' }));
+    expect(screen.queryByRole('complementary', { name: 'Test collection' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Open collection' }));
+    expect(screen.getByRole('complementary', { name: 'Test collection' })).toBeInTheDocument();
+  });
+});
