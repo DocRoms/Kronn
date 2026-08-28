@@ -5260,7 +5260,21 @@ def _visible_tools():
             "summary": {"type": "string", "minLength": 1},
         },
     }
-    return [commit, {
+    status = next(item for item in TOOLS if item["name"] == "task_exec_status")
+    status = {
+        **status,
+        "description": (
+            "Read THIS spawned task worker's execution status. Kronn derives "
+            "the execution, child room, provider and dispatch from the runner capability; "
+            "no execution selector is accepted."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {},
+        },
+    }
+    return [status, commit, {
         **delivery,
         "description": (
             "Submit semantic delivery assertions for THIS spawned task worker. "
@@ -5387,6 +5401,21 @@ def call_task_exec_launch(args):
 
 
 def call_task_exec_status(args):
+    if _spawned_task_worker_mode():
+        context = _spawned_task_worker_context(
+            required=True, tool_name="task_exec_status"
+        )
+        return _unwrap(_http(
+            "POST",
+            f"/api/orchestration/tool/executions/{urllib.parse.quote(context['execution_id'], safe='')}/status",
+            {
+                "spawned_agent": {
+                    "discussion_id": context["discussion_id"],
+                    "agent_type": context["agent_type"],
+                    "source_message_id": context["source_message_id"],
+                },
+            },
+        ))
     execution_id = (args.get("task_execution_id") or args.get("task_reference") or "").strip()
     if not execution_id:
         raise RuntimeError("task_exec_status: task_execution_id or task_reference is required")

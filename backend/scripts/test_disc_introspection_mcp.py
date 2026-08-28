@@ -954,7 +954,7 @@ class TaskExecDeliverTests(unittest.TestCase):
         self.assertEqual(self.mod._CURRENT_DISC_ID, "disc-child")
         write_binding.assert_not_called()
 
-    def test_spawned_worker_catalogue_is_exact_commit_then_delivery_surface(self):
+    def test_spawned_worker_catalogue_is_exact_status_commit_delivery_surface(self):
         encoded = json.dumps(self._spawned_context())
         with mock.patch.dict(
             os.environ, {self.mod._TASK_WORKER_CONTEXT_ENV: encoded}, clear=False
@@ -969,10 +969,13 @@ class TaskExecDeliverTests(unittest.TestCase):
 
         self.assertEqual(
             [tool["name"] for tool in tools],
-            ["task_exec_commit", "task_exec_deliver"],
+            ["task_exec_status", "task_exec_commit", "task_exec_deliver"],
         )
         self.assertEqual(listed["result"]["tools"], tools)
         by_name = {tool["name"]: tool for tool in tools}
+        status_schema = by_name["task_exec_status"]["inputSchema"]
+        self.assertFalse(status_schema["additionalProperties"])
+        self.assertEqual(status_schema["properties"], {})
         commit_schema = by_name["task_exec_commit"]["inputSchema"]
         self.assertFalse(commit_schema["additionalProperties"])
         self.assertEqual(commit_schema["required"], ["files", "message"])
@@ -1009,6 +1012,32 @@ class TaskExecDeliverTests(unittest.TestCase):
         self.assertIn("manifest", initialized["result"]["instructions"])
         self.assertNotIn("task_execution_id", initialized["result"]["instructions"])
         self.assertIn("opaque DoD ids", initialized["result"]["instructions"])
+
+    def test_spawned_worker_status_uses_runner_context(self):
+        encoded = json.dumps(self._spawned_context())
+        http = mock.MagicMock(return_value={
+            "success": True,
+            "data": {"execution": {"id": "exec-a", "status": "Working"}},
+        })
+        with mock.patch.dict(
+            os.environ, {self.mod._TASK_WORKER_CONTEXT_ENV: encoded}, clear=False
+        ), mock.patch.object(
+            self.mod, "_task_exec_identity", side_effect=AssertionError("must not join")
+        ), mock.patch.object(self.mod, "_http", http):
+            result = self.mod.call_task_exec_status({"task_execution_id": "forged"})
+
+        http.assert_called_once_with(
+            "POST",
+            "/api/orchestration/tool/executions/exec-a/status",
+            {
+                "spawned_agent": {
+                    "discussion_id": "disc-child-a",
+                    "agent_type": "Codex",
+                    "source_message_id": "trigger-a",
+                },
+            },
+        )
+        self.assertEqual(result["execution"]["status"], "Working")
 
     def test_spawned_worker_ignores_forged_execution_and_uses_runner_context(self):
         encoded = json.dumps(self._spawned_context())

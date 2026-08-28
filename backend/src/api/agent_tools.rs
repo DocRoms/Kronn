@@ -667,7 +667,6 @@ fn worker_room_catalogue(catalogue: Vec<Value>) -> Vec<Value> {
         "agent_list",
         "task_exec_prepare",
         "task_exec_launch",
-        "task_exec_status",
         "task_exec_cancel",
         "task_exec_reassign",
         "task_exec_review",
@@ -2936,10 +2935,10 @@ mod tests {
             projected["properties"]["dod_status"]["items"]["additionalProperties"],
             json!(false)
         );
-        assert!(worker.iter().all(|tool| {
+        assert!(worker.iter().any(|tool| {
             tool["function"]["name"]
                 .as_str()
-                .is_none_or(|name| name != "task_exec_status")
+                .is_some_and(|name| name == "task_exec_status")
         }));
     }
 

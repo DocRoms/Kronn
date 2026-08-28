@@ -5696,6 +5696,7 @@ Suite de la réponse.";
         assert_eq!(
             internal["enabled_tools"],
             toml::Value::Array(vec![
+                toml::Value::String("task_exec_status".into()),
                 toml::Value::String("task_exec_commit".into()),
                 toml::Value::String("task_exec_deliver".into()),
             ])
@@ -5703,6 +5704,10 @@ Suite de la réponse.";
         assert_eq!(
             internal["default_tools_approval_mode"].as_str(),
             Some("prompt")
+        );
+        assert_eq!(
+            internal["tools"]["task_exec_status"]["approval_mode"].as_str(),
+            Some("approve")
         );
         assert_eq!(
             internal["tools"]["task_exec_commit"]["approval_mode"].as_str(),
@@ -5714,7 +5719,7 @@ Suite de la réponse.";
         );
         assert_eq!(
             internal["tools"].as_table().map(toml::Table::len),
-            Some(2),
+            Some(3),
             "no other worker MCP tool may be auto-approved"
         );
         assert_eq!(

@@ -3873,14 +3873,31 @@ pub(crate) fn native_worker_dispatch_matches(
     let Some(current_assignment_started_at) = current_assignment_started_at else {
         return Ok(false);
     };
+    let reassignment_dedupe = conn
+        .query_row(
+            "SELECT generation FROM task_execution_assignment_events \
+             WHERE task_execution_id = ?1 ORDER BY generation DESC LIMIT 1",
+            [execution.id.as_str()],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?
+        .map(|generation| format!("orch-reassign:{}:{generation}", execution.id));
+    let resume_dedupe = format!(
+        "orch-resume-worker:{}:{}",
+        execution.id, execution.attempt_no
+    );
     let belongs_to_current_assignment: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM agent_dispatch_jobs \
          WHERE discussion_id = ?1 AND trigger_message_id = ?2 \
-           AND created_at >= ?3)",
+           AND created_at >= ?3 \
+           AND (dedupe_key = ?4 OR dedupe_key = ?5 OR dedupe_key LIKE ?6))",
         rusqlite::params![
             sub_discussion_id,
             source_message_id,
-            current_assignment_started_at
+            current_assignment_started_at,
+            reassignment_dedupe,
+            resume_dedupe,
+            format!("{}:retry:%", resume_dedupe),
         ],
         |row| row.get(0),
     )?;
@@ -7332,8 +7349,12 @@ pub struct TaskExecLaunchRequest {
 
 #[derive(Deserialize)]
 pub struct TaskExecCallerRequest {
+    #[serde(default)]
     pub source_agent: String,
+    #[serde(default)]
     pub source_session_id: String,
+    #[serde(default)]
+    pub spawned_agent: Option<SpawnedAgentCaller>,
 }
 
 #[derive(Deserialize)]
@@ -7841,6 +7862,61 @@ pub async fn task_exec_status(
     Path(exec_id): Path<String>,
     Json(request): Json<TaskExecCallerRequest>,
 ) -> Json<ApiResponse<crate::models::TaskExecutionDetail>> {
+    if let Some(caller) = request.spawned_agent {
+        if !request.source_agent.trim().is_empty() || !request.source_session_id.trim().is_empty() {
+            return Json(ApiResponse::err_coded(
+                ApiErrorCode::Validation,
+                "choose exactly one status identity mode",
+            ));
+        }
+        let (agent_type, discussion_id, source_message_id) = match spawned_native_caller(&caller) {
+            Ok(caller) => caller,
+            Err(message) => {
+                return Json(ApiResponse::err_coded(
+                    ApiErrorCode::Validation,
+                    message.to_string(),
+                ))
+            }
+        };
+        let alias = crate::db::orchestration::agent_type_to_db(&agent_type);
+        let execution = match native_worker_execution_for_caller(
+            &state.db,
+            &exec_id,
+            NativeExecutionCaller {
+                discussion_id,
+                agent_type: &agent_type,
+                source_message_id: Some(source_message_id),
+                alias: &alias,
+                actor_session_id: Some(source_message_id),
+            },
+        )
+        .await
+        {
+            Ok(Some(execution)) => execution,
+            Ok(None) => {
+                return Json(ApiResponse::err_coded(
+                    ApiErrorCode::NotFound,
+                    "execution not found or caller is not a party",
+                ))
+            }
+            Err(error) => {
+                let (code, message) = provision_error_parts(&error);
+                return Json(ApiResponse::err_coded(code, message));
+            }
+        };
+        let execution_id = execution.id;
+        return match state
+            .db
+            .with_conn(move |conn| execution_detail(conn, &execution_id))
+            .await
+        {
+            Ok(detail) => Json(ApiResponse::ok(detail)),
+            Err(error) => Json(ApiResponse::err_coded(
+                ApiErrorCode::NotFound,
+                error.to_string(),
+            )),
+        };
+    }
     let Some((agent, session_id)) =
         caller_fields(&request.source_agent, &request.source_session_id)
     else {
@@ -9641,6 +9717,61 @@ mod tests {
         assert!(
             matches,
             "the current generation remains authorized after recovery"
+        );
+        let unrelated_trigger = "unrelated-later-trigger".to_string();
+        let unrelated_child = child.clone();
+        let unrelated_execution = exec_of(&db, &execution_id).await;
+        db.with_conn({
+            let unrelated_trigger = unrelated_trigger.clone();
+            move |conn| {
+                let message =
+                    orchestrator_message(unrelated_trigger.clone(), "unrelated later run".into());
+                crate::db::discussions::insert_message(conn, &unrelated_child, &message)?;
+                crate::db::agent_dispatch::enqueue_for_latest_user(
+                    conn,
+                    crate::db::agent_dispatch::NewLatestUserDispatch {
+                        id: "unrelated-later-dispatch",
+                        discussion_id: &unrelated_child,
+                        dedupe_key: "unrelated-later-dispatch",
+                        agent_override: Some(&AgentType::Codex),
+                        chain_prompt_ids: &[],
+                        batch_item: None,
+                        group_id: None,
+                        group_concurrency_limit: None,
+                    },
+                )?;
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+        let unrelated_matches = db
+            .with_conn(move |conn| {
+                native_worker_dispatch_matches(conn, &unrelated_execution, Some(&unrelated_trigger))
+            })
+            .await
+            .unwrap();
+        assert!(
+            !unrelated_matches,
+            "a later same-provider dispatch outside the execution lineage must stay refused"
+        );
+        let Json(status) = task_exec_status(
+            State(state.clone()),
+            Path(execution_id.clone()),
+            Json(TaskExecCallerRequest {
+                source_agent: String::new(),
+                source_session_id: String::new(),
+                spawned_agent: Some(SpawnedAgentCaller {
+                    discussion_id: child.clone(),
+                    agent_type: "Codex".into(),
+                    source_message_id: replacement_trigger.clone(),
+                }),
+            }),
+        )
+        .await;
+        assert!(
+            status.success,
+            "current worker must read status: {status:?}"
         );
         let manifest = projected_manifest_for_execution(&db, &execution_id).await;
         let delivered = deliver_native_worker_manifest(

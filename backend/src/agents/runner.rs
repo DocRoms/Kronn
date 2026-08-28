@@ -2004,7 +2004,7 @@ fn render_codex_task_worker_mcp_override(script: Option<&str>) -> Option<String>
     let script = serde_json::to_string(script?).ok()?;
     let env_vars = serde_json::to_string(KRONN_INTERNAL_CODEX_ENV_VARS).ok()?;
     Some(format!(
-        "mcp_servers={{\"kronn-internal\"={{command=\"python3\",args=[{script}],env_vars={env_vars},startup_timeout_sec=30,required=true,enabled_tools=[\"task_exec_commit\",\"task_exec_deliver\"],default_tools_approval_mode=\"prompt\",tools={{task_exec_commit={{approval_mode=\"approve\"}},task_exec_deliver={{approval_mode=\"approve\"}}}}}}}}"
+        "mcp_servers={{\"kronn-internal\"={{command=\"python3\",args=[{script}],env_vars={env_vars},startup_timeout_sec=30,required=true,enabled_tools=[\"task_exec_status\",\"task_exec_commit\",\"task_exec_deliver\"],default_tools_approval_mode=\"prompt\",tools={{task_exec_status={{approval_mode=\"approve\"}},task_exec_commit={{approval_mode=\"approve\"}},task_exec_deliver={{approval_mode=\"approve\"}}}}}}}}"
     ))
 }
 
