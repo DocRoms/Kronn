@@ -100,6 +100,30 @@ pub enum ProvisionError {
     Internal(String),
 }
 
+/// Validate principal-authored mechanical gates before they are persisted.
+///
+/// Quick Exec owns the execution ceiling. Keeping this check at the orchestration
+/// boundary prevents a newly-created run from carrying a timeout that the
+/// validation runner would later refuse. Persisted runs from older Kronn builds
+/// are handled separately by `run_one_validation` so upgrades remain resumable.
+pub(crate) fn validate_new_validation_specs(
+    validations: &[crate::models::ValidationSpec],
+) -> Result<(), String> {
+    let max_timeout = crate::core::quick_exec::MAX_TIMEOUT_SECS;
+    if let Some(bad) = validations.iter().find(|spec| {
+        spec.command.trim().is_empty()
+            || spec
+                .timeout_secs
+                .is_some_and(|timeout| timeout == 0 || u64::from(timeout) > max_timeout)
+    }) {
+        return Err(format!(
+            "command must be non-empty and timeout_secs must be between 1 and {max_timeout} (got {})",
+            serde_json::to_string(bad).unwrap_or_default()
+        ));
+    }
+    Ok(())
+}
+
 /// A backend/system actor — every provisioning write is attributed to it.
 fn backend_actor() -> OrchestrationActor {
     PlanningActor {
@@ -2438,11 +2462,22 @@ async fn run_one_validation(
         return (None, 0, "empty validation command".into());
     };
     use crate::core::quick_exec;
+    let requested_timeout = spec.timeout_secs.map(u64::from);
+    let effective_timeout =
+        requested_timeout.map(|timeout| timeout.min(quick_exec::MAX_TIMEOUT_SECS));
+    let legacy_timeout_notice = requested_timeout
+        .filter(|timeout| *timeout > quick_exec::MAX_TIMEOUT_SECS)
+        .map(|timeout| {
+            format!(
+                "legacy validation timeout {timeout}s clamped to {}s",
+                quick_exec::MAX_TIMEOUT_SECS
+            )
+        });
     let quick = quick_exec::QuickExecSpec {
         binary: binary.to_string(),
         argv: parts.map(str::to_string).collect(),
         cwd: cwd.to_path_buf(),
-        timeout_secs: spec.timeout_secs.map(u64::from),
+        timeout_secs: effective_timeout,
         // A validation reads nothing: leaving stdin open would make a command that
         // waits for input indistinguishable from one that hangs.
         stdin: None,
@@ -2460,10 +2495,15 @@ async fn run_one_validation(
         Err(rejection) => return (None, 0, format!("refused: {rejection}")),
     };
     let cancel = tokio_util::sync::CancellationToken::new();
-    match quick_exec::run(&validated, None, &cancel).await {
+    let (code, duration, summary) = match quick_exec::run(&validated, None, &cancel).await {
         Ok(result) => (result.exit_code, result.duration_ms as i64, result.summary),
         Err(e) => (None, 0, format!("validation could not run: {e}")),
-    }
+    };
+    let summary = match legacy_timeout_notice {
+        Some(notice) => format!("{notice}\n{summary}"),
+        None => summary,
+    };
+    (code, duration, summary)
 }
 
 fn checkpoint_refusal_reason(reason: &StartTaskCheckpoint) -> String {
@@ -4512,6 +4552,14 @@ fn begin_provisioning(
     }
     let is_replay = idempotent_replay || explicit_resume;
 
+    if !is_replay {
+        if let Err(reason) = validate_new_validation_specs(validations) {
+            return Ok(Err(ProvisionError::NotLaunchable(format!(
+                "invalid validations: {reason}"
+            ))));
+        }
+    }
+
     if let Some(scope) = worker_scope {
         if let Err(reason) = scope.validate() {
             return Ok(Err(ProvisionError::NotLaunchable(reason)));
@@ -4584,6 +4632,14 @@ fn begin_provisioning(
             )))
         }
     };
+    if !is_replay {
+        if let Some(reason) = worker_project_refusal(worker, &project) {
+            return Ok(Err(ProvisionError::NotLaunchable(format!(
+                "{}: {}",
+                reason.code, reason.detail
+            ))));
+        }
+    }
     let repo_path = scanner::resolve_host_path(&project.path)
         .to_string_lossy()
         .to_string();
@@ -5468,6 +5524,18 @@ fn worker_static_refusal(worker: &MessageTarget) -> Option<crate::models::Campai
     None
 }
 
+fn worker_project_refusal(
+    worker: &MessageTarget,
+    project: &crate::models::Project,
+) -> Option<crate::models::CampaignTaskReason> {
+    if worker.kind == MessageTargetKind::Agent && worker.agent_type == AgentType::ClaudeCode {
+        return crate::agents::runner::claude_task_worker_catalogue_preflight(project)
+            .err()
+            .map(|detail| preparation_reason("claude_sandbox_catalogue_unsafe", detail));
+    }
+    None
+}
+
 /// Validate the worker identity at the shared launch boundary. HTTP/MCP
 /// preflight calls this for a useful refusal, but provisioning calls it again
 /// before creating any execution or worktree: internal callers and campaigns
@@ -5610,11 +5678,16 @@ pub(crate) fn prepare_task_execution(
                     "task project does not match the principal discussion project",
                 ));
             }
-            if crate::db::projects::get_project(conn, project_id)?.is_none() {
-                reasons.push(preparation_reason(
+            match crate::db::projects::get_project(conn, project_id)? {
+                None => reasons.push(preparation_reason(
                     "project_missing",
                     "task project no longer exists",
-                ));
+                )),
+                Some(project) => {
+                    if let Some(reason) = worker_project_refusal(worker, &project) {
+                        reasons.push(reason);
+                    }
+                }
             }
             Some(project_id.clone())
         }
@@ -5707,6 +5780,12 @@ pub async fn create_campaign(
         return Json(ApiResponse::err_coded(
             ApiErrorCode::Validation,
             "target_branch is required".to_string(),
+        ));
+    }
+    if let Err(reason) = validate_new_validation_specs(&request.validations) {
+        return Json(ApiResponse::err_coded(
+            ApiErrorCode::Validation,
+            format!("invalid validations: {reason}"),
         ));
     }
     let resilience = crate::models::OrchestrationResiliencePolicy {
@@ -7506,6 +7585,18 @@ fn fixed_worker_reason(code: &str) -> crate::models::CampaignTaskReason {
         "runtime_degraded" => {
             "The detected runtime reports degraded capabilities; inspect Agent settings."
         }
+        "copilot_auth_invalid" => {
+            "Copilot rejected the effective authentication during a bounded account probe; run `copilot login`."
+        }
+        "copilot_preflight_malformed" => {
+            "Copilot completed its bounded account probe without a usable account response; verify `copilot login`."
+        }
+        "copilot_preflight_spawn_failed" => {
+            "Kronn could not invoke Copilot's bounded account probe; verify the local Copilot CLI installation."
+        }
+        "copilot_preflight_timed_out" => {
+            "Copilot did not finish its bounded account probe; retry later or reassign the execution."
+        }
         _ => "The worker is unavailable for a stable, backend-classified reason.",
     };
     preparation_reason(code, detail)
@@ -7519,6 +7610,7 @@ fn build_task_worker_catalogue(
         Option<String>,
     )],
     http_reachability: &[(AgentType, bool)],
+    cli_preflight: &[(AgentType, crate::agents::runner::CopilotTaskWorkerPreflight)],
 ) -> crate::models::TaskWorkerCatalogue {
     let mut workers = Vec::new();
     let native_agents = [
@@ -7594,6 +7686,17 @@ fn build_task_worker_catalogue(
         if http && !reachable {
             reasons.push(fixed_worker_reason("endpoint_unreachable"));
         }
+        if agent == AgentType::CopilotCli {
+            if let Some(status) = cli_preflight
+                .iter()
+                .find(|(kind, _)| kind == &agent)
+                .map(|(_, status)| *status)
+            {
+                if let Some(code) = status.reason_code() {
+                    reasons.push(fixed_worker_reason(code));
+                }
+            }
+        }
         let worker = if http {
             MessageTarget::discussion_agent(agent.clone()).with_tier(ModelTier::Default)
         } else {
@@ -7650,6 +7753,18 @@ fn build_task_worker_catalogue(
     crate::models::TaskWorkerCatalogue { workers }
 }
 
+fn apply_project_worker_refusals(
+    catalogue: &mut crate::models::TaskWorkerCatalogue,
+    project: &crate::models::Project,
+) {
+    for entry in &mut catalogue.workers {
+        if let Some(reason) = worker_project_refusal(&entry.worker, project) {
+            entry.reasons.push(reason);
+            entry.available = false;
+        }
+    }
+}
+
 async fn bounded_http_worker_reachability(state: &AppState) -> Vec<(AgentType, bool)> {
     let config = state.config.read().await.clone();
     let nvidia_endpoint =
@@ -7686,6 +7801,31 @@ async fn bounded_http_worker_reachability(state: &AppState) -> Vec<(AgentType, b
     ]
 }
 
+async fn bounded_cli_worker_preflight(
+    detections: &[crate::models::AgentDetection],
+) -> Vec<(AgentType, crate::agents::runner::CopilotTaskWorkerPreflight)> {
+    let Some(copilot) = detections
+        .iter()
+        .find(|item| item.agent_type == AgentType::CopilotCli)
+    else {
+        return Vec::new();
+    };
+    if !(copilot.installed || copilot.runtime_available) {
+        return Vec::new();
+    }
+    let work_dir = std::env::temp_dir();
+    // The shared runner helper owns the deadline and cancellation policy, so
+    // catalogue discovery cannot abandon a live Copilot child at an outer
+    // timeout boundary.
+    let status = crate::agents::runner::probe_copilot_task_worker_preflight(
+        "copilot",
+        Some("@github/copilot"),
+        &work_dir,
+    )
+    .await;
+    vec![(AgentType::CopilotCli, status)]
+}
+
 pub(crate) async fn task_worker_catalogue_for_discussion(
     state: &AppState,
     parent_discussion_id: &str,
@@ -7709,12 +7849,36 @@ pub(crate) async fn task_worker_catalogue_for_discussion(
     let config = state.config.read().await.clone();
     crate::agents::apply_configured_status(&mut detections, &config);
     let reachability = bounded_http_worker_reachability(state).await;
+    let cli_preflight = bounded_cli_worker_preflight(&detections).await;
     Ok(build_task_worker_catalogue(
         &config,
         &detections,
         &joined,
         &reachability,
+        &cli_preflight,
     ))
+}
+
+pub(crate) async fn target_aware_task_worker_catalogue_for_discussion(
+    state: &AppState,
+    parent_discussion_id: &str,
+) -> Result<crate::models::TaskWorkerCatalogue> {
+    let mut catalogue = task_worker_catalogue_for_discussion(state, parent_discussion_id).await?;
+    let parent = parent_discussion_id.to_string();
+    let project = state
+        .db
+        .with_read_conn(move |conn| {
+            crate::db::discussions::get_discussion(conn, &parent)?
+                .and_then(|discussion| discussion.project_id)
+                .map(|project_id| crate::db::projects::get_project(conn, &project_id))
+                .transpose()
+                .map(Option::flatten)
+        })
+        .await?;
+    if let Some(project) = project.as_ref() {
+        apply_project_worker_refusals(&mut catalogue, project);
+    }
+    Ok(catalogue)
 }
 
 /// MCP-only worker discovery. Caller identity is injected by the bridge and
@@ -7748,7 +7912,7 @@ pub async fn task_worker_catalogue(
             "principal discussion not found or caller is not an active member",
         ));
     }
-    match task_worker_catalogue_for_discussion(&state, &parent).await {
+    match target_aware_task_worker_catalogue_for_discussion(&state, &parent).await {
         Ok(catalogue) => Json(ApiResponse::ok(catalogue)),
         Err(error) => Json(ApiResponse::err(error.to_string())),
     }
@@ -8977,6 +9141,7 @@ mod tests {
                 (AgentType::LiteLlm, false),
                 (AgentType::Nvidia, false),
             ],
+            &[],
         );
 
         for entry in &catalogue.workers {
@@ -9031,6 +9196,77 @@ mod tests {
             assert!(!reason.detail.contains("http://"));
             assert!(!reason.detail.contains("https://"));
         }
+    }
+
+    #[test]
+    fn worker_catalogue_refuses_copilot_until_its_account_preflight_succeeds() {
+        let detection = crate::models::AgentDetection {
+            name: "GitHub Copilot".into(),
+            agent_type: AgentType::CopilotCli,
+            installed: true,
+            enabled: true,
+            path: Some("copilot".into()),
+            version: None,
+            latest_version: None,
+            origin: "test".into(),
+            install_command: None,
+            host_managed: false,
+            host_label: None,
+            runtime_available: true,
+            auth_ready: Some(true),
+            auth_setup_command: None,
+            rtk_available: false,
+            rtk_hook_configured: false,
+            runtime_warning: None,
+        };
+        let catalogue = build_task_worker_catalogue(
+            &crate::core::config::default_config(),
+            std::slice::from_ref(&detection),
+            &[],
+            &[],
+            &[(
+                AgentType::CopilotCli,
+                crate::agents::runner::CopilotTaskWorkerPreflight::AuthInvalid,
+            )],
+        );
+        let copilot = catalogue
+            .workers
+            .iter()
+            .find(|entry| entry.worker.agent_type == AgentType::CopilotCli)
+            .expect("Copilot entry");
+        assert!(copilot.configured && copilot.reachable);
+        assert!(!copilot.available);
+        assert!(copilot
+            .reasons
+            .iter()
+            .any(|reason| reason.code == "copilot_auth_invalid"));
+        assert!(copilot
+            .reasons
+            .iter()
+            .all(|reason| !reason.detail.contains("token")));
+
+        let timed_out = build_task_worker_catalogue(
+            &crate::core::config::default_config(),
+            &[detection],
+            &[],
+            &[],
+            &[(
+                AgentType::CopilotCli,
+                crate::agents::runner::CopilotTaskWorkerPreflight::TimedOut,
+            )],
+        );
+        let copilot = timed_out
+            .workers
+            .iter()
+            .find(|entry| entry.worker.agent_type == AgentType::CopilotCli)
+            .expect("Copilot entry");
+        assert!(!copilot.available);
+        assert!(copilot.reasons.iter().any(|reason| {
+            reason.code == "copilot_preflight_timed_out"
+                && reason
+                    .detail
+                    .contains("did not finish its bounded account probe")
+        }));
     }
 
     // ── KT-319 tranche 1 — delivery/review contracts + brief (pure). ──
@@ -10401,6 +10637,10 @@ mod tests {
                 "structurally valid but zero timeout",
                 serde_json::json!([{"command": "cargo build", "timeout_secs": 0}]),
             ),
+            (
+                "structurally valid but timeout above Quick Exec cap",
+                serde_json::json!([{"command": "cargo build", "timeout_secs": 1801}]),
+            ),
         ];
         for (label, validations) in cases {
             let call = ToolCall {
@@ -10427,6 +10667,24 @@ mod tests {
             0,
             "no refused launch may provision an ungated run behind its error"
         );
+    }
+
+    #[tokio::test]
+    async fn persisted_legacy_validation_timeout_is_clamped_instead_of_refused() {
+        let cwd = tempfile::tempdir().unwrap();
+        let spec = ValidationSpec {
+            command: "true".into(),
+            quick_exec_id: None,
+            timeout_secs: Some(
+                u32::try_from(crate::core::quick_exec::MAX_TIMEOUT_SECS + 1)
+                    .expect("Quick Exec timeout cap fits u32"),
+            ),
+        };
+        let (exit_code, _duration_ms, output) = run_one_validation(&spec, cwd.path()).await;
+
+        assert_eq!(exit_code, Some(0));
+        assert!(output.contains("legacy validation timeout 1801s clamped to 1800s"));
+        assert!(!output.contains("refused:"));
     }
 
     #[tokio::test]

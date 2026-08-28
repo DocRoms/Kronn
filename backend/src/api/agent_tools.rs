@@ -1217,7 +1217,7 @@ impl KronnToolExecutor {
 
         match call.name.as_str() {
             "agent_list" => {
-                match crate::api::orchestration::task_worker_catalogue_for_discussion(
+                match crate::api::orchestration::target_aware_task_worker_catalogue_for_discussion(
                     &self.state,
                     &discussion_id,
                 )
@@ -1342,16 +1342,10 @@ impl KronnToolExecutor {
                                 return fail(call, format!("invalid validations: {error}"))
                             }
                         };
-                        if let Some(bad) = parsed.iter().find(|spec| {
-                            spec.command.trim().is_empty() || spec.timeout_secs == Some(0)
-                        }) {
-                            return fail(
-                                call,
-                                format!(
-                                    "invalid validations: command must be non-empty and timeout_secs must be at least 1 (got {})",
-                                    serde_json::to_string(bad).unwrap_or_default()
-                                ),
-                            );
+                        if let Err(reason) =
+                            crate::api::orchestration::validate_new_validation_specs(&parsed)
+                        {
+                            return fail(call, format!("invalid validations: {reason}"));
                         }
                         parsed
                     }

@@ -190,7 +190,7 @@ fn detect_host_label() -> String {
     "Unknown".into()
 }
 
-fn host_is_macos() -> bool {
+pub(crate) fn host_is_macos() -> bool {
     if let Ok(os) = std::env::var("KRONN_HOST_OS") {
         return os.eq_ignore_ascii_case("macos");
     }

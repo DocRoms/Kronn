@@ -5577,6 +5577,91 @@ Suite de la réponse.";
         );
     }
 
+    fn synthetic_git_worktree_catalogue(extra_worktrees: usize) -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        let main = root.path().join("main");
+        std::fs::create_dir(&main).unwrap();
+        let git = |cwd: &std::path::Path, args: &[&str]| {
+            let output = crate::core::cmd::sync_cmd("git")
+                .args(args)
+                .current_dir(cwd)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {} failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&main, &["init", "-q"]);
+        git(&main, &["config", "user.email", "test@kronn.local"]);
+        git(&main, &["config", "user.name", "Kronn Test"]);
+        std::fs::write(main.join("seed"), "seed").unwrap();
+        git(&main, &["add", "seed"]);
+        git(&main, &["commit", "-qm", "seed"]);
+        for index in 0..extra_worktrees {
+            let path = root.path().join(format!("worktree-{index}"));
+            git(
+                &main,
+                &[
+                    "worktree",
+                    "add",
+                    "-q",
+                    "--detach",
+                    path.to_str().unwrap(),
+                    "HEAD",
+                ],
+            );
+        }
+        root
+    }
+
+    #[test]
+    fn claude_task_worker_accepts_catalogue_below_conservative_bounds() {
+        let repo = synthetic_git_worktree_catalogue(3);
+        let duplicate_checkout = repo.path().join("worktree-0");
+        let receipt = super::super::claude_sandbox_catalogue_receipt(&[
+            repo.path().join("main"),
+            duplicate_checkout,
+        ])
+        .unwrap();
+        assert_eq!(receipt.common_dir_count, 1);
+        assert_eq!(receipt.worktree_count, 4);
+        assert!(receipt.worktree_bytes > 0);
+        assert_eq!(receipt.validate(), Ok(()));
+    }
+
+    #[test]
+    fn claude_task_worker_refuses_large_catalogue_without_leaking_paths() {
+        let repo = synthetic_git_worktree_catalogue(65);
+        std::fs::write(
+            repo.path().join(".claude.json"),
+            br#"{"projects":{"/one/project":{}}}"#,
+        )
+        .unwrap();
+        let secret_path = repo.path().to_string_lossy().to_string();
+        let receipt =
+            super::super::claude_sandbox_catalogue_receipt(&[repo.path().join("main")]).unwrap();
+        let error = receipt.validate().unwrap_err();
+        assert_eq!(receipt.common_dir_count, 1);
+        assert_eq!(receipt.worktree_count, 66);
+        assert!(error.contains("reason_code=claude_sandbox_catalogue_unsafe"));
+        assert!(error.contains("git_common_dir_count=1"));
+        assert!(error.contains("git_worktree_count=66"));
+        assert!(error.contains("git_worktree_bytes="));
+        assert!(error.contains("task_exec_reassign"));
+        assert!(!error.contains(&secret_path));
+        assert!(!error.contains("worktree-0"));
+    }
+
+    #[test]
+    fn claude_current_version_is_not_used_as_sandbox_recovery_evidence() {
+        let source = include_str!("../core/versions.rs");
+        assert!(source.contains("AgentType::ClaudeCode => Some(\"2.1.247\")"));
+        assert!(!source.contains("MIN_CLAUDE_TASK_WORKER_VERSION"));
+    }
+
     #[test]
     fn claude_task_worker_auth_probe_reassigns_when_logged_out() {
         let error = super::super::claude_task_worker_auth_result(
@@ -5596,6 +5681,97 @@ Suite de la réponse.";
         assert!(error.contains("unrecognized response"));
         assert!(error.contains("task_exec_reassign"));
         assert!(!error.contains("must-not-leak"));
+    }
+
+    #[test]
+    fn copilot_task_worker_preflight_accepts_a_bounded_account_response() {
+        assert_eq!(
+            super::super::parse_copilot_task_worker_preflight(b"Signed in as octocat", true),
+            CopilotTaskWorkerPreflight::Usable
+        );
+    }
+
+    #[test]
+    fn copilot_task_worker_preflight_classifies_invalid_auth_and_malformed_output() {
+        assert_eq!(
+            super::super::parse_copilot_task_worker_preflight(b"auth error", false),
+            CopilotTaskWorkerPreflight::AuthInvalid
+        );
+        assert_eq!(
+            super::super::parse_copilot_task_worker_preflight(b"", true),
+            CopilotTaskWorkerPreflight::Malformed
+        );
+        let error = super::super::copilot_task_worker_preflight_error(
+            CopilotTaskWorkerPreflight::Malformed,
+        );
+        assert!(error.contains("task_exec_reassign"));
+        assert!(!error.contains("auth error"));
+    }
+
+    #[test]
+    fn copilot_task_worker_preflight_spawn_failure_is_actionable_and_secret_free() {
+        let error = super::super::copilot_task_worker_preflight_error(
+            CopilotTaskWorkerPreflight::SpawnFailed,
+        );
+        assert!(error.contains("could not be invoked"));
+        assert!(error.contains("task_exec_reassign"));
+        assert_eq!(
+            CopilotTaskWorkerPreflight::SpawnFailed.reason_code(),
+            Some("copilot_preflight_spawn_failed")
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn copilot_task_worker_preflight_times_out_and_terminates_the_child() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let pid_file = temp_dir.path().join("copilot-preflight.pid");
+        let script_path = temp_dir.path().join("slow-copilot-preflight.sh");
+        std::fs::write(
+            &script_path,
+            format!(
+                "#!/bin/sh\necho $$ > {}\nwhile :; do :; done\n",
+                pid_file.display()
+            ),
+        )
+        .unwrap();
+
+        let work_dir = temp_dir.path().to_path_buf();
+        let preflight = tokio::spawn(async move {
+            super::super::run_copilot_task_worker_preflight_with_timeout(
+                ("sh".into(), vec![script_path.display().to_string()], false),
+                &work_dir,
+                std::time::Duration::from_millis(100),
+            )
+            .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while !pid_file.exists() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the slow preflight must have started");
+
+        assert_eq!(
+            preflight.await.unwrap(),
+            Err(CopilotTaskWorkerPreflight::TimedOut)
+        );
+        let pid: i32 = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(
+            unsafe { libc::kill(pid, 0) },
+            -1,
+            "the timed-out child must be gone"
+        );
+        assert_eq!(
+            CopilotTaskWorkerPreflight::TimedOut.reason_code(),
+            Some("copilot_preflight_timed_out")
+        );
     }
 
     #[test]

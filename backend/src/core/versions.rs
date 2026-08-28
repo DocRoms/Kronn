@@ -37,11 +37,11 @@ pub const RTK_UPDATE_CMD: &str =
 /// each vendor's release page / npm registry. Pairs (agent → version).
 ///
 /// Bumped per Kronn release; see `docs/AGENTS.md` for the bump checklist.
-/// Captured 2026-08-19.
+/// Captured 2026-08-28.
 pub fn latest_known_agent_version(agent_type: &AgentType) -> Option<&'static str> {
     match agent_type {
         // @anthropic-ai/claude-code on npm
-        AgentType::ClaudeCode => Some("2.1.235"),
+        AgentType::ClaudeCode => Some("2.1.247"),
         // @openai/codex on npm
         AgentType::Codex => Some("0.148.0"),
         // mistral-vibe on PyPI

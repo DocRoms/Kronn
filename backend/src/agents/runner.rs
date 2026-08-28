@@ -2894,6 +2894,9 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
     if task_worker && *config.agent_type == AgentType::ClaudeCode {
         probe_claude_task_worker_auth(binary, npx_pkg, &work_dir).await?;
     }
+    if task_worker && *config.agent_type == AgentType::CopilotCli {
+        probe_copilot_task_worker_auth(binary, npx_pkg, &work_dir).await?;
+    }
 
     // Try direct binary first, then npx fallback
     let mut child = match try_spawn(
@@ -7059,6 +7062,104 @@ fn claude_task_worker_auth_result(stdout: &[u8], exit_success: bool) -> Result<(
     }
 }
 
+const MAX_CLAUDE_SANDBOX_WORKTREES: usize = 64;
+const MAX_CLAUDE_SANDBOX_WORKTREE_BYTES: usize = 32 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ClaudeSandboxCatalogueReceipt {
+    pub common_dir_count: usize,
+    pub worktree_count: usize,
+    pub worktree_bytes: usize,
+}
+
+impl ClaudeSandboxCatalogueReceipt {
+    fn validate(self) -> Result<(), String> {
+        if self.worktree_count <= MAX_CLAUDE_SANDBOX_WORKTREES
+            && self.worktree_bytes <= MAX_CLAUDE_SANDBOX_WORKTREE_BYTES
+        {
+            return Ok(());
+        }
+        Err(format!(
+            "Claude task worker refused before provisioning: reason_code=claude_sandbox_catalogue_unsafe; \
+             git_common_dir_count={}, git_worktree_count={}, git_worktree_bytes={}, \
+             max_git_worktrees={}, max_git_worktree_bytes={}. No repository or worktree path was \
+             logged. Use `task_exec_reassign` to \
+             move this execution to another available worker.",
+            self.common_dir_count,
+            self.worktree_count,
+            self.worktree_bytes,
+            MAX_CLAUDE_SANDBOX_WORKTREES,
+            MAX_CLAUDE_SANDBOX_WORKTREE_BYTES,
+        ))
+    }
+}
+
+fn claude_sandbox_catalogue_receipt(
+    repo_roots: &[PathBuf],
+) -> Result<ClaudeSandboxCatalogueReceipt, String> {
+    let mut common_dirs = std::collections::BTreeSet::new();
+    let mut worktrees = std::collections::BTreeSet::new();
+    for repo_root in repo_roots {
+        let common_output = sync_cmd("git")
+            .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+            .current_dir(repo_root)
+            .output()
+            .map_err(|_| claude_sandbox_catalogue_unreadable())?;
+        if !common_output.status.success() {
+            return Err(claude_sandbox_catalogue_unreadable());
+        }
+        let common_dir = PathBuf::from(String::from_utf8_lossy(&common_output.stdout).trim())
+            .canonicalize()
+            .map_err(|_| claude_sandbox_catalogue_unreadable())?;
+        if !common_dirs.insert(common_dir) {
+            continue;
+        }
+        let output = sync_cmd("git")
+            .args(["worktree", "list", "--porcelain"])
+            .current_dir(repo_root)
+            .output()
+            .map_err(|_| claude_sandbox_catalogue_unreadable())?;
+        if !output.status.success() {
+            return Err(claude_sandbox_catalogue_unreadable());
+        }
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            if let Some(path) = line.strip_prefix("worktree ") {
+                worktrees.insert(path.to_string());
+            }
+        }
+    }
+    Ok(ClaudeSandboxCatalogueReceipt {
+        common_dir_count: common_dirs.len(),
+        worktree_count: worktrees.len(),
+        worktree_bytes: worktrees.iter().map(String::len).sum(),
+    })
+}
+
+fn claude_sandbox_catalogue_unreadable() -> String {
+    "Claude task worker refused before provisioning: reason_code=claude_sandbox_catalogue_unreadable; \
+     the registered Git worktree catalogue could not be measured. No repository or worktree path \
+     was logged. Use `task_exec_reassign` to move this execution to another available worker."
+        .to_string()
+}
+
+pub(crate) fn claude_task_worker_catalogue_preflight(
+    project: &crate::models::Project,
+) -> Result<(), String> {
+    if !super::host_is_macos() {
+        return Ok(());
+    }
+    let mut repo_roots = vec![crate::core::scanner::resolve_host_path(&project.path)];
+    repo_roots.extend(project.linked_repos.iter().filter_map(|repo| {
+        let location = repo.location.trim();
+        (!location.is_empty()
+            && !location.starts_with("http://")
+            && !location.starts_with("https://")
+            && !location.starts_with("git@"))
+        .then(|| crate::core::scanner::resolve_host_path(location))
+    }));
+    claude_sandbox_catalogue_receipt(&repo_roots)?.validate()
+}
+
 async fn run_claude_task_worker_auth_probe(
     resolved: (String, Vec<String>, bool),
     work_dir: &Path,
@@ -7086,13 +7187,20 @@ async fn probe_claude_task_worker_auth(
             Ok(output) => output,
             Err(direct_error) => {
                 let Some(package) = npx_package else {
-                    return Err(claude_task_worker_auth_spawn_diagnostic(&direct_error));
+                    return Err(claude_task_worker_probe_spawn_diagnostic(
+                        "authentication",
+                        &direct_error,
+                    ));
                 };
                 let fallback = resolve_agent_invocation(binary, Some(package), &auth_args)
-                    .map_err(|_| claude_task_worker_auth_spawn_diagnostic(&direct_error))?;
+                    .map_err(|_| {
+                        claude_task_worker_probe_spawn_diagnostic("authentication", &direct_error)
+                    })?;
                 run_claude_task_worker_auth_probe(fallback, work_dir)
                     .await
-                    .map_err(|error| claude_task_worker_auth_spawn_diagnostic(&error))?
+                    .map_err(|error| {
+                        claude_task_worker_probe_spawn_diagnostic("authentication", &error)
+                    })?
             }
         },
         Err(direct_error) => {
@@ -7111,18 +7219,182 @@ async fn probe_claude_task_worker_auth(
                 })?;
             run_claude_task_worker_auth_probe(fallback, work_dir)
                 .await
-                .map_err(|error| claude_task_worker_auth_spawn_diagnostic(&error))?
+                .map_err(|error| {
+                    claude_task_worker_probe_spawn_diagnostic("authentication", &error)
+                })?
         }
     };
 
     claude_task_worker_auth_result(&output.stdout, output.status.success())
 }
 
-fn claude_task_worker_auth_spawn_diagnostic(error: &std::io::Error) -> String {
+fn claude_task_worker_probe_spawn_diagnostic(probe: &str, error: &std::io::Error) -> String {
     format!(
-        "Claude task worker cannot start: the `claude auth status` preflight could not run \
+        "Claude task worker cannot start: the Claude {probe} preflight could not run \
          ({error}). Use `task_exec_reassign` to move this execution to another available worker."
     )
+}
+
+/// The bounded, read-only Copilot probe used both before a task-worker spawn
+/// and by the worker catalogue. `/user show` exercises the CLI's effective
+/// authentication source without asking a model to answer a user prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CopilotTaskWorkerPreflight {
+    Usable,
+    AuthInvalid,
+    Malformed,
+    SpawnFailed,
+    TimedOut,
+}
+
+impl CopilotTaskWorkerPreflight {
+    pub(crate) fn reason_code(self) -> Option<&'static str> {
+        match self {
+            Self::Usable => None,
+            Self::AuthInvalid => Some("copilot_auth_invalid"),
+            Self::Malformed => Some("copilot_preflight_malformed"),
+            Self::SpawnFailed => Some("copilot_preflight_spawn_failed"),
+            Self::TimedOut => Some("copilot_preflight_timed_out"),
+        }
+    }
+}
+
+fn parse_copilot_task_worker_preflight(
+    stdout: &[u8],
+    exit_success: bool,
+) -> CopilotTaskWorkerPreflight {
+    if !exit_success {
+        return CopilotTaskWorkerPreflight::AuthInvalid;
+    }
+    // A successful slash command must emit a response. Do not propagate that
+    // response (which may identify an account) outside this process.
+    let output = String::from_utf8_lossy(stdout);
+    if output.trim().is_empty() {
+        CopilotTaskWorkerPreflight::Malformed
+    } else {
+        CopilotTaskWorkerPreflight::Usable
+    }
+}
+
+fn copilot_task_worker_preflight_error(status: CopilotTaskWorkerPreflight) -> String {
+    let failure_kind = status
+        .reason_code()
+        .expect("unusable Copilot preflight has a stable reason code");
+    let detail = match status {
+        CopilotTaskWorkerPreflight::AuthInvalid => {
+            "the bounded `copilot -p /user show` preflight rejected the effective authentication"
+        }
+        CopilotTaskWorkerPreflight::Malformed => {
+            "the bounded `copilot -p /user show` preflight returned no account response"
+        }
+        CopilotTaskWorkerPreflight::SpawnFailed => {
+            "the bounded `copilot -p /user show` preflight could not be invoked"
+        }
+        CopilotTaskWorkerPreflight::TimedOut => {
+            "the bounded `copilot -p /user show` preflight did not finish before its deadline"
+        }
+        CopilotTaskWorkerPreflight::Usable => unreachable!("usable Copilot preflight has no error"),
+    };
+    format!(
+        "Copilot task worker cannot start: phase=preflight; failure_kind={failure_kind}; {detail}. Run `copilot login` or use \
+         `task_exec_reassign` to move this execution to another available worker."
+    )
+}
+
+const COPILOT_TASK_WORKER_PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(4);
+
+async fn run_copilot_task_worker_preflight(
+    resolved: (String, Vec<String>, bool),
+    work_dir: &Path,
+) -> Result<std::process::Output, CopilotTaskWorkerPreflight> {
+    run_copilot_task_worker_preflight_with_timeout(
+        resolved,
+        work_dir,
+        COPILOT_TASK_WORKER_PREFLIGHT_TIMEOUT,
+    )
+    .await
+}
+
+async fn run_copilot_task_worker_preflight_with_timeout(
+    resolved: (String, Vec<String>, bool),
+    work_dir: &Path,
+    timeout: Duration,
+) -> Result<std::process::Output, CopilotTaskWorkerPreflight> {
+    let (command, args, via_wsl) = resolved;
+    let (command, args, effective_work_dir) =
+        platform_agent_invocation(command, args, via_wsl, work_dir);
+    let mut command = async_cmd(command);
+    command
+        .args(args)
+        .current_dir(effective_work_dir)
+        .stdin(Stdio::null())
+        // `timeout` drops the output future. Ensure that cancellation also
+        // terminates the preflight child instead of leaving a CLI process alive.
+        .kill_on_drop(true);
+    match tokio::time::timeout(timeout, command.output()).await {
+        Ok(Ok(output)) => Ok(output),
+        Ok(Err(_)) => Err(CopilotTaskWorkerPreflight::SpawnFailed),
+        Err(_) => Err(CopilotTaskWorkerPreflight::TimedOut),
+    }
+}
+
+pub(crate) async fn probe_copilot_task_worker_preflight(
+    binary: &str,
+    npx_package: Option<&str>,
+    work_dir: &Path,
+) -> CopilotTaskWorkerPreflight {
+    let args = vec![
+        "-p".to_string(),
+        "/user show".to_string(),
+        "--no-ask-user".to_string(),
+        "--no-custom-instructions".to_string(),
+        "--no-auto-update".to_string(),
+        "--no-color".to_string(),
+    ];
+    let direct = resolve_agent_invocation(binary, None, &args);
+    let output = match direct {
+        Ok(resolved) => match run_copilot_task_worker_preflight(resolved, work_dir).await {
+            Ok(output) => output,
+            Err(CopilotTaskWorkerPreflight::SpawnFailed) => {
+                let Some(package) = npx_package else {
+                    return CopilotTaskWorkerPreflight::SpawnFailed;
+                };
+                let Ok(resolved) = resolve_agent_invocation(binary, Some(package), &args) else {
+                    return CopilotTaskWorkerPreflight::SpawnFailed;
+                };
+                match run_copilot_task_worker_preflight(resolved, work_dir).await {
+                    Ok(output) => output,
+                    Err(status) => return status,
+                }
+            }
+            Err(status) => return status,
+        },
+        Err(_) => {
+            let Some(package) = npx_package else {
+                return CopilotTaskWorkerPreflight::SpawnFailed;
+            };
+            let Ok(resolved) = resolve_agent_invocation(binary, Some(package), &args) else {
+                return CopilotTaskWorkerPreflight::SpawnFailed;
+            };
+            match run_copilot_task_worker_preflight(resolved, work_dir).await {
+                Ok(output) => output,
+                Err(status) => return status,
+            }
+        }
+    };
+    parse_copilot_task_worker_preflight(&output.stdout, output.status.success())
+}
+
+async fn probe_copilot_task_worker_auth(
+    binary: &str,
+    npx_package: Option<&str>,
+    work_dir: &Path,
+) -> Result<(), String> {
+    let status = probe_copilot_task_worker_preflight(binary, npx_package, work_dir).await;
+    match status {
+        CopilotTaskWorkerPreflight::Usable => Ok(()),
+        other => Err(copilot_task_worker_preflight_error(other)),
+    }
 }
 
 fn claude_task_worker_mcp_config(project_root: &Path) -> Result<String, String> {
