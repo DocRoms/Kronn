@@ -5599,6 +5599,44 @@ Suite de la réponse.";
     }
 
     #[test]
+    fn copilot_task_worker_preflight_accepts_a_bounded_account_response() {
+        assert_eq!(
+            super::super::parse_copilot_task_worker_preflight(b"Signed in as octocat", true),
+            CopilotTaskWorkerPreflight::Usable
+        );
+    }
+
+    #[test]
+    fn copilot_task_worker_preflight_classifies_invalid_auth_and_malformed_output() {
+        assert_eq!(
+            super::super::parse_copilot_task_worker_preflight(b"auth error", false),
+            CopilotTaskWorkerPreflight::AuthInvalid
+        );
+        assert_eq!(
+            super::super::parse_copilot_task_worker_preflight(b"", true),
+            CopilotTaskWorkerPreflight::Malformed
+        );
+        let error = super::super::copilot_task_worker_preflight_error(
+            CopilotTaskWorkerPreflight::Malformed,
+        );
+        assert!(error.contains("task_exec_reassign"));
+        assert!(!error.contains("auth error"));
+    }
+
+    #[test]
+    fn copilot_task_worker_preflight_spawn_failure_is_actionable_and_secret_free() {
+        let error = super::super::copilot_task_worker_preflight_error(
+            CopilotTaskWorkerPreflight::SpawnFailed,
+        );
+        assert!(error.contains("could not be invoked"));
+        assert!(error.contains("task_exec_reassign"));
+        assert_eq!(
+            CopilotTaskWorkerPreflight::SpawnFailed.reason_code(),
+            Some("copilot_preflight_spawn_failed")
+        );
+    }
+
+    #[test]
     fn claude_task_worker_command_receipt_contains_sizes_not_values() {
         let secret_marker = "must-not-leak";
         let settings = r#"{"sandbox":{"enabled":true}}"#;

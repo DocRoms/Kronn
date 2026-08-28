@@ -2894,6 +2894,9 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
     if task_worker && *config.agent_type == AgentType::ClaudeCode {
         probe_claude_task_worker_auth(binary, npx_pkg, &work_dir).await?;
     }
+    if task_worker && *config.agent_type == AgentType::CopilotCli {
+        probe_copilot_task_worker_auth(binary, npx_pkg, &work_dir).await?;
+    }
 
     // Try direct binary first, then npx fallback
     let mut child = match try_spawn(
@@ -7123,6 +7126,140 @@ fn claude_task_worker_auth_spawn_diagnostic(error: &std::io::Error) -> String {
         "Claude task worker cannot start: the `claude auth status` preflight could not run \
          ({error}). Use `task_exec_reassign` to move this execution to another available worker."
     )
+}
+
+/// The bounded, read-only Copilot probe used both before a task-worker spawn
+/// and by the worker catalogue. `/user show` exercises the CLI's effective
+/// authentication source without asking a model to answer a user prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CopilotTaskWorkerPreflight {
+    Usable,
+    AuthInvalid,
+    Malformed,
+    SpawnFailed,
+}
+
+impl CopilotTaskWorkerPreflight {
+    pub(crate) fn reason_code(self) -> Option<&'static str> {
+        match self {
+            Self::Usable => None,
+            Self::AuthInvalid => Some("copilot_auth_invalid"),
+            Self::Malformed => Some("copilot_preflight_malformed"),
+            Self::SpawnFailed => Some("copilot_preflight_spawn_failed"),
+        }
+    }
+}
+
+fn parse_copilot_task_worker_preflight(
+    stdout: &[u8],
+    exit_success: bool,
+) -> CopilotTaskWorkerPreflight {
+    if !exit_success {
+        return CopilotTaskWorkerPreflight::AuthInvalid;
+    }
+    // A successful slash command must emit a response. Do not propagate that
+    // response (which may identify an account) outside this process.
+    let output = String::from_utf8_lossy(stdout);
+    if output.trim().is_empty() {
+        CopilotTaskWorkerPreflight::Malformed
+    } else {
+        CopilotTaskWorkerPreflight::Usable
+    }
+}
+
+fn copilot_task_worker_preflight_error(status: CopilotTaskWorkerPreflight) -> String {
+    let failure_kind = status
+        .reason_code()
+        .expect("unusable Copilot preflight has a stable reason code");
+    let detail = match status {
+        CopilotTaskWorkerPreflight::AuthInvalid => {
+            "the bounded `copilot -p /user show` preflight rejected the effective authentication"
+        }
+        CopilotTaskWorkerPreflight::Malformed => {
+            "the bounded `copilot -p /user show` preflight returned no account response"
+        }
+        CopilotTaskWorkerPreflight::SpawnFailed => {
+            "the bounded `copilot -p /user show` preflight could not be invoked"
+        }
+        CopilotTaskWorkerPreflight::Usable => unreachable!("usable Copilot preflight has no error"),
+    };
+    format!(
+        "Copilot task worker cannot start: phase=preflight; failure_kind={failure_kind}; {detail}. Run `copilot login` or use \
+         `task_exec_reassign` to move this execution to another available worker."
+    )
+}
+
+async fn run_copilot_task_worker_preflight(
+    resolved: (String, Vec<String>, bool),
+    work_dir: &Path,
+) -> std::io::Result<std::process::Output> {
+    let (command, args, via_wsl) = resolved;
+    let (command, args, effective_work_dir) =
+        platform_agent_invocation(command, args, via_wsl, work_dir);
+    async_cmd(command)
+        .args(args)
+        .current_dir(effective_work_dir)
+        .stdin(Stdio::null())
+        .output()
+        .await
+}
+
+pub(crate) async fn probe_copilot_task_worker_preflight(
+    binary: &str,
+    npx_package: Option<&str>,
+    work_dir: &Path,
+) -> CopilotTaskWorkerPreflight {
+    let args = vec![
+        "-p".to_string(),
+        "/user show".to_string(),
+        "--no-ask-user".to_string(),
+        "--no-custom-instructions".to_string(),
+        "--no-auto-update".to_string(),
+        "--no-color".to_string(),
+    ];
+    let direct = resolve_agent_invocation(binary, None, &args);
+    let output = match direct {
+        Ok(resolved) => match run_copilot_task_worker_preflight(resolved, work_dir).await {
+            Ok(output) => output,
+            Err(_) => {
+                let Some(package) = npx_package else {
+                    return CopilotTaskWorkerPreflight::SpawnFailed;
+                };
+                let Ok(resolved) = resolve_agent_invocation(binary, Some(package), &args) else {
+                    return CopilotTaskWorkerPreflight::SpawnFailed;
+                };
+                match run_copilot_task_worker_preflight(resolved, work_dir).await {
+                    Ok(output) => output,
+                    Err(_) => return CopilotTaskWorkerPreflight::SpawnFailed,
+                }
+            }
+        },
+        Err(_) => {
+            let Some(package) = npx_package else {
+                return CopilotTaskWorkerPreflight::SpawnFailed;
+            };
+            let Ok(resolved) = resolve_agent_invocation(binary, Some(package), &args) else {
+                return CopilotTaskWorkerPreflight::SpawnFailed;
+            };
+            match run_copilot_task_worker_preflight(resolved, work_dir).await {
+                Ok(output) => output,
+                Err(_) => return CopilotTaskWorkerPreflight::SpawnFailed,
+            }
+        }
+    };
+    parse_copilot_task_worker_preflight(&output.stdout, output.status.success())
+}
+
+async fn probe_copilot_task_worker_auth(
+    binary: &str,
+    npx_package: Option<&str>,
+    work_dir: &Path,
+) -> Result<(), String> {
+    let status = probe_copilot_task_worker_preflight(binary, npx_package, work_dir).await;
+    match status {
+        CopilotTaskWorkerPreflight::Usable => Ok(()),
+        other => Err(copilot_task_worker_preflight_error(other)),
+    }
 }
 
 fn claude_task_worker_mcp_config(project_root: &Path) -> Result<String, String> {

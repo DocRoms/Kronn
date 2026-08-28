@@ -649,7 +649,7 @@ pub(crate) async fn make_agent_stream(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum AgentExecutionOutcome {
     Finished { success: bool },
-    PreflightFailed,
+    PreflightFailed { diagnostic: String },
     RuntimeUnavailable { reason: String },
 }
 
@@ -658,9 +658,16 @@ fn agent_start_failure_outcome(agent_type: &AgentType, error: &str) -> AgentExec
         .is_some_and(|status| (400..500).contains(&status) && !matches!(status, 408 | 425 | 429));
     if matches!(agent_type, AgentType::LiteLlm | AgentType::Ollama)
         || error.starts_with("Project path not found:")
+        || error.starts_with("Copilot task worker cannot start:")
         || non_retryable_http_status
     {
-        AgentExecutionOutcome::PreflightFailed
+        AgentExecutionOutcome::PreflightFailed {
+            diagnostic: if error.starts_with("Copilot task worker cannot start:") {
+                error.to_string()
+            } else {
+                "agent execution preflight failed".into()
+            },
+        }
     } else {
         AgentExecutionOutcome::RuntimeUnavailable {
             reason: error.to_string(),
@@ -764,7 +771,9 @@ fn finish_tracked_preflight(
     completion_tx: &mut Option<tokio::sync::oneshot::Sender<AgentExecutionOutcome>>,
 ) {
     if let Some(sender) = completion_tx.take() {
-        let _ = sender.send(AgentExecutionOutcome::PreflightFailed);
+        let _ = sender.send(AgentExecutionOutcome::PreflightFailed {
+            diagnostic: "agent execution preflight failed".into(),
+        });
     }
 }
 
@@ -4122,16 +4131,30 @@ mod agent_lifecycle_tests {
     fn http_agents_surface_runtime_outages_but_cli_runtime_absence_stays_deferred() {
         assert_eq!(
             agent_start_failure_outcome(&AgentType::LiteLlm, "LiteLLM unreachable at http://proxy"),
-            AgentExecutionOutcome::PreflightFailed
+            AgentExecutionOutcome::PreflightFailed {
+                diagnostic: "agent execution preflight failed".into()
+            }
         );
         assert_eq!(
             agent_start_failure_outcome(&AgentType::Ollama, "Ollama unreachable at localhost"),
-            AgentExecutionOutcome::PreflightFailed
+            AgentExecutionOutcome::PreflightFailed {
+                diagnostic: "agent execution preflight failed".into()
+            }
         );
         assert_eq!(
             agent_start_failure_outcome(&AgentType::Codex, "Binary 'codex' not found"),
             AgentExecutionOutcome::RuntimeUnavailable {
                 reason: "Binary 'codex' not found".into()
+            }
+        );
+        assert_eq!(
+            agent_start_failure_outcome(
+                &AgentType::CopilotCli,
+                "Copilot task worker cannot start: phase=auth; failure_kind=invalid_auth"
+            ),
+            AgentExecutionOutcome::PreflightFailed {
+                diagnostic:
+                    "Copilot task worker cannot start: phase=auth; failure_kind=invalid_auth".into()
             }
         );
     }
