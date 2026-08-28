@@ -2885,6 +2885,57 @@ mod tests {
     }
 
     #[test]
+    fn native_agent_message_persists_dynamic_connection_mention_target() {
+        let conn = test_conn();
+        insert_discussion(&conn, &handoff_discussion("d-connection-wake")).unwrap();
+        insert_message(
+            &conn,
+            "d-connection-wake",
+            &make_message("u-connection-wake", MessageRole::User, None),
+        )
+        .unwrap();
+        let now = Utc::now();
+        crate::db::external_api_connections::insert(
+            &conn,
+            &ExternalApiConnection {
+                id: "groq-primary".into(),
+                display_name: "Groq primary".into(),
+                mention_alias: "groq".into(),
+                endpoint: Some("https://api.example.test".into()),
+                credential_slug: "groq-primary-credential".into(),
+                origin_preset: ExternalApiConnectionPreset::Other,
+                economy_model: None,
+                default_model: Some("model".into()),
+                reasoning_model: None,
+                created_at: now,
+                updated_at: now,
+            },
+        )
+        .unwrap();
+        let mut response = agent_reply("a-connection-wake", AgentType::Codex, "u-connection-wake");
+        response.content = "@groq please inspect the persisted target.".into();
+
+        let outcome = insert_native_agent_message_with_handoffs(
+            &conn,
+            "d-connection-wake",
+            &response,
+            true,
+            None,
+            &AgentType::Codex,
+            &[],
+            true,
+            Some(1),
+        )
+        .unwrap();
+
+        assert!(outcome.dispatched_agents.is_empty());
+        assert_eq!(
+            list_message_targets(&conn, "a-connection-wake").unwrap(),
+            vec![MessageTarget::agent(AgentType::Custom).with_connection("groq-primary")]
+        );
+    }
+
+    #[test]
     fn native_agent_handoff_respects_global_discussion_and_attachment_guards() {
         for (id, globally_enabled, discussion_disabled, no_agent, run_succeeded) in [
             ("global-off", false, false, false, true),
