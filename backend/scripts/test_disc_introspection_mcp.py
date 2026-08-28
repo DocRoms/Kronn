@@ -428,11 +428,11 @@ class TaskExecPrincipalSurfaceTests(unittest.TestCase):
         self.mod = _load_module()
         self.mod._set_current_disc_id("disc-parent")
 
-    def test_catalogue_covers_prepare_launch_status_cancel_and_reassign(self):
+    def test_catalogue_covers_prepare_launch_status_resume_cancel_and_reassign(self):
         expected = {
             "agent_list",
             "task_exec_prepare", "task_exec_launch", "task_exec_status",
-            "task_exec_cancel", "task_exec_reassign",
+            "task_exec_resume", "task_exec_cancel", "task_exec_reassign",
         }
         tools = {item["name"]: item for item in self.mod.TOOLS}
         self.assertTrue(expected.issubset(tools))
@@ -698,7 +698,7 @@ class TaskExecPrincipalSurfaceTests(unittest.TestCase):
             })
         self.assertEqual(http.call_count, 2)
 
-    def test_status_cancel_and_reassign_forward_only_derived_identity(self):
+    def test_status_resume_cancel_and_reassign_forward_only_derived_identity(self):
         http = mock.MagicMock(return_value={"success": True, "data": {"execution": {"id": "e"}}})
         selection = {"target": {"kind": "cli", "agent_type": "Codex", "cli_session_id": 7}}
         with mock.patch.object(self.mod, "_agent_type_for_session", return_value="ClaudeCode"), \
@@ -706,6 +706,7 @@ class TaskExecPrincipalSurfaceTests(unittest.TestCase):
              mock.patch.object(self.mod, "_http", http):
             self.mod.call_task_exec_status({"task_execution_id": "exec-1"})
             self.mod.call_task_exec_status({"task_reference": "KT/324"})
+            self.mod.call_task_exec_resume({"task_execution_id": "exec-1"})
             self.mod.call_task_exec_cancel({
                 "task_execution_id": "exec-1", "reason": "stop",
                 "cleanup_policy": "preserve",
@@ -718,6 +719,7 @@ class TaskExecPrincipalSurfaceTests(unittest.TestCase):
         http.assert_has_calls([
             mock.call("POST", "/api/orchestration/tool/executions/exec-1/status", identity),
             mock.call("POST", "/api/orchestration/tool/executions/KT%2F324/status", identity),
+            mock.call("POST", "/api/orchestration/tool/executions/exec-1/resume", identity),
             mock.call("POST", "/api/orchestration/tool/executions/exec-1/cancel", {
                 **identity, "reason": "stop", "cleanup_policy": "preserve",
             }),
@@ -725,6 +727,54 @@ class TaskExecPrincipalSurfaceTests(unittest.TestCase):
                 **identity, "worker": selection, "reason": "provider unavailable",
             }),
         ])
+
+    def test_status_advertises_resume_only_for_public_applying_checkpoint(self):
+        identity = {"source_agent": "Codex", "source_session_id": "session-1"}
+        cases = [
+            ({
+                "lineage": {"execution": {
+                    "status": "Blocked", "blocked_from_status": "Applying",
+                    "interrupted_from_status": None,
+                }},
+            }, True),
+            ({
+                "lineage": {"execution": {
+                    "status": "Interrupted", "blocked_from_status": "Applying",
+                    "interrupted_from_status": "Blocked",
+                }},
+            }, True),
+            ({
+                "lineage": {"execution": {
+                    "status": "Blocked", "blocked_from_status": "Provisioning",
+                    "interrupted_from_status": None,
+                }},
+            }, False),
+            ({
+                "lineage": {"execution": {
+                    "status": "AwaitingReview", "blocked_from_status": None,
+                    "interrupted_from_status": None,
+                }},
+            }, False),
+        ]
+        with mock.patch.object(
+            self.mod, "_task_exec_identity", return_value=("Codex", "session-1"),
+        ):
+            for payload, expected in cases:
+                with self.subTest(payload=payload):
+                    with mock.patch.object(self.mod, "_http", return_value={
+                        "success": True, "data": payload,
+                    }) as http:
+                        result = self.mod.call_task_exec_status({
+                            "task_execution_id": "exec-1",
+                        })
+                    self.assertEqual("next_action" in result, expected)
+                    if expected:
+                        self.assertEqual(
+                            result["next_action"]["tool"], "task_exec_resume",
+                        )
+                    http.assert_called_once_with(
+                        "POST", "/api/orchestration/tool/executions/exec-1/status", identity,
+                    )
 
     def test_deliver_and_review_use_the_live_session_like_the_rest_of_the_family(self):
         """KT-378 follow-up — the fix originally reached only five of eight tools.
