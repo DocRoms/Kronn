@@ -547,6 +547,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "144_external_api_connections",
         include_str!("sql/144_external_api_connections.sql"),
     ),
+    (
+        "145_task_execution_worker_connection",
+        include_str!("sql/145_task_execution_worker_connection.sql"),
+    ),
 ];
 
 /// Apply one migration inside the caller-owned transaction.

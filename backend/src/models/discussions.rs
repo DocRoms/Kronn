@@ -451,6 +451,8 @@ pub struct MessageTarget {
     pub kind: MessageTargetKind,
     pub agent_type: AgentType,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cli_session_id: Option<i64>,
     /// Optional per-turn tier override. `None` preserves the historical
     /// discussion-wide routing; joined CLI sessions always ignore this field.
@@ -463,6 +465,7 @@ impl MessageTarget {
         Self {
             kind: MessageTargetKind::DiscussionAgent,
             agent_type,
+            connection_id: None,
             cli_session_id: None,
             tier: None,
         }
@@ -472,6 +475,7 @@ impl MessageTarget {
         Self {
             kind: MessageTargetKind::Agent,
             agent_type,
+            connection_id: None,
             cli_session_id: None,
             tier: None,
         }
@@ -481,6 +485,7 @@ impl MessageTarget {
         Self {
             kind: MessageTargetKind::Cli,
             agent_type,
+            connection_id: None,
             cli_session_id: Some(cli_session_id),
             tier: None,
         }
@@ -488,6 +493,11 @@ impl MessageTarget {
 
     pub fn with_tier(mut self, tier: ModelTier) -> Self {
         self.tier = Some(tier);
+        self
+    }
+
+    pub fn with_connection(mut self, connection_id: impl Into<String>) -> Self {
+        self.connection_id = Some(connection_id.into());
         self
     }
 }

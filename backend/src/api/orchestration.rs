@@ -4569,6 +4569,7 @@ fn begin_provisioning(
     launch.validations = validations.to_vec();
     launch.worker_target_kind = Some(worker.kind);
     launch.worker_cli_session_id = worker.cli_session_id;
+    launch.worker_connection_id = worker.connection_id.clone();
     launch.worker_agent_type = Some(crate::db::orchestration::agent_type_to_db(
         &worker.agent_type,
     ));
@@ -4731,6 +4732,18 @@ fn worker_target_from_execution(execution: &TaskExecution) -> Result<MessageTarg
             .as_deref()
             .context("execution has no worker_agent_type")?,
     )?;
+    let connection_id = execution
+        .worker_connection_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let requires_connection = matches!(
+        agent_type,
+        AgentType::LiteLlm | AgentType::Nvidia | AgentType::Custom
+    );
+    if requires_connection && connection_id.is_none() {
+        anyhow::bail!("execution external worker has no connection identifier");
+    }
     let tier = execution
         .worker_model_tier
         .as_deref()
@@ -4738,6 +4751,7 @@ fn worker_target_from_execution(execution: &TaskExecution) -> Result<MessageTarg
     Ok(MessageTarget {
         kind,
         agent_type,
+        connection_id: connection_id.map(str::to_string),
         cli_session_id: execution.worker_cli_session_id,
         tier,
     })
@@ -9598,6 +9612,174 @@ mod tests {
             count(&db, "SELECT COUNT(*) FROM agent_dispatch_jobs").await,
             1
         );
+    }
+
+    /// KT-482 — two independent tasks must retain independent durable lanes.
+    /// Both preparations and launches finish before either worker delivers, so a
+    /// sequential coordinator that waits for the first lane to complete cannot
+    /// satisfy this scenario.
+    #[tokio::test]
+    async fn two_independent_execution_lanes_launch_before_either_is_reviewed() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (first_task_ref, parent_id, project_id) = seed(&db, repo.path()).await;
+        let second_task_ref = {
+            let project_id = project_id.clone();
+            db.with_conn(move |conn| {
+                Ok(create_todo_task(conn, &project_id, "Faire l'autre chose")
+                    .summary
+                    .reference)
+            })
+            .await
+            .unwrap()
+        };
+        for task_reference in [&first_task_ref, &second_task_ref] {
+            let task_reference = task_reference.clone();
+            let parent_id = parent_id.clone();
+            db.with_conn(move |conn| {
+                crate::db::planning::link_discussion(
+                    conn,
+                    &task_reference,
+                    &crate::models::LinkPlanningDiscussionRequest {
+                        discussion_id: parent_id,
+                        placement: Default::default(),
+                        is_primary: true,
+                        position: None,
+                        actor: test_actor(),
+                    },
+                )
+            })
+            .await
+            .unwrap();
+        }
+        let worker = native_worker();
+
+        let (first_preparation, second_preparation) = {
+            let first_task_ref = first_task_ref.clone();
+            let second_task_ref = second_task_ref.clone();
+            let parent_id = parent_id.clone();
+            let worker = worker.clone();
+            db.with_conn(move |conn| {
+                Ok((
+                    prepare_task_execution(conn, &first_task_ref, &parent_id, &worker)?,
+                    prepare_task_execution(conn, &second_task_ref, &parent_id, &worker)?,
+                ))
+            })
+            .await
+            .unwrap()
+        };
+        assert!(
+            first_preparation.launchable,
+            "{:#?}",
+            first_preparation.reasons
+        );
+        assert!(
+            second_preparation.launchable,
+            "{:#?}",
+            second_preparation.reasons
+        );
+
+        let first_execution = provision_single_task_execution(
+            &db,
+            ProvisionInput {
+                task_reference: first_task_ref,
+                parent_discussion_id: parent_id.clone(),
+                worker: worker.clone(),
+                base_rev: Some("main".into()),
+                idempotency_key: Some("kt-482-lane-one".into()),
+            },
+        )
+        .await
+        .expect("first independent lane launches");
+        let second_execution = provision_single_task_execution(
+            &db,
+            ProvisionInput {
+                task_reference: second_task_ref,
+                parent_discussion_id: parent_id.clone(),
+                worker,
+                base_rev: Some("main".into()),
+                idempotency_key: Some("kt-482-lane-two".into()),
+            },
+        )
+        .await
+        .expect("second independent lane launches before either completion");
+
+        assert_ne!(first_execution.id, second_execution.id);
+        assert_eq!(
+            (
+                exec_of(&db, &first_execution.id).await.status,
+                exec_of(&db, &second_execution.id).await.status
+            ),
+            (TaskExecutionStatus::Working, TaskExecutionStatus::Working),
+            "both lanes are launched before either worker completes"
+        );
+        assert_eq!(
+            count(&db, "SELECT COUNT(*) FROM task_executions").await,
+            2,
+            "one durable execution per lane, with no duplicate launch"
+        );
+
+        for execution in [&first_execution, &second_execution] {
+            let child_id = execution.sub_discussion_id.clone().expect("worker room");
+            let dispatch_job_id = execution.dispatch_job_id.clone().expect("worker dispatch");
+            let trigger_message_id = db
+                .with_conn(move |conn| {
+                    Ok(crate::db::agent_dispatch::get(conn, &dispatch_job_id)?
+                        .expect("dispatch exists")
+                        .trigger_message_id)
+                })
+                .await
+                .unwrap();
+            let manifest = projected_manifest_for_execution(&db, &execution.id).await;
+            let delivered = deliver_native_worker_manifest(
+                &db,
+                &execution.id,
+                NativeExecutionCaller {
+                    discussion_id: &child_id,
+                    agent_type: &AgentType::ClaudeCode,
+                    source_message_id: Some(&trigger_message_id),
+                    alias: "Claude Code",
+                    actor_session_id: Some("kt-482-worker"),
+                },
+                &manifest,
+            )
+            .await
+            .unwrap();
+            assert!(matches!(delivered, DeliverOutcome::Delivered { .. }));
+        }
+
+        for execution in [&first_execution, &second_execution] {
+            assert_eq!(
+                exec_of(&db, &execution.id).await.status,
+                TaskExecutionStatus::AwaitingReview,
+                "each lane exposes its own status before review"
+            );
+            let reviewed = decide_native_review(
+                &db,
+                &execution.id,
+                &review_request_changes("review this lane independently"),
+                NativeExecutionCaller {
+                    discussion_id: &parent_id,
+                    agent_type: &AgentType::ClaudeCode,
+                    source_message_id: Some("kt-482-principal-review"),
+                    alias: "Claude Code",
+                    actor_session_id: Some("kt-482-principal"),
+                },
+            )
+            .await
+            .unwrap();
+            assert!(matches!(
+                reviewed,
+                ReviewOutcome::Reviewed {
+                    verdict: ReviewVerdict::RequestChanges,
+                    ..
+                }
+            ));
+            assert!(
+                review_row(&db, &execution.id).await.is_some(),
+                "each lane persists a separate review"
+            );
+        }
     }
 
     /// KT-410 — the CLI bridge already threaded `ValidationSpec`, but the native
