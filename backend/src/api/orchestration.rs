@@ -5794,7 +5794,9 @@ pub async fn create_campaign(
         human_wait_timeout_secs: request.human_wait_timeout_secs,
         cancellation_cleanup_policy: request
             .cancellation_cleanup_policy
-            .unwrap_or(crate::models::CancellationCleanupPolicy::Preserve),
+            // KT-514 — reclaim the clean checkout by default (the branch and its
+            // commits survive); `Preserve` stays an explicit opt-in.
+            .unwrap_or(crate::models::CancellationCleanupPolicy::RemoveIfClean),
     };
     let result = state
         .db

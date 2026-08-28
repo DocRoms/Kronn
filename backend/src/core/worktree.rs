@@ -987,6 +987,20 @@ fn find_branch_for_worktree(repo_path: &Path, worktree_path: &str) -> Option<Str
 }
 
 /// Remove a worktree and optionally delete the branch.
+///
+/// `--force` is required, not a preference: a managed task worktree materializes
+/// its submodules (KT-478), and Git refuses to remove a worktree that declares
+/// submodules without it — `working trees containing submodules cannot be moved
+/// or removed`. `--force` covers that on current Git; the manual directory
+/// removal covers the rest.
+///
+/// The one thing this must never do is report success while the checkout is
+/// still on disk. A worktree that silently survives its own reclamation is
+/// exactly how the `.git/worktrees/*` count climbed unbounded until the sandbox
+/// guard blocked every worker (KT-514). So the outcome is verified against the
+/// filesystem before returning, and a residual checkout is a traced error rather
+/// than a phantom success — with the branch left intact, since its worktree is
+/// still live.
 pub fn remove_discussion_worktree(
     repo_path: &Path,
     worktree_path: &str,
@@ -1020,16 +1034,35 @@ pub fn remove_discussion_worktree(
             .output();
     }
 
-    // Final fallback: manual cleanup if directory still exists
+    // Final fallback: remove the checkout directory by hand. Traced, never
+    // silently discarded — an ignored failure here is precisely how the worktree
+    // count rises unseen.
+    let mut manual_error: Option<String> = None;
     if wt_abs.exists() {
-        let _ = std::fs::remove_dir_all(wt_abs);
+        if let Err(e) = std::fs::remove_dir_all(wt_abs) {
+            manual_error = Some(e.to_string());
+        }
     }
 
-    // Prune stale worktree entries before deleting branch
+    // Prune the admin entry (`.git/worktrees/<name>`) so a removed checkout stops
+    // counting, whichever path above removed the directory.
     let _ = sync_cmd("git")
         .args(["worktree", "prune"])
         .current_dir(repo_path)
         .output();
+
+    // Reclamation only counts if the count actually goes down. If the checkout
+    // outlived every attempt, say so instead of reporting a phantom success, and
+    // leave the branch alone.
+    if wt_abs.exists() {
+        return Err(format!(
+            "worktree {} could not be removed{} — leaving it rather than reporting a phantom reclaim",
+            worktree_path,
+            manual_error
+                .map(|e| format!(" ({e})"))
+                .unwrap_or_default()
+        ));
+    }
 
     if let Some(branch) = branch_to_delete {
         let _ = sync_cmd("git")
@@ -2765,6 +2798,63 @@ mod tests {
         dir
     }
 
+    /// A repo carrying one committed, materialized submodule — the shape KT-478
+    /// gives every task worktree, and the shape `git worktree remove` refuses
+    /// without `--force`. The returned upstream `TempDir` must outlive the
+    /// `submodule add`; it is handed back so the caller keeps it alive.
+    fn make_test_repo_with_submodule(name: &str) -> (tempfile::TempDir, tempfile::TempDir) {
+        let upstream = tempfile::Builder::new()
+            .prefix(&format!("kronn-wt-{}-sub", name))
+            .tempdir()
+            .unwrap();
+        for args in [
+            vec!["init", "-b", "main"],
+            vec!["config", "user.email", "test@test.com"],
+            vec!["config", "user.name", "Test"],
+        ] {
+            std::process::Command::new("git")
+                .args(&args)
+                .current_dir(upstream.path())
+                .output()
+                .unwrap();
+        }
+        fs::write(upstream.path().join("lib.txt"), "shared").unwrap();
+        for args in [vec!["add", "."], vec!["commit", "-m", "sub init"]] {
+            std::process::Command::new("git")
+                .args(&args)
+                .current_dir(upstream.path())
+                .output()
+                .unwrap();
+        }
+
+        let repo = make_test_repo(name);
+        // Local-file submodules require the explicit protocol opt-in (git CVE
+        // hardening); the same flag Kronn uses on real checkouts.
+        let add = std::process::Command::new("git")
+            .args([
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                &upstream.path().to_string_lossy(),
+                "sub",
+            ])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        assert!(
+            add.status.success(),
+            "submodule add failed: {}",
+            String::from_utf8_lossy(&add.stderr)
+        );
+        std::process::Command::new("git")
+            .args(["commit", "-m", "add submodule"])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        (repo, upstream)
+    }
+
     #[test]
     fn test_slugify() {
         assert_eq!(slugify("My Project"), "my-project");
@@ -3757,6 +3847,80 @@ mod tests {
 
         assert!(remove_cancelled_task_worktree(repo.path(), &info.path, &info.branch).is_err());
         assert!(Path::new(&info.path).exists());
+    }
+
+    /// KT-514/KT-478 — the reclaim must succeed on a task worktree that carries a
+    /// materialized submodule, which `git worktree remove` refuses without
+    /// `--force`. An abandoned generation's checkout goes; its branch and the
+    /// worker's commits stay inspectable.
+    #[test]
+    fn remove_cancelled_task_worktree_reclaims_a_submodule_checkout() {
+        let (repo, _upstream) = make_test_repo_with_submodule("task-rm-submodule");
+        let base = head_sha(repo.path());
+        let info = create_task_worktree(repo.path(), "KT-514", "submod", &base).unwrap();
+        // The materialized submodule is exactly what breaks a plain remove.
+        assert!(
+            Path::new(&info.path).join("sub").join("lib.txt").exists(),
+            "submodule must be materialized in the task worktree"
+        );
+        let worker_head =
+            commit_file(Path::new(&info.path), "worker.txt", "keep", "worker work");
+
+        remove_cancelled_task_worktree(repo.path(), &info.path, &info.branch).unwrap();
+
+        assert!(
+            !Path::new(&info.path).exists(),
+            "the checkout (submodule and all) is reclaimed"
+        );
+        assert_eq!(
+            branch_commit(repo.path(), &info.branch).as_deref(),
+            Some(worker_head.as_str()),
+            "the branch and the worker's commits survive the reclaim"
+        );
+        // The admin entry is pruned too, so the worktree count actually drops.
+        assert!(
+            !repo
+                .path()
+                .join(".git/worktrees")
+                .join(Path::new(&info.path).file_name().unwrap())
+                .exists(),
+            "the .git/worktrees admin entry must be pruned"
+        );
+    }
+
+    /// The successful-integration teardown (a `Done` execution) must likewise
+    /// clear a submodule-bearing checkout instead of leaving it to accumulate.
+    #[test]
+    fn remove_integrated_task_worktree_reclaims_a_submodule_checkout() {
+        let (repo, _upstream) = make_test_repo_with_submodule("task-integrated-submodule");
+        let base = head_sha(repo.path());
+        let info = create_task_worktree(repo.path(), "KT-514", "intsub", &base).unwrap();
+        let integrated = commit_file(Path::new(&info.path), "worker.txt", "done", "worker work");
+
+        remove_integrated_task_worktree(repo.path(), &info.path, &info.branch, &integrated)
+            .unwrap();
+        assert!(
+            !Path::new(&info.path).exists(),
+            "an integrated submodule worktree is reclaimed"
+        );
+        assert!(
+            branch_commit(repo.path(), &info.branch).is_none(),
+            "an integrated branch is deleted with its checkout"
+        );
+    }
+
+    /// Observability (KT-514): removing an already-gone checkout is a success,
+    /// and it prunes so the count reflects reality rather than a phantom entry.
+    #[test]
+    fn remove_discussion_worktree_is_ok_when_the_checkout_is_already_gone() {
+        let (repo, _upstream) = make_test_repo_with_submodule("task-rm-idem-submodule");
+        let base = head_sha(repo.path());
+        let info = create_task_worktree(repo.path(), "KT-514", "idem", &base).unwrap();
+        // Simulate a partial prior cleanup: the directory is gone, the admin
+        // entry may linger.
+        std::fs::remove_dir_all(&info.path).unwrap();
+        remove_discussion_worktree(repo.path(), &info.path, false).unwrap();
+        assert!(!Path::new(&info.path).exists());
     }
 
     #[test]
