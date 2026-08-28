@@ -515,6 +515,13 @@ fn string_array(value: &serde_json::Value) -> bool {
         .is_some_and(|items| items.iter().all(serde_json::Value::is_string))
 }
 
+fn primitive_map(value: &serde_json::Value) -> bool {
+    value.as_object().is_some_and(|map| {
+        map.values()
+            .all(|value| value.is_string() || value.is_number() || value.is_boolean())
+    })
+}
+
 fn gemini_mcp_entry_valid(value: &serde_json::Value) -> bool {
     let Some(entry) = value.as_object() else {
         return false;
@@ -525,14 +532,17 @@ fn gemini_mcp_entry_valid(value: &serde_json::Value) -> bool {
         | "url"
         | "httpUrl"
         | "tcp"
-        | "authProviderType"
         | "targetAudience"
         | "targetServiceAccount"
-        | "description"
-        | "extensionName" => value.is_string(),
-        "type" => matches!(value.as_str(), Some("sse" | "http")),
+        | "description" => value.is_string(),
+        "type" => matches!(value.as_str(), Some("stdio" | "sse" | "http")),
+        "authProviderType" => matches!(
+            value.as_str(),
+            Some("dynamic_discovery" | "google_credentials" | "service_account_impersonation")
+        ),
         "args" | "includeTools" | "excludeTools" => string_array(value),
         "env" | "headers" => string_map(value),
+        "extension" => primitive_map(value),
         "timeout" => value.is_number(),
         "trust" => value.is_boolean(),
         "oauth" => value.is_object(),
@@ -1651,7 +1661,7 @@ mod tests {
         let settings = temp.path().join("settings.json");
         std::fs::write(
             &settings,
-            r#"{"mcpServers":{"remote":{"type":"http","httpUrl":"https://example.test/mcp","description":"Remote tools","targetServiceAccount":"worker@example.test"},"events":{"type":"sse","url":"https://example.test/events"}}}"#,
+            r#"{"mcpServers":{"remote":{"type":"http","httpUrl":"https://example.test/mcp","description":"Remote tools","targetServiceAccount":"worker@example.test","authProviderType":"service_account_impersonation","extension":{"enabled":true,"retries":2,"label":"prod"}},"events":{"type":"sse","url":"https://example.test/events","authProviderType":"dynamic_discovery"},"local":{"type":"stdio","command":"example","authProviderType":"google_credentials"}}}"#,
         )
         .unwrap();
         let signals = GeminiAuthSignals {
@@ -1674,6 +1684,30 @@ mod tests {
             gemini_api_key: true,
             ..GeminiAuthSignals::default()
         };
+        assert!(!gemini_config_and_auth_ready(&settings, false, &signals));
+    }
+
+    #[test]
+    fn gemini_preflight_rejects_extension_name_and_invalid_auth_provider_type() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings = temp.path().join("settings.json");
+        let signals = GeminiAuthSignals {
+            gemini_api_key: true,
+            ..GeminiAuthSignals::default()
+        };
+
+        std::fs::write(
+            &settings,
+            r#"{"mcpServers":{"bad":{"command":"x","extensionName":"legacy"}}}"#,
+        )
+        .unwrap();
+        assert!(!gemini_config_and_auth_ready(&settings, false, &signals));
+
+        std::fs::write(
+            &settings,
+            r#"{"mcpServers":{"bad":{"command":"x","authProviderType":"custom"}}}"#,
+        )
+        .unwrap();
         assert!(!gemini_config_and_auth_ready(&settings, false, &signals));
     }
 
