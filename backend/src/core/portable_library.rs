@@ -181,13 +181,13 @@ fn scan_skills(root: &Path, scope: LibraryScope, out: &mut Vec<LibraryItem>) -> 
             continue;
         }
         let content = fs::read(&skill_path).map_err(|e| format!("cannot read skill: {e}"))?;
-        validate_skill(&content)?;
         let relative = skill_path
             .strip_prefix(root)
             .map_err(|_| "skill escaped library root")?
             .to_path_buf();
         let id = entry.file_name().to_string_lossy().to_string();
         validate_id(&id)?;
+        validate_skill(&content, &id)?;
         let sidecar_path = folder.join("SKILL.kronn.json");
         let sidecar = read_or_derive_sidecar(
             &sidecar_path,
@@ -248,9 +248,12 @@ fn scan_json_kind(
             .map_err(|_| "item escaped library root")?
             .to_path_buf();
         validate_portable_source(&sidecar.provenance.source)?;
-        sidecar.provenance.scope = scope;
+        // Provenance records origin, not the tree it was found in: keep the
+        // recorded scope so a global item synced into a project is not promoted
+        // to project on rediscovery. Refresh the portable path and hash the
+        // payload (excluding provenance) so resync is a stable no-op.
         sidecar.provenance.source = portable_path(&relative)?;
-        sidecar.provenance.content_sha256 = sha256(&content);
+        sidecar.provenance.content_sha256 = sidecar_payload_sha256(&sidecar)?;
         out.push(LibraryItem {
             kind,
             id: sidecar.id.clone(),
@@ -272,17 +275,20 @@ fn read_or_derive_sidecar(
     relative: &Path,
     content: &[u8],
 ) -> Result<KronnSidecar, String> {
-    let expected = Provenance {
-        scope,
-        source: portable_path(relative)?,
-        content_sha256: sha256(content),
-    };
+    let source = portable_path(relative)?;
+    // A skill's content hash is over `SKILL.md`, which never embeds the hash, so
+    // it is already stable across resync.
+    let content_sha256 = sha256(content);
     if !path.exists() {
         return Ok(KronnSidecar {
             version: CONTRACT_VERSION,
             kind,
             id: id.to_string(),
-            provenance: expected,
+            provenance: Provenance {
+                scope,
+                source,
+                content_sha256,
+            },
             data: None,
         });
     }
@@ -294,7 +300,10 @@ fn read_or_derive_sidecar(
         return Err(format!("skill sidecar does not match '{id}'"));
     }
     validate_portable_source(&sidecar.provenance.source)?;
-    sidecar.provenance = expected;
+    // Keep the recorded origin scope (no global->project promotion); refresh the
+    // portable path and content hash from the current tree.
+    sidecar.provenance.source = source;
+    sidecar.provenance.content_sha256 = content_sha256;
     Ok(sidecar)
 }
 
@@ -410,7 +419,11 @@ fn export_relative_path(item: &LibraryItem) -> PathBuf {
     }
 }
 
-fn validate_skill(content: &[u8]) -> Result<(), String> {
+/// Validate the third-party `SKILL.md` against the official Agent Skills spec:
+/// YAML frontmatter with a valid `name` equal to the skill directory and a
+/// `description` within bounds, and never any Kronn key (that lives in the
+/// sidecar). See <https://docs.claude.com/en/docs/agents-and-tools/agent-skills>.
+fn validate_skill(content: &[u8], expected_id: &str) -> Result<(), String> {
     reject_secrets(content)?;
     let text = std::str::from_utf8(content).map_err(|_| "SKILL.md must be UTF-8")?;
     let trimmed = text.trim_start();
@@ -421,22 +434,46 @@ fn validate_skill(content: &[u8]) -> Result<(), String> {
         .find("\n---")
         .ok_or("SKILL.md frontmatter is not closed")?;
     let frontmatter = &trimmed[4..4 + end];
-    let has_name = frontmatter
-        .lines()
-        .any(|line| line.starts_with("name:") && !line[5..].trim().is_empty());
-    let has_description = frontmatter
-        .lines()
-        .any(|line| line.starts_with("description:") && !line[12..].trim().is_empty());
-    if !has_name || !has_description {
-        return Err("SKILL.md requires name and description".into());
-    }
     if frontmatter
         .lines()
         .any(|line| line.trim_start().starts_with("kronn"))
     {
         return Err("Kronn metadata must be stored in SKILL.kronn.json".into());
     }
+    let name = frontmatter_value(frontmatter, "name")
+        .ok_or("SKILL.md requires a non-empty name")?;
+    let description = frontmatter_value(frontmatter, "description")
+        .ok_or("SKILL.md requires a non-empty description")?;
+    // Agent Skills spec: name is a lowercase hyphenated slug (<=64 chars) and
+    // must equal the skill's directory name.
+    validate_id(&name)
+        .map_err(|_| format!("SKILL.md name '{name}' is not a valid Agent Skills name"))?;
+    if name != expected_id {
+        return Err(format!(
+            "SKILL.md name '{name}' must match its directory '{expected_id}'"
+        ));
+    }
+    // Agent Skills spec: description is capped at 1024 characters.
+    if description.chars().count() > 1024 {
+        return Err("SKILL.md description exceeds 1024 characters".into());
+    }
     Ok(())
+}
+
+/// Read a single-line scalar value from `SKILL.md` frontmatter, stripping one
+/// layer of surrounding quotes. Returns `None` when the key is absent or empty.
+fn frontmatter_value(frontmatter: &str, key: &str) -> Option<String> {
+    let prefix = format!("{key}:");
+    frontmatter.lines().find_map(|line| {
+        let value = line.strip_prefix(&prefix)?.trim();
+        let unquoted = value
+            .strip_prefix('"')
+            .and_then(|v| v.strip_suffix('"'))
+            .or_else(|| value.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')))
+            .unwrap_or(value)
+            .trim();
+        (!unquoted.is_empty()).then(|| unquoted.to_string())
+    })
 }
 
 fn validate_id(id: &str) -> Result<(), String> {
@@ -482,9 +519,18 @@ fn collect_auxiliary_files(
     entries.sort_by_key(|entry| entry.file_name());
     for entry in entries {
         let path = entry.path();
-        if path.is_dir() {
+        // Refuse symlinks explicitly: `is_dir`/`is_file` follow links and would
+        // let an auxiliary resource read outside the skill directory despite the
+        // lexical relative-path checks.
+        let file_type = entry
+            .file_type()
+            .map_err(|e| format!("cannot stat skill resource: {e}"))?;
+        if file_type.is_symlink() {
+            return Err("skill resources must not be symlinks".into());
+        }
+        if file_type.is_dir() {
             collect_auxiliary_files(base, &path, out)?;
-        } else if path.is_file() {
+        } else if file_type.is_file() {
             let relative = path
                 .strip_prefix(base)
                 .map_err(|_| "auxiliary file escaped skill directory")?
@@ -526,7 +572,30 @@ fn canonical_json<T: Serialize>(value: &T) -> Result<Vec<u8>, String> {
 }
 
 fn sha256(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    // sha2 0.11 returns a `GenericArray`, which does not implement `LowerHex`;
+    // encode the digest bytes explicitly so the hash stays a lowercase hex string.
+    use std::fmt::Write;
+    let digest = Sha256::digest(bytes);
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for &byte in digest.iter() {
+        let _ = write!(hex, "{byte:02x}");
+    }
+    hex
+}
+
+/// Hash the semantic payload of a `*.kronn.json` sidecar, excluding its own
+/// provenance block. Hashing the whole file would be self-referential: the file
+/// embeds `content_sha256`, so every sync rewrite would change the hash again.
+fn sidecar_payload_sha256(sidecar: &KronnSidecar) -> Result<String, String> {
+    let payload = serde_json::json!({
+        "version": sidecar.version,
+        "kind": sidecar.kind,
+        "id": sidecar.id,
+        "data": sidecar.data,
+    });
+    let bytes = serde_json::to_vec(&payload)
+        .map_err(|e| format!("cannot hash portable item payload: {e}"))?;
+    Ok(sha256(&bytes))
 }
 
 fn portable_path(path: &Path) -> Result<String, String> {
@@ -708,6 +777,117 @@ mod tests {
             .contains(&PathBuf::from("skills/assets/references/logo.bin")));
         let synced = fs::read(target.join(".agents/skills/assets/references/logo.bin")).unwrap();
         assert_eq!(synced, raw);
+    }
+
+    #[test]
+    fn cli_style_sync_into_project_tree_is_idempotent() {
+        // Mirrors run_cli_sync: the global source and the project source/target
+        // share the same tree after the first materialization.
+        let global = temp("cli-global");
+        let cwd = temp("cli-cwd");
+        skill(&global, "review", "body");
+        json_item(&global, "workflows", LibraryKind::Workflow, "release");
+        let project_agents = cwd.join(".agents");
+
+        let first = sync(
+            &discover(Some(&global), Some(&project_agents)).unwrap(),
+            &cwd,
+        )
+        .unwrap();
+        assert!(first.changed());
+
+        let cat1 = discover(Some(&global), Some(&project_agents)).unwrap();
+        let wf1 = cat1
+            .get(LibraryKind::Workflow, "release")
+            .unwrap()
+            .sidecar
+            .provenance
+            .clone();
+        let sk1 = cat1
+            .get(LibraryKind::Skill, "review")
+            .unwrap()
+            .sidecar
+            .provenance
+            .clone();
+
+        // Rediscover from the now-populated project tree and resync.
+        let second = sync(
+            &discover(Some(&global), Some(&project_agents)).unwrap(),
+            &cwd,
+        )
+        .unwrap();
+        assert!(!second.changed(), "resync must be a no-op: {second:?}");
+
+        let cat2 = discover(Some(&global), Some(&project_agents)).unwrap();
+        let wf2 = cat2
+            .get(LibraryKind::Workflow, "release")
+            .unwrap()
+            .sidecar
+            .provenance
+            .clone();
+        let sk2 = cat2
+            .get(LibraryKind::Skill, "review")
+            .unwrap()
+            .sidecar
+            .provenance
+            .clone();
+
+        assert_eq!(wf1, wf2, "workflow provenance/hash must stay stable");
+        assert_eq!(sk1, sk2, "skill provenance/hash must stay stable");
+        // Origin scope preserved, not promoted global -> project on rediscovery.
+        assert_eq!(wf1.scope, LibraryScope::Global);
+        assert_eq!(sk1.scope, LibraryScope::Global);
+    }
+
+    #[test]
+    fn skill_name_must_match_directory() {
+        let err = validate_skill(
+            b"---\nname: other\ndescription: ok\n---\nbody",
+            "review",
+        )
+        .unwrap_err();
+        assert!(err.contains("must match its directory"), "{err}");
+    }
+
+    #[test]
+    fn skill_name_must_be_a_valid_slug() {
+        let err = validate_skill(
+            b"---\nname: Bad_Name\ndescription: ok\n---\nbody",
+            "bad-name",
+        )
+        .unwrap_err();
+        assert!(err.contains("not a valid Agent Skills name"), "{err}");
+    }
+
+    #[test]
+    fn skill_description_out_of_bounds_is_rejected() {
+        let long = "x".repeat(1025);
+        let content = format!("---\nname: review\ndescription: {long}\n---\nbody");
+        let err = validate_skill(content.as_bytes(), "review").unwrap_err();
+        assert!(err.contains("exceeds 1024 characters"), "{err}");
+        // A quoted, in-bound description with the folder name still validates.
+        assert!(validate_skill(
+            b"---\nname: review\ndescription: \"a bounded summary\"\n---\nbody",
+            "review",
+        )
+        .is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn auxiliary_symlinks_are_refused() {
+        use std::os::unix::fs::symlink;
+        let root = temp("symlink");
+        skill(&root, "leaky", "body");
+        let outside = temp("outside");
+        fs::write(outside.join("target.txt"), "outside data").unwrap();
+        symlink(
+            outside.join("target.txt"),
+            root.join("skills/leaky/references/link.txt"),
+        )
+        .unwrap();
+        let err = discover(Some(&root), None).unwrap_err();
+        assert!(err.contains("symlink"), "{err}");
     }
 
     #[test]
