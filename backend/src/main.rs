@@ -25,75 +25,8 @@ async fn main() -> anyhow::Result<()> {
         );
         return Ok(());
     } else if first_arg.as_deref() == Some("run") {
-        let args: Vec<String> = std::env::args().collect();
-        if args.len() < 3 {
-            eprintln!("Usage: kronn run <workflow.json> [--var KEY=VALUE]...");
-            std::process::exit(1);
-        }
-        let file_path = &args[2];
-        let mut vars = std::collections::HashMap::new();
-        let mut i = 3;
-        while i < args.len() {
-            if args[i] == "--var" && i + 1 < args.len() {
-                let kv = &args[i + 1];
-                if let Some((k, v)) = kv.split_once('=') {
-                    vars.insert(k.to_string(), v.to_string());
-                } else {
-                    eprintln!("Invalid --var format, expected KEY=VALUE: {}", kv);
-                    std::process::exit(1);
-                }
-                i += 2;
-            } else {
-                eprintln!("Unknown argument: {}", args[i]);
-                std::process::exit(1);
-            }
-        }
-        
-        let content = std::fs::read_to_string(file_path).map_err(|e| anyhow::anyhow!("Failed to read {}: {}", file_path, e))?;
-        let workflow: serde_json::Value = serde_json::from_str(&content).map_err(|e| anyhow::anyhow!("Invalid JSON in {}: {}", file_path, e))?;
-        
-        if workflow.get("engine").and_then(|v| v.as_str()) != Some("kronn") {
-            eprintln!("Error: Unsupported engine or missing 'engine: kronn'");
-            std::process::exit(1);
-        }
-        
-        let steps = workflow.get("steps").and_then(|v| v.as_array()).ok_or_else(|| anyhow::anyhow!("Missing or invalid 'steps' array"))?;
-        
-        let mut env_map = std::collections::HashMap::new();
-        if let Some(env_obj) = workflow.get("env").and_then(|v| v.as_object()) {
-            for (k, v) in env_obj {
-                if let Some(v_str) = v.as_str() {
-                    if v_str.starts_with("${env:") && v_str.ends_with("}") {
-                        let host_var = &v_str[6..v_str.len()-1];
-                        let val = vars.get(host_var).cloned().or_else(|| std::env::var(host_var).ok());
-                        if let Some(val) = val {
-                            env_map.insert(k.to_string(), val);
-                        } else {
-                            eprintln!("Error: Required environment variable '{}' not provided (use --var {}=VALUE or set it in environment)", host_var, host_var);
-                            std::process::exit(1);
-                        }
-                    }
-                }
-            }
-        }
-        
-        for (idx, step) in steps.iter().enumerate() {
-            let name = step.get("name").and_then(|v| v.as_str()).unwrap_or("unnamed");
-            let run = step.get("run").and_then(|v| v.as_str()).ok_or_else(|| anyhow::anyhow!("Step {} missing 'run' command", idx))?;
-            
-            println!("--- Running step: {} ---", name);
-            let mut cmd = std::process::Command::new("sh");
-            cmd.arg("-c").arg(run);
-            cmd.envs(&env_map);
-            
-            let status = cmd.status().map_err(|e| anyhow::anyhow!("Failed to execute step {}: {}", name, e))?;
-            if !status.success() {
-                eprintln!("Error: Step '{}' failed with status {}", name, status);
-                std::process::exit(1);
-            }
-        }
-        
-        println!("Workflow completed successfully.");
+        let args: Vec<String> = std::env::args().skip(2).collect();
+        kronn::core::portable_library::run_cli_workflow(&args).map_err(anyhow::Error::msg)?;
         return Ok(());
     }
 
