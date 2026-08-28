@@ -9078,7 +9078,7 @@ mod tests {
         };
         let catalogue = build_task_worker_catalogue(
             &crate::core::config::default_config(),
-            &[detection.clone()],
+            std::slice::from_ref(&detection),
             &[],
             &[],
             &[(
