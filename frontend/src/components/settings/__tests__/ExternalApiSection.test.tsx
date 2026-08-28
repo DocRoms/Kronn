@@ -132,6 +132,10 @@ describe('ExternalApiSection', () => {
 
     fireEvent.change(screen.getByTestId('ext-api-display-name'), { target: { value: 'Together' } });
     fireEvent.change(screen.getByTestId('ext-api-mention-alias'), { target: { value: 'together' } });
+    // The user pastes the base URL documented by Together — which ends in `/v1`.
+    // The UI forwards it verbatim; the backend normalizes the trailing `/v1`
+    // away so the shared OpenAiCodec appends exactly one `/v1/chat/completions`
+    // (proven backend-side in normalized_endpoint_yields_the_correct_final_chat_url).
     fireEvent.change(screen.getByTestId('ext-api-endpoint'), {
       target: { value: 'https://api.together.xyz/v1' },
     });
@@ -157,9 +161,34 @@ describe('ExternalApiSection', () => {
     expect(listMock).toHaveBeenCalledTimes(2);
   });
 
+  it('blocks Save until a non-empty endpoint is provided (Other preset clears it)', async () => {
+    renderSection();
+    fireEvent.click(await screen.findByTestId('ext-api-add-connection'));
+
+    // "Other" clears the endpoint: a connection with no endpoint is not
+    // executable, so Save must stay disabled even with a name and alias.
+    fireEvent.click(screen.getByTestId('ext-api-preset-other'));
+    fireEvent.change(screen.getByTestId('ext-api-display-name'), { target: { value: 'Groq' } });
+    fireEvent.change(screen.getByTestId('ext-api-mention-alias'), { target: { value: 'groq' } });
+    expect((screen.getByTestId('ext-api-endpoint') as HTMLInputElement).value).toBe('');
+    expect((screen.getByTestId('ext-api-save') as HTMLButtonElement).disabled).toBe(true);
+
+    // Typing an endpoint unlocks it.
+    fireEvent.change(screen.getByTestId('ext-api-endpoint'), {
+      target: { value: 'https://api.groq.com/openai/v1' },
+    });
+    expect((screen.getByTestId('ext-api-save') as HTMLButtonElement).disabled).toBe(false);
+  });
+
   it('keeps the stored key when editing without retyping it', async () => {
     listMock.mockResolvedValue([
-      conn({ id: 'groq-1', display_name: 'Groq', mention_alias: 'groq', has_credential: true }),
+      conn({
+        id: 'groq-1',
+        display_name: 'Groq',
+        mention_alias: 'groq',
+        endpoint: 'https://api.groq.com/openai/v1',
+        has_credential: true,
+      }),
     ]);
     renderSection();
 

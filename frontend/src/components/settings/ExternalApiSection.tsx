@@ -121,8 +121,13 @@ function ConnectionForm({
     { id: 'nvidia', label: 'NVIDIA' },
     { id: 'other', label: t('config.extApi.presetOther') },
   ];
+  // An endpoint is mandatory: the "Other" preset clears it, and a connection
+  // with no endpoint is not executable. The backend enforces the same rule.
   const canSubmit =
-    form.display_name.trim().length > 0 && form.mention_alias.trim().length > 0 && !submitting;
+    form.display_name.trim().length > 0 &&
+    form.mention_alias.trim().length > 0 &&
+    form.endpoint.trim().length > 0 &&
+    !submitting;
 
   return (
     <div className="set-ext-api-form" data-testid="ext-api-form">

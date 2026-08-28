@@ -54,6 +54,43 @@ fn clean(value: Option<String>) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
+/// Canonicalize a user-entered mention alias into the BARE form persisted in
+/// the DB. The UI suggests `@groq`; storing that verbatim makes
+/// `connection_mention_alias` re-prepend `@` and emit `@@groq`, an alias the
+/// resolver can never match. We strip a single leading `@`, trim and lowercase,
+/// then reject anything empty or carrying a character that cannot appear inside
+/// a mention (whitespace or a second `@`).
+fn canonicalize_alias(raw: &str) -> Result<String, &'static str> {
+    let trimmed = raw.trim();
+    let bare = trimmed.strip_prefix('@').unwrap_or(trimmed).trim();
+    let alias = bare.to_lowercase();
+    if alias.is_empty() {
+        return Err("Mention alias required");
+    }
+    if alias.chars().any(|c| c.is_whitespace() || c == '@') {
+        return Err("Mention alias is invalid");
+    }
+    Ok(alias)
+}
+
+/// Normalize a base endpoint so the shared `OpenAiCodec` — which appends
+/// `/v1/chat/completions` — never produces a doubled `/v1`. Operators paste the
+/// URL documented by the service, which for Groq/Together ends in `/v1`; we
+/// store the bare base. Returns `None` when nothing usable remains, which the
+/// callers reject: a connection with no endpoint is not executable.
+fn normalize_endpoint(raw: Option<String>) -> Option<String> {
+    let value = raw?.trim().trim_end_matches('/').to_string();
+    if value.is_empty() {
+        return None;
+    }
+    let base = value.strip_suffix("/v1").unwrap_or(&value).trim_end_matches('/');
+    if base.is_empty() {
+        None
+    } else {
+        Some(base.to_string())
+    }
+}
+
 fn view(connection: ExternalApiConnection, config: &AppConfig) -> ConnectionView {
     let has_credential = config
         .tokens
@@ -117,19 +154,25 @@ pub async fn create(
     Json(req): Json<UpsertConnectionRequest>,
 ) -> Json<ApiResponse<ConnectionView>> {
     let display_name = req.display_name.trim().to_string();
-    let mention_alias = req.mention_alias.trim().to_string();
     if display_name.is_empty() {
         return Json(ApiResponse::err_coded(
             ApiErrorCode::Validation,
             "Display name required",
         ));
     }
-    if mention_alias.is_empty() {
-        return Json(ApiResponse::err_coded(
-            ApiErrorCode::Validation,
-            "Mention alias required",
-        ));
-    }
+    let mention_alias = match canonicalize_alias(&req.mention_alias) {
+        Ok(alias) => alias,
+        Err(msg) => return Json(ApiResponse::err_coded(ApiErrorCode::Validation, msg)),
+    };
+    let endpoint = match normalize_endpoint(req.endpoint) {
+        Some(endpoint) => endpoint,
+        None => {
+            return Json(ApiResponse::err_coded(
+                ApiErrorCode::Validation,
+                "Endpoint required",
+            ))
+        }
+    };
 
     let now = Utc::now();
     let credential_slug = credential_slug_for(&mention_alias);
@@ -137,7 +180,7 @@ pub async fn create(
         id: uuid::Uuid::new_v4().to_string(),
         display_name: display_name.clone(),
         mention_alias,
-        endpoint: clean(req.endpoint),
+        endpoint: Some(endpoint),
         credential_slug: credential_slug.clone(),
         origin_preset: req.origin_preset,
         economy_model: clean(req.economy_model),
@@ -179,13 +222,25 @@ pub async fn update(
     Json(req): Json<UpsertConnectionRequest>,
 ) -> Json<ApiResponse<ConnectionView>> {
     let display_name = req.display_name.trim().to_string();
-    let mention_alias = req.mention_alias.trim().to_string();
-    if display_name.is_empty() || mention_alias.is_empty() {
+    if display_name.is_empty() {
         return Json(ApiResponse::err_coded(
             ApiErrorCode::Validation,
-            "Display name and mention alias required",
+            "Display name required",
         ));
     }
+    let mention_alias = match canonicalize_alias(&req.mention_alias) {
+        Ok(alias) => alias,
+        Err(msg) => return Json(ApiResponse::err_coded(ApiErrorCode::Validation, msg)),
+    };
+    let endpoint = match normalize_endpoint(req.endpoint) {
+        Some(endpoint) => endpoint,
+        None => {
+            return Json(ApiResponse::err_coded(
+                ApiErrorCode::Validation,
+                "Endpoint required",
+            ))
+        }
+    };
 
     let lookup_id = id.clone();
     let existing = match state
@@ -210,7 +265,7 @@ pub async fn update(
         id: existing.id.clone(),
         display_name: display_name.clone(),
         mention_alias,
-        endpoint: clean(req.endpoint),
+        endpoint: Some(endpoint),
         credential_slug: credential_slug.clone(),
         origin_preset: req.origin_preset,
         economy_model: clean(req.economy_model),
@@ -288,6 +343,83 @@ pub async fn delete(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn canonicalize_alias_strips_leading_at_and_normalizes() {
+        // The UI suggests `@groq`; the bare, stored form must not carry the `@`,
+        // otherwise `connection_mention_alias` re-prepends it into `@@groq`.
+        assert_eq!(canonicalize_alias("@groq"), Ok("groq".to_string()));
+        assert_eq!(canonicalize_alias("  @Groq  "), Ok("groq".to_string()));
+        assert_eq!(canonicalize_alias("groq"), Ok("groq".to_string()));
+        assert_eq!(canonicalize_alias("Together-AI"), Ok("together-ai".to_string()));
+    }
+
+    #[test]
+    fn canonicalize_alias_rejects_empty_and_invalid() {
+        assert!(canonicalize_alias("").is_err());
+        assert!(canonicalize_alias("   ").is_err());
+        assert!(canonicalize_alias("@").is_err());
+        // A second `@` or embedded whitespace can never appear in a mention.
+        assert!(canonicalize_alias("@@groq").is_err());
+        assert!(canonicalize_alias("gr oq").is_err());
+    }
+
+    #[test]
+    fn canonical_alias_round_trips_to_a_single_at_mention() {
+        // Create/update path: canonicalized alias -> stored row -> the mention
+        // the resolver actually looks for. The regression the review asked for:
+        // a UI-suggested `@groq` yields `@groq`, never `@@groq`.
+        let alias = canonicalize_alias("@groq").unwrap();
+        let connection = ExternalApiConnection {
+            id: "id".into(),
+            display_name: "Groq".into(),
+            mention_alias: alias,
+            endpoint: Some("https://api.groq.com/openai".into()),
+            credential_slug: "conn-groq-1234".into(),
+            origin_preset: ExternalApiConnectionPreset::Other,
+            economy_model: None,
+            default_model: None,
+            reasoning_model: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        assert_eq!(
+            crate::db::external_api_connections::connection_mention_alias(&connection),
+            "@groq"
+        );
+    }
+
+    #[test]
+    fn normalize_endpoint_strips_trailing_v1_and_slashes() {
+        assert_eq!(
+            normalize_endpoint(Some("https://api.together.xyz/v1".into())),
+            Some("https://api.together.xyz".into())
+        );
+        assert_eq!(
+            normalize_endpoint(Some("https://api.groq.com/openai/v1/".into())),
+            Some("https://api.groq.com/openai".into())
+        );
+        // A base without `/v1` (NVIDIA/LiteLLM) is preserved verbatim.
+        assert_eq!(
+            normalize_endpoint(Some("https://integrate.api.nvidia.com".into())),
+            Some("https://integrate.api.nvidia.com".into())
+        );
+        // Blank/whitespace -> None, which the handlers reject as "Endpoint required".
+        assert_eq!(normalize_endpoint(Some("   ".into())), None);
+        assert_eq!(normalize_endpoint(None), None);
+    }
+
+    #[test]
+    fn normalized_endpoint_yields_the_correct_final_chat_url() {
+        // The third-service regression: a documented base URL ending in `/v1`
+        // must resolve to exactly one `/v1/chat/completions`, not two.
+        use crate::agents::chat_codec::{ChatCodec, OpenAiCodec};
+        let stored = normalize_endpoint(Some("https://api.together.xyz/v1".into())).unwrap();
+        assert_eq!(
+            OpenAiCodec.endpoint(&stored),
+            "https://api.together.xyz/v1/chat/completions"
+        );
+    }
 
     #[test]
     fn credential_slug_is_slugified_and_prefixed() {
