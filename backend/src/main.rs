@@ -13,6 +13,18 @@ use kronn::{
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    if std::env::args().nth(1).as_deref() == Some("sync") {
+        let report = kronn::core::portable_library::run_cli_sync().map_err(anyhow::Error::msg)?;
+        println!(
+            "kronn sync: {} created, {} modified, {} deleted, {} unchanged",
+            report.created.len(),
+            report.modified.len(),
+            report.deleted.len(),
+            report.unchanged.len()
+        );
+        return Ok(());
+    }
+
     // Load config FIRST (before tracing init) so `debug_mode` can influence
     // the tracing filter's default level. This is a tiny re-order vs. the
     // historical flow — `config::load()` doesn't emit logs itself, so we
