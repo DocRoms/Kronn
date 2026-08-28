@@ -722,6 +722,9 @@ pub(crate) struct HostSyncPlan {
     /// Mtime captured BEFORE the impl read the existing file. Used by
     /// the driver's `atomic_write_checked` to abort on concurrent edits.
     pub pre_mtime: Option<std::time::SystemTime>,
+    /// Optional state file committed before the host config. Gemini uses it
+    /// to keep Kronn ownership outside Gemini's closed settings schema.
+    pub prerequisite_write: Option<(PathBuf, String, Option<std::time::SystemTime>)>,
 }
 
 /// A Kronn-managed outbound sync to a host CLI's global MCP config file.
@@ -779,6 +782,22 @@ pub(crate) fn run_host_sync(t: &dyn HostMcpSync, conn: &rusqlite::Connection, se
                 parent.display(),
                 e
             );
+            return;
+        }
+    }
+    if let Some((path, content, pre_mtime)) = &plan.prerequisite_write {
+        if let Some(parent) = path.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                tracing::error!(
+                    "{} sync: cannot create state dir {}: {}",
+                    label,
+                    parent.display(),
+                    e
+                );
+                return;
+            }
+        }
+        if !write_host_config_checked(path, content, *pre_mtime, label, "Synced ownership state") {
             return;
         }
     }
@@ -2007,6 +2026,7 @@ impl HostMcpSync for CodexSync {
             content,
             summary,
             pre_mtime,
+            prerequisite_write: None,
         })
     }
 }
@@ -2148,6 +2168,7 @@ impl HostMcpSync for CopilotSync {
             content,
             summary,
             pre_mtime,
+            prerequisite_write: None,
         })
     }
 }
@@ -2481,6 +2502,7 @@ pub(crate) fn rotate_backup(path: &Path, max_n: usize) -> Option<PathBuf> {
 ///     (orphan cleanup — config was deleted from Kronn)
 ///   - entries WITHOUT `_kronn` marker → PRESERVED as-is (user-managed)
 ///   - new Kronn configs → ADDED
+#[cfg(test)]
 fn merge_kronn_entries(
     existing: &mut serde_json::Value,
     kronn_entries: HashMap<String, serde_json::Value>,
@@ -2684,6 +2706,7 @@ impl HostMcpSync for ClaudeSync {
             content,
             summary,
             pre_mtime,
+            prerequisite_write: None,
         })
     }
 
@@ -2902,6 +2925,46 @@ fn count_project_scopes(existing: &serde_json::Value) -> usize {
 /// (Gemini convention — Claude calls the same field `url`).
 pub(crate) struct GeminiSync;
 
+const GEMINI_KRONN_STATE: &str = ".gemini/kronn-mcp-state.json";
+
+fn load_gemini_ownership(path: &Path) -> HashMap<String, String> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|value| value.get("entries").and_then(|v| v.as_object()).cloned())
+        .map(|entries| {
+            entries
+                .into_iter()
+                .filter_map(|(id, label)| label.as_str().map(|label| (id, label.to_string())))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn merge_gemini_entries(
+    existing: &mut serde_json::Value,
+    previous_ownership: &HashMap<String, String>,
+    kronn_entries: HashMap<String, serde_json::Value>,
+) {
+    let Some(root) = existing.as_object_mut() else {
+        return;
+    };
+    let servers = root
+        .entry("mcpServers")
+        .or_insert_with(|| serde_json::json!({}));
+    if !servers.is_object() {
+        *servers = serde_json::json!({});
+    }
+    let servers = servers.as_object_mut().expect("object assigned above");
+    for label in previous_ownership.values() {
+        servers.remove(label);
+    }
+    // Migrate entries written by older Kronn versions that used an invalid
+    // in-schema marker. Ownership is persisted in the sidecar from now on.
+    servers.retain(|_, entry| !is_kronn_managed(entry));
+    servers.extend(kronn_entries);
+}
+
 impl HostMcpSync for GeminiSync {
     fn label(&self) -> &'static str {
         "Gemini"
@@ -2929,8 +2992,7 @@ impl HostMcpSync for GeminiSync {
 
         // Build Kronn-managed entries (filtered by host_sync ≠ None, ApiOnly skipped)
         let mut kronn_entries: HashMap<String, serde_json::Value> = HashMap::new();
-        let mut kronn_config_ids: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
+        let mut ownership = serde_json::Map::new();
         for config in &all_configs {
             if !should_host_sync(config) {
                 continue;
@@ -2943,7 +3005,10 @@ impl HostMcpSync for GeminiSync {
             match build_kronn_managed_json_entry(config, server, secret, true, false) {
                 Ok(Some(entry)) => {
                     kronn_entries.insert(config.label.clone(), entry);
-                    kronn_config_ids.insert(config.id.clone());
+                    ownership.insert(
+                        config.id.clone(),
+                        serde_json::Value::String(config.label.clone()),
+                    );
                 }
                 Ok(None) => {} // ApiOnly skipped
                 // Decrypt failure: abort the whole Gemini host sync (logged).
@@ -2952,10 +3017,11 @@ impl HostMcpSync for GeminiSync {
         }
 
         let path = resolve_home_subpath(".gemini/settings.json");
+        let state_path = resolve_home_subpath(GEMINI_KRONN_STATE);
 
         // Empty case: if Kronn has nothing to sync AND the file doesn't exist, skip.
         // If the file exists, we still want to walk it to remove orphan Kronn entries.
-        if kronn_entries.is_empty() && !path.exists() {
+        if kronn_entries.is_empty() && !path.exists() && !state_path.exists() {
             return None;
         }
 
@@ -2977,9 +3043,10 @@ impl HostMcpSync for GeminiSync {
             return None;
         }
 
-        let prev_kronn_count = count_kronn_entries(&existing);
-        merge_kronn_entries(&mut existing, kronn_entries, &kronn_config_ids);
-        let new_kronn_count = count_kronn_entries(&existing);
+        let previous_ownership = load_gemini_ownership(&state_path);
+        let prev_kronn_count = previous_ownership.len();
+        merge_gemini_entries(&mut existing, &previous_ownership, kronn_entries);
+        let new_kronn_count = ownership.len();
 
         let summary = format!(
             "Synced Gemini global config: {} Kronn entries (was {})",
@@ -2997,6 +3064,15 @@ impl HostMcpSync for GeminiSync {
             content,
             summary,
             pre_mtime,
+            prerequisite_write: Some((
+                state_path.clone(),
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "version": 1,
+                    "entries": ownership,
+                }))
+                .ok()?,
+                read_target_mtime(&state_path),
+            )),
         })
     }
 
@@ -3005,21 +3081,15 @@ impl HostMcpSync for GeminiSync {
     }
 }
 
-/// Count entries that carry a `_kronn.managed = true` marker.
+#[cfg(test)]
 fn count_kronn_entries(value: &serde_json::Value) -> usize {
     value
         .get("mcpServers")
         .and_then(|v| v.as_object())
-        .map(|o| {
-            o.values()
-                .filter(|v| {
-                    v.as_object()
-                        .and_then(|e| e.get("_kronn"))
-                        .and_then(|m| m.as_object())
-                        .and_then(|m| m.get("managed"))
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false)
-                })
+        .map(|servers| {
+            servers
+                .values()
+                .filter(|entry| is_kronn_managed(entry))
                 .count()
         })
         .unwrap_or(0)
@@ -4702,6 +4772,50 @@ mod host_sync_tests {
 
         assert_eq!(entries.len(), 11);
         assert!(entries.values().all(|entry| entry.get("_kronn").is_none()));
+    }
+
+    #[test]
+    fn gemini_marker_free_ownership_survives_rename_delete_and_second_sync() {
+        let mut settings = serde_json::json!({
+            "mcpServers": { "user-owned": { "command": "user-command" } }
+        });
+        let first_entries = (0..11)
+            .map(|index| {
+                (
+                    format!("server-{index}"),
+                    serde_json::json!({"command": "npx", "args": [index.to_string()]}),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        merge_gemini_entries(&mut settings, &HashMap::new(), first_entries);
+
+        let first_ownership = (0..11)
+            .map(|index| (format!("config-{index}"), format!("server-{index}")))
+            .collect::<HashMap<_, _>>();
+        let mut second_entries = (0..10)
+            .map(|index| {
+                let label = if index == 0 {
+                    "renamed-server".to_string()
+                } else {
+                    format!("server-{index}")
+                };
+                (label, serde_json::json!({"command": "npx"}))
+            })
+            .collect::<HashMap<_, _>>();
+        // Config 10 was deleted; config 0 was renamed.
+        merge_gemini_entries(
+            &mut settings,
+            &first_ownership,
+            std::mem::take(&mut second_entries),
+        );
+
+        let servers = settings["mcpServers"].as_object().unwrap();
+        assert_eq!(servers.len(), 11, "10 Kronn entries plus one user entry");
+        assert!(servers.contains_key("renamed-server"));
+        assert!(!servers.contains_key("server-0"));
+        assert!(!servers.contains_key("server-10"));
+        assert_eq!(servers["user-owned"]["command"], "user-command");
+        assert!(servers.values().all(|entry| entry.get("_kronn").is_none()));
     }
 
     #[test]
