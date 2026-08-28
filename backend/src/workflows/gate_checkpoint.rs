@@ -466,7 +466,7 @@ mod tests {
             let readme_before = fs::read(calling_repo.join("README.md")).unwrap();
             let wip_before = fs::read(calling_repo.join("wip.txt")).ok();
 
-            let child = std::process::Command::new(std::env::current_exe().unwrap())
+            let child = crate::core::cmd::sync_cmd(std::env::current_exe().unwrap())
                 .arg("commit_checkpoint_ignores_inherited_git_dir_and_work_tree")
                 .arg("--nocapture")
                 .env(INHERITED_CONTEXT_TARGET_ENV, &target)
