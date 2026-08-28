@@ -2312,6 +2312,7 @@ fn build_kronn_managed_json_entry(
     server: &crate::models::McpServer,
     secret: &str,
     use_http_url_for_streamable: bool,
+    include_ownership_marker: bool,
 ) -> Result<Option<serde_json::Value>, String> {
     use crate::models::McpTransport;
     // Err = decrypt failure with expected keys → the caller must abort its
@@ -2357,13 +2358,15 @@ fn build_kronn_managed_json_entry(
         McpTransport::ApiOnly => return Ok(None),
     }
 
-    let mut marker = serde_json::Map::new();
-    marker.insert("managed".into(), serde_json::Value::Bool(true));
-    marker.insert(
-        "config_id".into(),
-        serde_json::Value::String(config.id.clone()),
-    );
-    obj.insert("_kronn".into(), serde_json::Value::Object(marker));
+    if include_ownership_marker {
+        let mut marker = serde_json::Map::new();
+        marker.insert("managed".into(), serde_json::Value::Bool(true));
+        marker.insert(
+            "config_id".into(),
+            serde_json::Value::String(config.id.clone()),
+        );
+        obj.insert("_kronn".into(), serde_json::Value::Object(marker));
+    }
 
     Ok(Some(serde_json::Value::Object(obj)))
 }
@@ -2588,7 +2591,7 @@ impl HostMcpSync for ClaudeSync {
                 Some(s) => s,
                 None => continue,
             };
-            let entry = match build_kronn_managed_json_entry(config, server, secret, false) {
+            let entry = match build_kronn_managed_json_entry(config, server, secret, false, true) {
                 Ok(Some(e)) => e,
                 Ok(None) => continue, // ApiOnly skipped
                 // Decrypt failure: abort the whole Claude host sync so the
@@ -2937,7 +2940,7 @@ impl HostMcpSync for GeminiSync {
                 None => continue,
             };
             // Gemini: use `httpUrl` for Streamable HTTP.
-            match build_kronn_managed_json_entry(config, server, secret, true) {
+            match build_kronn_managed_json_entry(config, server, secret, true, false) {
                 Ok(Some(entry)) => {
                     kronn_entries.insert(config.label.clone(), entry);
                     kronn_config_ids.insert(config.id.clone());
@@ -4152,7 +4155,7 @@ mod host_sync_tests {
             api_spec: None,
         };
         assert!(
-            build_kronn_managed_json_entry(&config, &server, "secret-not-used", false)
+            build_kronn_managed_json_entry(&config, &server, "secret-not-used", false, true)
                 .unwrap()
                 .is_none()
         );
@@ -4201,7 +4204,8 @@ mod host_sync_tests {
             &config,
             &server,
             "0123456789abcdef0123456789abcdef",
-            false
+            false,
+            true
         )
         .is_err());
     }
@@ -4233,7 +4237,7 @@ mod host_sync_tests {
             source: McpSource::Registry,
             api_spec: None,
         };
-        let entry = build_kronn_managed_json_entry(&config, &server, "secret", false)
+        let entry = build_kronn_managed_json_entry(&config, &server, "secret", false, true)
             .unwrap()
             .unwrap();
         let marker = entry.get("_kronn").unwrap();
@@ -4635,7 +4639,7 @@ mod host_sync_tests {
             api_spec: None,
         };
         // Gemini convention
-        let gemini_entry = build_kronn_managed_json_entry(&config, &server, "s", true)
+        let gemini_entry = build_kronn_managed_json_entry(&config, &server, "s", true, false)
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -4643,9 +4647,13 @@ mod host_sync_tests {
             Some("https://example.com/mcp")
         );
         assert!(gemini_entry.get("type").is_none());
+        assert!(
+            gemini_entry.get("_kronn").is_none(),
+            "Gemini's schema rejects unknown per-server keys"
+        );
 
         // Claude convention (type:"http" + url)
-        let claude_entry = build_kronn_managed_json_entry(&config, &server, "s", false)
+        let claude_entry = build_kronn_managed_json_entry(&config, &server, "s", false, true)
             .unwrap()
             .unwrap();
         assert_eq!(claude_entry.get("type").unwrap().as_str(), Some("http"));
@@ -4653,6 +4661,47 @@ mod host_sync_tests {
             claude_entry.get("url").unwrap().as_str(),
             Some("https://example.com/mcp")
         );
+        assert!(claude_entry.get("_kronn").is_some());
+    }
+
+    #[test]
+    fn gemini_sync_entries_are_schema_clean_for_eleven_servers() {
+        use crate::models::{HostSyncMode, McpConfig, McpServer, McpSource, McpTransport};
+        let server = McpServer {
+            id: "server".into(),
+            name: "Server".into(),
+            description: String::new(),
+            transport: McpTransport::Stdio {
+                command: "npx".into(),
+                args: vec!["server".into()],
+            },
+            source: McpSource::Registry,
+            api_spec: None,
+        };
+        let entries = (0..11)
+            .map(|index| {
+                let config = McpConfig {
+                    id: format!("config-{index}"),
+                    server_id: "server".into(),
+                    label: format!("server-{index}"),
+                    env_keys: vec![],
+                    env_encrypted: String::new(),
+                    args_override: None,
+                    is_global: true,
+                    include_general: true,
+                    config_hash: String::new(),
+                    project_ids: vec![],
+                    host_sync: HostSyncMode::GlobalOnly,
+                };
+                let entry = build_kronn_managed_json_entry(&config, &server, "unused", true, false)
+                    .unwrap()
+                    .unwrap();
+                (config.label, entry)
+            })
+            .collect::<HashMap<_, _>>();
+
+        assert_eq!(entries.len(), 11);
+        assert!(entries.values().all(|entry| entry.get("_kronn").is_none()));
     }
 
     #[test]

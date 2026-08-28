@@ -443,6 +443,101 @@ pub struct AgentAuthStatus {
     pub setup_command: Option<&'static str>,
 }
 
+#[derive(Debug, Default)]
+struct GeminiAuthSignals {
+    gemini_api_key: bool,
+    google_api_key: bool,
+    vertex_enabled: bool,
+    google_cloud_project: bool,
+    google_cloud_location: bool,
+    google_login_enabled: bool,
+    compute_adc: bool,
+}
+
+fn env_present(name: &str) -> bool {
+    std::env::var_os(name).is_some_and(|value| !value.is_empty())
+}
+
+fn env_is_true(name: &str) -> bool {
+    std::env::var_os(name).is_some_and(|value| value == "true")
+}
+
+fn gemini_auth_signals(config: &AppConfig) -> GeminiAuthSignals {
+    let kronn_key_enabled = !config
+        .tokens
+        .disabled_overrides
+        .iter()
+        .any(|provider| provider == "google")
+        && config.tokens.has_active_key_for("google");
+    GeminiAuthSignals {
+        gemini_api_key: kronn_key_enabled || env_present("GEMINI_API_KEY"),
+        google_api_key: env_present("GOOGLE_API_KEY"),
+        vertex_enabled: env_is_true("GOOGLE_GENAI_USE_VERTEXAI"),
+        google_cloud_project: env_present("GOOGLE_CLOUD_PROJECT"),
+        google_cloud_location: env_present("GOOGLE_CLOUD_LOCATION"),
+        google_login_enabled: env_is_true("GOOGLE_GENAI_USE_GCA"),
+        compute_adc: env_is_true("GEMINI_CLI_USE_COMPUTE_ADC") || env_is_true("CLOUD_SHELL"),
+    }
+}
+
+fn gemini_config_and_auth_ready(
+    settings_path: &std::path::Path,
+    oauth_credentials_exist: bool,
+    signals: &GeminiAuthSignals,
+) -> bool {
+    let settings = match std::fs::read_to_string(settings_path) {
+        Ok(raw) => match serde_json::from_str::<serde_json::Value>(&raw) {
+            Ok(value) => value,
+            Err(_) => return false,
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
+        Err(_) => return false,
+    };
+
+    if settings
+        .get("mcpServers")
+        .and_then(|servers| servers.as_object())
+        .is_some_and(|servers| servers.values().any(|entry| entry.get("_kronn").is_some()))
+    {
+        return false;
+    }
+
+    let selected = settings
+        .pointer("/security/auth/selectedType")
+        .and_then(|value| value.as_str());
+    match selected {
+        Some("oauth-personal") => oauth_credentials_exist,
+        Some("gemini-api-key") => signals.gemini_api_key,
+        Some("vertex-ai") | Some("USE_VERTEX_AI") => {
+            signals.google_api_key
+                || (signals.google_cloud_project && signals.google_cloud_location)
+        }
+        Some("compute-default-credentials") | Some("COMPUTE_ADC") => signals.compute_adc,
+        Some(_) => false,
+        None => {
+            signals.gemini_api_key
+                || (signals.vertex_enabled
+                    && (signals.google_api_key
+                        || (signals.google_cloud_project && signals.google_cloud_location)))
+                || (signals.google_login_enabled && oauth_credentials_exist)
+                || signals.compute_adc
+        }
+    }
+}
+
+fn gemini_auth_ready(config: &AppConfig) -> bool {
+    let home = std::env::var_os("KRONN_HOST_HOME")
+        .or_else(|| std::env::var_os("HOME"))
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(std::path::PathBuf::from);
+    let Some(home) = home else { return false };
+    gemini_config_and_auth_ready(
+        &home.join(".gemini/settings.json"),
+        home.join(".gemini/oauth_creds.json").is_file(),
+        &gemini_auth_signals(config),
+    )
+}
+
 /// Report whether the selected runner can authenticate before Kronn queues it.
 ///
 /// CLI agents own local login state that Kronn must not second-guess. Recent
@@ -450,8 +545,12 @@ pub struct AgentAuthStatus {
 /// remove the old plaintext `~/.vibe/.env`; checking only env/files therefore
 /// rejects a working CLI. Let Vibe resolve its own keyring and surface a real
 /// runtime auth error if that lookup fails.
-pub fn agent_auth_status(agent_type: &AgentType, _config: &AppConfig) -> AgentAuthStatus {
+pub fn agent_auth_status(agent_type: &AgentType, config: &AppConfig) -> AgentAuthStatus {
     match agent_type {
+        AgentType::GeminiCli => AgentAuthStatus {
+            ready: gemini_auth_ready(config),
+            setup_command: Some("gemini"),
+        },
         AgentType::Vibe => AgentAuthStatus {
             ready: true,
             setup_command: Some("vibe --setup"),
@@ -1425,5 +1524,49 @@ mod tests {
                 name
             );
         }
+    }
+
+    #[test]
+    fn gemini_preflight_rejects_missing_auth() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings = temp.path().join("settings.json");
+        std::fs::write(&settings, r#"{"mcpServers":{}}"#).unwrap();
+        assert!(!gemini_config_and_auth_ready(
+            &settings,
+            false,
+            &GeminiAuthSignals::default()
+        ));
+    }
+
+    #[test]
+    fn gemini_preflight_accepts_cached_oauth_without_reading_credentials() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings = temp.path().join("settings.json");
+        std::fs::write(
+            &settings,
+            r#"{"security":{"auth":{"selectedType":"oauth-personal"}}}"#,
+        )
+        .unwrap();
+        assert!(gemini_config_and_auth_ready(
+            &settings,
+            true,
+            &GeminiAuthSignals::default()
+        ));
+    }
+
+    #[test]
+    fn gemini_preflight_rejects_unknown_kronn_mcp_key_even_with_auth() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings = temp.path().join("settings.json");
+        std::fs::write(
+            &settings,
+            r#"{"mcpServers":{"bad":{"command":"x","_kronn":{"managed":true}}}}"#,
+        )
+        .unwrap();
+        let signals = GeminiAuthSignals {
+            gemini_api_key: true,
+            ..GeminiAuthSignals::default()
+        };
+        assert!(!gemini_config_and_auth_ready(&settings, false, &signals));
     }
 }

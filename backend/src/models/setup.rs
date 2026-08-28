@@ -339,6 +339,14 @@ impl TokensConfig {
             .find(|k| k.provider == provider && k.active)
             .map(|k| k.value.as_str())
     }
+
+    /// Whether provider credential metadata declares an active key, without
+    /// returning or inspecting the secret value itself.
+    pub fn has_active_key_for(&self, provider: &str) -> bool {
+        self.keys
+            .iter()
+            .any(|key| key.provider == provider && key.active)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
