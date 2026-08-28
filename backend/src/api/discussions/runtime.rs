@@ -535,8 +535,8 @@ pub(crate) async fn stream_claimed_dispatch_job(
                 defer_runtime_unavailable(&state, &job, &reason).await;
                 return;
             }
-            AgentExecutionOutcome::PreflightFailed => {
-                fail_dispatch_job(&state, &job, "agent execution preflight failed").await;
+            AgentExecutionOutcome::PreflightFailed { diagnostic } => {
+                fail_dispatch_job(&state, &job, &diagnostic).await;
                 return;
             }
         };
@@ -725,7 +725,7 @@ async fn finish_dispatch_turn(
     }
 
     if !execution_succeeded {
-        fail_dispatch_job(state, &job, "agent reported an unsuccessful completion").await;
+        fail_dispatch_job(state, &job, &unsuccessful_completion_diagnostic(&response)).await;
         return;
     }
 
@@ -832,6 +832,20 @@ async fn finish_dispatch_turn(
         }
     }
     state.agent_dispatch_notify.notify_waiters();
+}
+
+fn unsuccessful_completion_diagnostic(response: &str) -> String {
+    let failure_kind = if response.trim().is_empty() {
+        "no_visible_output"
+    } else {
+        "worker_reported_failure"
+    };
+    format!(
+        "task-worker startup/completion failed: phase=worker_completion; \
+         failure_kind={failure_kind}; exit=unsuccessful. The worker did not submit a durable \
+         delivery manifest. Inspect the worker sub-discussion, then use `task_exec_reassign` \
+         to preserve this execution and its worktree while selecting another available worker."
+    )
 }
 
 async fn fail_dispatch_job(
