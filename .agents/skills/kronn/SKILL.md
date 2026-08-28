@@ -1,10 +1,19 @@
+---
+name: kronn
+description: Kronn Workflow Router
+---
+
 # Kronn Workflow Router
 
 This skill acts as the entry point and router for Kronn portable workflows.
 
 ## Available Workflows
 
-*(Inventory of workflows will be listed here)*
+Workflows are stored in `.agents/workflows/`. To list them, run:
+
+```bash
+ls -1 .agents/workflows/*.json 2>/dev/null || echo "No workflows found."
+```
 
 ## Invocation
 

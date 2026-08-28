@@ -1,18 +1,39 @@
-#!/bin/sh
-set -eu
+#!/usr/bin/env python3
+import sys
+import json
+import os
 
 # Minimal renderer to generate .env.example from workflow files
-# Extracts ${env:VAR} references and generates a deterministic .env.example
+# Extracts ${env:VAR} references from the "env" contract and generates a deterministic list.
 
-if [ "$#" -eq 0 ]; then
-    echo "Usage: $0 <workflow.json...>" >&2
-    exit 1
-fi
+def main():
+    if len(sys.argv) < 2:
+        print(f"Usage: {sys.argv[0]} <workflow.json...>", file=sys.stderr)
+        sys.exit(1)
 
-# Extract all env vars, sort them uniquely, and format as VAR=
-grep -hEo '\$\{env:[a-zA-Z0-9_]+\}' "$@" | \
-    sed -E 's/\$\{env:([a-zA-Z0-9_]+)\}/\1/' | \
-    sort -u | \
-    awk '{print $1 "="}' > .env.example
+    env_vars = set()
+    for fpath in sys.argv[1:]:
+        try:
+            with open(fpath, 'r') as f:
+                data = json.load(f)
+        except Exception as e:
+            print(f"Error: Invalid JSON in {fpath}: {e}", file=sys.stderr)
+            sys.exit(1)
+        
+        env_section = data.get("env", {})
+        if not isinstance(env_section, dict):
+            print(f"Error: 'env' section must be an object in {fpath}", file=sys.stderr)
+            sys.exit(1)
+            
+        for k, v in env_section.items():
+            if not isinstance(v, str) or not v.startswith("${env:") or not v.endswith("}"):
+                print(f"Error: Invalid env reference in {fpath}: {v}. Must be ${{env:VAR}}", file=sys.stderr)
+                sys.exit(1)
+            var_name = v[6:-1]
+            env_vars.add(var_name)
+            
+    for var in sorted(env_vars):
+        print(f"{var}=")
 
-echo "Generated .env.example with $(wc -l < .env.example | tr -d ' ') variables."
+if __name__ == "__main__":
+    main()

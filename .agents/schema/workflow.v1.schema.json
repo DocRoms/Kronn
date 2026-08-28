@@ -14,7 +14,8 @@
     "requires": {
       "type": "array",
       "items": {
-        "type": "string"
+        "type": "string",
+        "minLength": 1
       },
       "description": "List of required tools or dependencies"
     },
@@ -26,14 +27,15 @@
           "properties": {
             "type": {
               "type": "string",
-              "enum": ["string", "number", "boolean"]
+              "enum": ["string", "number", "boolean", "list"]
             },
             "description": {
               "type": "string"
             },
             "default": {}
           },
-          "required": ["type"]
+          "required": ["type"],
+          "additionalProperties": false
         }
       },
       "additionalProperties": false
@@ -51,21 +53,25 @@
     },
     "steps": {
       "type": "array",
+      "minItems": 1,
       "items": {
         "type": "object",
         "properties": {
-          "name": { "type": "string" },
+          "name": { "type": "string", "minLength": 1 },
           "run": { 
             "type": "string",
+            "minLength": 1,
             "not": {
               "pattern": "(^|\\s)/[a-zA-Z0-9_]"
             },
             "description": "Command to run. Absolute paths are forbidden."
           }
         },
-        "required": ["name", "run"]
+        "required": ["name", "run"],
+        "additionalProperties": false
       }
     }
   },
-  "required": ["version", "engine", "steps"]
+  "required": ["version", "engine", "steps"],
+  "additionalProperties": false
 }

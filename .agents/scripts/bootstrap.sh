@@ -20,17 +20,24 @@ echo "Bootstrapping workflow: $WORKFLOW_FILE"
 
 # Generate .env.example
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-"$SCRIPT_DIR/render-env.sh" "$WORKFLOW_FILE"
+WORKFLOW_DIR="$(cd "$(dirname "$WORKFLOW_FILE")" && pwd)"
+ENV_EXAMPLE="$WORKFLOW_DIR/.env.example"
 
-# Check if .env exists, if not copy .env.example
-if [ ! -f .env ] && [ -f .env.example ]; then
-    echo "No .env found. Copying .env.example to .env. Please fill in the values."
-    cp .env.example .env
-fi
+python3 "$SCRIPT_DIR/render-env.sh" "$WORKFLOW_FILE" > "$ENV_EXAMPLE"
+echo "Generated $ENV_EXAMPLE"
+echo "Please review $ENV_EXAMPLE and create your own .env file if needed."
 
-# Extract and check requires (using grep/sed for portability without jq)
-# This is a minimal check. In a real scenario, jq would be better, but we want portability.
-REQUIRES=$(grep -Eo '"requires"\s*:\s*\[(.*)\]' "$WORKFLOW_FILE" | sed -E 's/.*\[(.*)\].*/\1/' | tr -d '"' | tr ',' ' ' || true)
+# Extract and check requires (using python3 for portability and correctness)
+REQUIRES=$(python3 -c '
+import sys, json
+try:
+    with open(sys.argv[1]) as f:
+        reqs = json.load(f).get("requires", [])
+        if isinstance(reqs, list):
+            print(" ".join(reqs))
+except:
+    pass
+' "$WORKFLOW_FILE")
 
 for req in $REQUIRES; do
     if ! command -v "$req" >/dev/null 2>&1; then
