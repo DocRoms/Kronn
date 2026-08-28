@@ -11,6 +11,16 @@ Release notes for 0.9.3 and earlier are available in the
 
 ## [Unreleased]
 
+### Added
+
+- Settings now has a Portable library card that manages the global/project
+  `.agents` catalog end to end: scope by project, search, drift and TOFU trust
+  status, sync/check/approve, one-click migration of existing Skills,
+  Directives, Quick Prompts and Workflows into `.agents`, and JSON export/import.
+  The backing `/api/portable-library*` endpoints resolve project scope by
+  `project_id`. See
+  [portable agent library operations](docs/operations/portable-agent-library.md).
+
 ### Documentation
 
 - Added the portable `.agents` operator guide covering global/project

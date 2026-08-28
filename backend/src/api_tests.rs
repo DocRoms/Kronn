@@ -5595,4 +5595,70 @@ mod tests {
             crate::models::AgentResumeJobStatus::Cancelled
         );
     }
+    #[tokio::test]
+    #[serial]
+    async fn portable_library_api_resolves_project_id_and_reports_catalog_state() {
+        isolate_config_dir();
+        let state = test_state();
+        let root =
+            std::env::temp_dir().join(format!("kronn-portable-api-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join(".agents/skills/review")).unwrap();
+        std::fs::write(
+            root.join(".agents/skills/review/SKILL.md"),
+            "---\nname: review\ndescription: Review code\n---\n\nReview carefully.\n",
+        )
+        .unwrap();
+        let project_path = root.to_string_lossy().into_owned();
+        state
+            .db
+            .with_conn(move |conn| {
+                let now = chrono::Utc::now();
+                crate::db::projects::insert_project(
+                    conn,
+                    &crate::models::Project {
+                        id: "portable-project".into(),
+                        name: "Portable".into(),
+                        path: project_path,
+                        repo_url: None,
+                        token_override: None,
+                        ai_config: crate::models::AiConfigStatus {
+                            detected: false,
+                            configs: vec![],
+                        },
+                        audit_status: crate::models::AiAuditStatus::NoTemplate,
+                        ai_todo_count: 0,
+                        tech_debt_count: 0,
+                        needs_docs_migration: false,
+                        path_exists: true,
+                        default_skill_ids: vec![],
+                        default_profile_id: None,
+                        briefing_notes: None,
+                        linked_repos: vec![],
+                        created_at: now,
+                        updated_at: now,
+                    },
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let req = Request::builder()
+            .uri("/api/portable-library?project_id=portable-project&search=review")
+            .body(Body::empty())
+            .unwrap();
+        let (status, json) = send(state.clone(), false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"]["project_id"], "portable-project");
+        assert_eq!(json["data"]["items"][0]["id"], "review");
+        assert_eq!(json["data"]["items"][0]["scope"], "project");
+
+        let req = Request::builder()
+            .uri("/api/portable-library?project_id=../../tmp")
+            .body(Body::empty())
+            .unwrap();
+        let (_, json) = send(state, false, req).await;
+        assert_eq!(json["success"], false);
+        assert_eq!(json["error"], "project not found");
+        std::fs::remove_dir_all(root).ok();
+    }
 }

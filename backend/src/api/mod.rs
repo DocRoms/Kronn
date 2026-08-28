@@ -40,6 +40,7 @@ pub mod openapi;
 pub mod orchestration;
 pub mod planning;
 pub mod plugin_portability;
+pub mod portable_library;
 pub mod profiles;
 pub mod projects;
 pub mod quick_apis;

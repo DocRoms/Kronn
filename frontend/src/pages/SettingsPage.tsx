@@ -28,6 +28,7 @@ import { CapabilityOriginBadge, type CapabilityOrigin } from '../components/sett
 import { HostDiscoverySection } from '../components/settings/HostDiscoverySection';
 import { TourProgressCta } from '../components/tour/TourProgressCta';
 import { clearTourProgress } from '../components/tour/tourProgress';
+import { PortableLibrarySection } from '../components/settings/PortableLibrarySection';
 
 /** 0.7+ — Render a description paragraph and visually separate the optional
  *  attribution suffix ("Adapted from <url> (<license>).") so the user sees
@@ -104,6 +105,7 @@ const SETTINGS_SECTION_IDS = [
   'settings-sourcing',
   'settings-continual-learning',
   'settings-capabilities',
+  'settings-portable-library',
   'settings-appearance',
   'settings-voice',
   'settings-scan',
@@ -139,6 +141,7 @@ export function SettingsPage({
   agents,
   agentAccess,
   configLanguage,
+  projects = [],
   refetchAgents,
   refetchAgentAccess,
   refetchLanguage,
@@ -387,6 +390,7 @@ export function SettingsPage({
     { id: 'settings-sourcing', label: t('config.sourcing'), icon: <Shield size={15} /> },
     { id: 'settings-continual-learning', label: t('config.learning'), icon: <BookOpen size={15} /> },
     { id: 'settings-capabilities', label: t('config.capabilities'), icon: <Zap size={15} /> },
+    { id: 'settings-portable-library', label: t('config.portableLibrary.navLabel'), icon: <Layers size={15} /> },
     { id: 'settings-appearance', label: t('config.preferences'), icon: <Settings2 size={15} /> },
     { id: 'settings-voice', label: t('settings.voice'), icon: <Mic size={15} />, group: t('config.workspaceSettings') },
     { id: 'settings-scan', label: t('config.scan'), icon: <FolderSearch size={15} /> },
@@ -1216,6 +1220,8 @@ export function SettingsPage({
         </div>
 
       </div>{/* end capabilities card */}
+
+      <PortableLibrarySection projects={projects} toast={toast} />
 
       {/* Interface preferences: appearance + UI/output languages. */}
       <div id="settings-appearance" className="set-card set-preferences-card">

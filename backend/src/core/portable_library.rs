@@ -260,12 +260,167 @@ impl LibraryCatalog {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SyncReport {
     pub created: Vec<PathBuf>,
     pub modified: Vec<PathBuf>,
     pub deleted: Vec<PathBuf>,
     pub unchanged: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MigrationReport {
+    pub created: Vec<String>,
+    pub unchanged: Vec<String>,
+}
+
+impl MigrationReport {
+    pub fn changed(&self) -> bool {
+        !self.created.is_empty()
+    }
+}
+
+/// Copy legacy library records into a portable source tree. This is deliberately
+/// additive: the custom Markdown files and SQLite rows remain authoritative and
+/// untouched until an operator chooses to switch consumers to `.agents`.
+pub fn migrate_legacy(
+    root: &Path,
+    scope: LibraryScope,
+    skills: &[crate::models::Skill],
+    directives: &[crate::models::Directive],
+    quick_prompts: &[crate::models::QuickPrompt],
+    workflows: &[crate::models::Workflow],
+) -> Result<MigrationReport, String> {
+    let mut report = MigrationReport::default();
+    for skill in skills.iter().filter(|item| !item.is_builtin) {
+        let id = skill.id.clone();
+        validate_id(&id)?;
+        // Agent Skills spec requires `name` to be the slug (== directory name),
+        // not the human-readable display name; the display name is preserved
+        // verbatim in the sidecar's `data` field instead.
+        let description: String = skill.description.chars().take(1024).collect();
+        let yaml_description = serde_json::to_string(&description)
+            .map_err(|e| format!("cannot encode skill description: {e}"))?;
+        let content = format!(
+            "---\nname: {id}\ndescription: {yaml_description}\n---\n\n{}\n",
+            skill.content
+        );
+        let relative = PathBuf::from("skills").join(&id).join("SKILL.md");
+        write_migration_file(root, &relative, content.as_bytes(), &mut report)?;
+        let sidecar = sidecar_with_data(LibraryKind::Skill, &id, scope, &relative, skill)?;
+        write_migration_file(
+            root,
+            &relative.with_file_name("SKILL.kronn.json"),
+            &canonical_json(&sidecar)?,
+            &mut report,
+        )?;
+    }
+    for directive in directives.iter().filter(|item| !item.is_builtin) {
+        migrate_json_record(
+            root,
+            LibraryKind::Directive,
+            &directive.id,
+            scope,
+            directive,
+            &mut report,
+        )?;
+    }
+    for prompt in quick_prompts {
+        let item = quick_prompt_to_skill(prompt, scope)?;
+        let base = export_relative_path(&item);
+        write_migration_file(root, &base, &item.content, &mut report)?;
+        write_migration_file(
+            root,
+            &base.with_file_name("SKILL.kronn.json"),
+            &canonical_json(&item.sidecar)?,
+            &mut report,
+        )?;
+    }
+    for workflow in workflows {
+        migrate_json_record(
+            root,
+            LibraryKind::Workflow,
+            &workflow.id,
+            scope,
+            workflow,
+            &mut report,
+        )?;
+    }
+    report.created.sort();
+    report.unchanged.sort();
+    Ok(report)
+}
+
+fn migrate_json_record<T: Serialize>(
+    root: &Path,
+    kind: LibraryKind,
+    id: &str,
+    scope: LibraryScope,
+    value: &T,
+    report: &mut MigrationReport,
+) -> Result<(), String> {
+    validate_id(id)?;
+    let folder = match kind {
+        LibraryKind::Directive => "directives",
+        LibraryKind::Workflow => "workflows",
+        _ => return Err("unsupported JSON migration kind".into()),
+    };
+    let relative = PathBuf::from(folder).join(format!("{id}.kronn.json"));
+    let sidecar = sidecar_with_data(kind, id, scope, &relative, value)?;
+    write_migration_file(root, &relative, &canonical_json(&sidecar)?, report)
+}
+
+fn sidecar_with_data<T: Serialize>(
+    kind: LibraryKind,
+    id: &str,
+    scope: LibraryScope,
+    relative: &Path,
+    value: &T,
+) -> Result<KronnSidecar, String> {
+    let data =
+        serde_json::to_value(value).map_err(|e| format!("cannot serialize legacy record: {e}"))?;
+    let mut sidecar = KronnSidecar {
+        version: CONTRACT_VERSION,
+        kind,
+        id: id.to_string(),
+        provenance: Provenance {
+            scope,
+            source: portable_path(relative)?,
+            content_sha256: String::new(),
+        },
+        data: Some(data),
+    };
+    sidecar.provenance.content_sha256 = sidecar_payload_sha256(&sidecar)?;
+    Ok(sidecar)
+}
+
+fn write_migration_file(
+    root: &Path,
+    relative: &Path,
+    bytes: &[u8],
+    report: &mut MigrationReport,
+) -> Result<(), String> {
+    reject_secrets(bytes)?;
+    validate_relative(relative)?;
+    fs::create_dir_all(root).map_err(|e| format!("cannot create .agents: {e}"))?;
+    let path = root.join(relative);
+    ensure_inside(root, &path)?;
+    let label = portable_path(relative)?;
+    if fs::read(&path).ok().as_deref() == Some(bytes) {
+        report.unchanged.push(label);
+        return Ok(());
+    }
+    if path.exists() {
+        return Err(format!("migration refuses to overwrite '{label}'"));
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("cannot create migration directory: {e}"))?;
+    }
+    crate::core::mcp_scanner::atomic_write_bytes(&path, bytes)
+        .map_err(|e| format!("cannot migrate '{label}': {e}"))?;
+    report.created.push(label);
+    Ok(())
 }
 
 impl SyncReport {
@@ -773,6 +928,60 @@ pub fn approve_lock(project_root: &Path) -> Result<(), String> {
         .map_err(|e| format!("cannot determine Kronn config directory: {e}"))?
         .join("trust/portable-library");
     approve_lock_at(project_root, &trust_dir)
+}
+
+pub fn is_lock_approved(project_root: &Path) -> Result<bool, String> {
+    let trust_dir = crate::core::config::config_dir()
+        .map_err(|e| e.to_string())?
+        .join("trust/portable-library");
+    match require_lock_approval_at(project_root, &trust_dir) {
+        Ok(()) => Ok(true),
+        Err(e)
+            if e.starts_with("TOFU approval required")
+                || e.starts_with("TOFU approval is stale") =>
+        {
+            Ok(false)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+pub fn import_item(
+    root: &Path,
+    kind: LibraryKind,
+    id: &str,
+    content: &str,
+    data: Option<Value>,
+    scope: LibraryScope,
+) -> Result<(), String> {
+    validate_id(id)?;
+    match kind {
+        LibraryKind::Skill | LibraryKind::QuickPrompt => {
+            let relative = PathBuf::from("skills").join(id).join("SKILL.md");
+            let sidecar =
+                sidecar_with_data(kind, id, scope, &relative, &data.unwrap_or(Value::Null))?;
+            let mut report = MigrationReport::default();
+            write_migration_file(root, &relative, content.as_bytes(), &mut report)?;
+            write_migration_file(
+                root,
+                &relative.with_file_name("SKILL.kronn.json"),
+                &canonical_json(&sidecar)?,
+                &mut report,
+            )
+        }
+        LibraryKind::Directive | LibraryKind::Workflow => {
+            let folder = if kind == LibraryKind::Directive {
+                "directives"
+            } else {
+                "workflows"
+            };
+            let relative = PathBuf::from(folder).join(format!("{id}.kronn.json"));
+            let sidecar =
+                sidecar_with_data(kind, id, scope, &relative, &data.unwrap_or(Value::Null))?;
+            let mut report = MigrationReport::default();
+            write_migration_file(root, &relative, &canonical_json(&sidecar)?, &mut report)
+        }
+    }
 }
 
 fn canonical_project_identity(project_root: &Path) -> Result<String, String> {
@@ -2846,5 +3055,154 @@ mod tests {
         assert!(discover(Some(&root), None)
             .unwrap_err()
             .contains("duplicate"));
+    }
+
+    #[test]
+    fn legacy_migration_is_idempotent_and_round_trips_quick_prompt_bindings() {
+        let root = temp("legacy-migration");
+        let mut qp = prompt("bound-prompt", "Review {{ticket}}", vec![]);
+        qp.project_id = Some("project-1".into());
+        qp.skill_ids = vec!["rust-dev".into()];
+        qp.profile_ids = vec!["reviewer".into()];
+        qp.directive_ids = vec!["terse".into()];
+        let first =
+            migrate_legacy(&root, LibraryScope::Project, &[], &[], &[qp.clone()], &[]).unwrap();
+        assert!(first.changed());
+        let second =
+            migrate_legacy(&root, LibraryScope::Project, &[], &[], &[qp.clone()], &[]).unwrap();
+        assert!(!second.changed());
+        let catalog = discover(None, Some(&root)).unwrap();
+        let restored = quick_prompt_from_skill(
+            catalog
+                .get(LibraryKind::QuickPrompt, "bound-prompt")
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(restored.project_id, qp.project_id);
+        assert_eq!(restored.skill_ids, qp.skill_ids);
+        assert_eq!(restored.profile_ids, qp.profile_ids);
+        assert_eq!(restored.directive_ids, qp.directive_ids);
+        assert_eq!(restored.prompt_template, qp.prompt_template);
+    }
+
+    #[test]
+    fn legacy_migration_bootstraps_missing_agents_root() {
+        let parent = temp("migration-bootstrap");
+        let root = parent.join(".agents");
+        assert!(!root.exists());
+        let qp = prompt("fresh-prompt", "Summarize {{ticket}}", vec![]);
+        let report = migrate_legacy(&root, LibraryScope::Project, &[], &[], &[qp], &[]).unwrap();
+        assert!(report.changed());
+        assert!(root.is_dir());
+        let catalog = discover(None, Some(&root)).unwrap();
+        assert!(catalog
+            .get(LibraryKind::QuickPrompt, "fresh-prompt")
+            .is_some());
+    }
+
+    #[test]
+    fn import_item_bootstraps_missing_agents_root() {
+        let parent = temp("import-bootstrap");
+        let root = parent.join(".agents");
+        assert!(!root.exists());
+        import_item(
+            &root,
+            LibraryKind::Skill,
+            "fresh-skill",
+            "---\nname: fresh-skill\ndescription: test\n---\n\nBody.\n",
+            None,
+            LibraryScope::Project,
+        )
+        .unwrap();
+        assert!(root.is_dir());
+        let catalog = discover(None, Some(&root)).unwrap();
+        assert!(catalog.get(LibraryKind::Skill, "fresh-skill").is_some());
+    }
+
+    #[test]
+    fn legacy_migration_is_idempotent_and_preserves_every_skill_and_directive_field() {
+        let root = temp("legacy-migration-skill-directive");
+        let skill = crate::models::Skill {
+            id: "custom-skill".into(),
+            name: "Custom skill".into(),
+            description: "A custom skill with every field set".into(),
+            icon: "🧪".into(),
+            category: crate::models::SkillCategory::Domain,
+            content: "Body with **markdown**.".into(),
+            is_builtin: false,
+            token_estimate: 42,
+            license: Some("MIT".into()),
+            allowed_tools: Some("Bash Read".into()),
+            auto_triggers: Some(crate::models::AutoTriggers {
+                common: vec!["\\bcustom\\b".into()],
+                locales: std::collections::HashMap::from([(
+                    "en".into(),
+                    vec!["custom skill".into()],
+                )]),
+            }),
+            external: true,
+            source_url: Some("https://example.com/custom-skill".into()),
+        };
+        let directive = crate::models::Directive {
+            id: "custom-directive".into(),
+            name: "Custom directive".into(),
+            description: "A custom directive with every field set".into(),
+            icon: "📎".into(),
+            category: crate::models::DirectiveCategory::Output,
+            content: "Directive body.".into(),
+            is_builtin: false,
+            conflicts: vec!["other-directive".into()],
+            token_estimate: 7,
+            source_url: Some("https://example.com/custom-directive".into()),
+        };
+
+        let first = migrate_legacy(
+            &root,
+            LibraryScope::Global,
+            std::slice::from_ref(&skill),
+            std::slice::from_ref(&directive),
+            &[],
+            &[],
+        )
+        .unwrap();
+        assert!(first.changed());
+        let second = migrate_legacy(
+            &root,
+            LibraryScope::Global,
+            std::slice::from_ref(&skill),
+            std::slice::from_ref(&directive),
+            &[],
+            &[],
+        )
+        .unwrap();
+        assert!(!second.changed(), "repeated migration must be a no-op");
+
+        let catalog = discover(Some(&root), None).unwrap();
+        let skill_item = catalog.get(LibraryKind::Skill, "custom-skill").unwrap();
+        let restored_skill: crate::models::Skill =
+            serde_json::from_value(skill_item.sidecar.data.clone().unwrap()).unwrap();
+        assert_eq!(restored_skill.name, skill.name);
+        assert_eq!(restored_skill.icon, skill.icon);
+        assert_eq!(restored_skill.category, skill.category);
+        assert_eq!(restored_skill.token_estimate, skill.token_estimate);
+        assert_eq!(restored_skill.license, skill.license);
+        assert_eq!(restored_skill.allowed_tools, skill.allowed_tools);
+        assert_eq!(
+            restored_skill.auto_triggers.unwrap().common,
+            skill.auto_triggers.unwrap().common
+        );
+        assert_eq!(restored_skill.external, skill.external);
+        assert_eq!(restored_skill.source_url, skill.source_url);
+
+        let directive_item = catalog
+            .get(LibraryKind::Directive, "custom-directive")
+            .unwrap();
+        let restored_directive: crate::models::Directive =
+            serde_json::from_value(directive_item.sidecar.data.clone().unwrap()).unwrap();
+        assert_eq!(restored_directive.name, directive.name);
+        assert_eq!(restored_directive.category, directive.category);
+        assert_eq!(restored_directive.conflicts, directive.conflicts);
+        assert_eq!(restored_directive.token_estimate, directive.token_estimate);
+        assert_eq!(restored_directive.source_url, directive.source_url);
     }
 }

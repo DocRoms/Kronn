@@ -131,6 +131,15 @@ vi.mock('../../lib/api', () => ({
     update: vi.fn(),
     delete: vi.fn(),
   },
+  portableLibrary: {
+    state: vi.fn().mockResolvedValue({ scope: 'global', items: [], drift: 'not_applicable', approved: false }),
+    sync: vi.fn().mockResolvedValue({}),
+    check: vi.fn().mockResolvedValue({}),
+    approve: vi.fn().mockResolvedValue(true),
+    migrate: vi.fn().mockResolvedValue({ created: [], unchanged: [] }),
+    export: vi.fn().mockResolvedValue([]),
+    import: vi.fn().mockResolvedValue({}),
+  },
   autoTriggersApi: {
     listDisabled: vi.fn().mockResolvedValue([]),
     toggle: vi.fn().mockResolvedValue(false),
