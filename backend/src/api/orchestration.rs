@@ -7777,24 +7777,18 @@ pub(crate) async fn task_worker_catalogue_for_discussion(
     parent_discussion_id: &str,
 ) -> Result<crate::models::TaskWorkerCatalogue> {
     let parent = parent_discussion_id.to_string();
-    let (joined, project) = state
+    let joined = state
         .db
         .with_read_conn(move |conn| {
-            let project = crate::db::discussions::get_discussion(conn, &parent)?
-                .and_then(|discussion| discussion.project_id)
-                .map(|project_id| crate::db::projects::get_project(conn, &project_id))
-                .transpose()?
-                .flatten();
             let sessions = crate::db::discussion_sessions::list_sessions(conn, &parent, false)?;
-            let joined = sessions
+            sessions
                 .into_iter()
                 .map(|session| {
                     let (_, alias) =
                         crate::db::discussion_sessions::cli_session_identity(conn, session.id)?;
                     Ok((session, alias))
                 })
-                .collect::<Result<Vec<_>>>()?;
-            Ok((joined, project))
+                .collect::<Result<Vec<_>>>()
         })
         .await?;
     let mut detections = crate::agents::detect_all_cached(false).await;
@@ -7802,8 +7796,31 @@ pub(crate) async fn task_worker_catalogue_for_discussion(
     crate::agents::apply_configured_status(&mut detections, &config);
     let reachability = bounded_http_worker_reachability(state).await;
     let cli_preflight = bounded_cli_worker_preflight(&detections).await;
-    let mut catalogue =
-        build_task_worker_catalogue(&config, &detections, &joined, &reachability, &cli_preflight);
+    Ok(build_task_worker_catalogue(
+        &config,
+        &detections,
+        &joined,
+        &reachability,
+        &cli_preflight,
+    ))
+}
+
+pub(crate) async fn target_aware_task_worker_catalogue_for_discussion(
+    state: &AppState,
+    parent_discussion_id: &str,
+) -> Result<crate::models::TaskWorkerCatalogue> {
+    let mut catalogue = task_worker_catalogue_for_discussion(state, parent_discussion_id).await?;
+    let parent = parent_discussion_id.to_string();
+    let project = state
+        .db
+        .with_read_conn(move |conn| {
+            crate::db::discussions::get_discussion(conn, &parent)?
+                .and_then(|discussion| discussion.project_id)
+                .map(|project_id| crate::db::projects::get_project(conn, &project_id))
+                .transpose()
+                .map(Option::flatten)
+        })
+        .await?;
     if let Some(project) = project.as_ref() {
         apply_project_worker_refusals(&mut catalogue, project);
     }
@@ -7841,7 +7858,7 @@ pub async fn task_worker_catalogue(
             "principal discussion not found or caller is not an active member",
         ));
     }
-    match task_worker_catalogue_for_discussion(&state, &parent).await {
+    match target_aware_task_worker_catalogue_for_discussion(&state, &parent).await {
         Ok(catalogue) => Json(ApiResponse::ok(catalogue)),
         Err(error) => Json(ApiResponse::err(error.to_string())),
     }

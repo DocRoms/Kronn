@@ -1217,7 +1217,7 @@ impl KronnToolExecutor {
 
         match call.name.as_str() {
             "agent_list" => {
-                match crate::api::orchestration::task_worker_catalogue_for_discussion(
+                match crate::api::orchestration::target_aware_task_worker_catalogue_for_discussion(
                     &self.state,
                     &discussion_id,
                 )
