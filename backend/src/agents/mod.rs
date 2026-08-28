@@ -1144,7 +1144,7 @@ mod tests {
         ];
         let temp = tempfile::tempdir().unwrap();
         let original_home = std::env::var_os("KRONN_HOST_HOME");
-        let original_auth = AUTH_ENV.map(|name| std::env::var_os(name));
+        let original_auth = AUTH_ENV.map(std::env::var_os);
         std::env::set_var("KRONN_HOST_HOME", temp.path());
         for name in AUTH_ENV {
             std::env::remove_var(name);
