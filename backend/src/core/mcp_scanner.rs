@@ -722,6 +722,10 @@ pub(crate) struct HostSyncPlan {
     /// Mtime captured BEFORE the impl read the existing file. Used by
     /// the driver's `atomic_write_checked` to abort on concurrent edits.
     pub pre_mtime: Option<std::time::SystemTime>,
+    /// Optional state file committed after the host config. Gemini uses it
+    /// to keep Kronn ownership outside Gemini's closed settings schema. The
+    /// previous state remains a safe recovery point if this write fails.
+    pub followup_write: Option<(PathBuf, String, Option<std::time::SystemTime>)>,
 }
 
 /// A Kronn-managed outbound sync to a host CLI's global MCP config file.
@@ -782,14 +786,29 @@ pub(crate) fn run_host_sync(t: &dyn HostMcpSync, conn: &rusqlite::Connection, se
             return;
         }
     }
-    if write_host_config_checked(
+    if !write_host_config_checked(
         &plan.path,
         &plan.content,
         plan.pre_mtime,
         label,
         &plan.summary,
     ) {
-        t.post_write(&plan.path);
+        return;
+    }
+    t.post_write(&plan.path);
+    if let Some((path, content, pre_mtime)) = &plan.followup_write {
+        if let Some(parent) = path.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                tracing::error!(
+                    "{} sync: cannot create state dir {}: {}",
+                    label,
+                    parent.display(),
+                    e
+                );
+                return;
+            }
+        }
+        write_host_config_checked(path, content, *pre_mtime, label, "Synced ownership state");
     }
 }
 
@@ -2007,6 +2026,7 @@ impl HostMcpSync for CodexSync {
             content,
             summary,
             pre_mtime,
+            followup_write: None,
         })
     }
 }
@@ -2148,6 +2168,7 @@ impl HostMcpSync for CopilotSync {
             content,
             summary,
             pre_mtime,
+            followup_write: None,
         })
     }
 }
@@ -2312,6 +2333,7 @@ fn build_kronn_managed_json_entry(
     server: &crate::models::McpServer,
     secret: &str,
     use_http_url_for_streamable: bool,
+    include_ownership_marker: bool,
 ) -> Result<Option<serde_json::Value>, String> {
     use crate::models::McpTransport;
     // Err = decrypt failure with expected keys → the caller must abort its
@@ -2357,13 +2379,15 @@ fn build_kronn_managed_json_entry(
         McpTransport::ApiOnly => return Ok(None),
     }
 
-    let mut marker = serde_json::Map::new();
-    marker.insert("managed".into(), serde_json::Value::Bool(true));
-    marker.insert(
-        "config_id".into(),
-        serde_json::Value::String(config.id.clone()),
-    );
-    obj.insert("_kronn".into(), serde_json::Value::Object(marker));
+    if include_ownership_marker {
+        let mut marker = serde_json::Map::new();
+        marker.insert("managed".into(), serde_json::Value::Bool(true));
+        marker.insert(
+            "config_id".into(),
+            serde_json::Value::String(config.id.clone()),
+        );
+        obj.insert("_kronn".into(), serde_json::Value::Object(marker));
+    }
 
     Ok(Some(serde_json::Value::Object(obj)))
 }
@@ -2478,6 +2502,7 @@ pub(crate) fn rotate_backup(path: &Path, max_n: usize) -> Option<PathBuf> {
 ///     (orphan cleanup — config was deleted from Kronn)
 ///   - entries WITHOUT `_kronn` marker → PRESERVED as-is (user-managed)
 ///   - new Kronn configs → ADDED
+#[cfg(test)]
 fn merge_kronn_entries(
     existing: &mut serde_json::Value,
     kronn_entries: HashMap<String, serde_json::Value>,
@@ -2588,7 +2613,7 @@ impl HostMcpSync for ClaudeSync {
                 Some(s) => s,
                 None => continue,
             };
-            let entry = match build_kronn_managed_json_entry(config, server, secret, false) {
+            let entry = match build_kronn_managed_json_entry(config, server, secret, false, true) {
                 Ok(Some(e)) => e,
                 Ok(None) => continue, // ApiOnly skipped
                 // Decrypt failure: abort the whole Claude host sync so the
@@ -2681,6 +2706,7 @@ impl HostMcpSync for ClaudeSync {
             content,
             summary,
             pre_mtime,
+            followup_write: None,
         })
     }
 
@@ -2899,6 +2925,46 @@ fn count_project_scopes(existing: &serde_json::Value) -> usize {
 /// (Gemini convention — Claude calls the same field `url`).
 pub(crate) struct GeminiSync;
 
+const GEMINI_KRONN_STATE: &str = ".gemini/kronn-mcp-state.json";
+
+fn load_gemini_ownership(path: &Path) -> HashMap<String, String> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|value| value.get("entries").and_then(|v| v.as_object()).cloned())
+        .map(|entries| {
+            entries
+                .into_iter()
+                .filter_map(|(id, label)| label.as_str().map(|label| (id, label.to_string())))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn merge_gemini_entries(
+    existing: &mut serde_json::Value,
+    previous_ownership: &HashMap<String, String>,
+    kronn_entries: HashMap<String, serde_json::Value>,
+) {
+    let Some(root) = existing.as_object_mut() else {
+        return;
+    };
+    let servers = root
+        .entry("mcpServers")
+        .or_insert_with(|| serde_json::json!({}));
+    if !servers.is_object() {
+        *servers = serde_json::json!({});
+    }
+    let servers = servers.as_object_mut().expect("object assigned above");
+    for label in previous_ownership.values() {
+        servers.remove(label);
+    }
+    // Migrate entries written by older Kronn versions that used an invalid
+    // in-schema marker. Ownership is persisted in the sidecar from now on.
+    servers.retain(|_, entry| !is_kronn_managed(entry));
+    servers.extend(kronn_entries);
+}
+
 impl HostMcpSync for GeminiSync {
     fn label(&self) -> &'static str {
         "Gemini"
@@ -2926,8 +2992,7 @@ impl HostMcpSync for GeminiSync {
 
         // Build Kronn-managed entries (filtered by host_sync ≠ None, ApiOnly skipped)
         let mut kronn_entries: HashMap<String, serde_json::Value> = HashMap::new();
-        let mut kronn_config_ids: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
+        let mut ownership = serde_json::Map::new();
         for config in &all_configs {
             if !should_host_sync(config) {
                 continue;
@@ -2937,10 +3002,13 @@ impl HostMcpSync for GeminiSync {
                 None => continue,
             };
             // Gemini: use `httpUrl` for Streamable HTTP.
-            match build_kronn_managed_json_entry(config, server, secret, true) {
+            match build_kronn_managed_json_entry(config, server, secret, true, false) {
                 Ok(Some(entry)) => {
                     kronn_entries.insert(config.label.clone(), entry);
-                    kronn_config_ids.insert(config.id.clone());
+                    ownership.insert(
+                        config.id.clone(),
+                        serde_json::Value::String(config.label.clone()),
+                    );
                 }
                 Ok(None) => {} // ApiOnly skipped
                 // Decrypt failure: abort the whole Gemini host sync (logged).
@@ -2949,10 +3017,11 @@ impl HostMcpSync for GeminiSync {
         }
 
         let path = resolve_home_subpath(".gemini/settings.json");
+        let state_path = resolve_home_subpath(GEMINI_KRONN_STATE);
 
         // Empty case: if Kronn has nothing to sync AND the file doesn't exist, skip.
         // If the file exists, we still want to walk it to remove orphan Kronn entries.
-        if kronn_entries.is_empty() && !path.exists() {
+        if kronn_entries.is_empty() && !path.exists() && !state_path.exists() {
             return None;
         }
 
@@ -2974,9 +3043,10 @@ impl HostMcpSync for GeminiSync {
             return None;
         }
 
-        let prev_kronn_count = count_kronn_entries(&existing);
-        merge_kronn_entries(&mut existing, kronn_entries, &kronn_config_ids);
-        let new_kronn_count = count_kronn_entries(&existing);
+        let previous_ownership = load_gemini_ownership(&state_path);
+        let prev_kronn_count = previous_ownership.len();
+        merge_gemini_entries(&mut existing, &previous_ownership, kronn_entries);
+        let new_kronn_count = ownership.len();
 
         let summary = format!(
             "Synced Gemini global config: {} Kronn entries (was {})",
@@ -2994,6 +3064,15 @@ impl HostMcpSync for GeminiSync {
             content,
             summary,
             pre_mtime,
+            followup_write: Some((
+                state_path.clone(),
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "version": 1,
+                    "entries": ownership,
+                }))
+                .ok()?,
+                read_target_mtime(&state_path),
+            )),
         })
     }
 
@@ -3002,21 +3081,15 @@ impl HostMcpSync for GeminiSync {
     }
 }
 
-/// Count entries that carry a `_kronn.managed = true` marker.
+#[cfg(test)]
 fn count_kronn_entries(value: &serde_json::Value) -> usize {
     value
         .get("mcpServers")
         .and_then(|v| v.as_object())
-        .map(|o| {
-            o.values()
-                .filter(|v| {
-                    v.as_object()
-                        .and_then(|e| e.get("_kronn"))
-                        .and_then(|m| m.as_object())
-                        .and_then(|m| m.get("managed"))
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false)
-                })
+        .map(|servers| {
+            servers
+                .values()
+                .filter(|entry| is_kronn_managed(entry))
                 .count()
         })
         .unwrap_or(0)
@@ -4152,7 +4225,7 @@ mod host_sync_tests {
             api_spec: None,
         };
         assert!(
-            build_kronn_managed_json_entry(&config, &server, "secret-not-used", false)
+            build_kronn_managed_json_entry(&config, &server, "secret-not-used", false, true)
                 .unwrap()
                 .is_none()
         );
@@ -4201,7 +4274,8 @@ mod host_sync_tests {
             &config,
             &server,
             "0123456789abcdef0123456789abcdef",
-            false
+            false,
+            true
         )
         .is_err());
     }
@@ -4233,7 +4307,7 @@ mod host_sync_tests {
             source: McpSource::Registry,
             api_spec: None,
         };
-        let entry = build_kronn_managed_json_entry(&config, &server, "secret", false)
+        let entry = build_kronn_managed_json_entry(&config, &server, "secret", false, true)
             .unwrap()
             .unwrap();
         let marker = entry.get("_kronn").unwrap();
@@ -4635,7 +4709,7 @@ mod host_sync_tests {
             api_spec: None,
         };
         // Gemini convention
-        let gemini_entry = build_kronn_managed_json_entry(&config, &server, "s", true)
+        let gemini_entry = build_kronn_managed_json_entry(&config, &server, "s", true, false)
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -4643,9 +4717,13 @@ mod host_sync_tests {
             Some("https://example.com/mcp")
         );
         assert!(gemini_entry.get("type").is_none());
+        assert!(
+            gemini_entry.get("_kronn").is_none(),
+            "Gemini's schema rejects unknown per-server keys"
+        );
 
         // Claude convention (type:"http" + url)
-        let claude_entry = build_kronn_managed_json_entry(&config, &server, "s", false)
+        let claude_entry = build_kronn_managed_json_entry(&config, &server, "s", false, true)
             .unwrap()
             .unwrap();
         assert_eq!(claude_entry.get("type").unwrap().as_str(), Some("http"));
@@ -4653,6 +4731,145 @@ mod host_sync_tests {
             claude_entry.get("url").unwrap().as_str(),
             Some("https://example.com/mcp")
         );
+        assert!(claude_entry.get("_kronn").is_some());
+    }
+
+    #[test]
+    fn gemini_sync_entries_are_schema_clean_for_eleven_servers() {
+        use crate::models::{HostSyncMode, McpConfig, McpServer, McpSource, McpTransport};
+        let server = McpServer {
+            id: "server".into(),
+            name: "Server".into(),
+            description: String::new(),
+            transport: McpTransport::Stdio {
+                command: "npx".into(),
+                args: vec!["server".into()],
+            },
+            source: McpSource::Registry,
+            api_spec: None,
+        };
+        let entries = (0..11)
+            .map(|index| {
+                let config = McpConfig {
+                    id: format!("config-{index}"),
+                    server_id: "server".into(),
+                    label: format!("server-{index}"),
+                    env_keys: vec![],
+                    env_encrypted: String::new(),
+                    args_override: None,
+                    is_global: true,
+                    include_general: true,
+                    config_hash: String::new(),
+                    project_ids: vec![],
+                    host_sync: HostSyncMode::GlobalOnly,
+                };
+                let entry = build_kronn_managed_json_entry(&config, &server, "unused", true, false)
+                    .unwrap()
+                    .unwrap();
+                (config.label, entry)
+            })
+            .collect::<HashMap<_, _>>();
+
+        assert_eq!(entries.len(), 11);
+        assert!(entries.values().all(|entry| entry.get("_kronn").is_none()));
+    }
+
+    #[test]
+    fn gemini_marker_free_ownership_survives_rename_delete_and_second_sync() {
+        let mut settings = serde_json::json!({
+            "mcpServers": { "user-owned": { "command": "user-command" } }
+        });
+        let first_entries = (0..11)
+            .map(|index| {
+                (
+                    format!("server-{index}"),
+                    serde_json::json!({"command": "npx", "args": [index.to_string()]}),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        merge_gemini_entries(&mut settings, &HashMap::new(), first_entries);
+
+        let first_ownership = (0..11)
+            .map(|index| (format!("config-{index}"), format!("server-{index}")))
+            .collect::<HashMap<_, _>>();
+        let mut second_entries = (0..10)
+            .map(|index| {
+                let label = if index == 0 {
+                    "renamed-server".to_string()
+                } else {
+                    format!("server-{index}")
+                };
+                (label, serde_json::json!({"command": "npx"}))
+            })
+            .collect::<HashMap<_, _>>();
+        // Config 10 was deleted; config 0 was renamed.
+        merge_gemini_entries(
+            &mut settings,
+            &first_ownership,
+            std::mem::take(&mut second_entries),
+        );
+
+        let servers = settings["mcpServers"].as_object().unwrap();
+        assert_eq!(servers.len(), 11, "10 Kronn entries plus one user entry");
+        assert!(servers.contains_key("renamed-server"));
+        assert!(!servers.contains_key("server-0"));
+        assert!(!servers.contains_key("server-10"));
+        assert_eq!(servers["user-owned"]["command"], "user-command");
+        assert!(servers.values().all(|entry| entry.get("_kronn").is_none()));
+    }
+
+    #[test]
+    fn gemini_sync_recovers_when_ownership_write_fails_after_settings() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings_path = temp.path().join("settings.json");
+        let state_path = temp.path().join("state.json");
+        let old_ownership = HashMap::from([("config-a".to_string(), "server-a".to_string())]);
+        let mut settings = serde_json::json!({
+            "mcpServers": {
+                "server-a": {"command": "old"},
+                "user-owned": {"command": "user-command"}
+            }
+        });
+        merge_gemini_entries(
+            &mut settings,
+            &old_ownership,
+            HashMap::from([(
+                "server-b".to_string(),
+                serde_json::json!({"command": "new"}),
+            )]),
+        );
+
+        atomic_write_checked(&settings_path, &settings.to_string(), None).unwrap();
+        std::fs::write(&state_path, r#"{"entries":{"config-a":"server-a"}}"#).unwrap();
+        assert!(matches!(
+            atomic_write_checked(
+                &state_path,
+                r#"{"entries":{"config-b":"server-b"}}"#,
+                Some(std::time::SystemTime::UNIX_EPOCH)
+            ),
+            Err(AtomicWriteCheckedError::ConcurrentWrite)
+        ));
+        assert_eq!(
+            std::fs::read_to_string(&state_path).unwrap(),
+            r#"{"entries":{"config-a":"server-a"}}"#
+        );
+
+        let mut recovered: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
+        merge_gemini_entries(
+            &mut recovered,
+            &old_ownership,
+            HashMap::from([(
+                "server-b".to_string(),
+                serde_json::json!({"command": "new"}),
+            )]),
+        );
+
+        let servers = recovered["mcpServers"].as_object().unwrap();
+        assert_eq!(servers.len(), 2);
+        assert_eq!(servers["server-b"]["command"], "new");
+        assert_eq!(servers["user-owned"]["command"], "user-command");
+        assert!(!servers.contains_key("server-a"));
     }
 
     #[test]
