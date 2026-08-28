@@ -161,7 +161,11 @@ describe('OllamaCard — per-model context policy', () => {
     expect(screen.getByText('ollama.contextCeiling')).toBeTruthy();
     expect(screen.getByText('ollama.contextOrigin.portable_fallback')).toBeTruthy();
     expect(screen.getByText('ollama.contextFallbackWarning')).toBeTruthy();
-    expect(document.body.textContent).toContain('8,192');
+    // `toLocaleString()` deliberately follows the runtime locale: Quick Exec
+    // may render 8 192 while an English workstation renders 8,192. Assert the
+    // numeric value without coupling this regression test to one separator.
+    const ceilingMetric = screen.getByText('ollama.contextCeiling').closest('span');
+    expect(ceilingMetric?.textContent?.replace(/\D/g, '')).toBe('8192');
   });
 
   it('persists a bounded override and refreshes the effective projection', async () => {
