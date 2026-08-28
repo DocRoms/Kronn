@@ -39,4 +39,24 @@ describe('PortableLibrarySection', () => {
     fireEvent.click(syncButton);
     await waitFor(() => expect(portableLibrary.sync).toHaveBeenCalledTimes(1));
   });
+
+  it('imports in global scope without a carrier project (no project_id sent)', async () => {
+    render(<PortableLibrarySection projects={[{ id: 'p1', name: 'Project One' } as never]} toast={vi.fn()} />);
+    await screen.findByText('review');
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+    expect(input).not.toBeDisabled();
+    const file = new File([JSON.stringify({ items: [{ kind: 'skill', id: 'x', scope: 'global', content: 'body' }] })], 'lib.json', { type: 'application/json' });
+    fireEvent.change(input, { target: { files: [file] } });
+    await waitFor(() => expect(portableLibrary.import).toHaveBeenCalledWith(undefined, [{ kind: 'skill', id: 'x', scope: 'global', content: 'body' }]));
+  });
+
+  it('imports in project scope with the selected project_id', async () => {
+    render(<PortableLibrarySection projects={[{ id: 'p1', name: 'Project One' } as never]} toast={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText('config.portableLibrary.scopeAria'), { target: { value: 'p1' } });
+    await screen.findByText('review');
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+    const file = new File([JSON.stringify({ items: [{ kind: 'skill', id: 'y', scope: 'project', content: 'body' }] })], 'lib.json', { type: 'application/json' });
+    fireEvent.change(input, { target: { files: [file] } });
+    await waitFor(() => expect(portableLibrary.import).toHaveBeenCalledWith('p1', [{ kind: 'skill', id: 'y', scope: 'project', content: 'body' }]));
+  });
 });

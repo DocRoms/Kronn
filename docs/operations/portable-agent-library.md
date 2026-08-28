@@ -20,6 +20,20 @@ path): `GET/POST /api/portable-library*` look up the project's row and its
 path-less project. `project_id` is optional — omitting it targets the global
 library. [src: file: backend/src/api/portable_library.rs:43-64]
 
+`POST /api/portable-library/import` routes each item independently by its own
+declared `scope`, not by the request's `project_id`: a `global`-scope item
+always lands in the global root and never needs a carrier project, while a
+`project`-scope item requires a resolvable `project_id` and is refused
+otherwise. A mixed-scope batch with no `project_id` therefore still succeeds
+for its global items and fails only the project ones.
+[src: file: backend/src/api/portable_library.rs:255-289]
+
+The Settings UI contract (scope select, drift/trust chips, sync/check/approve
+gating, migrate, and both import scopes) is locked by an end-to-end Playwright
+spec that stubs `/api/projects` and `/api/portable-library*` so it stays
+hermetic — no real disk writes, no pre-existing project required.
+[src: file: frontend/e2e/specs/settings-portable-library.spec.ts]
+
 ## Bootstrap and sync
 
 Run commands from the project root:
@@ -180,4 +194,3 @@ copy approval state between projects.
   it in a shell command.
 - **Interrupted sync:** run sync again. Managed output and lock generation are
   deterministic, so an unchanged catalog converges to the same tree.
-

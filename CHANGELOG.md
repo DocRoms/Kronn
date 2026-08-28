@@ -21,6 +21,14 @@ Release notes for 0.9.3 and earlier are available in the
   `project_id`. See
   [portable agent library operations](docs/operations/portable-agent-library.md).
 
+### Fixed
+
+- `POST /api/portable-library/import` no longer requires a carrier project to
+  import global-scope items: each item is routed to the global or project root
+  matching its own declared `scope`, and only project-scope items require a
+  resolvable `project_id`. The Settings import control is no longer disabled
+  while the Global scope is selected.
+
 ### Documentation
 
 - Added the portable `.agents` operator guide covering global/project

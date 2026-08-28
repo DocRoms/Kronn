@@ -2422,7 +2422,7 @@ export const portableLibrary = {
   approve: (projectId: string) => api<boolean>('POST', `/portable-library/approve${portableQuery(projectId)}`),
   migrate: (projectId?: string) => api<{ created: string[]; unchanged: string[] }>('POST', `/portable-library/migrate${portableQuery(projectId)}`),
   export: (projectId?: string) => api<PortableLibraryItem[]>('GET', `/portable-library/export${portableQuery(projectId)}`),
-  import: (projectId: string, items: PortableLibraryItem[]) => api<unknown>('POST', '/portable-library/import', { project_id: projectId, items }),
+  import: (projectId: string | undefined, items: PortableLibraryItem[]) => api<unknown>('POST', '/portable-library/import', { project_id: projectId || undefined, items }),
 };
 
 // ─── Stats ──────────────────────────────────────────────────────────────────

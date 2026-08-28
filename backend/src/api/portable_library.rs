@@ -36,7 +36,7 @@ pub struct LibraryItemView {
 
 #[derive(Debug, Deserialize)]
 pub struct ImportRequest {
-    pub project_id: String,
+    pub project_id: Option<String>,
     pub items: Vec<LibraryItemView>,
 }
 
@@ -256,23 +256,34 @@ async fn import_inner(
     state: &AppState,
     req: ImportRequest,
 ) -> Result<portable::SyncReport, String> {
-    let (global, project) = roots(state, Some(&req.project_id)).await?;
-    let project = project.ok_or_else(|| "project not found".to_string())?;
-    let staging = project.join(".agents");
-    for item in req.items {
+    let (global, project) = roots(state, req.project_id.as_deref()).await?;
+    let has_project_item = req
+        .items
+        .iter()
+        .any(|item| item.scope == portable::LibraryScope::Project);
+    if has_project_item && project.is_none() {
+        return Err("project_id is required to import project-scope items".to_string());
+    }
+    let staging = project.as_ref().map(|p| p.join(".agents"));
+    for item in &req.items {
         let root = match item.scope {
             portable::LibraryScope::Global => &global,
-            portable::LibraryScope::Project => &staging,
+            portable::LibraryScope::Project => staging.as_ref().expect("checked above"),
         };
         portable::import_item(
             root,
             item.kind,
             &item.id,
             &item.content,
-            item.data,
+            item.data.clone(),
             item.scope,
         )?;
     }
-    let catalog = portable::discover(Some(&global), Some(&staging))?;
-    portable::sync(&catalog, &project)
+    match project {
+        Some(project) => {
+            let catalog = portable::discover(Some(&global), staging.as_deref())?;
+            portable::sync(&catalog, &project)
+        }
+        None => Ok(portable::SyncReport::default()),
+    }
 }

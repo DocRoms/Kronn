@@ -38,11 +38,11 @@ export function PortableLibrarySection({ projects, toast }: { projects: Project[
     } catch (e) { setError(userError(e)); }
   };
   const importFile = async (file?: File) => {
-    if (!file || !projectId) return;
+    if (!file) return;
     try {
       const parsed = JSON.parse(await file.text()) as { items?: PortableLibraryItem[] };
       if (!Array.isArray(parsed.items)) throw new Error(t('config.portableLibrary.importInvalid'));
-      await portableLibrary.import(projectId, parsed.items); await load();
+      await portableLibrary.import(projectId || undefined, parsed.items); await load();
     } catch (e) { setError(userError(e)); }
   };
   return <div id="settings-portable-library" className="set-card">
@@ -61,7 +61,7 @@ export function PortableLibrarySection({ projects, toast }: { projects: Project[
         <button disabled={busy || !projectId} className="btn btn-secondary" onClick={() => act(t('config.portableLibrary.actionApprove'), () => portableLibrary.approve(projectId))}><ShieldCheck size={12}/> {t('config.portableLibrary.actionApprove')}</button>
         <button disabled={busy} className="btn btn-secondary" onClick={() => act(t('config.portableLibrary.actionMigrate'), () => portableLibrary.migrate(projectId || undefined))}>{t('config.portableLibrary.actionMigrate')}</button>
         <button className="btn btn-secondary" onClick={exportItems}><Download size={12}/> {t('config.portableLibrary.actionExport')}</button>
-        <label className="btn btn-secondary" aria-disabled={!projectId}><Upload size={12}/> {t('config.portableLibrary.actionImport')}<input hidden type="file" accept="application/json" disabled={!projectId} onChange={e => void importFile(e.target.files?.[0])}/></label>
+        <label className="btn btn-secondary"><Upload size={12}/> {t('config.portableLibrary.actionImport')}<input hidden type="file" accept="application/json" onChange={e => void importFile(e.target.files?.[0])}/></label>
       </div>
       <div className="set-capability-grid mt-8">{data?.items.map(item => <div className="set-capability-card" key={`${item.kind}-${item.id}`}><div className="font-semibold">{item.id}</div><div className="flex-row gap-3"><span className="set-accordion-count">{item.kind}</span><span className="set-accordion-count">{item.scope}</span></div><div className="set-hint-xs">{item.source}</div></div>)}</div>
     </div>

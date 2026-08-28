@@ -5661,4 +5661,291 @@ mod tests {
         assert_eq!(json["error"], "project not found");
         std::fs::remove_dir_all(root).ok();
     }
+
+    async fn insert_portable_project(state: &AppState, id: &str, path: &std::path::Path) {
+        let id = id.to_string();
+        let path = path.to_string_lossy().into_owned();
+        state
+            .db
+            .with_conn(move |conn| {
+                let now = chrono::Utc::now();
+                crate::db::projects::insert_project(
+                    conn,
+                    &crate::models::Project {
+                        id: id.clone(),
+                        name: id,
+                        path,
+                        repo_url: None,
+                        token_override: None,
+                        ai_config: crate::models::AiConfigStatus {
+                            detected: false,
+                            configs: vec![],
+                        },
+                        audit_status: crate::models::AiAuditStatus::NoTemplate,
+                        ai_todo_count: 0,
+                        tech_debt_count: 0,
+                        needs_docs_migration: false,
+                        path_exists: true,
+                        default_skill_ids: vec![],
+                        default_profile_id: None,
+                        briefing_notes: None,
+                        linked_repos: vec![],
+                        created_at: now,
+                        updated_at: now,
+                    },
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn portable_library_api_sync_check_approve_round_trip() {
+        isolate_config_dir();
+        let state = test_state();
+        let root =
+            std::env::temp_dir().join(format!("kronn-portable-sync-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        insert_portable_project(&state, "sync-project", &root).await;
+
+        // First sync materializes an empty catalog + a fresh kronn.lock.
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/portable-library/sync?project_id=sync-project")
+            .body(Body::empty())
+            .unwrap();
+        let (status, json) = send(state.clone(), false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["success"], true);
+        assert!(json["data"]["created"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v == "kronn.lock"));
+
+        // Re-syncing the same catalog is idempotent: nothing changes.
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/portable-library/sync?project_id=sync-project")
+            .body(Body::empty())
+            .unwrap();
+        let (_, json) = send(state.clone(), false, req).await;
+        assert_eq!(json["success"], true);
+        assert!(json["data"]["created"].as_array().unwrap().is_empty());
+        assert!(json["data"]["modified"].as_array().unwrap().is_empty());
+
+        // check confirms the frozen hash matches what sync wrote.
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/portable-library/check?project_id=sync-project")
+            .body(Body::empty())
+            .unwrap();
+        let (_, json) = send(state.clone(), false, req).await;
+        assert_eq!(json["success"], true);
+
+        // GET state reports the project as not yet approved.
+        let req = Request::builder()
+            .uri("/api/portable-library?project_id=sync-project")
+            .body(Body::empty())
+            .unwrap();
+        let (_, json) = send(state.clone(), false, req).await;
+        assert_eq!(json["data"]["drift"], "clean");
+        assert_eq!(json["data"]["approved"], false);
+
+        // approve records TOFU trust for the current lock.
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/portable-library/approve?project_id=sync-project")
+            .body(Body::empty())
+            .unwrap();
+        let (_, json) = send(state.clone(), false, req).await;
+        assert_eq!(json["success"], true);
+        assert_eq!(json["data"], true);
+
+        let req = Request::builder()
+            .uri("/api/portable-library?project_id=sync-project")
+            .body(Body::empty())
+            .unwrap();
+        let (_, json) = send(state, false, req).await;
+        assert_eq!(json["data"]["approved"], true);
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn portable_library_api_mutating_endpoints_require_project_id() {
+        isolate_config_dir();
+        let state = test_state();
+        for (method, path, expected_error) in [
+            (
+                "POST",
+                "/api/portable-library/sync",
+                "project_id is required for sync",
+            ),
+            (
+                "POST",
+                "/api/portable-library/check",
+                "project_id is required",
+            ),
+            (
+                "POST",
+                "/api/portable-library/approve",
+                "project_id is required",
+            ),
+        ] {
+            let req = Request::builder()
+                .method(method)
+                .uri(path)
+                .body(Body::empty())
+                .unwrap();
+            let (status, json) = send(state.clone(), false, req).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(json["success"], false, "path {path} unexpectedly succeeded");
+            assert_eq!(json["error"], expected_error, "path {path}");
+        }
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn portable_library_api_import_global_scope_without_project_id() {
+        isolate_config_dir();
+        let state = test_state();
+        let body = serde_json::json!({
+            "items": [{
+                "kind": "skill",
+                "id": "no-project-skill",
+                "scope": "global",
+                "source": "skills/no-project-skill/SKILL.md",
+                "content_sha256": "unused",
+                "content": "---\nname: no-project-skill\ndescription: Global import\n---\n\nBody.\n",
+                "data": null,
+            }],
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/portable-library/import")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let (status, json) = send(state.clone(), false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["success"], true, "import failed: {json}");
+
+        // The item lands directly in the global root and is visible without
+        // any project_id — global scope does not require a carrier project.
+        let req = Request::builder()
+            .uri("/api/portable-library")
+            .body(Body::empty())
+            .unwrap();
+        let (_, json) = send(state, false, req).await;
+        assert_eq!(json["data"]["scope"], "global");
+        assert!(json["data"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["id"] == "no-project-skill" && item["scope"] == "global"));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn portable_library_api_import_project_scope_requires_project_id() {
+        isolate_config_dir();
+        let state = test_state();
+        let body = serde_json::json!({
+            "items": [{
+                "kind": "skill",
+                "id": "orphan-skill",
+                "scope": "project",
+                "source": "skills/orphan-skill/SKILL.md",
+                "content_sha256": "unused",
+                "content": "---\nname: orphan-skill\ndescription: Needs a project\n---\n\nBody.\n",
+                "data": null,
+            }],
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/portable-library/import")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let (status, json) = send(state, false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["success"], false);
+        assert_eq!(
+            json["error"],
+            "project_id is required to import project-scope items"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn portable_library_api_migrate_bootstraps_missing_root_via_api() {
+        isolate_config_dir();
+        let state = test_state();
+        let root = std::env::temp_dir().join(format!(
+            "kronn-portable-migrate-api-{}",
+            uuid::Uuid::new_v4()
+        ));
+        // Deliberately create the project directory WITHOUT a `.agents` root,
+        // reproducing the bootstrap gap: `write_migration_file` must create
+        // the root before validating paths against it.
+        std::fs::create_dir_all(&root).unwrap();
+        insert_portable_project(&state, "migrate-project", &root).await;
+
+        let now = chrono::Utc::now();
+        let prompt = crate::models::QuickPrompt {
+            id: "legacy-prompt".into(),
+            name: "Legacy prompt".into(),
+            icon: "🧳".into(),
+            prompt_template: "Do the thing.".into(),
+            variables: vec![],
+            agent: crate::models::AgentType::Codex,
+            project_id: Some("migrate-project".into()),
+            skill_ids: vec![],
+            profile_ids: vec![],
+            directive_ids: vec![],
+            tier: crate::models::ModelTier::default(),
+            agent_settings: None,
+            description: "A legacy prompt to migrate".into(),
+            pinned: false,
+            created_at: now,
+            updated_at: now,
+        };
+        state
+            .db
+            .with_conn(move |conn| crate::db::quick_prompts::insert_quick_prompt(conn, &prompt))
+            .await
+            .unwrap();
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/portable-library/migrate?project_id=migrate-project")
+            .body(Body::empty())
+            .unwrap();
+        let (status, json) = send(state.clone(), false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["success"], true, "migrate failed: {json}");
+        let created = json["data"]["created"].as_array().unwrap();
+        assert!(created.iter().any(|v| v == "skills/legacy-prompt/SKILL.md"));
+
+        // Re-running migrate against the now-populated root is idempotent.
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/portable-library/migrate?project_id=migrate-project")
+            .body(Body::empty())
+            .unwrap();
+        let (_, json) = send(state, false, req).await;
+        assert_eq!(json["success"], true);
+        assert!(json["data"]["created"].as_array().unwrap().is_empty());
+        assert!(json["data"]["unchanged"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v == "skills/legacy-prompt/SKILL.md"));
+
+        std::fs::remove_dir_all(root).ok();
+    }
 }
