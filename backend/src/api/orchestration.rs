@@ -100,6 +100,30 @@ pub enum ProvisionError {
     Internal(String),
 }
 
+/// Validate principal-authored mechanical gates before they are persisted.
+///
+/// Quick Exec owns the execution ceiling. Keeping this check at the orchestration
+/// boundary prevents a newly-created run from carrying a timeout that the
+/// validation runner would later refuse. Persisted runs from older Kronn builds
+/// are handled separately by `run_one_validation` so upgrades remain resumable.
+pub(crate) fn validate_new_validation_specs(
+    validations: &[crate::models::ValidationSpec],
+) -> Result<(), String> {
+    let max_timeout = crate::core::quick_exec::MAX_TIMEOUT_SECS;
+    if let Some(bad) = validations.iter().find(|spec| {
+        spec.command.trim().is_empty()
+            || spec
+                .timeout_secs
+                .is_some_and(|timeout| timeout == 0 || u64::from(timeout) > max_timeout)
+    }) {
+        return Err(format!(
+            "command must be non-empty and timeout_secs must be between 1 and {max_timeout} (got {})",
+            serde_json::to_string(bad).unwrap_or_default()
+        ));
+    }
+    Ok(())
+}
+
 /// A backend/system actor — every provisioning write is attributed to it.
 fn backend_actor() -> OrchestrationActor {
     PlanningActor {
@@ -2438,11 +2462,22 @@ async fn run_one_validation(
         return (None, 0, "empty validation command".into());
     };
     use crate::core::quick_exec;
+    let requested_timeout = spec.timeout_secs.map(u64::from);
+    let effective_timeout =
+        requested_timeout.map(|timeout| timeout.min(quick_exec::MAX_TIMEOUT_SECS));
+    let legacy_timeout_notice = requested_timeout
+        .filter(|timeout| *timeout > quick_exec::MAX_TIMEOUT_SECS)
+        .map(|timeout| {
+            format!(
+                "legacy validation timeout {timeout}s clamped to {}s",
+                quick_exec::MAX_TIMEOUT_SECS
+            )
+        });
     let quick = quick_exec::QuickExecSpec {
         binary: binary.to_string(),
         argv: parts.map(str::to_string).collect(),
         cwd: cwd.to_path_buf(),
-        timeout_secs: spec.timeout_secs.map(u64::from),
+        timeout_secs: effective_timeout,
         // A validation reads nothing: leaving stdin open would make a command that
         // waits for input indistinguishable from one that hangs.
         stdin: None,
@@ -2460,10 +2495,15 @@ async fn run_one_validation(
         Err(rejection) => return (None, 0, format!("refused: {rejection}")),
     };
     let cancel = tokio_util::sync::CancellationToken::new();
-    match quick_exec::run(&validated, None, &cancel).await {
+    let (code, duration, summary) = match quick_exec::run(&validated, None, &cancel).await {
         Ok(result) => (result.exit_code, result.duration_ms as i64, result.summary),
         Err(e) => (None, 0, format!("validation could not run: {e}")),
-    }
+    };
+    let summary = match legacy_timeout_notice {
+        Some(notice) => format!("{notice}\n{summary}"),
+        None => summary,
+    };
+    (code, duration, summary)
 }
 
 fn checkpoint_refusal_reason(reason: &StartTaskCheckpoint) -> String {
@@ -4512,6 +4552,14 @@ fn begin_provisioning(
     }
     let is_replay = idempotent_replay || explicit_resume;
 
+    if !is_replay {
+        if let Err(reason) = validate_new_validation_specs(validations) {
+            return Ok(Err(ProvisionError::NotLaunchable(format!(
+                "invalid validations: {reason}"
+            ))));
+        }
+    }
+
     if let Some(scope) = worker_scope {
         if let Err(reason) = scope.validate() {
             return Ok(Err(ProvisionError::NotLaunchable(reason)));
@@ -5707,6 +5755,12 @@ pub async fn create_campaign(
         return Json(ApiResponse::err_coded(
             ApiErrorCode::Validation,
             "target_branch is required".to_string(),
+        ));
+    }
+    if let Err(reason) = validate_new_validation_specs(&request.validations) {
+        return Json(ApiResponse::err_coded(
+            ApiErrorCode::Validation,
+            format!("invalid validations: {reason}"),
         ));
     }
     let resilience = crate::models::OrchestrationResiliencePolicy {
@@ -10524,6 +10578,10 @@ mod tests {
                 "structurally valid but zero timeout",
                 serde_json::json!([{"command": "cargo build", "timeout_secs": 0}]),
             ),
+            (
+                "structurally valid but timeout above Quick Exec cap",
+                serde_json::json!([{"command": "cargo build", "timeout_secs": 1801}]),
+            ),
         ];
         for (label, validations) in cases {
             let call = ToolCall {
@@ -10550,6 +10608,24 @@ mod tests {
             0,
             "no refused launch may provision an ungated run behind its error"
         );
+    }
+
+    #[tokio::test]
+    async fn persisted_legacy_validation_timeout_is_clamped_instead_of_refused() {
+        let cwd = tempfile::tempdir().unwrap();
+        let spec = ValidationSpec {
+            command: "true".into(),
+            quick_exec_id: None,
+            timeout_secs: Some(
+                u32::try_from(crate::core::quick_exec::MAX_TIMEOUT_SECS + 1)
+                    .expect("Quick Exec timeout cap fits u32"),
+            ),
+        };
+        let (exit_code, _duration_ms, output) = run_one_validation(&spec, cwd.path()).await;
+
+        assert_eq!(exit_code, Some(0));
+        assert!(output.contains("legacy validation timeout 1801s clamped to 1800s"));
+        assert!(!output.contains("refused:"));
     }
 
     #[tokio::test]
