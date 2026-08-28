@@ -467,14 +467,13 @@ fn application_default_credentials_exist(
     explicit_path: Option<std::ffi::OsString>,
     home: Option<std::path::PathBuf>,
 ) -> bool {
-    explicit_path
-        .filter(|path| !path.is_empty())
-        .map(std::path::PathBuf::from)
-        .is_some_and(|path| path.is_file())
-        || home.is_some_and(|home| {
+    match explicit_path {
+        Some(path) => !path.is_empty() && std::path::PathBuf::from(path).is_file(),
+        None => home.is_some_and(|home| {
             home.join(".config/gcloud/application_default_credentials.json")
                 .is_file()
-        })
+        }),
+    }
 }
 
 fn gemini_auth_signals(config: &AppConfig) -> GeminiAuthSignals {
@@ -521,9 +520,17 @@ fn gemini_mcp_entry_valid(value: &serde_json::Value) -> bool {
         return false;
     };
     entry.iter().all(|(key, value)| match key.as_str() {
-        "command" | "cwd" | "url" | "httpUrl" | "tcp" | "authProviderType" | "targetAudience" => {
-            value.is_string()
-        }
+        "command"
+        | "cwd"
+        | "url"
+        | "httpUrl"
+        | "tcp"
+        | "authProviderType"
+        | "targetAudience"
+        | "targetServiceAccount"
+        | "description"
+        | "extensionName" => value.is_string(),
+        "type" => matches!(value.as_str(), Some("sse" | "http")),
         "args" | "includeTools" | "excludeTools" => string_array(value),
         "env" | "headers" => string_map(value),
         "timeout" => value.is_number(),
@@ -1639,6 +1646,38 @@ mod tests {
     }
 
     #[test]
+    fn gemini_preflight_accepts_current_remote_mcp_fields() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings = temp.path().join("settings.json");
+        std::fs::write(
+            &settings,
+            r#"{"mcpServers":{"remote":{"type":"http","httpUrl":"https://example.test/mcp","description":"Remote tools","targetServiceAccount":"worker@example.test"},"events":{"type":"sse","url":"https://example.test/events"}}}"#,
+        )
+        .unwrap();
+        let signals = GeminiAuthSignals {
+            gemini_api_key: true,
+            ..GeminiAuthSignals::default()
+        };
+        assert!(gemini_config_and_auth_ready(&settings, false, &signals));
+    }
+
+    #[test]
+    fn gemini_preflight_rejects_invalid_mcp_transport_type() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings = temp.path().join("settings.json");
+        std::fs::write(
+            &settings,
+            r#"{"mcpServers":{"bad":{"type":"websocket","url":"https://example.test"}}}"#,
+        )
+        .unwrap();
+        let signals = GeminiAuthSignals {
+            gemini_api_key: true,
+            ..GeminiAuthSignals::default()
+        };
+        assert!(!gemini_config_and_auth_ready(&settings, false, &signals));
+    }
+
+    #[test]
     fn gemini_vertex_requires_routing_and_credential_metadata() {
         let temp = tempfile::tempdir().unwrap();
         let settings = temp.path().join("settings.json");
@@ -1710,5 +1749,22 @@ mod tests {
             None
         ));
         assert!(!application_default_credentials_exist(None, None));
+    }
+
+    #[test]
+    fn gemini_explicit_missing_adc_does_not_fall_back_to_home() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcloud = temp.path().join(".config/gcloud");
+        std::fs::create_dir_all(&gcloud).unwrap();
+        std::fs::write(gcloud.join("application_default_credentials.json"), "{}").unwrap();
+
+        assert!(!application_default_credentials_exist(
+            Some(temp.path().join("missing.json").into_os_string()),
+            Some(temp.path().to_path_buf())
+        ));
+        assert!(application_default_credentials_exist(
+            None,
+            Some(temp.path().to_path_buf())
+        ));
     }
 }

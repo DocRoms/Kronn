@@ -722,9 +722,10 @@ pub(crate) struct HostSyncPlan {
     /// Mtime captured BEFORE the impl read the existing file. Used by
     /// the driver's `atomic_write_checked` to abort on concurrent edits.
     pub pre_mtime: Option<std::time::SystemTime>,
-    /// Optional state file committed before the host config. Gemini uses it
-    /// to keep Kronn ownership outside Gemini's closed settings schema.
-    pub prerequisite_write: Option<(PathBuf, String, Option<std::time::SystemTime>)>,
+    /// Optional state file committed after the host config. Gemini uses it
+    /// to keep Kronn ownership outside Gemini's closed settings schema. The
+    /// previous state remains a safe recovery point if this write fails.
+    pub followup_write: Option<(PathBuf, String, Option<std::time::SystemTime>)>,
 }
 
 /// A Kronn-managed outbound sync to a host CLI's global MCP config file.
@@ -785,7 +786,17 @@ pub(crate) fn run_host_sync(t: &dyn HostMcpSync, conn: &rusqlite::Connection, se
             return;
         }
     }
-    if let Some((path, content, pre_mtime)) = &plan.prerequisite_write {
+    if !write_host_config_checked(
+        &plan.path,
+        &plan.content,
+        plan.pre_mtime,
+        label,
+        &plan.summary,
+    ) {
+        return;
+    }
+    t.post_write(&plan.path);
+    if let Some((path, content, pre_mtime)) = &plan.followup_write {
         if let Some(parent) = path.parent() {
             if let Err(e) = std::fs::create_dir_all(parent) {
                 tracing::error!(
@@ -797,18 +808,7 @@ pub(crate) fn run_host_sync(t: &dyn HostMcpSync, conn: &rusqlite::Connection, se
                 return;
             }
         }
-        if !write_host_config_checked(path, content, *pre_mtime, label, "Synced ownership state") {
-            return;
-        }
-    }
-    if write_host_config_checked(
-        &plan.path,
-        &plan.content,
-        plan.pre_mtime,
-        label,
-        &plan.summary,
-    ) {
-        t.post_write(&plan.path);
+        write_host_config_checked(path, content, *pre_mtime, label, "Synced ownership state");
     }
 }
 
@@ -2026,7 +2026,7 @@ impl HostMcpSync for CodexSync {
             content,
             summary,
             pre_mtime,
-            prerequisite_write: None,
+            followup_write: None,
         })
     }
 }
@@ -2168,7 +2168,7 @@ impl HostMcpSync for CopilotSync {
             content,
             summary,
             pre_mtime,
-            prerequisite_write: None,
+            followup_write: None,
         })
     }
 }
@@ -2706,7 +2706,7 @@ impl HostMcpSync for ClaudeSync {
             content,
             summary,
             pre_mtime,
-            prerequisite_write: None,
+            followup_write: None,
         })
     }
 
@@ -3064,7 +3064,7 @@ impl HostMcpSync for GeminiSync {
             content,
             summary,
             pre_mtime,
-            prerequisite_write: Some((
+            followup_write: Some((
                 state_path.clone(),
                 serde_json::to_string_pretty(&serde_json::json!({
                     "version": 1,
@@ -4816,6 +4816,60 @@ mod host_sync_tests {
         assert!(!servers.contains_key("server-10"));
         assert_eq!(servers["user-owned"]["command"], "user-command");
         assert!(servers.values().all(|entry| entry.get("_kronn").is_none()));
+    }
+
+    #[test]
+    fn gemini_sync_recovers_when_ownership_write_fails_after_settings() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings_path = temp.path().join("settings.json");
+        let state_path = temp.path().join("state.json");
+        let old_ownership = HashMap::from([("config-a".to_string(), "server-a".to_string())]);
+        let mut settings = serde_json::json!({
+            "mcpServers": {
+                "server-a": {"command": "old"},
+                "user-owned": {"command": "user-command"}
+            }
+        });
+        merge_gemini_entries(
+            &mut settings,
+            &old_ownership,
+            HashMap::from([(
+                "server-b".to_string(),
+                serde_json::json!({"command": "new"}),
+            )]),
+        );
+
+        atomic_write_checked(&settings_path, &settings.to_string(), None).unwrap();
+        std::fs::write(&state_path, r#"{"entries":{"config-a":"server-a"}}"#).unwrap();
+        assert!(matches!(
+            atomic_write_checked(
+                &state_path,
+                r#"{"entries":{"config-b":"server-b"}}"#,
+                Some(std::time::SystemTime::UNIX_EPOCH)
+            ),
+            Err(AtomicWriteCheckedError::ConcurrentWrite)
+        ));
+        assert_eq!(
+            std::fs::read_to_string(&state_path).unwrap(),
+            r#"{"entries":{"config-a":"server-a"}}"#
+        );
+
+        let mut recovered: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
+        merge_gemini_entries(
+            &mut recovered,
+            &old_ownership,
+            HashMap::from([(
+                "server-b".to_string(),
+                serde_json::json!({"command": "new"}),
+            )]),
+        );
+
+        let servers = recovered["mcpServers"].as_object().unwrap();
+        assert_eq!(servers.len(), 2);
+        assert_eq!(servers["server-b"]["command"], "new");
+        assert_eq!(servers["user-owned"]["command"], "user-command");
+        assert!(!servers.contains_key("server-a"));
     }
 
     #[test]
