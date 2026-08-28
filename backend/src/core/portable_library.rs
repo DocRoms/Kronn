@@ -281,6 +281,40 @@ struct ManagedManifest {
     files: BTreeMap<String, String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LockProvenance {
+    Vendored,
+    Local,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LockResource {
+    pub kind: String,
+    pub id: String,
+    pub provenance: LockProvenance,
+    pub version: String,
+    pub source: String,
+    pub content_sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KronnLock {
+    pub version: u32,
+    pub resources: Vec<LockResource>,
+    pub files: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LockApprovals {
+    version: u32,
+    canonical_project_sha256: String,
+    approved_lock_sha256: String,
+}
+
 /// Discover global and project libraries. A project item deterministically
 /// overrides a global item with the same `(kind, id)`; duplicates inside one
 /// scope are rejected instead of depending on filesystem iteration order.
@@ -576,6 +610,7 @@ pub fn sync(catalog: &LibraryCatalog, target: &Path) -> Result<SyncReport, Strin
         }
     }
     insert_workflow_router_assets(catalog, &mut desired)?;
+    let lock_bytes = canonical_json(&build_lock(catalog, &desired))?;
     let mut report = SyncReport::default();
     let mut hashes = BTreeMap::new();
     for (relative, bytes) in &desired {
@@ -602,6 +637,19 @@ pub fn sync(catalog: &LibraryCatalog, target: &Path) -> Result<SyncReport, Strin
         }
         hashes.insert(relative.clone(), sha256(bytes));
     }
+    let lock_path = root.join("kronn.lock");
+    let lock_existed = lock_path.exists();
+    if fs::read(&lock_path).ok().as_deref() == Some(lock_bytes.as_slice()) {
+        report.unchanged.push(PathBuf::from("kronn.lock"));
+    } else {
+        crate::core::mcp_scanner::atomic_write_bytes(&lock_path, &lock_bytes)
+            .map_err(|e| format!("cannot write kronn.lock: {e}"))?;
+        if lock_existed {
+            report.modified.push(PathBuf::from("kronn.lock"));
+        } else {
+            report.created.push(PathBuf::from("kronn.lock"));
+        }
+    }
     for relative in previous
         .files
         .keys()
@@ -626,6 +674,193 @@ pub fn sync(catalog: &LibraryCatalog, target: &Path) -> Result<SyncReport, Strin
             .map_err(|e| format!("cannot write sync manifest: {e}"))?;
     }
     Ok(report)
+}
+
+fn build_lock(catalog: &LibraryCatalog, desired: &BTreeMap<String, Vec<u8>>) -> KronnLock {
+    let mut resources: Vec<_> = catalog
+        .items()
+        .map(|item| LockResource {
+            kind: format!("{:?}", item.kind).to_ascii_lowercase(),
+            id: item.id.clone(),
+            provenance: match item.sidecar.provenance.scope {
+                LibraryScope::Global => LockProvenance::Vendored,
+                LibraryScope::Project => LockProvenance::Local,
+            },
+            version: item.sidecar.version.to_string(),
+            source: item.sidecar.provenance.source.clone(),
+            content_sha256: item.sidecar.provenance.content_sha256.clone(),
+        })
+        .collect();
+    resources.sort_by(|a, b| (&a.kind, &a.id).cmp(&(&b.kind, &b.id)));
+    KronnLock {
+        version: CONTRACT_VERSION,
+        resources,
+        files: desired
+            .iter()
+            .map(|(path, bytes)| (path.clone(), sha256(bytes)))
+            .collect(),
+    }
+}
+
+pub fn check_frozen_hash(project_root: &Path) -> Result<KronnLock, String> {
+    let root = project_root.join(".agents");
+    let lock_path = root.join("kronn.lock");
+    let lock: KronnLock = serde_json::from_slice(
+        &fs::read(&lock_path).map_err(|e| format!("cannot read '{}': {e}", lock_path.display()))?,
+    )
+    .map_err(|e| format!("invalid kronn.lock: {e}"))?;
+    if lock.version != CONTRACT_VERSION {
+        return Err("unsupported kronn.lock version".into());
+    }
+    let actual = collect_locked_files(&root, &root)?;
+    let expected: BTreeSet<_> = lock.files.keys().cloned().collect();
+    let present: BTreeSet<_> = actual.keys().cloned().collect();
+    let added: Vec<_> = present.difference(&expected).cloned().collect();
+    let removed: Vec<_> = expected.difference(&present).cloned().collect();
+    let altered: Vec<_> = expected
+        .intersection(&present)
+        .filter(|path| actual.get(*path) != lock.files.get(*path))
+        .cloned()
+        .collect();
+    if !added.is_empty() || !removed.is_empty() || !altered.is_empty() {
+        return Err(format!(
+            "frozen hash mismatch (added: {}; removed: {}; altered: {})",
+            added.join(", "),
+            removed.join(", "),
+            altered.join(", ")
+        ));
+    }
+    Ok(lock)
+}
+
+fn collect_locked_files(root: &Path, directory: &Path) -> Result<BTreeMap<String, String>, String> {
+    let mut files = BTreeMap::new();
+    for entry in fs::read_dir(directory)
+        .map_err(|e| format!("cannot inspect '{}': {e}", directory.display()))?
+    {
+        let entry = entry.map_err(|e| format!("cannot inspect .agents entry: {e}"))?;
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .map_err(|e| format!("cannot inspect .agents entry: {e}"))?;
+        if file_type.is_symlink() {
+            return Err(format!("frozen hash refuses symlink '{}'", path.display()));
+        }
+        if file_type.is_dir() {
+            files.extend(collect_locked_files(root, &path)?);
+        } else if file_type.is_file() {
+            let relative = portable_path(
+                path.strip_prefix(root)
+                    .map_err(|_| "file escaped .agents")?,
+            )?;
+            if matches!(relative.as_str(), "kronn.lock" | ".kronn-sync.json") {
+                continue;
+            }
+            files.insert(
+                relative,
+                sha256(
+                    &fs::read(&path)
+                        .map_err(|e| format!("cannot hash '{}': {e}", path.display()))?,
+                ),
+            );
+        }
+    }
+    Ok(files)
+}
+
+pub fn approve_lock(project_root: &Path) -> Result<(), String> {
+    let trust_dir = crate::core::config::config_dir()
+        .map_err(|e| format!("cannot determine Kronn config directory: {e}"))?
+        .join("trust/portable-library");
+    approve_lock_at(project_root, &trust_dir)
+}
+
+fn canonical_project_identity(project_root: &Path) -> Result<String, String> {
+    let canonical = project_root.canonicalize().map_err(|e| {
+        format!(
+            "cannot resolve project root '{}': {e}",
+            project_root.display()
+        )
+    })?;
+    #[cfg(unix)]
+    let identity = {
+        use std::os::unix::ffi::OsStrExt;
+        sha256(canonical.as_os_str().as_bytes())
+    };
+    #[cfg(windows)]
+    let identity = {
+        use std::os::windows::ffi::OsStrExt;
+        let bytes: Vec<u8> = canonical
+            .as_os_str()
+            .encode_wide()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        sha256(&bytes)
+    };
+    Ok(identity)
+}
+
+fn approval_path(project_root: &Path, trust_dir: &Path) -> Result<(PathBuf, String), String> {
+    let identity = canonical_project_identity(project_root)?;
+    Ok((trust_dir.join(format!("{identity}.json")), identity))
+}
+
+fn approve_lock_at(project_root: &Path, trust_dir: &Path) -> Result<(), String> {
+    check_frozen_hash(project_root)?;
+    let root = project_root.join(".agents");
+    let (approval_path, canonical_project_sha256) = approval_path(project_root, trust_dir)?;
+    let approval = LockApprovals {
+        version: CONTRACT_VERSION,
+        canonical_project_sha256,
+        approved_lock_sha256: sha256(
+            &fs::read(root.join("kronn.lock"))
+                .map_err(|e| format!("cannot read kronn.lock: {e}"))?,
+        ),
+    };
+    fs::create_dir_all(trust_dir)
+        .map_err(|e| format!("cannot create TOFU trust directory: {e}"))?;
+    crate::core::mcp_scanner::atomic_write_bytes(&approval_path, &canonical_json(&approval)?)
+        .map_err(|e| format!("cannot record TOFU approval: {e}"))
+}
+
+fn require_lock_approval(project_root: &Path) -> Result<(), String> {
+    let trust_dir = crate::core::config::config_dir()
+        .map_err(|e| format!("cannot determine Kronn config directory: {e}"))?
+        .join("trust/portable-library");
+    require_lock_approval_at(project_root, &trust_dir)
+}
+
+fn require_lock_approval_at(project_root: &Path, trust_dir: &Path) -> Result<(), String> {
+    check_frozen_hash(project_root)?;
+    let root = project_root.join(".agents");
+    let (approval_path, canonical_project_sha256) = approval_path(project_root, trust_dir)?;
+    let approval: LockApprovals =
+        serde_json::from_slice(&fs::read(approval_path).map_err(|_| {
+            "TOFU approval required; run 'kronn check --approve' first".to_string()
+        })?)
+        .map_err(|e| format!("invalid TOFU approval: {e}"))?;
+    let lock_hash = sha256(
+        &fs::read(root.join("kronn.lock")).map_err(|e| format!("cannot read kronn.lock: {e}"))?,
+    );
+    if approval.version != CONTRACT_VERSION
+        || approval.canonical_project_sha256 != canonical_project_sha256
+        || approval.approved_lock_sha256 != lock_hash
+    {
+        return Err(
+            "TOFU approval is stale or belongs to a different project; run 'kronn check --approve' again"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+pub fn run_cli_check(args: &[String]) -> Result<(), String> {
+    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    match args {
+        [flag] if flag == "--frozen-hash" => check_frozen_hash(&cwd).map(|_| ()),
+        [flag] if flag == "--approve" => approve_lock(&cwd),
+        _ => Err("Usage: kronn check --frozen-hash | --approve".into()),
+    }
 }
 
 /// CLI entry point for `kronn sync`. The global source is
@@ -714,7 +949,7 @@ fn render_workflow_router(catalog: &LibraryCatalog) -> String {
             .collect()
     };
     format!(
-        "---\nname: kronn\ndescription: Route validated portable Kronn workflows from the project .agents library.\n---\n\n# Kronn workflow router\n\n## Installed workflows\n\n{inventory}\n## Validate, render, and run\n\nValidate without executing:\n\n```sh\nkronn run .agents/workflows/<id>.kronn.json --check --var name=value\n```\n\nExecution is always explicit and uses literal argv, never a shell:\n\n```sh\nkronn run .agents/workflows/<id>.kronn.json --var name=value --allow-exec\n```\n\nGenerate the secret-free environment template with `sh .agents/scripts/render-env.sh <workflow>`. Bootstrap validation with `sh .agents/scripts/bootstrap.sh <workflow>`.\n\n## Container fallback\n\n```sh\ndocker run --rm -v \"$PWD:/workspace\" -w /workspace kronn:0.12.0 kronn run .agents/workflows/<id>.kronn.json --check --var name=value\n```\n"
+        "---\nname: kronn\ndescription: Route validated portable Kronn workflows from the project .agents library.\n---\n\n# Kronn workflow router\n\n## Installed workflows\n\n{inventory}\n## Validate, approve, and run\n\nVerify the committed lock without changing files (suitable for a pre-commit hook):\n\n```sh\nkronn check --frozen-hash\n```\n\nTrust the current lock on first use or after a reviewed hash change:\n\n```sh\nkronn check --approve\n```\n\nValidate without executing:\n\n```sh\nkronn run .agents/workflows/<id>.kronn.json --check --var name=value\n```\n\nExecution is always explicit and uses literal argv, never a shell:\n\n```sh\nkronn run .agents/workflows/<id>.kronn.json --var name=value --allow-exec\n```\n\nGenerate the secret-free environment template with `sh .agents/scripts/render-env.sh <workflow>`. Bootstrap validation with `sh .agents/scripts/bootstrap.sh <workflow>`.\n\n## Container fallback\n\n```sh\ndocker run --rm -v \"$PWD:/workspace\" -w /workspace kronn:0.12.0 kronn run .agents/workflows/<id>.kronn.json --check --var name=value\n```\n"
     )
 }
 
@@ -1243,6 +1478,13 @@ pub fn run_cli_workflow(args: &[String]) -> Result<(), String> {
         println!("workflow validated: {} step(s)", workflow.steps.len());
         return Ok(());
     }
+
+    let project_root = workflow_path
+        .ancestors()
+        .find(|path| path.file_name().and_then(|name| name.to_str()) == Some(".agents"))
+        .and_then(Path::parent)
+        .ok_or("executable workflow must be inside a locked .agents tree")?;
+    require_lock_approval(project_root)?;
 
     let host_env: BTreeMap<_, _> = std::env::vars().collect();
     let rendered = render_portable_workflow(&workflow, &supplied, &host_env)?;
@@ -2273,6 +2515,114 @@ mod tests {
         assert!(third
             .deleted
             .contains(&PathBuf::from("skills/two/SKILL.md")));
+    }
+
+    #[test]
+    fn lock_is_deterministic_and_frozen_check_detects_add_remove_and_alter() {
+        let source = temp("lock-source");
+        let target = temp("lock-target");
+        skill(&source, "one", "v1");
+        json_item(&source, "workflows", LibraryKind::Workflow, "release");
+        let catalog = discover(Some(&source), None).unwrap();
+        sync(&catalog, &target).unwrap();
+
+        let first = fs::read(target.join(".agents/kronn.lock")).unwrap();
+        let lock = check_frozen_hash(&target).unwrap();
+        assert_eq!(lock.resources.len(), 2);
+        assert!(lock.resources.iter().all(|resource| {
+            resource.provenance == LockProvenance::Vendored
+                && !resource.source.is_empty()
+                && resource.content_sha256.len() == 64
+        }));
+        sync(&catalog, &target).unwrap();
+        assert_eq!(first, fs::read(target.join(".agents/kronn.lock")).unwrap());
+
+        let changed = target.join(".agents/skills/one/SKILL.md");
+        let original = fs::read(&changed).unwrap();
+        fs::write(&changed, "altered").unwrap();
+        assert!(check_frozen_hash(&target).unwrap_err().contains("altered:"));
+        fs::write(&changed, original).unwrap();
+
+        let removed = target.join(".agents/schema/workflow.v1.schema.json");
+        let original = fs::read(&removed).unwrap();
+        fs::remove_file(&removed).unwrap();
+        assert!(check_frozen_hash(&target).unwrap_err().contains("removed:"));
+        fs::write(&removed, original).unwrap();
+
+        fs::write(target.join(".agents/unlocked.txt"), "unexpected").unwrap();
+        assert!(check_frozen_hash(&target).unwrap_err().contains("added:"));
+
+        fs::remove_file(target.join(".agents/unlocked.txt")).unwrap();
+        fs::write(target.join(".agents/.kronn-approvals.json"), "untrusted").unwrap();
+        assert!(check_frozen_hash(&target).unwrap_err().contains("added:"));
+    }
+
+    #[test]
+    fn tofu_approval_is_hash_bound_and_cannot_be_replayed_after_change() {
+        let source = temp("approval-source");
+        let target = temp("approval-target");
+        let trust = temp("approval-trust");
+        skill(&source, "one", "v1");
+        sync(&discover(Some(&source), None).unwrap(), &target).unwrap();
+
+        assert!(require_lock_approval_at(&target, &trust)
+            .unwrap_err()
+            .contains("TOFU approval required"));
+        approve_lock_at(&target, &trust).unwrap();
+        require_lock_approval_at(&target, &trust).unwrap();
+
+        skill(&source, "one", "v2");
+        sync(&discover(Some(&source), None).unwrap(), &target).unwrap();
+        assert!(require_lock_approval_at(&target, &trust)
+            .unwrap_err()
+            .contains("stale"));
+        approve_lock_at(&target, &trust).unwrap();
+        require_lock_approval_at(&target, &trust).unwrap();
+    }
+
+    #[test]
+    fn tofu_approval_cannot_be_replayed_between_identical_projects() {
+        let source = temp("approval-replay-source");
+        let first = temp("approval-replay-first");
+        let second = temp("approval-replay-second");
+        let trust = temp("approval-replay-trust");
+        skill(&source, "one", "v1");
+        let catalog = discover(Some(&source), None).unwrap();
+        sync(&catalog, &first).unwrap();
+        sync(&catalog, &second).unwrap();
+
+        assert_eq!(
+            fs::read(first.join(".agents/kronn.lock")).unwrap(),
+            fs::read(second.join(".agents/kronn.lock")).unwrap()
+        );
+        approve_lock_at(&first, &trust).unwrap();
+        require_lock_approval_at(&first, &trust).unwrap();
+        assert!(require_lock_approval_at(&second, &trust)
+            .unwrap_err()
+            .contains("TOFU approval required"));
+
+        let (first_approval, _) = approval_path(&first, &trust).unwrap();
+        let (second_approval, _) = approval_path(&second, &trust).unwrap();
+        fs::copy(first_approval, second_approval).unwrap();
+        assert!(require_lock_approval_at(&second, &trust)
+            .unwrap_err()
+            .contains("stale"));
+    }
+
+    #[test]
+    fn executable_workflow_requires_declared_binary_and_explicit_mode() {
+        let mut workflow = portable_workflow();
+        workflow.steps[0].command = "git".into();
+        assert!(validate_portable_workflow(&workflow)
+            .unwrap_err()
+            .contains("not declared in requires"));
+
+        let root = temp("exec-mode");
+        let path = root.join("audit.kronn.json");
+        fs::write(&path, canonical_json(&workflow).unwrap()).unwrap();
+        assert!(run_cli_workflow(&[path.to_string_lossy().into_owned()])
+            .unwrap_err()
+            .contains("choose exactly one"));
     }
 
     #[test]
