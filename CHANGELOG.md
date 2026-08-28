@@ -11,6 +11,14 @@ Release notes for 0.9.3 and earlier are available in the
 
 ## [Unreleased]
 
+### Documentation
+
+- Added the portable `.agents` operator guide covering global/project
+  precedence, bootstrap and deterministic sync, frozen checks and TOFU
+  approval, workflow variables/secrets/execution, container fallback,
+  migration rollback, and error recovery. See
+  [portable agent library operations](docs/operations/portable-agent-library.md).
+
 ## [0.11.0] - 2026-08-22
 
 ### Added
