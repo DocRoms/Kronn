@@ -1684,6 +1684,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             post(api::orchestration::task_exec_status),
         )
         .route(
+            "/api/orchestration/tool/executions/{id}/resume",
+            post(api::orchestration::task_exec_resume),
+        )
+        .route(
             "/api/orchestration/tool/executions/{id}/cancel",
             post(api::orchestration::task_exec_cancel),
         )
