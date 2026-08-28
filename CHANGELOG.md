@@ -77,6 +77,16 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- Audit/template installation now creates the shared `AGENTS.md` entry point
+  unconditionally but emits Claude, Gemini, Cursor, Windsurf, Cline, Copilot,
+  Kiro and Vibe instruction adapters only when the target repository already
+  declares that integration or the user explicitly launches it for bootstrap
+  or audit. Generated adapters are rendered without raw placeholders or
+  example commands, and a bounded upgrade repairs only recognizable
+  Kronn-managed template ranges while preserving user content.
+  Localized briefing prompts now consistently reference the canonical `docs/`
+  tree instead of the retired `ai/` path.
+
 - The orchestration bridge no longer makes every principal session pay for the
   full Ollama worker methodology and duplicated scope schemas in its MCP
   catalogue. Selection-time contracts stay visible; exact transport, bounded

@@ -25,9 +25,259 @@
 //!   - Re-run on the same file is a no-op when the block content
 //!     hasn't changed (no spurious writes).
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+/// Agent-specific instruction families supported by the template bundle.
+/// `AGENTS.md` is deliberately absent: it is the shared, vendor-neutral entry
+/// point and is always installed, even when no agent adapter is detected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum AgentAdapter {
+    ClaudeCode,
+    GeminiCli,
+    Cursor,
+    Windsurf,
+    Cline,
+    Copilot,
+    Kiro,
+    Vibe,
+}
+
+/// Translate a Kronn launch choice into the repository adapter that launch
+/// explicitly configures. Codex consumes the shared `AGENTS.md`; API-only and
+/// generic providers have no vendor-specific root template.
+pub fn adapter_for_agent_type(agent: &crate::models::AgentType) -> Option<AgentAdapter> {
+    match agent {
+        crate::models::AgentType::ClaudeCode => Some(AgentAdapter::ClaudeCode),
+        crate::models::AgentType::GeminiCli => Some(AgentAdapter::GeminiCli),
+        crate::models::AgentType::Kiro => Some(AgentAdapter::Kiro),
+        crate::models::AgentType::Vibe => Some(AgentAdapter::Vibe),
+        crate::models::AgentType::CopilotCli => Some(AgentAdapter::Copilot),
+        crate::models::AgentType::Codex
+        | crate::models::AgentType::Ollama
+        | crate::models::AgentType::LiteLlm
+        | crate::models::AgentType::Nvidia
+        | crate::models::AgentType::Custom => None,
+    }
+}
+
+/// Result of a non-destructive instruction-file install.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct AgentFileInstallReport {
+    pub created: Vec<String>,
+    pub updated: Vec<String>,
+    pub already_present: Vec<String>,
+    pub failed: Vec<String>,
+}
+
+fn any_signal(project_root: &Path, signals: &[&str]) -> bool {
+    signals
+        .iter()
+        .any(|relative| std::fs::symlink_metadata(project_root.join(relative)).is_ok())
+}
+
+/// Detect only adapters that the target repository already declares through
+/// an agent instruction file/directory. Generic provider settings written by
+/// Kronn itself (for example `.kiro/settings/mcp.json`) are intentionally not
+/// signals: otherwise an MCP sync would manufacture a Kiro adapter in every
+/// repository.
+pub fn detect_agent_adapters(project_root: &Path) -> BTreeSet<AgentAdapter> {
+    let mut detected = BTreeSet::new();
+    for (adapter, signals) in [
+        (
+            AgentAdapter::ClaudeCode,
+            &["CLAUDE.md", "CLAUDE.local.md", ".claude/CLAUDE.md"][..],
+        ),
+        (
+            AgentAdapter::GeminiCli,
+            &["GEMINI.md", ".gemini/GEMINI.md"][..],
+        ),
+        (AgentAdapter::Cursor, &[".cursorrules", ".cursor/rules"][..]),
+        (AgentAdapter::Windsurf, &[".windsurfrules"][..]),
+        (AgentAdapter::Cline, &[".clinerules"][..]),
+        (
+            AgentAdapter::Copilot,
+            &[".github/copilot-instructions.md", ".github/instructions"][..],
+        ),
+        (AgentAdapter::Kiro, &[".kiro/steering"][..]),
+        (
+            AgentAdapter::Vibe,
+            &[".vibe/instructions.md", ".vibe/AGENTS.md"][..],
+        ),
+    ] {
+        if any_signal(project_root, signals) {
+            detected.insert(adapter);
+        }
+    }
+    detected
+}
+
+/// Canonical template paths for one immutable detection snapshot. Order is
+/// stable so API receipts and tests stay deterministic.
+pub fn desired_agent_template_paths(detected: &BTreeSet<AgentAdapter>) -> Vec<&'static str> {
+    let mut paths = vec!["AGENTS.md"];
+    for adapter in detected {
+        match adapter {
+            AgentAdapter::ClaudeCode => paths.push("CLAUDE.md"),
+            AgentAdapter::GeminiCli => paths.push("GEMINI.md"),
+            AgentAdapter::Cursor => {
+                paths.push(".cursorrules");
+                paths.push(".cursor/rules/repo-instructions.mdc");
+            }
+            AgentAdapter::Windsurf => paths.push(".windsurfrules"),
+            AgentAdapter::Cline => paths.push(".clinerules"),
+            AgentAdapter::Copilot => paths.push(".github/copilot-instructions.md"),
+            AgentAdapter::Kiro => paths.push(".kiro/steering/instructions.md"),
+            AgentAdapter::Vibe => paths.push(".vibe/instructions.md"),
+        }
+    }
+    paths
+}
+
+/// Render a root instruction template with only facts Kronn can prove from
+/// the repository. Unlike the docs skeleton, emitted adapter files must never
+/// carry raw `{{...}}` placeholders: many agents load them before the audit
+/// gets a chance to refine `docs/AGENTS.md`.
+pub fn render_agent_template(project_root: &Path, template: &str) -> Result<String, String> {
+    let mut rendered = template.to_string();
+    for (token, value) in crate::core::docs_migration::compute_replacements(project_root) {
+        rendered = rendered.replace(token, &value);
+    }
+    for (token, fallback) in [
+        ("{{PROJECT_NAME}}", "Project"),
+        (
+            "{{STACK_SUMMARY}}",
+            "See docs/AGENTS.md for the verified stack",
+        ),
+        (
+            "{{TEST_CMD}}",
+            "See docs/AGENTS.md for the verified test command",
+        ),
+        (
+            "{{LINT_CMD}}",
+            "See docs/AGENTS.md for the verified lint command",
+        ),
+        ("{{PROJECT_LANGUAGE}}", "English"),
+        (
+            "{{DO_NOT_1}}",
+            "DO NOT bypass project-specific instructions in docs/AGENTS.md.",
+        ),
+        (
+            "{{DO_NOT_2}}",
+            "DO NOT change code before locating the repository's documented checks.",
+        ),
+    ] {
+        rendered = rendered.replace(token, fallback);
+    }
+    rendered = rendered
+        .replace(" [ex: \"cargo test && npm test\"]", "")
+        .replace(" [ex: \"cargo clippy && npx tsc --noEmit\"]", "");
+    if rendered.contains("{{") || rendered.contains("}}") {
+        return Err("instruction template contains an unresolved placeholder".into());
+    }
+    Ok(rendered)
+}
+
+/// Upgrade a file that still has the exact structural markers of Kronn's old
+/// instruction template. Only the template header/facts/critical-rules ranges
+/// are rendered; bytes before the template header and from `## More context`
+/// onward are preserved, including user-authored suffixes.
+fn repair_generated_agent_file(project_root: &Path, path: &Path) -> Result<bool, String> {
+    let original = std::fs::read_to_string(path)
+        .map_err(|e| format!("read {} for upgrade: {e}", path.display()))?;
+    let Some(facts_start) = original.find("<!-- KRONN:FACTS") else {
+        return Ok(false);
+    };
+    let Some(facts_end_rel) = original[facts_start..].find("<!-- END KRONN:FACTS -->") else {
+        return Ok(false);
+    };
+    let facts_end = facts_start + facts_end_rel + "<!-- END KRONN:FACTS -->".len();
+    let Some(critical_rel) =
+        original[facts_end..].find("## Critical rules (follow these BEFORE any action)")
+    else {
+        return Ok(false);
+    };
+    let critical_start = facts_end + critical_rel;
+    let Some(more_rel) = original[critical_start..].find("## More context") else {
+        return Ok(false);
+    };
+    let more_start = critical_start + more_rel;
+    if !original[more_start..].contains("docs/AGENTS.md") {
+        return Ok(false);
+    }
+    let header_start = original[..facts_start]
+        .rfind("\n# ")
+        .map(|index| index + 1)
+        .unwrap_or(0);
+
+    let mut updated = String::with_capacity(original.len());
+    updated.push_str(&original[..header_start]);
+    updated.push_str(&render_agent_template(
+        project_root,
+        &original[header_start..critical_start],
+    )?);
+    updated.push_str(&render_agent_template(
+        project_root,
+        &original[critical_start..more_start],
+    )?);
+    updated.push_str(&original[more_start..]);
+    if updated == original {
+        return Ok(false);
+    }
+    crate::core::fs_guard::assert_contained_no_symlink(project_root, path)?;
+    atomic_write(path, updated.as_bytes())
+        .map_err(|e| format!("upgrade {}: {e}", path.display()))?;
+    Ok(true)
+}
+
+/// Install only the shared entry point plus adapters from the caller's
+/// pre-write detection snapshot. Existing files are never overwritten and all
+/// nested writes use the repository's no-follow guard.
+pub fn install_detected_agent_files(
+    project_root: &Path,
+    template_root: &Path,
+    detected: &BTreeSet<AgentAdapter>,
+) -> AgentFileInstallReport {
+    let mut report = AgentFileInstallReport::default();
+    for relative in desired_agent_template_paths(detected) {
+        let src = template_root.join(relative);
+        let dst = project_root.join(relative);
+        let template = match std::fs::read_to_string(&src) {
+            Ok(value) => value,
+            Err(e) => {
+                report.failed.push(format!("{relative}: read failed: {e}"));
+                continue;
+            }
+        };
+        let rendered = match render_agent_template(project_root, &template) {
+            Ok(value) => value,
+            Err(e) => {
+                report.failed.push(format!("{relative}: {e}"));
+                continue;
+            }
+        };
+        match crate::core::fs_guard::guarded_write_new(project_root, &dst, rendered.as_bytes()) {
+            Ok(true) => report.created.push(relative.to_string()),
+            Ok(false) => match repair_generated_agent_file(project_root, &dst) {
+                Ok(true) => report.updated.push(relative.to_string()),
+                Ok(false) => report.already_present.push(relative.to_string()),
+                Err(e) => report.failed.push(format!("{relative}: {e}")),
+            },
+            Err(e) => report.failed.push(format!("{relative}: {e}")),
+        }
+    }
+    report
+}
+
+pub fn created_agent_paths(project_root: &Path, report: &AgentFileInstallReport) -> Vec<PathBuf> {
+    report
+        .created
+        .iter()
+        .map(|relative| project_root.join(relative))
+        .collect()
+}
 
 /// Marker that opens the managed block. The exact byte sequence is
 /// part of the contract — if you change it, also bump
@@ -440,6 +690,233 @@ mod tests {
         assert!(
             body.contains(user),
             "user content survives 3 audit runs verbatim"
+        );
+    }
+
+    fn templates_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../templates")
+    }
+
+    #[test]
+    fn zero_detected_agents_installs_only_shared_agents_entry() {
+        let tmp = TempDir::new().unwrap();
+        let detected = detect_agent_adapters(tmp.path());
+        assert!(detected.is_empty());
+
+        let report = install_detected_agent_files(tmp.path(), &templates_root(), &detected);
+        assert!(report.failed.is_empty(), "{:?}", report.failed);
+        assert_eq!(report.created, vec!["AGENTS.md"]);
+
+        for absent in [
+            "CLAUDE.md",
+            "GEMINI.md",
+            ".cursorrules",
+            ".cursor/rules/repo-instructions.mdc",
+            ".windsurfrules",
+            ".clinerules",
+            ".github/copilot-instructions.md",
+            ".kiro/steering/instructions.md",
+            ".vibe/instructions.md",
+        ] {
+            assert!(!tmp.path().join(absent).exists(), "created absent {absent}");
+        }
+    }
+
+    #[test]
+    fn subset_detection_installs_only_matching_adapter_files() {
+        let tmp = TempDir::new().unwrap();
+        write(&tmp.path().join("CLAUDE.md"), "# User Claude rules\n");
+        write(
+            &tmp.path().join(".cursor/rules/existing.mdc"),
+            "existing Cursor rule",
+        );
+
+        let detected = detect_agent_adapters(tmp.path());
+        assert_eq!(
+            detected,
+            BTreeSet::from([AgentAdapter::ClaudeCode, AgentAdapter::Cursor])
+        );
+        let report = install_detected_agent_files(tmp.path(), &templates_root(), &detected);
+        assert!(report.failed.is_empty(), "{:?}", report.failed);
+        assert_eq!(
+            report.created,
+            vec![
+                "AGENTS.md",
+                ".cursorrules",
+                ".cursor/rules/repo-instructions.mdc"
+            ]
+        );
+        assert!(report.already_present.contains(&"CLAUDE.md".to_string()));
+        assert!(!tmp.path().join("GEMINI.md").exists());
+        assert!(!tmp.path().join(".windsurfrules").exists());
+        assert!(!tmp.path().join(".github/copilot-instructions.md").exists());
+
+        for relative in report.created {
+            let body = fs::read_to_string(tmp.path().join(relative)).unwrap();
+            assert!(!body.contains("{{"), "raw placeholder in {body}");
+            assert!(!body.contains("ai/index.md"), "legacy pointer in {body}");
+            assert!(!body.contains("[ex:"), "generic command example in {body}");
+        }
+    }
+
+    #[test]
+    fn all_supported_agent_signals_map_to_the_complete_template_set() {
+        let tmp = TempDir::new().unwrap();
+        for signal in [
+            "CLAUDE.md",
+            "GEMINI.md",
+            ".cursorrules",
+            ".windsurfrules",
+            ".clinerules",
+            ".github/copilot-instructions.md",
+            ".kiro/steering/existing.md",
+            ".vibe/instructions.md",
+        ] {
+            write(&tmp.path().join(signal), "present");
+        }
+        let detected = detect_agent_adapters(tmp.path());
+        assert_eq!(detected.len(), 8);
+        assert_eq!(
+            desired_agent_template_paths(&detected),
+            vec![
+                "AGENTS.md",
+                "CLAUDE.md",
+                "GEMINI.md",
+                ".cursorrules",
+                ".cursor/rules/repo-instructions.mdc",
+                ".windsurfrules",
+                ".clinerules",
+                ".github/copilot-instructions.md",
+                ".kiro/steering/instructions.md",
+                ".vibe/instructions.md",
+            ]
+        );
+    }
+
+    #[test]
+    fn configured_launch_agents_map_only_to_supported_repository_adapters() {
+        assert_eq!(
+            adapter_for_agent_type(&crate::models::AgentType::ClaudeCode),
+            Some(AgentAdapter::ClaudeCode)
+        );
+        assert_eq!(
+            adapter_for_agent_type(&crate::models::AgentType::GeminiCli),
+            Some(AgentAdapter::GeminiCli)
+        );
+        assert_eq!(
+            adapter_for_agent_type(&crate::models::AgentType::Kiro),
+            Some(AgentAdapter::Kiro)
+        );
+        assert_eq!(
+            adapter_for_agent_type(&crate::models::AgentType::Vibe),
+            Some(AgentAdapter::Vibe)
+        );
+        assert_eq!(
+            adapter_for_agent_type(&crate::models::AgentType::CopilotCli),
+            Some(AgentAdapter::Copilot)
+        );
+        for shared_only in [
+            crate::models::AgentType::Codex,
+            crate::models::AgentType::Ollama,
+            crate::models::AgentType::LiteLlm,
+            crate::models::AgentType::Nvidia,
+            crate::models::AgentType::Custom,
+        ] {
+            assert_eq!(adapter_for_agent_type(&shared_only), None);
+        }
+    }
+
+    #[test]
+    fn kronn_mcp_settings_alone_do_not_enable_kiro_adapter() {
+        let tmp = TempDir::new().unwrap();
+        write(
+            &tmp.path().join(".kiro/settings/mcp.json"),
+            r#"{"mcpServers":{}}"#,
+        );
+        let detected = detect_agent_adapters(tmp.path());
+        assert!(!detected.contains(&AgentAdapter::Kiro));
+        assert_eq!(desired_agent_template_paths(&detected), vec!["AGENTS.md"]);
+    }
+
+    #[test]
+    fn rendered_adapter_uses_honest_fallbacks_without_placeholders() {
+        let tmp = TempDir::new().unwrap();
+        let template = fs::read_to_string(templates_root().join("CLAUDE.md")).unwrap();
+        let rendered = render_agent_template(tmp.path(), &template).unwrap();
+        assert!(!rendered.contains("{{"), "{rendered}");
+        assert!(!rendered.contains("[ex:"), "{rendered}");
+        assert!(rendered.contains("docs/AGENTS.md"));
+        assert!(!rendered.contains("ai/index.md"));
+    }
+
+    #[test]
+    fn complete_fixture_output_has_no_placeholder_legacy_path_or_example_command() {
+        let tmp = TempDir::new().unwrap();
+        let detected = BTreeSet::from([
+            AgentAdapter::ClaudeCode,
+            AgentAdapter::GeminiCli,
+            AgentAdapter::Cursor,
+            AgentAdapter::Windsurf,
+            AgentAdapter::Cline,
+            AgentAdapter::Copilot,
+            AgentAdapter::Kiro,
+            AgentAdapter::Vibe,
+        ]);
+        let report = install_detected_agent_files(tmp.path(), &templates_root(), &detected);
+        assert!(report.failed.is_empty(), "{:?}", report.failed);
+        assert_eq!(report.created.len(), 10);
+        for relative in report.created {
+            let body = fs::read_to_string(tmp.path().join(&relative)).unwrap();
+            assert!(!body.contains("{{"), "placeholder in {relative}: {body}");
+            assert!(!body.contains("ai/"), "legacy path in {relative}: {body}");
+            assert!(!body.contains("[ex:"), "example in {relative}: {body}");
+        }
+    }
+
+    #[test]
+    fn upgrade_repairs_only_recognized_template_ranges_and_preserves_user_bytes() {
+        let tmp = TempDir::new().unwrap();
+        let old_template = fs::read_to_string(templates_root().join("CLAUDE.md"))
+            .unwrap()
+            .replace(
+                "Test: {{TEST_CMD}}",
+                "Test: {{TEST_CMD}} [ex: \"cargo test && npm test\"]",
+            )
+            .replace(
+                "Lint: {{LINT_CMD}}",
+                "Lint: {{LINT_CMD}} [ex: \"cargo clippy && npx tsc --noEmit\"]",
+            );
+        let prefix = "<!-- user prefix stays -->\n";
+        let suffix = "\n## User rules\nKeep {{USER_TOKEN}} byte-identical.\n";
+        write(
+            &tmp.path().join("CLAUDE.md"),
+            &format!("{prefix}{old_template}{suffix}"),
+        );
+
+        let detected = detect_agent_adapters(tmp.path());
+        let report = install_detected_agent_files(tmp.path(), &templates_root(), &detected);
+        assert!(report.failed.is_empty(), "{:?}", report.failed);
+        assert!(report.updated.contains(&"CLAUDE.md".to_string()));
+        let body = fs::read_to_string(tmp.path().join("CLAUDE.md")).unwrap();
+        assert!(body.starts_with(prefix));
+        assert!(body.ends_with(suffix));
+        assert!(!body.contains("{{DO_NOT_1}}"));
+        assert!(!body.contains("{{TEST_CMD}}"));
+        assert!(!body.contains("[ex:"));
+        assert!(body.contains("{{USER_TOKEN}}"));
+    }
+
+    #[test]
+    fn upgrade_does_not_rewrite_unmarked_user_file() {
+        let tmp = TempDir::new().unwrap();
+        let user = "# User template\nTest: {{TEST_CMD}}\n- {{DO_NOT_1}}\n";
+        write(&tmp.path().join("CLAUDE.md"), user);
+        let detected = detect_agent_adapters(tmp.path());
+        let report = install_detected_agent_files(tmp.path(), &templates_root(), &detected);
+        assert!(report.updated.is_empty());
+        assert_eq!(
+            fs::read_to_string(tmp.path().join("CLAUDE.md")).unwrap(),
+            user
         );
     }
 }

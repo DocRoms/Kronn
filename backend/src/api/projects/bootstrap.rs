@@ -52,6 +52,7 @@ pub async fn bootstrap(
     let project_path_str = format!("{}/{}", parent_dir.trim_end_matches('/'), dir_name);
     let description = req.description.clone();
     let agent_type = req.agent;
+    let configured_adapter = crate::core::root_agent_files::adapter_for_agent_type(&agent_type);
 
     // 2. Create directory + git init on blocking thread
     let setup_result = tokio::task::spawn_blocking({
@@ -125,24 +126,21 @@ pub async fn bootstrap(
                 {
                     tracing::warn!("docs index not installed: {e}");
                 }
-                for filename in crate::api::audit::AUDIT_REDIRECTOR_FILES {
-                    let src = template_dir.join(filename);
-                    let dst = project_path.join(filename);
-                    if src.exists() && !dst.exists() {
-                        if let Some(parent) = dst.parent() {
-                            let _ = std::fs::create_dir_all(parent);
-                        }
-                        let _ = std::fs::copy(&src, &dst);
-                    }
+                // A brand-new repository starts with no filesystem signal.
+                // Install the shared entry plus the adapter explicitly chosen
+                // for this bootstrap, when that provider has one.
+                let mut detected =
+                    crate::core::root_agent_files::detect_agent_adapters(&project_path);
+                if let Some(adapter) = configured_adapter {
+                    detected.insert(adapter);
                 }
-                // Kiro steering (nested path, not in super::audit::AUDIT_REDIRECTOR_FILES)
-                let kiro_src = template_dir.join(".kiro/steering/instructions.md");
-                let kiro_dst = project_path.join(".kiro/steering/instructions.md");
-                if kiro_src.exists() && !kiro_dst.exists() {
-                    // Safety: kiro_dst is a multi-segment path (.kiro/steering/instructions.md), parent() cannot be None
-                    let _ =
-                        std::fs::create_dir_all(kiro_dst.parent().expect("kiro_dst has a parent"));
-                    let _ = std::fs::copy(&kiro_src, &kiro_dst);
+                let report = crate::core::root_agent_files::install_detected_agent_files(
+                    &project_path,
+                    &template_dir,
+                    &detected,
+                );
+                for failure in report.failed {
+                    tracing::warn!("Agent instruction install failed: {failure}");
                 }
             }
 
