@@ -311,6 +311,7 @@ pub struct KronnLock {
 #[serde(deny_unknown_fields)]
 struct LockApprovals {
     version: u32,
+    canonical_project_sha256: String,
     approved_lock_sha256: String,
 }
 
@@ -752,10 +753,7 @@ fn collect_locked_files(root: &Path, directory: &Path) -> Result<BTreeMap<String
                 path.strip_prefix(root)
                     .map_err(|_| "file escaped .agents")?,
             )?;
-            if matches!(
-                relative.as_str(),
-                "kronn.lock" | ".kronn-sync.json" | ".kronn-approvals.json"
-            ) {
+            if matches!(relative.as_str(), "kronn.lock" | ".kronn-sync.json") {
                 continue;
             }
             files.insert(
@@ -771,36 +769,85 @@ fn collect_locked_files(root: &Path, directory: &Path) -> Result<BTreeMap<String
 }
 
 pub fn approve_lock(project_root: &Path) -> Result<(), String> {
+    let trust_dir = crate::core::config::config_dir()
+        .map_err(|e| format!("cannot determine Kronn config directory: {e}"))?
+        .join("trust/portable-library");
+    approve_lock_at(project_root, &trust_dir)
+}
+
+fn canonical_project_identity(project_root: &Path) -> Result<String, String> {
+    let canonical = project_root.canonicalize().map_err(|e| {
+        format!(
+            "cannot resolve project root '{}': {e}",
+            project_root.display()
+        )
+    })?;
+    #[cfg(unix)]
+    let identity = {
+        use std::os::unix::ffi::OsStrExt;
+        sha256(canonical.as_os_str().as_bytes())
+    };
+    #[cfg(windows)]
+    let identity = {
+        use std::os::windows::ffi::OsStrExt;
+        let bytes: Vec<u8> = canonical
+            .as_os_str()
+            .encode_wide()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        sha256(&bytes)
+    };
+    Ok(identity)
+}
+
+fn approval_path(project_root: &Path, trust_dir: &Path) -> Result<(PathBuf, String), String> {
+    let identity = canonical_project_identity(project_root)?;
+    Ok((trust_dir.join(format!("{identity}.json")), identity))
+}
+
+fn approve_lock_at(project_root: &Path, trust_dir: &Path) -> Result<(), String> {
     check_frozen_hash(project_root)?;
     let root = project_root.join(".agents");
+    let (approval_path, canonical_project_sha256) = approval_path(project_root, trust_dir)?;
     let approval = LockApprovals {
         version: CONTRACT_VERSION,
+        canonical_project_sha256,
         approved_lock_sha256: sha256(
             &fs::read(root.join("kronn.lock"))
                 .map_err(|e| format!("cannot read kronn.lock: {e}"))?,
         ),
     };
-    crate::core::mcp_scanner::atomic_write_bytes(
-        &root.join(".kronn-approvals.json"),
-        &canonical_json(&approval)?,
-    )
-    .map_err(|e| format!("cannot record TOFU approval: {e}"))
+    fs::create_dir_all(trust_dir)
+        .map_err(|e| format!("cannot create TOFU trust directory: {e}"))?;
+    crate::core::mcp_scanner::atomic_write_bytes(&approval_path, &canonical_json(&approval)?)
+        .map_err(|e| format!("cannot record TOFU approval: {e}"))
 }
 
 fn require_lock_approval(project_root: &Path) -> Result<(), String> {
+    let trust_dir = crate::core::config::config_dir()
+        .map_err(|e| format!("cannot determine Kronn config directory: {e}"))?
+        .join("trust/portable-library");
+    require_lock_approval_at(project_root, &trust_dir)
+}
+
+fn require_lock_approval_at(project_root: &Path, trust_dir: &Path) -> Result<(), String> {
     check_frozen_hash(project_root)?;
     let root = project_root.join(".agents");
+    let (approval_path, canonical_project_sha256) = approval_path(project_root, trust_dir)?;
     let approval: LockApprovals =
-        serde_json::from_slice(&fs::read(root.join(".kronn-approvals.json")).map_err(|_| {
+        serde_json::from_slice(&fs::read(approval_path).map_err(|_| {
             "TOFU approval required; run 'kronn check --approve' first".to_string()
         })?)
         .map_err(|e| format!("invalid TOFU approval: {e}"))?;
     let lock_hash = sha256(
         &fs::read(root.join("kronn.lock")).map_err(|e| format!("cannot read kronn.lock: {e}"))?,
     );
-    if approval.version != CONTRACT_VERSION || approval.approved_lock_sha256 != lock_hash {
+    if approval.version != CONTRACT_VERSION
+        || approval.canonical_project_sha256 != canonical_project_sha256
+        || approval.approved_lock_sha256 != lock_hash
+    {
         return Err(
-            "TOFU approval is stale after a lock hash change; run 'kronn check --approve' again"
+            "TOFU approval is stale or belongs to a different project; run 'kronn check --approve' again"
                 .into(),
         );
     }
@@ -2504,28 +2551,62 @@ mod tests {
 
         fs::write(target.join(".agents/unlocked.txt"), "unexpected").unwrap();
         assert!(check_frozen_hash(&target).unwrap_err().contains("added:"));
+
+        fs::remove_file(target.join(".agents/unlocked.txt")).unwrap();
+        fs::write(target.join(".agents/.kronn-approvals.json"), "untrusted").unwrap();
+        assert!(check_frozen_hash(&target).unwrap_err().contains("added:"));
     }
 
     #[test]
     fn tofu_approval_is_hash_bound_and_cannot_be_replayed_after_change() {
         let source = temp("approval-source");
         let target = temp("approval-target");
+        let trust = temp("approval-trust");
         skill(&source, "one", "v1");
         sync(&discover(Some(&source), None).unwrap(), &target).unwrap();
 
-        assert!(require_lock_approval(&target)
+        assert!(require_lock_approval_at(&target, &trust)
             .unwrap_err()
             .contains("TOFU approval required"));
-        approve_lock(&target).unwrap();
-        require_lock_approval(&target).unwrap();
+        approve_lock_at(&target, &trust).unwrap();
+        require_lock_approval_at(&target, &trust).unwrap();
 
         skill(&source, "one", "v2");
         sync(&discover(Some(&source), None).unwrap(), &target).unwrap();
-        assert!(require_lock_approval(&target)
+        assert!(require_lock_approval_at(&target, &trust)
             .unwrap_err()
             .contains("stale"));
-        approve_lock(&target).unwrap();
-        require_lock_approval(&target).unwrap();
+        approve_lock_at(&target, &trust).unwrap();
+        require_lock_approval_at(&target, &trust).unwrap();
+    }
+
+    #[test]
+    fn tofu_approval_cannot_be_replayed_between_identical_projects() {
+        let source = temp("approval-replay-source");
+        let first = temp("approval-replay-first");
+        let second = temp("approval-replay-second");
+        let trust = temp("approval-replay-trust");
+        skill(&source, "one", "v1");
+        let catalog = discover(Some(&source), None).unwrap();
+        sync(&catalog, &first).unwrap();
+        sync(&catalog, &second).unwrap();
+
+        assert_eq!(
+            fs::read(first.join(".agents/kronn.lock")).unwrap(),
+            fs::read(second.join(".agents/kronn.lock")).unwrap()
+        );
+        approve_lock_at(&first, &trust).unwrap();
+        require_lock_approval_at(&first, &trust).unwrap();
+        assert!(require_lock_approval_at(&second, &trust)
+            .unwrap_err()
+            .contains("TOFU approval required"));
+
+        let (first_approval, _) = approval_path(&first, &trust).unwrap();
+        let (second_approval, _) = approval_path(&second, &trust).unwrap();
+        fs::copy(first_approval, second_approval).unwrap();
+        assert!(require_lock_approval_at(&second, &trust)
+            .unwrap_err()
+            .contains("stale"));
     }
 
     #[test]
