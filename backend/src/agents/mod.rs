@@ -1119,7 +1119,6 @@ mod tests {
         for agent in [
             AgentType::ClaudeCode,
             AgentType::Codex,
-            AgentType::GeminiCli,
             AgentType::Kiro,
             AgentType::CopilotCli,
             AgentType::Ollama,
@@ -1128,6 +1127,46 @@ mod tests {
             assert!(status.ready, "{agent:?}");
             assert_eq!(status.setup_command, None, "{agent:?}");
         }
+    }
+
+    #[test]
+    #[serial]
+    fn gemini_without_auth_reports_setup_requirement() {
+        const AUTH_ENV: [&str; 8] = [
+            "GEMINI_API_KEY",
+            "GOOGLE_API_KEY",
+            "GOOGLE_APPLICATION_CREDENTIALS",
+            "GOOGLE_GENAI_USE_VERTEXAI",
+            "GOOGLE_CLOUD_PROJECT",
+            "GOOGLE_CLOUD_LOCATION",
+            "GOOGLE_GENAI_USE_GCA",
+            "GEMINI_CLI_USE_COMPUTE_ADC",
+        ];
+        let temp = tempfile::tempdir().unwrap();
+        let original_home = std::env::var_os("KRONN_HOST_HOME");
+        let original_auth = AUTH_ENV.map(|name| std::env::var_os(name));
+        std::env::set_var("KRONN_HOST_HOME", temp.path());
+        for name in AUTH_ENV {
+            std::env::remove_var(name);
+        }
+
+        let mut config = crate::core::config::default_config();
+        config.tokens.disabled_overrides.push("google".to_string());
+        let status = agent_auth_status(&AgentType::GeminiCli, &config);
+
+        match original_home {
+            Some(value) => std::env::set_var("KRONN_HOST_HOME", value),
+            None => std::env::remove_var("KRONN_HOST_HOME"),
+        }
+        for (name, value) in AUTH_ENV.into_iter().zip(original_auth) {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+
+        assert!(!status.ready);
+        assert_eq!(status.setup_command, Some("gemini"));
     }
 
     #[test]
