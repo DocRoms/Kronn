@@ -5578,6 +5578,34 @@ Suite de la réponse.";
     }
 
     #[test]
+    fn claude_task_worker_version_requires_internal_e2big_recovery() {
+        let error = super::super::claude_task_worker_version_result(b"2.1.246 (Claude Code)", true)
+            .unwrap_err();
+        assert!(error.contains("sandbox E2BIG recovery"));
+        assert!(error.contains("minimum 2.1.247"));
+        assert!(error.contains("task_exec_reassign"));
+
+        assert_eq!(
+            super::super::claude_task_worker_version_result(b"2.1.247 (Claude Code)", true,),
+            Ok(())
+        );
+        assert_eq!(
+            super::super::claude_task_worker_version_result(b"2.2.0 (Claude Code)", true,),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn claude_task_worker_version_reassigns_on_unrecognized_output_without_leaking_it() {
+        let error =
+            super::super::claude_task_worker_version_result(b"malformed must-not-leak", true)
+                .unwrap_err();
+        assert!(error.contains("unrecognized response"));
+        assert!(error.contains("task_exec_reassign"));
+        assert!(!error.contains("must-not-leak"));
+    }
+
+    #[test]
     fn claude_task_worker_auth_probe_reassigns_when_logged_out() {
         let error = super::super::claude_task_worker_auth_result(
             br#"{"loggedIn":false,"account":"must-not-leak"}"#,

@@ -33,15 +33,24 @@ pub const LATEST_RTK_VERSION: &str = "0.37.2";
 pub const RTK_UPDATE_CMD: &str =
     "curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/main/install.sh | sh";
 
+/// First Claude Code build accepted for punctual task workers.
+///
+/// Earlier builds can overflow the macOS sandbox command when many unrelated
+/// Git worktrees are registered on the host. 2.1.247 is the first locally
+/// verified build whose native binary contains an E2BIG argument-shrinking
+/// recovery. Ordinary discussions keep their existing compatibility policy;
+/// this gate is specific to sandboxed task workers that require Bash.
+pub const MIN_CLAUDE_TASK_WORKER_VERSION: &str = "2.1.247";
+
 /// Latest known versions of the agent CLIs Kronn detects. Source of truth:
 /// each vendor's release page / npm registry. Pairs (agent → version).
 ///
 /// Bumped per Kronn release; see `docs/AGENTS.md` for the bump checklist.
-/// Captured 2026-08-19.
+/// Captured 2026-08-28.
 pub fn latest_known_agent_version(agent_type: &AgentType) -> Option<&'static str> {
     match agent_type {
         // @anthropic-ai/claude-code on npm
-        AgentType::ClaudeCode => Some("2.1.235"),
+        AgentType::ClaudeCode => Some("2.1.247"),
         // @openai/codex on npm
         AgentType::Codex => Some("0.148.0"),
         // mistral-vibe on PyPI

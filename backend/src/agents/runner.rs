@@ -7059,6 +7059,33 @@ fn claude_task_worker_auth_result(stdout: &[u8], exit_success: bool) -> Result<(
     }
 }
 
+fn claude_task_worker_version_result(stdout: &[u8], exit_success: bool) -> Result<(), String> {
+    let raw = std::str::from_utf8(stdout).unwrap_or_default();
+    let version = regex_lite::Regex::new(r"\d+\.\d+\.\d+")
+        .ok()
+        .and_then(|regex| regex.find(raw))
+        .map(|matched| matched.as_str());
+    let minimum = crate::core::versions::MIN_CLAUDE_TASK_WORKER_VERSION;
+
+    match (version, exit_success) {
+        (Some(version), true) if !crate::core::versions::update_available(version, minimum) => {
+            Ok(())
+        }
+        (Some(version), true) => Err(format!(
+            "Claude task worker cannot start: Claude Code {version} predates the sandbox E2BIG \
+             recovery required for hosts with many Git worktrees (minimum {minimum}). Update \
+             Claude Code, or use `task_exec_reassign` to move this execution to another \
+             available worker."
+        )),
+        _ => Err(
+            "Claude task worker cannot start: `claude --version` returned an unrecognized \
+             response. Verify or update the local Claude CLI; if it remains unavailable, use \
+             `task_exec_reassign` to move this execution to another available worker."
+                .to_string(),
+        ),
+    }
+}
+
 async fn run_claude_task_worker_auth_probe(
     resolved: (String, Vec<String>, bool),
     work_dir: &Path,
@@ -7079,6 +7106,49 @@ async fn probe_claude_task_worker_auth(
     npx_package: Option<&str>,
     work_dir: &Path,
 ) -> Result<(), String> {
+    let version_args = vec!["--version".to_string()];
+    let direct_version = resolve_agent_invocation(binary, None, &version_args);
+    let version_output = match direct_version {
+        Ok(resolved) => match run_claude_task_worker_auth_probe(resolved, work_dir).await {
+            Ok(output) => output,
+            Err(direct_error) => {
+                let Some(package) = npx_package else {
+                    return Err(claude_task_worker_probe_spawn_diagnostic(
+                        "version",
+                        &direct_error,
+                    ));
+                };
+                let fallback = resolve_agent_invocation(binary, Some(package), &version_args)
+                    .map_err(|_| {
+                        claude_task_worker_probe_spawn_diagnostic("version", &direct_error)
+                    })?;
+                run_claude_task_worker_auth_probe(fallback, work_dir)
+                    .await
+                    .map_err(|error| claude_task_worker_probe_spawn_diagnostic("version", &error))?
+            }
+        },
+        Err(direct_error) => {
+            let Some(package) = npx_package else {
+                return Err(format!(
+                    "{direct_error}. Use `task_exec_reassign` to move this execution to another \
+                     available worker."
+                ));
+            };
+            let fallback = resolve_agent_invocation(binary, Some(package), &version_args).map_err(
+                |error| {
+                    format!(
+                        "{error}. Use `task_exec_reassign` to move this execution to another \
+                         available worker."
+                    )
+                },
+            )?;
+            run_claude_task_worker_auth_probe(fallback, work_dir)
+                .await
+                .map_err(|error| claude_task_worker_probe_spawn_diagnostic("version", &error))?
+        }
+    };
+    claude_task_worker_version_result(&version_output.stdout, version_output.status.success())?;
+
     let auth_args = vec!["auth".to_string(), "status".to_string()];
     let direct = resolve_agent_invocation(binary, None, &auth_args);
     let output = match direct {
@@ -7086,13 +7156,20 @@ async fn probe_claude_task_worker_auth(
             Ok(output) => output,
             Err(direct_error) => {
                 let Some(package) = npx_package else {
-                    return Err(claude_task_worker_auth_spawn_diagnostic(&direct_error));
+                    return Err(claude_task_worker_probe_spawn_diagnostic(
+                        "authentication",
+                        &direct_error,
+                    ));
                 };
                 let fallback = resolve_agent_invocation(binary, Some(package), &auth_args)
-                    .map_err(|_| claude_task_worker_auth_spawn_diagnostic(&direct_error))?;
+                    .map_err(|_| {
+                        claude_task_worker_probe_spawn_diagnostic("authentication", &direct_error)
+                    })?;
                 run_claude_task_worker_auth_probe(fallback, work_dir)
                     .await
-                    .map_err(|error| claude_task_worker_auth_spawn_diagnostic(&error))?
+                    .map_err(|error| {
+                        claude_task_worker_probe_spawn_diagnostic("authentication", &error)
+                    })?
             }
         },
         Err(direct_error) => {
@@ -7111,16 +7188,18 @@ async fn probe_claude_task_worker_auth(
                 })?;
             run_claude_task_worker_auth_probe(fallback, work_dir)
                 .await
-                .map_err(|error| claude_task_worker_auth_spawn_diagnostic(&error))?
+                .map_err(|error| {
+                    claude_task_worker_probe_spawn_diagnostic("authentication", &error)
+                })?
         }
     };
 
     claude_task_worker_auth_result(&output.stdout, output.status.success())
 }
 
-fn claude_task_worker_auth_spawn_diagnostic(error: &std::io::Error) -> String {
+fn claude_task_worker_probe_spawn_diagnostic(probe: &str, error: &std::io::Error) -> String {
     format!(
-        "Claude task worker cannot start: the `claude auth status` preflight could not run \
+        "Claude task worker cannot start: the Claude {probe} preflight could not run \
          ({error}). Use `task_exec_reassign` to move this execution to another available worker."
     )
 }
