@@ -49,6 +49,36 @@ pub struct KronnSidecar {
     pub data: Option<Value>,
 }
 
+/// Typed input contract stored in a Quick Prompt's Kronn sidecar. The
+/// third-party-facing `SKILL.md` deliberately stays a plain Agent Skill.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QuickPromptInputKind {
+    Boolean,
+    Number,
+    String,
+    List,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QuickPromptInput {
+    pub name: String,
+    pub kind: QuickPromptInputKind,
+    #[serde(default)]
+    pub required: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QuickPromptSkillData {
+    pub schema_version: u32,
+    pub quick_prompt: crate::models::QuickPrompt,
+    pub inputs: Vec<QuickPromptInput>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct LibraryItem {
     pub kind: LibraryKind,
@@ -153,13 +183,7 @@ fn scan_root(root: &Path, scope: LibraryScope) -> Result<Vec<LibraryItem>, Strin
     let mut out = Vec::new();
     scan_skills(&root, scope, &mut out)?;
     scan_json_kind(&root, scope, LibraryKind::Directive, "directives", &mut out)?;
-    scan_json_kind(
-        &root,
-        scope,
-        LibraryKind::QuickPrompt,
-        "quick-prompts",
-        &mut out,
-    )?;
+    scan_legacy_quick_prompts(&root, scope, &mut out)?;
     scan_json_kind(&root, scope, LibraryKind::Workflow, "workflows", &mut out)?;
     Ok(out)
 }
@@ -189,14 +213,14 @@ fn scan_skills(root: &Path, scope: LibraryScope, out: &mut Vec<LibraryItem>) -> 
         validate_id(&id)?;
         validate_skill(&content, &id)?;
         let sidecar_path = folder.join("SKILL.kronn.json");
-        let sidecar = read_or_derive_sidecar(
-            &sidecar_path,
-            LibraryKind::Skill,
-            &id,
-            scope,
-            &relative,
-            &content,
-        )?;
+        let sidecar = read_or_derive_sidecar(&sidecar_path, &id, scope, &relative, &content)?;
+        if sidecar.kind == LibraryKind::QuickPrompt {
+            let data = quick_prompt_data(&sidecar)?;
+            if data.quick_prompt.id != id {
+                return Err(format!("Quick Prompt sidecar does not match '{id}'"));
+            }
+            validate_quick_prompt_inputs(&data.inputs)?;
+        }
         if scope == LibraryScope::Project && sidecar.provenance.scope == LibraryScope::Global {
             continue;
         }
@@ -205,7 +229,7 @@ fn scan_skills(root: &Path, scope: LibraryScope, out: &mut Vec<LibraryItem>) -> 
         auxiliary_files.remove(Path::new("SKILL.md"));
         auxiliary_files.remove(Path::new("SKILL.kronn.json"));
         out.push(LibraryItem {
-            kind: LibraryKind::Skill,
+            kind: sidecar.kind,
             id,
             scope,
             relative_path: relative,
@@ -273,9 +297,71 @@ fn scan_json_kind(
     Ok(())
 }
 
+fn scan_legacy_quick_prompts(
+    root: &Path,
+    scope: LibraryScope,
+    out: &mut Vec<LibraryItem>,
+) -> Result<(), String> {
+    let dir = root.join("quick-prompts");
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return Ok(());
+    };
+    let mut entries: Vec<_> = entries.flatten().collect();
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let path = entry.path();
+        if !path.is_file() || path.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        let raw = fs::read(&path).map_err(|e| format!("cannot read legacy QP: {e}"))?;
+        reject_secrets(&raw)?;
+        let sidecar: KronnSidecar =
+            serde_json::from_slice(&raw).map_err(|e| format!("invalid legacy QP: {e}"))?;
+        let Some(id) = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.strip_suffix(".kronn.json"))
+            .map(str::to_owned)
+        else {
+            continue;
+        };
+        if sidecar.version != CONTRACT_VERSION
+            || sidecar.kind != LibraryKind::QuickPrompt
+            || sidecar.id != id
+        {
+            return Err(format!("legacy QP does not match '{id}'"));
+        }
+        validate_portable_source(&sidecar.provenance.source)?;
+        if scope == LibraryScope::Project && sidecar.provenance.scope == LibraryScope::Global {
+            continue;
+        }
+        // A materialized skill wins over its legacy source. This makes the
+        // migration idempotent after the first sync.
+        if root.join("skills").join(&id).join("SKILL.md").is_file() {
+            continue;
+        }
+        let data = sidecar
+            .data
+            .clone()
+            .ok_or_else(|| format!("legacy QP '{id}' has no data"))?;
+        let (prompt, inputs) = match serde_json::from_value::<QuickPromptSkillData>(data.clone()) {
+            Ok(portable) => (portable.quick_prompt, portable.inputs),
+            Err(_) => {
+                let prompt: crate::models::QuickPrompt = serde_json::from_value(data)
+                    .map_err(|e| format!("invalid legacy QP '{id}': {e}"))?;
+                let inputs = legacy_inputs(&prompt);
+                (prompt, inputs)
+            }
+        };
+        let mut item =
+            quick_prompt_to_skill_with_inputs(&prompt, inputs, sidecar.provenance.scope)?;
+        item.scope = scope;
+        out.push(item);
+    }
+    Ok(())
+}
 fn read_or_derive_sidecar(
     path: &Path,
-    kind: LibraryKind,
     id: &str,
     scope: LibraryScope,
     relative: &Path,
@@ -288,7 +374,7 @@ fn read_or_derive_sidecar(
     if !path.exists() {
         return Ok(KronnSidecar {
             version: CONTRACT_VERSION,
-            kind,
+            kind: LibraryKind::Skill,
             id: id.to_string(),
             provenance: Provenance {
                 scope,
@@ -302,8 +388,11 @@ fn read_or_derive_sidecar(
     reject_secrets(&raw)?;
     let mut sidecar: KronnSidecar =
         serde_json::from_slice(&raw).map_err(|e| format!("invalid skill sidecar: {e}"))?;
-    if sidecar.version != CONTRACT_VERSION || sidecar.kind != kind || sidecar.id != id {
+    if sidecar.version != CONTRACT_VERSION || sidecar.id != id {
         return Err(format!("skill sidecar does not match '{id}'"));
+    }
+    if sidecar.kind != LibraryKind::Skill && sidecar.kind != LibraryKind::QuickPrompt {
+        return Err(format!("skill sidecar has invalid kind {:?}", sidecar.kind));
     }
     validate_portable_source(&sidecar.provenance.source)?;
     // Keep the recorded origin scope (no global->project promotion); refresh the
@@ -312,7 +401,6 @@ fn read_or_derive_sidecar(
     sidecar.provenance.content_sha256 = content_sha256;
     Ok(sidecar)
 }
-
 /// Materialize the effective catalog into `target/.agents`. Only files listed
 /// in the previous managed manifest can be deleted; unrelated user files and
 /// Agent Skills auxiliary resources are preserved.
@@ -326,13 +414,13 @@ pub fn sync(catalog: &LibraryCatalog, target: &Path) -> Result<SyncReport, Strin
         let base = export_relative_path(item);
         desired.insert(
             portable_path(&base)?,
-            if item.kind == LibraryKind::Skill {
+            if uses_skill_layout(item) {
                 item.content.clone()
             } else {
                 canonical_json(&item.sidecar)?
             },
         );
-        if item.kind == LibraryKind::Skill {
+        if uses_skill_layout(item) {
             let sidecar_path = base.parent().unwrap().join("SKILL.kronn.json");
             desired.insert(
                 portable_path(&sidecar_path)?,
@@ -418,11 +506,318 @@ fn export_relative_path(item: &LibraryItem) -> PathBuf {
         LibraryKind::Directive => {
             PathBuf::from("directives").join(format!("{}.kronn.json", item.id))
         }
-        LibraryKind::QuickPrompt => {
-            PathBuf::from("quick-prompts").join(format!("{}.kronn.json", item.id))
-        }
+        LibraryKind::QuickPrompt => PathBuf::from("skills").join(&item.id).join("SKILL.md"),
         LibraryKind::Workflow => PathBuf::from("workflows").join(format!("{}.kronn.json", item.id)),
     }
+}
+
+fn uses_skill_layout(item: &LibraryItem) -> bool {
+    matches!(item.kind, LibraryKind::Skill | LibraryKind::QuickPrompt)
+}
+
+/// Convert an existing Quick Prompt to the portable Agent Skill layout. Legacy
+/// variables become required string inputs, preserving their previous runtime
+/// semantics while allowing new sidecars to opt into richer types/defaults.
+pub fn quick_prompt_to_skill(
+    prompt: &crate::models::QuickPrompt,
+    scope: LibraryScope,
+) -> Result<LibraryItem, String> {
+    quick_prompt_to_skill_with_inputs(prompt, legacy_inputs(prompt), scope)
+}
+
+pub fn quick_prompt_to_skill_with_inputs(
+    prompt: &crate::models::QuickPrompt,
+    inputs: Vec<QuickPromptInput>,
+    scope: LibraryScope,
+) -> Result<LibraryItem, String> {
+    validate_id(&prompt.id)?;
+    validate_quick_prompt_inputs(&inputs)?;
+    let declared: BTreeSet<_> = inputs.iter().map(|input| input.name.as_str()).collect();
+    for variable in &prompt.variables {
+        if !declared.contains(variable.name.as_str()) {
+            return Err(format!(
+                "Quick Prompt variable '{}' has no portable input declaration",
+                variable.name
+            ));
+        }
+    }
+
+    let description = if prompt.description.trim().is_empty() {
+        format!("Kronn Quick Prompt: {}", prompt.name.trim())
+    } else {
+        prompt.description.replace(['\r', '\n'], " ")
+    };
+    let description: String = description.chars().take(1024).collect();
+    let yaml_description = serde_json::to_string(&description)
+        .map_err(|e| format!("cannot encode Quick Prompt description: {e}"))?;
+    let content = format!(
+        "---\nname: {}\ndescription: {}\n---\n{}",
+        prompt.id, yaml_description, prompt.prompt_template
+    )
+    .into_bytes();
+    validate_skill(&content, &prompt.id)?;
+
+    let relative_path = PathBuf::from("skills").join(&prompt.id).join("SKILL.md");
+    let data = QuickPromptSkillData {
+        schema_version: CONTRACT_VERSION,
+        quick_prompt: prompt.clone(),
+        inputs,
+    };
+    let mut sidecar = KronnSidecar {
+        version: CONTRACT_VERSION,
+        kind: LibraryKind::QuickPrompt,
+        id: prompt.id.clone(),
+        provenance: Provenance {
+            scope,
+            source: portable_path(&relative_path)?,
+            content_sha256: sha256(&content),
+        },
+        data: Some(
+            serde_json::to_value(data)
+                .map_err(|e| format!("cannot encode Quick Prompt sidecar: {e}"))?,
+        ),
+    };
+    // Keep the same semantic-payload hash convention as every JSON sidecar.
+    // The SKILL.md hash remains available after discovery in `provenance`.
+    sidecar.provenance.content_sha256 = sha256(&content);
+    Ok(LibraryItem {
+        kind: LibraryKind::QuickPrompt,
+        id: prompt.id.clone(),
+        scope,
+        relative_path,
+        content,
+        sidecar,
+        auxiliary_files: BTreeMap::new(),
+    })
+}
+
+/// Reimport a Quick Prompt skill. The editable `SKILL.md` body is authoritative
+/// for the prompt text; all other legacy bindings round-trip through the
+/// sidecar's complete `QuickPrompt` snapshot.
+pub fn quick_prompt_from_skill(item: &LibraryItem) -> Result<crate::models::QuickPrompt, String> {
+    if item.kind != LibraryKind::QuickPrompt {
+        return Err("portable item is not a Quick Prompt".into());
+    }
+    validate_skill(&item.content, &item.id)?;
+    let data = quick_prompt_data(&item.sidecar)?;
+    validate_quick_prompt_inputs(&data.inputs)?;
+    if data.quick_prompt.id != item.id {
+        return Err(format!("Quick Prompt sidecar does not match '{}'", item.id));
+    }
+    let mut prompt = data.quick_prompt;
+    prompt.prompt_template = skill_body(&item.content)?.to_string();
+    Ok(prompt)
+}
+
+/// Render a parameterized Quick Prompt in one non-recursive pass. Literal
+/// placeholder-shaped text uses `{{{{name}}}}`; inserted values are never
+/// parsed again, so a value containing braces cannot create a second variable.
+pub fn render_quick_prompt_skill(
+    item: &LibraryItem,
+    supplied: &BTreeMap<String, Value>,
+) -> Result<String, String> {
+    if item.kind != LibraryKind::QuickPrompt {
+        return Err("portable item is not a Quick Prompt".into());
+    }
+    let data = quick_prompt_data(&item.sidecar)?;
+    validate_quick_prompt_inputs(&data.inputs)?;
+    let inputs: BTreeMap<_, _> = data
+        .inputs
+        .iter()
+        .map(|input| (input.name.as_str(), input))
+        .collect();
+    for name in supplied.keys() {
+        if !inputs.contains_key(name.as_str()) {
+            return Err(format!("unknown Quick Prompt variable '{name}'"));
+        }
+    }
+
+    let mut values = BTreeMap::<&str, String>::new();
+    for input in &data.inputs {
+        let value = supplied.get(&input.name).or(input.default.as_ref());
+        match value {
+            Some(value) => {
+                validate_input_value(input, value)?;
+                if input.required
+                    && ((input.kind == QuickPromptInputKind::String
+                        && value.as_str().unwrap().trim().is_empty())
+                        || (input.kind == QuickPromptInputKind::List
+                            && value.as_array().unwrap().is_empty()))
+                {
+                    return Err(format!(
+                        "missing required Quick Prompt variable '{}'",
+                        input.name
+                    ));
+                }
+                values.insert(&input.name, render_input_value(input.kind, value)?);
+            }
+            None if input.required => {
+                return Err(format!(
+                    "missing required Quick Prompt variable '{}'",
+                    input.name
+                ));
+            }
+            None => {
+                values.insert(&input.name, String::new());
+            }
+        }
+    }
+    for variable in &data.quick_prompt.variables {
+        let Some(pattern) = variable
+            .pattern
+            .as_deref()
+            .filter(|pattern| !pattern.trim().is_empty())
+        else {
+            continue;
+        };
+        let Some(value) = values.get(variable.name.as_str()) else {
+            continue;
+        };
+        match regex_lite::Regex::new(&format!("^(?:{pattern})$")) {
+            Ok(regex) if !value.is_empty() && !regex.is_match(value) => {
+                return Err(format!(
+                    "Quick Prompt variable '{}' does not match its pattern",
+                    variable.name
+                ));
+            }
+            Ok(_) => {}
+            Err(error) => tracing::warn!(
+                "Quick Prompt variable '{}' has an invalid pattern '{}' ({}); skipping shape check",
+                variable.name,
+                pattern,
+                error
+            ),
+        }
+    }
+    render_template(skill_body(&item.content)?, &values)
+}
+
+fn legacy_inputs(prompt: &crate::models::QuickPrompt) -> Vec<QuickPromptInput> {
+    prompt
+        .variables
+        .iter()
+        .map(|variable| QuickPromptInput {
+            name: variable.name.clone(),
+            kind: QuickPromptInputKind::String,
+            required: variable.required,
+            default: None,
+        })
+        .collect()
+}
+
+fn quick_prompt_data(sidecar: &KronnSidecar) -> Result<QuickPromptSkillData, String> {
+    if sidecar.kind != LibraryKind::QuickPrompt {
+        return Err("sidecar is not a Quick Prompt".into());
+    }
+    let data = sidecar
+        .data
+        .clone()
+        .ok_or("Quick Prompt sidecar has no data")?;
+    let data: QuickPromptSkillData = serde_json::from_value(data)
+        .map_err(|e| format!("invalid Quick Prompt sidecar data: {e}"))?;
+    if data.schema_version != CONTRACT_VERSION {
+        return Err(format!(
+            "unsupported Quick Prompt schema version {}",
+            data.schema_version
+        ));
+    }
+    Ok(data)
+}
+
+fn validate_quick_prompt_inputs(inputs: &[QuickPromptInput]) -> Result<(), String> {
+    let mut names = BTreeSet::new();
+    for input in inputs {
+        if input.name.is_empty()
+            || input.name.len() > 128
+            || !input.name.chars().all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.')
+            })
+        {
+            return Err(format!("invalid Quick Prompt input name '{}'", input.name));
+        }
+        if !names.insert(&input.name) {
+            return Err(format!("duplicate Quick Prompt input '{}'", input.name));
+        }
+        if let Some(default) = &input.default {
+            validate_input_value(input, default).map_err(|error| {
+                format!(
+                    "invalid default for Quick Prompt input '{}': {error}",
+                    input.name
+                )
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_input_value(input: &QuickPromptInput, value: &Value) -> Result<(), String> {
+    let valid = match input.kind {
+        QuickPromptInputKind::Boolean => value.is_boolean(),
+        QuickPromptInputKind::Number => value.is_number(),
+        QuickPromptInputKind::String => value.is_string(),
+        QuickPromptInputKind::List => value.is_array(),
+    };
+    valid.then_some(()).ok_or_else(|| {
+        format!(
+            "Quick Prompt variable '{}' must be {:?}",
+            input.name, input.kind
+        )
+    })
+}
+
+fn render_input_value(kind: QuickPromptInputKind, value: &Value) -> Result<String, String> {
+    match kind {
+        QuickPromptInputKind::String => Ok(value.as_str().unwrap().to_string()),
+        QuickPromptInputKind::Boolean | QuickPromptInputKind::Number => Ok(value.to_string()),
+        QuickPromptInputKind::List => serde_json::to_string(value)
+            .map_err(|e| format!("cannot render Quick Prompt list: {e}")),
+    }
+}
+
+fn render_template(template: &str, values: &BTreeMap<&str, String>) -> Result<String, String> {
+    let mut output = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(open) = rest.find("{{") {
+        output.push_str(&rest[..open]);
+        rest = &rest[open..];
+        if let Some(literal) = rest.strip_prefix("{{{{") {
+            let close = literal
+                .find("}}}}")
+                .ok_or("unclosed escaped Quick Prompt placeholder")?;
+            output.push_str("{{");
+            output.push_str(&literal[..close]);
+            output.push_str("}}");
+            rest = &literal[close + 4..];
+            continue;
+        }
+        let variable = &rest[2..];
+        let close = variable
+            .find("}}")
+            .ok_or("unclosed Quick Prompt placeholder")?;
+        let name = variable[..close].trim();
+        if name.is_empty() || name != &variable[..close] {
+            return Err("Quick Prompt placeholders must be non-empty and unpadded".into());
+        }
+        let value = values
+            .get(name)
+            .ok_or_else(|| format!("unknown Quick Prompt variable '{name}'"))?;
+        output.push_str(value);
+        rest = &variable[close + 2..];
+    }
+    output.push_str(rest);
+    Ok(output)
+}
+
+fn skill_body(content: &[u8]) -> Result<&str, String> {
+    let text = std::str::from_utf8(content).map_err(|_| "SKILL.md must be UTF-8")?;
+    let start = text
+        .strip_prefix("---\n")
+        .ok_or("SKILL.md must start with YAML frontmatter")?;
+    let end = start
+        .find("\n---")
+        .ok_or("SKILL.md frontmatter is not closed")?;
+    let body = &start[end + 4..];
+    Ok(body.strip_prefix('\n').unwrap_or(body))
 }
 
 /// Validate the third-party `SKILL.md` against the official Agent Skills spec:
@@ -650,6 +1045,8 @@ fn ensure_inside(root: &Path, path: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::{AgentType, ModelTier, PromptVariable, QuickPrompt};
+    use chrono::Utc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp(name: &str) -> PathBuf {
@@ -693,6 +1090,39 @@ mod tests {
         .unwrap();
     }
 
+    fn prompt(id: &str, template: &str, variables: Vec<PromptVariable>) -> QuickPrompt {
+        let now = Utc::now();
+        QuickPrompt {
+            id: id.into(),
+            name: "Portable prompt".into(),
+            icon: "🧳".into(),
+            prompt_template: template.into(),
+            variables,
+            agent: AgentType::Codex,
+            project_id: Some("project-1".into()),
+            skill_ids: vec!["testing".into()],
+            profile_ids: vec!["reviewer".into()],
+            directive_ids: vec!["concise".into()],
+            tier: ModelTier::Reasoning,
+            agent_settings: None,
+            description: "A portable Quick Prompt".into(),
+            pinned: true,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    fn variable(name: &str, required: bool) -> PromptVariable {
+        PromptVariable {
+            name: name.into(),
+            label: name.into(),
+            placeholder: String::new(),
+            description: Some(format!("input {name}")),
+            required,
+            pattern: None,
+        }
+    }
+
     #[test]
     fn project_scope_wins_and_search_reuses_effective_item() {
         let global = temp("global");
@@ -710,12 +1140,23 @@ mod tests {
         let root = temp("all");
         skill(&root, "testing", "body");
         json_item(&root, "directives", LibraryKind::Directive, "concise");
-        json_item(
-            &root,
-            "quick-prompts",
-            LibraryKind::QuickPrompt,
-            "review-pr",
-        );
+        let qp = quick_prompt_to_skill(
+            &prompt(
+                "review-pr",
+                "Review {{subject}}",
+                vec![variable("subject", true)],
+            ),
+            LibraryScope::Global,
+        )
+        .unwrap();
+        let qp_dir = root.join("skills/review-pr");
+        fs::create_dir_all(&qp_dir).unwrap();
+        fs::write(qp_dir.join("SKILL.md"), &qp.content).unwrap();
+        fs::write(
+            qp_dir.join("SKILL.kronn.json"),
+            canonical_json(&qp.sidecar).unwrap(),
+        )
+        .unwrap();
         json_item(&root, "workflows", LibraryKind::Workflow, "release");
         let catalog = discover(Some(&root), None).unwrap();
         assert_eq!(catalog.items().count(), 4);
@@ -724,6 +1165,212 @@ mod tests {
         assert!(item
             .auxiliary_files
             .contains_key(Path::new("references/example.md")));
+    }
+
+    #[test]
+    fn quick_prompt_exports_as_valid_agent_skill_and_round_trips() {
+        let source = temp("qp-source");
+        let target = temp("qp-target");
+        let original = prompt(
+            "review-pr",
+            "Review {{subject}} with {{depth}}",
+            vec![variable("subject", true), variable("depth", false)],
+        );
+        let item = quick_prompt_to_skill(&original, LibraryScope::Project).unwrap();
+        let skill = String::from_utf8(item.content.clone()).unwrap();
+        let frontmatter = skill.split("---").nth(1).unwrap();
+        assert!(frontmatter.contains("name: review-pr"));
+        assert!(!frontmatter.to_lowercase().contains("kronn"));
+        assert_eq!(item.sidecar.kind, LibraryKind::QuickPrompt);
+
+        let dir = source.join("skills/review-pr");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("SKILL.md"), &item.content).unwrap();
+        fs::write(
+            dir.join("SKILL.kronn.json"),
+            canonical_json(&item.sidecar).unwrap(),
+        )
+        .unwrap();
+        let catalog = discover(None, Some(&source)).unwrap();
+        let discovered = catalog.get(LibraryKind::QuickPrompt, "review-pr").unwrap();
+        let imported = quick_prompt_from_skill(discovered).unwrap();
+        assert_eq!(
+            serde_json::to_value(imported).unwrap(),
+            serde_json::to_value(original).unwrap()
+        );
+
+        let report = sync(&catalog, &target).unwrap();
+        assert!(report
+            .created
+            .contains(&PathBuf::from("skills/review-pr/SKILL.md")));
+        assert!(report
+            .created
+            .contains(&PathBuf::from("skills/review-pr/SKILL.kronn.json")));
+    }
+
+    #[test]
+    fn quick_prompt_render_validates_types_defaults_required_and_escaping() {
+        let mut qp = prompt(
+            "typed-prompt",
+            "enabled={{enabled}} count={{count}} title={{title}} tags={{tags}} default={{mode}} literal={{{{title}}}} raw={{raw}}",
+            vec![
+                variable("enabled", true),
+                variable("count", true),
+                variable("title", true),
+                variable("tags", true),
+                variable("mode", false),
+                variable("raw", true),
+            ],
+        );
+        qp.variables
+            .iter_mut()
+            .find(|variable| variable.name == "title")
+            .unwrap()
+            .pattern = Some("[A-Z][A-Za-z]+".into());
+        let item = quick_prompt_to_skill_with_inputs(
+            &qp,
+            vec![
+                QuickPromptInput {
+                    name: "enabled".into(),
+                    kind: QuickPromptInputKind::Boolean,
+                    required: true,
+                    default: None,
+                },
+                QuickPromptInput {
+                    name: "count".into(),
+                    kind: QuickPromptInputKind::Number,
+                    required: true,
+                    default: None,
+                },
+                QuickPromptInput {
+                    name: "title".into(),
+                    kind: QuickPromptInputKind::String,
+                    required: true,
+                    default: None,
+                },
+                QuickPromptInput {
+                    name: "tags".into(),
+                    kind: QuickPromptInputKind::List,
+                    required: true,
+                    default: None,
+                },
+                QuickPromptInput {
+                    name: "mode".into(),
+                    kind: QuickPromptInputKind::String,
+                    required: false,
+                    default: Some(Value::String("safe".into())),
+                },
+                QuickPromptInput {
+                    name: "raw".into(),
+                    kind: QuickPromptInputKind::String,
+                    required: true,
+                    default: None,
+                },
+            ],
+            LibraryScope::Project,
+        )
+        .unwrap();
+        let values = BTreeMap::from([
+            ("enabled".into(), Value::Bool(true)),
+            ("count".into(), serde_json::json!(2.5)),
+            ("title".into(), Value::String("Audit".into())),
+            ("tags".into(), serde_json::json!(["rust", "safe"])),
+            ("raw".into(), Value::String("{{not-recursive}}".into())),
+        ]);
+        assert_eq!(
+            render_quick_prompt_skill(&item, &values).unwrap(),
+            "enabled=true count=2.5 title=Audit tags=[\"rust\",\"safe\"] default=safe literal={{title}} raw={{not-recursive}}"
+        );
+
+        let mut missing = values.clone();
+        missing.remove("title");
+        assert!(render_quick_prompt_skill(&item, &missing)
+            .unwrap_err()
+            .contains("missing required"));
+        let mut wrong = values.clone();
+        wrong.insert("count".into(), Value::String("two".into()));
+        assert!(render_quick_prompt_skill(&item, &wrong)
+            .unwrap_err()
+            .contains("must be Number"));
+        let mut empty = values.clone();
+        empty.insert("title".into(), Value::String("   ".into()));
+        assert!(render_quick_prompt_skill(&item, &empty)
+            .unwrap_err()
+            .contains("missing required"));
+        let mut bad_pattern = values.clone();
+        bad_pattern.insert("title".into(), Value::String("audit".into()));
+        assert!(render_quick_prompt_skill(&item, &bad_pattern)
+            .unwrap_err()
+            .contains("does not match its pattern"));
+        let mut unknown = values;
+        unknown.insert("surprise".into(), Value::Bool(true));
+        assert!(render_quick_prompt_skill(&item, &unknown)
+            .unwrap_err()
+            .contains("unknown Quick Prompt variable"));
+    }
+
+    #[test]
+    fn quick_prompt_render_rejects_unknown_template_variables_and_bad_defaults() {
+        let qp = prompt("bad-template", "Hello {{undeclared}}", vec![]);
+        let item = quick_prompt_to_skill(&qp, LibraryScope::Global).unwrap();
+        assert!(render_quick_prompt_skill(&item, &BTreeMap::new())
+            .unwrap_err()
+            .contains("unknown Quick Prompt variable"));
+
+        let qp = prompt("bad-default", "{{count}}", vec![variable("count", false)]);
+        let error = quick_prompt_to_skill_with_inputs(
+            &qp,
+            vec![QuickPromptInput {
+                name: "count".into(),
+                kind: QuickPromptInputKind::Number,
+                required: false,
+                default: Some(Value::String("not-a-number".into())),
+            }],
+            LibraryScope::Global,
+        )
+        .unwrap_err();
+        assert!(error.contains("invalid default"));
+    }
+
+    #[test]
+    fn legacy_quick_prompt_json_migrates_to_skill_layout() {
+        let root = temp("legacy-qp");
+        let target = temp("legacy-target");
+        let qp = prompt(
+            "legacy-review",
+            "Review {{subject}}",
+            vec![variable("subject", true)],
+        );
+        let relative = PathBuf::from("quick-prompts/legacy-review.kronn.json");
+        let sidecar = KronnSidecar {
+            version: CONTRACT_VERSION,
+            kind: LibraryKind::QuickPrompt,
+            id: qp.id.clone(),
+            provenance: Provenance {
+                scope: LibraryScope::Global,
+                source: portable_path(&relative).unwrap(),
+                content_sha256: "legacy".into(),
+            },
+            data: Some(serde_json::to_value(&qp).unwrap()),
+        };
+        fs::create_dir_all(root.join("quick-prompts")).unwrap();
+        fs::write(root.join(&relative), canonical_json(&sidecar).unwrap()).unwrap();
+
+        let catalog = discover(Some(&root), None).unwrap();
+        let item = catalog
+            .get(LibraryKind::QuickPrompt, "legacy-review")
+            .unwrap();
+        assert_eq!(
+            item.relative_path,
+            PathBuf::from("skills/legacy-review/SKILL.md")
+        );
+        let report = sync(&catalog, &target).unwrap();
+        assert!(report
+            .created
+            .contains(&PathBuf::from("skills/legacy-review/SKILL.md")));
+        assert!(target
+            .join(".agents/skills/legacy-review/SKILL.kronn.json")
+            .is_file());
     }
 
     #[test]
