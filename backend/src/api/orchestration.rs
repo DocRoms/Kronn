@@ -7367,7 +7367,7 @@ pub struct TaskExecCancelRequest {
     pub cleanup_policy: Option<crate::models::CancellationCleanupPolicy>,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct TaskExecReassignRequest {
     pub source_agent: String,
     pub source_session_id: String,
