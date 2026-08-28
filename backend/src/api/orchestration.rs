@@ -3853,7 +3853,38 @@ pub(crate) fn native_worker_dispatch_matches(
     let Some(job) = crate::db::agent_dispatch::get(conn, dispatch_job_id)? else {
         return Ok(false);
     };
-    Ok(job.discussion_id == sub_discussion_id && job.trigger_message_id == source_message_id)
+    if job.discussion_id == sub_discussion_id && job.trigger_message_id == source_message_id {
+        return Ok(true);
+    }
+
+    // Backend recovery may replace the dispatch row while the already-running
+    // worker still holds the trusted trigger from the dispatch that launched it.
+    // Keep that caller valid only inside the current assignment generation: the
+    // latest assignment event is the hard boundary that makes every prior
+    // worker stale, including a previous worker of the same provider.
+    let current_assignment_started_at: Option<String> = conn
+        .query_row(
+            "SELECT created_at FROM task_execution_assignment_events \
+             WHERE task_execution_id = ?1 ORDER BY generation DESC LIMIT 1",
+            [execution.id.as_str()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(current_assignment_started_at) = current_assignment_started_at else {
+        return Ok(false);
+    };
+    let belongs_to_current_assignment: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM agent_dispatch_jobs \
+         WHERE discussion_id = ?1 AND trigger_message_id = ?2 \
+           AND created_at >= ?3)",
+        rusqlite::params![
+            sub_discussion_id,
+            source_message_id,
+            current_assignment_started_at
+        ],
+        |row| row.get(0),
+    )?;
+    Ok(belongs_to_current_assignment)
 }
 
 async fn decide_authorized_review(
@@ -9512,6 +9543,121 @@ mod tests {
         db.with_conn(move |conn| Ok(conn.query_row(sql, [], |r| r.get::<_, i64>(0))?))
             .await
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn current_reassignment_survives_dispatch_recovery_but_previous_worker_does_not() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let (task_ref, parent_id, _) = seed(&db, repo.path()).await;
+        let initial = provision_single_task_execution(
+            &db,
+            ProvisionInput {
+                task_reference: task_ref,
+                parent_discussion_id: parent_id,
+                worker: native_worker(),
+                base_rev: Some("main".into()),
+                idempotency_key: Some("reassignment-restart-auth".into()),
+            },
+        )
+        .await
+        .unwrap();
+        let execution_id = initial.id.clone();
+        let child = initial.sub_discussion_id.clone().unwrap();
+        let old_dispatch = initial.dispatch_job_id.clone().unwrap();
+        let old_trigger = db
+            .with_conn(move |conn| {
+                Ok(crate::db::agent_dispatch::get(conn, &old_dispatch)?
+                    .unwrap()
+                    .trigger_message_id)
+            })
+            .await
+            .unwrap();
+        let state = AppState::new_defaults(
+            std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::core::config::default_config(),
+            )),
+            db.clone(),
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        );
+        reassign_native_execution(
+            &state,
+            &execution_id,
+            crate::models::CampaignWorkerSelection {
+                target: MessageTarget::agent(AgentType::Codex),
+                model: None,
+                profile_id: None,
+            },
+            "replace the unavailable worker",
+        )
+        .await
+        .unwrap();
+        let reassigned = exec_of(&db, &execution_id).await;
+        let replacement_dispatch = reassigned.dispatch_job_id.clone().unwrap();
+        let replacement_trigger = {
+            let dispatch = replacement_dispatch.clone();
+            db.with_conn(move |conn| {
+                Ok(crate::db::agent_dispatch::get(conn, &dispatch)?
+                    .unwrap()
+                    .trigger_message_id)
+            })
+            .await
+            .unwrap()
+        };
+        let previous_matches = {
+            let old = old_trigger.clone();
+            let execution = reassigned.clone();
+            db.with_conn(move |conn| native_worker_dispatch_matches(conn, &execution, Some(&old)))
+                .await
+                .unwrap()
+        };
+        assert!(
+            !previous_matches,
+            "the previous assignment must stay refused"
+        );
+
+        let interrupted_id = execution_id.clone();
+        db.with_conn(move |conn| {
+            crate::db::agent_dispatch::mark_failed(conn, &replacement_dispatch, "backend restart")?;
+            crate::db::orchestration::transition_execution(
+                conn,
+                &interrupted_id,
+                TaskExecutionStatus::Interrupted,
+                &backend_actor(),
+                serde_json::json!({ "reason": "simulated backend restart" }),
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        wake_recovered_worker(&db, &execution_id).await.unwrap();
+        let current = exec_of(&db, &execution_id).await;
+        let matches = {
+            let trigger = replacement_trigger.clone();
+            db.with_conn(move |conn| native_worker_dispatch_matches(conn, &current, Some(&trigger)))
+                .await
+                .unwrap()
+        };
+        assert!(
+            matches,
+            "the current generation remains authorized after recovery"
+        );
+        let manifest = projected_manifest_for_execution(&db, &execution_id).await;
+        let delivered = deliver_native_worker_manifest(
+            &db,
+            &execution_id,
+            NativeExecutionCaller {
+                discussion_id: &child,
+                agent_type: &AgentType::Codex,
+                source_message_id: Some(&replacement_trigger),
+                alias: "Codex",
+                actor_session_id: Some("current-worker"),
+            },
+            &manifest,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(delivered, DeliverOutcome::Delivered { .. }));
     }
 
     #[tokio::test]
