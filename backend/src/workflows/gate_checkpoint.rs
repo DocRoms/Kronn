@@ -43,20 +43,27 @@ const GIT_ENV_OVERRIDES: &[&str] = &[
     "GIT_INDEX_FILE",
     "GIT_COMMON_DIR",
     "GIT_CEILING_DIRECTORIES",
+    "GIT_DISCOVERY_ACROSS_FILESYSTEM",
     "GIT_OBJECT_DIRECTORY",
     "GIT_ALTERNATE_OBJECT_DIRECTORIES",
 ];
 
 /// `sync_cmd("git")` scoped to `project_path`, with every inherited
-/// repo-override env var stripped so `current_dir` is the sole authority
-/// on which repository gets touched. Every git invocation in this module —
-/// production and test alike — must go through this, never `sync_cmd("git")`
-/// directly.
+/// repo-override env var stripped. Repository discovery is capped at the
+/// requested path's parent so a temporary non-repository nested below the
+/// caller cannot fall back to the caller's `.git`. Every git invocation in
+/// this module — production and test alike — must go through this, never
+/// `sync_cmd("git")` directly.
 fn git_cmd(project_path: &Path) -> std::process::Command {
     let mut cmd = crate::core::cmd::sync_cmd("git");
     cmd.current_dir(project_path);
     for var in GIT_ENV_OVERRIDES {
         cmd.env_remove(var);
+    }
+    if let Ok(canonical_path) = project_path.canonicalize() {
+        if let Some(parent) = canonical_path.parent() {
+            cmd.env("GIT_CEILING_DIRECTORIES", parent);
+        }
     }
     cmd
 }
@@ -212,9 +219,10 @@ pub fn reset_to_checkpoint(project_path: &Path, sha: &str) -> Result<(), String>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serial_test::serial;
     use std::fs;
     use std::path::PathBuf;
+
+    const INHERITED_CONTEXT_TARGET_ENV: &str = "KRONN_GATE_CHECKPOINT_TEST_TARGET";
 
     fn tmp_repo() -> PathBuf {
         let tmp =
@@ -248,7 +256,7 @@ mod tests {
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     }
 
-    /// `git log --pretty=%s` subjects of `repo`, oldest first.
+    /// `git log --pretty=%s` subjects of `repo`, newest first.
     fn git_log_subjects(repo: &Path) -> Vec<String> {
         let out = git_cmd(repo).args(["log", "--pretty=%s"]).output().unwrap();
         String::from_utf8_lossy(&out.stdout)
@@ -257,14 +265,57 @@ mod tests {
             .collect()
     }
 
+    fn git_status(repo: &Path) -> Vec<u8> {
+        let out = git_cmd(repo)
+            .args(["status", "--porcelain=v1", "-z", "--untracked-files=all"])
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        out.stdout
+    }
+
+    /// Semantic snapshot of the index. Unlike reading `.git/index` directly,
+    /// this also works for linked worktrees and ignores harmless stat-cache
+    /// refreshes while still detecting any accidental `git add`.
+    fn git_index_tree(repo: &Path) -> Vec<u8> {
+        let out = git_cmd(repo).args(["write-tree"]).output().unwrap();
+        assert!(out.status.success());
+        out.stdout
+    }
+
+    /// Tracked worktree changes relative to the index. Untracked paths are
+    /// represented separately by `git_status` above.
+    fn git_worktree_diff(repo: &Path) -> Vec<u8> {
+        let out = git_cmd(repo)
+            .args(["diff", "--binary", "--no-ext-diff"])
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        out.stdout
+    }
+
     #[test]
     fn commit_checkpoint_in_non_git_dir_returns_not_a_git_repo() {
         let tmp =
             std::env::temp_dir().join(format!("kronn-checkpoint-nogit-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&tmp).unwrap();
 
+        let probe = git_cmd(&tmp)
+            .args(["rev-parse", "--show-toplevel"])
+            .output()
+            .unwrap();
+        assert!(
+            !probe.status.success(),
+            "temporary non-repo unexpectedly resolved to {} from {}",
+            String::from_utf8_lossy(&probe.stdout).trim(),
+            tmp.display(),
+        );
+
         let out = commit_checkpoint(&tmp, "pre-merge", "run-abc");
-        assert!(matches!(out, CheckpointOutcome::NotAGitRepo));
+        assert!(
+            matches!(out, CheckpointOutcome::NotAGitRepo),
+            "expected NotAGitRepo, got {out:?}"
+        );
 
         let _ = fs::remove_dir_all(&tmp);
     }
@@ -382,58 +433,92 @@ mod tests {
         let _ = fs::remove_dir_all(&tmp);
     }
 
-    /// KT-493 regression : reproduces the incident with a simulated managed
-    /// worktree context — a "calling" repo (stand-in for the orchestrated
-    /// task worktree Kronn actually runs tests inside) whose `GIT_DIR`/
-    /// `GIT_WORK_TREE` are inherited by the process, plus a worker's
-    /// uncommitted WIP file in it, exactly like the incident. Every git call
-    /// in this module now scrubs those vars via `git_cmd`, so
-    /// `commit_checkpoint` must land its commit in the unrelated target temp
-    /// repo it was actually asked about, and the calling repo's HEAD, index
-    /// and untracked WIP must come out exactly as they went in.
+    /// KT-493 regression: reproduce both observed incidents with a simulated
+    /// managed-worktree caller: an empty checkpoint must not add a commit to a
+    /// clean caller, and a caller's uncommitted files must not be captured.
     #[test]
-    #[serial]
     fn commit_checkpoint_ignores_inherited_git_dir_and_work_tree() {
-        let calling_repo = tmp_repo();
-        let calling_git_dir = calling_repo.join(".git");
-        let head_before = git_head(&calling_repo);
-        fs::write(calling_repo.join("wip.txt"), "worker's uncommitted work\n").unwrap();
+        // The parent test starts this same test in a dedicated process with a
+        // simulated inherited Git context. Keeping that environment mutation
+        // in the child avoids redirecting Git commands from concurrently
+        // running tests in this test binary.
+        if let Some(target) = std::env::var_os(INHERITED_CONTEXT_TARGET_ENV) {
+            let target = PathBuf::from(target);
+            let out = commit_checkpoint(&target, "pre-merge", "run-abc");
+            assert!(
+                matches!(out, CheckpointOutcome::Committed { .. }),
+                "expected the checkpoint to land in the target repo, got {out:?}"
+            );
+            return;
+        }
 
-        // Simulate the incident: the process inherited GIT_DIR/GIT_WORK_TREE
-        // pointing at the calling repo (the real task worktree).
-        std::env::set_var("GIT_DIR", &calling_git_dir);
-        std::env::set_var("GIT_WORK_TREE", &calling_repo);
-        let target = tmp_repo();
-        let out = commit_checkpoint(&target, "pre-merge", "run-abc");
-        std::env::remove_var("GIT_DIR");
-        std::env::remove_var("GIT_WORK_TREE");
+        for caller_has_wip in [false, true] {
+            let calling_repo = tmp_repo();
+            let target = tmp_repo();
+            if caller_has_wip {
+                fs::write(calling_repo.join("README.md"), "worker modified this\n").unwrap();
+                fs::write(calling_repo.join("wip.txt"), "worker's uncommitted work\n").unwrap();
+            }
+            let head_before = git_head(&calling_repo);
+            let index_before = git_index_tree(&calling_repo);
+            let worktree_before = git_worktree_diff(&calling_repo);
+            let status_before = git_status(&calling_repo);
+            let readme_before = fs::read(calling_repo.join("README.md")).unwrap();
+            let wip_before = fs::read(calling_repo.join("wip.txt")).ok();
 
-        assert!(
-            matches!(out, CheckpointOutcome::Committed { .. }),
-            "expected the checkpoint to land in the TARGET repo, got {out:?}"
-        );
+            let child = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("commit_checkpoint_ignores_inherited_git_dir_and_work_tree")
+                .arg("--nocapture")
+                .env(INHERITED_CONTEXT_TARGET_ENV, &target)
+                .env("GIT_DIR", calling_repo.join(".git"))
+                .env("GIT_WORK_TREE", &calling_repo)
+                .output()
+                .unwrap();
+            assert!(
+                child.status.success(),
+                "checkpoint child failed (caller_has_wip={caller_has_wip}):\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&child.stdout),
+                String::from_utf8_lossy(&child.stderr),
+            );
+            assert_eq!(
+                git_log_subjects(&target).first().map(String::as_str),
+                Some("kronn-checkpoint: pre-pre-merge @ run-abc"),
+                "the run-abc checkpoint must exist only in the target repo"
+            );
+            assert_eq!(
+                git_head(&calling_repo),
+                head_before,
+                "calling repo HEAD must not move (caller_has_wip={caller_has_wip})"
+            );
+            assert_eq!(
+                git_index_tree(&calling_repo),
+                index_before,
+                "calling repo index must not change (caller_has_wip={caller_has_wip})"
+            );
+            assert_eq!(
+                git_worktree_diff(&calling_repo),
+                worktree_before,
+                "calling repo tracked worktree diff must not change (caller_has_wip={caller_has_wip})"
+            );
+            assert_eq!(
+                git_status(&calling_repo),
+                status_before,
+                "calling repo path/status state must not change (caller_has_wip={caller_has_wip})"
+            );
+            assert!(
+                !git_log_subjects(&calling_repo)
+                    .iter()
+                    .any(|subject| subject.contains("run-abc")),
+                "run-abc must never appear in the calling repo"
+            );
+            assert_eq!(
+                fs::read(calling_repo.join("README.md")).unwrap(),
+                readme_before
+            );
+            assert_eq!(fs::read(calling_repo.join("wip.txt")).ok(), wip_before);
 
-        // The calling repo — the branch/worktree that invoked us — must be
-        // strictly untouched: same HEAD, WIP still uncommitted, no stray
-        // kronn-checkpoint commit.
-        assert_eq!(
-            git_head(&calling_repo),
-            head_before,
-            "calling repo HEAD must not move"
-        );
-        assert_eq!(
-            fs::read_to_string(calling_repo.join("wip.txt")).unwrap(),
-            "worker's uncommitted work\n",
-            "the worker's WIP must remain exactly as written, never swept into a commit"
-        );
-        assert!(
-            !git_log_subjects(&calling_repo)
-                .iter()
-                .any(|s| s.contains("kronn-checkpoint")),
-            "no kronn-checkpoint commit must ever appear on the calling repo"
-        );
-
-        let _ = fs::remove_dir_all(&calling_repo);
-        let _ = fs::remove_dir_all(&target);
+            let _ = fs::remove_dir_all(&calling_repo);
+            let _ = fs::remove_dir_all(&target);
+        }
     }
 }
