@@ -7371,7 +7371,12 @@ pub struct TaskExecCancelRequest {
 pub struct TaskExecReassignRequest {
     pub source_agent: String,
     pub source_session_id: String,
-    pub worker: crate::models::CampaignWorkerSelection,
+    /// The same typed `MessageTarget` shape `agent_list` hands back verbatim
+    /// and `task_exec_prepare`/`task_exec_launch` accept as `worker` — not
+    /// the internal `CampaignWorkerSelection` envelope. `model`/`profile_id`
+    /// are not publicly overridable here; a reassignment always resolves
+    /// them from the target's tier, exactly like a fresh launch would.
+    pub worker: MessageTarget,
     pub reason: String,
 }
 
@@ -8030,7 +8035,11 @@ pub async fn task_exec_reassign(
         State(state),
         Path(exec_id),
         Json(ReassignExecutionRequest {
-            worker: request.worker,
+            worker: crate::models::CampaignWorkerSelection {
+                target: request.worker,
+                model: None,
+                profile_id: None,
+            },
             reason: request.reason,
         }),
     )
@@ -15421,6 +15430,134 @@ mod tests {
         assert!(
             replaced_worker_token.is_cancelled(),
             "the superseded dispatch must not keep running after commit"
+        );
+    }
+
+    /// KT-492 — `task_exec_reassign` must accept the exact typed `MessageTarget`
+    /// `agent_list` hands back verbatim (kind/agent_type/...), not the internal
+    /// `{target, model, profile_id}` `CampaignWorkerSelection` envelope that used
+    /// to make this endpoint 422 on every copy-pasted worker.
+    #[tokio::test]
+    async fn task_exec_reassign_endpoint_accepts_the_bare_message_target_worker_from_agent_list() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let (task_ref, parent_id, _) = seed(&db, repo.path()).await;
+        let execution = provision_single_task_execution(
+            &db,
+            ProvisionInput {
+                task_reference: task_ref,
+                parent_discussion_id: parent_id.clone(),
+                worker: native_worker(),
+                base_rev: Some("main".into()),
+                idempotency_key: Some("reassign-bare-message-target".into()),
+            },
+        )
+        .await
+        .unwrap();
+        let execution_id = execution.id.clone();
+        let child = execution.sub_discussion_id.clone().unwrap();
+        let dispatch = execution.dispatch_job_id.clone().unwrap();
+        let interrupted_id = execution_id.clone();
+        let session_disc_id = parent_id.clone();
+        db.with_conn(move |conn| {
+            crate::db::agent_dispatch::mark_completed(conn, &dispatch)?;
+            crate::db::discussion_sessions::create_session(
+                conn,
+                &session_disc_id,
+                "ClaudeCode",
+                Some("reassign-session-1"),
+                "owner",
+            )?;
+            crate::db::orchestration::transition_execution(
+                conn,
+                &interrupted_id,
+                TaskExecutionStatus::Interrupted,
+                &backend_actor(),
+                serde_json::json!({}),
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let state = AppState::new_defaults(
+            std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::core::config::default_config(),
+            )),
+            db.clone(),
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        );
+
+        // Exactly the payload copied verbatim from `agent_list` — no
+        // {target, model, profile_id} envelope.
+        let raw = serde_json::json!({
+            "source_agent": "ClaudeCode",
+            "source_session_id": "reassign-session-1",
+            "worker": {"kind": "agent", "agent_type": "Codex"},
+            "reason": "codex is a stronger fit for this rework",
+        });
+        let request: TaskExecReassignRequest = serde_json::from_value(raw).unwrap();
+
+        let Json(response) =
+            task_exec_reassign(State(state), Path(execution_id.clone()), Json(request)).await;
+        assert!(response.success, "{:?}", response.error);
+
+        let worker_room = db
+            .with_conn(move |conn| {
+                crate::db::discussions::get_discussion(conn, &child)?
+                    .context("reassigned child room missing")
+            })
+            .await
+            .unwrap();
+        assert_eq!(worker_room.agent, AgentType::Codex);
+        assert_eq!(worker_room.tier, ModelTier::Default);
+        assert!(worker_room.pin_first_message);
+    }
+
+    /// The public `worker` field must round-trip for every `MessageTarget` kind
+    /// `agent_list` can hand back: an HTTP provider (`discussion_agent`), a
+    /// punctual host CLI (`agent`), and an exact joined CLI session (`cli`).
+    #[test]
+    fn task_exec_reassign_worker_deserializes_every_message_target_kind() {
+        for raw in [
+            serde_json::json!({"kind": "discussion_agent", "agent_type": "Ollama"}),
+            serde_json::json!({"kind": "agent", "agent_type": "ClaudeCode"}),
+            serde_json::json!({"kind": "cli", "agent_type": "Codex", "cli_session_id": 42}),
+        ] {
+            let body = serde_json::json!({
+                "source_agent": "ClaudeCode",
+                "source_session_id": "s1",
+                "worker": raw.clone(),
+                "reason": "swap worker",
+            });
+            let request: TaskExecReassignRequest = serde_json::from_value(body)
+                .unwrap_or_else(|error| panic!("{raw} must deserialize as worker: {error}"));
+            assert_eq!(
+                serde_json::to_value(&request.worker).unwrap()["kind"],
+                raw["kind"]
+            );
+        }
+    }
+
+    /// The legacy internal envelope must be refused, not silently accepted with
+    /// a `None` target: it nests the real identity under `target` while this
+    /// endpoint now expects the flat `MessageTarget` fields directly.
+    #[test]
+    fn task_exec_reassign_worker_refuses_the_legacy_campaign_worker_selection_envelope() {
+        let raw = serde_json::json!({
+            "source_agent": "ClaudeCode",
+            "source_session_id": "s1",
+            "worker": {
+                "target": {"kind": "discussion_agent", "agent_type": "Ollama"},
+                "model": null,
+                "profile_id": null,
+            },
+            "reason": "legacy shape must be refused",
+        });
+        let error = serde_json::from_value::<TaskExecReassignRequest>(raw).unwrap_err();
+        assert!(
+            error.to_string().contains("kind"),
+            "legacy {{target, model, profile_id}} envelope must fail on the missing flat \
+             `kind`: {error}"
         );
     }
 

@@ -700,7 +700,9 @@ class TaskExecPrincipalSurfaceTests(unittest.TestCase):
 
     def test_status_cancel_and_reassign_forward_only_derived_identity(self):
         http = mock.MagicMock(return_value={"success": True, "data": {"execution": {"id": "e"}}})
-        selection = {"target": {"kind": "cli", "agent_type": "Codex", "cli_session_id": 7}}
+        # KT-492 — the same flat MessageTarget shape agent_list hands back
+        # verbatim, not the legacy {target, model, profile_id} envelope.
+        selection = {"kind": "cli", "agent_type": "Codex", "cli_session_id": 7}
         with mock.patch.object(self.mod, "_agent_type_for_session", return_value="ClaudeCode"), \
             mock.patch.object(self.mod, "_session_id_for_caller", return_value="adhoc-live-a"), \
              mock.patch.object(self.mod, "_http", http):
@@ -725,6 +727,56 @@ class TaskExecPrincipalSurfaceTests(unittest.TestCase):
                 **identity, "worker": selection, "reason": "provider unavailable",
             }),
         ])
+
+    def test_task_exec_reassign_accepts_every_message_target_kind_from_agent_list(self):
+        """KT-492 — `worker` is the flat MessageTarget object copied verbatim
+        from `agent_list`, for every transport it can report: an HTTP provider
+        (discussion_agent), a punctual host CLI (agent) and an exact joined CLI
+        session (cli)."""
+        http = mock.MagicMock(return_value={"success": True, "data": {"execution": {"id": "e"}}})
+        workers = [
+            {"kind": "discussion_agent", "agent_type": "Ollama"},
+            {"kind": "agent", "agent_type": "Codex"},
+            {"kind": "cli", "agent_type": "ClaudeCode", "cli_session_id": 11},
+        ]
+        with mock.patch.object(self.mod, "_agent_type_for_session", return_value="ClaudeCode"), \
+            mock.patch.object(self.mod, "_session_id_for_caller", return_value="adhoc-live-a"), \
+             mock.patch.object(self.mod, "_http", http):
+            for worker in workers:
+                with self.subTest(kind=worker["kind"]):
+                    self.mod.call_task_exec_reassign({
+                        "task_execution_id": "exec-1", "worker": worker,
+                        "reason": "swap worker",
+                    })
+        identity = {"source_agent": "ClaudeCode", "source_session_id": "adhoc-live-a"}
+        http.assert_has_calls([
+            mock.call("POST", "/api/orchestration/tool/executions/exec-1/reassign", {
+                **identity, "worker": worker, "reason": "swap worker",
+            })
+            for worker in workers
+        ])
+
+    def test_task_exec_reassign_refuses_the_legacy_campaign_worker_selection_envelope(self):
+        """The internal backend envelope `{target, model, profile_id}` must be
+        refused with a typed, actionable bridge error before any HTTP call —
+        not a raw 422 from the backend's deserializer."""
+        http = mock.MagicMock()
+        legacy = {
+            "target": {"kind": "discussion_agent", "agent_type": "Ollama"},
+            "model": None,
+            "profile_id": None,
+        }
+        with mock.patch.object(self.mod, "_agent_type_for_session", return_value="ClaudeCode"), \
+            mock.patch.object(self.mod, "_session_id_for_caller", return_value="adhoc-live-a"), \
+             mock.patch.object(self.mod, "_http", http):
+            with self.assertRaises(RuntimeError) as refused:
+                self.mod.call_task_exec_reassign({
+                    "task_execution_id": "exec-1", "worker": legacy,
+                    "reason": "provider unavailable",
+                })
+        self.assertIn("flat MessageTarget", str(refused.exception))
+        self.assertIn("agent_list", str(refused.exception))
+        http.assert_not_called()
 
     def test_deliver_and_review_use_the_live_session_like_the_rest_of_the_family(self):
         """KT-378 follow-up — the fix originally reached only five of eight tools.
