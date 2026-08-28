@@ -216,7 +216,7 @@ path is the human-gated `kronn-plan-action` fence.
 
 Principal agents that can mutate Planning receive the typed execution lifecycle:
 `agent_list`, `task_exec_prepare`, `task_exec_launch`, `task_exec_status`,
-`task_exec_deliver`, `task_exec_review`, `task_exec_cancel` and
+`task_exec_resume`, `task_exec_deliver`, `task_exec_review`, `task_exec_cancel` and
 `task_exec_reassign`. A principal must preflight before launch and reuse one
 idempotency key after an uncertain response. Native HTTP workers receive a
 narrowed surface: no backlog mutation or execution-status lookup, and
@@ -226,6 +226,17 @@ The optional `validations` passed to `task_exec_launch` are principal-owned and
 persisted on the implicit single-task run. They use the same `ValidationSpec`
 contract as campaign runs and cannot be supplied or changed by the delivery
 manifest.
+
+`task_exec_status` returns `next_action.tool = task_exec_resume` only for a
+publicly recoverable Applying-origin checkpoint. The principal may then call
+`task_exec_resume`, which uses the backend's guarded resume path: it rechecks
+the parent checkout and recorded SHAs, refuses dirty or unrelated states, and
+returns the existing terminal result when the same successful resume is
+retried. The tool cannot advance provisioning- or review-owned checkpoints.
+[src: file: backend/src/api/orchestration.rs:6492-6499]
+[src: file: backend/src/api/orchestration.rs:7955-7997]
+[src: file: backend/scripts/disc-introspection-mcp.py:921-941]
+[src: file: backend/scripts/disc-introspection-mcp.py:5437-5475]
 
 When the worker identity is not already known, call `agent_list()` first and
 copy one returned `worker` object unchanged into `task_exec_prepare`. Native

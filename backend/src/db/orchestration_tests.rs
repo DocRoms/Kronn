@@ -978,6 +978,70 @@ fn reassignment_repairs_an_unadvanced_request_changes_attempt() {
 }
 
 #[test]
+fn reassignment_repairs_an_unadvanced_approved_attempt_after_validation_sendback() {
+    let conn = setup();
+    seed_task(&conn, "t-reassign-approved-rework", 1104);
+    let execution = launch_single_task(
+        &conn,
+        &LaunchSingleTaskInput::new("t-reassign-approved-rework", DISC),
+        &backend_actor(),
+    )
+    .unwrap()
+    .execution;
+    for status in [
+        TaskExecutionStatus::Provisioning,
+        TaskExecutionStatus::Working,
+    ] {
+        transition_execution(
+            &conn,
+            &execution.id,
+            status,
+            &backend_actor(),
+            serde_json::json!({}),
+        )
+        .unwrap();
+    }
+    crate::db::worker_reviews::upsert_review(
+        &conn,
+        &execution.id,
+        0,
+        "approve",
+        r#"{"version":"1","decision":"approve"}"#,
+    )
+    .unwrap();
+
+    let reassigned = reassign_execution_worker(
+        &conn,
+        &execution.id,
+        &CampaignWorkerSelection {
+            target: MessageTarget::discussion_agent(AgentType::Ollama),
+            model: None,
+            profile_id: None,
+        },
+        "recover validation sendback",
+        &backend_actor(),
+    )
+    .unwrap();
+    assert_eq!(reassigned.attempt_no, 1);
+    assert!(
+        crate::db::worker_reviews::get_review(&conn, &execution.id, 1)
+            .unwrap()
+            .is_none()
+    );
+    let events = list_execution_events(&conn, &execution.id).unwrap();
+    let repair = events
+        .iter()
+        .find(|event| event.action == "rework_attempt_repaired")
+        .expect("the approve-path repair is auditable");
+    assert_eq!(repair.changes["from_attempt"], 0);
+    assert_eq!(repair.changes["to_attempt"], 1);
+    assert_eq!(
+        repair.changes["reason"],
+        "reviewed_attempt_was_not_advanced"
+    );
+}
+
+#[test]
 fn timeout_scan_reports_activity_total_review_and_human_wait_distinctly() {
     let conn = setup();
     let past = "2020-01-01T00:00:00Z";

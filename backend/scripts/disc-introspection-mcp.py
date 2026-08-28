@@ -922,6 +922,23 @@ TOOLS = [
         },
     },
     {
+        "name": "task_exec_resume",
+        "description": (
+            "Resume a recoverable TaskExecution as its principal through Kronn's guarded "
+            "backend checkpoint. Use only when task_exec_status returns "
+            "next_action.tool=task_exec_resume. The backend revalidates parent cleanliness "
+            "and checkpoint SHAs; this cannot skip provisioning or review. Repeating a "
+            "successful Applying-origin resume returns the existing terminal result."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_execution_id": {"type": "string"},
+            },
+            "required": ["task_execution_id"],
+        },
+    },
+    {
         "name": "task_exec_reassign",
         "description": (
             "Reassign an interrupted/blocked execution as principal, preserving its room, "
@@ -5462,9 +5479,39 @@ def call_task_exec_status(args):
     if not execution_id:
         raise RuntimeError("task_exec_status: task_execution_id or task_reference is required")
     source_agent, source_session_id = _task_exec_identity("task_exec_status")
-    return _unwrap(_http(
+    result = _unwrap(_http(
         "POST",
         f"/api/orchestration/tool/executions/{urllib.parse.quote(execution_id, safe='')}/status",
+        {"source_agent": source_agent, "source_session_id": source_session_id},
+    ))
+    execution = ((result.get("lineage") or {}).get("execution") or {})
+    status = execution.get("status")
+    blocked_from = execution.get("blocked_from_status")
+    interrupted_from = execution.get("interrupted_from_status")
+    if (
+        (status == "Blocked" and blocked_from == "Applying")
+        or (
+            status == "Interrupted"
+            and interrupted_from == "Blocked"
+            and blocked_from == "Applying"
+        )
+    ):
+        result["next_action"] = {
+            "tool": "task_exec_resume",
+            "task_execution_id": execution_id,
+            "reason": "Applying-origin checkpoint can be retried after cleaning the parent",
+        }
+    return result
+
+
+def call_task_exec_resume(args):
+    execution_id = (args.get("task_execution_id") or "").strip()
+    if not execution_id:
+        raise RuntimeError("task_exec_resume: task_execution_id is required")
+    source_agent, source_session_id = _task_exec_identity("task_exec_resume")
+    return _unwrap(_http(
+        "POST",
+        f"/api/orchestration/tool/executions/{urllib.parse.quote(execution_id, safe='')}/resume",
         {"source_agent": source_agent, "source_session_id": source_session_id},
     ))
 
@@ -9742,6 +9789,7 @@ DISPATCH = {
     "task_exec_prepare": call_task_exec_prepare,
     "task_exec_launch": call_task_exec_launch,
     "task_exec_status": call_task_exec_status,
+    "task_exec_resume": call_task_exec_resume,
     "task_exec_cancel": call_task_exec_cancel,
     "task_exec_reassign": call_task_exec_reassign,
     "task_exec_accept_worker_offer": call_task_exec_accept_worker_offer,

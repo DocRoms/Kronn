@@ -2337,13 +2337,34 @@ async fn checkpoint(
 async fn send_back(db: &Database, exec_id: &str, reason: String) -> Result<(), ProvisionError> {
     let id = exec_id.to_string();
     db.with_conn(move |conn| {
-        crate::db::orchestration::transition_execution(
-            conn,
+        let transaction = conn.unchecked_transaction()?;
+        let execution = crate::db::orchestration::get_task_execution(&transaction, &id)?
+            .context("execution vanished before integration rework")?;
+        let moved = crate::db::orchestration::transition_execution(
+            &transaction,
             &id,
             TaskExecutionStatus::ChangesRequested,
             &backend_actor(),
-            serde_json::json!({ "reason": reason }),
+            serde_json::json!({
+                "reason": reason,
+                "from_attempt": execution.attempt_no,
+                "to_attempt": execution.attempt_no + 1,
+            }),
         )?;
+        if moved {
+            // An approved attempt already owns both a delivery/review row and the
+            // deterministic `orch-review-request:<exec>:<attempt>` message. Reusing
+            // that attempt after a candidate conflict or failed validation makes the
+            // next otherwise-valid delivery collide with the old message primary key.
+            // Integration rework is a distinct worker attempt, just like an explicit
+            // request_changes review, so advance it in the same durable checkpoint.
+            transaction.execute(
+                "UPDATE task_executions SET attempt_no = attempt_no + 1, updated_at = ?2 \
+                 WHERE id = ?1",
+                rusqlite::params![id, chrono::Utc::now().to_rfc3339()],
+            )?;
+        }
+        transaction.commit()?;
         Ok(())
     })
     .await
@@ -6492,6 +6513,13 @@ pub async fn resume_execution(
             "task execution or recovery decision not found",
         ));
     };
+    if snapshot.execution.status == TaskExecutionStatus::Done
+        && snapshot.execution.integrated_sha.is_some()
+    {
+        let mut snapshot = snapshot;
+        snapshot.outcome = Some("already resumed: Done".to_string());
+        return Json(ApiResponse::ok(snapshot));
+    }
     if snapshot.execution.status == TaskExecutionStatus::Interrupted
         && snapshot.execution.interrupted_from_status == Some(TaskExecutionStatus::Blocked)
         && snapshot.execution.blocked_from_status == Some(TaskExecutionStatus::Applying)
@@ -7948,6 +7976,50 @@ pub async fn task_exec_status(
             error.to_string(),
         )),
     }
+}
+
+pub async fn task_exec_resume(
+    State(state): State<AppState>,
+    Path(exec_id): Path<String>,
+    Json(request): Json<TaskExecCallerRequest>,
+) -> Json<ApiResponse<ExecutionRecoveryView>> {
+    if request.spawned_agent.is_some() {
+        return Json(ApiResponse::err_coded(
+            ApiErrorCode::Validation,
+            "task execution resume is available only to its principal",
+        ));
+    }
+    let Some((agent, session_id)) =
+        caller_fields(&request.source_agent, &request.source_session_id)
+    else {
+        return Json(ApiResponse::err_coded(
+            ApiErrorCode::Validation,
+            "durable source_agent and source_session_id are required",
+        ));
+    };
+    let authorized = {
+        let id = exec_id.clone();
+        state
+            .db
+            .with_conn(move |conn| {
+                let execution = crate::db::orchestration::get_task_execution(conn, &id)?
+                    .context("execution not found or caller is not its principal")?;
+                principal_cli_is_authorized(
+                    conn,
+                    &execution.parent_discussion_id,
+                    &agent,
+                    &session_id,
+                )
+            })
+            .await
+    };
+    if !matches!(authorized, Ok(true)) {
+        return Json(ApiResponse::err_coded(
+            ApiErrorCode::NotFound,
+            "execution not found or caller is not its principal",
+        ));
+    }
+    resume_execution(State(state), Path(exec_id)).await
 }
 
 pub async fn task_exec_cancel(
@@ -10838,7 +10910,7 @@ mod tests {
     #[tokio::test]
     async fn dirty_apply_block_resumes_after_the_parent_is_cleaned() {
         let repo = init_repo();
-        let db = Database::open_in_memory().unwrap();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
         let (execution, _task_ref, child) = approved_execution_with_commit(
             &db,
             repo.path(),
@@ -10917,6 +10989,58 @@ mod tests {
         assert_eq!(
             parked.blocked_from_status,
             Some(TaskExecutionStatus::Applying)
+        );
+        let parent_id = parked.parent_discussion_id.clone();
+        db.with_conn(move |conn| {
+            crate::db::discussion_sessions::create_session(
+                conn,
+                &parent_id,
+                "Codex",
+                Some("principal-session"),
+                "owner",
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let state = AppState::new_defaults(
+            std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::core::config::default_config(),
+            )),
+            db.clone(),
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        );
+        let Json(unauthorized) = task_exec_resume(
+            State(state.clone()),
+            Path(execution.id.clone()),
+            Json(TaskExecCallerRequest {
+                source_agent: "Codex".into(),
+                source_session_id: "another-session".into(),
+                spawned_agent: None,
+            }),
+        )
+        .await;
+        assert!(!unauthorized.success);
+        assert_eq!(unauthorized.error_code.as_deref(), Some("not_found"));
+        let Json(still_dirty) = task_exec_resume(
+            State(state.clone()),
+            Path(execution.id.clone()),
+            Json(TaskExecCallerRequest {
+                source_agent: "Codex".into(),
+                source_session_id: "principal-session".into(),
+                spawned_agent: None,
+            }),
+        )
+        .await;
+        assert!(!still_dirty.success);
+        assert_eq!(still_dirty.error_code.as_deref(), Some("conflict"));
+        assert!(
+            still_dirty
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("target still has 1 uncommitted file")),
+            "dirty refusal must be actionable: {:?}",
+            still_dirty.error
         );
 
         // Reproduce the two-stage restart that stranded the real 0.11.0
@@ -10999,11 +11123,21 @@ mod tests {
         .status
         .success());
         let advanced_target = git_rev(repo.path(), "HEAD");
-        let resumed = resume_blocked_apply(&db, &execution.id).await.unwrap();
-        let IntegrationOutcome::Integrated { sha: resumed_sha } = resumed else {
-            panic!("expected rebuilt integration");
-        };
-        assert_ne!(resumed_sha, merge_sha, "the stale candidate was rebuilt");
+        let Json(resumed) = task_exec_resume(
+            State(state.clone()),
+            Path(execution.id.clone()),
+            Json(TaskExecCallerRequest {
+                source_agent: "Codex".into(),
+                source_session_id: "principal-session".into(),
+                spawned_agent: None,
+            }),
+        )
+        .await;
+        assert!(
+            resumed.success,
+            "clean resume must succeed: {:?}",
+            resumed.error
+        );
         let execution_id = execution.id.clone();
         let done = db
             .with_conn(move |conn| {
@@ -11017,10 +11151,90 @@ mod tests {
             done.candidate_target_sha.as_deref(),
             Some(advanced_target.as_str())
         );
+        let resumed_sha = done.integrated_sha.clone().expect("integrated sha");
+        assert_ne!(resumed_sha, merge_sha, "the stale candidate was rebuilt");
         assert_eq!(done.integrated_sha.as_deref(), Some(resumed_sha.as_str()));
         assert_eq!(git_rev(repo.path(), "HEAD"), resumed_sha);
         assert!(dirty_path.exists(), "the committed parent change survives");
         assert!(repo.path().join("worker.txt").exists());
+
+        let Json(retried) = task_exec_resume(
+            State(state),
+            Path(execution.id.clone()),
+            Json(TaskExecCallerRequest {
+                source_agent: "Codex".into(),
+                source_session_id: "principal-session".into(),
+                spawned_agent: None,
+            }),
+        )
+        .await;
+        assert!(
+            retried.success,
+            "successful resume must be idempotent: {:?}",
+            retried.error
+        );
+        assert_eq!(
+            retried.data.and_then(|view| view.outcome).as_deref(),
+            Some("already resumed: Done")
+        );
+    }
+
+    #[tokio::test]
+    async fn principal_resume_refuses_non_recoverable_execution_state() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let (task_ref, parent_id, _) = seed(&db, repo.path()).await;
+        let execution = provision_single_task_execution(
+            &db,
+            ProvisionInput {
+                task_reference: task_ref,
+                parent_discussion_id: parent_id.clone(),
+                worker: native_worker(),
+                base_rev: Some("main".into()),
+                idempotency_key: Some("non-recoverable-resume".into()),
+            },
+        )
+        .await
+        .unwrap();
+        db.with_conn(move |conn| {
+            crate::db::discussion_sessions::create_session(
+                conn,
+                &parent_id,
+                "Codex",
+                Some("principal-session"),
+                "owner",
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let state = AppState::new_defaults(
+            std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::core::config::default_config(),
+            )),
+            db,
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        );
+        let Json(refused) = task_exec_resume(
+            State(state),
+            Path(execution.id),
+            Json(TaskExecCallerRequest {
+                source_agent: "Codex".into(),
+                source_session_id: "principal-session".into(),
+                spawned_agent: None,
+            }),
+        )
+        .await;
+        assert!(!refused.success);
+        assert_eq!(refused.error_code.as_deref(), Some("conflict"));
+        assert!(
+            refused
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("recovery decision was already consumed")),
+            "non-recoverable state must be explicit: {:?}",
+            refused.error
+        );
     }
 
     #[tokio::test]
@@ -11109,6 +11323,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(after.status, TaskExecutionStatus::ChangesRequested);
+        assert_eq!(
+            after.attempt_no,
+            execution.attempt_no + 1,
+            "integration rework must not reuse the reviewed attempt"
+        );
         assert!(after.integrated_sha.is_none());
         assert_eq!(validations.len(), 1);
         assert_eq!(validations[0].command, validation.command);
@@ -11121,6 +11340,86 @@ mod tests {
         assert!(
             child.exists(),
             "failed validation preserves the worker checkout"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_validation_redelivery_uses_a_fresh_review_request_message() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (_parent, _child, exec_id, _head, _path) =
+            delivered_awaiting_review(&db, repo.path()).await;
+        let execution = exec_of(&db, &exec_id).await;
+        let run_id = execution.orchestration_run_id.clone();
+        let validations = vec![ValidationSpec {
+            command: "false".into(),
+            quick_exec_id: None,
+            timeout_secs: Some(5),
+        }];
+        db.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE orchestration_runs SET validation_json = ?2 WHERE id = ?1",
+                rusqlite::params![run_id, serde_json::to_string(&validations)?],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        decide_review(
+            &db,
+            &exec_id,
+            &review_approve(&db, &exec_id).await,
+            "ClaudeCode",
+            "sess-b",
+        )
+        .await
+        .unwrap();
+        let outcome = run_integration(&db, &exec_id).await.unwrap();
+        assert!(matches!(outcome, IntegrationOutcome::SentBack { .. }));
+        let sent_back = exec_of(&db, &exec_id).await;
+        assert_eq!(sent_back.status, TaskExecutionStatus::ChangesRequested);
+        assert_eq!(sent_back.attempt_no, 1);
+
+        let execution_id = exec_id.clone();
+        db.with_conn(move |conn| {
+            crate::db::orchestration::transition_execution(
+                conn,
+                &execution_id,
+                TaskExecutionStatus::Working,
+                &backend_actor(),
+                serde_json::json!({ "recovery": "test_worker_resumed" }),
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let manifest = clean_manifest_for_execution(&db, &exec_id).await;
+        let redelivery = deliver_worker_manifest(&db, &exec_id, "ClaudeCode", "sess-a", &manifest)
+            .await
+            .unwrap();
+        assert!(matches!(redelivery, DeliverOutcome::Delivered { .. }));
+        let delivered = exec_of(&db, &exec_id).await;
+        assert_eq!(delivered.status, TaskExecutionStatus::AwaitingReview);
+        assert_eq!(delivered.attempt_no, 1);
+
+        let execution_id = exec_id.clone();
+        let review_requests = db
+            .with_conn(move |conn| {
+                Ok(conn.query_row(
+                    "SELECT COUNT(*) FROM messages WHERE id IN (?1, ?2)",
+                    rusqlite::params![
+                        format!("orch-review-request:{execution_id}:0"),
+                        format!("orch-review-request:{execution_id}:1"),
+                    ],
+                    |row| row.get::<_, i64>(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            review_requests, 2,
+            "both review obligations keep distinct durable message ids"
         );
     }
 
