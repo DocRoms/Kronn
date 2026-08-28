@@ -294,6 +294,17 @@ test-frontend:
 	@echo "$(CYAN)▸ Running frontend unit tests (vitest)...$(RESET)"
 	cd frontend && pnpm test
 
+## Orchestration validation compatibility: keep these stable target names for
+## persisted TaskExecution gates, even though the frontend now uses pnpm.
+typecheck:
+	@echo "$(CYAN)▸ Running frontend TypeScript parity checks...$(RESET)"
+	cd frontend && pnpm typecheck:native
+	cd frontend && pnpm typecheck:legacy
+
+yarn-test-changed:
+	@echo "$(CYAN)▸ Running frontend unit tests for persisted validation gates...$(RESET)"
+	cd frontend && pnpm test
+
 ## Run frontend E2E tests (Playwright). Pre-req: `make dev` running (Vite + backend).
 test-e2e:
 	@echo "$(CYAN)▸ Running E2E tests (Playwright)...$(RESET)"
