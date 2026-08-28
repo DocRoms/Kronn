@@ -1,0 +1,71 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Kronn Portable Workflow",
+  "type": "object",
+  "properties": {
+    "version": {
+      "type": "string",
+      "enum": ["1.0"]
+    },
+    "engine": {
+      "type": "string",
+      "enum": ["kronn"]
+    },
+    "requires": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "List of required tools or dependencies"
+    },
+    "inputs": {
+      "type": "object",
+      "patternProperties": {
+        "^[a-zA-Z0-9_]+$": {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": ["string", "number", "boolean"]
+            },
+            "description": {
+              "type": "string"
+            },
+            "default": {}
+          },
+          "required": ["type"]
+        }
+      },
+      "additionalProperties": false
+    },
+    "env": {
+      "type": "object",
+      "patternProperties": {
+        "^[a-zA-Z0-9_]+$": {
+          "type": "string",
+          "pattern": "^\\$\\{env:[a-zA-Z0-9_]+\\}$",
+          "description": "Must reference an environment variable, no hardcoded secrets allowed."
+        }
+      },
+      "additionalProperties": false
+    },
+    "steps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string" },
+          "run": { 
+            "type": "string",
+            "not": {
+              "pattern": "(^|\\s)/[a-zA-Z0-9_]"
+            },
+            "description": "Command to run. Absolute paths are forbidden."
+          }
+        },
+        "required": ["name", "run"]
+      }
+    }
+  },
+  "required": ["version", "engine", "steps"]
+}

@@ -54,10 +54,10 @@ docker-compose.override.yml
 .docker/data/
 
 #ai
+#ai
 .mcp.json
 .vibe/
 .gemini/
-.agents/
 .codex/
 .ai/mcp/
 .kiro/settings/
