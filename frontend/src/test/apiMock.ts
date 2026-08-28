@@ -52,6 +52,7 @@ export const API_NAMESPACES = [
   'ollama',
   'liteLlm',
   'nvidia',
+  'externalApi',
   'debugApi',
   'themes',
   'docs',
@@ -107,6 +108,7 @@ interface DefaultMock {
   ollama: Record<string, AnyFn>;
   liteLlm: Record<string, AnyFn>;
   nvidia: Record<string, AnyFn>;
+  externalApi: Record<string, AnyFn>;
   debugApi: Record<string, AnyFn>;
   themes: Record<string, AnyFn>;
   docs: Record<string, AnyFn>;
@@ -548,6 +550,27 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
         ok: false, saved: false, status: 'offline',
         endpoint: 'http://localhost:4000', models: [], hint: null,
       }),
+    },
+
+    externalApi: {
+      // KT-339 — unified External API connections. Empty list = the neutral
+      // "no connections yet" state so any settings test mounts clean.
+      list: resolve([]),
+      create: resolve({
+        id: '', display_name: '', mention_alias: '', endpoint: null,
+        credential_slug: '', origin_preset: 'other',
+        economy_model: null, default_model: null, reasoning_model: null,
+        created_at: '2026-08-28T00:00:00Z', updated_at: '2026-08-28T00:00:00Z',
+        has_credential: false,
+      }),
+      update: resolve({
+        id: '', display_name: '', mention_alias: '', endpoint: null,
+        credential_slug: '', origin_preset: 'other',
+        economy_model: null, default_model: null, reasoning_model: null,
+        created_at: '2026-08-28T00:00:00Z', updated_at: '2026-08-28T00:00:00Z',
+        has_credential: false,
+      }),
+      remove: resolve(null),
     },
 
     debugApi: {

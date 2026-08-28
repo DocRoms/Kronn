@@ -55,6 +55,23 @@ pub fn list(conn: &Connection) -> Result<Vec<ExternalApiConnection>> {
         .collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
+pub fn get(conn: &Connection, id: &str) -> Result<Option<ExternalApiConnection>> {
+    let sql = format!("SELECT {COLUMNS} FROM external_api_connections WHERE id = ?1");
+    Ok(conn
+        .query_row(&sql, params![id], row_to_connection)
+        .optional()?)
+}
+
+/// Remove a connection row. The caller is responsible for clearing the linked
+/// credential from the token store; the row only references it by slug.
+pub fn delete(conn: &Connection, id: &str) -> Result<bool> {
+    let affected = conn.execute(
+        "DELETE FROM external_api_connections WHERE id = ?1",
+        params![id],
+    )?;
+    Ok(affected > 0)
+}
+
 pub fn connection_mention_alias(connection: &ExternalApiConnection) -> String {
     format!("@{}", connection.mention_alias.trim().to_lowercase())
 }

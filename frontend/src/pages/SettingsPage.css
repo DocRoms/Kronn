@@ -2414,6 +2414,105 @@
   margin-left: var(--kr-sp-4);
 }
 
+/* KT-339 — unified External API zone. One list of named OpenAI-compatible
+   connections (LiteLLM, NVIDIA, Other), each with its own endpoint + tiers. */
+.set-ext-api-section {
+  margin-top: var(--kr-sp-6);
+}
+.set-ext-api-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-3);
+}
+.set-ext-api-loading {
+  display: flex;
+  justify-content: center;
+  padding: var(--kr-sp-4);
+  color: var(--kr-text-ghost);
+}
+.set-ext-api-conn,
+.set-ext-api-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-2);
+  padding: var(--kr-sp-3) var(--kr-sp-4);
+  border: 1px solid var(--kr-border-soft);
+  border-radius: var(--kr-radius-md);
+  background: var(--kr-surface-1);
+}
+.set-ext-api-conn-head {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-3);
+  flex-wrap: wrap;
+}
+.set-ext-api-conn-name {
+  font-weight: 600;
+}
+.set-ext-api-conn-alias {
+  color: var(--kr-accent);
+  font-size: var(--kr-fs-xs);
+}
+.set-ext-api-conn-preset {
+  font-size: var(--kr-fs-2xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--kr-text-secondary);
+  border: 1px solid var(--kr-border-soft);
+  border-radius: var(--kr-radius-sm);
+  padding: 0 var(--kr-sp-2);
+}
+.set-ext-api-conn-cred[data-has-credential='true'] {
+  color: var(--kr-success);
+}
+.set-ext-api-conn-cred[data-has-credential='false'] {
+  color: var(--kr-text-ghost);
+}
+.set-ext-api-conn-actions {
+  margin-left: auto;
+  display: flex;
+  gap: var(--kr-sp-2);
+}
+.set-ext-api-conn-endpoint {
+  font-size: var(--kr-fs-2xs);
+  color: var(--kr-text-tertiary);
+  word-break: break-all;
+}
+.set-ext-api-conn-tiers,
+.set-ext-api-tiers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--kr-sp-3);
+}
+.set-ext-api-conn-tier {
+  font-size: var(--kr-fs-2xs);
+  color: var(--kr-text-secondary);
+}
+.set-ext-api-tier {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.set-ext-api-tier-label {
+  font-size: var(--kr-fs-2xs);
+  color: var(--kr-text-secondary);
+}
+.set-ext-api-presets {
+  display: flex;
+  gap: var(--kr-sp-2);
+  flex-wrap: wrap;
+}
+.set-ext-api-preset {
+  flex: 0 0 auto;
+}
+.set-ext-api-form-actions {
+  display: flex;
+  gap: var(--kr-sp-2);
+}
+.set-ext-api-add {
+  align-self: flex-start;
+}
+
 .set-agent-row:has(.kr-context-help-panel) {
   overflow: visible;
 }

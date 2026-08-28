@@ -1079,6 +1079,17 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             "/api/lite-llm/model-failures/retry",
             post(api::lite_llm::retry_model),
         )
+        // ── External API connections (unified LiteLLM/NVIDIA/Other zone) ──
+        .route(
+            "/api/external-api/connections",
+            get(api::external_api_connections::list)
+                .post(api::external_api_connections::create),
+        )
+        .route(
+            "/api/external-api/connections/{id}",
+            put(api::external_api_connections::update)
+                .delete(api::external_api_connections::delete),
+        )
         // ── Debug (log ringbuffer — backs Settings > Debug viewer) ──
         .route("/api/debug/logs", get(api::debug::get_logs))
         .route("/api/debug/logs/clear", post(api::debug::clear_logs))

@@ -2496,6 +2496,51 @@ export const liteLlm = {
     api<LiteLlmTestResponse>('POST', '/lite-llm/test', body),
 };
 
+// ─── External API connections (unified LiteLLM/NVIDIA/Other zone) ──────────
+// KT-339 — one CRUD surface for every OpenAI-compatible connection. Adding a
+// third compatible service (e.g. Groq) is an `other` preset with a custom
+// endpoint: no enum variant, no dedicated card, no new i18n key. The type is
+// declared here rather than in generated.ts because the backend request/
+// response bodies are plain serde (not exported to ts-rs), so no typegen step.
+export type ExternalApiPreset = 'litellm' | 'nvidia' | 'other';
+
+export interface ExternalApiConnectionView {
+  id: string;
+  display_name: string;
+  mention_alias: string;
+  endpoint: string | null;
+  credential_slug: string;
+  origin_preset: ExternalApiPreset;
+  economy_model: string | null;
+  default_model: string | null;
+  reasoning_model: string | null;
+  created_at: string;
+  updated_at: string;
+  /** Whether a credential is currently stored; the value never crosses the wire. */
+  has_credential: boolean;
+}
+
+export interface UpsertExternalApiConnection {
+  display_name: string;
+  mention_alias: string;
+  endpoint: string | null;
+  origin_preset: ExternalApiPreset;
+  economy_model: string | null;
+  default_model: string | null;
+  reasoning_model: string | null;
+  /** Tri-state: omitted/null keeps the stored key, '' clears it, a value replaces it. */
+  api_key?: string | null;
+}
+
+export const externalApi = {
+  list: () => api<ExternalApiConnectionView[]>('GET', '/external-api/connections'),
+  create: (body: UpsertExternalApiConnection) =>
+    api<ExternalApiConnectionView>('POST', '/external-api/connections', body),
+  update: (id: string, body: UpsertExternalApiConnection) =>
+    api<ExternalApiConnectionView>('PUT', `/external-api/connections/${id}`, body),
+  remove: (id: string) => api<null>('DELETE', `/external-api/connections/${id}`),
+};
+
 // 0.8.6 (#24) — Unified API call logs.
 export interface ApiCallLogRow {
   id: string;
