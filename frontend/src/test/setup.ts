@@ -1,6 +1,25 @@
 import '@testing-library/jest-dom/vitest';
 import { configure } from '@testing-library/react';
 
+// Unit tests must never fall through to happy-dom's real HTTP client. A missing
+// API mock previously opened requests to localhost:3000; Vitest then aborted
+// those sockets while tearing workers down and intermittently exited 2 after all
+// assertions had passed. Install a deterministic fail-closed boundary before
+// every spec. Tests that exercise fetch explicitly replace it with `vi.stubGlobal`
+// or a local spy, then restore this guard.
+const unexpectedFetch: typeof fetch = (input) => {
+  const target = input instanceof Request ? input.url : String(input);
+  throw new Error(
+    `[test-network-guard] Unexpected unmocked fetch to ${target}. `
+      + 'Stub globalThis.fetch or mock the API module in this test.',
+  );
+};
+Object.defineProperty(globalThis, 'fetch', {
+  value: unexpectedFetch,
+  configurable: true,
+  writable: true,
+});
+
 // CI runs `vitest run --coverage` (v8 instrumentation) with heavy file
 // parallelism on a shared runner. That slows React effect / microtask
 // scheduling enough that the default 1000ms `waitFor` timeout can expire
