@@ -24,6 +24,10 @@ async fn main() -> anyhow::Result<()> {
             report.unchanged.len()
         );
         return Ok(());
+    } else if first_arg.as_deref() == Some("check") {
+        let args: Vec<String> = std::env::args().skip(2).collect();
+        kronn::core::portable_library::run_cli_check(&args).map_err(anyhow::Error::msg)?;
+        return Ok(());
     } else if first_arg.as_deref() == Some("run") {
         let args: Vec<String> = std::env::args().skip(2).collect();
         kronn::core::portable_library::run_cli_workflow(&args).map_err(anyhow::Error::msg)?;
