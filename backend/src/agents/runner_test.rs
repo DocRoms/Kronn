@@ -5578,31 +5578,56 @@ Suite de la réponse.";
     }
 
     #[test]
-    fn claude_task_worker_version_requires_internal_e2big_recovery() {
-        let error = super::super::claude_task_worker_version_result(b"2.1.246 (Claude Code)", true)
-            .unwrap_err();
-        assert!(error.contains("sandbox E2BIG recovery"));
-        assert!(error.contains("minimum 2.1.247"));
-        assert!(error.contains("task_exec_reassign"));
+    fn claude_task_worker_accepts_catalogue_below_conservative_bounds() {
+        let home = tempfile::tempdir().unwrap();
+        let projects: serde_json::Map<String, serde_json::Value> = (0..32)
+            .map(|index| (format!("/synthetic/project-{index}"), serde_json::json!({})))
+            .collect();
+        std::fs::write(
+            home.path().join(".claude.json"),
+            serde_json::to_vec(&serde_json::json!({ "projects": projects })).unwrap(),
+        )
+        .unwrap();
 
-        assert_eq!(
-            super::super::claude_task_worker_version_result(b"2.1.247 (Claude Code)", true,),
-            Ok(())
-        );
-        assert_eq!(
-            super::super::claude_task_worker_version_result(b"2.2.0 (Claude Code)", true,),
-            Ok(())
-        );
+        let receipt =
+            super::super::claude_sandbox_catalogue_receipt(&home.path().join(".claude.json"))
+                .unwrap();
+        assert_eq!(receipt.entry_count, 32);
+        assert!(receipt.key_bytes > 0);
+        assert_eq!(receipt.validate(), Ok(()));
     }
 
     #[test]
-    fn claude_task_worker_version_reassigns_on_unrecognized_output_without_leaking_it() {
-        let error =
-            super::super::claude_task_worker_version_result(b"malformed must-not-leak", true)
-                .unwrap_err();
-        assert!(error.contains("unrecognized response"));
+    fn claude_task_worker_refuses_large_catalogue_without_leaking_paths() {
+        let home = tempfile::tempdir().unwrap();
+        let secret_path = "/must-not-leak/private/worktree";
+        let projects: serde_json::Map<String, serde_json::Value> = (0..234)
+            .map(|index| (format!("{secret_path}-{index}"), serde_json::json!({})))
+            .collect();
+        std::fs::write(
+            home.path().join(".claude.json"),
+            serde_json::to_vec(&serde_json::json!({ "projects": projects })).unwrap(),
+        )
+        .unwrap();
+
+        let receipt =
+            super::super::claude_sandbox_catalogue_receipt(&home.path().join(".claude.json"))
+                .unwrap();
+        let error = receipt.validate().unwrap_err();
+        assert_eq!(receipt.entry_count, 234);
+        assert!(error.contains("reason_code=claude_sandbox_catalogue_unsafe"));
+        assert!(error.contains("project_entry_count=234"));
+        assert!(error.contains("project_key_bytes="));
         assert!(error.contains("task_exec_reassign"));
-        assert!(!error.contains("must-not-leak"));
+        assert!(!error.contains(secret_path));
+        assert!(!error.contains("worktree-0"));
+    }
+
+    #[test]
+    fn claude_current_version_is_not_used_as_sandbox_recovery_evidence() {
+        let source = include_str!("../core/versions.rs");
+        assert!(source.contains("AgentType::ClaudeCode => Some(\"2.1.247\")"));
+        assert!(!source.contains("MIN_CLAUDE_TASK_WORKER_VERSION"));
     }
 
     #[test]

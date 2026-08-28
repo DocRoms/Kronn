@@ -7059,31 +7059,75 @@ fn claude_task_worker_auth_result(stdout: &[u8], exit_success: bool) -> Result<(
     }
 }
 
-fn claude_task_worker_version_result(stdout: &[u8], exit_success: bool) -> Result<(), String> {
-    let raw = std::str::from_utf8(stdout).unwrap_or_default();
-    let version = regex_lite::Regex::new(r"\d+\.\d+\.\d+")
-        .ok()
-        .and_then(|regex| regex.find(raw))
-        .map(|matched| matched.as_str());
-    let minimum = crate::core::versions::MIN_CLAUDE_TASK_WORKER_VERSION;
+const MAX_CLAUDE_SANDBOX_PROJECT_ENTRIES: usize = 128;
+const MAX_CLAUDE_SANDBOX_PROJECT_KEY_BYTES: usize = 48 * 1024;
 
-    match (version, exit_success) {
-        (Some(version), true) if !crate::core::versions::update_available(version, minimum) => {
-            Ok(())
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ClaudeSandboxCatalogueReceipt {
+    pub entry_count: usize,
+    pub key_bytes: usize,
+}
+
+impl ClaudeSandboxCatalogueReceipt {
+    fn validate(self) -> Result<(), String> {
+        if self.entry_count <= MAX_CLAUDE_SANDBOX_PROJECT_ENTRIES
+            && self.key_bytes <= MAX_CLAUDE_SANDBOX_PROJECT_KEY_BYTES
+        {
+            return Ok(());
         }
-        (Some(version), true) => Err(format!(
-            "Claude task worker cannot start: Claude Code {version} predates the sandbox E2BIG \
-             recovery required for hosts with many Git worktrees (minimum {minimum}). Update \
-             Claude Code, or use `task_exec_reassign` to move this execution to another \
-             available worker."
-        )),
-        _ => Err(
-            "Claude task worker cannot start: `claude --version` returned an unrecognized \
-             response. Verify or update the local Claude CLI; if it remains unavailable, use \
-             `task_exec_reassign` to move this execution to another available worker."
-                .to_string(),
-        ),
+        Err(format!(
+            "Claude task worker refused before provisioning: reason_code=claude_sandbox_catalogue_unsafe; \
+             project_entry_count={}, project_key_bytes={}, max_project_entries={}, \
+             max_project_key_bytes={}. No project path was logged. Use `task_exec_reassign` to \
+             move this execution to another available worker.",
+            self.entry_count,
+            self.key_bytes,
+            MAX_CLAUDE_SANDBOX_PROJECT_ENTRIES,
+            MAX_CLAUDE_SANDBOX_PROJECT_KEY_BYTES,
+        ))
     }
+}
+
+fn claude_sandbox_catalogue_receipt(path: &Path) -> Result<ClaudeSandboxCatalogueReceipt, String> {
+    if !path.exists() {
+        return Ok(ClaudeSandboxCatalogueReceipt {
+            entry_count: 0,
+            key_bytes: 0,
+        });
+    }
+    let raw = std::fs::read(path).map_err(|_| {
+        "Claude task worker refused before provisioning: reason_code=claude_sandbox_catalogue_unreadable; \
+         the Claude project catalogue could not be read. No project path was logged. Use \
+         `task_exec_reassign` to move this execution to another available worker."
+            .to_string()
+    })?;
+    let value: serde_json::Value = serde_json::from_slice(&raw).map_err(|_| {
+        "Claude task worker refused before provisioning: reason_code=claude_sandbox_catalogue_unreadable; \
+         the Claude project catalogue is not valid JSON. No project path was logged. Use \
+         `task_exec_reassign` to move this execution to another available worker."
+            .to_string()
+    })?;
+    let projects = value.get("projects").and_then(serde_json::Value::as_object);
+    Ok(ClaudeSandboxCatalogueReceipt {
+        entry_count: projects.map_or(0, serde_json::Map::len),
+        key_bytes: projects.map_or(0, |entries| entries.keys().map(String::len).sum()),
+    })
+}
+
+pub(crate) fn claude_task_worker_catalogue_preflight() -> Result<(), String> {
+    if !super::host_is_macos() {
+        return Ok(());
+    }
+    let home = std::env::var_os("KRONN_HOST_HOME")
+        .or_else(|| std::env::var_os("HOME"))
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .ok_or_else(|| {
+            "Claude task worker refused before provisioning: reason_code=claude_sandbox_catalogue_unreadable; \
+             the host home directory is unavailable. No project path was logged. Use \
+             `task_exec_reassign` to move this execution to another available worker."
+                .to_string()
+        })?;
+    claude_sandbox_catalogue_receipt(&PathBuf::from(home).join(".claude.json"))?.validate()
 }
 
 async fn run_claude_task_worker_auth_probe(
@@ -7106,49 +7150,6 @@ async fn probe_claude_task_worker_auth(
     npx_package: Option<&str>,
     work_dir: &Path,
 ) -> Result<(), String> {
-    let version_args = vec!["--version".to_string()];
-    let direct_version = resolve_agent_invocation(binary, None, &version_args);
-    let version_output = match direct_version {
-        Ok(resolved) => match run_claude_task_worker_auth_probe(resolved, work_dir).await {
-            Ok(output) => output,
-            Err(direct_error) => {
-                let Some(package) = npx_package else {
-                    return Err(claude_task_worker_probe_spawn_diagnostic(
-                        "version",
-                        &direct_error,
-                    ));
-                };
-                let fallback = resolve_agent_invocation(binary, Some(package), &version_args)
-                    .map_err(|_| {
-                        claude_task_worker_probe_spawn_diagnostic("version", &direct_error)
-                    })?;
-                run_claude_task_worker_auth_probe(fallback, work_dir)
-                    .await
-                    .map_err(|error| claude_task_worker_probe_spawn_diagnostic("version", &error))?
-            }
-        },
-        Err(direct_error) => {
-            let Some(package) = npx_package else {
-                return Err(format!(
-                    "{direct_error}. Use `task_exec_reassign` to move this execution to another \
-                     available worker."
-                ));
-            };
-            let fallback = resolve_agent_invocation(binary, Some(package), &version_args).map_err(
-                |error| {
-                    format!(
-                        "{error}. Use `task_exec_reassign` to move this execution to another \
-                         available worker."
-                    )
-                },
-            )?;
-            run_claude_task_worker_auth_probe(fallback, work_dir)
-                .await
-                .map_err(|error| claude_task_worker_probe_spawn_diagnostic("version", &error))?
-        }
-    };
-    claude_task_worker_version_result(&version_output.stdout, version_output.status.success())?;
-
     let auth_args = vec!["auth".to_string(), "status".to_string()];
     let direct = resolve_agent_invocation(binary, None, &auth_args);
     let output = match direct {

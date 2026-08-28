@@ -5465,6 +5465,14 @@ fn worker_static_refusal(worker: &MessageTarget) -> Option<crate::models::Campai
             "this native runtime cannot acknowledge the typed delivery lifecycle; use an exact joined CLI session or another supported agent",
         ));
     }
+    if worker.kind == MessageTargetKind::Agent && worker.agent_type == AgentType::ClaudeCode {
+        if let Err(detail) = crate::agents::runner::claude_task_worker_catalogue_preflight() {
+            return Some(preparation_reason(
+                "claude_sandbox_catalogue_unsafe",
+                detail,
+            ));
+        }
+    }
     None
 }
 
