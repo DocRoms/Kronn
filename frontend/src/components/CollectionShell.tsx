@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Menu, Search, Star, X } from 'lucide-react';
+import { Menu, MoreHorizontal, Search, Star, X } from 'lucide-react';
 import './CollectionShell.css';
 
 export type CollectionItemId = string;
@@ -187,7 +187,7 @@ export function CollectionShell<TItem>({
     <div className="collection-shell-detail">
       {isMobile && !sidebarOpen && <button type="button" className="collection-shell-open" onClick={() => onSidebarOpenChange?.(true)} aria-label={labels.openCollection}><Menu size={18} /></button>}
       {actions.length > 0 && <div className="collection-shell-actions" ref={menuRef}>
-        <button ref={menuTriggerRef} type="button" className="collection-shell-icon" onClick={() => setMenuOpen(open => !open)} aria-label={labels.moreActions} aria-expanded={menuOpen}><Menu size={17} /></button>
+        <button ref={menuTriggerRef} type="button" className="collection-shell-icon" onClick={() => setMenuOpen(open => !open)} aria-label={labels.moreActions} aria-expanded={menuOpen}><MoreHorizontal size={17} /></button>
         {menuOpen && <div className="collection-shell-menu" role="menu" aria-label={labels.moreActions}>{actions.map(action => <button key={action.id} type="button" role="menuitem" disabled={action.disabled?.(actionItems)} onClick={() => { action.onSelect(actionItems); closeMenu(true); }}>{action.label}</button>)}</div>}
       </div>}
       {slots.renderDetail(selectedId == null ? null : items.find(item => getId(item) === selectedId) ?? null)}
