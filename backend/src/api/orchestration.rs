@@ -2337,13 +2337,34 @@ async fn checkpoint(
 async fn send_back(db: &Database, exec_id: &str, reason: String) -> Result<(), ProvisionError> {
     let id = exec_id.to_string();
     db.with_conn(move |conn| {
-        crate::db::orchestration::transition_execution(
-            conn,
+        let transaction = conn.unchecked_transaction()?;
+        let execution = crate::db::orchestration::get_task_execution(&transaction, &id)?
+            .context("execution vanished before integration rework")?;
+        let moved = crate::db::orchestration::transition_execution(
+            &transaction,
             &id,
             TaskExecutionStatus::ChangesRequested,
             &backend_actor(),
-            serde_json::json!({ "reason": reason }),
+            serde_json::json!({
+                "reason": reason,
+                "from_attempt": execution.attempt_no,
+                "to_attempt": execution.attempt_no + 1,
+            }),
         )?;
+        if moved {
+            // An approved attempt already owns both a delivery/review row and the
+            // deterministic `orch-review-request:<exec>:<attempt>` message. Reusing
+            // that attempt after a candidate conflict or failed validation makes the
+            // next otherwise-valid delivery collide with the old message primary key.
+            // Integration rework is a distinct worker attempt, just like an explicit
+            // request_changes review, so advance it in the same durable checkpoint.
+            transaction.execute(
+                "UPDATE task_executions SET attempt_no = attempt_no + 1, updated_at = ?2 \
+                 WHERE id = ?1",
+                rusqlite::params![id, chrono::Utc::now().to_rfc3339()],
+            )?;
+        }
+        transaction.commit()?;
         Ok(())
     })
     .await
@@ -11293,6 +11314,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(after.status, TaskExecutionStatus::ChangesRequested);
+        assert_eq!(
+            after.attempt_no,
+            execution.attempt_no + 1,
+            "integration rework must not reuse the reviewed attempt"
+        );
         assert!(after.integrated_sha.is_none());
         assert_eq!(validations.len(), 1);
         assert_eq!(validations[0].command, validation.command);
@@ -11305,6 +11331,86 @@ mod tests {
         assert!(
             child.exists(),
             "failed validation preserves the worker checkout"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_validation_redelivery_uses_a_fresh_review_request_message() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (_parent, _child, exec_id, _head, _path) =
+            delivered_awaiting_review(&db, repo.path()).await;
+        let execution = exec_of(&db, &exec_id).await;
+        let run_id = execution.orchestration_run_id.clone();
+        let validations = vec![ValidationSpec {
+            command: "false".into(),
+            quick_exec_id: None,
+            timeout_secs: Some(5),
+        }];
+        db.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE orchestration_runs SET validation_json = ?2 WHERE id = ?1",
+                rusqlite::params![run_id, serde_json::to_string(&validations)?],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        decide_review(
+            &db,
+            &exec_id,
+            &review_approve(&db, &exec_id).await,
+            "ClaudeCode",
+            "sess-b",
+        )
+        .await
+        .unwrap();
+        let outcome = run_integration(&db, &exec_id).await.unwrap();
+        assert!(matches!(outcome, IntegrationOutcome::SentBack { .. }));
+        let sent_back = exec_of(&db, &exec_id).await;
+        assert_eq!(sent_back.status, TaskExecutionStatus::ChangesRequested);
+        assert_eq!(sent_back.attempt_no, 1);
+
+        let execution_id = exec_id.clone();
+        db.with_conn(move |conn| {
+            crate::db::orchestration::transition_execution(
+                conn,
+                &execution_id,
+                TaskExecutionStatus::Working,
+                &backend_actor(),
+                serde_json::json!({ "recovery": "test_worker_resumed" }),
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let manifest = clean_manifest_for_execution(&db, &exec_id).await;
+        let redelivery = deliver_worker_manifest(&db, &exec_id, "ClaudeCode", "sess-a", &manifest)
+            .await
+            .unwrap();
+        assert!(matches!(redelivery, DeliverOutcome::Delivered { .. }));
+        let delivered = exec_of(&db, &exec_id).await;
+        assert_eq!(delivered.status, TaskExecutionStatus::AwaitingReview);
+        assert_eq!(delivered.attempt_no, 1);
+
+        let execution_id = exec_id.clone();
+        let review_requests = db
+            .with_conn(move |conn| {
+                Ok(conn.query_row(
+                    "SELECT COUNT(*) FROM messages WHERE id IN (?1, ?2)",
+                    rusqlite::params![
+                        format!("orch-review-request:{execution_id}:0"),
+                        format!("orch-review-request:{execution_id}:1"),
+                    ],
+                    |row| row.get::<_, i64>(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            review_requests, 2,
+            "both review obligations keep distinct durable message ids"
         );
     }
 
