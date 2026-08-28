@@ -197,6 +197,9 @@ fn scan_skills(root: &Path, scope: LibraryScope, out: &mut Vec<LibraryItem>) -> 
             &relative,
             &content,
         )?;
+        if scope == LibraryScope::Project && sidecar.provenance.scope == LibraryScope::Global {
+            continue;
+        }
         let mut auxiliary_files = BTreeMap::new();
         collect_auxiliary_files(&folder, &folder, &mut auxiliary_files)?;
         auxiliary_files.remove(Path::new("SKILL.md"));
@@ -243,6 +246,9 @@ fn scan_json_kind(
             return Err(format!("invalid kind or version in {name}"));
         }
         validate_id(&sidecar.id)?;
+        if scope == LibraryScope::Project && sidecar.provenance.scope == LibraryScope::Global {
+            continue;
+        }
         let relative = path
             .strip_prefix(root)
             .map_err(|_| "item escaped library root")?
@@ -422,7 +428,7 @@ fn export_relative_path(item: &LibraryItem) -> PathBuf {
 /// Validate the third-party `SKILL.md` against the official Agent Skills spec:
 /// YAML frontmatter with a valid `name` equal to the skill directory and a
 /// `description` within bounds, and never any Kronn key (that lives in the
-/// sidecar). See <https://docs.claude.com/en/docs/agents-and-tools/agent-skills>.
+/// sidecar). See <https://agentskills.io/specification>.
 fn validate_skill(content: &[u8], expected_id: &str) -> Result<(), String> {
     reject_secrets(content)?;
     let text = std::str::from_utf8(content).map_err(|_| "SKILL.md must be UTF-8")?;
@@ -440,8 +446,8 @@ fn validate_skill(content: &[u8], expected_id: &str) -> Result<(), String> {
     {
         return Err("Kronn metadata must be stored in SKILL.kronn.json".into());
     }
-    let name = frontmatter_value(frontmatter, "name")
-        .ok_or("SKILL.md requires a non-empty name")?;
+    let name =
+        frontmatter_value(frontmatter, "name").ok_or("SKILL.md requires a non-empty name")?;
     let description = frontmatter_value(frontmatter, "description")
         .ok_or("SKILL.md requires a non-empty description")?;
     // Agent Skills spec: name is a lowercase hyphenated slug (<=64 chars) and
@@ -837,15 +843,84 @@ mod tests {
         // Origin scope preserved, not promoted global -> project on rediscovery.
         assert_eq!(wf1.scope, LibraryScope::Global);
         assert_eq!(sk1.scope, LibraryScope::Global);
+
+        // A real project-local resource still wins over a global resource with
+        // the same id; only managed copies with Global provenance are skipped.
+        skill(&global, "project-wins", "global");
+        skill(&project_agents, "project-wins", "project");
+        let override_catalog = discover(Some(&global), Some(&project_agents)).unwrap();
+        let override_item = override_catalog
+            .get(LibraryKind::Skill, "project-wins")
+            .unwrap();
+        assert_eq!(override_item.scope, LibraryScope::Project);
+        assert!(String::from_utf8_lossy(&override_item.content).contains("project"));
+
+        // Changes in the actual global sources propagate through the managed
+        // project copies instead of being shadowed by those copies.
+        fs::write(
+            global.join("skills/review/SKILL.md"),
+            "---\nname: review\ndescription: updated\n---\n\nupdated body\n",
+        )
+        .unwrap();
+        let workflow_path = global.join("workflows/release.kronn.json");
+        let mut workflow: KronnSidecar =
+            serde_json::from_slice(&fs::read(&workflow_path).unwrap()).unwrap();
+        workflow.data = Some(serde_json::json!({"name": "release", "revision": 2}));
+        fs::write(&workflow_path, canonical_json(&workflow).unwrap()).unwrap();
+
+        let modified = sync(
+            &discover(Some(&global), Some(&project_agents)).unwrap(),
+            &cwd,
+        )
+        .unwrap();
+        assert!(modified
+            .modified
+            .contains(&PathBuf::from("skills/review/SKILL.md")));
+        assert!(modified
+            .modified
+            .contains(&PathBuf::from("workflows/release.kronn.json")));
+        assert!(
+            fs::read_to_string(project_agents.join("skills/review/SKILL.md"))
+                .unwrap()
+                .contains("updated body")
+        );
+        assert!(
+            fs::read_to_string(project_agents.join("workflows/release.kronn.json"))
+                .unwrap()
+                .contains("\"revision\": 2")
+        );
+
+        let stable_after_update = sync(
+            &discover(Some(&global), Some(&project_agents)).unwrap(),
+            &cwd,
+        )
+        .unwrap();
+        assert!(!stable_after_update.changed());
+
+        // Removing global sources removes their managed project copies, while
+        // the explicit project override remains present.
+        fs::remove_dir_all(global.join("skills/review")).unwrap();
+        fs::remove_file(&workflow_path).unwrap();
+        let deleted = sync(
+            &discover(Some(&global), Some(&project_agents)).unwrap(),
+            &cwd,
+        )
+        .unwrap();
+        assert!(deleted
+            .deleted
+            .contains(&PathBuf::from("skills/review/SKILL.md")));
+        assert!(deleted
+            .deleted
+            .contains(&PathBuf::from("workflows/release.kronn.json")));
+        assert!(!project_agents.join("skills/review/SKILL.md").exists());
+        assert!(!project_agents.join("workflows/release.kronn.json").exists());
+        assert!(project_agents.join("skills/project-wins/SKILL.md").exists());
     }
 
     #[test]
     fn skill_name_must_match_directory() {
-        let err = validate_skill(
-            b"---\nname: other\ndescription: ok\n---\nbody",
-            "review",
-        )
-        .unwrap_err();
+        let err =
+            validate_skill(b"---\nname: other\ndescription: ok\n---\nbody", "review").unwrap_err();
         assert!(err.contains("must match its directory"), "{err}");
     }
 
