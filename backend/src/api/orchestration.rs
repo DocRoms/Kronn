@@ -7531,6 +7531,18 @@ fn fixed_worker_reason(code: &str) -> crate::models::CampaignTaskReason {
         "runtime_degraded" => {
             "The detected runtime reports degraded capabilities; inspect Agent settings."
         }
+        "copilot_auth_invalid" => {
+            "Copilot rejected the effective authentication during a bounded account probe; run `copilot login`."
+        }
+        "copilot_preflight_malformed" => {
+            "Copilot completed its bounded account probe without a usable account response; verify `copilot login`."
+        }
+        "copilot_preflight_spawn_failed" => {
+            "Kronn could not invoke Copilot's bounded account probe; verify the local Copilot CLI installation."
+        }
+        "copilot_preflight_timed_out" => {
+            "Copilot did not finish its bounded account probe; retry later or reassign the execution."
+        }
         _ => "The worker is unavailable for a stable, backend-classified reason.",
     };
     preparation_reason(code, detail)
@@ -7544,6 +7556,7 @@ fn build_task_worker_catalogue(
         Option<String>,
     )],
     http_reachability: &[(AgentType, bool)],
+    cli_preflight: &[(AgentType, crate::agents::runner::CopilotTaskWorkerPreflight)],
     project: Option<&crate::models::Project>,
 ) -> crate::models::TaskWorkerCatalogue {
     let mut workers = Vec::new();
@@ -7619,6 +7632,17 @@ fn build_task_worker_catalogue(
         }
         if http && !reachable {
             reasons.push(fixed_worker_reason("endpoint_unreachable"));
+        }
+        if agent == AgentType::CopilotCli {
+            if let Some(status) = cli_preflight
+                .iter()
+                .find(|(kind, _)| kind == &agent)
+                .map(|(_, status)| *status)
+            {
+                if let Some(code) = status.reason_code() {
+                    reasons.push(fixed_worker_reason(code));
+                }
+            }
         }
         let worker = if http {
             MessageTarget::discussion_agent(agent.clone()).with_tier(ModelTier::Default)
@@ -7715,6 +7739,31 @@ async fn bounded_http_worker_reachability(state: &AppState) -> Vec<(AgentType, b
     ]
 }
 
+async fn bounded_cli_worker_preflight(
+    detections: &[crate::models::AgentDetection],
+) -> Vec<(AgentType, crate::agents::runner::CopilotTaskWorkerPreflight)> {
+    let Some(copilot) = detections
+        .iter()
+        .find(|item| item.agent_type == AgentType::CopilotCli)
+    else {
+        return Vec::new();
+    };
+    if !(copilot.installed || copilot.runtime_available) {
+        return Vec::new();
+    }
+    let work_dir = std::env::temp_dir();
+    // The shared runner helper owns the deadline and cancellation policy, so
+    // catalogue discovery cannot abandon a live Copilot child at an outer
+    // timeout boundary.
+    let status = crate::agents::runner::probe_copilot_task_worker_preflight(
+        "copilot",
+        Some("@github/copilot"),
+        &work_dir,
+    )
+    .await;
+    vec![(AgentType::CopilotCli, status)]
+}
+
 pub(crate) async fn task_worker_catalogue_for_discussion(
     state: &AppState,
     parent_discussion_id: &str,
@@ -7744,11 +7793,13 @@ pub(crate) async fn task_worker_catalogue_for_discussion(
     let config = state.config.read().await.clone();
     crate::agents::apply_configured_status(&mut detections, &config);
     let reachability = bounded_http_worker_reachability(state).await;
+    let cli_preflight = bounded_cli_worker_preflight(&detections).await;
     Ok(build_task_worker_catalogue(
         &config,
         &detections,
         &joined,
         &reachability,
+        &cli_preflight,
         project.as_ref(),
     ))
 }
@@ -9013,6 +9064,7 @@ mod tests {
                 (AgentType::LiteLlm, false),
                 (AgentType::Nvidia, false),
             ],
+            &[],
             None,
         );
 
@@ -9068,6 +9120,79 @@ mod tests {
             assert!(!reason.detail.contains("http://"));
             assert!(!reason.detail.contains("https://"));
         }
+    }
+
+    #[test]
+    fn worker_catalogue_refuses_copilot_until_its_account_preflight_succeeds() {
+        let detection = crate::models::AgentDetection {
+            name: "GitHub Copilot".into(),
+            agent_type: AgentType::CopilotCli,
+            installed: true,
+            enabled: true,
+            path: Some("copilot".into()),
+            version: None,
+            latest_version: None,
+            origin: "test".into(),
+            install_command: None,
+            host_managed: false,
+            host_label: None,
+            runtime_available: true,
+            auth_ready: Some(true),
+            auth_setup_command: None,
+            rtk_available: false,
+            rtk_hook_configured: false,
+            runtime_warning: None,
+        };
+        let catalogue = build_task_worker_catalogue(
+            &crate::core::config::default_config(),
+            std::slice::from_ref(&detection),
+            &[],
+            &[],
+            &[(
+                AgentType::CopilotCli,
+                crate::agents::runner::CopilotTaskWorkerPreflight::AuthInvalid,
+            )],
+            None,
+        );
+        let copilot = catalogue
+            .workers
+            .iter()
+            .find(|entry| entry.worker.agent_type == AgentType::CopilotCli)
+            .expect("Copilot entry");
+        assert!(copilot.configured && copilot.reachable);
+        assert!(!copilot.available);
+        assert!(copilot
+            .reasons
+            .iter()
+            .any(|reason| reason.code == "copilot_auth_invalid"));
+        assert!(copilot
+            .reasons
+            .iter()
+            .all(|reason| !reason.detail.contains("token")));
+
+        let timed_out = build_task_worker_catalogue(
+            &crate::core::config::default_config(),
+            &[detection],
+            &[],
+            &[],
+            &[(
+                AgentType::CopilotCli,
+                crate::agents::runner::CopilotTaskWorkerPreflight::TimedOut,
+            )],
+            None,
+        );
+        let copilot = timed_out
+            .workers
+            .iter()
+            .find(|entry| entry.worker.agent_type == AgentType::CopilotCli)
+            .expect("Copilot entry");
+        assert!(!copilot.available);
+        assert!(copilot.reasons.iter().any(|reason| {
+            reason.code == "copilot_preflight_timed_out"
+                && reason
+                    .detail
+                    .contains("did not finish its bounded account probe")
+        }));
     }
 
     // ── KT-319 tranche 1 — delivery/review contracts + brief (pure). ──
