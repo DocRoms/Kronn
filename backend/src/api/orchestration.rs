@@ -2337,13 +2337,34 @@ async fn checkpoint(
 async fn send_back(db: &Database, exec_id: &str, reason: String) -> Result<(), ProvisionError> {
     let id = exec_id.to_string();
     db.with_conn(move |conn| {
-        crate::db::orchestration::transition_execution(
-            conn,
+        let transaction = conn.unchecked_transaction()?;
+        let execution = crate::db::orchestration::get_task_execution(&transaction, &id)?
+            .context("execution vanished before integration rework")?;
+        let moved = crate::db::orchestration::transition_execution(
+            &transaction,
             &id,
             TaskExecutionStatus::ChangesRequested,
             &backend_actor(),
-            serde_json::json!({ "reason": reason }),
+            serde_json::json!({
+                "reason": reason,
+                "from_attempt": execution.attempt_no,
+                "to_attempt": execution.attempt_no + 1,
+            }),
         )?;
+        if moved {
+            // An approved attempt already owns both a delivery/review row and the
+            // deterministic `orch-review-request:<exec>:<attempt>` message. Reusing
+            // that attempt after a candidate conflict or failed validation makes the
+            // next otherwise-valid delivery collide with the old message primary key.
+            // Integration rework is a distinct worker attempt, just like an explicit
+            // request_changes review, so advance it in the same durable checkpoint.
+            transaction.execute(
+                "UPDATE task_executions SET attempt_no = attempt_no + 1, updated_at = ?2 \
+                 WHERE id = ?1",
+                rusqlite::params![id, chrono::Utc::now().to_rfc3339()],
+            )?;
+        }
+        transaction.commit()?;
         Ok(())
     })
     .await
@@ -7374,11 +7395,16 @@ pub struct TaskExecCancelRequest {
     pub cleanup_policy: Option<crate::models::CancellationCleanupPolicy>,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct TaskExecReassignRequest {
     pub source_agent: String,
     pub source_session_id: String,
-    pub worker: crate::models::CampaignWorkerSelection,
+    /// The same typed `MessageTarget` shape `agent_list` hands back verbatim
+    /// and `task_exec_prepare`/`task_exec_launch` accept as `worker` — not
+    /// the internal `CampaignWorkerSelection` envelope. `model`/`profile_id`
+    /// are not publicly overridable here; a reassignment always resolves
+    /// them from the target's tier, exactly like a fresh launch would.
+    pub worker: MessageTarget,
     pub reason: String,
 }
 
@@ -8081,7 +8107,11 @@ pub async fn task_exec_reassign(
         State(state),
         Path(exec_id),
         Json(ReassignExecutionRequest {
-            worker: request.worker,
+            worker: crate::models::CampaignWorkerSelection {
+                target: request.worker,
+                model: None,
+                profile_id: None,
+            },
             reason: request.reason,
         }),
     )
@@ -11293,6 +11323,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(after.status, TaskExecutionStatus::ChangesRequested);
+        assert_eq!(
+            after.attempt_no,
+            execution.attempt_no + 1,
+            "integration rework must not reuse the reviewed attempt"
+        );
         assert!(after.integrated_sha.is_none());
         assert_eq!(validations.len(), 1);
         assert_eq!(validations[0].command, validation.command);
@@ -11305,6 +11340,86 @@ mod tests {
         assert!(
             child.exists(),
             "failed validation preserves the worker checkout"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_validation_redelivery_uses_a_fresh_review_request_message() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (_parent, _child, exec_id, _head, _path) =
+            delivered_awaiting_review(&db, repo.path()).await;
+        let execution = exec_of(&db, &exec_id).await;
+        let run_id = execution.orchestration_run_id.clone();
+        let validations = vec![ValidationSpec {
+            command: "false".into(),
+            quick_exec_id: None,
+            timeout_secs: Some(5),
+        }];
+        db.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE orchestration_runs SET validation_json = ?2 WHERE id = ?1",
+                rusqlite::params![run_id, serde_json::to_string(&validations)?],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        decide_review(
+            &db,
+            &exec_id,
+            &review_approve(&db, &exec_id).await,
+            "ClaudeCode",
+            "sess-b",
+        )
+        .await
+        .unwrap();
+        let outcome = run_integration(&db, &exec_id).await.unwrap();
+        assert!(matches!(outcome, IntegrationOutcome::SentBack { .. }));
+        let sent_back = exec_of(&db, &exec_id).await;
+        assert_eq!(sent_back.status, TaskExecutionStatus::ChangesRequested);
+        assert_eq!(sent_back.attempt_no, 1);
+
+        let execution_id = exec_id.clone();
+        db.with_conn(move |conn| {
+            crate::db::orchestration::transition_execution(
+                conn,
+                &execution_id,
+                TaskExecutionStatus::Working,
+                &backend_actor(),
+                serde_json::json!({ "recovery": "test_worker_resumed" }),
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let manifest = clean_manifest_for_execution(&db, &exec_id).await;
+        let redelivery = deliver_worker_manifest(&db, &exec_id, "ClaudeCode", "sess-a", &manifest)
+            .await
+            .unwrap();
+        assert!(matches!(redelivery, DeliverOutcome::Delivered { .. }));
+        let delivered = exec_of(&db, &exec_id).await;
+        assert_eq!(delivered.status, TaskExecutionStatus::AwaitingReview);
+        assert_eq!(delivered.attempt_no, 1);
+
+        let execution_id = exec_id.clone();
+        let review_requests = db
+            .with_conn(move |conn| {
+                Ok(conn.query_row(
+                    "SELECT COUNT(*) FROM messages WHERE id IN (?1, ?2)",
+                    rusqlite::params![
+                        format!("orch-review-request:{execution_id}:0"),
+                        format!("orch-review-request:{execution_id}:1"),
+                    ],
+                    |row| row.get::<_, i64>(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            review_requests, 2,
+            "both review obligations keep distinct durable message ids"
         );
     }
 
@@ -15614,6 +15729,134 @@ mod tests {
         assert!(
             replaced_worker_token.is_cancelled(),
             "the superseded dispatch must not keep running after commit"
+        );
+    }
+
+    /// KT-492 — `task_exec_reassign` must accept the exact typed `MessageTarget`
+    /// `agent_list` hands back verbatim (kind/agent_type/...), not the internal
+    /// `{target, model, profile_id}` `CampaignWorkerSelection` envelope that used
+    /// to make this endpoint 422 on every copy-pasted worker.
+    #[tokio::test]
+    async fn task_exec_reassign_endpoint_accepts_the_bare_message_target_worker_from_agent_list() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let (task_ref, parent_id, _) = seed(&db, repo.path()).await;
+        let execution = provision_single_task_execution(
+            &db,
+            ProvisionInput {
+                task_reference: task_ref,
+                parent_discussion_id: parent_id.clone(),
+                worker: native_worker(),
+                base_rev: Some("main".into()),
+                idempotency_key: Some("reassign-bare-message-target".into()),
+            },
+        )
+        .await
+        .unwrap();
+        let execution_id = execution.id.clone();
+        let child = execution.sub_discussion_id.clone().unwrap();
+        let dispatch = execution.dispatch_job_id.clone().unwrap();
+        let interrupted_id = execution_id.clone();
+        let session_disc_id = parent_id.clone();
+        db.with_conn(move |conn| {
+            crate::db::agent_dispatch::mark_completed(conn, &dispatch)?;
+            crate::db::discussion_sessions::create_session(
+                conn,
+                &session_disc_id,
+                "ClaudeCode",
+                Some("reassign-session-1"),
+                "owner",
+            )?;
+            crate::db::orchestration::transition_execution(
+                conn,
+                &interrupted_id,
+                TaskExecutionStatus::Interrupted,
+                &backend_actor(),
+                serde_json::json!({}),
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let state = AppState::new_defaults(
+            std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::core::config::default_config(),
+            )),
+            db.clone(),
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        );
+
+        // Exactly the payload copied verbatim from `agent_list` — no
+        // {target, model, profile_id} envelope.
+        let raw = serde_json::json!({
+            "source_agent": "ClaudeCode",
+            "source_session_id": "reassign-session-1",
+            "worker": {"kind": "agent", "agent_type": "Codex"},
+            "reason": "codex is a stronger fit for this rework",
+        });
+        let request: TaskExecReassignRequest = serde_json::from_value(raw).unwrap();
+
+        let Json(response) =
+            task_exec_reassign(State(state), Path(execution_id.clone()), Json(request)).await;
+        assert!(response.success, "{:?}", response.error);
+
+        let worker_room = db
+            .with_conn(move |conn| {
+                crate::db::discussions::get_discussion(conn, &child)?
+                    .context("reassigned child room missing")
+            })
+            .await
+            .unwrap();
+        assert_eq!(worker_room.agent, AgentType::Codex);
+        assert_eq!(worker_room.tier, ModelTier::Default);
+        assert!(worker_room.pin_first_message);
+    }
+
+    /// The public `worker` field must round-trip for every `MessageTarget` kind
+    /// `agent_list` can hand back: an HTTP provider (`discussion_agent`), a
+    /// punctual host CLI (`agent`), and an exact joined CLI session (`cli`).
+    #[test]
+    fn task_exec_reassign_worker_deserializes_every_message_target_kind() {
+        for raw in [
+            serde_json::json!({"kind": "discussion_agent", "agent_type": "Ollama"}),
+            serde_json::json!({"kind": "agent", "agent_type": "ClaudeCode"}),
+            serde_json::json!({"kind": "cli", "agent_type": "Codex", "cli_session_id": 42}),
+        ] {
+            let body = serde_json::json!({
+                "source_agent": "ClaudeCode",
+                "source_session_id": "s1",
+                "worker": raw.clone(),
+                "reason": "swap worker",
+            });
+            let request: TaskExecReassignRequest = serde_json::from_value(body)
+                .unwrap_or_else(|error| panic!("{raw} must deserialize as worker: {error}"));
+            assert_eq!(
+                serde_json::to_value(&request.worker).unwrap()["kind"],
+                raw["kind"]
+            );
+        }
+    }
+
+    /// The legacy internal envelope must be refused, not silently accepted with
+    /// a `None` target: it nests the real identity under `target` while this
+    /// endpoint now expects the flat `MessageTarget` fields directly.
+    #[test]
+    fn task_exec_reassign_worker_refuses_the_legacy_campaign_worker_selection_envelope() {
+        let raw = serde_json::json!({
+            "source_agent": "ClaudeCode",
+            "source_session_id": "s1",
+            "worker": {
+                "target": {"kind": "discussion_agent", "agent_type": "Ollama"},
+                "model": null,
+                "profile_id": null,
+            },
+            "reason": "legacy shape must be refused",
+        });
+        let error = serde_json::from_value::<TaskExecReassignRequest>(raw).unwrap_err();
+        assert!(
+            error.to_string().contains("kind"),
+            "legacy {{target, model, profile_id}} envelope must fail on the missing flat \
+             `kind`: {error}"
         );
     }
 

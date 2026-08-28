@@ -511,7 +511,7 @@ fn orchestration_tool_catalogue() -> Vec<Value> {
             "Reassign a blocked/interrupted execution as its parent-room principal while preserving durable child/worktree/checkpoints.",
             json!({
                 "task_execution_id": {"type": "string"},
-                "worker": {"type": "object", "description": "CampaignWorkerSelection with typed target and optional model/profile."},
+                "worker": {"type": "object", "description": "Typed MessageTarget: kind, agent_type, optional exact cli_session_id and tier — the same object agent_list hands back and task_exec_prepare/task_exec_launch accept as worker."},
                 "reason": {"type": "string"}
             }),
             json!(["task_execution_id", "worker", "reason"]),
@@ -1582,11 +1582,25 @@ impl KronnToolExecutor {
                 let Some(reason) = required_string(call, "reason") else {
                     return fail(call, "missing required field `reason`");
                 };
-                let worker = match serde_json::from_value::<crate::models::CampaignWorkerSelection>(
+                let target = match serde_json::from_value::<crate::models::MessageTarget>(
                     call.arguments["worker"].clone(),
                 ) {
-                    Ok(worker) => worker,
-                    Err(error) => return fail(call, format!("invalid worker selection: {error}")),
+                    Ok(target) => target,
+                    Err(error) => {
+                        return fail(
+                            call,
+                            format!(
+                                "worker must be the typed MessageTarget object copied verbatim \
+                                 from agent_list (kind/agent_type/...), not the internal \
+                                 CampaignWorkerSelection envelope: {error}"
+                            ),
+                        )
+                    }
+                };
+                let worker = crate::models::CampaignWorkerSelection {
+                    target,
+                    model: None,
+                    profile_id: None,
                 };
                 let authorized = {
                     let execution_id = execution_id.clone();
