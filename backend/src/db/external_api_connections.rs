@@ -1,11 +1,12 @@
 //! Persistence and one-time legacy-config backfill for named external API connections.
 
-use anyhow::Result;
-use rusqlite::{params, Connection};
+use anyhow::{bail, Result};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use super::parse_dt;
 use crate::models::{
-    AppConfig, ExternalApiConnection, ExternalApiConnectionPreset, ModelTierConfig,
+    AgentType, AppConfig, ExternalApiConnection, ExternalApiConnectionPreset, MessageTarget,
+    ModelTierConfig,
 };
 
 const COLUMNS: &str = "id, display_name, mention_alias, endpoint, credential_slug, origin_preset, \
@@ -54,7 +55,108 @@ pub fn list(conn: &Connection) -> Result<Vec<ExternalApiConnection>> {
         .collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
+pub fn connection_mention_alias(connection: &ExternalApiConnection) -> String {
+    format!("@{}", connection.mention_alias.trim().to_lowercase())
+}
+
+fn ensure_mention_alias_available(
+    conn: &Connection,
+    mention_alias: &str,
+    excluding_id: Option<&str>,
+) -> Result<()> {
+    let conflicting_id = conn
+        .query_row(
+            "SELECT id FROM external_api_connections
+             WHERE mention_alias = ?1 COLLATE NOCASE
+               AND (?2 IS NULL OR id <> ?2)",
+            params![mention_alias.trim(), excluding_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    if let Some(id) = conflicting_id {
+        bail!(
+            "mention alias @{} is already claimed by connection {id}",
+            mention_alias.trim().to_lowercase()
+        );
+    }
+    Ok(())
+}
+
+pub fn target_for_connection(connection: &ExternalApiConnection) -> MessageTarget {
+    let agent_type = match connection.origin_preset {
+        ExternalApiConnectionPreset::LiteLlm => AgentType::LiteLlm,
+        ExternalApiConnectionPreset::Nvidia => AgentType::Nvidia,
+        ExternalApiConnectionPreset::Other => AgentType::Custom,
+    };
+    let mut target = MessageTarget::agent(agent_type);
+    target.connection_id = Some(connection.id.clone());
+    target
+}
+
+pub fn resolve_connection_mentions(
+    content: &str,
+    connections: &[ExternalApiConnection],
+) -> Vec<MessageTarget> {
+    let lower = content.to_lowercase();
+    let mut found = Vec::new();
+    for connection in connections {
+        let alias = connection_mention_alias(connection);
+        for (index, _) in lower.match_indices(&alias) {
+            let before = lower[..index].chars().next_back();
+            let after = lower[index + alias.len()..].chars().next();
+            let valid_before = before.is_none_or(|ch| !ch.is_alphanumeric());
+            let valid_after = after.is_none_or(|ch| !(ch.is_alphanumeric() || ch == '-'));
+            if valid_before && valid_after {
+                found.push((index, target_for_connection(connection)));
+                break;
+            }
+        }
+    }
+    found.sort_by_key(|(index, _)| *index);
+    found.into_iter().map(|(_, target)| target).collect()
+}
+
+/// Add dynamically resolved connection targets without retaining the generic
+/// static target for the same provider. The scoped connection wins because it
+/// carries the runtime identity; a tier selected on the static target remains
+/// attached to the replacement.
+pub fn merge_connection_mention_targets(
+    targets: &mut Vec<MessageTarget>,
+    connection_targets: Vec<MessageTarget>,
+) {
+    for mut connection_target in connection_targets {
+        let generic_position = targets.iter().position(|target| {
+            target.kind == crate::models::MessageTargetKind::Agent
+                && target.agent_type == connection_target.agent_type
+                && target.connection_id.is_none()
+                && target.cli_session_id.is_none()
+        });
+        let existing_position = targets.iter().position(|target| {
+            target.kind == connection_target.kind
+                && target.agent_type == connection_target.agent_type
+                && target.connection_id == connection_target.connection_id
+                && target.cli_session_id == connection_target.cli_session_id
+        });
+
+        match (generic_position, existing_position) {
+            (Some(generic), Some(existing)) => {
+                if targets[existing].tier.is_none() {
+                    targets[existing].tier = targets[generic].tier;
+                }
+                targets.remove(generic);
+            }
+            (Some(generic), None) => {
+                connection_target.tier = targets[generic].tier;
+                targets[generic] = connection_target;
+            }
+            (None, Some(_)) => {}
+            (None, None) => targets.push(connection_target),
+        }
+    }
+}
+
 pub fn insert(conn: &Connection, connection: &ExternalApiConnection) -> Result<()> {
+    ensure_mention_alias_available(conn, &connection.mention_alias, None)?;
     conn.execute(
         "INSERT INTO external_api_connections (
              id, display_name, mention_alias, endpoint, credential_slug, origin_preset,
@@ -63,7 +165,7 @@ pub fn insert(conn: &Connection, connection: &ExternalApiConnection) -> Result<(
         params![
             connection.id,
             connection.display_name,
-            connection.mention_alias,
+            connection.mention_alias.trim().to_lowercase(),
             connection.endpoint,
             connection.credential_slug,
             preset_name(connection.origin_preset),
@@ -71,6 +173,30 @@ pub fn insert(conn: &Connection, connection: &ExternalApiConnection) -> Result<(
             connection.default_model,
             connection.reasoning_model,
             connection.created_at.to_rfc3339(),
+            connection.updated_at.to_rfc3339(),
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn update(conn: &Connection, connection: &ExternalApiConnection) -> Result<()> {
+    ensure_mention_alias_available(conn, &connection.mention_alias, Some(&connection.id))?;
+    conn.execute(
+        "UPDATE external_api_connections SET
+             display_name = ?2, mention_alias = ?3, endpoint = ?4, credential_slug = ?5,
+             origin_preset = ?6, economy_model = ?7, default_model = ?8,
+             reasoning_model = ?9, updated_at = ?10
+         WHERE id = ?1",
+        params![
+            connection.id,
+            connection.display_name,
+            connection.mention_alias.trim().to_lowercase(),
+            connection.endpoint,
+            connection.credential_slug,
+            preset_name(connection.origin_preset),
+            connection.economy_model,
+            connection.default_model,
+            connection.reasoning_model,
             connection.updated_at.to_rfc3339(),
         ],
     )?;
@@ -137,6 +263,98 @@ mod tests {
     use crate::core::config::default_config;
     use crate::models::ApiKey;
     use chrono::Utc;
+
+    fn connection(
+        id: &str,
+        alias: &str,
+        preset: ExternalApiConnectionPreset,
+    ) -> ExternalApiConnection {
+        let now = Utc::now();
+        ExternalApiConnection {
+            id: id.into(),
+            display_name: id.into(),
+            mention_alias: alias.into(),
+            endpoint: Some("https://api.example.test".into()),
+            credential_slug: format!("credential-{id}"),
+            origin_preset: preset,
+            economy_model: None,
+            default_model: Some("model".into()),
+            reasoning_model: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[test]
+    fn mention_alias_is_unique_for_insert_and_update_case_insensitively() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        insert(
+            &conn,
+            &connection("groq-primary", "Groq", ExternalApiConnectionPreset::Other),
+        )
+        .unwrap();
+
+        let insert_error = insert(
+            &conn,
+            &connection("groq-secondary", "groq", ExternalApiConnectionPreset::Other),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(insert_error.contains("already claimed"));
+
+        let mut other = connection("other", "other", ExternalApiConnectionPreset::Other);
+        insert(&conn, &other).unwrap();
+        other.mention_alias = "GROQ".into();
+        let update_error = update(&conn, &other).unwrap_err().to_string();
+        assert!(update_error.contains("already claimed"));
+    }
+
+    #[test]
+    fn dynamic_alias_resolves_by_exact_match_to_typed_connection_target() {
+        let connections = vec![
+            connection("groq-primary", "groq", ExternalApiConnectionPreset::Other),
+            connection(
+                "nvidia-primary",
+                "nvidia",
+                ExternalApiConnectionPreset::Nvidia,
+            ),
+        ];
+
+        let targets = resolve_connection_mentions("Ask @GROQ, then @nvidia.", &connections);
+        assert_eq!(targets.len(), 2);
+        assert_eq!(targets[0].agent_type, AgentType::Custom);
+        assert_eq!(targets[0].connection_id.as_deref(), Some("groq-primary"));
+        assert_eq!(targets[1].agent_type, AgentType::Nvidia);
+        assert_eq!(targets[1].connection_id.as_deref(), Some("nvidia-primary"));
+        assert!(
+            resolve_connection_mentions("mail@groq.example or @groq-fast", &connections).is_empty()
+        );
+    }
+
+    #[test]
+    fn dynamic_connection_target_replaces_static_provider_target_without_losing_tier() {
+        let connections = vec![connection(
+            "nvidia-primary",
+            "nvidia",
+            ExternalApiConnectionPreset::Nvidia,
+        )];
+        let mut targets =
+            vec![MessageTarget::agent(AgentType::Nvidia)
+                .with_tier(crate::models::ModelTier::Reasoning)];
+
+        merge_connection_mention_targets(
+            &mut targets,
+            resolve_connection_mentions("Ask @nvidia.", &connections),
+        );
+
+        assert_eq!(
+            targets,
+            vec![MessageTarget::agent(AgentType::Nvidia)
+                .with_connection("nvidia-primary")
+                .with_tier(crate::models::ModelTier::Reasoning)]
+        );
+    }
 
     #[tokio::test]
     async fn shared_bootstrap_backfills_legacy_connections_idempotently_without_secrets() {

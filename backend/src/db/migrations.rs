@@ -551,6 +551,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "145_task_execution_worker_connection",
         include_str!("sql/145_task_execution_worker_connection.sql"),
     ),
+    (
+        "146_message_target_connection",
+        include_str!("sql/146_message_target_connection.sql"),
+    ),
 ];
 
 /// Apply one migration inside the caller-owned transaction.

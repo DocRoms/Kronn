@@ -440,6 +440,33 @@ pub async fn disc_append(
             };
         }
     }
+    if routing_candidate {
+        let content = req.messages[0].content.clone();
+        let connection_targets = match state
+            .db
+            .with_read_conn(move |conn| {
+                let connections = crate::db::external_api_connections::list(conn)?;
+                Ok(
+                    crate::db::external_api_connections::resolve_connection_mentions(
+                        &content,
+                        &connections,
+                    ),
+                )
+            })
+            .await
+        {
+            Ok(targets) => targets,
+            Err(error) => {
+                return Json(ApiResponse::err(format!(
+                    "DB error resolving connection mentions: {error}"
+                )))
+            }
+        };
+        crate::db::external_api_connections::merge_connection_mention_targets(
+            &mut requested_targets,
+            connection_targets,
+        );
+    }
     // KT-330 — resolve joined-CLI room-alias mentions (`@claude-cli`) in the body
     // into Cli wake targets, server-side, via the SAME shared resolver as the
     // native path. New bridges resolve mentions client-side, but an older or
@@ -1588,6 +1615,94 @@ mod tests {
 
     async fn append(state: &crate::AppState, msgs: Vec<DiscAppendMessage>) -> DiscAppendResponse {
         append_as(state, msgs, None).await
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn live_peer_dynamic_connection_alias_persists_exact_target_with_static_precedence() {
+        crate::core::anti_halluc::set_mode("off");
+        let (state, _tmp) = lint_state(false).await;
+        state
+            .db
+            .with_conn(|conn| {
+                for (id, alias, preset) in [
+                    ("groq-primary", "groq", ExternalApiConnectionPreset::Other),
+                    (
+                        "nvidia-primary",
+                        "nvidia",
+                        ExternalApiConnectionPreset::Nvidia,
+                    ),
+                ] {
+                    let now = chrono::Utc::now();
+                    crate::db::external_api_connections::insert(
+                        conn,
+                        &ExternalApiConnection {
+                            id: id.into(),
+                            display_name: id.into(),
+                            mention_alias: alias.into(),
+                            endpoint: Some("https://api.example.test".into()),
+                            credential_slug: format!("credential-{id}"),
+                            origin_preset: preset,
+                            economy_model: None,
+                            default_model: Some("model".into()),
+                            reasoning_model: None,
+                            created_at: now,
+                            updated_at: now,
+                        },
+                    )?;
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        append_as(
+            &state,
+            vec![agent_msg("dynamic-groq", "Ask @groq to review this.")],
+            Some("joined-session"),
+        )
+        .await;
+        let groq_targets = state
+            .db
+            .with_conn(|conn| {
+                let message_id = crate::db::disc_source::message_id_for_source_id(
+                    conn,
+                    "d-lint",
+                    "dynamic-groq",
+                )?
+                .expect("dynamic alias message persisted");
+                crate::db::discussions::list_message_targets(conn, &message_id)
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            groq_targets,
+            vec![MessageTarget::agent(AgentType::Custom).with_connection("groq-primary")]
+        );
+
+        let mut static_nvidia = agent_msg("dynamic-nvidia", "Ask @nvidia to review this.");
+        static_nvidia.targets =
+            vec![MessageTarget::agent(AgentType::Nvidia).with_tier(ModelTier::Reasoning)];
+        append_as(&state, vec![static_nvidia], Some("joined-session")).await;
+        let nvidia_targets = state
+            .db
+            .with_conn(|conn| {
+                let message_id = crate::db::disc_source::message_id_for_source_id(
+                    conn,
+                    "d-lint",
+                    "dynamic-nvidia",
+                )?
+                .expect("static alias message persisted");
+                crate::db::discussions::list_message_targets(conn, &message_id)
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            nvidia_targets,
+            vec![MessageTarget::agent(AgentType::Nvidia)
+                .with_connection("nvidia-primary")
+                .with_tier(ModelTier::Reasoning)]
+        );
     }
 
     #[tokio::test]

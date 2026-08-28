@@ -49,6 +49,7 @@ fn accepted_event(message_id: &str, sort_order: i64, duplicate: bool) -> Event {
 fn same_target_identity(left: &MessageTarget, right: &MessageTarget) -> bool {
     left.kind == right.kind
         && left.agent_type == right.agent_type
+        && left.connection_id == right.connection_id
         && left.cli_session_id == right.cli_session_id
 }
 
@@ -160,12 +161,13 @@ pub(crate) async fn canonical_targets(
             let discussion = crate::db::discussions::get_discussion(conn, &did)?
                 .ok_or_else(|| anyhow::anyhow!("discussion not found"))?;
             let sessions = crate::db::discussion_sessions::list_sessions(conn, &did, false)?;
+            let connections = crate::db::external_api_connections::list(conn)?;
             let no_agent = crate::db::discussions::disc_is_no_agent(conn, &did)?;
-            Ok((discussion, sessions, no_agent))
+            Ok((discussion, sessions, connections, no_agent))
         })
         .await
         .map_err(|error| error.to_string())?;
-    let (discussion, sessions, no_agent) = context;
+    let (discussion, sessions, connections, no_agent) = context;
 
     let mut candidates = if target_all {
         let mut all = if no_agent {
@@ -203,7 +205,22 @@ pub(crate) async fn canonical_targets(
                 canonical
             }
             MessageTargetKind::Agent => {
-                let mut canonical = MessageTarget::agent(target.agent_type);
+                let mut canonical = if let Some(connection_id) = target.connection_id.as_deref() {
+                    let Some(connection) = connections.iter().find(|item| item.id == connection_id)
+                    else {
+                        return Err(format!("unknown connection target {connection_id}"));
+                    };
+                    let canonical =
+                        crate::db::external_api_connections::target_for_connection(connection);
+                    if canonical.agent_type != target.agent_type {
+                        return Err(format!(
+                            "connection target {connection_id} does not match the requested agent"
+                        ));
+                    }
+                    canonical
+                } else {
+                    MessageTarget::agent(target.agent_type)
+                };
                 canonical.tier = target.tier;
                 canonical
             }
@@ -404,10 +421,36 @@ pub async fn send_message(
         };
     }
 
-    let requested_targets = normalized_targets(
+    let mut requested_targets = normalized_targets(
         req.targets.clone(),
         req.target_agents.clone(),
         req.target_agent.clone(),
+    );
+    let content = req.content.clone();
+    let connection_targets = match state
+        .db
+        .with_conn(move |conn| {
+            let connections = crate::db::external_api_connections::list(conn)?;
+            Ok(
+                crate::db::external_api_connections::resolve_connection_mentions(
+                    &content,
+                    &connections,
+                ),
+            )
+        })
+        .await
+    {
+        Ok(targets) => targets,
+        Err(error) => {
+            return sse_events(vec![Event::default().event("error").data(
+                serde_json::json!({ "error": format!("Failed to resolve connection aliases: {error}") })
+                    .to_string(),
+            )]);
+        }
+    };
+    crate::db::external_api_connections::merge_connection_mention_targets(
+        &mut requested_targets,
+        connection_targets,
     );
     let targets = match canonical_targets(&state, &id, requested_targets, req.target_all).await {
         Ok(targets) => targets,
