@@ -4173,13 +4173,13 @@ pub fn reassign_execution_worker(
         }
         crate::db::worker_offers::cancel_live_offers_for_execution(conn, exec_id)?;
         let now = Utc::now().to_rfc3339();
-        // Repair rows created by the pre-KT-385 native request_changes path: it persisted the
-        // review on attempt N but forgot to advance the execution before a later reassignment.
-        // Without this guard the next delivery/review would overwrite attempt N's audit rows.
-        // Correct rows already point at N+1, where no review exists yet, so this is idempotent.
+        // Repair historical rework rows that still point at an already-reviewed attempt.
+        // Pre-KT-385 request_changes forgot to advance it; pre-KT-497 validation/integration
+        // send-backs did the same after an approve. In both cases attempt N already owns its
+        // delivery/review/message audit identities, so the next delivery must use N+1.
+        // Correct rows already point at an unreviewed attempt, making this idempotent.
         let repaired_rework_attempt =
-            crate::db::worker_reviews::get_review(conn, exec_id, execution.attempt_no)?
-                .is_some_and(|review| review.decision == "request_changes");
+            crate::db::worker_reviews::get_review(conn, exec_id, execution.attempt_no)?.is_some();
         if repaired_rework_attempt {
             conn.execute(
                 "UPDATE task_executions SET attempt_no = attempt_no + 1, updated_at = ?2 \
@@ -4196,7 +4196,7 @@ pub fn reassign_execution_worker(
                 serde_json::json!({
                     "from_attempt": execution.attempt_no,
                     "to_attempt": execution.attempt_no + 1,
-                    "reason": "request_changes_attempt_was_not_advanced",
+                    "reason": "reviewed_attempt_was_not_advanced",
                 }),
             )?;
         }

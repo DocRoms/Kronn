@@ -942,14 +942,19 @@ TOOLS = [
         "name": "task_exec_reassign",
         "description": (
             "Reassign an interrupted/blocked execution as principal, preserving its room, "
-            "worktree and evidence. Transport changes must change target.kind; invalid "
-            "pairs are refused before mutation."
+            "worktree and evidence. `worker` is the exact typed MessageTarget object copied "
+            "verbatim from agent_list — the same shape task_exec_prepare and task_exec_launch "
+            "accept, NOT the internal {target, model, profile_id} envelope. A transport change "
+            "must change worker.kind; invalid pairs are refused before mutation."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "task_execution_id": {"type": "string"},
-                "worker": {"type": "object"},
+                "worker": {
+                    "type": "object",
+                    "description": "Typed MessageTarget: kind, agent_type, optional exact cli_session_id and tier.",
+                },
                 "reason": {"type": "string"},
             },
             "required": ["task_execution_id", "worker", "reason"],
@@ -5315,6 +5320,43 @@ _TASK_EXEC_MANUAL_HINT = (
     "worker_scope_intent, worker_scope and validations shapes."
 )
 
+_TASK_EXEC_WORKER_KINDS = ("discussion_agent", "agent", "cli")
+
+
+def _validate_task_exec_worker(worker, tool_name):
+    """Fail closed with a typed, actionable error instead of the backend's raw
+    422 when `worker` is not the flat MessageTarget object `agent_list` hands
+    back verbatim. Catches the classic mistake of wrapping it as the internal
+    `{target: {...}, model, profile_id}` envelope."""
+    if not isinstance(worker, dict):
+        raise RuntimeError(
+            f"{tool_name}: worker must be the typed MessageTarget object copied "
+            f"verbatim from agent_list. {_TASK_EXEC_MANUAL_HINT}"
+        )
+    if "target" in worker and "kind" not in worker:
+        raise RuntimeError(
+            f"{tool_name}: worker must be the flat MessageTarget object itself "
+            '(kind/agent_type/...), not wrapped as {"target": {...}, "model": ..., '
+            '"profile_id": ...}. Copy the `worker` object from agent_list verbatim. '
+            f"{_TASK_EXEC_MANUAL_HINT}"
+        )
+    kind = worker.get("kind")
+    if kind not in _TASK_EXEC_WORKER_KINDS:
+        raise RuntimeError(
+            f"{tool_name}: worker.kind must be one of {_TASK_EXEC_WORKER_KINDS}, "
+            f"got {kind!r}. {_TASK_EXEC_MANUAL_HINT}"
+        )
+    agent_type = worker.get("agent_type")
+    if not isinstance(agent_type, str) or not agent_type.strip():
+        raise RuntimeError(
+            f"{tool_name}: worker.agent_type is required. {_TASK_EXEC_MANUAL_HINT}"
+        )
+    if kind == "cli" and not isinstance(worker.get("cli_session_id"), int):
+        raise RuntimeError(
+            f"{tool_name}: worker.kind=cli requires the exact integer cli_session_id "
+            f"copied from agent_list — never guess it. {_TASK_EXEC_MANUAL_HINT}"
+        )
+
 
 def _task_exec_request(path, body):
     """Keep compact schemas fail-closed while making shape errors self-repairing."""
@@ -5501,9 +5543,9 @@ def call_task_exec_reassign(args):
         raise RuntimeError(
             "task_exec_reassign: task_execution_id, typed worker and reason are required"
         )
+    _validate_task_exec_worker(worker, "task_exec_reassign")
     source_agent, source_session_id = _task_exec_identity("task_exec_reassign")
-    return _unwrap(_http(
-        "POST",
+    return _task_exec_request(
         f"/api/orchestration/tool/executions/{execution_id}/reassign",
         {
             "source_agent": source_agent,
@@ -5511,7 +5553,7 @@ def call_task_exec_reassign(args):
             "worker": worker,
             "reason": reason,
         },
-    ))
+    )
 
 
 def call_task_exec_accept_worker_offer(args):
