@@ -3863,8 +3863,7 @@ mod tests {
             Path::new(&info.path).join("sub").join("lib.txt").exists(),
             "submodule must be materialized in the task worktree"
         );
-        let worker_head =
-            commit_file(Path::new(&info.path), "worker.txt", "keep", "worker work");
+        let worker_head = commit_file(Path::new(&info.path), "worker.txt", "keep", "worker work");
 
         remove_cancelled_task_worktree(repo.path(), &info.path, &info.branch).unwrap();
 
