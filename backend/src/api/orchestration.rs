@@ -7557,7 +7557,6 @@ fn build_task_worker_catalogue(
     )],
     http_reachability: &[(AgentType, bool)],
     cli_preflight: &[(AgentType, crate::agents::runner::CopilotTaskWorkerPreflight)],
-    project: Option<&crate::models::Project>,
 ) -> crate::models::TaskWorkerCatalogue {
     let mut workers = Vec::new();
     let native_agents = [
@@ -7652,9 +7651,6 @@ fn build_task_worker_catalogue(
         if let Some(reason) = worker_static_refusal(&worker) {
             reasons.push(reason);
         }
-        if let Some(reason) = project.and_then(|project| worker_project_refusal(&worker, project)) {
-            reasons.push(reason);
-        }
         let warnings = detection
             .and_then(|item| item.runtime_warning.as_ref())
             .map(|_| vec![fixed_worker_reason("runtime_degraded")])
@@ -7701,6 +7697,18 @@ fn build_task_worker_catalogue(
     }
 
     crate::models::TaskWorkerCatalogue { workers }
+}
+
+fn apply_project_worker_refusals(
+    catalogue: &mut crate::models::TaskWorkerCatalogue,
+    project: &crate::models::Project,
+) {
+    for entry in &mut catalogue.workers {
+        if let Some(reason) = worker_project_refusal(&entry.worker, project) {
+            entry.reasons.push(reason);
+            entry.available = false;
+        }
+    }
 }
 
 async fn bounded_http_worker_reachability(state: &AppState) -> Vec<(AgentType, bool)> {
@@ -7794,14 +7802,12 @@ pub(crate) async fn task_worker_catalogue_for_discussion(
     crate::agents::apply_configured_status(&mut detections, &config);
     let reachability = bounded_http_worker_reachability(state).await;
     let cli_preflight = bounded_cli_worker_preflight(&detections).await;
-    Ok(build_task_worker_catalogue(
-        &config,
-        &detections,
-        &joined,
-        &reachability,
-        &cli_preflight,
-        project.as_ref(),
-    ))
+    let mut catalogue =
+        build_task_worker_catalogue(&config, &detections, &joined, &reachability, &cli_preflight);
+    if let Some(project) = project.as_ref() {
+        apply_project_worker_refusals(&mut catalogue, project);
+    }
+    Ok(catalogue)
 }
 
 /// MCP-only worker discovery. Caller identity is injected by the bridge and
@@ -9065,7 +9071,6 @@ mod tests {
                 (AgentType::Nvidia, false),
             ],
             &[],
-            None,
         );
 
         for entry in &catalogue.workers {
@@ -9152,7 +9157,6 @@ mod tests {
                 AgentType::CopilotCli,
                 crate::agents::runner::CopilotTaskWorkerPreflight::AuthInvalid,
             )],
-            None,
         );
         let copilot = catalogue
             .workers
@@ -9179,7 +9183,6 @@ mod tests {
                 AgentType::CopilotCli,
                 crate::agents::runner::CopilotTaskWorkerPreflight::TimedOut,
             )],
-            None,
         );
         let copilot = timed_out
             .workers
