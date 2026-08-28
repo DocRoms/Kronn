@@ -2438,7 +2438,7 @@
   padding: var(--kr-sp-3) var(--kr-sp-4);
   border: 1px solid var(--kr-border-soft);
   border-radius: var(--kr-radius-md);
-  background: var(--kr-surface-1);
+  background: var(--kr-bg-surface);
 }
 .set-ext-api-conn-head {
   display: flex;
