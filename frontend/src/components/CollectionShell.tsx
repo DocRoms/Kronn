@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Menu, Search, Star, X } from 'lucide-react';
 import './CollectionShell.css';
 
@@ -81,6 +81,11 @@ export function CollectionShell<TItem>({
   const canMultiSelect = selectedIds != null && onSelectedIdsChange != null;
   const activeFilter = filters.find(filter => filter.id === persistence.activeFilterId);
 
+  const closeMenu = useCallback((restoreTriggerFocus = false) => {
+    setMenuOpen(false);
+    if (restoreTriggerFocus) requestAnimationFrame(() => menuTriggerRef.current?.focus());
+  }, []);
+
   const visibleItems = useMemo(() => {
     const query = persistence.query.trim().toLocaleLowerCase();
     return items.filter(item => {
@@ -99,14 +104,13 @@ export function CollectionShell<TItem>({
 
   useEffect(() => {
     if (!menuOpen) return;
-    menuRef.current?.querySelector<HTMLButtonElement>('button:not([disabled])')?.focus();
+    menuRef.current?.querySelector<HTMLButtonElement>('[role="menuitem"]:not([disabled])')?.focus();
     const close = (event: PointerEvent) => {
-      if (!menuRef.current?.contains(event.target as Node)) setMenuOpen(false);
+      if (!menuRef.current?.contains(event.target as Node)) closeMenu(true);
     };
     const closeFromKeyboard = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return;
-      setMenuOpen(false);
-      requestAnimationFrame(() => menuTriggerRef.current?.focus());
+      closeMenu(true);
     };
     window.addEventListener('pointerdown', close);
     window.addEventListener('keydown', closeFromKeyboard);
@@ -114,7 +118,7 @@ export function CollectionShell<TItem>({
       window.removeEventListener('pointerdown', close);
       window.removeEventListener('keydown', closeFromKeyboard);
     };
-  }, [menuOpen]);
+  }, [closeMenu, menuOpen]);
 
   const selectItem = (item: TItem) => {
     onSelect(getId(item));
@@ -184,7 +188,7 @@ export function CollectionShell<TItem>({
       {isMobile && !sidebarOpen && <button type="button" className="collection-shell-open" onClick={() => onSidebarOpenChange?.(true)} aria-label={labels.openCollection}><Menu size={18} /></button>}
       {actions.length > 0 && <div className="collection-shell-actions" ref={menuRef}>
         <button ref={menuTriggerRef} type="button" className="collection-shell-icon" onClick={() => setMenuOpen(open => !open)} aria-label={labels.moreActions} aria-expanded={menuOpen}><Menu size={17} /></button>
-        {menuOpen && <div className="collection-shell-menu" role="menu" aria-label={labels.moreActions}>{actions.map(action => <button key={action.id} type="button" role="menuitem" disabled={action.disabled?.(actionItems)} onClick={() => { action.onSelect(actionItems); setMenuOpen(false); }}>{action.label}</button>)}</div>}
+        {menuOpen && <div className="collection-shell-menu" role="menu" aria-label={labels.moreActions}>{actions.map(action => <button key={action.id} type="button" role="menuitem" disabled={action.disabled?.(actionItems)} onClick={() => { action.onSelect(actionItems); closeMenu(true); }}>{action.label}</button>)}</div>}
       </div>}
       {slots.renderDetail(selectedId == null ? null : items.find(item => getId(item) === selectedId) ?? null)}
     </div>

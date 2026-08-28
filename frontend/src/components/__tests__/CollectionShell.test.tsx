@@ -43,9 +43,24 @@ describe('CollectionShell', () => {
     fireEvent.click(screen.getByRole('checkbox', { name: 'Two selected' }));
     const trigger = screen.getByRole('button', { name: 'More actions' });
     fireEvent.click(trigger);
-    expect(screen.getByRole('menuitem', { name: 'Archive selected' })).toHaveFocus();
+    await waitFor(() => expect(screen.getByRole('menuitem', { name: 'Archive selected' })).toHaveFocus());
     fireEvent.keyDown(window, { key: 'Escape' });
     await waitFor(() => expect(trigger).toHaveFocus());
+  });
+
+  it('restores menu-trigger focus after an action or outside pointer dismissal', async () => {
+    render(<Fixture />);
+    const trigger = screen.getByRole('button', { name: 'More actions' });
+
+    fireEvent.click(trigger);
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Archive selected' }));
+    await waitFor(() => expect(trigger).toHaveFocus());
+    expect(screen.getByText('Detail: One')).toBeInTheDocument();
+
+    fireEvent.click(trigger);
+    fireEvent.pointerDown(document.body);
+    await waitFor(() => expect(trigger).toHaveFocus());
+    expect(screen.queryByRole('menuitem', { name: 'Archive selected' })).toBeNull();
   });
 
   it('supports the shared slash and arrow-key sidebar shortcuts', () => {
