@@ -7137,6 +7137,7 @@ pub(crate) enum CopilotTaskWorkerPreflight {
     AuthInvalid,
     Malformed,
     SpawnFailed,
+    TimedOut,
 }
 
 impl CopilotTaskWorkerPreflight {
@@ -7146,6 +7147,7 @@ impl CopilotTaskWorkerPreflight {
             Self::AuthInvalid => Some("copilot_auth_invalid"),
             Self::Malformed => Some("copilot_preflight_malformed"),
             Self::SpawnFailed => Some("copilot_preflight_spawn_failed"),
+            Self::TimedOut => Some("copilot_preflight_timed_out"),
         }
     }
 }
@@ -7181,6 +7183,9 @@ fn copilot_task_worker_preflight_error(status: CopilotTaskWorkerPreflight) -> St
         CopilotTaskWorkerPreflight::SpawnFailed => {
             "the bounded `copilot -p /user show` preflight could not be invoked"
         }
+        CopilotTaskWorkerPreflight::TimedOut => {
+            "the bounded `copilot -p /user show` preflight did not finish before its deadline"
+        }
         CopilotTaskWorkerPreflight::Usable => unreachable!("usable Copilot preflight has no error"),
     };
     format!(
@@ -7189,19 +7194,41 @@ fn copilot_task_worker_preflight_error(status: CopilotTaskWorkerPreflight) -> St
     )
 }
 
+const COPILOT_TASK_WORKER_PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(4);
+
 async fn run_copilot_task_worker_preflight(
     resolved: (String, Vec<String>, bool),
     work_dir: &Path,
-) -> std::io::Result<std::process::Output> {
+) -> Result<std::process::Output, CopilotTaskWorkerPreflight> {
+    run_copilot_task_worker_preflight_with_timeout(
+        resolved,
+        work_dir,
+        COPILOT_TASK_WORKER_PREFLIGHT_TIMEOUT,
+    )
+    .await
+}
+
+async fn run_copilot_task_worker_preflight_with_timeout(
+    resolved: (String, Vec<String>, bool),
+    work_dir: &Path,
+    timeout: Duration,
+) -> Result<std::process::Output, CopilotTaskWorkerPreflight> {
     let (command, args, via_wsl) = resolved;
     let (command, args, effective_work_dir) =
         platform_agent_invocation(command, args, via_wsl, work_dir);
-    async_cmd(command)
+    let mut command = async_cmd(command);
+    command
         .args(args)
         .current_dir(effective_work_dir)
         .stdin(Stdio::null())
-        .output()
-        .await
+        // `timeout` drops the output future. Ensure that cancellation also
+        // terminates the preflight child instead of leaving a CLI process alive.
+        .kill_on_drop(true);
+    match tokio::time::timeout(timeout, command.output()).await {
+        Ok(Ok(output)) => Ok(output),
+        Ok(Err(_)) => Err(CopilotTaskWorkerPreflight::SpawnFailed),
+        Err(_) => Err(CopilotTaskWorkerPreflight::TimedOut),
+    }
 }
 
 pub(crate) async fn probe_copilot_task_worker_preflight(
@@ -7221,7 +7248,7 @@ pub(crate) async fn probe_copilot_task_worker_preflight(
     let output = match direct {
         Ok(resolved) => match run_copilot_task_worker_preflight(resolved, work_dir).await {
             Ok(output) => output,
-            Err(_) => {
+            Err(CopilotTaskWorkerPreflight::SpawnFailed) => {
                 let Some(package) = npx_package else {
                     return CopilotTaskWorkerPreflight::SpawnFailed;
                 };
@@ -7230,9 +7257,10 @@ pub(crate) async fn probe_copilot_task_worker_preflight(
                 };
                 match run_copilot_task_worker_preflight(resolved, work_dir).await {
                     Ok(output) => output,
-                    Err(_) => return CopilotTaskWorkerPreflight::SpawnFailed,
+                    Err(status) => return status,
                 }
             }
+            Err(status) => return status,
         },
         Err(_) => {
             let Some(package) = npx_package else {
@@ -7243,7 +7271,7 @@ pub(crate) async fn probe_copilot_task_worker_preflight(
             };
             match run_copilot_task_worker_preflight(resolved, work_dir).await {
                 Ok(output) => output,
-                Err(_) => return CopilotTaskWorkerPreflight::SpawnFailed,
+                Err(status) => return status,
             }
         }
     };

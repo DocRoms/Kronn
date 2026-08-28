@@ -5636,6 +5636,59 @@ Suite de la réponse.";
         );
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn copilot_task_worker_preflight_times_out_and_terminates_the_child() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let pid_file = temp_dir.path().join("copilot-preflight.pid");
+        let script_path = temp_dir.path().join("slow-copilot-preflight.sh");
+        std::fs::write(
+            &script_path,
+            format!(
+                "#!/bin/sh\necho $$ > {}\nwhile :; do :; done\n",
+                pid_file.display()
+            ),
+        )
+        .unwrap();
+
+        let work_dir = temp_dir.path().to_path_buf();
+        let preflight = tokio::spawn(async move {
+            super::super::run_copilot_task_worker_preflight_with_timeout(
+                ("sh".into(), vec![script_path.display().to_string()], false),
+                &work_dir,
+                std::time::Duration::from_millis(100),
+            )
+            .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while !pid_file.exists() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the slow preflight must have started");
+
+        assert_eq!(
+            preflight.await.unwrap(),
+            Err(CopilotTaskWorkerPreflight::TimedOut)
+        );
+        let pid: i32 = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(
+            unsafe { libc::kill(pid, 0) },
+            -1,
+            "the timed-out child must be gone"
+        );
+        assert_eq!(
+            CopilotTaskWorkerPreflight::TimedOut.reason_code(),
+            Some("copilot_preflight_timed_out")
+        );
+    }
+
     #[test]
     fn claude_task_worker_command_receipt_contains_sizes_not_values() {
         let secret_marker = "must-not-leak";

@@ -7489,6 +7489,9 @@ fn fixed_worker_reason(code: &str) -> crate::models::CampaignTaskReason {
         "copilot_preflight_spawn_failed" => {
             "Kronn could not invoke Copilot's bounded account probe; verify the local Copilot CLI installation."
         }
+        "copilot_preflight_timed_out" => {
+            "Copilot did not finish its bounded account probe; retry later or reassign the execution."
+        }
         _ => "The worker is unavailable for a stable, backend-classified reason.",
     };
     preparation_reason(code, detail)
@@ -7694,14 +7697,15 @@ async fn bounded_cli_worker_preflight(
         return Vec::new();
     }
     let work_dir = std::env::temp_dir();
-    let probe = crate::agents::runner::probe_copilot_task_worker_preflight(
+    // The shared runner helper owns the deadline and cancellation policy, so
+    // catalogue discovery cannot abandon a live Copilot child at an outer
+    // timeout boundary.
+    let status = crate::agents::runner::probe_copilot_task_worker_preflight(
         "copilot",
         Some("@github/copilot"),
         &work_dir,
-    );
-    let status = tokio::time::timeout(std::time::Duration::from_secs(4), probe)
-        .await
-        .unwrap_or(crate::agents::runner::CopilotTaskWorkerPreflight::SpawnFailed);
+    )
+    .await;
     vec![(AgentType::CopilotCli, status)]
 }
 
@@ -9074,7 +9078,7 @@ mod tests {
         };
         let catalogue = build_task_worker_catalogue(
             &crate::core::config::default_config(),
-            &[detection],
+            &[detection.clone()],
             &[],
             &[],
             &[(
@@ -9097,6 +9101,29 @@ mod tests {
             .reasons
             .iter()
             .all(|reason| !reason.detail.contains("token")));
+
+        let timed_out = build_task_worker_catalogue(
+            &crate::core::config::default_config(),
+            &[detection],
+            &[],
+            &[],
+            &[(
+                AgentType::CopilotCli,
+                crate::agents::runner::CopilotTaskWorkerPreflight::TimedOut,
+            )],
+        );
+        let copilot = timed_out
+            .workers
+            .iter()
+            .find(|entry| entry.worker.agent_type == AgentType::CopilotCli)
+            .expect("Copilot entry");
+        assert!(!copilot.available);
+        assert!(copilot.reasons.iter().any(|reason| {
+            reason.code == "copilot_preflight_timed_out"
+                && reason
+                    .detail
+                    .contains("did not finish its bounded account probe")
+        }));
     }
 
     // ── KT-319 tranche 1 — delivery/review contracts + brief (pure). ──
