@@ -7059,75 +7059,102 @@ fn claude_task_worker_auth_result(stdout: &[u8], exit_success: bool) -> Result<(
     }
 }
 
-const MAX_CLAUDE_SANDBOX_PROJECT_ENTRIES: usize = 128;
-const MAX_CLAUDE_SANDBOX_PROJECT_KEY_BYTES: usize = 48 * 1024;
+const MAX_CLAUDE_SANDBOX_WORKTREES: usize = 64;
+const MAX_CLAUDE_SANDBOX_WORKTREE_BYTES: usize = 32 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ClaudeSandboxCatalogueReceipt {
-    pub entry_count: usize,
-    pub key_bytes: usize,
+    pub common_dir_count: usize,
+    pub worktree_count: usize,
+    pub worktree_bytes: usize,
 }
 
 impl ClaudeSandboxCatalogueReceipt {
     fn validate(self) -> Result<(), String> {
-        if self.entry_count <= MAX_CLAUDE_SANDBOX_PROJECT_ENTRIES
-            && self.key_bytes <= MAX_CLAUDE_SANDBOX_PROJECT_KEY_BYTES
+        if self.worktree_count <= MAX_CLAUDE_SANDBOX_WORKTREES
+            && self.worktree_bytes <= MAX_CLAUDE_SANDBOX_WORKTREE_BYTES
         {
             return Ok(());
         }
         Err(format!(
             "Claude task worker refused before provisioning: reason_code=claude_sandbox_catalogue_unsafe; \
-             project_entry_count={}, project_key_bytes={}, max_project_entries={}, \
-             max_project_key_bytes={}. No project path was logged. Use `task_exec_reassign` to \
+             git_common_dir_count={}, git_worktree_count={}, git_worktree_bytes={}, \
+             max_git_worktrees={}, max_git_worktree_bytes={}. No repository or worktree path was \
+             logged. Use `task_exec_reassign` to \
              move this execution to another available worker.",
-            self.entry_count,
-            self.key_bytes,
-            MAX_CLAUDE_SANDBOX_PROJECT_ENTRIES,
-            MAX_CLAUDE_SANDBOX_PROJECT_KEY_BYTES,
+            self.common_dir_count,
+            self.worktree_count,
+            self.worktree_bytes,
+            MAX_CLAUDE_SANDBOX_WORKTREES,
+            MAX_CLAUDE_SANDBOX_WORKTREE_BYTES,
         ))
     }
 }
 
-fn claude_sandbox_catalogue_receipt(path: &Path) -> Result<ClaudeSandboxCatalogueReceipt, String> {
-    if !path.exists() {
-        return Ok(ClaudeSandboxCatalogueReceipt {
-            entry_count: 0,
-            key_bytes: 0,
-        });
+fn claude_sandbox_catalogue_receipt(
+    repo_roots: &[PathBuf],
+) -> Result<ClaudeSandboxCatalogueReceipt, String> {
+    let mut common_dirs = std::collections::BTreeSet::new();
+    let mut worktrees = std::collections::BTreeSet::new();
+    for repo_root in repo_roots {
+        let common_output = sync_cmd("git")
+            .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+            .current_dir(repo_root)
+            .output()
+            .map_err(|_| claude_sandbox_catalogue_unreadable())?;
+        if !common_output.status.success() {
+            return Err(claude_sandbox_catalogue_unreadable());
+        }
+        let common_dir = PathBuf::from(String::from_utf8_lossy(&common_output.stdout).trim())
+            .canonicalize()
+            .map_err(|_| claude_sandbox_catalogue_unreadable())?;
+        if !common_dirs.insert(common_dir) {
+            continue;
+        }
+        let output = sync_cmd("git")
+            .args(["worktree", "list", "--porcelain"])
+            .current_dir(repo_root)
+            .output()
+            .map_err(|_| claude_sandbox_catalogue_unreadable())?;
+        if !output.status.success() {
+            return Err(claude_sandbox_catalogue_unreadable());
+        }
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            if let Some(path) = line.strip_prefix("worktree ") {
+                worktrees.insert(path.to_string());
+            }
+        }
     }
-    let raw = std::fs::read(path).map_err(|_| {
-        "Claude task worker refused before provisioning: reason_code=claude_sandbox_catalogue_unreadable; \
-         the Claude project catalogue could not be read. No project path was logged. Use \
-         `task_exec_reassign` to move this execution to another available worker."
-            .to_string()
-    })?;
-    let value: serde_json::Value = serde_json::from_slice(&raw).map_err(|_| {
-        "Claude task worker refused before provisioning: reason_code=claude_sandbox_catalogue_unreadable; \
-         the Claude project catalogue is not valid JSON. No project path was logged. Use \
-         `task_exec_reassign` to move this execution to another available worker."
-            .to_string()
-    })?;
-    let projects = value.get("projects").and_then(serde_json::Value::as_object);
     Ok(ClaudeSandboxCatalogueReceipt {
-        entry_count: projects.map_or(0, serde_json::Map::len),
-        key_bytes: projects.map_or(0, |entries| entries.keys().map(String::len).sum()),
+        common_dir_count: common_dirs.len(),
+        worktree_count: worktrees.len(),
+        worktree_bytes: worktrees.iter().map(String::len).sum(),
     })
 }
 
-pub(crate) fn claude_task_worker_catalogue_preflight() -> Result<(), String> {
+fn claude_sandbox_catalogue_unreadable() -> String {
+    "Claude task worker refused before provisioning: reason_code=claude_sandbox_catalogue_unreadable; \
+     the registered Git worktree catalogue could not be measured. No repository or worktree path \
+     was logged. Use `task_exec_reassign` to move this execution to another available worker."
+        .to_string()
+}
+
+pub(crate) fn claude_task_worker_catalogue_preflight(
+    project: &crate::models::Project,
+) -> Result<(), String> {
     if !super::host_is_macos() {
         return Ok(());
     }
-    let home = std::env::var_os("KRONN_HOST_HOME")
-        .or_else(|| std::env::var_os("HOME"))
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .ok_or_else(|| {
-            "Claude task worker refused before provisioning: reason_code=claude_sandbox_catalogue_unreadable; \
-             the host home directory is unavailable. No project path was logged. Use \
-             `task_exec_reassign` to move this execution to another available worker."
-                .to_string()
-        })?;
-    claude_sandbox_catalogue_receipt(&PathBuf::from(home).join(".claude.json"))?.validate()
+    let mut repo_roots = vec![crate::core::scanner::resolve_host_path(&project.path)];
+    repo_roots.extend(project.linked_repos.iter().filter_map(|repo| {
+        let location = repo.location.trim();
+        (!location.is_empty()
+            && !location.starts_with("http://")
+            && !location.starts_with("https://")
+            && !location.starts_with("git@"))
+        .then(|| crate::core::scanner::resolve_host_path(location))
+    }));
+    claude_sandbox_catalogue_receipt(&repo_roots)?.validate()
 }
 
 async fn run_claude_task_worker_auth_probe(

@@ -5577,49 +5577,81 @@ Suite de la réponse.";
         );
     }
 
+    fn synthetic_git_worktree_catalogue(extra_worktrees: usize) -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        let main = root.path().join("main");
+        std::fs::create_dir(&main).unwrap();
+        let git = |cwd: &std::path::Path, args: &[&str]| {
+            let output = crate::core::cmd::sync_cmd("git")
+                .args(args)
+                .current_dir(cwd)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {} failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&main, &["init", "-q"]);
+        git(&main, &["config", "user.email", "test@kronn.local"]);
+        git(&main, &["config", "user.name", "Kronn Test"]);
+        std::fs::write(main.join("seed"), "seed").unwrap();
+        git(&main, &["add", "seed"]);
+        git(&main, &["commit", "-qm", "seed"]);
+        for index in 0..extra_worktrees {
+            let path = root.path().join(format!("worktree-{index}"));
+            git(
+                &main,
+                &[
+                    "worktree",
+                    "add",
+                    "-q",
+                    "--detach",
+                    path.to_str().unwrap(),
+                    "HEAD",
+                ],
+            );
+        }
+        root
+    }
+
     #[test]
     fn claude_task_worker_accepts_catalogue_below_conservative_bounds() {
-        let home = tempfile::tempdir().unwrap();
-        let projects: serde_json::Map<String, serde_json::Value> = (0..32)
-            .map(|index| (format!("/synthetic/project-{index}"), serde_json::json!({})))
-            .collect();
-        std::fs::write(
-            home.path().join(".claude.json"),
-            serde_json::to_vec(&serde_json::json!({ "projects": projects })).unwrap(),
-        )
+        let repo = synthetic_git_worktree_catalogue(3);
+        let duplicate_checkout = repo.path().join("worktree-0");
+        let receipt = super::super::claude_sandbox_catalogue_receipt(&[
+            repo.path().join("main"),
+            duplicate_checkout,
+        ])
         .unwrap();
-
-        let receipt =
-            super::super::claude_sandbox_catalogue_receipt(&home.path().join(".claude.json"))
-                .unwrap();
-        assert_eq!(receipt.entry_count, 32);
-        assert!(receipt.key_bytes > 0);
+        assert_eq!(receipt.common_dir_count, 1);
+        assert_eq!(receipt.worktree_count, 4);
+        assert!(receipt.worktree_bytes > 0);
         assert_eq!(receipt.validate(), Ok(()));
     }
 
     #[test]
     fn claude_task_worker_refuses_large_catalogue_without_leaking_paths() {
-        let home = tempfile::tempdir().unwrap();
-        let secret_path = "/must-not-leak/private/worktree";
-        let projects: serde_json::Map<String, serde_json::Value> = (0..234)
-            .map(|index| (format!("{secret_path}-{index}"), serde_json::json!({})))
-            .collect();
+        let repo = synthetic_git_worktree_catalogue(65);
         std::fs::write(
-            home.path().join(".claude.json"),
-            serde_json::to_vec(&serde_json::json!({ "projects": projects })).unwrap(),
+            repo.path().join(".claude.json"),
+            br#"{"projects":{"/one/project":{}}}"#,
         )
         .unwrap();
-
+        let secret_path = repo.path().to_string_lossy().to_string();
         let receipt =
-            super::super::claude_sandbox_catalogue_receipt(&home.path().join(".claude.json"))
-                .unwrap();
+            super::super::claude_sandbox_catalogue_receipt(&[repo.path().join("main")]).unwrap();
         let error = receipt.validate().unwrap_err();
-        assert_eq!(receipt.entry_count, 234);
+        assert_eq!(receipt.common_dir_count, 1);
+        assert_eq!(receipt.worktree_count, 66);
         assert!(error.contains("reason_code=claude_sandbox_catalogue_unsafe"));
-        assert!(error.contains("project_entry_count=234"));
-        assert!(error.contains("project_key_bytes="));
+        assert!(error.contains("git_common_dir_count=1"));
+        assert!(error.contains("git_worktree_count=66"));
+        assert!(error.contains("git_worktree_bytes="));
         assert!(error.contains("task_exec_reassign"));
-        assert!(!error.contains(secret_path));
+        assert!(!error.contains(&secret_path));
         assert!(!error.contains("worktree-0"));
     }
 

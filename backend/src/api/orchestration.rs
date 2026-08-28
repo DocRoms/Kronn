@@ -4584,6 +4584,14 @@ fn begin_provisioning(
             )))
         }
     };
+    if !is_replay {
+        if let Some(reason) = worker_project_refusal(worker, &project) {
+            return Ok(Err(ProvisionError::NotLaunchable(format!(
+                "{}: {}",
+                reason.code, reason.detail
+            ))));
+        }
+    }
     let repo_path = scanner::resolve_host_path(&project.path)
         .to_string_lossy()
         .to_string();
@@ -5465,13 +5473,17 @@ fn worker_static_refusal(worker: &MessageTarget) -> Option<crate::models::Campai
             "this native runtime cannot acknowledge the typed delivery lifecycle; use an exact joined CLI session or another supported agent",
         ));
     }
+    None
+}
+
+fn worker_project_refusal(
+    worker: &MessageTarget,
+    project: &crate::models::Project,
+) -> Option<crate::models::CampaignTaskReason> {
     if worker.kind == MessageTargetKind::Agent && worker.agent_type == AgentType::ClaudeCode {
-        if let Err(detail) = crate::agents::runner::claude_task_worker_catalogue_preflight() {
-            return Some(preparation_reason(
-                "claude_sandbox_catalogue_unsafe",
-                detail,
-            ));
-        }
+        return crate::agents::runner::claude_task_worker_catalogue_preflight(project)
+            .err()
+            .map(|detail| preparation_reason("claude_sandbox_catalogue_unsafe", detail));
     }
     None
 }
@@ -5618,11 +5630,16 @@ pub(crate) fn prepare_task_execution(
                     "task project does not match the principal discussion project",
                 ));
             }
-            if crate::db::projects::get_project(conn, project_id)?.is_none() {
-                reasons.push(preparation_reason(
+            match crate::db::projects::get_project(conn, project_id)? {
+                None => reasons.push(preparation_reason(
                     "project_missing",
                     "task project no longer exists",
-                ));
+                )),
+                Some(project) => {
+                    if let Some(reason) = worker_project_refusal(worker, &project) {
+                        reasons.push(reason);
+                    }
+                }
             }
             Some(project_id.clone())
         }
@@ -7527,6 +7544,7 @@ fn build_task_worker_catalogue(
         Option<String>,
     )],
     http_reachability: &[(AgentType, bool)],
+    project: Option<&crate::models::Project>,
 ) -> crate::models::TaskWorkerCatalogue {
     let mut workers = Vec::new();
     let native_agents = [
@@ -7608,6 +7626,9 @@ fn build_task_worker_catalogue(
             MessageTarget::agent(agent.clone()).with_tier(ModelTier::Default)
         };
         if let Some(reason) = worker_static_refusal(&worker) {
+            reasons.push(reason);
+        }
+        if let Some(reason) = project.and_then(|project| worker_project_refusal(&worker, project)) {
             reasons.push(reason);
         }
         let warnings = detection
@@ -7699,18 +7720,24 @@ pub(crate) async fn task_worker_catalogue_for_discussion(
     parent_discussion_id: &str,
 ) -> Result<crate::models::TaskWorkerCatalogue> {
     let parent = parent_discussion_id.to_string();
-    let joined = state
+    let (joined, project) = state
         .db
         .with_read_conn(move |conn| {
+            let project = crate::db::discussions::get_discussion(conn, &parent)?
+                .and_then(|discussion| discussion.project_id)
+                .map(|project_id| crate::db::projects::get_project(conn, &project_id))
+                .transpose()?
+                .flatten();
             let sessions = crate::db::discussion_sessions::list_sessions(conn, &parent, false)?;
-            sessions
+            let joined = sessions
                 .into_iter()
                 .map(|session| {
                     let (_, alias) =
                         crate::db::discussion_sessions::cli_session_identity(conn, session.id)?;
                     Ok((session, alias))
                 })
-                .collect::<Result<Vec<_>>>()
+                .collect::<Result<Vec<_>>>()?;
+            Ok((joined, project))
         })
         .await?;
     let mut detections = crate::agents::detect_all_cached(false).await;
@@ -7722,6 +7749,7 @@ pub(crate) async fn task_worker_catalogue_for_discussion(
         &detections,
         &joined,
         &reachability,
+        project.as_ref(),
     ))
 }
 
@@ -8985,6 +9013,7 @@ mod tests {
                 (AgentType::LiteLlm, false),
                 (AgentType::Nvidia, false),
             ],
+            None,
         );
 
         for entry in &catalogue.workers {
