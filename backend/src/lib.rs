@@ -1082,8 +1082,7 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         // ── External API connections (unified LiteLLM/NVIDIA/Other zone) ──
         .route(
             "/api/external-api/connections",
-            get(api::external_api_connections::list)
-                .post(api::external_api_connections::create),
+            get(api::external_api_connections::list).post(api::external_api_connections::create),
         )
         .route(
             "/api/external-api/connections/{id}",

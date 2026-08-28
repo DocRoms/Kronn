@@ -83,7 +83,10 @@ fn normalize_endpoint(raw: Option<String>) -> Option<String> {
     if value.is_empty() {
         return None;
     }
-    let base = value.strip_suffix("/v1").unwrap_or(&value).trim_end_matches('/');
+    let base = value
+        .strip_suffix("/v1")
+        .unwrap_or(&value)
+        .trim_end_matches('/');
     if base.is_empty() {
         None
     } else {
@@ -351,7 +354,10 @@ mod tests {
         assert_eq!(canonicalize_alias("@groq"), Ok("groq".to_string()));
         assert_eq!(canonicalize_alias("  @Groq  "), Ok("groq".to_string()));
         assert_eq!(canonicalize_alias("groq"), Ok("groq".to_string()));
-        assert_eq!(canonicalize_alias("Together-AI"), Ok("together-ai".to_string()));
+        assert_eq!(
+            canonicalize_alias("Together-AI"),
+            Ok("together-ai".to_string())
+        );
     }
 
     #[test]

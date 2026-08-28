@@ -462,6 +462,54 @@ mod tests {
         assert_eq!(persisted_secret_count, 0);
     }
 
+    #[tokio::test]
+    async fn migrated_legacy_connections_coexist_with_unique_live_aliases_end_to_end() {
+        let database = crate::db::Database::open_in_memory().unwrap();
+        let mut config = default_config();
+        config.agents.lite_llm.base_url = Some("https://proxy.example.test".into());
+        config.agents.nvidia.base_url = Some("https://nim.example.test".into());
+        config.agents.model_tiers.lite_llm.default = Some("lite-default".into());
+        config.agents.model_tiers.nvidia.default = Some("nim-default".into());
+
+        // Replay the startup migration exactly as two consecutive boots would.
+        crate::bootstrap_external_api_connections(&database, &config)
+            .await
+            .unwrap();
+        crate::bootstrap_external_api_connections(&database, &config)
+            .await
+            .unwrap();
+
+        database
+            .with_conn(|conn| {
+                let connections = list(conn)?;
+                assert_eq!(connections.len(), 2);
+
+                let targets = resolve_connection_mentions(
+                    "Compare @litellm with @NVIDIA in the same turn.",
+                    &connections,
+                );
+                assert_eq!(
+                    targets,
+                    vec![
+                        MessageTarget::agent(AgentType::LiteLlm).with_connection(LEGACY_LITELLM_ID),
+                        MessageTarget::agent(AgentType::Nvidia).with_connection(LEGACY_NVIDIA_ID),
+                    ]
+                );
+
+                let duplicate = connection(
+                    "duplicate-litellm",
+                    "LITELLM",
+                    ExternalApiConnectionPreset::Other,
+                );
+                let error = insert(conn, &duplicate).unwrap_err().to_string();
+                assert!(error.contains("already claimed"));
+                assert_eq!(list(conn)?.len(), 2);
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
     #[test]
     fn connections_keep_endpoints_and_credential_slugs_isolated() {
         let conn = Connection::open_in_memory().unwrap();
