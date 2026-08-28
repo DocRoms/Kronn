@@ -28,11 +28,34 @@ export interface CollectionAction<TItem> {
   disabled?: (items: TItem[]) => boolean;
 }
 
+/** Context handed to `renderList` — the already-filtered items plus the
+ * selection helpers a caller needs to keep custom (grouped, nested) markup
+ * wired to the shell's shared query/favorites/selection state. */
+export interface CollectionListContext<TItem> {
+  visibleItems: TItem[];
+  selectItem: (item: TItem) => void;
+  isSelected: (item: TItem) => boolean;
+  canMultiSelect: boolean;
+  isMultiSelected: (item: TItem) => boolean;
+  toggleMultiSelection: (id: CollectionItemId) => void;
+}
+
 export interface CollectionShellSlots<TItem> {
   renderItem?: (item: TItem, state: { selected: boolean; multiSelected: boolean }) => React.ReactNode;
   renderDetail: (item: TItem | null) => React.ReactNode;
   renderEmpty?: () => React.ReactNode;
   sidebarHeaderEnd?: React.ReactNode;
+  /** Rendered above the shared search/controls row — lets a domain page keep
+   * its own title/count/bulk-toolbar without a local shell reimplementation. */
+  beforeSidebarHeader?: React.ReactNode;
+  /** Full override of the list body. Receives the already query/favorites/
+   * filter-narrowed items so a caller can render grouped or nested markup
+   * (project trees, resource kinds…) while still sharing the filtering and
+   * selection logic owned by this component. Falls back to the default flat
+   * row rendering when absent. */
+  renderList?: (context: CollectionListContext<TItem>) => React.ReactNode;
+  /** Rendered below the list, inside the sidebar (hints, shortcuts…). */
+  sidebarFooter?: React.ReactNode;
 }
 
 export interface CollectionShellProps<TItem> {
@@ -151,8 +174,18 @@ export function CollectionShell<TItem>({
     rows[next]?.focus();
   };
 
+  const listContext: CollectionListContext<TItem> = {
+    visibleItems,
+    selectItem,
+    isSelected: item => selectedId === getId(item),
+    canMultiSelect,
+    isMultiSelected: item => canMultiSelect && (selectedIds?.has(getId(item)) ?? false),
+    toggleMultiSelection,
+  };
+
   const sidebar = (
     <aside className="collection-shell-sidebar" data-mobile={isMobile} aria-label={ariaLabel} onKeyDown={onSidebarKeyDown}>
+      {slots.beforeSidebarHeader}
       <header className="collection-shell-header">
         <div className="collection-shell-search">
           <Search size={15} aria-hidden="true" />
@@ -167,18 +200,21 @@ export function CollectionShell<TItem>({
         {(persistence.query || persistence.favoritesOnly || persistence.activeFilterId) && <button type="button" className="collection-shell-clear" onClick={() => { persistence.onQueryChange(''); persistence.onFavoritesOnlyChange(false); persistence.onActiveFilterIdChange?.(null); }}>{labels.clearFilters}</button>}
       </div>
       <div className="collection-shell-list" role="list">
-        {visibleItems.map(item => {
-          const id = getId(item);
-          const multiSelected = selectedIds?.has(id) ?? false;
-          const selected = selectedId === id;
-          return <div key={id} className="collection-shell-row" data-selected={selected} data-multi-selected={multiSelected} role="listitem">
-            {canMultiSelect && <input type="checkbox" aria-label={`${getLabel(item)} ${labels.selectItem}`} checked={multiSelected} onChange={() => toggleMultiSelection(id)} />}
-            <button type="button" className="collection-shell-row-button" onClick={() => selectItem(item)}>{slots.renderItem?.(item, { selected, multiSelected }) ?? getLabel(item)}</button>
-            {isFavorite && onToggleFavorite && <button type="button" className="collection-shell-favorite" aria-label={`${labels.favorites} · ${getLabel(item)}`} aria-pressed={isFavorite(item)} onClick={() => onToggleFavorite(item)}><Star size={14} fill={isFavorite(item) ? 'currentColor' : 'none'} /></button>}
-          </div>;
-        })}
-        {visibleItems.length === 0 && <div className="collection-shell-empty">{slots.renderEmpty?.()}</div>}
+        {slots.renderList ? slots.renderList(listContext) : <>
+          {visibleItems.map(item => {
+            const id = getId(item);
+            const multiSelected = selectedIds?.has(id) ?? false;
+            const selected = selectedId === id;
+            return <div key={id} className="collection-shell-row" data-selected={selected} data-multi-selected={multiSelected} role="listitem">
+              {canMultiSelect && <input type="checkbox" aria-label={`${getLabel(item)} ${labels.selectItem}`} checked={multiSelected} onChange={() => toggleMultiSelection(id)} />}
+              <button type="button" className="collection-shell-row-button" onClick={() => selectItem(item)}>{slots.renderItem?.(item, { selected, multiSelected }) ?? getLabel(item)}</button>
+              {isFavorite && onToggleFavorite && <button type="button" className="collection-shell-favorite" aria-label={`${labels.favorites} · ${getLabel(item)}`} aria-pressed={isFavorite(item)} onClick={() => onToggleFavorite(item)}><Star size={14} fill={isFavorite(item) ? 'currentColor' : 'none'} /></button>}
+            </div>;
+          })}
+          {visibleItems.length === 0 && <div className="collection-shell-empty">{slots.renderEmpty?.()}</div>}
+        </>}
       </div>
+      {slots.sidebarFooter}
     </aside>
   );
 

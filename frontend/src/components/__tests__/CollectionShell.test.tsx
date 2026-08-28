@@ -81,4 +81,38 @@ describe('CollectionShell', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Open collection' }));
     expect(screen.getByRole('complementary', { name: 'Test collection' })).toBeInTheDocument();
   });
+
+  it('lets a caller render custom grouped list markup from the filtered items, plus header/footer slots', () => {
+    function GroupedFixture() {
+      const [query, setQuery] = useState('');
+      const [favoritesOnly, setFavoritesOnly] = useState(false);
+      const [selectedId, setSelectedId] = useState<string | null>('one');
+      return <CollectionShell<Item>
+        ariaLabel="Grouped collection" items={items} getId={item => item.id} getLabel={item => item.name} isFavorite={item => item.favorite}
+        persistence={{ query, onQueryChange: setQuery, favoritesOnly, onFavoritesOnlyChange: setFavoritesOnly }}
+        selectedId={selectedId} onSelect={setSelectedId} labels={labels}
+        slots={{
+          renderDetail: item => <p>Detail: {item?.name ?? 'none'}</p>,
+          beforeSidebarHeader: <div>Custom title row</div>,
+          sidebarFooter: <div>Custom footer</div>,
+          renderList: ({ visibleItems, selectItem, isSelected }) => (
+            <ul>
+              {visibleItems.map(item => (
+                <li key={item.id} data-selected={isSelected(item)}>
+                  <button type="button" onClick={() => selectItem(item)}>Grouped {item.name}</button>
+                </li>
+              ))}
+            </ul>
+          ),
+        }}
+      />;
+    }
+    render(<GroupedFixture />);
+    expect(screen.getByText('Custom title row')).toBeInTheDocument();
+    expect(screen.getByText('Custom footer')).toBeInTheDocument();
+    const oneRow = screen.getByRole('button', { name: 'Grouped One' });
+    expect(oneRow.closest('li')).toHaveAttribute('data-selected', 'true');
+    fireEvent.click(screen.getByRole('button', { name: 'Grouped Two' }));
+    expect(screen.getByText('Detail: Two')).toBeInTheDocument();
+  });
 });
