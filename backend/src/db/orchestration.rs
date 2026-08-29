@@ -1537,6 +1537,61 @@ pub fn attach_execution_dispatch(conn: &Connection, exec_id: &str, job_id: &str)
     Ok(())
 }
 
+/// Result of reserving the non-transactional Git commit boundary for a spawned
+/// CLI worker. The lease is keyed by the immutable dispatch that launched that
+/// process; reassignment refuses while it exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpawnedCommitLeaseOutcome {
+    Acquired,
+    NotCurrent,
+    Busy,
+}
+
+pub fn acquire_spawned_commit_lease(
+    conn: &Connection,
+    exec_id: &str,
+    dispatch_job_id: &str,
+) -> Result<SpawnedCommitLeaseOutcome> {
+    in_savepoint(conn, |conn| {
+        let inserted = conn.execute(
+            "INSERT OR IGNORE INTO task_execution_commit_leases \
+                 (task_execution_id, dispatch_job_id, created_at) \
+             SELECT id, ?2, ?3 FROM task_executions \
+              WHERE id = ?1 AND status = 'Working' AND dispatch_job_id = ?2",
+            params![exec_id, dispatch_job_id, Utc::now().to_rfc3339()],
+        )?;
+        if inserted == 1 {
+            return Ok(SpawnedCommitLeaseOutcome::Acquired);
+        }
+        let current: Option<String> = conn
+            .query_row(
+                "SELECT dispatch_job_id FROM task_executions \
+                  WHERE id = ?1 AND status = 'Working'",
+                [exec_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(if current.as_deref() == Some(dispatch_job_id) {
+            SpawnedCommitLeaseOutcome::Busy
+        } else {
+            SpawnedCommitLeaseOutcome::NotCurrent
+        })
+    })
+}
+
+pub fn release_spawned_commit_lease(
+    conn: &Connection,
+    exec_id: &str,
+    dispatch_job_id: &str,
+) -> Result<()> {
+    conn.execute(
+        "DELETE FROM task_execution_commit_leases \
+          WHERE task_execution_id = ?1 AND dispatch_job_id = ?2",
+        params![exec_id, dispatch_job_id],
+    )?;
+    Ok(())
+}
+
 pub fn get_execution_for_dispatch(
     conn: &Connection,
     dispatch_job_id: &str,
@@ -2214,6 +2269,10 @@ pub fn commit_cli_rework_checkpoint(
 pub struct DeliveryCheckpoint<'a> {
     pub exec_id: &'a str,
     pub attempt_no: u32,
+    /// Spawned CLI workers pin the immutable dispatch that started their
+    /// process. The delivery transaction compares it with the current row so
+    /// an intervening rework cannot accept a stale worker's manifest.
+    pub expected_dispatch_job_id: Option<&'a str>,
     /// The exact HEAD delivered (denormalized onto the delivery row for the DoD-5 check).
     pub head_sha: &'a str,
     /// The full validated DeliveryManifest v1 bytes.
@@ -2261,16 +2320,19 @@ pub fn commit_delivery_checkpoint(
 ) -> Result<DeliveryCheckpointOutcome> {
     use TaskExecutionStatus::*;
     let tx = conn.unchecked_transaction()?;
-    let current: Option<String> = tx
+    let current: Option<(String, Option<String>)> = tx
         .query_row(
-            "SELECT status FROM task_executions WHERE id = ?1",
+            "SELECT status, dispatch_job_id FROM task_executions WHERE id = ?1",
             params![input.exec_id],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?;
-    let Some(current) = current else {
+    let Some((current, dispatch_job_id)) = current else {
         return Ok(DeliveryCheckpointOutcome::ExecutionRaced);
     };
+    if input.expected_dispatch_job_id != dispatch_job_id.as_deref() {
+        return Ok(DeliveryCheckpointOutcome::ExecutionRaced);
+    }
     let status = TaskExecutionStatus::from_str(&current)?;
 
     match status {
@@ -4201,6 +4263,15 @@ pub fn reassign_execution_worker(
                 exec_id,
                 execution.status.as_str()
             );
+        }
+        let commit_in_progress: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM task_execution_commit_leases \
+              WHERE task_execution_id = ?1)",
+            [exec_id],
+            |row| row.get(0),
+        )?;
+        if commit_in_progress {
+            bail!("execution {exec_id} has a worker commit in progress; retry reassignment after it settles");
         }
         let run = get_orchestration_run(conn, &execution.orchestration_run_id)?
             .ok_or_else(|| anyhow::anyhow!("orchestration run vanished"))?;

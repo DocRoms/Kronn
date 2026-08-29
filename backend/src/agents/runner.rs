@@ -1960,6 +1960,7 @@ pub struct TaskWorkerBridgeContext {
     pub execution_id: String,
     pub discussion_id: String,
     pub agent_type: String,
+    pub dispatch_job_id: String,
     pub source_message_id: String,
 }
 
@@ -1993,7 +1994,7 @@ fn codex_kronn_internal_env_override() -> String {
 /// `--ignore-user-config` deliberately removes every user MCP and policy, so
 /// overriding only `...env_vars` leaves a partial server with no command. Codex
 /// rejects that shape as `invalid transport` before the model starts. A worker
-/// gets one self-contained server instead: the exact commit + delivery bridge
+/// gets one self-contained server instead: the exact status, commit and delivery bridge
 /// it needs, and nothing inherited from the user's global config.
 fn codex_task_worker_mcp_override() -> Option<String> {
     let script = disc_introspection_mcp_path()?;
@@ -7549,6 +7550,7 @@ fn agent_command_with_task_worker_policy(
                 args.push("--tools".into());
                 args.push("Bash,Edit,Read,Write,Glob,Grep".into());
                 args.push("--allowedTools".into());
+                args.push("mcp__kronn-internal__task_exec_status".into());
                 args.push("mcp__kronn-internal__task_exec_commit".into());
                 args.push("mcp__kronn-internal__task_exec_deliver".into());
                 args.push("--permission-mode".into());

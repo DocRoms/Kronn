@@ -5804,7 +5804,7 @@ Suite de la réponse.";
     }
 
     #[test]
-    fn claude_task_worker_allows_exact_commit_then_delivery_tools() {
+    fn claude_task_worker_allows_exact_status_commit_and_delivery_tools() {
         let (_, _, args, _, _, _) = super::super::agent_command_with_task_worker_policy(
             &AgentType::ClaudeCode,
             "test prompt",
@@ -5824,6 +5824,7 @@ Suite de la réponse.";
         assert_eq!(
             &args[allowed_tools_index + 1..permission_mode_index],
             [
+                "mcp__kronn-internal__task_exec_status",
                 "mcp__kronn-internal__task_exec_commit",
                 "mcp__kronn-internal__task_exec_deliver",
             ]

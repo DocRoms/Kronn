@@ -104,7 +104,23 @@ async fn cli_task_worker_context(
     if runner::is_http_chat_agent(agent_type) {
         return Ok(None);
     }
+    let discussion_id_owned = discussion_id.to_string();
+    let is_task_worker_room = state
+        .db
+        .with_read_conn(move |conn| {
+            Ok(conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM task_executions \
+                 WHERE sub_discussion_id = ?1 AND worker_target_kind = 'agent')",
+                rusqlite::params![discussion_id_owned],
+                |row| row.get::<_, bool>(0),
+            )?)
+        })
+        .await?;
     let Some(dispatch_job_id) = dispatch_job_id else {
+        anyhow::ensure!(
+            !is_task_worker_room,
+            "task-worker launch is missing its immutable dispatch id"
+        );
         return Ok(None);
     };
     let lineage = state
@@ -120,12 +136,20 @@ async fn cli_task_worker_context(
         })
         .await?;
     let Some((execution, dispatch)) = lineage else {
+        anyhow::ensure!(
+            !is_task_worker_room,
+            "task-worker launch has no matching execution dispatch lineage"
+        );
         return Ok(None);
     };
 
     anyhow::ensure!(
         execution.worker_target_kind == Some(MessageTargetKind::Agent),
         "task dispatch is not owned by a launched discussion agent"
+    );
+    anyhow::ensure!(
+        execution.dispatch_job_id.as_deref() == Some(dispatch_job_id),
+        "task dispatch is no longer the execution's current worker dispatch"
     );
     anyhow::ensure!(
         execution.sub_discussion_id.as_deref() == Some(discussion_id),
@@ -153,6 +177,7 @@ async fn cli_task_worker_context(
         execution_id: execution.id,
         discussion_id: discussion_id.to_string(),
         agent_type: crate::db::orchestration::agent_type_to_db(agent_type),
+        dispatch_job_id: dispatch_job_id.to_string(),
         source_message_id: dispatch.trigger_message_id,
     }))
 }
@@ -364,6 +389,7 @@ mod native_http_tools_scope_tests {
         assert_eq!(context.execution_id, execution_id);
         assert_eq!(context.discussion_id, "d-worker");
         assert_eq!(context.agent_type, "Codex");
+        assert_eq!(context.dispatch_job_id, "dispatch-a");
         assert_eq!(context.source_message_id, "trigger-a");
 
         assert!(cli_task_worker_context(
@@ -398,8 +424,12 @@ mod native_http_tools_scope_tests {
             Some("unknown-dispatch"),
         )
         .await
-        .expect("ordinary dispatch is not a worker capability")
-        .is_none());
+        .is_err());
+        assert!(
+            cli_task_worker_context(&state, "d-worker", &AgentType::Codex, None)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

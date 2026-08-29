@@ -5183,7 +5183,8 @@ def _spawned_task_worker_context(required=False, tool_name="spawned task worker"
             f"{tool_name}: spawned worker context is invalid"
         ) from error
     required_fields = (
-        "execution_id", "discussion_id", "agent_type", "source_message_id",
+        "execution_id", "discussion_id", "agent_type", "dispatch_job_id",
+        "source_message_id",
     )
     if not isinstance(value, dict) or any(
         not isinstance(value.get(field), str) or not value[field].strip()
@@ -5471,6 +5472,7 @@ def call_task_exec_status(args):
                 "spawned_agent": {
                     "discussion_id": context["discussion_id"],
                     "agent_type": context["agent_type"],
+                    "dispatch_job_id": context["dispatch_job_id"],
                     "source_message_id": context["source_message_id"],
                 },
             },
@@ -5658,6 +5660,7 @@ def call_task_exec_deliver(args):
             "spawned_agent": {
                 "discussion_id": context["discussion_id"],
                 "agent_type": context["agent_type"],
+                "dispatch_job_id": context["dispatch_job_id"],
                 "source_message_id": context["source_message_id"],
             },
         }))
@@ -5712,6 +5715,7 @@ def call_task_exec_commit(args):
         "spawned_agent": {
             "discussion_id": context["discussion_id"],
             "agent_type": context["agent_type"],
+            "dispatch_job_id": context["dispatch_job_id"],
             "source_message_id": context["source_message_id"],
         },
     }))

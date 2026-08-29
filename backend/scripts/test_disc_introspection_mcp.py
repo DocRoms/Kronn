@@ -1008,6 +1008,7 @@ class TaskExecDeliverTests(unittest.TestCase):
             "execution_id": "exec-a",
             "discussion_id": "disc-child-a",
             "agent_type": "Codex",
+            "dispatch_job_id": "dispatch-a",
             "source_message_id": "trigger-a",
         }
 
@@ -1143,6 +1144,7 @@ class TaskExecDeliverTests(unittest.TestCase):
                 "spawned_agent": {
                     "discussion_id": "disc-child-a",
                     "agent_type": "Codex",
+                    "dispatch_job_id": "dispatch-a",
                     "source_message_id": "trigger-a",
                 },
             },
@@ -1185,6 +1187,7 @@ class TaskExecDeliverTests(unittest.TestCase):
             "spawned_agent": {
                 "discussion_id": "disc-child-a",
                 "agent_type": "Codex",
+                "dispatch_job_id": "dispatch-a",
                 "source_message_id": "trigger-a",
             },
         })
@@ -1220,16 +1223,17 @@ class TaskExecDeliverTests(unittest.TestCase):
                 },
             })
 
-        http.assert_called_once_with("POST", "/api/orchestration/worker-commit", {
+        self.assertIn(mock.call("POST", "/api/orchestration/worker-commit", {
             "task_execution_id": "exec-a",
             "files": ["src/lib.rs"],
             "message": "fix: bounded change",
             "spawned_agent": {
                 "discussion_id": "disc-child-a",
                 "agent_type": "Codex",
+                "dispatch_job_id": "dispatch-a",
                 "source_message_id": "trigger-a",
             },
-        })
+        }), http.call_args_list)
         self.assertEqual(response["result"]["content"][0]["type"], "text")
         self.assertNotIn("error", response)
 

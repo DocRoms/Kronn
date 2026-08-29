@@ -3079,6 +3079,7 @@ pub async fn deliver_worker_manifest(
         exec,
         &alias,
         Some(source_session_id.to_string()),
+        None,
         manifest_json,
         DeliveryManifestAuthorship::Full,
     )
@@ -3149,6 +3150,24 @@ async fn native_worker_execution_for_caller(
     Ok(authorized.then_some(execution))
 }
 
+/// A spawned CLI worker additionally carries the immutable dispatch id that
+/// launched its process. A trigger alone is not sufficient after rework: a
+/// current execution can have multiple historical dispatches with related
+/// recovery lineage. Require the current attached dispatch before exposing a
+/// commit, status, or delivery surface to the spawned process.
+async fn spawned_native_worker_execution_for_caller(
+    db: &Database,
+    task_execution_id: &str,
+    dispatch_job_id: &str,
+    caller: NativeExecutionCaller<'_>,
+) -> Result<Option<TaskExecution>, ProvisionError> {
+    let Some(execution) = native_worker_execution_for_caller(db, task_execution_id, caller).await?
+    else {
+        return Ok(None);
+    };
+    Ok((execution.dispatch_job_id.as_deref() == Some(dispatch_job_id)).then_some(execution))
+}
+
 /// Native HTTP agents do not own a CLI session. Their trusted executor supplies the
 /// current discussion, typed provider and dispatch trigger, so the backend can
 /// authenticate the worker without accepting identity from model arguments.
@@ -3167,6 +3186,7 @@ pub(crate) async fn deliver_native_worker_manifest(
         execution,
         caller.alias,
         caller.actor_session_id.map(str::to_string),
+        None,
         manifest_json,
         DeliveryManifestAuthorship::NativeProjection,
     )
@@ -3178,6 +3198,7 @@ async fn deliver_authorized_worker_manifest(
     exec: TaskExecution,
     alias: &str,
     actor_session_id: Option<String>,
+    expected_dispatch_job_id: Option<&str>,
     manifest_json: &str,
     authorship: DeliveryManifestAuthorship,
 ) -> Result<DeliverOutcome, ProvisionError> {
@@ -3305,6 +3326,7 @@ async fn deliver_authorized_worker_manifest(
         let (eid, attempt) = (exec.id.clone(), exec.attempt_no);
         let alias = alias.to_string();
         let actor_session_id = actor_session_id.clone();
+        let expected_dispatch_job_id = expected_dispatch_job_id.map(str::to_string);
         let (parent, head, mj) = (
             exec.parent_discussion_id.clone(),
             manifest.head_sha.clone(),
@@ -3316,6 +3338,7 @@ async fn deliver_authorized_worker_manifest(
                 &crate::db::orchestration::DeliveryCheckpoint {
                     exec_id: &eid,
                     attempt_no: attempt,
+                    expected_dispatch_job_id: expected_dispatch_job_id.as_deref(),
                     head_sha: &head,
                     manifest_json: &mj,
                     parent_discussion_id: &parent,
@@ -8148,19 +8171,21 @@ pub async fn task_exec_status(
                 "choose exactly one status identity mode",
             ));
         }
-        let (agent_type, discussion_id, source_message_id) = match spawned_native_caller(&caller) {
-            Ok(caller) => caller,
-            Err(message) => {
-                return Json(ApiResponse::err_coded(
-                    ApiErrorCode::Validation,
-                    message.to_string(),
-                ))
-            }
-        };
+        let (agent_type, discussion_id, dispatch_job_id, source_message_id) =
+            match spawned_native_caller(&caller) {
+                Ok(caller) => caller,
+                Err(message) => {
+                    return Json(ApiResponse::err_coded(
+                        ApiErrorCode::Validation,
+                        message.to_string(),
+                    ))
+                }
+            };
         let alias = crate::db::orchestration::agent_type_to_db(&agent_type);
-        let execution = match native_worker_execution_for_caller(
+        let execution = match spawned_native_worker_execution_for_caller(
             &state.db,
             &exec_id,
+            dispatch_job_id,
             NativeExecutionCaller {
                 discussion_id,
                 agent_type: &agent_type,
@@ -8539,20 +8564,27 @@ pub async fn accept_offer(
 pub struct SpawnedAgentCaller {
     pub discussion_id: String,
     pub agent_type: String,
+    pub dispatch_job_id: String,
     pub source_message_id: String,
 }
 
 fn spawned_native_caller(
     caller: &SpawnedAgentCaller,
-) -> Result<(AgentType, &str, &str), &'static str> {
+) -> Result<(AgentType, &str, &str, &str), &'static str> {
     let discussion_id = caller.discussion_id.trim();
+    let dispatch_job_id = caller.dispatch_job_id.trim();
     let source_message_id = caller.source_message_id.trim();
     let agent_type = crate::db::orchestration::agent_type_from_db(caller.agent_type.trim())
         .map_err(|_| "spawned agent context is incomplete")?;
-    if discussion_id.is_empty() || source_message_id.is_empty() {
+    if discussion_id.is_empty() || dispatch_job_id.is_empty() || source_message_id.is_empty() {
         return Err("spawned agent context is incomplete");
     }
-    Ok((agent_type, discussion_id, source_message_id))
+    Ok((
+        agent_type,
+        discussion_id,
+        dispatch_job_id,
+        source_message_id,
+    ))
 }
 
 /// Body of `POST /api/orchestration/worker-commit`. The model supplies only an
@@ -8581,7 +8613,7 @@ pub async fn commit_spawned_worker(
             "task_execution_id is required".to_string(),
         ));
     }
-    let (agent_type, discussion_id, source_message_id) =
+    let (agent_type, discussion_id, dispatch_job_id, source_message_id) =
         match spawned_native_caller(&request.spawned_agent) {
             Ok(caller) => caller,
             Err(message) => {
@@ -8592,9 +8624,10 @@ pub async fn commit_spawned_worker(
             }
         };
     let alias = crate::db::orchestration::agent_type_to_db(&agent_type);
-    let execution = match native_worker_execution_for_caller(
+    let execution = match spawned_native_worker_execution_for_caller(
         &state.db,
         &exec_id,
+        dispatch_job_id,
         NativeExecutionCaller {
             discussion_id,
             agent_type: &agent_type,
@@ -8677,12 +8710,63 @@ pub async fn commit_spawned_worker(
             ))
         }
     };
+    let lease_execution_id = execution.id.clone();
+    let lease_dispatch_job_id = dispatch_job_id.to_string();
+    let lease = state
+        .db
+        .with_conn(move |conn| {
+            crate::db::orchestration::acquire_spawned_commit_lease(
+                conn,
+                &lease_execution_id,
+                &lease_dispatch_job_id,
+            )
+        })
+        .await;
+    match lease {
+        Ok(crate::db::orchestration::SpawnedCommitLeaseOutcome::Acquired) => {}
+        Ok(crate::db::orchestration::SpawnedCommitLeaseOutcome::NotCurrent) => {
+            return Json(ApiResponse::err_coded(
+                ApiErrorCode::NotFound,
+                "execution not found or not addressed to this worker".to_string(),
+            ))
+        }
+        Ok(crate::db::orchestration::SpawnedCommitLeaseOutcome::Busy) => {
+            return Json(ApiResponse::err_coded(
+                ApiErrorCode::Conflict,
+                "a commit is already in progress for this worker".to_string(),
+            ))
+        }
+        Err(error) => {
+            return Json(ApiResponse::err_coded(
+                ApiErrorCode::Internal,
+                format!("unable to reserve worker commit authority: {error}"),
+            ))
+        }
+    }
     let files = request.files;
     let message = request.message;
     let committed = tokio::task::spawn_blocking(move || {
         crate::api::agent_workspace_tools::git_commit_payload(&root, &files, &message)
     })
     .await;
+    let release_execution_id = execution.id.clone();
+    let release_dispatch_job_id = dispatch_job_id.to_string();
+    if let Err(error) = state
+        .db
+        .with_conn(move |conn| {
+            crate::db::orchestration::release_spawned_commit_lease(
+                conn,
+                &release_execution_id,
+                &release_dispatch_job_id,
+            )
+        })
+        .await
+    {
+        return Json(ApiResponse::err_coded(
+            ApiErrorCode::Internal,
+            format!("unable to release worker commit authority: {error}"),
+        ));
+    }
     match committed {
         Ok(Ok(payload)) => Json(ApiResponse::ok(payload)),
         Ok(Err(message)) => Json(ApiResponse::err_coded(ApiErrorCode::Validation, message)),
@@ -8786,19 +8870,21 @@ pub async fn deliver(
                 "choose exactly one delivery identity mode".to_string(),
             ));
         }
-        let (agent_type, discussion_id, source_message_id) = match spawned_native_caller(&caller) {
-            Ok(caller) => caller,
-            Err(_) => {
-                return Json(ApiResponse::err_coded(
-                    ApiErrorCode::Validation,
-                    "spawned agent delivery context is incomplete".to_string(),
-                ))
-            }
-        };
+        let (agent_type, discussion_id, dispatch_job_id, source_message_id) =
+            match spawned_native_caller(&caller) {
+                Ok(caller) => caller,
+                Err(_) => {
+                    return Json(ApiResponse::err_coded(
+                        ApiErrorCode::Validation,
+                        "spawned agent delivery context is incomplete".to_string(),
+                    ))
+                }
+            };
         let alias = crate::db::orchestration::agent_type_to_db(&agent_type);
-        deliver_native_worker_manifest(
+        let execution = match spawned_native_worker_execution_for_caller(
             &state.db,
             &exec_id,
+            dispatch_job_id,
             NativeExecutionCaller {
                 discussion_id,
                 agent_type: &agent_type,
@@ -8806,9 +8892,30 @@ pub async fn deliver(
                 alias: &alias,
                 actor_session_id: Some(source_message_id),
             },
-            &manifest_json,
         )
         .await
+        {
+            Ok(execution) => execution,
+            Err(error) => {
+                let (code, message) = provision_error_parts(&error);
+                return Json(ApiResponse::err_coded(code, message));
+            }
+        };
+        match execution {
+            Some(execution) => {
+                deliver_authorized_worker_manifest(
+                    &state.db,
+                    execution,
+                    &alias,
+                    Some(source_message_id.to_string()),
+                    Some(dispatch_job_id),
+                    &manifest_json,
+                    DeliveryManifestAuthorship::NativeProjection,
+                )
+                .await
+            }
+            None => Ok(DeliverOutcome::NotAddressed),
+        }
     } else {
         let (source_agent, source_session_id) = match (
             clean(&request.source_agent),
@@ -10114,7 +10221,7 @@ mod tests {
             &db,
             ProvisionInput {
                 task_reference: task_ref,
-                parent_discussion_id: parent_id,
+                parent_discussion_id: parent_id.clone(),
                 worker: native_worker(),
                 base_rev: Some("main".into()),
                 idempotency_key: Some("reassignment-restart-auth".into()),
@@ -10177,8 +10284,13 @@ mod tests {
         );
 
         let interrupted_id = execution_id.clone();
+        let replacement_dispatch_for_failure = replacement_dispatch.clone();
         db.with_conn(move |conn| {
-            crate::db::agent_dispatch::mark_failed(conn, &replacement_dispatch, "backend restart")?;
+            crate::db::agent_dispatch::mark_failed(
+                conn,
+                &replacement_dispatch_for_failure,
+                "backend restart",
+            )?;
             crate::db::orchestration::transition_execution(
                 conn,
                 &interrupted_id,
@@ -10192,6 +10304,17 @@ mod tests {
         .unwrap();
         wake_recovered_worker(&db, &execution_id).await.unwrap();
         let current = exec_of(&db, &execution_id).await;
+        let current_dispatch = current.dispatch_job_id.clone().unwrap();
+        let current_trigger = {
+            let dispatch = current_dispatch.clone();
+            db.with_conn(move |conn| {
+                Ok(crate::db::agent_dispatch::get(conn, &dispatch)?
+                    .unwrap()
+                    .trigger_message_id)
+            })
+            .await
+            .unwrap()
+        };
         let matches = {
             let trigger = replacement_trigger.clone();
             db.with_conn(move |conn| native_worker_dispatch_matches(conn, &current, Some(&trigger)))
@@ -10239,6 +10362,25 @@ mod tests {
             !unrelated_matches,
             "a later same-provider dispatch outside the execution lineage must stay refused"
         );
+        let Json(stale_status) = task_exec_status(
+            State(state.clone()),
+            Path(execution_id.clone()),
+            Json(TaskExecCallerRequest {
+                source_agent: String::new(),
+                source_session_id: String::new(),
+                spawned_agent: Some(SpawnedAgentCaller {
+                    discussion_id: child.clone(),
+                    agent_type: "Codex".into(),
+                    dispatch_job_id: replacement_dispatch.clone(),
+                    source_message_id: current_trigger.clone(),
+                }),
+            }),
+        )
+        .await;
+        assert!(
+            !stale_status.success,
+            "a previous dispatch id must not inherit the current worker capability"
+        );
         let Json(status) = task_exec_status(
             State(state.clone()),
             Path(execution_id.clone()),
@@ -10248,7 +10390,8 @@ mod tests {
                 spawned_agent: Some(SpawnedAgentCaller {
                     discussion_id: child.clone(),
                     agent_type: "Codex".into(),
-                    source_message_id: replacement_trigger.clone(),
+                    dispatch_job_id: current_dispatch.clone(),
+                    source_message_id: current_trigger.clone(),
                 }),
             }),
         )
@@ -10257,22 +10400,293 @@ mod tests {
             status.success,
             "current worker must read status: {status:?}"
         );
-        let manifest = projected_manifest_for_execution(&db, &execution_id).await;
-        let delivered = deliver_native_worker_manifest(
+        let manifest: serde_json::Value =
+            serde_json::from_str(&projected_manifest_for_execution(&db, &execution_id).await)
+                .unwrap();
+        let Json(stale_delivery) = deliver(
+            State(state.clone()),
+            Json(DeliverRequest {
+                task_execution_id: execution_id.clone(),
+                manifest: manifest.clone(),
+                source_agent: None,
+                source_session_id: None,
+                spawned_agent: Some(SpawnedAgentCaller {
+                    discussion_id: child.clone(),
+                    agent_type: "Codex".into(),
+                    dispatch_job_id: replacement_dispatch.clone(),
+                    source_message_id: replacement_trigger,
+                }),
+            }),
+        )
+        .await;
+        assert!(
+            !stale_delivery.success,
+            "a previous dispatch must not deliver after recovery"
+        );
+        let Json(delivered) = deliver(
+            State(state.clone()),
+            Json(DeliverRequest {
+                task_execution_id: execution_id.clone(),
+                manifest,
+                source_agent: None,
+                source_session_id: None,
+                spawned_agent: Some(SpawnedAgentCaller {
+                    discussion_id: child.clone(),
+                    agent_type: "Codex".into(),
+                    dispatch_job_id: current_dispatch.clone(),
+                    source_message_id: current_trigger,
+                }),
+            }),
+        )
+        .await;
+        assert!(delivered.success, "current dispatch must deliver");
+
+        set_max_review_rounds(&db, &execution_id, 2).await;
+        let worktree = managed_worktree_path(&db, &execution_id).await;
+        let mut previous_dispatch = current_dispatch;
+        for cycle in 1..=2 {
+            let reviewed = decide_native_review(
+                &db,
+                &execution_id,
+                &review_request_changes("start the next native rework generation"),
+                NativeExecutionCaller {
+                    discussion_id: &parent_id,
+                    agent_type: &AgentType::ClaudeCode,
+                    source_message_id: Some("principal-review"),
+                    alias: "Claude Code",
+                    actor_session_id: Some("principal-review"),
+                },
+            )
+            .await
+            .unwrap();
+            assert!(matches!(
+                reviewed,
+                ReviewOutcome::Reviewed {
+                    verdict: ReviewVerdict::RequestChanges,
+                    ..
+                }
+            ));
+
+            let current = exec_of(&db, &execution_id).await;
+            let dispatch_job_id = current.dispatch_job_id.clone().unwrap();
+            let trigger = {
+                let dispatch = dispatch_job_id.clone();
+                db.with_conn(move |conn| {
+                    Ok(crate::db::agent_dispatch::get(conn, &dispatch)?
+                        .unwrap()
+                        .trigger_message_id)
+                })
+                .await
+                .unwrap()
+            };
+            let Json(stale_status) = task_exec_status(
+                State(state.clone()),
+                Path(execution_id.clone()),
+                Json(TaskExecCallerRequest {
+                    source_agent: String::new(),
+                    source_session_id: String::new(),
+                    spawned_agent: Some(SpawnedAgentCaller {
+                        discussion_id: child.clone(),
+                        agent_type: "Codex".into(),
+                        dispatch_job_id: previous_dispatch.clone(),
+                        source_message_id: trigger.clone(),
+                    }),
+                }),
+            )
+            .await;
+            assert!(
+                !stale_status.success,
+                "cycle {cycle}: superseded worker must lose status"
+            );
+
+            std::fs::write(
+                std::path::Path::new(&worktree).join("README.md"),
+                format!("# native rework cycle {cycle}\n"),
+            )
+            .unwrap();
+            let Json(committed) = commit_spawned_worker(
+                State(state.clone()),
+                Json(SpawnedWorkerCommitRequest {
+                    task_execution_id: execution_id.clone(),
+                    files: vec!["README.md".into()],
+                    message: format!("test: native rework cycle {cycle}"),
+                    spawned_agent: SpawnedAgentCaller {
+                        discussion_id: child.clone(),
+                        agent_type: "Codex".into(),
+                        dispatch_job_id: dispatch_job_id.clone(),
+                        source_message_id: trigger.clone(),
+                    },
+                }),
+            )
+            .await;
+            assert!(
+                committed.success,
+                "cycle {cycle}: current worker must commit"
+            );
+
+            let manifest: serde_json::Value =
+                serde_json::from_str(&projected_manifest_for_execution(&db, &execution_id).await)
+                    .unwrap();
+            let Json(redelivered) = deliver(
+                State(state.clone()),
+                Json(DeliverRequest {
+                    task_execution_id: execution_id.clone(),
+                    manifest,
+                    source_agent: None,
+                    source_session_id: None,
+                    spawned_agent: Some(SpawnedAgentCaller {
+                        discussion_id: child.clone(),
+                        agent_type: "Codex".into(),
+                        dispatch_job_id: dispatch_job_id.clone(),
+                        source_message_id: trigger,
+                    }),
+                }),
+            )
+            .await;
+            assert!(
+                redelivered.success,
+                "cycle {cycle}: current worker must deliver"
+            );
+            previous_dispatch = dispatch_job_id;
+        }
+    }
+
+    #[tokio::test]
+    async fn stale_spawned_worker_cannot_commit_or_deliver_after_reassignment() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let (task_ref, parent_id, _) = seed(&db, repo.path()).await;
+        let initial = provision_single_task_execution(
             &db,
-            &execution_id,
-            NativeExecutionCaller {
-                discussion_id: &child,
-                agent_type: &AgentType::Codex,
-                source_message_id: Some(&replacement_trigger),
-                alias: "Codex",
-                actor_session_id: Some("current-worker"),
+            ProvisionInput {
+                task_reference: task_ref,
+                parent_discussion_id: parent_id,
+                worker: native_worker(),
+                base_rev: Some("main".into()),
+                idempotency_key: Some("spawned-commit-delivery-cas".into()),
             },
-            &manifest,
         )
         .await
         .unwrap();
-        assert!(matches!(delivered, DeliverOutcome::Delivered { .. }));
+        let exec_id = initial.id.clone();
+        let stale_dispatch = initial.dispatch_job_id.clone().unwrap();
+        let stale_execution = initial.clone();
+        let state = AppState::new_defaults(
+            std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::core::config::default_config(),
+            )),
+            db.clone(),
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        );
+
+        let lease_exec_id = exec_id.clone();
+        let lease_dispatch = stale_dispatch.clone();
+        let lease = db
+            .with_conn(move |conn| {
+                crate::db::orchestration::acquire_spawned_commit_lease(
+                    conn,
+                    &lease_exec_id,
+                    &lease_dispatch,
+                )
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            lease,
+            crate::db::orchestration::SpawnedCommitLeaseOutcome::Acquired
+        );
+        let blocked = match reassign_native_execution(
+            &state,
+            &exec_id,
+            crate::models::CampaignWorkerSelection {
+                target: MessageTarget::agent(AgentType::Codex),
+                model: None,
+                profile_id: None,
+            },
+            "race with a spawned commit",
+        )
+        .await
+        {
+            Ok(_) => panic!("reassignment must not cross an active commit lease"),
+            Err(error) => error,
+        };
+        assert!(blocked.to_string().contains("commit in progress"));
+
+        let release_exec_id = exec_id.clone();
+        let release_dispatch = stale_dispatch.clone();
+        db.with_conn(move |conn| {
+            crate::db::orchestration::release_spawned_commit_lease(
+                conn,
+                &release_exec_id,
+                &release_dispatch,
+            )
+        })
+        .await
+        .unwrap();
+        reassign_native_execution(
+            &state,
+            &exec_id,
+            crate::models::CampaignWorkerSelection {
+                target: MessageTarget::agent(AgentType::Codex),
+                model: None,
+                profile_id: None,
+            },
+            "replace the old dispatch",
+        )
+        .await
+        .unwrap();
+
+        let stale_manifest = projected_manifest_for_execution(&db, &exec_id).await;
+        let stale_delivery = deliver_authorized_worker_manifest(
+            &db,
+            stale_execution,
+            "Claude Code",
+            Some("stale-worker".into()),
+            Some(&stale_dispatch),
+            &stale_manifest,
+            DeliveryManifestAuthorship::NativeProjection,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            stale_delivery,
+            DeliverOutcome::NotDeliverable { .. }
+        ));
+
+        let current = exec_of(&db, &exec_id).await;
+        let current_dispatch = current.dispatch_job_id.clone().unwrap();
+        let current_trigger = {
+            let dispatch = current_dispatch.clone();
+            db.with_conn(move |conn| {
+                Ok(crate::db::agent_dispatch::get(conn, &dispatch)?
+                    .unwrap()
+                    .trigger_message_id)
+            })
+            .await
+            .unwrap()
+        };
+        let manifest: serde_json::Value =
+            serde_json::from_str(&projected_manifest_for_execution(&db, &exec_id).await).unwrap();
+        let Json(delivered) = deliver(
+            State(state),
+            Json(DeliverRequest {
+                task_execution_id: exec_id,
+                manifest,
+                source_agent: None,
+                source_session_id: None,
+                spawned_agent: Some(SpawnedAgentCaller {
+                    discussion_id: current.sub_discussion_id.unwrap(),
+                    agent_type: "Codex".into(),
+                    dispatch_job_id: current_dispatch,
+                    source_message_id: current_trigger,
+                }),
+            }),
+        )
+        .await;
+        assert!(
+            delivered.success,
+            "the replacement dispatch must still deliver"
+        );
     }
 
     #[tokio::test]
@@ -13633,8 +14047,9 @@ mod tests {
         .await
         .unwrap();
         let child = execution.sub_discussion_id.clone().unwrap();
+        let dispatch_job_id = execution.dispatch_job_id.clone().unwrap();
         let dispatch_trigger = {
-            let dispatch_job_id = execution.dispatch_job_id.clone().unwrap();
+            let dispatch_job_id = dispatch_job_id.clone();
             db.with_read_conn(move |conn| {
                 Ok(crate::db::agent_dispatch::get(conn, &dispatch_job_id)?
                     .unwrap()
@@ -13659,6 +14074,7 @@ mod tests {
             spawned_agent: SpawnedAgentCaller {
                 discussion_id,
                 agent_type: "ClaudeCode".into(),
+                dispatch_job_id: dispatch_job_id.clone(),
                 source_message_id: dispatch_trigger.clone(),
             },
         };
@@ -13761,8 +14177,9 @@ mod tests {
         .await
         .unwrap();
         let child = execution.sub_discussion_id.clone().unwrap();
+        let dispatch_job_id = execution.dispatch_job_id.clone().unwrap();
         let dispatch_trigger = {
-            let dispatch_job_id = execution.dispatch_job_id.clone().unwrap();
+            let dispatch_job_id = dispatch_job_id.clone();
             db.with_conn(move |conn| {
                 Ok(crate::db::agent_dispatch::get(conn, &dispatch_job_id)?
                     .unwrap()
@@ -13792,6 +14209,7 @@ mod tests {
                 spawned_agent: Some(SpawnedAgentCaller {
                     discussion_id: "another-child".into(),
                     agent_type: "ClaudeCode".into(),
+                    dispatch_job_id: dispatch_job_id.clone(),
                     source_message_id: dispatch_trigger.clone(),
                 }),
             }),
@@ -13811,6 +14229,7 @@ mod tests {
                 spawned_agent: Some(SpawnedAgentCaller {
                     discussion_id: child,
                     agent_type: "ClaudeCode".into(),
+                    dispatch_job_id,
                     source_message_id: dispatch_trigger,
                 }),
             }),
@@ -15963,9 +16382,10 @@ mod tests {
         assert_eq!(execution.attempt_no, 1);
         let dispatch_id = execution.dispatch_job_id.expect("fresh dispatch attached");
 
+        let dispatch_for_lookup = dispatch_id.clone();
         let (status, dedupe, discussion_id, trigger_message_id, target) = db
             .with_conn(move |conn| {
-                let job = crate::db::agent_dispatch::get(conn, &dispatch_id)?
+                let job = crate::db::agent_dispatch::get(conn, &dispatch_for_lookup)?
                     .context("native rework dispatch vanished")?;
                 let target =
                     crate::db::discussions::list_message_targets(conn, &job.trigger_message_id)?
@@ -15991,6 +16411,72 @@ mod tests {
         );
         assert_eq!(target.kind, MessageTargetKind::Agent);
         assert_eq!(target.agent_type, AgentType::Ollama);
+
+        let manifest = projected_manifest_for_execution(&db, &exec_id).await;
+        let delivered = deliver_native_worker_manifest(
+            &db,
+            &exec_id,
+            NativeExecutionCaller {
+                discussion_id: &child_id,
+                agent_type: &AgentType::Ollama,
+                source_message_id: Some(&trigger_message_id),
+                alias: "Ollama",
+                actor_session_id: Some("native-rework-1"),
+            },
+            &manifest,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(delivered, DeliverOutcome::Delivered { .. }));
+
+        let second = decide_review(
+            &db,
+            &exec_id,
+            &review_request_changes("second native rework cycle"),
+            "ClaudeCode",
+            "sess-b",
+        )
+        .await
+        .unwrap();
+        let second_execution = match second {
+            ReviewOutcome::Reviewed {
+                verdict: ReviewVerdict::RequestChanges,
+                execution,
+            } => execution,
+            other => panic!("expected second native rework, got {other:?}"),
+        };
+        assert_eq!(second_execution.attempt_no, 2);
+        let second_dispatch = second_execution
+            .dispatch_job_id
+            .expect("second rework dispatch attached");
+        assert_ne!(
+            second_dispatch, dispatch_id,
+            "each rework gets a new dispatch"
+        );
+        let second_trigger = db
+            .with_conn(move |conn| {
+                Ok(crate::db::agent_dispatch::get(conn, &second_dispatch)?
+                    .context("second native rework dispatch vanished")?
+                    .trigger_message_id)
+            })
+            .await
+            .unwrap();
+        let manifest = projected_manifest_for_execution(&db, &exec_id).await;
+        let delivered = deliver_native_worker_manifest(
+            &db,
+            &exec_id,
+            NativeExecutionCaller {
+                discussion_id: &child_id,
+                agent_type: &AgentType::Ollama,
+                source_message_id: Some(&second_trigger),
+                alias: "Ollama",
+                actor_session_id: Some("native-rework-2"),
+            },
+            &manifest,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(delivered, DeliverOutcome::Delivered { .. }));
     }
 
     /// Both handoffs — the wake and the reassignment — must match what the
