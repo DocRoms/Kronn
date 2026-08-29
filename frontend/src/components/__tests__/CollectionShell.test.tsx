@@ -54,6 +54,41 @@ describe('CollectionShell', () => {
     await waitFor(() => expect(trigger).toHaveFocus());
   });
 
+  it('renders the canonical title row, enters bulk mode from the ellipsis, and collapses on desktop', async () => {
+    function HeaderFixture() {
+      const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+      const [sidebarOpen, setSidebarOpen] = useState(true);
+      const [result, setResult] = useState('');
+      return <>
+        <output>{result}</output>
+        <CollectionShell<Item>
+          ariaLabel="Managed collection" title="Projects" titleCount={items.length}
+          items={items} getId={item => item.id} getLabel={item => item.name}
+          persistence={{ query: '', onQueryChange: () => {}, favoritesOnly: false, onFavoritesOnlyChange: () => {} }}
+          selectedId="one" onSelect={() => {}} selectedIds={selectedIds} onSelectedIdsChange={setSelectedIds}
+          actions={[{ id: 'delete', label: 'Delete selection', onSelect: selected => setResult(selected.map(item => item.id).join(',')) }]}
+          sidebarOpen={sidebarOpen} onSidebarOpenChange={setSidebarOpen}
+          labels={{ ...labels, selectMultiple: 'Select multiple', cancelSelection: 'Cancel selection', selectedCount: count => `${count} selected` }}
+          slots={{ renderDetail: () => null }}
+        />
+      </>;
+    }
+    render(<HeaderFixture />);
+    expect(screen.getByText('Projects')).toHaveTextContent('Projects · 2');
+    fireEvent.click(screen.getByRole('button', { name: 'More actions' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Select multiple' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: 'One selected' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Two selected' }));
+    expect(screen.getByText('2 selected')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Delete selection' }));
+    await waitFor(() => expect(screen.getByText('one,two', { selector: 'output' })).toBeInTheDocument());
+    expect(screen.queryByRole('checkbox')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Close collection' }));
+    expect(screen.queryByRole('complementary', { name: 'Managed collection' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Open collection' }));
+    expect(screen.getByRole('complementary', { name: 'Managed collection' })).toBeInTheDocument();
+  });
+
   it('removes deleted ids from an active bulk selection after the list refreshes', () => {
     function RefreshingFixture() {
       const [currentItems, setCurrentItems] = useState(items);

@@ -1,8 +1,9 @@
 .planning-page {
   display: flex;
   flex-direction: column;
-  height: 100%;
+  height: calc(100vh - 56px);
   min-height: 0;
+  margin: -24px -20px;
   background: var(--kr-bg-base);
 }
 
@@ -48,6 +49,32 @@
   color: var(--kr-text-primary);
   font-size: var(--kr-fs-lg);
 }
+
+.planning-sidebar-summary {
+  display: flex;
+  gap: var(--kr-sp-2);
+  padding: var(--kr-sp-2) var(--kr-sp-3) 0;
+  color: var(--kr-text-muted);
+  font-size: var(--kr-fs-xs);
+}
+
+.planning-sidebar-summary span { display: flex; align-items: baseline; gap: 3px; }
+.planning-sidebar-summary strong { color: var(--kr-text-primary); }
+
+.collection-shell-sidebar .planning-toolbar {
+  flex-wrap: wrap;
+  padding: var(--kr-sp-2) var(--kr-sp-3);
+}
+
+.collection-shell-sidebar .planning-create {
+  grid-template-columns: minmax(100px, 1fr) auto auto;
+  width: 100%;
+  margin-left: 0;
+}
+
+.collection-shell-sidebar .planning-filters { padding: 0 var(--kr-sp-3) var(--kr-sp-2); }
+.collection-shell-sidebar .planning-filters select { min-width: 0; flex: 1 1 120px; }
+.collection-shell-sidebar .planning-duplicates { margin: 0 var(--kr-sp-3) var(--kr-sp-2); }
 
 .planning-toolbar {
   display: flex;

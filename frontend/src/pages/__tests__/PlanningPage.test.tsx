@@ -71,6 +71,8 @@ describe('PlanningPage', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     sessionStorage.clear();
+    localStorage.clear();
+    vi.stubGlobal('confirm', () => true);
     mocks.list.mockResolvedValue({
       items: [
         summary(),
@@ -110,6 +112,28 @@ describe('PlanningPage', () => {
     expect(screen.getByText('Old task')).toBeInTheDocument();
   });
 
+  it('uses the shared title, favorites, collapse, and bulk archive flow', async () => {
+    render(<PlanningPage projects={[]} discussions={[]} toast={vi.fn()} onNavigateDiscussion={vi.fn()} />);
+    await screen.findByText('Upgrade PHP');
+    expect(screen.getByText('planning.title')).toHaveTextContent('planning.title · 2');
+    fireEvent.click(screen.getByRole('button', { name: /collection\.favorites · Upgrade PHP/ }));
+    expect(localStorage.getItem('kronn:collection-favorites:planning')).toContain('task-1');
+    fireEvent.click(screen.getByRole('button', { name: 'collection.favorites' }));
+    expect(screen.getByText('Upgrade PHP')).toBeInTheDocument();
+    expect(screen.queryByText('Old task')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'collection.favorites' }));
+    fireEvent.click(screen.getByRole('button', { name: 'collection.moreActions' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'collection.selectMultiple' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: /Upgrade PHP.*collection\.selectItem/ }));
+    fireEvent.click(screen.getByRole('checkbox', { name: /Old task.*collection\.selectItem/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'collection.archiveSelected' }));
+    await waitFor(() => expect(mocks.update).toHaveBeenCalledTimes(2));
+    expect(mocks.update).toHaveBeenCalledWith('task-1', { status: 'archived' });
+    expect(mocks.update).toHaveBeenCalledWith('task-done', { status: 'archived' });
+    fireEvent.click(screen.getByRole('button', { name: 'collection.closeCollection' }));
+    expect(screen.queryByRole('complementary', { name: 'planning.title' })).toBeNull();
+  });
+
   it('keeps Planning task rows in the shared keyboard and active-row contract', async () => {
     render(
       <PlanningPage
@@ -120,8 +144,10 @@ describe('PlanningPage', () => {
       />,
     );
 
-    const first = await screen.findByRole('button', { name: /Upgrade PHP/ });
-    const second = screen.getByRole('button', { name: /Old task/ });
+    const first = (await screen.findAllByRole('button', { name: /Upgrade PHP/ }))
+      .find(button => button.classList.contains('collection-shell-row-button'))!;
+    const second = screen.getAllByRole('button', { name: /Old task/ })
+      .find(button => button.classList.contains('collection-shell-row-button'))!;
     first.focus();
     fireEvent.keyDown(first, { key: 'ArrowDown' });
     expect(second).toHaveFocus();

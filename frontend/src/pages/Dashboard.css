@@ -1920,7 +1920,9 @@ html[data-density="large"] .dash-main {
 /* ── Projects master/detail workspace ─────────────────────────────── */
 .project-page {
   display: flex;
+  height: calc(100vh - 56px);
   min-height: 0;
+  margin: -24px -20px;
   flex: 1;
   flex-direction: column;
 }
@@ -1934,15 +1936,15 @@ html[data-density="large"] .dash-main {
   flex-wrap: wrap;
   align-items: center;
   gap: var(--kr-sp-2);
-  padding: var(--kr-sp-2) var(--kr-sp-3) 0;
+  justify-content: space-between;
+  padding: var(--kr-sp-2) var(--kr-sp-3);
+  border-bottom: 1px solid var(--kr-border-light);
 }
 
 .project-shell {
-  height: calc(100dvh - 215px);
+  height: 100%;
   min-height: 440px;
-  flex: 0 0 auto;
-  border: 1px solid var(--kr-border-light);
-  border-radius: var(--kr-r-lg);
+  flex: 1 1 auto;
   overflow: hidden;
 }
 

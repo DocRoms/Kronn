@@ -1,6 +1,12 @@
 .collection-shell { display: flex; min-height: 0; height: 100%; overflow: hidden; background: var(--kr-bg-surface); }
 .collection-shell-sidebar { width: min(360px, 38%); min-width: 260px; display: flex; flex-direction: column; border-right: 1px solid var(--kr-border); background: var(--kr-bg-raised); }
 .collection-shell[data-mobile="true"] .collection-shell-sidebar { position: absolute; inset: 0; z-index: var(--kr-z-modal); width: 100%; min-width: 0; }
+.collection-shell-titlebar { position: relative; display: flex; min-height: 48px; align-items: center; justify-content: space-between; gap: var(--kr-sp-2); padding: var(--kr-sp-3); border-bottom: 1px solid var(--kr-border-light); }
+.collection-shell-title { min-width: 0; overflow: hidden; display: flex; align-items: center; gap: var(--kr-sp-1); color: var(--kr-text-primary); font-size: var(--kr-fs-md); text-overflow: ellipsis; white-space: nowrap; }
+.collection-shell-title-count { color: var(--kr-text-muted); font-size: var(--kr-fs-xs); font-weight: 500; }
+.collection-shell-title-actions { display: flex; flex: 0 0 auto; align-items: center; gap: var(--kr-sp-1); }
+.collection-shell-title-menu { position: relative; }
+.collection-shell-title-menu .collection-shell-menu { z-index: var(--kr-z-popover, 20); }
 .collection-shell-header, .collection-shell-controls, .collection-shell-row, .collection-shell-actions { display: flex; align-items: center; gap: var(--kr-sp-2); }
 .collection-shell-header { padding: var(--kr-sp-3); border-bottom: 1px solid var(--kr-border-light); }
 .collection-shell-search { flex: 1; min-width: 0; display: flex; align-items: center; gap: var(--kr-sp-2); border-radius: var(--kr-r-sm); color: var(--kr-text-muted); }
@@ -13,6 +19,7 @@
 .collection-shell-filter[data-active="true"] { background: var(--kr-accent-bg); color: var(--kr-text-primary); }
 .collection-shell-clear { margin-left: auto; }
 .collection-shell-icon, .collection-shell-favorite, .collection-shell-open { width: 30px; height: 30px; padding: 0; }
+.collection-shell-icon[data-danger="true"] { color: var(--kr-error); }
 .collection-shell-icon:hover, .collection-shell-icon:focus-visible, .collection-shell-favorite:hover, .collection-shell-favorite:focus-visible, .collection-shell-filter:hover, .collection-shell-filter:focus-visible, .collection-shell-clear:hover, .collection-shell-clear:focus-visible { background: var(--kr-bg-hover); color: var(--kr-text-primary); }
 .collection-shell-icon:focus-visible, .collection-shell-favorite:focus-visible, .collection-shell-filter:focus-visible, .collection-shell-clear:focus-visible, .collection-shell-open:focus-visible, .collection-shell-menu button:focus-visible { outline: 2px solid var(--kr-accent); outline-offset: 2px; }
 .collection-shell-list { flex: 1; margin: 0; overflow-y: auto; padding: var(--kr-sp-2); list-style: none; }
@@ -29,4 +36,4 @@
 .collection-shell-menu button { min-height: 32px; padding: 0 var(--kr-sp-2); border: 0; border-radius: var(--kr-r-sm); background: transparent; color: var(--kr-text-primary); font: inherit; text-align: left; cursor: pointer; }
 .collection-shell-menu button:hover, .collection-shell-menu button:focus-visible { background: var(--kr-bg-hover); }
 .collection-shell-menu button:disabled { opacity: .5; cursor: not-allowed; }
-.collection-shell-open { margin-bottom: var(--kr-sp-3); }
+.collection-shell-open { position: sticky; top: 0; z-index: 2; margin-bottom: var(--kr-sp-3); background: var(--kr-bg-raised); border: 1px solid var(--kr-border); }

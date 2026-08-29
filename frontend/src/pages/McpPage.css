@@ -1,5 +1,13 @@
 /* McpPage — page-specific styles */
 
+.mcp-page {
+  display: flex;
+  height: calc(100vh - 56px);
+  min-height: 0;
+  margin: -24px -20px;
+  flex-direction: column;
+}
+
 /* ── Page header ────────────────────────────────────────── */
 .mcp-page-header {
   display: flex;
@@ -12,6 +20,18 @@
   flex-wrap: wrap;
   justify-content: flex-end;
 }
+
+.mcp-collection-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--kr-sp-2);
+  padding: var(--kr-sp-2) var(--kr-sp-3);
+  border-bottom: 1px solid var(--kr-border-light);
+}
+
+.mcp-collection-toolbar .mcp-meta { margin: 0; font-size: var(--kr-fs-2xs); }
+.mcp-collection-toolbar-actions { display: flex; align-items: center; gap: var(--kr-sp-1); }
 
 /* ── Incomplete-config warning banner ───────────────────── */
 .mcp-warning-banner {
@@ -472,10 +492,9 @@
 
 /* ── Installed plugins collection ───────────────────────── */
 .mcp-plugin-shell {
-  height: calc(100dvh - 260px);
+  height: 100%;
   min-height: 440px;
-  border: 1px solid var(--kr-border-light);
-  border-radius: var(--kr-r-lg);
+  flex: 1 1 auto;
   overflow: hidden;
 }
 

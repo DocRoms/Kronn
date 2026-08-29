@@ -22,6 +22,7 @@ import { userError } from '../lib/userError';
 import { CopyIdPill } from '../components/CopyIdPill';
 import { ContextHelp } from '../components/ContextHelp';
 import { CollectionShell } from '../components/CollectionShell';
+import { usePersistentIdSet } from '../hooks/usePersistentIdSet';
 import type { ToastFn } from '../hooks/useToast';
 import type {
   Discussion,
@@ -79,6 +80,11 @@ export function PlanningPage({
   const [detailLoading, setDetailLoading] = useState(Boolean(initialSelectedTaskId));
   const [saving, setSaving] = useState(false);
   const [filtersOpen, setFiltersOpen] = useState(false);
+  const [tasksLoaded, setTasksLoaded] = useState(false);
+  const [favoritesOnly, setFavoritesOnly] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const taskIds = useMemo(() => tasks.map(task => task.id), [tasks]);
+  const { ids: favoriteIds, toggle: toggleFavorite } = usePersistentIdSet('kronn:collection-favorites:planning', taskIds, tasksLoaded);
 
   const fetchTasks = useCallback(async (cursor?: number) => {
     const append = cursor !== undefined;
@@ -178,6 +184,23 @@ export function PlanningPage({
     return updated;
   };
 
+  const archiveSelectedTasks = async (selected: PlanningTaskSummary[]) => {
+    if (selected.length === 0 || !confirm(t('collection.archiveConfirm', selected.length))) return;
+    try {
+      const archived = await Promise.all(selected.map(task => planning.update(task.id, { status: 'archived' })));
+      const archivedIds = new Set(archived.map(task => task.id));
+      setTasks(previous => previous.map(task => archived.find(item => item.id === task.id) ?? task));
+      if (selectedId && archivedIds.has(selectedId)) {
+        setSelectedId(null);
+        setDetail(null);
+      }
+      toast(t('collection.archiveSuccess', selected.length), 'success');
+    } catch (cause) {
+      toast(t('collection.deleteError', userError(cause)), 'error');
+      throw cause;
+    }
+  };
+
   const renderCard = (task: PlanningTaskSummary, selected: boolean) => (
     <div
       className="planning-card"
@@ -218,122 +241,44 @@ export function PlanningPage({
 
   return (
     <div className="planning-page">
-      <header className="planning-header">
-        <div>
-          <div className="kr-context-help-title-row">
-            <h1><Target size={20} /> {t('planning.title')}</h1>
-            <ContextHelp title={t('contextHelp.planning.title')}>
-              <p>{t('contextHelp.planning.intro')}</p>
-              <ul>
-                <li>{t('contextHelp.planning.global')}</li>
-                <li>{t('contextHelp.planning.discussions')}</li>
-                <li>{t('contextHelp.planning.priority')}</li>
-                <li>{t('contextHelp.planning.orchestration')}</li>
-              </ul>
-              <p className="kr-context-help-agent-note">{t('contextHelp.planning.mcp')}</p>
-            </ContextHelp>
-          </div>
-          <p>{t('planning.subtitle')}</p>
-        </div>
-        <div className="planning-summary">
-          <span><strong>{activeTasks.length}</strong>{t('planning.activeCount')}</span>
-          <span><strong>{completedTasks.length}</strong>{t('planning.doneCount')}</span>
-        </div>
-      </header>
-
-      <div className="planning-toolbar">
-        <button
-          type="button"
-          className="btn btn-sm"
-          data-active={filtersOpen}
-          onClick={() => setFiltersOpen(value => !value)}
-        >
-          <Filter size={14} /> {t('planning.filters')}
-        </button>
-        <div className="planning-create">
-          <input
-            value={quickTitle}
-            onChange={event => setQuickTitle(event.target.value)}
-            onKeyDown={event => {
-              if (event.key === 'Enter') void createQuickTask();
-            }}
-            placeholder={t('planning.newIdea')}
-            maxLength={240}
-          />
-          <select
-            value={quickPriority}
-            onChange={event => setQuickPriority(event.target.value as PlanningTaskPriority)}
-            aria-label={t('planning.allPriorities')}
-          >
-            {PRIORITIES.map(value => (
-              <option key={value} value={value}>{t(`planning.priority.${value}`)}</option>
-            ))}
-          </select>
-          <button type="button" onClick={() => void createQuickTask()} disabled={!quickTitle.trim() || creating} aria-label={t('planning.quickCreate')}>
-            {creating ? <Loader2 size={14} className="spin" /> : <Plus size={14} />}
-          </button>
-        </div>
-      </div>
-      {quickTitle.trim() && duplicateCandidates.length > 0 && (
-        <div className="planning-duplicates">
-          <span>{t('planning.possibleDuplicates')}</span>
-          {duplicateCandidates.map(task => (
-            <button type="button" key={task.id} onClick={() => selectTask(task.id)}>
-              {task.reference} · {task.title}
-            </button>
-          ))}
-        </div>
-      )}
-
-      {filtersOpen && (
-        <div className="planning-filters">
-          <select value={status} onChange={event => setStatus(event.target.value as PlanningTaskStatus | '')} aria-label={t('planning.allStatuses')}>
-            <option value="">{t('planning.allStatuses')}</option>
-            {(['idea', 'todo', 'in_progress', 'blocked', 'done', 'archived'] as PlanningTaskStatus[])
-              .map(value => <option key={value} value={value}>{t(`planning.status.${value}`)}</option>)}
-          </select>
-          <select value={projectId} onChange={event => setProjectId(event.target.value)} aria-label={t('planning.allProjects')}>
-            <option value="">{t('planning.allProjects')}</option>
-            {projects.map(project => <option key={project.id} value={project.id}>{project.name}</option>)}
-          </select>
-          <select
-            value={priorityFilter}
-            onChange={event => setPriorityFilter(event.target.value as PlanningTaskPriority | '')}
-            aria-label={t('planning.allPriorities')}
-          >
-            <option value="">{t('planning.allPriorities')}</option>
-            {PRIORITIES.map(value => (
-              <option key={value} value={value}>{t(`planning.priority.${value}`)}</option>
-            ))}
-          </select>
-          <select value={withDiscussion} onChange={event => setWithDiscussion(event.target.value as typeof withDiscussion)} aria-label={t('planning.allLinks')}>
-            <option value="">{t('planning.allLinks')}</option>
-            <option value="yes">{t('planning.withDiscussion')}</option>
-            <option value="no">{t('planning.withoutDiscussion')}</option>
-          </select>
-          {tags.length > 0 && (
-            <select value={tag} onChange={event => setTag(event.target.value)} aria-label={t('planning.allTags')}>
-              <option value="">{t('planning.allTags')}</option>
-              {tags.map(value => <option key={value} value={value}>{value}</option>)}
-            </select>
-          )}
-        </div>
-      )}
-
       <div className="planning-shell">
         <CollectionShell<PlanningTaskSummary>
           ariaLabel={t('planning.title')}
+          title={<><Target size={17} /> {t('planning.title')}</>}
+          titleCount={tasks.length}
+          headerActions={<ContextHelp title={t('contextHelp.planning.title')}>
+            <p>{t('contextHelp.planning.intro')}</p>
+            <ul>
+              <li>{t('contextHelp.planning.global')}</li>
+              <li>{t('contextHelp.planning.discussions')}</li>
+              <li>{t('contextHelp.planning.priority')}</li>
+              <li>{t('contextHelp.planning.orchestration')}</li>
+            </ul>
+            <p className="kr-context-help-agent-note">{t('contextHelp.planning.mcp')}</p>
+          </ContextHelp>}
           items={tasks}
           getId={task => task.id}
           getLabel={task => `${task.title} ${task.reference} ${task.tags.join(' ')}`}
+          isFavorite={task => favoriteIds.has(task.id)}
+          onToggleFavorite={task => toggleFavorite(task.id)}
           persistence={{
             query: search,
             onQueryChange: setSearch,
-            favoritesOnly: false,
-            onFavoritesOnlyChange: () => {},
+            favoritesOnly,
+            onFavoritesOnlyChange: setFavoritesOnly,
           }}
           selectedId={selectedId}
           onSelect={id => selectTask(id)}
+          selectedIds={selectedIds}
+          onSelectedIdsChange={setSelectedIds}
+          actions={[{
+            id: 'archive',
+            label: t('collection.archiveSelected'),
+            icon: <Archive size={15} />,
+            danger: true,
+            disabled: selected => selected.length === 0,
+            onSelect: archiveSelectedTasks,
+          }]}
           isMobile={isMobile}
           sidebarOpen={sidebarOpen}
           onSidebarOpenChange={setSidebarOpen}
@@ -345,8 +290,55 @@ export function PlanningPage({
             openCollection: t('collection.openCollection'),
             closeCollection: t('collection.closeCollection'),
             selectItem: t('collection.selectItem'),
+            selectMultiple: t('collection.selectMultiple'),
+            cancelSelection: t('collection.cancelSelection'),
+            selectedCount: count => t('collection.selectedCount', count),
           }}
           slots={{
+            afterSidebarHeader: <>
+              <div className="planning-sidebar-summary">
+                <span><strong>{activeTasks.length}</strong>{t('planning.activeCount')}</span>
+                <span><strong>{completedTasks.length}</strong>{t('planning.doneCount')}</span>
+              </div>
+              <div className="planning-toolbar">
+                <button type="button" className="btn btn-sm" data-active={filtersOpen} onClick={() => setFiltersOpen(value => !value)}>
+                  <Filter size={14} /> {t('planning.filters')}
+                </button>
+                <div className="planning-create">
+                  <input value={quickTitle} onChange={event => setQuickTitle(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') void createQuickTask(); }} placeholder={t('planning.newIdea')} maxLength={240} />
+                  <select value={quickPriority} onChange={event => setQuickPriority(event.target.value as PlanningTaskPriority)} aria-label={t('planning.allPriorities')}>
+                    {PRIORITIES.map(value => <option key={value} value={value}>{t(`planning.priority.${value}`)}</option>)}
+                  </select>
+                  <button type="button" onClick={() => void createQuickTask()} disabled={!quickTitle.trim() || creating} aria-label={t('planning.quickCreate')}>
+                    {creating ? <Loader2 size={14} className="spin" /> : <Plus size={14} />}
+                  </button>
+                </div>
+              </div>
+              {quickTitle.trim() && duplicateCandidates.length > 0 && <div className="planning-duplicates">
+                <span>{t('planning.possibleDuplicates')}</span>
+                {duplicateCandidates.map(task => <button type="button" key={task.id} onClick={() => selectTask(task.id)}>{task.reference} · {task.title}</button>)}
+              </div>}
+              {filtersOpen && <div className="planning-filters">
+                <select value={status} onChange={event => setStatus(event.target.value as PlanningTaskStatus | '')} aria-label={t('planning.allStatuses')}>
+                  <option value="">{t('planning.allStatuses')}</option>
+                  {(['idea', 'todo', 'in_progress', 'blocked', 'done', 'archived'] as PlanningTaskStatus[]).map(value => <option key={value} value={value}>{t(`planning.status.${value}`)}</option>)}
+                </select>
+                <select value={projectId} onChange={event => setProjectId(event.target.value)} aria-label={t('planning.allProjects')}>
+                  <option value="">{t('planning.allProjects')}</option>
+                  {projects.map(project => <option key={project.id} value={project.id}>{project.name}</option>)}
+                </select>
+                <select value={priorityFilter} onChange={event => setPriorityFilter(event.target.value as PlanningTaskPriority | '')} aria-label={t('planning.allPriorities')}>
+                  <option value="">{t('planning.allPriorities')}</option>
+                  {PRIORITIES.map(value => <option key={value} value={value}>{t(`planning.priority.${value}`)}</option>)}
+                </select>
+                <select value={withDiscussion} onChange={event => setWithDiscussion(event.target.value as typeof withDiscussion)} aria-label={t('planning.allLinks')}>
+                  <option value="">{t('planning.allLinks')}</option><option value="yes">{t('planning.withDiscussion')}</option><option value="no">{t('planning.withoutDiscussion')}</option>
+                </select>
+                {tags.length > 0 && <select value={tag} onChange={event => setTag(event.target.value)} aria-label={t('planning.allTags')}>
+                  <option value="">{t('planning.allTags')}</option>{tags.map(value => <option key={value} value={value}>{value}</option>)}
+                </select>}
+              </div>}
+            </>,
             renderEmpty: () => <div className="planning-state"><Target size={24} /> {t('planning.emptyBacklog')}</div>,
             renderItem: (task, { selected }) => renderCard(task, selected),
             renderDetail: () => {

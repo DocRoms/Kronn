@@ -5,8 +5,8 @@
 // vs plural) and a one-click toggle to filter down to just those projects.
 // ProjectCard is stubbed — this exercises the list's own logic only.
 
-import { describe, it, expect, vi } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { beforeEach, describe, it, expect, vi } from 'vitest';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import type { Project } from '../../types/generated';
 
 vi.mock('../../lib/I18nContext', () => ({
@@ -21,6 +21,8 @@ vi.mock('../ProjectCard', () => ({
   ),
 }));
 vi.mock('../MatrixText', () => ({ MatrixText: ({ text }: { text: string }) => <span>{text}</span> }));
+const deleteProject = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
+vi.mock('../../lib/api', () => ({ projects: { delete: deleteProject } }));
 
 import { ProjectList } from '../ProjectList';
 
@@ -65,6 +67,11 @@ function renderList(projects: Project[]) {
 }
 
 describe('ProjectList — missing-path banner', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    deleteProject.mockClear();
+    vi.stubGlobal('confirm', () => true);
+  });
   it('mounts one detail card while keeping every project in the compact list', () => {
     renderList([
       proj('p1', 'Alpha', '/repos/alpha', true),
@@ -152,5 +159,34 @@ describe('ProjectList — missing-path banner', () => {
     expect(screen.queryByTestId('project-list-item-p1')).not.toBeInTheDocument();
     expect(screen.getByTestId('project-list-item-p2')).toBeInTheDocument();
     expect(screen.getByText('projects.missingBanner.showAll')).toBeInTheDocument();
+  });
+
+  it('uses the shared title, favorite, collapse, and bulk-delete interactions', async () => {
+    const onRefetch = vi.fn();
+    render(
+      <ProjectList
+        projects={[proj('p1', 'Alpha', '/repos/alpha', true), proj('p2', 'Beta', '/repos/beta', true)]}
+        discussions={[]} discussionsByProject={{}} driftByProject={{}} agents={[]} allSkills={[]} mcpConfigs={[]} workflows={[]}
+        configLanguage="fr" toast={vi.fn()} onNavigate={noop} onSetDiscPrefill={noop} onAutoRunDiscussion={noop}
+        onOpenDiscussion={noop} onRefetch={onRefetch} onRefetchDiscussions={noop} onRefetchSkills={noop} onRefetchDrift={noop}
+        expandedId={null} onSetExpandedId={noop}
+      />,
+    );
+    expect(screen.getByText('projects.title').closest('.collection-shell-title')).toHaveTextContent('projects.title · 2');
+    fireEvent.click(screen.getByRole('button', { name: /collection\.favorites · Alpha/ }));
+    expect(localStorage.getItem('kronn:collection-favorites:projects')).toContain('p1');
+    fireEvent.click(screen.getByRole('button', { name: 'collection.favorites' }));
+    expect(screen.getByTestId('project-list-item-p1')).toBeInTheDocument();
+    expect(screen.queryByTestId('project-list-item-p2')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'collection.favorites' }));
+    fireEvent.click(screen.getByRole('button', { name: 'collection.moreActions' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'collection.selectMultiple' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: /Alpha.*collection\.selectItem/ }));
+    fireEvent.click(screen.getByRole('checkbox', { name: /Beta.*collection\.selectItem/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'collection.deleteSelected' }));
+    await waitFor(() => expect(deleteProject).toHaveBeenCalledTimes(2));
+    expect(onRefetch).toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'collection.closeCollection' }));
+    expect(screen.queryByRole('complementary', { name: 'projects.title' })).toBeNull();
   });
 });

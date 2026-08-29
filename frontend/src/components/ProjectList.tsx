@@ -6,10 +6,12 @@ import { useIsMobile } from '../hooks/useMediaQuery';
 import { ProjectCard } from './ProjectCard';
 import { ListControls } from './ListControls';
 import { CollectionShell, type CollectionFilter } from './CollectionShell';
+import { projects as projectsApi } from '../lib/api';
+import { usePersistentIdSet } from '../hooks/usePersistentIdSet';
 import type { Project, AgentDetection, AuditProgress, DriftCheckResponse, Discussion, Skill, McpConfigDisplay, WorkflowSummary } from '../types/generated';
 import {
   Folder, ChevronRight, AlertTriangle,
-  MessageSquare, Workflow, Puzzle, ShieldCheck, Loader2, FileCode, Clock,
+  MessageSquare, Workflow, Puzzle, ShieldCheck, Loader2, FileCode, Clock, Trash2,
 } from 'lucide-react';
 import { MatrixText } from './MatrixText';
 
@@ -81,6 +83,10 @@ export function ProjectList({
   const [projectSort, setProjectSort] = useState<ProjectSort>('name');
   const [projectSortReversed, setProjectSortReversed] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [favoritesOnly, setFavoritesOnly] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const projectIds = useMemo(() => projects.map(project => project.id), [projects]);
+  const { ids: favoriteIds, toggle: toggleFavorite } = usePersistentIdSet('kronn:collection-favorites:projects', projectIds);
   const shellRootRef = useRef<HTMLDivElement | null>(null);
 
   // Search input vs derived filter — useDeferredValue lets the keystroke
@@ -177,20 +183,21 @@ export function ProjectList({
     });
   };
 
+  const deleteSelectedProjects = async (selected: Project[]) => {
+    if (selected.length === 0 || !confirm(t('collection.deleteConfirm', selected.length))) return;
+    try {
+      await Promise.all(selected.map(project => projectsApi.delete(project.id)));
+      if (expandedId && selected.some(project => project.id === expandedId)) onSetExpandedId(null);
+      onRefetch();
+      toast(t('collection.deleteSuccess', selected.length), 'success');
+    } catch (cause) {
+      toast(t('collection.deleteError', String(cause)), 'error');
+      throw cause;
+    }
+  };
+
   return (
     <div className="project-page">
-      <div className="dash-page-header project-page-header">
-        <div>
-          <h1 className="dash-h1"><MatrixText text={t('projects.title')} /></h1>
-          <p className="dash-meta">
-            {aiCount}/{visibleProjects.length} {t('projects.aiReady')}
-            {hiddenProjects.length > 0 && (
-              <span className="text-faint"> + {hiddenProjects.length} {hiddenProjects.length > 1 ? t('projects.hiddenPlural') : t('projects.hidden')}</span>
-            )}
-          </p>
-        </div>
-      </div>
-
       {missingPathProjects.length > 0 && (
         <div className="dash-missing-banner" role="status" data-testid="missing-path-banner">
           <AlertTriangle size={15} className="dash-missing-banner-icon" />
@@ -209,40 +216,37 @@ export function ProjectList({
         </div>
       )}
 
-      <div className="project-list-toolbar">
-        <ListControls
-          sortLabel={t('projects.master.sort')}
-          sortValue={projectSort}
-          sortOptions={[
-            { value: 'name', label: t('projects.master.sort.name') },
-            { value: 'updated', label: t('projects.master.sort.updated') },
-            { value: 'status', label: t('projects.master.sort.status') },
-            { value: 'techDebt', label: t('projects.master.sort.techDebt') },
-          ]}
-          onSortChange={setProjectSort}
-          reversed={projectSortReversed}
-          onToggleDirection={() => setProjectSortReversed(value => !value)}
-          directionLabel={t('projects.master.sort.direction')}
-        />
-      </div>
-
       <div ref={shellRootRef} className="project-shell">
         <CollectionShell<Project>
           ariaLabel={t('projects.title')}
+          title={<MatrixText text={t('projects.title')} />}
+          titleCount={visibleProjects.length}
           items={sortedProjects}
           getId={project => project.id}
           getLabel={project => `${project.name} ${project.path}`}
+          isFavorite={project => favoriteIds.has(project.id)}
+          onToggleFavorite={project => toggleFavorite(project.id)}
           filters={projectFilters}
           persistence={{
             query: projectSearch,
             onQueryChange: setProjectSearch,
             activeFilterId: projectFilter,
             onActiveFilterIdChange: id => setProjectFilter((id ?? 'all') as ProjectFilter),
-            favoritesOnly: false,
-            onFavoritesOnlyChange: () => {},
+            favoritesOnly,
+            onFavoritesOnlyChange: setFavoritesOnly,
           }}
           selectedId={selectedProject?.id ?? null}
           onSelect={selectProject}
+          selectedIds={selectedIds}
+          onSelectedIdsChange={setSelectedIds}
+          actions={[{
+            id: 'delete',
+            label: t('collection.deleteSelected'),
+            icon: <Trash2 size={15} />,
+            danger: true,
+            disabled: selected => selected.length === 0,
+            onSelect: deleteSelectedProjects,
+          }]}
           isMobile={isMobile}
           sidebarOpen={sidebarOpen}
           onSidebarOpenChange={setSidebarOpen}
@@ -254,8 +258,31 @@ export function ProjectList({
             openCollection: t('collection.openCollection'),
             closeCollection: t('collection.closeCollection'),
             selectItem: t('collection.selectItem'),
+            selectMultiple: t('collection.selectMultiple'),
+            cancelSelection: t('collection.cancelSelection'),
+            selectedCount: count => t('collection.selectedCount', count),
           }}
           slots={{
+            afterSidebarHeader: <div className="project-list-toolbar">
+              <span className="dash-meta">
+                {aiCount}/{visibleProjects.length} {t('projects.aiReady')}
+                {hiddenProjects.length > 0 && <> + {hiddenProjects.length} {hiddenProjects.length > 1 ? t('projects.hiddenPlural') : t('projects.hidden')}</>}
+              </span>
+              <ListControls
+                sortLabel={t('projects.master.sort')}
+                sortValue={projectSort}
+                sortOptions={[
+                  { value: 'name', label: t('projects.master.sort.name') },
+                  { value: 'updated', label: t('projects.master.sort.updated') },
+                  { value: 'status', label: t('projects.master.sort.status') },
+                  { value: 'techDebt', label: t('projects.master.sort.techDebt') },
+                ]}
+                onSortChange={setProjectSort}
+                reversed={projectSortReversed}
+                onToggleDirection={() => setProjectSortReversed(value => !value)}
+                directionLabel={t('projects.master.sort.direction')}
+              />
+            </div>,
             renderDetail: () => (
               selectedProject ? (
                 <ProjectCard

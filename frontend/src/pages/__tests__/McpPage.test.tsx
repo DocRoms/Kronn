@@ -39,6 +39,9 @@ import type { McpOverview, McpConfigDisplay, McpServer, McpDefinition, Project, 
 // scroll animation) from leaking across tests and causing timeout issues.
 beforeEach(() => {
   vi.useFakeTimers();
+  localStorage.clear();
+  vi.mocked(mcpsApi.deleteConfig).mockClear();
+  vi.stubGlobal('confirm', () => true);
 });
 
 afterEach(() => {
@@ -166,6 +169,35 @@ describe('McpPage', () => {
     // Cards are always visible (no accordion)
     expect(container.textContent).toContain('GitHub Main');
     expect(container.textContent).toContain('GitHub Secondary');
+  });
+
+  it('uses the shared title, favorites, collapse, and bulk-delete flow', async () => {
+    const configs = [
+      makeConfig('c1', 'github', 'GitHub', { label: 'GitHub Main' }),
+      makeConfig('c2', 'slack', 'Slack', { label: 'Slack Main' }),
+    ];
+    const overview: McpOverview = {
+      servers: [makeServer('github', 'GitHub'), makeServer('slack', 'Slack')],
+      configs, customized_contexts: [], incompatibilities: [], incomplete_configs: [],
+    };
+    wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={vi.fn()} />);
+    await act(async () => {});
+    expect(screen.getByText('Plugins').closest('.collection-shell-title')).toHaveTextContent('Plugins · 2');
+    fireEvent.click(screen.getByRole('button', { name: /Favoris · GitHub Main/ }));
+    expect(localStorage.getItem('kronn:collection-favorites:plugins')).toContain('c1');
+    fireEvent.click(screen.getByRole('button', { name: 'Favoris' }));
+    expect(screen.getByText('GitHub Main')).toBeInTheDocument();
+    expect(screen.queryByText('Slack Main')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Favoris' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Plus d’actions' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Sélection multiple' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: /GitHub Main.*sélectionné/ }));
+    fireEvent.click(screen.getByRole('checkbox', { name: /Slack Main.*sélectionné/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Supprimer la sélection' }));
+    await act(async () => {});
+    expect(mcpsApi.deleteConfig).toHaveBeenCalledTimes(2);
+    fireEvent.click(screen.getByRole('button', { name: 'Fermer la liste' }));
+    expect(screen.queryByRole('complementary', { name: 'Plugins' })).toBeNull();
   });
 
   it('uses the shared identity, metadata, and action hierarchy on plugin cards', () => {
@@ -357,7 +389,7 @@ describe('McpPage', () => {
     expect(document.querySelector('.mcp-detail-inline')).toBeNull();
   });
 
-  it('exposes plugin actions through the shared collection menu', () => {
+  it('starts bulk selection through the shared collection menu', () => {
     const overview: McpOverview = {
       servers: [makeServer('github', 'GitHub')],
       configs: [makeConfig('github-config', 'github', 'GitHub')],
@@ -367,9 +399,8 @@ describe('McpPage', () => {
     };
 
     wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
-    fireEvent.click(screen.getByRole('button', { name: 'GitHub — Voir les détails' }));
     fireEvent.click(screen.getByRole('button', { name: 'Plus d’actions' }));
-    expect(screen.getByRole('menuitem', { name: 'Supprimer cette config' })).toBeTruthy();
+    expect(screen.getByRole('menuitem', { name: 'Sélection multiple' })).toBeTruthy();
   });
 
   it('shows real plugin capabilities and persists only selectable preferences', async () => {

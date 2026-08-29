@@ -1,9 +1,10 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useMemo } from 'react';
 import { mcps as mcpsApi, apiCallLogs, type EndpointDrift } from '../lib/api';
 import { useT } from '../lib/I18nContext';
 import { useIsMobile } from '../hooks/useMediaQuery';
 import { useToast } from '../hooks/useToast';
 import { useAsyncGuard } from '../hooks/useAsyncGuard';
+import { usePersistentIdSet } from '../hooks/usePersistentIdSet';
 import { userError } from '../lib/userError';
 import { isHiddenPath } from '../lib/constants';
 import type { AgentType, ApiAuthKind, ApiEndpoint, Project, McpConfigDisplay, McpDefinition, McpOverview, McpProbeResponse, HostSyncMode, CustomApiPayload, McpServer, PluginInterface } from '../types/generated';
@@ -270,6 +271,10 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
   });
   const [mcpKindFilter, setMcpKindFilter] = useState<'all' | 'mcp' | 'api' | 'cli'>('all');
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [favoritesOnly, setFavoritesOnly] = useState(false);
+  const [selectedConfigIds, setSelectedConfigIds] = useState<Set<string>>(new Set());
+  const availableConfigIds = useMemo(() => mcpOverview.configs.map(config => config.id), [mcpOverview.configs]);
+  const { ids: favoriteConfigIds, toggle: toggleConfigFavorite } = usePersistentIdSet('kronn:collection-favorites:plugins', availableConfigIds);
   useEffect(() => {
     try {
       localStorage.setItem('kronn:mcpSort', mcpSortReversed ? 'za' : 'az');
@@ -878,6 +883,19 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
     } catch (e) {
       console.warn('Failed to delete MCP config:', e);
       toast(t('mcp.deleteConfigError', userError(e)), 'error');
+    }
+  };
+
+  const handleDeleteSelectedMcpConfigs = async (selected: McpConfigDisplay[]) => {
+    if (selected.length === 0 || !confirm(t('collection.deleteConfirm', selected.length))) return;
+    try {
+      await Promise.all(selected.map(config => mcpsApi.deleteConfig(config.id)));
+      if (selectedConfigId && selected.some(config => config.id === selectedConfigId)) setSelectedConfigId(null);
+      refetchMcps();
+      toast(t('collection.deleteSuccess', selected.length), 'success');
+    } catch (cause) {
+      toast(t('collection.deleteError', userError(cause)), 'error');
+      throw cause;
     }
   };
 
@@ -1577,7 +1595,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
   );
 
   return (
-    <div>
+    <div className="mcp-page">
       <ToastContainer />
       {/* 0.8.6 (#33 fix 2026-05-21) — Custom plugin export modal.
           Renders unconditionally at the top so it survives navigation
@@ -1669,50 +1687,6 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
           }}
         />
       )}
-
-      <div className="mcp-page-header">
-        <div>
-          <div className="kr-context-help-title-row">
-            <h1 className="mcp-h1"><MatrixText text={t('mcp.title')} /> <span className="mcp-subtitle"><MatrixText text={t('mcp.subtitle')} /></span></h1>
-            <ContextHelp title={t('contextHelp.plugins.title')}>
-              <p>{t('contextHelp.plugins.intro')}</p>
-              <ul>
-                <li>{t('contextHelp.plugins.mcp')}</li>
-                <li>{t('contextHelp.plugins.api')}</li>
-                <li>{t('contextHelp.plugins.cli')}</li>
-              </ul>
-              <p className="kr-context-help-agent-note">{t('contextHelp.plugins.agents')}</p>
-            </ContextHelp>
-          </div>
-          <p className="mcp-meta">
-            {totalConfigs} {totalConfigs > 1 ? t('mcp.configPlural') : t('mcp.config')} · {servers.length} {servers.length > 1 ? t('mcp.serverPlural') : t('mcp.server')} · {globalConfigs.length} {globalConfigs.length > 1 ? t('mcp.globalPlural') : t('mcp.global')}
-          </p>
-        </div>
-        <div className="flex-row gap-4 mcp-header-actions">
-          {totalConfigs > 0 && (
-            <button
-              className="mcp-btn-action"
-              onClick={() => setPortabilityMode('export')}
-              title={t('mcp.portability.exportTitle')}
-            >
-              <Download size={14} /> {t('mcp.portability.export')}
-            </button>
-          )}
-          <button
-            className="mcp-btn-action"
-            onClick={() => setPortabilityMode('import')}
-            title={t('mcp.portability.importTitle')}
-          >
-            <Upload size={14} /> {t('mcp.portability.import')}
-          </button>
-          <button className="mcp-btn-action mcp-btn-action-primary" data-tour-id="add-plugin-btn" onClick={() => { setShowAddMcp(true); setAddMcpSelected(null); setAddMcpSearch(''); }} title={t('mcp.addTitle')}>
-            <Plus size={14} /> {t('mcp.add')}
-          </button>
-          <button className="mcp-btn-action" disabled={syncing} onClick={async () => { setSyncing(true); try { await mcpsApi.refresh(); refetchMcps(); } catch (e) { console.warn('Failed to sync MCPs:', e); } finally { setSyncing(false); } }} title={t('mcp.detect')}>
-            <RefreshCw size={14} className={syncing ? 'spin' : ''} /> {syncing ? t('mcp.syncing') : t('mcp.detect')}
-          </button>
-        </div>
-      </div>
 
       {/* Incomplete-config warning banner. Lists the MCPs whose env_keys
           are declared but values are missing/empty — those would fail
@@ -2200,13 +2174,9 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
         </div>
       )}
 
-      {/* ── Empty-state banner: no MCP exposed in CLI hors Kronn (UX#7) ── */}
-      <CliExposureHint configs={configs} onJumpToConfig={(id) => setSelectedConfigId(id)} />
-
       {/* ── Installed plugins grid (detail expands inline) ── */}
-      {totalConfigs > 0 || showBuiltinFallback ? (
-        <div className="mcp-plugin-shell">
-          {!(showBuiltinFallback && totalConfigs === 0) && (() => {
+      <div className="mcp-plugin-shell">
+          {(() => {
             const renderPlugin = (cfg: McpConfigDisplay, renderDetail: boolean): React.ReactNode => {
               const linkedProjects = cfg.is_global ? projects.filter(p => !isHiddenPath(p.path)).length : cfg.project_ids.length;
               const isSelected = selectedConfigId === cfg.id;
@@ -2838,25 +2808,39 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
             return (
               <CollectionShell<McpConfigDisplay>
                 ariaLabel={t('mcp.title')}
+                title={<><Puzzle size={17} /> <MatrixText text={t('mcp.title')} /></>}
+                titleCount={totalConfigs}
+                headerActions={<>
+                  <ContextHelp title={t('contextHelp.plugins.title')}>
+                    <p>{t('contextHelp.plugins.intro')}</p>
+                    <ul><li>{t('contextHelp.plugins.mcp')}</li><li>{t('contextHelp.plugins.api')}</li><li>{t('contextHelp.plugins.cli')}</li></ul>
+                    <p className="kr-context-help-agent-note">{t('contextHelp.plugins.agents')}</p>
+                  </ContextHelp>
+                  <button type="button" className="collection-shell-icon" data-tour-id="add-plugin-btn" onClick={() => { setShowAddMcp(true); setAddMcpSelected(null); setAddMcpSearch(''); }} aria-label={t('mcp.add')} title={t('mcp.addTitle')}><Plus size={16} /><span className="sr-only">{t('mcp.add')}</span></button>
+                </>}
                 items={visibleConfigs}
                 getId={config => config.id}
                 getLabel={config => `${config.label} ${config.server_name} ${config.project_names.join(' ')}`}
+                isFavorite={config => favoriteConfigIds.has(config.id)}
+                onToggleFavorite={config => toggleConfigFavorite(config.id)}
                 persistence={{
                   query: mcpSearch,
                   onQueryChange: setMcpSearch,
-                  favoritesOnly: false,
-                  onFavoritesOnlyChange: () => {},
+                  favoritesOnly,
+                  onFavoritesOnlyChange: setFavoritesOnly,
                 }}
                 selectedId={selectedConfigId}
                 onSelect={setSelectedConfigId}
+                selectedIds={selectedConfigIds}
+                onSelectedIdsChange={setSelectedConfigIds}
                 actions={[
                   {
                     id: 'delete',
-                    label: t('mcp.deleteConfig'),
-                    onSelect: items => {
-                      items.forEach(config => handleDeleteMcpConfig(config.id));
-                      setSelectedConfigId(null);
-                    },
+                    label: t('collection.deleteSelected'),
+                    icon: <Trash2 size={15} />,
+                    danger: true,
+                    disabled: selected => selected.length === 0,
+                    onSelect: handleDeleteSelectedMcpConfigs,
                   },
                 ]}
                 isMobile={isMobile}
@@ -2870,8 +2854,19 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                   openCollection: t('collection.openCollection'),
                   closeCollection: t('collection.closeCollection'),
                   selectItem: t('collection.selectItem'),
+                  selectMultiple: t('collection.selectMultiple'),
+                  cancelSelection: t('collection.cancelSelection'),
+                  selectedCount: count => t('collection.selectedCount', count),
                 }}
                 slots={{
+                  afterSidebarHeader: <div className="mcp-collection-toolbar">
+                    <span className="mcp-meta">{servers.length} {servers.length > 1 ? t('mcp.serverPlural') : t('mcp.server')} · {globalConfigs.length} {globalConfigs.length > 1 ? t('mcp.globalPlural') : t('mcp.global')}</span>
+                    <div className="mcp-collection-toolbar-actions">
+                      {totalConfigs > 0 && <button type="button" className="collection-shell-icon" onClick={() => setPortabilityMode('export')} aria-label={t('mcp.portability.export')} title={t('mcp.portability.exportTitle')}><Download size={14} /></button>}
+                      <button type="button" className="collection-shell-icon" onClick={() => setPortabilityMode('import')} aria-label={t('mcp.portability.import')} title={t('mcp.portability.importTitle')}><Upload size={14} /></button>
+                      <button type="button" className="collection-shell-icon" disabled={syncing} onClick={async () => { setSyncing(true); try { await mcpsApi.refresh(); refetchMcps(); } catch (e) { console.warn('Failed to sync MCPs:', e); } finally { setSyncing(false); } }} aria-label={t('mcp.detect')} title={t('mcp.detect')}><RefreshCw size={14} className={syncing ? 'spin' : ''} /></button>
+                    </div>
+                  </div>,
                   sidebarHeaderEnd: totalConfigs > 1 ? (
                     <ListControls
                       filterLabel={t('automation.filter.label')}
@@ -2904,9 +2899,12 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                     <span className="sr-only">{`${config.label} — ${t('mcp.openDetails')}`}</span>
                     {renderPlugin(config, false)}
                   </>,
-                  renderDetail: config => config
-                    ? renderPlugin(config, true)
-                    : <div className="mcp-detail-empty">{t('mcp.openDetails')}</div>,
+                  renderDetail: config => <>
+                    <CliExposureHint configs={configs} onJumpToConfig={(id) => setSelectedConfigId(id)} />
+                    {config
+                      ? renderPlugin(config, true)
+                      : <div className="mcp-detail-empty">{t('mcp.openDetails')}</div>}
+                  </>,
                   renderEmpty: () => <div className="mcp-filter-empty">{t('automation.filter.empty')}</div>,
                 }}
               />
@@ -2935,15 +2933,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
               </div>
             </article>
           )}
-        </div>
-      ) : !showAddMcp ? (
-        <div className="mcp-card mcp-empty">
-          <Puzzle size={32} className="text-ghost mb-6" />
-          <p className="mcp-empty-text">
-            {t('mcp.empty')}
-          </p>
-        </div>
-      ) : null}
+      </div>
 
       {/* ── MCP Context Editor Modal ── */}
       {contextEditor && (

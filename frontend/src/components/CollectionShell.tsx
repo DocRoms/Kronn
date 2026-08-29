@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
-import { Menu, MoreHorizontal, Search, Star, X } from 'lucide-react';
+import { ChevronLeft, ChevronRight, ListChecks, Loader2, Menu, MoreHorizontal, Search, Star, X } from 'lucide-react';
 import './CollectionShell.css';
 
 export type CollectionItemId = string;
@@ -24,7 +24,9 @@ export interface CollectionPersistence {
 export interface CollectionAction<TItem> {
   id: string;
   label: string;
-  onSelect: (items: TItem[]) => void;
+  icon?: React.ReactNode;
+  danger?: boolean;
+  onSelect: (items: TItem[]) => void | Promise<void>;
   disabled?: (items: TItem[]) => boolean;
 }
 
@@ -124,6 +126,11 @@ export interface CollectionShellProps<TItem> {
   selectedIds?: ReadonlySet<CollectionItemId>;
   onSelectedIdsChange?: (ids: Set<CollectionItemId>) => void;
   actions?: CollectionAction<TItem>[];
+  /** Enables the canonical Discussions-style sidebar title row. */
+  title?: React.ReactNode;
+  titleCount?: number;
+  /** Domain actions such as create/import that remain visible outside bulk mode. */
+  headerActions?: React.ReactNode;
   slots: CollectionShellSlots<TItem>;
   isMobile?: boolean;
   /** For surfaces whose detail pane is already composed by the caller. */
@@ -154,6 +161,9 @@ export interface CollectionShellProps<TItem> {
     openCollection: string;
     closeCollection: string;
     selectItem: string;
+    selectMultiple?: string;
+    cancelSelection?: string;
+    selectedCount?: (count: number) => string;
   };
 }
 
@@ -165,7 +175,7 @@ export interface CollectionShellProps<TItem> {
 export function CollectionShell<TItem>({
   ariaLabel, items, getId, getLabel, isFavorite, onToggleFavorite, filters = [], itemFilter, filterQuery = true,
   persistence, selectedId, onSelect, selectedIds, onSelectedIdsChange, actions = [],
-  slots, isMobile = false, sidebarOnly = false, sidebarClassName = '', globalSearchShortcut = false, searchInputRef, showSearchClear = false, shortcutsEnabled = true, showControls = true, sidebarOpen = true, onSidebarOpenChange, onSearchSubmit, labels,
+  title, titleCount, headerActions, slots, isMobile = false, sidebarOnly = false, sidebarClassName = '', globalSearchShortcut = false, searchInputRef, showSearchClear = false, shortcutsEnabled = true, showControls = true, sidebarOpen = true, onSidebarOpenChange, onSearchSubmit, labels,
 }: CollectionShellProps<TItem>) {
   const internalSearchRef = useRef<HTMLInputElement>(null);
   const searchRef = searchInputRef ?? internalSearchRef;
@@ -173,7 +183,11 @@ export function CollectionShell<TItem>({
   const menuTriggerRef = useRef<HTMLButtonElement>(null);
   const menuId = useId();
   const [menuOpen, setMenuOpen] = useState(false);
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [actionBusy, setActionBusy] = useState(false);
   const canMultiSelect = selectedIds != null && onSelectedIdsChange != null;
+  const managedSelection = title != null && canMultiSelect;
+  const multiSelectionVisible = canMultiSelect && (!managedSelection || selectionMode);
   const activeFilter = filters.find(filter => filter.id === persistence.activeFilterId);
 
   useEffect(() => {
@@ -202,11 +216,30 @@ export function CollectionShell<TItem>({
   }, [activeFilter, filterQuery, getLabel, isFavorite, itemFilter, items, persistence.favoritesOnly, persistence.query]);
 
   const actionItems = useMemo(() => {
-    if (!canMultiSelect || (selectedIds?.size ?? 0) === 0) return selectedId == null
+    if (!multiSelectionVisible || (selectedIds?.size ?? 0) === 0) return selectedId == null
       ? []
       : items.filter(item => getId(item) === selectedId);
     return items.filter(item => selectedIds?.has(getId(item)));
-  }, [canMultiSelect, getId, items, selectedId, selectedIds]);
+  }, [getId, items, multiSelectionVisible, selectedId, selectedIds]);
+
+  const leaveSelectionMode = useCallback(() => {
+    setSelectionMode(false);
+    onSelectedIdsChange?.(new Set());
+  }, [onSelectedIdsChange]);
+
+  const runAction = useCallback(async (action: CollectionAction<TItem>) => {
+    if (actionBusy || action.disabled?.(actionItems)) return;
+    setActionBusy(true);
+    try {
+      await action.onSelect(actionItems);
+      if (managedSelection) leaveSelectionMode();
+    } catch {
+      // Consumers own domain error reporting. Keep selection active so the
+      // user can retry instead of also leaking an unhandled promise.
+    } finally {
+      setActionBusy(false);
+    }
+  }, [actionBusy, actionItems, leaveSelectionMode, managedSelection]);
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -304,8 +337,8 @@ export function CollectionShell<TItem>({
     visibleItems,
     selectItem,
     isSelected: item => selectedId === getId(item),
-    canMultiSelect,
-    isMultiSelected: item => canMultiSelect && (selectedIds?.has(getId(item)) ?? false),
+    canMultiSelect: multiSelectionVisible,
+    isMultiSelected: item => multiSelectionVisible && (selectedIds?.has(getId(item)) ?? false),
     toggleMultiSelection,
     getRowProps: item => ({
       className: 'collection-shell-row-button',
@@ -324,6 +357,37 @@ export function CollectionShell<TItem>({
 
   const sidebar = (
     <aside className={`collection-shell-sidebar ${sidebarClassName}`.trim()} data-mobile={isMobile} aria-label={ariaLabel} onKeyDown={onSidebarKeyDown}>
+      {title != null && <div className="collection-shell-titlebar" data-selection-mode={selectionMode}>
+        <strong className="collection-shell-title">
+          {selectionMode
+            ? (labels.selectedCount?.(selectedIds?.size ?? 0) ?? `${selectedIds?.size ?? 0} ${labels.selectItem}`)
+            : <>{title}{titleCount != null && <span className="collection-shell-title-count"> · {titleCount}</span>}</>}
+        </strong>
+        <div className="collection-shell-title-actions">
+          {selectionMode ? <>
+            {actions.map(action => <button
+              key={action.id}
+              type="button"
+              className="collection-shell-icon"
+              data-danger={action.danger || undefined}
+              disabled={actionBusy || action.disabled?.(actionItems)}
+              onClick={() => void runAction(action)}
+              aria-label={action.label}
+              title={action.label}
+            >{actionBusy ? <Loader2 size={15} className="spin" /> : action.icon ?? action.label}</button>)}
+            <button type="button" className="collection-shell-icon" disabled={actionBusy} onClick={leaveSelectionMode} aria-label={labels.cancelSelection ?? labels.closeCollection} title={labels.cancelSelection ?? labels.closeCollection}><X size={16} /></button>
+          </> : <>
+            {headerActions}
+            {canMultiSelect && <div className="collection-shell-title-menu" ref={menuRef}>
+              <button ref={menuTriggerRef} type="button" className="collection-shell-icon" onClick={() => setMenuOpen(open => !open)} aria-label={labels.moreActions} aria-haspopup="menu" aria-expanded={menuOpen} aria-controls={menuOpen ? menuId : undefined}><MoreHorizontal size={17} /></button>
+              {menuOpen && <div id={menuId} className="collection-shell-menu" role="menu" aria-label={labels.moreActions} onKeyDown={onMenuKeyDown}>
+                <button type="button" role="menuitem" onClick={() => { setSelectionMode(true); closeMenu(false); }}><ListChecks size={14} />{labels.selectMultiple ?? labels.selectItem}</button>
+              </div>}
+            </div>}
+            {onSidebarOpenChange && <button type="button" className="collection-shell-icon" onClick={() => onSidebarOpenChange(false)} aria-label={labels.closeCollection} title={labels.closeCollection}>{isMobile ? <X size={17} /> : <ChevronLeft size={17} />}</button>}
+          </>}
+        </div>
+      </div>}
       {slots.beforeSidebarHeader}
       {slots.renderSearch ? slots.renderSearch(searchContext) : <header className="collection-shell-header">
         <div className="collection-shell-search">
@@ -331,7 +395,7 @@ export function CollectionShell<TItem>({
           <input ref={searchRef} value={persistence.query} onChange={event => persistence.onQueryChange(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') onSearchSubmit?.(); }} aria-label={labels.search} placeholder={labels.search} />
           {showSearchClear && persistence.query && <button type="button" className="collection-shell-icon" onClick={() => persistence.onQueryChange('')} aria-label={labels.clearFilters}><X size={15} /></button>}
         </div>
-        {isMobile && <button type="button" className="collection-shell-icon" onClick={() => onSidebarOpenChange?.(false)} aria-label={labels.closeCollection}><X size={17} /></button>}
+        {title == null && isMobile && <button type="button" className="collection-shell-icon" onClick={() => onSidebarOpenChange?.(false)} aria-label={labels.closeCollection}><X size={17} /></button>}
         {slots.sidebarHeaderEnd}
       </header>}
       {slots.afterSidebarHeader}
@@ -346,7 +410,7 @@ export function CollectionShell<TItem>({
             const multiSelected = selectedIds?.has(id) ?? false;
             const selected = selectedId === id;
             return <li key={id} className="collection-shell-row" data-selected={selected} data-multi-selected={multiSelected}>
-              {canMultiSelect && <input type="checkbox" aria-label={`${getLabel(item)} ${labels.selectItem}`} checked={multiSelected} onChange={() => toggleMultiSelection(id)} />}
+              {multiSelectionVisible && <input type="checkbox" aria-label={`${getLabel(item)} ${labels.selectItem}`} checked={multiSelected} onChange={() => toggleMultiSelection(id)} />}
               <button type="button" className="collection-shell-row-button" aria-current={selected ? 'true' : undefined} onClick={() => selectItem(item)}>{slots.renderItem?.(item, { selected, multiSelected }) ?? getLabel(item)}</button>
               {isFavorite && onToggleFavorite && <button type="button" className="collection-shell-favorite" aria-label={`${labels.favorites} · ${getLabel(item)}`} aria-pressed={isFavorite(item)} onClick={() => onToggleFavorite(item)}><Star size={14} fill={isFavorite(item) ? 'currentColor' : 'none'} /></button>}
             </li>;
@@ -360,12 +424,12 @@ export function CollectionShell<TItem>({
   if (sidebarOnly) return sidebar;
 
   return <section className="collection-shell" data-mobile={isMobile}>
-    {(!isMobile || sidebarOpen) && sidebar}
+    {sidebarOpen && sidebar}
     <div className="collection-shell-detail">
-      {isMobile && !sidebarOpen && <button type="button" className="collection-shell-open" onClick={() => onSidebarOpenChange?.(true)} aria-label={labels.openCollection}><Menu size={18} /></button>}
-      {actions.length > 0 && <div className="collection-shell-actions" ref={menuRef}>
+      {!sidebarOpen && <button type="button" className="collection-shell-open" onClick={() => onSidebarOpenChange?.(true)} aria-label={labels.openCollection}>{isMobile ? <Menu size={18} /> : <ChevronRight size={18} />}</button>}
+      {title == null && actions.length > 0 && <div className="collection-shell-actions" ref={menuRef}>
         <button ref={menuTriggerRef} type="button" className="collection-shell-icon" onClick={() => setMenuOpen(open => !open)} aria-label={labels.moreActions} aria-haspopup="menu" aria-expanded={menuOpen} aria-controls={menuOpen ? menuId : undefined}><MoreHorizontal size={17} /></button>
-        {menuOpen && <div id={menuId} className="collection-shell-menu" role="menu" aria-label={labels.moreActions} onKeyDown={onMenuKeyDown}>{actions.map(action => <button key={action.id} type="button" role="menuitem" disabled={action.disabled?.(actionItems)} onClick={() => { action.onSelect(actionItems); closeMenu(true); }}>{action.label}</button>)}</div>}
+        {menuOpen && <div id={menuId} className="collection-shell-menu" role="menu" aria-label={labels.moreActions} onKeyDown={onMenuKeyDown}>{actions.map(action => <button key={action.id} type="button" role="menuitem" disabled={action.disabled?.(actionItems)} onClick={() => { void runAction(action); closeMenu(true); }}>{action.label}</button>)}</div>}
       </div>}
       {slots.renderDetail(selectedId == null ? null : items.find(item => getId(item) === selectedId) ?? null)}
     </div>
