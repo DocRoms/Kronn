@@ -3017,6 +3017,27 @@ fn external_worker_connection_round_trips_and_unknown_id_is_rejected_on_reload()
 }
 
 #[test]
+fn connectionless_custom_worker_is_rejected_before_persistence() {
+    use MessageTargetKind::Agent;
+    let conn = setup();
+    seed_task(&conn, "t-custom-connection", 1);
+    let mut input = LaunchSingleTaskInput::new("t-custom-connection", DISC);
+    input.worker_target_kind = Some(Agent);
+    input.worker_agent_type = Some(agent_type_to_db(&AgentType::Custom));
+    let error = launch_single_task(&conn, &input, &backend_actor()).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("worker connection identifier is required for Custom providers"),
+        "Custom must retain its connection pin before persistence: {error:#}"
+    );
+    let executions: i64 = conn
+        .query_row("SELECT COUNT(*) FROM task_executions", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(executions, 0, "the refused Custom launch must roll back");
+}
+
+#[test]
 fn worker_identity_check_is_all_or_nothing_and_session_fk_is_restrict() {
     let conn = setup();
     seed_session(&conn, 21, "Codex", "codex-x");

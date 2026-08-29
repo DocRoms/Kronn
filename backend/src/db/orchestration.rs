@@ -882,6 +882,7 @@ pub fn resolve_campaign_worker(
         MessageTargetKind::DiscussionAgent | MessageTargetKind::Agent => {}
     }
     ensure_task_worker_transport_compatible(&selection.target)?;
+    validate_task_worker_connection(conn, &selection.target)?;
     Ok((selection, explanation))
 }
 
@@ -1170,7 +1171,32 @@ fn validate_worker_connection(conn: &Connection, execution: &TaskExecution) -> R
         .as_deref()
         .map(agent_type_from_db)
         .transpose()?;
-    let Some(raw_connection_id) = execution.worker_connection_id.as_deref() else {
+    validate_worker_connection_fields(
+        conn,
+        persisted_agent.as_ref(),
+        execution.worker_connection_id.as_deref(),
+    )
+}
+
+/// Native HTTP worker configuration is resolved by provider type. A dynamic
+/// `Custom` target, in contrast, must retain its external connection pin.
+pub fn validate_task_worker_connection(conn: &Connection, target: &MessageTarget) -> Result<()> {
+    validate_worker_connection_fields(
+        conn,
+        Some(&target.agent_type),
+        target.connection_id.as_deref(),
+    )
+}
+
+fn validate_worker_connection_fields(
+    conn: &Connection,
+    persisted_agent: Option<&AgentType>,
+    raw_connection_id: Option<&str>,
+) -> Result<()> {
+    let Some(raw_connection_id) = raw_connection_id else {
+        if persisted_agent == Some(&AgentType::Custom) {
+            bail!("worker connection identifier is required for Custom providers");
+        }
         // The public task-worker target returned by `agent_list` identifies an
         // HTTP provider by its typed provider + transport. It intentionally has
         // no internal external-api connection id; the runtime is resolved
@@ -1198,7 +1224,7 @@ fn validate_worker_connection(conn: &Connection, execution: &TaskExecution) -> R
     };
     let persisted = persisted_agent
         .ok_or_else(|| anyhow::anyhow!("execution connection has no worker_agent_type"))?;
-    if persisted != expected {
+    if *persisted != expected {
         bail!("worker connection does not match persisted provider");
     }
     Ok(())
@@ -4147,6 +4173,54 @@ pub fn resume_rebuild_candidate(
 
 /// Replace only the worker coordinates. The sub-discussion, workspace,
 /// deliveries, review history and every Git SHA remain untouched.
+fn restore_reassigned_cli_worker_to_origin(
+    conn: &Connection,
+    execution: &TaskExecution,
+) -> Result<()> {
+    let Some(session_pk) = execution.worker_cli_session_id else {
+        bail!("CLI reassignment has no exact session identity");
+    };
+    let Some(child) = execution.sub_discussion_id.as_deref() else {
+        bail!("CLI reassignment has no child discussion");
+    };
+    if child == execution.parent_discussion_id {
+        return Ok(());
+    }
+    let source: Option<(String, String)> = conn
+        .query_row(
+            "SELECT agent_type, session_id FROM discussion_sessions WHERE id = ?1",
+            [session_pk],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    if let Some((source_agent, source_session_id)) = source {
+        let current = crate::db::disc_source::find_disc_by_source_session(
+            conn,
+            &source_agent,
+            &source_session_id,
+        )?;
+        match current.as_deref() {
+            Some(current) if current == child => crate::db::disc_source::bind_to_source(
+                conn,
+                &execution.parent_discussion_id,
+                &source_agent,
+                &source_session_id,
+            )?,
+            Some(current) if current == execution.parent_discussion_id => {}
+            Some(current) => bail!(
+                "CLI reassignment return refused: session ownership moved from child {child} to {current}"
+            ),
+            None => {}
+        }
+        crate::db::discussion_sessions::move_session_to_discussion(
+            conn,
+            session_pk,
+            &execution.parent_discussion_id,
+        )?;
+    }
+    Ok(())
+}
+
 pub fn reassign_execution_worker(
     conn: &Connection,
     exec_id: &str,
@@ -4202,6 +4276,11 @@ pub fn reassign_execution_worker(
         let run = get_orchestration_run(conn, &execution.orchestration_run_id)?
             .ok_or_else(|| anyhow::anyhow!("orchestration run vanished"))?;
         resolve_campaign_worker(conn, &run, Some(selection))?;
+        if execution.worker_target_kind == Some(MessageTargetKind::Cli)
+            && selection.target.kind != MessageTargetKind::Cli
+        {
+            restore_reassigned_cli_worker_to_origin(conn, &execution)?;
+        }
         if let Some(dispatch_id) = execution.dispatch_job_id.as_deref() {
             crate::db::agent_dispatch::cancel_for_discussion_by_id(
                 conn,

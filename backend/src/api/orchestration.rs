@@ -4862,6 +4862,9 @@ fn worker_target_from_execution(execution: &TaskExecution) -> Result<MessageTarg
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty());
+    if agent_type == AgentType::Custom && connection_id.is_none() {
+        bail!("worker connection identifier is required for Custom providers");
+    }
     let tier = execution
         .worker_model_tier
         .as_deref()
@@ -16409,50 +16412,21 @@ mod tests {
 
     /// A principal CLI can copy an HTTP `discussion_agent` target directly from
     /// `agent_list`: server-side provider resolution must not require an internal
-    /// connection id. This covers the regression from a host `agent` worker to
-    /// LiteLLM and keeps the child room/worktree lineage intact.
+    /// connection id. This covers a real CLI-to-LiteLLM handoff and returns the
+    /// superseded joined worker to the parent room without replacing its child or
+    /// worktree lineage.
     #[tokio::test]
     async fn task_exec_reassign_endpoint_accepts_connectionless_http_worker_from_agent_list() {
         let repo = init_repo();
         let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
-        let (task_ref, parent_id, _) = seed(&db, repo.path()).await;
-        let execution = provision_single_task_execution(
-            &db,
-            ProvisionInput {
-                task_reference: task_ref,
-                parent_discussion_id: parent_id.clone(),
-                worker: native_worker(),
-                base_rev: Some("main".into()),
-                idempotency_key: Some("reassign-bare-message-target".into()),
-            },
-        )
-        .await
-        .unwrap();
-        let execution_id = execution.id.clone();
-        let child = execution.sub_discussion_id.clone().unwrap();
-        let dispatch = execution.dispatch_job_id.clone().unwrap();
-        let interrupted_id = execution_id.clone();
-        let session_disc_id = parent_id.clone();
-        db.with_conn(move |conn| {
-            crate::db::agent_dispatch::mark_completed(conn, &dispatch)?;
-            crate::db::discussion_sessions::create_session(
-                conn,
-                &session_disc_id,
-                "ClaudeCode",
-                Some("reassign-session-1"),
-                "owner",
-            )?;
-            crate::db::orchestration::transition_execution(
-                conn,
-                &interrupted_id,
-                TaskExecutionStatus::Interrupted,
-                &backend_actor(),
-                serde_json::json!({}),
-            )?;
-            Ok(())
-        })
-        .await
-        .unwrap();
+        let (_task_ref, parent_id, child, execution_id) =
+            attached_cli_worker(&db, repo.path()).await;
+        seed_cli_session(&db, 102, &parent_id, "reassign-principal").await;
+        let before = exec_of(&db, &execution_id).await;
+        assert_eq!(before.worker_target_kind, Some(MessageTargetKind::Cli));
+        assert_eq!(before.worker_cli_session_id, Some(101));
+        let workspace_id = before.workspace_id.clone();
+        let child_branch = before.child_branch.clone();
         let state = AppState::new_defaults(
             std::sync::Arc::new(tokio::sync::RwLock::new(
                 crate::core::config::default_config(),
@@ -16465,7 +16439,7 @@ mod tests {
         // {target, model, profile_id} envelope or internal connection_id.
         let raw = serde_json::json!({
             "source_agent": "ClaudeCode",
-            "source_session_id": "reassign-session-1",
+            "source_session_id": "reassign-principal",
             "worker": {"kind": "discussion_agent", "agent_type": "LiteLlm", "tier": "default"},
             "reason": "LiteLLM is the selected HTTP worker for this rework",
         });
@@ -16494,10 +16468,178 @@ mod tests {
         );
         assert_eq!(reassigned.worker_agent_type.as_deref(), Some("LiteLlm"));
         assert_eq!(reassigned.worker_connection_id, None);
+        assert_eq!(reassigned.workspace_id, workspace_id);
+        assert_eq!(reassigned.child_branch, child_branch);
         assert_eq!(
             reassigned.sub_discussion_id.as_deref(),
             Some(child.as_str())
         );
+        let parent_for_session = parent_id.clone();
+        let child_for_binding = child.clone();
+        let (session_discussion, source_discussion) = db
+            .with_conn(move |conn| {
+                let session_discussion: String = conn.query_row(
+                    "SELECT disc_id FROM discussion_sessions WHERE id = 101",
+                    [],
+                    |row| row.get(0),
+                )?;
+                let source_discussion = crate::db::disc_source::find_disc_by_source_session(
+                    conn,
+                    "ClaudeCode",
+                    "sess-a",
+                )?;
+                Ok((session_discussion, source_discussion))
+            })
+            .await
+            .unwrap();
+        assert_eq!(session_discussion, parent_for_session);
+        assert_eq!(
+            source_discussion.as_deref(),
+            Some(parent_for_session.as_str())
+        );
+        assert_ne!(session_discussion, child_for_binding);
+    }
+
+    #[tokio::test]
+    async fn reassign_accepts_each_native_http_provider_without_a_connection_id() {
+        for provider in [AgentType::Ollama, AgentType::LiteLlm, AgentType::Nvidia] {
+            let repo = init_repo();
+            let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+            let (task_ref, parent_id, _) = seed(&db, repo.path()).await;
+            let execution = provision_single_task_execution(
+                &db,
+                ProvisionInput {
+                    task_reference: task_ref,
+                    parent_discussion_id: parent_id,
+                    worker: native_worker(),
+                    base_rev: Some("main".into()),
+                    idempotency_key: Some(format!("reassign-native-{provider:?}")),
+                },
+            )
+            .await
+            .unwrap();
+            let dispatch = execution.dispatch_job_id.clone().unwrap();
+            let execution_id = execution.id.clone();
+            db.with_conn(move |conn| {
+                crate::db::agent_dispatch::mark_completed(conn, &dispatch)?;
+                crate::db::orchestration::transition_execution(
+                    conn,
+                    &execution_id,
+                    TaskExecutionStatus::Interrupted,
+                    &backend_actor(),
+                    serde_json::json!({}),
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+            let state = AppState::new_defaults(
+                std::sync::Arc::new(tokio::sync::RwLock::new(
+                    crate::core::config::default_config(),
+                )),
+                db.clone(),
+                crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+            );
+            let target: MessageTarget = serde_json::from_value(serde_json::json!({
+                "kind": "discussion_agent",
+                "agent_type": provider,
+                "tier": "default",
+            }))
+            .unwrap_or_else(|error| {
+                panic!("{provider:?} agent_list worker shape must deserialize: {error}")
+            });
+            assert!(target.connection_id.is_none());
+            reassign_native_execution(
+                &state,
+                &execution.id,
+                crate::models::CampaignWorkerSelection {
+                    target,
+                    model: None,
+                    profile_id: None,
+                },
+                "native HTTP handoff",
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{provider:?} must be connectionless: {error:#}"));
+            let reassigned = exec_of(&db, &execution.id).await;
+            let expected_provider = crate::db::orchestration::agent_type_to_db(&provider);
+            assert_eq!(
+                reassigned.worker_agent_type.as_deref(),
+                Some(expected_provider.as_str())
+            );
+            assert_eq!(reassigned.worker_connection_id, None);
+        }
+    }
+
+    #[tokio::test]
+    async fn reassign_rejects_connectionless_custom_without_mutating_the_execution() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let (task_ref, parent_id, _) = seed(&db, repo.path()).await;
+        let execution = provision_single_task_execution(
+            &db,
+            ProvisionInput {
+                task_reference: task_ref,
+                parent_discussion_id: parent_id,
+                worker: native_worker(),
+                base_rev: Some("main".into()),
+                idempotency_key: Some("reassign-custom-without-connection".into()),
+            },
+        )
+        .await
+        .unwrap();
+        let dispatch = execution.dispatch_job_id.clone().unwrap();
+        let execution_id = execution.id.clone();
+        db.with_conn(move |conn| {
+            crate::db::agent_dispatch::mark_completed(conn, &dispatch)?;
+            crate::db::orchestration::transition_execution(
+                conn,
+                &execution_id,
+                TaskExecutionStatus::Interrupted,
+                &backend_actor(),
+                serde_json::json!({}),
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let before = exec_of(&db, &execution.id).await;
+        let state = AppState::new_defaults(
+            std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::core::config::default_config(),
+            )),
+            db.clone(),
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        );
+        let error = match reassign_native_execution(
+            &state,
+            &execution.id,
+            crate::models::CampaignWorkerSelection {
+                target: MessageTarget::agent(AgentType::Custom),
+                model: None,
+                profile_id: None,
+            },
+            "Custom cannot be resolved without its pin",
+        )
+        .await
+        {
+            Ok(_) => panic!("Custom reassignment without connection_id must be refused"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("worker connection identifier is required for Custom providers"),
+            "the refusal must identify the missing Custom connection: {error:#}"
+        );
+        let after = exec_of(&db, &execution.id).await;
+        assert_eq!(after.status, before.status);
+        assert_eq!(after.worker_target_kind, before.worker_target_kind);
+        assert_eq!(after.worker_agent_type, before.worker_agent_type);
+        assert_eq!(after.worker_connection_id, before.worker_connection_id);
+        assert_eq!(after.sub_discussion_id, before.sub_discussion_id);
+        assert_eq!(after.workspace_id, before.workspace_id);
+        assert_eq!(after.dispatch_job_id, before.dispatch_job_id);
     }
 
     /// The public `worker` field must round-trip for every `MessageTarget` kind

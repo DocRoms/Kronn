@@ -953,7 +953,7 @@ TOOLS = [
                 "task_execution_id": {"type": "string"},
                 "worker": {
                     "type": "object",
-                    "description": "Typed MessageTarget: kind, agent_type, optional exact cli_session_id and tier. HTTP workers copied from agent_list never require an internal connection_id.",
+                    "description": "Typed MessageTarget: kind, agent_type, optional exact cli_session_id and tier. Native HTTP workers copied from agent_list never require an internal connection_id; dynamic Custom targets require their connection_id.",
                 },
                 "reason": {"type": "string"},
             },
