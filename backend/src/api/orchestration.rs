@@ -11045,11 +11045,28 @@ mod tests {
 
         std::fs::write(&release, "done\n").unwrap();
         assert!(git_child.wait().unwrap().success());
-        let replacement_lock = crate::core::config::acquire_lock_in(database_dir.path()).unwrap();
-        assert!(
-            unrelated_child.try_wait().unwrap().is_none(),
-            "the unrelated witness must still be alive when the lock becomes recoverable"
-        );
+        // A different test thread may be between `fork` and `exec` right now.
+        // Such a child temporarily has every parent descriptor, including this
+        // one, until CLOEXEC closes it at `exec`. That is not an inheritance
+        // leak: unlike the targeted Git/hook tree, the unrelated long-lived
+        // child must stop holding the lock as soon as its exec completes.
+        let reacquire_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let replacement_lock = loop {
+            assert!(
+                unrelated_child.try_wait().unwrap().is_none(),
+                "the unrelated witness must still be alive while the lock becomes recoverable"
+            );
+            match crate::core::config::acquire_lock_in(database_dir.path()) {
+                Ok(lock) => break lock,
+                Err(_) if std::time::Instant::now() < reacquire_deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(error) => panic!(
+                    "the lock remained inherited after Git exited and while the unrelated \
+                     witness was still alive: {error:#}"
+                ),
+            }
+        };
         let reopened = Database::open_path_for_backend_boot(&database_path).unwrap();
         assert_eq!(
             count(
