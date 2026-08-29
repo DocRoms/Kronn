@@ -1126,9 +1126,17 @@ class TaskExecDeliverTests(unittest.TestCase):
         ), mock.patch.object(
             self.mod, "_task_exec_identity", side_effect=AssertionError("must not join")
         ), mock.patch.object(self.mod, "_http", http):
-            result = self.mod.call_task_exec_status({"task_execution_id": "forged"})
+            response = self.mod._handle({
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "tools/call",
+                "params": {
+                    "name": "task_exec_status",
+                    "arguments": {"task_execution_id": "forged"},
+                },
+            })
 
-        http.assert_called_once_with(
+        http.assert_any_call(
             "POST",
             "/api/orchestration/tool/executions/exec-a/status",
             {
@@ -1139,6 +1147,8 @@ class TaskExecDeliverTests(unittest.TestCase):
                 },
             },
         )
+        self.assertNotIn("error", response)
+        result = json.loads(response["result"]["content"][0]["text"])
         self.assertEqual(result["execution"]["status"], "Working")
 
     def test_spawned_worker_ignores_forged_execution_and_uses_runner_context(self):

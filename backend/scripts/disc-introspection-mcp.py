@@ -10146,7 +10146,7 @@ def _handle(req):
         name = params.get("name") or ""
         args = params.get("arguments") or {}
         if _spawned_task_worker_mode() and name not in {
-            "task_exec_commit", "task_exec_deliver",
+            "task_exec_status", "task_exec_commit", "task_exec_deliver",
         }:
             return {
                 "jsonrpc": "2.0",
