@@ -556,6 +556,39 @@
   overflow: hidden;
 }
 
+.mcp-sidebar-plugin-icon {
+  display: inline-grid;
+  width: 26px;
+  height: 26px;
+  flex: 0 0 26px;
+  place-items: center;
+  border: 1px solid var(--kr-border-light);
+  border-radius: var(--kr-r-sm);
+  background: var(--kr-bg-surface);
+  color: var(--kr-text-muted);
+}
+
+.mcp-sidebar-plugin-icon[data-kind='mcp'] { color: var(--kr-purple); }
+.mcp-sidebar-plugin-icon[data-kind='api'] { color: var(--kr-cyan); }
+.mcp-sidebar-plugin-icon[data-kind='cli'] { color: var(--kr-warning); }
+.mcp-sidebar-plugin-icon[data-kind='hybrid'] { color: var(--kr-accent); }
+
+.mcp-sidebar-plugin-row .disc-item-meta {
+  overflow: hidden;
+}
+
+.mcp-sidebar-plugin-row .mcp-scope-badge,
+.mcp-sidebar-plugin-row .mcp-kind-badge,
+.mcp-sidebar-plugin-row .badge {
+  flex: 0 0 auto;
+  padding: 1px 4px;
+  font-size: 9px;
+}
+
+.mcp-sidebar-group-star {
+  color: var(--kr-warning);
+}
+
 .mcp-filter-empty {
   grid-column: 1 / -1;
   padding: var(--kr-sp-9);

@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useMemo } from 'react';
+import { useState, useRef, useEffect, useMemo, type ReactNode } from 'react';
 import { mcps as mcpsApi, apiCallLogs, type EndpointDrift } from '../lib/api';
 import { useT } from '../lib/I18nContext';
 import { useIsMobile } from '../hooks/useMediaQuery';
@@ -23,12 +23,13 @@ import {
   Puzzle, Plus, Trash2, Eye, Check, RefreshCw, Square, CheckSquare, Minus,
   X, Key, Pencil, FileText, ExternalLink, Save,
   Plug, Globe, Info, Sparkles, Upload, Download, ChevronRight, Terminal, AlertTriangle,
-  ArrowUpDown, Filter,
+  ArrowUpDown, Filter, Folder, Star,
 } from 'lucide-react';
 import { HostSyncChip } from '../components/HostSyncChip';
 import { HostSyncPreview } from '../components/HostSyncPreview';
 import { ListControls } from '../components/ListControls';
 import { CollectionShell } from '../components/CollectionShell';
+import { FavoriteToggle } from '../components/FavoriteToggle';
 import { PluginPortabilityModal } from '../components/PluginPortabilityModal';
 import { ContextHelp } from '../components/ContextHelp';
 
@@ -60,9 +61,25 @@ function PluginKindBadge({ kind }: { kind: PluginKind }) {
   );
 }
 import { MatrixText } from '../components/MatrixText';
+import './DiscussionsPage.css';
 import './McpPage.css';
 
 const slugify = (label: string) => label.toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+const MCP_COLLAPSED_GROUPS_STORAGE_KEY = 'kronn:mcpCollapsedGroups';
+const MCP_STATIC_GROUPS = new Set(['favorites', 'projects', 'global', 'general', 'unassigned']);
+
+function readCollapsedMcpGroups(): Set<string> {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(MCP_COLLAPSED_GROUPS_STORAGE_KEY) ?? '[]') as unknown;
+    if (!Array.isArray(parsed)) return new Set();
+    return new Set(parsed.filter((group): group is string => (
+      typeof group === 'string'
+      && (MCP_STATIC_GROUPS.has(group) || group.startsWith('project:'))
+    )));
+  } catch {
+    return new Set();
+  }
+}
 
 const hasAgentScope = (
   isGlobal: boolean,
@@ -275,7 +292,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
   const [mcpKindFilter, setMcpKindFilter] = useState<'all' | 'mcp' | 'api' | 'cli'>('all');
   const [mcpSearchPanel, setMcpSearchPanel] = useState<'filters' | 'sort' | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [favoritesOnly, setFavoritesOnly] = useState(false);
+  const [collapsedMcpGroups, setCollapsedMcpGroups] = useState<Set<string>>(readCollapsedMcpGroups);
   const [selectedConfigIds, setSelectedConfigIds] = useState<Set<string>>(new Set());
   const availableConfigIds = useMemo(() => mcpOverview.configs.map(config => config.id), [mcpOverview.configs]);
   const { ids: favoriteConfigIds, toggle: toggleConfigFavorite } = usePersistentIdSet('kronn:collection-favorites:plugins', availableConfigIds);
@@ -284,6 +301,11 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
       localStorage.setItem('kronn:mcpSort', mcpSortReversed ? 'za' : 'az');
     } catch { /* localStorage disabled (incognito / quota) — sort defaults to A→Z on next load */ }
   }, [mcpSortReversed]);
+  useEffect(() => {
+    try {
+      localStorage.setItem(MCP_COLLAPSED_GROUPS_STORAGE_KEY, JSON.stringify([...collapsedMcpGroups]));
+    } catch { /* localStorage may be unavailable in private/restricted browser modes. */ }
+  }, [collapsedMcpGroups]);
   const [selectedConfigId, setSelectedConfigId] = useState<string | null>(initialSelectedConfigId ?? null);
   useEffect(() => {
     if (showAddMcp) {
@@ -2229,7 +2251,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
       {/* ── Installed plugins grid (detail expands inline) ── */}
       <div className="mcp-plugin-shell">
           {(() => {
-            const renderPlugin = (cfg: McpConfigDisplay, renderDetail: boolean): React.ReactNode => {
+            const renderPlugin = (cfg: McpConfigDisplay, renderDetail: boolean): ReactNode => {
               const linkedProjects = cfg.is_global ? projects.filter(p => !isHiddenPath(p.path)).length : cfg.project_ids.length;
               const isSelected = selectedConfigId === cfg.id;
               const isBuiltin = isBuiltinConfig(cfg);
@@ -2878,8 +2900,8 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                 persistence={{
                   query: mcpSearch,
                   onQueryChange: setMcpSearch,
-                  favoritesOnly,
-                  onFavoritesOnlyChange: setFavoritesOnly,
+                  favoritesOnly: false,
+                  onFavoritesOnlyChange: () => {},
                 }}
                 selectedId={selectedConfigId}
                 onSelect={setSelectedConfigId}
@@ -2900,6 +2922,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                 onSidebarOpenChange={setSidebarOpen}
                 globalSearchShortcut
                 showSearchClear
+                showControls={false}
                 labels={{
                   search: t('mcp.search'),
                   favorites: t('collection.favorites'),
@@ -2989,10 +3012,175 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                       <ArrowUpDown size={14} aria-hidden="true" />
                     </button>
                   </> : undefined,
-                  renderItem: config => <>
-                    <span className="sr-only">{`${config.label} — ${t('mcp.openDetails')}`}</span>
-                    {renderPlugin(config, false)}
-                  </>,
+                  renderList: ({ visibleItems, getRowProps, canMultiSelect, isMultiSelected, toggleMultiSelection }) => {
+                    const isGroupCollapsed = (group: string) => (
+                      !canMultiSelect && !mcpSearch.trim() && collapsedMcpGroups.has(group)
+                    );
+                    const toggleGroup = (group: string) => {
+                      setCollapsedMcpGroups(current => {
+                        const next = new Set(current);
+                        if (next.has(group)) next.delete(group);
+                        else next.add(group);
+                        return next;
+                      });
+                    };
+                    const row = (config: McpConfigDisplay, keyPrefix: string) => {
+                      const rowProps = getRowProps(config);
+                      const kind = kindForServer(config.server_id);
+                      const isBuiltin = isBuiltinConfig(config);
+                      const selected = isMultiSelected(config);
+                      const scopeLabels = [
+                        config.is_global ? t('mcp.globalAll') : null,
+                        config.include_general ? t('disc.general') : null,
+                        config.project_ids.length > 0
+                          ? `${config.project_ids.length} ${config.project_ids.length > 1 ? t('mcp.projectPlural') : t('mcp.project')}`
+                          : null,
+                      ].filter((label): label is string => Boolean(label));
+                      const drifting = driftBySlug[config.server_id] ?? [];
+                      const worstDrift = drifting[0];
+                      return <div className="disc-swipe-wrap" key={`${keyPrefix}-${config.id}`}>
+                        <div
+                          className="disc-item mcp-sidebar-plugin-row"
+                          data-active={config.id === selectedConfigId}
+                          data-selected={selected}
+                          data-kind={kind}
+                          data-config-id={config.id}
+                          data-testid={isBuiltin ? 'mcp-kronn-internal-card' : undefined}
+                        >
+                          <button
+                            type="button"
+                            {...rowProps}
+                            className={`${rowProps.className} disc-item-open`}
+                            onClick={canMultiSelect
+                              ? () => toggleMultiSelection(config.id)
+                              : rowProps.onClick}
+                            aria-label={canMultiSelect
+                              ? `${config.label} · ${t('collection.selectItem')}`
+                              : `${config.label} — ${t('mcp.openDetails')}`}
+                            role={canMultiSelect ? 'checkbox' : undefined}
+                            aria-checked={canMultiSelect ? selected : undefined}
+                          >
+                            {canMultiSelect && <span className="disc-item-selection-box" data-selected={selected} aria-hidden="true">{selected && <CheckSquare size={12} />}</span>}
+                            <span className="mcp-sidebar-plugin-icon" data-kind={kind} aria-hidden="true"><Puzzle size={14} /></span>
+                            <span className="disc-item-content">
+                              <span className="disc-item-title">
+                                <span className="disc-item-title-text">{config.label}</span>
+                                {isBuiltin && <span className="mcp-origin-badge mcp-origin-official">{t('mcp.builtin.tileBadge')}</span>}
+                              </span>
+                              <span className="disc-item-meta">
+                                <span className="disc-item-meta-summary">
+                                  {config.server_name !== config.label ? `${config.server_name} · ` : ''}
+                                  {scopeLabels.length > 0 ? scopeLabels.join(' · ') : t('mcp.scopeOrphanShort')}
+                                </span>
+                                <PluginKindBadge kind={kind} />
+                                {kind !== 'api' && <HostSyncChip mode={config.host_sync} />}
+                                {config.env_keys.length > 0 && <span className="mcp-installed-keys"><Key size={9} /> {config.env_keys.length}</span>}
+                                {config.secrets_broken && <span className="mcp-scope-badge mcp-scope-broken" title={t('mcp.secretsBroken')}>⚠ {t('mcp.secretsBrokenShort')}</span>}
+                                {config.registry_drift && <span className="mcp-scope-badge mcp-scope-drift" title={t('mcp.registryDrift')}>⚠ {t(config.registry_drift.orphaned ? 'mcp.registryOrphanShort' : 'mcp.registryDriftShort')}</span>}
+                                {worstDrift && <span
+                                  className="mcp-scope-badge mcp-scope-drift"
+                                  data-testid={`mcp-endpoint-drift-${config.server_id}`}
+                                  title={t(
+                                    worstDrift.successes > 0 ? 'mcp.drift.sometimes' : 'mcp.drift.never',
+                                    worstDrift.failures,
+                                    worstDrift.endpoint_path,
+                                    `HTTP ${worstDrift.http_status}`,
+                                  )}
+                                >⚠ {t('mcp.drift.short')}</span>}
+                              </span>
+                            </span>
+                          </button>
+                          {!canMultiSelect && <div className="disc-item-actions"><FavoriteToggle
+                            active={favoriteConfigIds.has(config.id)}
+                            onToggle={() => toggleConfigFavorite(config.id)}
+                            activeLabel={t('disc.unpin')}
+                            inactiveLabel={t('disc.pin')}
+                            itemName={config.label}
+                          /></div>}
+                        </div>
+                      </div>;
+                    };
+
+                    const globalConfigs = visibleItems.filter(config => config.is_global);
+                    const generalConfigs = visibleItems.filter(config => config.include_general);
+                    const unassignedConfigs = visibleItems.filter(config => !hasAgentScope(
+                      config.is_global,
+                      config.include_general,
+                      config.project_ids,
+                    ));
+                    const projectGroups = new Map<string, { name: string; configs: McpConfigDisplay[] }>();
+                    const projectById = new Map(projects.map(project => [project.id, project]));
+                    for (const config of visibleItems) {
+                      config.project_ids.forEach((projectId, index) => {
+                        const knownProject = projectById.get(projectId);
+                        const group = projectGroups.get(projectId) ?? {
+                          name: knownProject?.name ?? config.project_names[index] ?? projectId,
+                          configs: [],
+                        };
+                        group.configs.push(config);
+                        projectGroups.set(projectId, group);
+                      });
+                    }
+                    const sortedProjectGroups = [...projectGroups.entries()].sort(([, left], [, right]) => (
+                      left.name.localeCompare(right.name, undefined, { sensitivity: 'base', numeric: true })
+                    ));
+                    const favorites = canMultiSelect
+                      ? []
+                      : visibleItems.filter(config => favoriteConfigIds.has(config.id));
+                    const renderGroup = (
+                      key: string,
+                      label: string,
+                      icon: ReactNode,
+                      groupConfigs: McpConfigDisplay[],
+                    ) => {
+                      if (groupConfigs.length === 0) return null;
+                      const collapsed = isGroupCollapsed(key);
+                      return <div key={key} data-mcp-group={key}>
+                        <button
+                          type="button"
+                          className="disc-group-btn"
+                          onClick={() => toggleGroup(key)}
+                          aria-expanded={!collapsed}
+                        >
+                          <ChevronRight size={10} className="disc-chevron" data-expanded={!collapsed} />
+                          {icon}<span>{label}</span><span className="disc-group-count">{groupConfigs.length}</span>
+                        </button>
+                        {!collapsed && groupConfigs.map(config => row(config, key))}
+                      </div>;
+                    };
+                    const projectsCollapsed = isGroupCollapsed('projects');
+                    const favoritesCollapsed = isGroupCollapsed('favorites');
+                    return <div className="disc-sidebar-list mcp-sidebar-items">
+                      {favorites.length > 0 && <div className="disc-sidebar-section disc-sidebar-favorites" data-expanded={!favoritesCollapsed}>
+                        <button type="button" className="disc-group-btn" data-no-border="true" onClick={() => toggleGroup('favorites')} aria-expanded={!favoritesCollapsed}>
+                          <ChevronRight size={10} className="disc-chevron" data-expanded={!favoritesCollapsed} />
+                          <Star size={10} className="mcp-sidebar-group-star" fill="currentColor" />
+                          <span>{t('disc.favorites')}</span><span className="disc-group-count">{favorites.length}</span>
+                        </button>
+                        {!favoritesCollapsed && favorites.map(config => row(config, 'favorite'))}
+                      </div>}
+
+                      {visibleItems.length > 0 && <div className="disc-sidebar-section disc-sidebar-projects" data-expanded={!projectsCollapsed}>
+                        <button type="button" className="disc-group-btn" data-no-border="true" onClick={() => toggleGroup('projects')} aria-expanded={!projectsCollapsed}>
+                          <ChevronRight size={10} className="disc-chevron" data-expanded={!projectsCollapsed} />
+                          <Folder size={10} /><span>{t('projects.title')}</span><span className="disc-group-count">{visibleItems.length}</span>
+                        </button>
+                        {!projectsCollapsed && <div className="disc-project-tree">
+                          {renderGroup('global', t('mcp.globalAll'), <Globe size={10} />, globalConfigs)}
+                          {renderGroup('general', t('disc.general'), <Plug size={10} />, generalConfigs)}
+                          {sortedProjectGroups.map(([projectId, group]) => renderGroup(
+                            `project:${projectId}`,
+                            group.name,
+                            <Folder size={10} />,
+                            group.configs,
+                          ))}
+                          {renderGroup('unassigned', t('mcp.scopeOrphanShort'), <AlertTriangle size={10} />, unassignedConfigs)}
+                        </div>}
+                      </div>}
+
+                      {visibleItems.length === 0 && <div className="disc-empty">{t('automation.filter.empty')}</div>}
+                    </div>;
+                  },
                   renderDetail: config => <>
                     <CliExposureHint configs={configs} onJumpToConfig={(id) => setSelectedConfigId(id)} />
                     {config

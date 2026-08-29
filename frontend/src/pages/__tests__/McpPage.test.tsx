@@ -1,7 +1,7 @@
 // Note: assertions use French strings because the default UI locale is 'fr'.
 // If the default locale changes, these assertions must be updated.
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
-import { render, screen, cleanup, fireEvent, act } from '@testing-library/react';
+import { render, screen, cleanup, fireEvent, act, within } from '@testing-library/react';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { I18nProvider } from '../../lib/I18nContext';
@@ -187,19 +187,22 @@ describe('McpPage', () => {
       servers: [makeServer('github', 'GitHub'), makeServer('slack', 'Slack')],
       configs, customized_contexts: [], incompatibilities: [], incomplete_configs: [],
     };
-    wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={vi.fn()} />);
+    const { container } = wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={vi.fn()} />);
     await act(async () => {});
     expect(screen.getByText('Plugins').closest('.collection-shell-title')).toHaveTextContent('Plugins · 2');
     const addPluginButton = document.querySelector('[data-tour-id="add-plugin-btn"]');
     expect(addPluginButton).toHaveClass('collection-shell-primary-action');
     expect(addPluginButton).toHaveAccessibleName('Ajouter');
     expect(addPluginButton).toHaveTextContent(/^$/);
-    fireEvent.click(screen.getByRole('button', { name: /Favoris · GitHub Main/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Ajouter aux favoris · GitHub Main' }));
     expect(localStorage.getItem('kronn:collection-favorites:plugins')).toContain('c1');
-    fireEvent.click(screen.getByRole('button', { name: 'Favoris' }));
-    expect(screen.getByText('GitHub Main')).toBeInTheDocument();
-    expect(screen.queryByText('Slack Main')).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: 'Favoris' }));
+    const favoritesSection = container.querySelector('.disc-sidebar-favorites') as HTMLElement;
+    expect(favoritesSection).toBeInTheDocument();
+    expect(within(favoritesSection).getByRole('button', { name: 'GitHub Main — Voir les détails' })).toBeInTheDocument();
+    const favoritesHeader = within(favoritesSection).getByRole('button', { name: 'Favoris 1' });
+    fireEvent.click(favoritesHeader);
+    expect(favoritesHeader).toHaveAttribute('aria-expanded', 'false');
+    expect(within(favoritesSection).queryByRole('button', { name: 'GitHub Main — Voir les détails' })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Plus d’actions' }));
     fireEvent.click(screen.getByRole('menuitem', { name: 'Sélection multiple' }));
     fireEvent.click(screen.getByRole('checkbox', { name: /GitHub Main.*sélectionné/ }));
@@ -210,6 +213,65 @@ describe('McpPage', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Fermer la liste' }));
     expect(screen.queryByRole('complementary', { name: 'Plugins' })).toBeNull();
     expect(screen.getByRole('button', { name: 'Ouvrir la liste' })).toHaveClass('collection-shell-sidebar-rail');
+  });
+
+  it('orders Favorites before the persistent canonical scope tree without a Recent section', () => {
+    localStorage.setItem('kronn:collection-favorites:plugins', JSON.stringify(['general-config']));
+    const configs = [
+      makeConfig('global-config', 'global', 'Global plugin', {
+        is_global: true,
+        include_general: false,
+      }),
+      makeConfig('general-config', 'general', 'General plugin'),
+      makeConfig('shared-config', 'shared', 'Shared plugin', {
+        include_general: false,
+        project_ids: ['p1', 'p2'],
+        project_names: ['Alpha', 'Beta'],
+      }),
+      makeConfig('orphan-config', 'orphan', 'Orphan plugin', {
+        include_general: false,
+      }),
+    ];
+    const overview: McpOverview = {
+      servers: configs.map(config => makeServer(config.server_id, config.server_name)),
+      configs,
+      customized_contexts: [], incompatibilities: [], incomplete_configs: [],
+    };
+    const projects = [makeProject('p1', 'Alpha'), makeProject('p2', 'Beta')];
+    const first = wrap(<McpPage projects={projects} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
+
+    const list = first.container.querySelector('.mcp-sidebar-items') as HTMLElement;
+    const topSections = list.querySelectorAll(':scope > .disc-sidebar-section');
+    expect(topSections).toHaveLength(2);
+    expect(topSections[0]).toHaveClass('disc-sidebar-favorites');
+    expect(topSections[1]).toHaveClass('disc-sidebar-projects');
+    expect(within(topSections[0] as HTMLElement).getByRole('button', { name: 'General plugin — Voir les détails' })).toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: 'General plugin — Voir les détails' })).toHaveLength(2);
+    expect(screen.getAllByRole('button', { name: 'Shared plugin — Voir les détails' })).toHaveLength(2);
+    expect(screen.queryByRole('button', { name: /Récents/ })).toBeNull();
+
+    const scopeOrder = [...list.querySelectorAll<HTMLElement>('[data-mcp-group]')]
+      .map(group => group.dataset.mcpGroup);
+    expect(scopeOrder).toEqual(['global', 'general', 'project:p1', 'project:p2', 'unassigned']);
+    expect(within(list.querySelector('[data-mcp-group="global"]') as HTMLElement).getByRole('button', { name: 'Global plugin — Voir les détails' })).toBeInTheDocument();
+    expect(within(list.querySelector('[data-mcp-group="unassigned"]') as HTMLElement).getByRole('button', { name: 'Orphan plugin — Voir les détails' })).toBeInTheDocument();
+
+    const alphaGroup = list.querySelector('[data-mcp-group="project:p1"]') as HTMLElement;
+    const alphaHeader = alphaGroup.querySelector(':scope > button') as HTMLButtonElement;
+    fireEvent.click(alphaHeader);
+    expect(alphaHeader).toHaveAttribute('aria-expanded', 'false');
+    expect(within(alphaGroup).queryByRole('button', { name: 'Shared plugin — Voir les détails' })).toBeNull();
+    expect(localStorage.getItem('kronn:mcpCollapsedGroups')).toContain('project:p1');
+
+    first.unmount();
+    const second = wrap(<McpPage projects={projects} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
+    const restoredAlphaGroup = second.container.querySelector('[data-mcp-group="project:p1"]') as HTMLElement;
+    expect(restoredAlphaGroup.querySelector(':scope > button')).toHaveAttribute('aria-expanded', 'false');
+    fireEvent.change(screen.getByRole('textbox', { name: 'Rechercher un plugin ou un projet...' }), {
+      target: { value: 'Shared plugin' },
+    });
+    expect(restoredAlphaGroup.querySelector(':scope > button')).toHaveAttribute('aria-expanded', 'true');
+    expect(within(restoredAlphaGroup).getByRole('button', { name: 'Shared plugin — Voir les détails' })).toBeInTheDocument();
   });
 
   it('opens plugin creation in an accessible modal and restores focus when it closes', () => {
@@ -236,7 +298,7 @@ describe('McpPage', () => {
     expect(trigger).toHaveFocus();
   });
 
-  it('uses the shared identity, metadata, and action hierarchy on plugin cards', () => {
+  it('uses compact Discussion-style identity, metadata, and actions on plugin rows', () => {
     const configs = [
       makeConfig('c1', 'github', 'GitHub', {
         label: 'GitHub Main',
@@ -253,17 +315,19 @@ describe('McpPage', () => {
       incompatibilities: [],
       incomplete_configs: [],
     };
-    const { container } = wrap(
+    wrap(
       <McpPage projects={[makeProject('p1', 'my-app')]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />,
     );
 
-    const card = screen.getByRole('button', { name: 'GitHub Main — Voir les détails' });
-    const pluginCard = container.querySelector('[data-config-id="c1"]');
-    expect(pluginCard).toHaveAttribute('data-kind', 'mcp');
-    expect(pluginCard?.querySelector('.mcp-plugin-card-identity')).toHaveTextContent('GitHub MainGitHub');
-    expect(pluginCard?.querySelector('.mcp-plugin-card-meta')).toHaveTextContent(/1 projet\s+1/);
-    expect(pluginCard?.querySelector('.mcp-plugin-card-footer')).toHaveTextContent('MCP');
-    expect(card).toHaveClass('collection-shell-row-button');
+    const openRow = screen.getAllByRole('button', { name: 'GitHub Main — Voir les détails' })[0];
+    const pluginRow = openRow.closest('.mcp-sidebar-plugin-row');
+    expect(pluginRow).toHaveClass('disc-item');
+    expect(pluginRow).toHaveAttribute('data-kind', 'mcp');
+    expect(pluginRow).toHaveTextContent('GitHub Main');
+    expect(pluginRow).toHaveTextContent('GitHub · Général · 1 projet');
+    expect(pluginRow).toHaveTextContent('MCP');
+    expect(openRow).toHaveClass('collection-shell-row-button', 'disc-item-open');
+    expect(within(pluginRow as HTMLElement).getByRole('button', { name: 'Ajouter aux favoris · GitHub Main' })).toBeInTheDocument();
   });
 
   it('opens plugin details in the shared collection detail pane and renders the real probe result', async () => {
@@ -381,7 +445,7 @@ describe('McpPage', () => {
     expect(screen.queryByRole('button', { name: 'GitHub — Voir les détails' })).toBeNull();
     fireEvent.change(search, { target: { value: 'github' } });
     fireEvent.click(screen.getByRole('button', { name: 'GitHub — Voir les détails' }));
-    expect(document.querySelector('.collection-shell-row[data-selected="true"]')).not.toBeNull();
+    expect(document.querySelector('.mcp-sidebar-plugin-row[data-active="true"]')).not.toBeNull();
     expect(document.querySelector('.mcp-detail-inline')).not.toBeNull();
   });
 
@@ -676,7 +740,7 @@ describe('McpPage', () => {
       <McpPage projects={[]} mcpOverview={overview} mcpRegistry={[cliDefinition]} refetchMcps={noop} />,
     );
     const cardOrder = () => Array.from(
-      container.querySelectorAll<HTMLElement>('.mcp-installed-card'),
+      container.querySelectorAll<HTMLElement>('.mcp-sidebar-plugin-row'),
       card => card.dataset.configId,
     ).filter((id): id is string => id !== undefined);
 
@@ -728,7 +792,7 @@ describe('McpPage', () => {
     };
     wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
 
-    expect(screen.getByText('Invisible des agents')).toBeInTheDocument();
+    expect(screen.getAllByText('Invisible des agents').length).toBeGreaterThan(0);
     fireEvent.click(screen.getByRole('button', { name: 'Resend — Voir les détails' }));
     expect(screen.getByRole('alert')).toHaveTextContent('Cette configuration n’est visible par aucun agent');
 
@@ -795,7 +859,7 @@ describe('McpPage', () => {
     expect(card.textContent).toContain('Intégré');
   });
 
-  it('uses the real kronn-internal config as the single built-in card when present', () => {
+  it('uses the real kronn-internal config in each of its declared scope groups', () => {
     const config = makeConfig('kronn-config', 'detected:kronn-internal', 'kronn-internal', {
       is_global: true,
     });
@@ -808,10 +872,10 @@ describe('McpPage', () => {
     };
     wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
 
-    const cards = screen.getAllByTestId('mcp-kronn-internal-card');
-    expect(cards).toHaveLength(1);
-    expect(cards[0]).toHaveAttribute('data-config-id', 'kronn-config');
-    expect(cards[0]).toHaveTextContent('Intégré');
+    const rows = screen.getAllByTestId('mcp-kronn-internal-card');
+    expect(rows).toHaveLength(2);
+    expect(rows.every(row => row.dataset.configId === 'kronn-config')).toBe(true);
+    expect(rows.every(row => row.textContent?.includes('Intégré'))).toBe(true);
   });
 
   it('shows incompatibility badge in detail panel when card is clicked', () => {
@@ -1411,13 +1475,7 @@ describe('McpPage', () => {
 
     wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
 
-    // Open the detail panel — the card-level div carries the click
-    // handler. The plugin name also appears in the host-discovery
-    // banner ("Configurer 'ExampleAPI' →"), so we target the actual
-    // installed-card container by class to disambiguate.
-    const installedCard = document.querySelector('.mcp-installed-card') as HTMLElement | null;
-    expect(installedCard).toBeTruthy();
-    fireEvent.click(installedCard!);
+    fireEvent.click(screen.getByRole('button', { name: 'ExampleAPI — Voir les détails' }));
 
     // Click "Modifier le plugin" (FR). The label appears in 3 places
     // (button text, button title, helper sentence), so target the
@@ -1659,9 +1717,7 @@ describe('McpPage', () => {
       incompatibilities: [], incomplete_configs: [],
     };
     wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
-    const installedCard = document.querySelector('.mcp-installed-card') as HTMLElement | null;
-    expect(installedCard).toBeTruthy();
-    fireEvent.click(installedCard!);
+    fireEvent.click(screen.getByRole('button', { name: 'Chartbeat — Voir les détails' }));
     expect(screen.queryByTitle('Modifier le plugin')).toBeNull();
   });
 
