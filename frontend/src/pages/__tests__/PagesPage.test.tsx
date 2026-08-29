@@ -472,6 +472,26 @@ describe('PagesPage', () => {
     await waitFor(() => expect(pagesApi.update).toHaveBeenCalledWith(page.id, { archived: true }));
   });
 
+  it('uses the shared row menu and complete keyboard footer', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
+    vi.stubGlobal('confirm', vi.fn(() => true));
+    const { container } = render(<PagesPage />);
+    await screen.findByTestId('live-page-frame');
+
+    const row = getCanonicalPageRow('Adobe Signals').closest('.disc-item') as HTMLElement;
+    fireEvent.click(within(row).getByRole('button', { name: 'collection.moreActions · Adobe Signals' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'disc.copyId' }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(page.id));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'pages.archive' }));
+    await waitFor(() => expect(pagesApi.update).toHaveBeenCalledWith(page.id, { archived: true }));
+
+    const footer = container.querySelector('.disc-sidebar-footer') as HTMLElement;
+    expect(footer).toHaveTextContent('pages.sidebar.hint');
+    expect(within(footer).getByText('↑↓')).toBeInTheDocument();
+    expect(within(footer).getByText('/')).toBeInTheDocument();
+  });
+
   it('keeps keyboard navigation, active-row state, and empty state in the custom sidebar renderer', async () => {
     const other = { ...page, id: 'page-2', title: 'Jira Delivery', slug: 'jira-delivery' };
     vi.mocked(pagesApi.list).mockResolvedValue([page, other]);

@@ -24,7 +24,8 @@ import { userError } from '../lib/userError';
 import { CopyIdPill } from '../components/CopyIdPill';
 import { ContextHelp } from '../components/ContextHelp';
 import { CollectionShell } from '../components/CollectionShell';
-import { FavoriteToggle } from '../components/FavoriteToggle';
+import { CollectionRowActions } from '../components/CollectionRowActions';
+import { CollectionSidebarFooter } from '../components/CollectionSidebarFooter';
 import { usePersistentIdSet } from '../hooks/usePersistentIdSet';
 import type { ToastFn } from '../hooks/useToast';
 import type {
@@ -454,13 +455,24 @@ export function PlanningPage({
                         </span>
                       </span>
                     </button>
-                    {!canMultiSelect && <div className="disc-item-actions"><FavoriteToggle
-                      active={favoriteIds.has(task.id)}
-                      onToggle={() => toggleFavorite(task.id)}
-                      activeLabel={t('wf.unpin')}
-                      inactiveLabel={t('wf.pin')}
+                    {!canMultiSelect && <CollectionRowActions
                       itemName={task.title}
-                    /></div>}
+                      favorite={{
+                        active: favoriteIds.has(task.id),
+                        onToggle: () => toggleFavorite(task.id),
+                        activeLabel: t('wf.unpin'),
+                        inactiveLabel: t('wf.pin'),
+                      }}
+                      menuLabel={t('collection.moreActions')}
+                      copyId={task.id}
+                      copyLabel={t('disc.copyId')}
+                      actions={task.status === 'archived' ? [] : [{
+                        id: 'archive',
+                        label: t('disc.archive'),
+                        icon: <Archive size={12} />,
+                        onSelect: () => archiveSelectedTasks([task]),
+                      }]}
+                    />}
                   </div>
                 </div>;
               };
@@ -518,6 +530,11 @@ export function PlanningPage({
                 {visibleItems.length === 0 && <div className="disc-empty"><Target size={24} /> {t('planning.emptyBacklog')}</div>}
               </div>;
             },
+            sidebarFooter: <CollectionSidebarFooter
+              label={t('planning.sidebar.hint')}
+              navigateLabel={t('disc.sidebar.navigate')}
+              searchLabel={t('disc.sidebar.searchShortcut')}
+            />,
             renderDetail: () => {
               if (!selectedId && !detailLoading) {
                 return <div className="planning-detail-empty-hint">{t('planning.selectHint')}</div>;

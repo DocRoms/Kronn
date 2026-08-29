@@ -196,6 +196,26 @@ describe('PlanningPage', () => {
     expect(screen.getByRole('button', { name: 'collection.openCollection' })).toHaveClass('collection-shell-sidebar-rail');
   });
 
+  it('uses the shared row menu and keyboard footer', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
+    const { container } = render(
+      <PlanningPage projects={[]} discussions={[]} toast={vi.fn()} onNavigateDiscussion={vi.fn()} />,
+    );
+    const taskRow = await findCanonicalTaskRow('Upgrade PHP');
+    const item = taskRow.closest('.disc-item') as HTMLElement;
+    fireEvent.click(within(item).getByRole('button', { name: 'collection.moreActions · Upgrade PHP' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'disc.copyId' }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('task-1'));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'disc.archive' }));
+    await waitFor(() => expect(mocks.update).toHaveBeenCalledWith('task-1', { status: 'archived' }));
+
+    const footer = container.querySelector('.disc-sidebar-footer') as HTMLElement;
+    expect(footer).toHaveTextContent('planning.sidebar.hint');
+    expect(within(footer).getByText('↑↓')).toBeInTheDocument();
+    expect(within(footer).getByText('/')).toBeInTheDocument();
+  });
+
   it('keeps Planning task rows in the shared keyboard and active-row contract', async () => {
     render(
       <PlanningPage

@@ -215,6 +215,34 @@ describe('McpPage', () => {
     expect(screen.getByRole('button', { name: 'Ouvrir la liste' })).toHaveClass('collection-shell-sidebar-rail');
   });
 
+  it('uses the shared row menu and complete keyboard footer', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
+    const config = makeConfig('c1', 'github', 'GitHub', { label: 'GitHub Main' });
+    const overview: McpOverview = {
+      servers: [makeServer('github', 'GitHub')],
+      configs: [config], customized_contexts: [], incompatibilities: [], incomplete_configs: [],
+    };
+    const refetchMcps = vi.fn();
+    const { container } = wrap(
+      <McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={refetchMcps} />,
+    );
+    const row = screen.getByRole('button', { name: 'GitHub Main — Voir les détails' }).closest('.disc-item') as HTMLElement;
+    fireEvent.click(within(row).getByRole('button', { name: 'Plus d’actions · GitHub Main' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Copier l’ID' }));
+    await act(async () => {});
+    expect(writeText).toHaveBeenCalledWith('c1');
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Supprimer cette config' }));
+    await act(async () => {});
+    expect(mcpsApi.deleteConfig).toHaveBeenCalledWith('c1');
+    expect(refetchMcps).toHaveBeenCalled();
+
+    const footer = container.querySelector('.disc-sidebar-footer') as HTMLElement;
+    expect(footer).toHaveTextContent('Bibliothèque de plugins');
+    expect(within(footer).getByText('↑↓')).toBeInTheDocument();
+    expect(within(footer).getByText('/')).toBeInTheDocument();
+  });
+
   it('orders Favorites before the persistent canonical scope tree without a Recent section', () => {
     localStorage.setItem('kronn:collection-favorites:plugins', JSON.stringify(['general-config']));
     const configs = [

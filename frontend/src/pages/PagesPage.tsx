@@ -19,7 +19,8 @@ import {
 } from '../lib/live-page-sandbox';
 import { formatRelativeTime } from '../lib/relativeTime';
 import { CopyIdPill } from '../components/CopyIdPill';
-import { FavoriteToggle } from '../components/FavoriteToggle';
+import { CollectionRowActions } from '../components/CollectionRowActions';
+import { CollectionSidebarFooter } from '../components/CollectionSidebarFooter';
 import { CollectionShell, CollectionSidebarCollapseButton } from '../components/CollectionShell';
 import { HtmlCodeEditor, HtmlRevisionDiff } from '../components/HtmlCodeEditor';
 import { useT } from '../lib/I18nContext';
@@ -592,7 +593,33 @@ export function PagesPage({
                     {selectionMode && <span className="disc-item-selection-box" data-selected={selectedIds.has(page.id)} aria-hidden="true">{selectedIds.has(page.id) && <CheckSquare2 size={12} />}</span>}
                     <span className="disc-item-content"><span className="disc-item-title"><span className="disc-item-title-text">{page.title}</span></span><span className="disc-item-meta"><span className="disc-item-meta-summary">{page.slug}</span></span></span>
                   </button>
-                  {!selectionMode && <div className="disc-item-actions"><FavoriteToggle active={page.pinned} onToggle={() => void updatePage(page, { pinned: !page.pinned })} activeLabel={t('pages.unfavorite')} inactiveLabel={t('pages.favorite')} itemName={page.title} /></div>}
+                  {!selectionMode && <CollectionRowActions
+                    itemName={page.title}
+                    favorite={{
+                      active: page.pinned,
+                      onToggle: () => void updatePage(page, { pinned: !page.pinned }),
+                      activeLabel: t('pages.unfavorite'),
+                      inactiveLabel: t('pages.favorite'),
+                    }}
+                    menuLabel={t('collection.moreActions')}
+                    copyId={page.id}
+                    copyLabel={t('disc.copyId')}
+                    actions={[
+                      {
+                        id: page.archived ? 'restore' : 'archive',
+                        label: t(page.archived ? 'pages.restore' : 'pages.archive'),
+                        icon: page.archived ? <RotateCcw size={12} /> : <Archive size={12} />,
+                        onSelect: () => runBulkAction(page.archived ? 'restore' : 'archive', [page.id]),
+                      },
+                      {
+                        id: 'delete',
+                        label: t('pages.delete'),
+                        icon: <Trash2 size={12} />,
+                        danger: true,
+                        onSelect: () => runBulkAction('delete', [page.id]),
+                      },
+                    ]}
+                  />}
                 </div>
               </div>;
             };
@@ -643,7 +670,11 @@ export function PagesPage({
           {visibleItems.length === 0 && <div className="disc-empty">{t(query ? 'pages.noSearchResults' : 'pages.empty')}</div>}
             </div>;
           },
-          sidebarFooter: <div className="disc-sidebar-footer"><span>{t('pages.sidebar.hint')}</span><span><kbd>/</kbd> {t('pages.sidebar.search')}</span></div>,
+          sidebarFooter: <CollectionSidebarFooter
+            label={t('pages.sidebar.hint')}
+            navigateLabel={t('disc.sidebar.navigate')}
+            searchLabel={t('pages.sidebar.search')}
+          />,
           renderDetail: () => null,
         }}
       />

@@ -113,7 +113,14 @@ export function CollectionRowActions({
               className={action.danger ? 'disc-item-action-danger' : undefined}
               onClick={() => {
                 setMenuOpen(false);
-                void action.onSelect();
+                try {
+                  const result = action.onSelect();
+                  if (result) void result.catch(() => {
+                    // Domain handlers own their toast/inline error, as in CollectionShell.
+                  });
+                } catch {
+                  // Domain handlers own synchronous error reporting too.
+                }
               }}
             >
               {action.icon}

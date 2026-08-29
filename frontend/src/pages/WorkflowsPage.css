@@ -89,12 +89,6 @@
   min-width: 0;
 }
 
-/* KT-464 — visual identity (size/color/focus) lives in the shared
-   FavoriteToggle component; only page-specific spacing stays here. */
-.automation-resource-pin {
-  margin-right: 6px;
-}
-
 .automation-favorites-section > .automation-kind-button {
   color: var(--kr-accent);
 }

@@ -29,7 +29,8 @@ import { HostSyncChip } from '../components/HostSyncChip';
 import { HostSyncPreview } from '../components/HostSyncPreview';
 import { ListControls } from '../components/ListControls';
 import { CollectionShell } from '../components/CollectionShell';
-import { FavoriteToggle } from '../components/FavoriteToggle';
+import { CollectionRowActions } from '../components/CollectionRowActions';
+import { CollectionSidebarFooter } from '../components/CollectionSidebarFooter';
 import { PluginPortabilityModal } from '../components/PluginPortabilityModal';
 import { ContextHelp } from '../components/ContextHelp';
 
@@ -3090,13 +3091,25 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                               </span>
                             </span>
                           </button>
-                          {!canMultiSelect && <div className="disc-item-actions"><FavoriteToggle
-                            active={favoriteConfigIds.has(config.id)}
-                            onToggle={() => toggleConfigFavorite(config.id)}
-                            activeLabel={t('disc.unpin')}
-                            inactiveLabel={t('disc.pin')}
+                          {!canMultiSelect && <CollectionRowActions
                             itemName={config.label}
-                          /></div>}
+                            favorite={{
+                              active: favoriteConfigIds.has(config.id),
+                              onToggle: () => toggleConfigFavorite(config.id),
+                              activeLabel: t('disc.unpin'),
+                              inactiveLabel: t('disc.pin'),
+                            }}
+                            menuLabel={t('collection.moreActions')}
+                            copyId={config.id}
+                            copyLabel={t('disc.copyId')}
+                            actions={[{
+                              id: 'delete',
+                              label: t('mcp.deleteConfig'),
+                              icon: <Trash2 size={12} />,
+                              danger: true,
+                              onSelect: () => handleDeleteMcpConfig(config.id),
+                            }]}
+                          />}
                         </div>
                       </div>;
                     };
@@ -3181,6 +3194,11 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                       {visibleItems.length === 0 && <div className="disc-empty">{t('automation.filter.empty')}</div>}
                     </div>;
                   },
+                  sidebarFooter: <CollectionSidebarFooter
+                    label={t('mcp.sidebar.hint')}
+                    navigateLabel={t('disc.sidebar.navigate')}
+                    searchLabel={t('disc.sidebar.searchShortcut')}
+                  />,
                   renderDetail: config => <>
                     <CliExposureHint configs={configs} onJumpToConfig={(id) => setSelectedConfigId(id)} />
                     {config

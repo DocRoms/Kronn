@@ -192,6 +192,34 @@ describe('ProjectList — missing-path banner', () => {
     expect(screen.getByRole('button', { name: 'collection.openCollection' })).toHaveClass('collection-shell-sidebar-rail');
   });
 
+  it('uses the shared row menu and keyboard footer', async () => {
+    const onRefetch = vi.fn();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
+    const { container } = render(
+      <ProjectList
+        projects={[proj('p1', 'Alpha', '/repos/alpha', true)]}
+        discussions={[]} discussionsByProject={{}} driftByProject={{}} agents={[]} allSkills={[]} mcpConfigs={[]} workflows={[]}
+        configLanguage="fr" toast={vi.fn()} onNavigate={noop} onSetDiscPrefill={noop} onAutoRunDiscussion={noop}
+        onOpenDiscussion={noop} onRefetch={onRefetch} onRefetchDiscussions={noop} onRefetchSkills={noop} onRefetchDrift={noop}
+        expandedId={null} onSetExpandedId={noop}
+      />,
+    );
+
+    const row = within(screen.getByTestId('project-section-all')).getByTestId('project-list-item-p1');
+    fireEvent.click(within(row).getByRole('button', { name: 'collection.moreActions · Alpha' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'disc.copyId' }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('p1'));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'disc.delete' }));
+    await waitFor(() => expect(deleteProject).toHaveBeenCalledWith('p1'));
+    expect(onRefetch).toHaveBeenCalled();
+
+    const footer = container.querySelector('.disc-sidebar-footer') as HTMLElement;
+    expect(footer).toHaveTextContent('projects.sidebar.hint');
+    expect(within(footer).getByText('↑↓')).toBeInTheDocument();
+    expect(within(footer).getByText('/')).toBeInTheDocument();
+  });
+
   it('renders persistent Favorites, Recent, and canonical All sections', async () => {
     localStorage.setItem('kronn:collection-favorites:projects', JSON.stringify(['p12']));
     const projects = Array.from({ length: 12 }, (_, index) => {

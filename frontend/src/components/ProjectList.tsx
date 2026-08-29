@@ -5,7 +5,8 @@ import { useT } from '../lib/I18nContext';
 import { getProjectGroup, isHiddenPath, isValidationDisc } from '../lib/constants';
 import { useIsMobile } from '../hooks/useMediaQuery';
 import { ProjectCard } from './ProjectCard';
-import { FavoriteToggle } from './FavoriteToggle';
+import { CollectionRowActions } from './CollectionRowActions';
+import { CollectionSidebarFooter } from './CollectionSidebarFooter';
 import { ListControls } from './ListControls';
 import { CollectionShell, type CollectionFilter } from './CollectionShell';
 import { projects as projectsApi } from '../lib/api';
@@ -488,15 +489,25 @@ export function ProjectList({
                         </span>
                       </span>
                     </button>
-                    {!canMultiSelect && <div className="disc-item-actions">
-                      <FavoriteToggle
-                        active={favoriteIds.has(proj.id)}
-                        onToggle={() => toggleFavorite(proj.id)}
-                        activeLabel={t('wf.unpin')}
-                        inactiveLabel={t('wf.pin')}
-                        itemName={proj.name}
-                      />
-                    </div>}
+                    {!canMultiSelect && <CollectionRowActions
+                      itemName={proj.name}
+                      favorite={{
+                        active: favoriteIds.has(proj.id),
+                        onToggle: () => toggleFavorite(proj.id),
+                        activeLabel: t('wf.unpin'),
+                        inactiveLabel: t('wf.pin'),
+                      }}
+                      menuLabel={t('collection.moreActions')}
+                      copyId={proj.id}
+                      copyLabel={t('disc.copyId')}
+                      actions={[{
+                        id: 'delete',
+                        label: t('disc.delete'),
+                        icon: <Trash2 size={12} />,
+                        danger: true,
+                        onSelect: () => deleteSelectedProjects([proj]),
+                      }]}
+                    />}
                   </div>
                 </div>;
               };
@@ -555,6 +566,11 @@ export function ProjectList({
                 </div>
               </div>;
             },
+            sidebarFooter: <CollectionSidebarFooter
+              label={t('projects.sidebar.hint')}
+              navigateLabel={t('disc.sidebar.navigate')}
+              searchLabel={t('disc.sidebar.searchShortcut')}
+            />,
           }}
         />
       </div>

@@ -246,6 +246,7 @@ const en: TranslationDict = {
 
   // ── Projects page ──
   'projects.title': 'Projects',
+  'projects.sidebar.hint': 'Project library',
   'projects.master.clear': 'Clear search',
   'projects.master.filter': 'Filter projects',
   'projects.master.filter.visible': 'Visible projects',
@@ -1202,6 +1203,7 @@ const en: TranslationDict = {
   'planning.blocked': 'Blocked',
   'planning.definitionOfDone': 'Definition of Done',
   'planning.title': 'Planning',
+  'planning.sidebar.hint': 'Task library',
   'planning.subtitle': 'Prioritize ideas and tasks, with or without a project or discussion.',
   'planning.activeCount': ' active',
   'planning.doneCount': ' completed',
@@ -2323,6 +2325,7 @@ const en: TranslationDict = {
 
   // ── Plugins ──
   'mcp.title': 'Plugins',
+  'mcp.sidebar.hint': 'Plugin library',
   'mcp.portability.export': 'Export',
   'mcp.portability.import': 'Import',
   'mcp.portability.exportTitle': 'Export plugins',

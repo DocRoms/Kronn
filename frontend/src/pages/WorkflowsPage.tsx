@@ -35,7 +35,8 @@ import { detectAutomationImport, type AutomationImportKind } from '../lib/automa
 import { AGENT_LABELS, MODEL_TIER_ICONS, agentColor, modelForAgentTier } from '../lib/constants';
 import { MatrixText } from '../components/MatrixText';
 import { AgentSwitchPicker } from '../components/AgentSwitchPicker';
-import { FavoriteToggle } from '../components/FavoriteToggle';
+import { CollectionRowActions } from '../components/CollectionRowActions';
+import { CollectionSidebarFooter } from '../components/CollectionSidebarFooter';
 import { ListControls } from '../components/ListControls';
 import { CopyIdPill } from '../components/CopyIdPill';
 import { ContextHelp } from '../components/ContextHelp';
@@ -78,6 +79,7 @@ interface AutomationNavigationState {
 }
 
 interface AutomationResourceRowProps {
+  resourceId: string;
   name: string;
   meta: string;
   icon: string;
@@ -92,6 +94,7 @@ interface AutomationResourceRowProps {
 }
 
 function AutomationResourceRow({
+  resourceId,
   name,
   meta,
   icon,
@@ -104,6 +107,7 @@ function AutomationResourceRow({
   onTogglePinned,
   rowProps,
 }: AutomationResourceRowProps) {
+  const { t } = useT();
   return (
     <div className="disc-swipe-wrap automation-resource-row">
       <div className="disc-item" data-active={active}>
@@ -124,13 +128,12 @@ function AutomationResourceRow({
             </span>
           </span>
         </button>
-        <FavoriteToggle
-          active={pinned}
-          onToggle={onTogglePinned}
-          activeLabel={unpinLabel}
-          inactiveLabel={pinLabel}
+        <CollectionRowActions
           itemName={name}
-          className="automation-resource-pin"
+          favorite={{ active: pinned, onToggle: onTogglePinned, activeLabel: unpinLabel, inactiveLabel: pinLabel }}
+          menuLabel={t('collection.moreActions')}
+          copyId={resourceId}
+          copyLabel={t('disc.copyId')}
         />
       </div>
     </div>
@@ -1946,6 +1949,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
               {!isAutomationSectionCollapsed('favorites') && sidebarWorkflows.filter(item => item.pinned).map(workflow => (
                 <AutomationResourceRow
                   key={`favorite-workflow-${workflow.id}`}
+                  resourceId={workflow.id}
                   name={workflow.name}
                   meta={`${t('wf.tabWorkflows')} · ${TRIGGER_LABELS[workflow.trigger_type] ?? workflow.trigger_type}`}
                   icon={workflow.enabled ? '⚡' : '○'}
@@ -1962,6 +1966,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
               {!isAutomationSectionCollapsed('favorites') && sidebarQuickApis.filter(item => item.pinned).map(quickApi => (
                 <AutomationResourceRow
                   key={`favorite-quick-api-${quickApi.id}`}
+                  resourceId={quickApi.id}
                   name={quickApi.name}
                   meta={`${t('wf.tabQuickApis')} · ${quickApi.api_method ?? 'GET'}`}
                   icon={quickApi.icon}
@@ -1978,6 +1983,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
               {!isAutomationSectionCollapsed('favorites') && sidebarQuickPrompts.filter(item => item.pinned).map(quickPrompt => (
                 <AutomationResourceRow
                   key={`favorite-quick-prompt-${quickPrompt.id}`}
+                  resourceId={quickPrompt.id}
                   name={quickPrompt.name}
                   meta={`${t('wf.tabQuickPrompts')} · ${AGENT_LABELS[quickPrompt.agent] ?? quickPrompt.agent}`}
                   icon={quickPrompt.icon}
@@ -1994,6 +2000,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
               {!isAutomationSectionCollapsed('favorites') && sidebarQuickExecs.filter(item => item.pinned).map(quickExec => (
                 <AutomationResourceRow
                   key={`favorite-quick-exec-${quickExec.id}`}
+                  resourceId={quickExec.id}
                   name={quickExec.name}
                   meta={`${t('wf.tabQuickExecs')} · ${quickExec.output_format.toUpperCase()}`}
                   icon={quickExec.icon}
@@ -2027,6 +2034,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
             {!isAutomationSectionCollapsed('workflows') && sidebarWorkflows.map(workflow => (
               <AutomationResourceRow
                 key={workflow.id}
+                resourceId={workflow.id}
                 name={workflow.name}
                 meta={`${TRIGGER_LABELS[workflow.trigger_type] ?? workflow.trigger_type} · ${workflow.step_count} step${workflow.step_count > 1 ? 's' : ''}`}
                 icon={workflow.enabled ? '⚡' : '○'}
@@ -2059,6 +2067,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
             {!isAutomationSectionCollapsed('quickApis') && sidebarQuickApis.map(quickApi => (
               <AutomationResourceRow
                 key={quickApi.id}
+                resourceId={quickApi.id}
                 name={quickApi.name}
                 meta={`${quickApi.api_method ?? 'GET'} · ${quickApi.api_endpoint_path}`}
                 icon={quickApi.icon}
@@ -2091,6 +2100,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
             {!isAutomationSectionCollapsed('quickPrompts') && sidebarQuickPrompts.map(quickPrompt => (
               <AutomationResourceRow
                 key={quickPrompt.id}
+                resourceId={quickPrompt.id}
                 name={quickPrompt.name}
                 meta={AGENT_LABELS[quickPrompt.agent] ?? quickPrompt.agent}
                 icon={quickPrompt.icon}
@@ -2123,6 +2133,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
             {!isAutomationSectionCollapsed('quickExecs') && sidebarQuickExecs.map(quickExec => (
               <AutomationResourceRow
                 key={quickExec.id}
+                resourceId={quickExec.id}
                 name={quickExec.name}
                 meta={`${quickExec.command} · ${quickExec.output_format.toUpperCase()}`}
                 icon={quickExec.icon}
@@ -2144,10 +2155,11 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
         </div>
             </>;
           },
-          sidebarFooter: <div className="disc-sidebar-footer">
-          <span>{t('automation.sidebarHint')}</span>
-          <span><kbd>/</kbd> {t('automation.sidebarSearchHint')}</span>
-          </div>,
+          sidebarFooter: <CollectionSidebarFooter
+            label={t('automation.sidebarHint')}
+            navigateLabel={t('disc.sidebar.navigate')}
+            searchLabel={t('automation.sidebarSearchHint')}
+          />,
           renderDetail: () => null,
         }}
       />

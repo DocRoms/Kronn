@@ -723,6 +723,27 @@ describe('WorkflowsPage', () => {
     expect(mockWorkflowsApi.update).toHaveBeenCalledWith('wf-reg', { pinned: true });
   });
 
+  it('uses the shared row menu and complete keyboard footer', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
+    mockWorkflowsApi.list.mockResolvedValue([{
+      id: 'wf-reg', name: 'Regular WF', project_id: null, project_name: null,
+      trigger_type: 'manual', step_count: 1, misconfigured_step_count: 0,
+      enabled: true, pinned: false, last_run: null, created_at: '2026-01-01T00:00:00Z',
+    }]);
+
+    await wrap(<WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig} />);
+    const sidebar = screen.getByRole('complementary', { name: 'Automatisation' });
+    fireEvent.click(within(sidebar).getByRole('button', { name: 'Plus d’actions · Regular WF' }));
+    fireEvent.click(within(sidebar).getByRole('menuitem', { name: 'Copier l’ID' }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('wf-reg'));
+
+    const footer = sidebar.querySelector('.disc-sidebar-footer') as HTMLElement;
+    expect(footer).toHaveTextContent('Sélectionne une ressource pour l’ouvrir');
+    expect(within(footer).getByText('↑↓')).toBeInTheDocument();
+    expect(within(footer).getByText('/')).toBeInTheDocument();
+  });
+
   it('shows a "needs config" badge on the card when misconfigured_step_count > 0', async () => {
     // A freshly AI-generated workflow with an unwired API step: the backend
     // reports misconfigured_step_count > 0 and the card must surface it so the
