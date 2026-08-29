@@ -2568,6 +2568,13 @@ export interface UpsertExternalApiConnection {
   api_key?: string | null;
 }
 
+export interface ExternalApiConnectionTestResult {
+  ok: boolean;
+  status: 'success' | 'invalid_url' | 'credential_required' | 'auth_error' | 'http_error' | 'timeout' | 'transport_error' | 'invalid_catalogue';
+  models: string[];
+  hint: string | null;
+}
+
 export const externalApi = {
   list: () => api<ExternalApiConnectionView[]>('GET', '/external-api/connections'),
   create: (body: UpsertExternalApiConnection) =>
@@ -2575,6 +2582,8 @@ export const externalApi = {
   update: (id: string, body: UpsertExternalApiConnection) =>
     api<ExternalApiConnectionView>('PUT', `/external-api/connections/${id}`, body),
   remove: (id: string) => api<null>('DELETE', `/external-api/connections/${id}`),
+  test: (body: { endpoint: string | null; api_key: string | null; connection_id?: string; origin_preset?: ExternalApiPreset }) =>
+    api<ExternalApiConnectionTestResult>('POST', '/external-api/connections/test', body),
 };
 
 // 0.8.6 (#24) — Unified API call logs.

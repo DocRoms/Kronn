@@ -12,11 +12,12 @@ import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/re
 import { buildApiMock } from '../../../test/apiMock';
 import type { ExternalApiConnectionView } from '../../../lib/api';
 
-const { listMock, createMock, updateMock, removeMock } = vi.hoisted(() => ({
+const { listMock, createMock, updateMock, removeMock, testMock } = vi.hoisted(() => ({
   listMock: vi.fn(),
   createMock: vi.fn(),
   updateMock: vi.fn(),
   removeMock: vi.fn(),
+  testMock: vi.fn(),
 }));
 
 vi.mock('../../../lib/api', () =>
@@ -26,6 +27,7 @@ vi.mock('../../../lib/api', () =>
       create: createMock as never,
       update: updateMock as never,
       remove: removeMock as never,
+      test: testMock as never,
     },
   }),
 );
@@ -66,6 +68,7 @@ beforeEach(() => {
   createMock.mockResolvedValue(conn({}));
   updateMock.mockResolvedValue(conn({}));
   removeMock.mockResolvedValue(null);
+  testMock.mockResolvedValue({ ok: true, status: 'success', models: ['model-a', 'model-b'], hint: null });
 });
 
 afterEach(() => {
@@ -140,9 +143,9 @@ describe('ExternalApiSection', () => {
       target: { value: 'https://api.together.xyz/v1' },
     });
     fireEvent.change(screen.getByTestId('ext-api-key'), { target: { value: 'sk-together' } });
-    fireEvent.change(screen.getByTestId('ext-api-tier-default'), {
-      target: { value: 'meta-llama/Llama-3-70b' },
-    });
+    fireEvent.click(screen.getByTestId('ext-api-test'));
+    await waitFor(() => expect(screen.getByTestId('ext-api-tier-default')).not.toBeDisabled());
+    fireEvent.change(screen.getByTestId('ext-api-tier-default'), { target: { value: 'model-a' } });
 
     fireEvent.click(screen.getByTestId('ext-api-save'));
 
@@ -153,7 +156,7 @@ describe('ExternalApiSection', () => {
       endpoint: 'https://api.together.xyz/v1',
       origin_preset: 'other',
       economy_model: null,
-      default_model: 'meta-llama/Llama-3-70b',
+      default_model: 'model-a',
       reasoning_model: null,
       api_key: 'sk-together',
     });
@@ -202,5 +205,160 @@ describe('ExternalApiSection', () => {
       display_name: 'Groq Prod',
       api_key: null,
     }));
+  });
+
+  it('loads tested models into every tier selector without saving the draft', async () => {
+    renderSection();
+    fireEvent.click(await screen.findByTestId('ext-api-add-connection'));
+    expect(screen.getByTestId('ext-api-test-required')).toBeTruthy();
+    expect((screen.getByTestId('ext-api-tier-default') as HTMLSelectElement).disabled).toBe(true);
+
+    fireEvent.click(screen.getByTestId('ext-api-test'));
+    await waitFor(() => expect(testMock).toHaveBeenCalledWith({ endpoint: 'http://localhost:4000', api_key: null }));
+    expect(createMock).not.toHaveBeenCalled();
+    expect((screen.getByTestId('ext-api-tier-default') as HTMLSelectElement).disabled).toBe(false);
+    expect(screen.getAllByRole('option', { name: 'model-a' })).toHaveLength(3);
+  });
+
+  it('tests a saved connection with its server-side credential and renders the returned models', async () => {
+    listMock.mockResolvedValue([conn({
+      id: 'groq-1',
+      display_name: 'Groq',
+      mention_alias: 'groq',
+      endpoint: 'https://api.groq.com/openai',
+      origin_preset: 'other',
+      has_credential: true,
+    })]);
+    renderSection();
+
+    fireEvent.click(await screen.findByTestId('ext-api-test-saved-groq-1'));
+    await waitFor(() => expect(testMock).toHaveBeenCalledWith({
+      endpoint: 'https://api.groq.com/openai',
+      api_key: null,
+      connection_id: 'groq-1',
+      origin_preset: 'other',
+    }));
+    expect(await screen.findByTestId('ext-api-saved-test-result-groq-1')).toHaveAttribute('data-status', 'success');
+    expect(screen.getByTestId('ext-api-saved-models-groq-1')).toHaveTextContent('model-a');
+    expect(screen.getByTestId('ext-api-saved-models-groq-1')).toHaveTextContent('model-b');
+  });
+
+  it('shows a loading state while a saved connection test is in progress', async () => {
+    listMock.mockResolvedValue([conn({ id: 'saved-1', endpoint: 'https://saved.example.test' })]);
+    testMock.mockImplementationOnce(() => new Promise(() => undefined));
+    renderSection();
+
+    const button = await screen.findByTestId('ext-api-test-saved-saved-1');
+    fireEvent.click(button);
+    expect(button).toBeDisabled();
+    expect(button.querySelector('.spin')).not.toBeNull();
+  });
+
+  it('renders a saved connection test error without stale models', async () => {
+    listMock.mockResolvedValue([conn({ id: 'nvidia-1', endpoint: 'https://integrate.api.nvidia.com', origin_preset: 'nvidia' })]);
+    testMock.mockResolvedValue({ ok: false, status: 'auth_error', models: [], hint: 'Credentials rejected' });
+    renderSection();
+
+    fireEvent.click(await screen.findByTestId('ext-api-test-saved-nvidia-1'));
+    const result = await screen.findByTestId('ext-api-saved-test-result-nvidia-1');
+    expect(result).toHaveAttribute('data-status', 'auth_error');
+    expect(result).toHaveTextContent('Credentials rejected');
+    expect(screen.queryByTestId('ext-api-saved-models-nvidia-1')).toBeNull();
+  });
+
+  it('invalidates tested models when endpoint, key, or preset changes', async () => {
+    renderSection();
+    fireEvent.click(await screen.findByTestId('ext-api-add-connection'));
+    fireEvent.click(screen.getByTestId('ext-api-test'));
+    await waitFor(() => expect(screen.getAllByRole('option', { name: 'model-a' })).toHaveLength(3));
+
+    fireEvent.change(screen.getByTestId('ext-api-endpoint'), { target: { value: 'https://new.example.test' } });
+    expect(screen.getByTestId('ext-api-test-required')).toBeTruthy();
+    expect((screen.getByTestId('ext-api-tier-default') as HTMLSelectElement).disabled).toBe(true);
+
+    fireEvent.click(screen.getByTestId('ext-api-test'));
+    await waitFor(() => expect(screen.getAllByRole('option', { name: 'model-a' })).toHaveLength(3));
+    fireEvent.change(screen.getByTestId('ext-api-key'), { target: { value: 'new-key' } });
+    expect(screen.getByTestId('ext-api-test-required')).toBeTruthy();
+
+    fireEvent.click(screen.getByTestId('ext-api-test'));
+    await waitFor(() => expect(screen.getAllByRole('option', { name: 'model-a' })).toHaveLength(3));
+    fireEvent.click(screen.getByTestId('ext-api-preset-nvidia'));
+    expect(screen.getByTestId('ext-api-test-required')).toBeTruthy();
+  });
+
+  it('clears all selected tiers after connection details change, so save cannot retain stale models', async () => {
+    renderSection();
+    fireEvent.click(await screen.findByTestId('ext-api-add-connection'));
+    fireEvent.change(screen.getByTestId('ext-api-display-name'), { target: { value: 'Catalogue' } });
+    fireEvent.change(screen.getByTestId('ext-api-mention-alias'), { target: { value: 'catalogue' } });
+    fireEvent.click(screen.getByTestId('ext-api-test'));
+    await waitFor(() => expect(screen.getByTestId('ext-api-tier-default')).not.toBeDisabled());
+    fireEvent.change(screen.getByTestId('ext-api-tier-economy'), { target: { value: 'model-a' } });
+    fireEvent.change(screen.getByTestId('ext-api-tier-default'), { target: { value: 'model-b' } });
+    fireEvent.change(screen.getByTestId('ext-api-tier-reasoning'), { target: { value: 'model-a' } });
+
+    fireEvent.change(screen.getByTestId('ext-api-endpoint'), { target: { value: 'https://changed.example.test' } });
+    expect((screen.getByTestId('ext-api-tier-economy') as HTMLSelectElement).value).toBe('');
+    expect((screen.getByTestId('ext-api-tier-default') as HTMLSelectElement).value).toBe('');
+    expect((screen.getByTestId('ext-api-tier-reasoning') as HTMLSelectElement).value).toBe('');
+    fireEvent.click(screen.getByTestId('ext-api-save'));
+
+    await waitFor(() => expect(createMock).toHaveBeenCalledTimes(1));
+    expect(createMock).toHaveBeenCalledWith(expect.objectContaining({
+      economy_model: null,
+      default_model: null,
+      reasoning_model: null,
+    }));
+  });
+
+  it('immediately starts a replacement draft test after invalidation and ignores the old response', async () => {
+    let resolveProbe!: (result: { ok: boolean; status: 'success'; models: string[]; hint: null }) => void;
+    testMock.mockImplementationOnce(() => new Promise(resolve => { resolveProbe = resolve; }));
+    testMock.mockResolvedValueOnce({ ok: true, status: 'success', models: ['new-model'], hint: null });
+    renderSection();
+    fireEvent.click(await screen.findByTestId('ext-api-add-connection'));
+    fireEvent.click(screen.getByTestId('ext-api-test'));
+    fireEvent.change(screen.getByTestId('ext-api-endpoint'), { target: { value: 'https://changed.example.test' } });
+
+    // The original request is still pending, but invalidation releases the
+    // visual and imperative guards so testing the changed endpoint is possible.
+    await waitFor(() => expect(screen.getByTestId('ext-api-test')).not.toBeDisabled());
+    fireEvent.click(screen.getByTestId('ext-api-test'));
+    await waitFor(() => expect(testMock).toHaveBeenCalledTimes(2));
+    expect(await screen.findAllByRole('option', { name: 'new-model' })).toHaveLength(3);
+
+    resolveProbe({ ok: true, status: 'success', models: ['stale-model'], hint: null });
+    expect(screen.queryByRole('option', { name: 'stale-model' })).toBeNull();
+    expect((screen.getByTestId('ext-api-tier-default') as HTMLSelectElement).disabled).toBe(false);
+  });
+
+  it('uses one synchronous guard for draft and saved test clicks', async () => {
+    listMock.mockResolvedValue([
+      conn({ id: 'saved-1', endpoint: 'https://saved.example.test' }),
+      conn({ id: 'saved-2', endpoint: 'https://saved-two.example.test' }),
+    ]);
+    testMock.mockImplementationOnce(() => new Promise(() => undefined));
+    renderSection();
+    const first = await screen.findByTestId('ext-api-test-saved-saved-1');
+    const second = screen.getByTestId('ext-api-test-saved-saved-2');
+    fireEvent.click(first);
+    fireEvent.click(first);
+    fireEvent.click(second);
+    expect(testMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('ignores a saved result after editing that connection', async () => {
+    let resolveProbe!: (result: { ok: boolean; status: 'success'; models: string[]; hint: null }) => void;
+    listMock.mockResolvedValue([conn({ id: 'saved-1', endpoint: 'https://saved.example.test' })]);
+    testMock.mockImplementationOnce(() => new Promise(resolve => { resolveProbe = resolve; }));
+    renderSection();
+    fireEvent.click(await screen.findByTestId('ext-api-test-saved-saved-1'));
+    fireEvent.click(screen.getByTestId('ext-api-edit-saved-1'));
+    resolveProbe({ ok: true, status: 'success', models: ['stale-model'], hint: null });
+
+    await waitFor(() => expect(screen.getByTestId('ext-api-form')).toBeTruthy());
+    fireEvent.click(screen.getByTestId('ext-api-cancel'));
+    expect(screen.queryByTestId('ext-api-saved-test-result-saved-1')).toBeNull();
   });
 });

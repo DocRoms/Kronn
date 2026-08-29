@@ -5659,6 +5659,327 @@ async fn start_test_server(state: AppState) -> std::net::SocketAddr {
     addr
 }
 
+async fn external_api_test_state(endpoint: String) -> AppState {
+    let state = test_state();
+    let connection = kronn::models::ExternalApiConnection {
+        id: "saved-connection".into(),
+        display_name: "Saved connection".into(),
+        mention_alias: "saved".into(),
+        endpoint: Some(endpoint),
+        credential_slug: "conn-saved".into(),
+        origin_preset: kronn::models::ExternalApiConnectionPreset::Other,
+        economy_model: None,
+        default_model: None,
+        reasoning_model: None,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    };
+    let insert = connection.clone();
+    state
+        .db
+        .with_conn(move |conn| kronn::db::external_api_connections::insert(conn, &insert))
+        .await
+        .unwrap();
+    state
+        .config
+        .write()
+        .await
+        .tokens
+        .keys
+        .push(kronn::models::ApiKey {
+            id: "test-key".into(),
+            name: "saved test credential".into(),
+            provider: connection.credential_slug,
+            value: "stored-secret-must-not-leak".into(),
+            active: true,
+        });
+    state
+}
+
+#[tokio::test]
+async fn external_api_test_route_returns_catalogue_without_returning_the_credential() {
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let upstream = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .and(header(
+            "authorization",
+            "Bearer stored-secret-must-not-leak",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [{"id": "catalogue-model"}]
+        })))
+        .expect(1)
+        .mount(&upstream)
+        .await;
+    // A valid key: the authenticated probe accepts the credential and the
+    // catalogue stands.
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(header(
+            "authorization",
+            "Bearer stored-secret-must-not-leak",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "choices": [{"message": {"role": "assistant", "content": ""}}]
+        })))
+        .expect(1)
+        .mount(&upstream)
+        .await;
+    let app = build_router_with_auth(external_api_test_state(upstream.uri()).await, false);
+
+    let (status, response) = post_json(
+        app,
+        "/api/external-api/connections/test",
+        serde_json::json!({
+            "endpoint": upstream.uri(),
+            "api_key": null,
+            "connection_id": "saved-connection",
+            "origin_preset": "other"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(response["success"], true, "{response}");
+    assert_eq!(response["data"]["status"], "success");
+    assert_eq!(
+        response["data"]["models"],
+        serde_json::json!(["catalogue-model"])
+    );
+    assert!(!response.to_string().contains("stored-secret-must-not-leak"));
+}
+
+#[tokio::test]
+async fn external_api_test_route_public_catalogue_rejects_an_invalid_key() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    // Provider whose `/v1/models` is public (200 to anyone) but whose chat
+    // endpoint enforces auth. The catalogue read alone would let an invalid key
+    // through; the authenticated probe must fail it.
+    let upstream = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [{"id": "catalogue-model"}]
+        })))
+        .mount(&upstream)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(401).set_body_string("secret upstream diagnostic"))
+        .mount(&upstream)
+        .await;
+    let app = test_app();
+
+    let (status, response) = post_json(
+        app,
+        "/api/external-api/connections/test",
+        serde_json::json!({
+            "endpoint": upstream.uri(),
+            "api_key": "wrong-secret"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(response["data"]["status"], "auth_error", "{response}");
+    assert!(response["data"]["models"]
+        .as_array()
+        .is_some_and(Vec::is_empty));
+    assert!(!response.to_string().contains("wrong-secret"));
+    assert!(!response.to_string().contains("secret upstream diagnostic"));
+}
+
+#[tokio::test]
+async fn external_api_test_route_public_catalogue_rejects_non_successful_chat_statuses() {
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    for upstream_status in [404_u16, 429, 500] {
+        let upstream = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{"id": "catalogue-model"}]
+            })))
+            .expect(1)
+            .mount(&upstream)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(header("authorization", "Bearer wrong-secret"))
+            .respond_with(
+                ResponseTemplate::new(upstream_status)
+                    .set_body_string("secret upstream diagnostic"),
+            )
+            .expect(1)
+            .mount(&upstream)
+            .await;
+
+        let (status, response) = post_json(
+            test_app(),
+            "/api/external-api/connections/test",
+            serde_json::json!({
+                "endpoint": upstream.uri(),
+                "api_key": "wrong-secret"
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["data"]["status"], "http_error", "{response}");
+        assert!(response["data"]["models"]
+            .as_array()
+            .is_some_and(Vec::is_empty));
+        assert!(response["data"]["hint"]
+            .as_str()
+            .is_some_and(|hint| hint.contains(&upstream_status.to_string())));
+        assert!(!response.to_string().contains("wrong-secret"));
+        assert!(!response.to_string().contains("secret upstream diagnostic"));
+    }
+}
+
+#[tokio::test]
+async fn external_api_test_route_maps_auth_empty_and_transport_failures_without_upstream_bodies() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let auth_upstream = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(401).set_body_string("secret upstream diagnostic"))
+        .mount(&auth_upstream)
+        .await;
+    let app = test_app();
+    let (_, auth) = post_json(
+        app.clone(),
+        "/api/external-api/connections/test",
+        serde_json::json!({ "endpoint": auth_upstream.uri(), "api_key": "submitted-secret" }),
+    )
+    .await;
+    assert_eq!(auth["data"]["status"], "auth_error");
+    assert!(!auth.to_string().contains("submitted-secret"));
+    assert!(!auth.to_string().contains("secret upstream diagnostic"));
+
+    let empty_upstream = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": []})))
+        .mount(&empty_upstream)
+        .await;
+    let (_, empty) = post_json(
+        app.clone(),
+        "/api/external-api/connections/test",
+        serde_json::json!({ "endpoint": empty_upstream.uri(), "api_key": null }),
+    )
+    .await;
+    assert_eq!(empty["data"]["status"], "success");
+    assert_eq!(empty["data"]["models"], serde_json::json!([]));
+
+    let malformed_upstream = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("not-json"))
+        .mount(&malformed_upstream)
+        .await;
+    let (_, malformed) = post_json(
+        app.clone(),
+        "/api/external-api/connections/test",
+        serde_json::json!({ "endpoint": malformed_upstream.uri(), "api_key": "submitted-secret" }),
+    )
+    .await;
+    assert_eq!(malformed["data"]["status"], "invalid_catalogue");
+    assert_eq!(malformed["data"]["models"], serde_json::json!([]));
+    assert!(!malformed.to_string().contains("submitted-secret"));
+
+    let incompatible_catalogue_upstream = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "models": [{"name": "not-openai-compatible"}]
+        })))
+        .mount(&incompatible_catalogue_upstream)
+        .await;
+    let (_, incompatible_catalogue) = post_json(
+        app.clone(),
+        "/api/external-api/connections/test",
+        serde_json::json!({ "endpoint": incompatible_catalogue_upstream.uri(), "api_key": null }),
+    )
+    .await;
+    assert_eq!(
+        incompatible_catalogue["data"]["status"],
+        "invalid_catalogue"
+    );
+    assert_eq!(
+        incompatible_catalogue["data"]["models"],
+        serde_json::json!([])
+    );
+
+    let (_, transport) = post_json(
+        app.clone(),
+        "/api/external-api/connections/test",
+        serde_json::json!({ "endpoint": "http://127.0.0.1:1", "api_key": null }),
+    )
+    .await;
+    assert_eq!(transport["data"]["status"], "transport_error");
+
+    let timeout_upstream = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(std::time::Duration::from_secs(7))
+                .set_body_json(serde_json::json!({"data": []})),
+        )
+        .mount(&timeout_upstream)
+        .await;
+    let (_, timeout) = post_json(
+        app,
+        "/api/external-api/connections/test",
+        serde_json::json!({ "endpoint": timeout_upstream.uri(), "api_key": null }),
+    )
+    .await;
+    assert_eq!(timeout["data"]["status"], "timeout");
+}
+
+#[tokio::test]
+async fn external_api_test_route_does_not_send_a_saved_credential_to_a_changed_endpoint() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let canonical_upstream = MockServer::start().await;
+    let changed_upstream = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&changed_upstream)
+        .await;
+    let app = build_router_with_auth(
+        external_api_test_state(canonical_upstream.uri()).await,
+        false,
+    );
+
+    let (_, response) = post_json(
+        app,
+        "/api/external-api/connections/test",
+        serde_json::json!({
+            "endpoint": changed_upstream.uri(),
+            "api_key": null,
+            "connection_id": "saved-connection",
+            "origin_preset": "other"
+        }),
+    )
+    .await;
+    assert_eq!(response["data"]["status"], "credential_required");
+    assert!(response["data"]["models"]
+        .as_array()
+        .is_some_and(Vec::is_empty));
+    assert!(!response.to_string().contains("stored-secret-must-not-leak"));
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // disc_git / ai_docs / discover — route existence smoke tests (0.3.7)
 // ═══════════════════════════════════════════════════════════════════════════════

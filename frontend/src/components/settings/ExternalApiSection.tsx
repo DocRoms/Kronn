@@ -11,10 +11,11 @@
 // own endpoint, mention alias and per-tier models, so several connections
 // (e.g. NVIDIA and Groq) coexist with fully independent settings.
 
-import { useCallback, useEffect, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { externalApi } from '../../lib/api';
 import type {
   ExternalApiConnectionView,
+  ExternalApiConnectionTestResult,
   ExternalApiPreset,
   UpsertExternalApiConnection,
 } from '../../lib/api';
@@ -106,6 +107,10 @@ function ConnectionForm({
   onSubmit,
   onCancel,
   submitting,
+  testResult,
+  testing,
+  onTest,
+  onConnectionChange,
   modelCostSuffix,
 }: {
   t: ExternalApiSectionProps['t'];
@@ -114,6 +119,10 @@ function ConnectionForm({
   onSubmit: () => void;
   onCancel: () => void;
   submitting: boolean;
+  testResult: ExternalApiConnectionTestResult | null;
+  testing: boolean;
+  onTest: () => void;
+  onConnectionChange: (updater: (prev: FormState) => FormState) => void;
   modelCostSuffix?: (model: string) => string;
 }) {
   const presets: { id: ExternalApiPreset; label: string }[] = [
@@ -142,7 +151,7 @@ function ConnectionForm({
             className="set-agent-choice set-ext-api-preset"
             data-testid={`ext-api-preset-${p.id}`}
             onClick={() =>
-              setForm(prev => ({
+              onConnectionChange(prev => ({
                 ...prev,
                 origin_preset: p.id,
                 // Pre-fill the endpoint from the preset. "Other" clears it so a
@@ -191,7 +200,7 @@ function ConnectionForm({
           placeholder="https://api.example.com/v1"
           value={form.endpoint}
           data-testid="ext-api-endpoint"
-          onChange={e => setForm(prev => ({ ...prev, endpoint: e.target.value }))}
+          onChange={e => onConnectionChange(prev => ({ ...prev, endpoint: e.target.value }))}
           aria-label={t('liteLlm.endpointLabel')}
         />
       </label>
@@ -205,10 +214,21 @@ function ConnectionForm({
           placeholder={t('liteLlm.keyOptional')}
           value={form.api_key}
           data-testid="ext-api-key"
-          onChange={e => setForm(prev => ({ ...prev, api_key: e.target.value, keyTouched: true }))}
+          onChange={e => onConnectionChange(prev => ({ ...prev, api_key: e.target.value, keyTouched: true }))}
           aria-label={t('liteLlm.keyLabel')}
         />
       </label>
+
+      <div className="set-ext-api-test-actions">
+        <button type="button" className="set-btn-secondary" disabled={!form.endpoint.trim() || testing} onClick={onTest} data-testid="ext-api-test">
+          {testing ? <Loader2 size={12} className="spin" /> : <Check size={12} />} {t('config.extApi.testConnection')}
+        </button>
+        {testResult ? (
+          <p className="set-hint" data-testid="ext-api-test-result" data-status={testResult.status}>
+            {testResult.hint ?? (testResult.models.length > 0 ? t('config.extApi.modelsLoaded', testResult.models.length) : t('config.extApi.noModels'))}
+          </p>
+        ) : <p className="set-hint" data-testid="ext-api-test-required">{t('config.extApi.testRequired')}</p>}
+      </div>
 
       <div className="set-ext-api-tiers">
         {TIERS.map(tier => {
@@ -233,15 +253,17 @@ function ConnectionForm({
               <span className="set-ext-api-tier-label">
                 <span aria-hidden="true">{TIER_ICON[tier]}</span> {t(`disc.tier.${tier}`)}
               </span>
-              <input
+              <select
                 className="set-tier-input"
-                type="text"
-                placeholder={t('config.defaultModel')}
                 value={value}
                 data-testid={`ext-api-tier-${tier}`}
                 onChange={e => setValue(e.target.value)}
                 aria-label={t(`disc.tier.${tier}`)}
-              />
+                disabled={!testResult?.ok || testResult.models.length === 0}
+              >
+                <option value="">{testResult?.ok ? t('config.defaultModel') : t('config.extApi.testRequired')}</option>
+                {testResult?.models.map(model => <option key={model} value={model}>{model}</option>)}
+              </select>
               {value && modelCostSuffix ? (
                 <span className="text-2xs text-muted">{modelCostSuffix(value)}</span>
               ) : null}
@@ -274,8 +296,107 @@ export function ExternalApiSection({ t, toast, modelCostSuffix }: ExternalApiSec
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState<FormState>(emptyForm());
   const [submitting, setSubmitting] = useState(false);
+  const [testResult, setTestResult] = useState<ExternalApiConnectionTestResult | null>(null);
+  const [testing, setTesting] = useState(false);
+  const [savedTests, setSavedTests] = useState<Record<string, ExternalApiConnectionTestResult | null>>({});
+  const [testingSavedId, setTestingSavedId] = useState<string | null>(null);
+  // State updates do not protect two synchronous clicks: retain the in-flight
+  // request outside React so draft and saved probes share one bounded request.
+  // Invalidating a form must release this lock immediately: the old request
+  // may never settle, and its eventual completion must not clear a newer run.
+  const activeTestRef = useRef<{ id: number; scope: 'draft' | 'saved' } | null>(null);
+  const testRequestIdRef = useRef(0);
+  const draftTestGenerationRef = useRef(0);
+  const savedTestGenerationRef = useRef(0);
+
+  const invalidateSavedTests = () => {
+    savedTestGenerationRef.current += 1;
+    if (activeTestRef.current?.scope === 'saved') activeTestRef.current = null;
+    setSavedTests({});
+    setTestingSavedId(null);
+  };
+
+  const invalidateDraftTest = () => {
+    draftTestGenerationRef.current += 1;
+    if (activeTestRef.current?.scope === 'draft') activeTestRef.current = null;
+    setTesting(false);
+    setTestResult(null);
+  };
+
+  const changeConnection = (updater: (prev: FormState) => FormState) => {
+    invalidateDraftTest();
+    // Models come from the exact endpoint/key/preset just tested. Never keep
+    // a previous catalogue selection after any of those inputs changes.
+    setForm(prev => {
+      const next = updater(prev);
+      return {
+        ...next,
+        economy_model: '',
+        default_model: '',
+        reasoning_model: '',
+      };
+    });
+  };
+
+  const testConnection = async () => {
+    if (activeTestRef.current) return;
+    const request = { id: ++testRequestIdRef.current, scope: 'draft' as const };
+    activeTestRef.current = request;
+    const generation = ++draftTestGenerationRef.current;
+    setTesting(true);
+    try {
+      const result = await externalApi.test({
+        endpoint: form.endpoint.trim() || null,
+        api_key: form.keyTouched ? form.api_key : null,
+        ...(editingId ? { connection_id: editingId, origin_preset: form.origin_preset } : {}),
+      });
+      if (draftTestGenerationRef.current === generation) setTestResult(result);
+    } catch (e) {
+      if (draftTestGenerationRef.current === generation) {
+        setTestResult({ ok: false, status: 'transport_error', models: [], hint: userError(e) });
+      }
+    } finally {
+      if (activeTestRef.current?.id === request.id) {
+        activeTestRef.current = null;
+        if (draftTestGenerationRef.current === generation) setTesting(false);
+      }
+    }
+  };
+
+  const testSavedConnection = async (connection: ExternalApiConnectionView) => {
+    if (activeTestRef.current) return;
+    const request = { id: ++testRequestIdRef.current, scope: 'saved' as const };
+    activeTestRef.current = request;
+    const generation = ++savedTestGenerationRef.current;
+    setTestingSavedId(connection.id);
+    setSavedTests(prev => ({ ...prev, [connection.id]: null }));
+    try {
+      const result = await externalApi.test({
+        endpoint: connection.endpoint,
+        api_key: null,
+        connection_id: connection.id,
+        origin_preset: connection.origin_preset,
+      });
+      if (savedTestGenerationRef.current === generation) {
+        setSavedTests(prev => ({ ...prev, [connection.id]: result }));
+      }
+    } catch (e) {
+      if (savedTestGenerationRef.current === generation) {
+        setSavedTests(prev => ({
+          ...prev,
+          [connection.id]: { ok: false, status: 'transport_error', models: [], hint: userError(e) },
+        }));
+      }
+    } finally {
+      if (activeTestRef.current?.id === request.id) {
+        activeTestRef.current = null;
+        if (savedTestGenerationRef.current === generation) setTestingSavedId(null);
+      }
+    }
+  };
 
   const load = useCallback(async () => {
+    invalidateSavedTests();
     try {
       setConnections(await externalApi.list());
     } catch (e) {
@@ -289,6 +410,7 @@ export function ExternalApiSection({ t, toast, modelCostSuffix }: ExternalApiSec
   }, [load]);
 
   const startAdd = () => {
+    invalidateDraftTest();
     setEditingId(null);
     setForm(emptyForm());
     // Seed the default preset's endpoint so the field is never blank on open.
@@ -297,12 +419,15 @@ export function ExternalApiSection({ t, toast, modelCostSuffix }: ExternalApiSec
   };
 
   const startEdit = (c: ExternalApiConnectionView) => {
+    invalidateDraftTest();
+    invalidateSavedTests();
     setAdding(false);
     setEditingId(c.id);
     setForm(formFromConnection(c));
   };
 
   const cancel = () => {
+    invalidateDraftTest();
     setAdding(false);
     setEditingId(null);
   };
@@ -338,6 +463,7 @@ export function ExternalApiSection({ t, toast, modelCostSuffix }: ExternalApiSec
   const remove = async (c: ExternalApiConnectionView) => {
     if (!confirm(t('config.extApi.deleteConfirm', c.display_name))) return;
     try {
+      invalidateSavedTests();
       await externalApi.remove(c.id);
       await load();
     } catch (e) {
@@ -397,6 +523,10 @@ export function ExternalApiSection({ t, toast, modelCostSuffix }: ExternalApiSec
                 onSubmit={() => void submitEdit(c.id)}
                 onCancel={cancel}
                 submitting={submitting}
+                testResult={testResult}
+                testing={testing}
+                onTest={() => void testConnection()}
+                onConnectionChange={changeConnection}
                 modelCostSuffix={modelCostSuffix}
               />
             ) : (
@@ -422,6 +552,16 @@ export function ExternalApiSection({ t, toast, modelCostSuffix }: ExternalApiSec
                     <button
                       type="button"
                       className="set-icon-btn"
+                      disabled={!c.endpoint || testingSavedId === c.id}
+                      onClick={() => void testSavedConnection(c)}
+                      aria-label={t('config.extApi.testConnection')}
+                      data-testid={`ext-api-test-saved-${c.id}`}
+                    >
+                      {testingSavedId === c.id ? <Loader2 size={11} className="spin" /> : <Check size={11} />}
+                    </button>
+                    <button
+                      type="button"
+                      className="set-icon-btn"
                       onClick={() => startEdit(c)}
                       aria-label={t('common.save')}
                       data-testid={`ext-api-edit-${c.id}`}
@@ -440,6 +580,20 @@ export function ExternalApiSection({ t, toast, modelCostSuffix }: ExternalApiSec
                   </div>
                 </div>
                 {c.endpoint && <code className="set-ext-api-conn-endpoint">{c.endpoint}</code>}
+                {savedTests[c.id] ? (
+                  <p className="set-hint" data-testid={`ext-api-saved-test-result-${c.id}`} data-status={savedTests[c.id]?.status}>
+                    {savedTests[c.id]?.hint ?? (
+                      savedTests[c.id]?.models.length
+                        ? t('config.extApi.modelsLoaded', savedTests[c.id]?.models.length ?? 0)
+                        : t('config.extApi.noModels')
+                    )}
+                  </p>
+                ) : null}
+                {savedTests[c.id]?.ok && savedTests[c.id]?.models.length ? (
+                  <div className="set-ext-api-conn-models" data-testid={`ext-api-saved-models-${c.id}`}>
+                    {savedTests[c.id]?.models.map(model => <code key={model}>{model}</code>)}
+                  </div>
+                ) : null}
                 {renderTiers(c)}
               </div>
             ),
@@ -453,6 +607,10 @@ export function ExternalApiSection({ t, toast, modelCostSuffix }: ExternalApiSec
               onSubmit={() => void submitCreate()}
               onCancel={cancel}
               submitting={submitting}
+              testResult={testResult}
+              testing={testing}
+              onTest={() => void testConnection()}
+              onConnectionChange={changeConnection}
               modelCostSuffix={modelCostSuffix}
             />
           ) : (

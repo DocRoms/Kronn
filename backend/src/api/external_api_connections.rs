@@ -48,6 +48,31 @@ pub struct UpsertConnectionRequest {
     pub api_key: Option<String>,
 }
 
+/// A non-persisting probe for a saved connection or the form currently being
+/// edited. `api_key` is write-only; omitting it for a saved connection reuses
+/// its stored credential without returning it to the browser.
+#[derive(Debug, Deserialize)]
+pub struct TestConnectionRequest {
+    pub endpoint: Option<String>,
+    #[serde(default)]
+    pub api_key: Option<String>,
+    #[serde(default)]
+    pub connection_id: Option<String>,
+    /// The saved connection's provider context. A stored credential is only
+    /// reusable when this still matches the persisted connection as well as
+    /// its canonical endpoint.
+    #[serde(default)]
+    pub origin_preset: Option<ExternalApiConnectionPreset>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TestConnectionResponse {
+    pub ok: bool,
+    pub status: String,
+    pub models: Vec<String>,
+    pub hint: Option<String>,
+}
+
 fn clean(value: Option<String>) -> Option<String> {
     value
         .map(|v| v.trim().to_string())
@@ -92,6 +117,251 @@ fn normalize_endpoint(raw: Option<String>) -> Option<String> {
     } else {
         Some(base.to_string())
     }
+}
+
+fn probe_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(6))
+        .connect_timeout(std::time::Duration::from_secs(3))
+        .build()
+        .unwrap_or_default()
+}
+
+/// Validate a connection in two bounded phases:
+///
+/// 1. discover the OpenAI-compatible catalogue via `GET /v1/models`;
+/// 2. when a key is present and the catalogue is non-empty, confirm the key is
+///    genuinely accepted with a minimal authenticated `POST /v1/chat/completions`.
+///
+/// Phase 2 exists because `/v1/models` is public on several providers
+/// (LiteLLM, some NVIDIA/Groq deployments): a catalogue read alone lets an
+/// invalid key through. The chat call is rejected with 401/403 when the key is
+/// wrong, so an invalid key can no longer pass. Neither phase surfaces an
+/// upstream body or the submitted key.
+async fn probe_models(endpoint: &str, api_key: Option<&str>) -> TestConnectionResponse {
+    let catalogue = fetch_catalogue(endpoint, api_key).await;
+    if catalogue.ok {
+        if let Some(key) = api_key.filter(|key| !key.trim().is_empty()) {
+            if let Some(model) = catalogue.models.first() {
+                if let Some(auth_failure) = probe_auth(endpoint, key, model).await {
+                    return auth_failure;
+                }
+            }
+        }
+    }
+    catalogue
+}
+
+/// Minimal authenticated invocation confirming the credential is accepted. A
+/// `max_tokens: 1` request is the smallest billable/no-output probe compatible
+/// with the OpenAI chat contract. A 2xx response confirms the credential;
+/// 401/403 are classified as authentication errors, while every other HTTP
+/// status is a generic probe failure because it does not prove that the
+/// connection is usable. `None` = the credential passed.
+async fn probe_auth(endpoint: &str, api_key: &str, model: &str) -> Option<TestConnectionResponse> {
+    let body = serde_json::json!({
+        "model": model,
+        "messages": [{"role": "user", "content": "ping"}],
+        "max_tokens": 1,
+        "temperature": 0,
+        "stream": false,
+    });
+    let request = probe_client()
+        .post(format!("{endpoint}/v1/chat/completions"))
+        .bearer_auth(api_key)
+        .json(&body);
+    match request.send().await {
+        Ok(response) if matches!(response.status().as_u16(), 401 | 403) => {
+            Some(TestConnectionResponse {
+                ok: false,
+                status: "auth_error".into(),
+                models: vec![],
+                hint: Some(
+                    "The endpoint rejected the credentials. Check the API key and its permissions."
+                        .into(),
+                ),
+            })
+        }
+        Ok(response) if response.status().is_success() => None,
+        Ok(response) => Some(TestConnectionResponse {
+            ok: false,
+            status: "http_error".into(),
+            models: vec![],
+            hint: Some(format!(
+                "The endpoint returned HTTP {} while validating the connection.",
+                response.status().as_u16()
+            )),
+        }),
+        Err(error) if error.is_timeout() => Some(TestConnectionResponse {
+            ok: false,
+            status: "timeout".into(),
+            models: vec![],
+            hint: Some(
+                "The endpoint did not respond in time. Check its URL and availability.".into(),
+            ),
+        }),
+        Err(_) => Some(TestConnectionResponse {
+            ok: false,
+            status: "transport_error".into(),
+            models: vec![],
+            hint: Some(
+                "Kronn could not reach this endpoint. Check the URL and network access.".into(),
+            ),
+        }),
+    }
+}
+
+async fn fetch_catalogue(endpoint: &str, api_key: Option<&str>) -> TestConnectionResponse {
+    let mut request = probe_client().get(format!("{endpoint}/v1/models"));
+    if let Some(key) = api_key.filter(|key| !key.trim().is_empty()) {
+        request = request.bearer_auth(key);
+    }
+    match request.send().await {
+        Ok(response) if response.status().is_success() => {
+            match response.json::<serde_json::Value>().await {
+                Ok(body) if model_ids_from_body(&body).is_some() => {
+                    let models = model_ids_from_body(&body).expect("checked above");
+                    TestConnectionResponse {
+                    ok: true,
+                    status: "success".into(),
+                    hint: models.is_empty().then(|| "The endpoint responded but returned no usable models. Check this account or endpoint.".into()),
+                    models,
+                    }
+                }
+                _ => TestConnectionResponse {
+                    ok: false,
+                    status: "invalid_catalogue".into(),
+                    models: vec![],
+                    hint: Some(
+                        "The endpoint responded, but its model catalogue is not OpenAI-compatible. Check the endpoint and provider settings."
+                            .into(),
+                    ),
+                },
+            }
+        }
+        Ok(response) if matches!(response.status().as_u16(), 401 | 403) => TestConnectionResponse {
+            ok: false,
+            status: "auth_error".into(),
+            models: vec![],
+            hint: Some(
+                "The endpoint rejected the credentials. Check the API key and its permissions."
+                    .into(),
+            ),
+        },
+        Ok(response) => TestConnectionResponse {
+            ok: false,
+            status: "http_error".into(),
+            models: vec![],
+            hint: Some(format!(
+                "The endpoint returned HTTP {} while loading models.",
+                response.status().as_u16()
+            )),
+        },
+        Err(error) if error.is_timeout() => TestConnectionResponse {
+            ok: false,
+            status: "timeout".into(),
+            models: vec![],
+            hint: Some(
+                "The endpoint did not respond in time. Check its URL and availability.".into(),
+            ),
+        },
+        Err(_) => TestConnectionResponse {
+            ok: false,
+            status: "transport_error".into(),
+            models: vec![],
+            hint: Some(
+                "Kronn could not reach this endpoint. Check the URL and network access.".into(),
+            ),
+        },
+    }
+}
+
+fn model_ids_from_body(body: &serde_json::Value) -> Option<Vec<String>> {
+    body["data"].as_array().and_then(|items| {
+        items
+            .iter()
+            .map(|model| {
+                model["id"]
+                    .as_str()
+                    .filter(|id| !id.trim().is_empty())
+                    .map(str::to_string)
+            })
+            .collect()
+    })
+}
+
+/// POST /api/external-api/connections/test
+///
+/// Validate the OpenAI-compatible models endpoint without saving form data.
+/// The response contains only model ids and generic actionable status text,
+/// never a submitted key or an upstream response body.
+pub async fn test(
+    State(state): State<AppState>,
+    Json(req): Json<TestConnectionRequest>,
+) -> Json<ApiResponse<TestConnectionResponse>> {
+    let Some(endpoint) = normalize_endpoint(req.endpoint) else {
+        return Json(ApiResponse::ok(TestConnectionResponse {
+            ok: false,
+            status: "invalid_url".into(),
+            models: vec![],
+            hint: Some("Enter a valid endpoint before testing the connection.".into()),
+        }));
+    };
+    if reqwest::Url::parse(&endpoint).is_err() {
+        return Json(ApiResponse::ok(TestConnectionResponse {
+            ok: false,
+            status: "invalid_url".into(),
+            models: vec![],
+            hint: Some("Enter a valid endpoint before testing the connection.".into()),
+        }));
+    }
+
+    let stored_key = if req.api_key.is_none() {
+        match req.connection_id.as_deref() {
+            Some(connection_id) => {
+                let lookup_id = connection_id.to_string();
+                match state
+                    .db
+                    .with_read_conn(move |conn| store::get(conn, &lookup_id))
+                    .await
+                {
+                    Ok(Some(connection))
+                        if connection.endpoint.as_deref() == Some(endpoint.as_str())
+                            && req.origin_preset == Some(connection.origin_preset) =>
+                    {
+                        state
+                            .config
+                            .read()
+                            .await
+                            .tokens
+                            .active_key_for(&connection.credential_slug)
+                            .map(str::to_string)
+                    }
+                    Ok(Some(_)) => {
+                        return Json(ApiResponse::ok(TestConnectionResponse {
+                            ok: false,
+                            status: "credential_required".into(),
+                            models: vec![],
+                            hint: Some(
+                                "The endpoint or provider changed. Enter the API key again before testing."
+                                    .into(),
+                            ),
+                        }));
+                    }
+                    _ => None,
+                }
+            }
+            None => None,
+        }
+    } else {
+        None
+    };
+    let key = req
+        .api_key
+        .as_deref()
+        .or(stored_key.as_deref())
+        .filter(|key| !key.trim().is_empty());
+    Json(ApiResponse::ok(probe_models(&endpoint, key).await))
 }
 
 fn view(connection: ExternalApiConnection, config: &AppConfig) -> ConnectionView {
@@ -451,5 +721,22 @@ mod tests {
         );
         set_credential(&mut cfg, "conn-groq-1234", "Groq", "");
         assert_eq!(cfg.tokens.active_key_for("conn-groq-1234"), None);
+    }
+
+    #[test]
+    fn model_catalogue_accepts_a_valid_empty_list_and_rejects_invalid_shapes() {
+        let models = model_ids_from_body(&serde_json::json!({
+            "data": [{"id": "model-a"}, {"id": "model-b"}]
+        }));
+        assert_eq!(models, Some(vec!["model-a".into(), "model-b".into()]));
+        assert_eq!(
+            model_ids_from_body(&serde_json::json!({"data": []})),
+            Some(vec![])
+        );
+        assert_eq!(model_ids_from_body(&serde_json::json!({})), None);
+        assert_eq!(
+            model_ids_from_body(&serde_json::json!({"data": [{"name": "missing-id"}]})),
+            None
+        );
     }
 }
