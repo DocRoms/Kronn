@@ -1877,6 +1877,31 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             "/api/skills",
             get(api::skills::list).post(api::skills::create),
         )
+        .route("/api/portable-library", get(api::portable_library::state))
+        .route(
+            "/api/portable-library/sync",
+            post(api::portable_library::sync),
+        )
+        .route(
+            "/api/portable-library/check",
+            post(api::portable_library::check),
+        )
+        .route(
+            "/api/portable-library/approve",
+            post(api::portable_library::approve),
+        )
+        .route(
+            "/api/portable-library/migrate",
+            post(api::portable_library::migrate),
+        )
+        .route(
+            "/api/portable-library/export",
+            get(api::portable_library::export),
+        )
+        .route(
+            "/api/portable-library/import",
+            post(api::portable_library::import),
+        )
         .route(
             "/api/skills/{id}",
             put(api::skills::update).delete(api::skills::delete),

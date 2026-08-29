@@ -2299,6 +2299,28 @@ const fr: TranslationDict = {
   'config.reset': 'Reset configuration',
   'config.configFile': 'Fichier de config',
 
+  // ── Bibliothèque d'agents portable ──
+  'config.portableLibrary.navLabel': 'Bibliothèque portable',
+  'config.portableLibrary.title': 'Bibliothèque d’agents portable',
+  'config.portableLibrary.hint': 'Gérer les ressources globales et projet `.agents`, la dérive, la confiance et la migration des ressources existantes.',
+  'config.portableLibrary.scope': 'Périmètre',
+  'config.portableLibrary.scopeAria': 'Périmètre de la bibliothèque portable',
+  'config.portableLibrary.scopeGlobal': 'Global',
+  'config.portableLibrary.search': 'Recherche',
+  'config.portableLibrary.searchAria': 'Rechercher dans la bibliothèque portable',
+  'config.portableLibrary.drift': 'Dérive',
+  'config.portableLibrary.trust': 'Confiance',
+  'config.portableLibrary.trustApproved': 'approuvée',
+  'config.portableLibrary.trustRequired': 'approbation requise',
+  'config.portableLibrary.actionSync': 'Synchroniser',
+  'config.portableLibrary.actionCheck': 'Vérifier (frozen)',
+  'config.portableLibrary.actionApprove': 'Approuver',
+  'config.portableLibrary.actionMigrate': 'Migrer',
+  'config.portableLibrary.actionExport': 'Exporter .agents',
+  'config.portableLibrary.actionImport': 'Importer .agents',
+  'config.portableLibrary.actionDone': '{0} terminé',
+  'config.portableLibrary.importInvalid': 'Fichier de bibliothèque portable invalide',
+
   // ── Plugins ──
   'mcp.title': 'Plugins',
   'mcp.portability.export': 'Exporter',

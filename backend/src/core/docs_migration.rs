@@ -617,7 +617,7 @@ pub fn prefill_files(project_path: &Path, files: &[std::path::PathBuf]) -> usize
 /// Build the (placeholder → value) map from filesystem heuristics.
 /// Only emits entries for placeholders we can answer with confidence;
 /// unknown ones stay as `{{...}}` for the agent to fill during bootstrap.
-fn compute_replacements(project_path: &Path) -> Vec<(&'static str, String)> {
+pub(crate) fn compute_replacements(project_path: &Path) -> Vec<(&'static str, String)> {
     let mut out: Vec<(&'static str, String)> = Vec::new();
 
     // PROJECT_NAME — directory basename, Title-Cased + dashes/underscores → spaces.

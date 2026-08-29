@@ -505,6 +505,8 @@ pub async fn full_audit(
         let is_full = matches!(kind, crate::models::AuditKind::Full);
         let status = scanner::detect_audit_status(&project_path_str);
         let template_installed = is_full && matches!(status, AiAuditStatus::NoTemplate);
+        let configured_adapter =
+            crate::core::root_agent_files::adapter_for_agent_type(&agent_type);
 
         if template_installed {
             let pp = project_path_str.clone();
@@ -512,6 +514,12 @@ pub async fn full_audit(
                 let project_path = scanner::resolve_host_path(&pp);
                 if !project_path.exists() {
                     return Err(format!("Project path not found: {}", project_path.display()));
+                }
+
+                let mut detected_adapters =
+                    crate::core::root_agent_files::detect_agent_adapters(&project_path);
+                if let Some(adapter) = configured_adapter {
+                    detected_adapters.insert(adapter);
                 }
 
                 // 0.7.1 — bootstrap to docs/ (or respect legacy ai/ when
@@ -561,8 +569,22 @@ pub async fn full_audit(
                     );
                 }
 
+                // Install only the shared entry plus adapters present in the
+                // target repository or explicitly selected for this audit.
+                // Every emitted template is rendered before publication, so a
+                // crashed audit cannot leave raw placeholders.
+                let adapter_report =
+                    crate::core::root_agent_files::install_detected_agent_files(
+                        &project_path,
+                        &template_dir,
+                        &detected_adapters,
+                    );
+                for failure in adapter_report.failed {
+                    tracing::warn!("Agent instruction install failed: {failure}");
+                }
+
                 // 0.8.3 (#278) — inject the Kronn-managed block into
-                // every root agent file. Replaces the pre-0.8.3
+                // every detected root agent file. Replaces the pre-0.8.3
                 // `copy if !exists` loop that silently skipped user-
                 // curated files → the agent never learned that Kronn
                 // had put `docs/AGENTS.md` in place. The new helper:
@@ -576,7 +598,13 @@ pub async fn full_audit(
                 // Failures on one file don't abort the audit — we log
                 // and move on so a single locked / permission-denied
                 // file doesn't break the whole install path.
-                for filename in crate::core::root_agent_files::KRONN_ROOT_AGENT_FILES {
+                for filename in crate::core::root_agent_files::desired_agent_template_paths(
+                    &detected_adapters,
+                )
+                .into_iter()
+                .filter(|path| {
+                    crate::core::root_agent_files::KRONN_ROOT_AGENT_FILES.contains(path)
+                }) {
                     let src = template_dir.join(filename);
                     let dst = project_path.join(filename);
                     let template_body = std::fs::read_to_string(&src).ok();

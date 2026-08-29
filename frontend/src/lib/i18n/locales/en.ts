@@ -2289,6 +2289,28 @@ const en: TranslationDict = {
   'config.reset': 'Reset configuration',
   'config.configFile': 'Config file',
 
+  // ── Portable agent library ──
+  'config.portableLibrary.navLabel': 'Portable library',
+  'config.portableLibrary.title': 'Portable agent library',
+  'config.portableLibrary.hint': 'Manage global and project `.agents` resources, drift, trust, and legacy migration.',
+  'config.portableLibrary.scope': 'Scope',
+  'config.portableLibrary.scopeAria': 'Portable library scope',
+  'config.portableLibrary.scopeGlobal': 'Global',
+  'config.portableLibrary.search': 'Search',
+  'config.portableLibrary.searchAria': 'Search portable library',
+  'config.portableLibrary.drift': 'Drift',
+  'config.portableLibrary.trust': 'Trust',
+  'config.portableLibrary.trustApproved': 'approved',
+  'config.portableLibrary.trustRequired': 'approval required',
+  'config.portableLibrary.actionSync': 'Sync',
+  'config.portableLibrary.actionCheck': 'Check frozen',
+  'config.portableLibrary.actionApprove': 'Approve',
+  'config.portableLibrary.actionMigrate': 'Migrate',
+  'config.portableLibrary.actionExport': 'Export .agents',
+  'config.portableLibrary.actionImport': 'Import .agents',
+  'config.portableLibrary.actionDone': '{0} completed',
+  'config.portableLibrary.importInvalid': 'Invalid portable library file',
+
   // ── Plugins ──
   'mcp.title': 'Plugins',
   'mcp.portability.export': 'Export',

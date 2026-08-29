@@ -1705,6 +1705,47 @@ pub fn escalate_execution_for_dispatch_quota(
     Ok(Some((execution.id, execution.parent_discussion_id)))
 }
 
+/// KT-515 — the honest availability signal for `agent_list`, launch preflight
+/// and reassignment. True when `provider` (the [`agent_type_to_db`] form, e.g.
+/// `"Codex"`) still has an execution sitting in `Escalated` with the exact
+/// `quota_exhausted:<provider>` marker written by
+/// [`escalate_execution_for_dispatch_quota`]. `Escalated` is also reached by
+/// unrelated watchdog timeouts, so the marker (not the bare status) is what
+/// proves this is a real quota rejection: a transient timeout/transport error
+/// never writes that exact reason, so it never trips this check — Kronn does
+/// not confuse "could not reach the provider this time" with "the account
+/// quota is spent". The flag clears only on real evidence: reassigning the
+/// escalated execution moves it out of `Escalated` (see
+/// `reassign_execution_worker` + the `Escalated -> Working` transition in
+/// `reassign_native_execution`), as does cancelling or otherwise completing
+/// it — never a guessed provider-side reset schedule.
+///
+/// `exclude_exec_id` lets a reassignment of the very execution that raised the
+/// escalation target the same provider again (the human's explicit "quota is
+/// back, retry" signal) without being blocked by its own still-open row; a
+/// fresh `agent_list`/launch preflight for any other task passes `None` and
+/// sees every open escalation for the provider.
+pub fn provider_has_open_quota_exhaustion(
+    conn: &Connection,
+    provider: &str,
+    exclude_exec_id: Option<&str>,
+) -> Result<bool> {
+    let marker = format!("quota_exhausted:{provider}");
+    conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM task_execution_recovery r
+             JOIN task_executions e ON e.id = r.task_execution_id
+             WHERE e.worker_agent_type = ?1
+               AND r.recovery_reason = ?2
+               AND e.status = 'Escalated'
+               AND (?3 IS NULL OR e.id <> ?3)
+         )",
+        params![provider, marker, exclude_exec_id],
+        |row| row.get(0),
+    )
+    .map_err(Into::into)
+}
+
 /// Move an execution to `Blocked` and stamp a human-readable reason plus a structured
 /// `code` (KT-328/KT-334: consumers branch on the code, never the prose), so a partial
 /// provisioning failure leaves an explicitly resumable row (DoD-6) instead of a silent

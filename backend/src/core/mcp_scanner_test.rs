@@ -719,54 +719,43 @@ command = "manual-command"
     #[test]
     #[serial]
     #[serial(kronn_templates_env)]
-    fn ensure_redirectors_creates_missing_files() {
+    fn ensure_redirectors_without_agent_signals_creates_only_shared_entry() {
         let tmp = setup_tmp("redir-create");
-        // Create ai/ directory so project qualifies
-        std::fs::create_dir_all(tmp.join("ai")).unwrap();
+        // A docs directory makes the project eligible, but is not itself an
+        // agent-specific signal.
+        std::fs::create_dir_all(tmp.join("docs")).unwrap();
 
         // Create a minimal templates dir with redirectors
         let tpl = std::env::temp_dir().join("kronn-test-templates-redir");
         let _ = std::fs::remove_dir_all(&tpl);
         std::fs::create_dir_all(&tpl).unwrap();
-        std::fs::write(tpl.join("CLAUDE.md"), "Read ai/index.md").unwrap();
-        std::fs::write(tpl.join("GEMINI.md"), "Read ai/index.md").unwrap();
-        std::fs::write(tpl.join("AGENTS.md"), "Read ai/index.md").unwrap();
+        std::fs::write(tpl.join("CLAUDE.md"), "Read docs/AGENTS.md").unwrap();
+        std::fs::write(tpl.join("GEMINI.md"), "Read docs/AGENTS.md").unwrap();
+        std::fs::write(tpl.join("AGENTS.md"), "Read docs/AGENTS.md").unwrap();
         std::fs::create_dir_all(tpl.join(".kiro/steering")).unwrap();
         std::fs::write(
             tpl.join(".kiro/steering/instructions.md"),
-            "Read ai/index.md",
+            "Read docs/AGENTS.md",
         )
         .unwrap();
         std::fs::create_dir_all(tpl.join(".github")).unwrap();
         std::fs::write(
             tpl.join(".github/copilot-instructions.md"),
-            "Read ai/index.md",
+            "Read docs/AGENTS.md",
         )
         .unwrap();
 
         std::env::set_var("KRONN_TEMPLATES_DIR", tpl.to_string_lossy().to_string());
         super::super::mcp_scanner::ensure_redirectors_public(&tmp.to_string_lossy());
 
-        assert!(
-            tmp.join("CLAUDE.md").exists(),
-            "CLAUDE.md should be created"
-        );
-        assert!(
-            tmp.join("GEMINI.md").exists(),
-            "GEMINI.md should be created"
-        );
+        assert!(!tmp.join("CLAUDE.md").exists());
+        assert!(!tmp.join("GEMINI.md").exists());
         assert!(
             tmp.join("AGENTS.md").exists(),
             "AGENTS.md should be created"
         );
-        assert!(
-            tmp.join(".kiro/steering/instructions.md").exists(),
-            ".kiro/steering/instructions.md should be created"
-        );
-        assert!(
-            tmp.join(".github/copilot-instructions.md").exists(),
-            ".github/copilot-instructions.md should be created"
-        );
+        assert!(!tmp.join(".kiro/steering/instructions.md").exists());
+        assert!(!tmp.join(".github/copilot-instructions.md").exists());
 
         cleanup(&tmp);
         let _ = std::fs::remove_dir_all(&tpl);
@@ -777,7 +766,7 @@ command = "manual-command"
     #[serial(kronn_templates_env)]
     fn ensure_redirectors_does_not_overwrite_existing() {
         let tmp = setup_tmp("redir-no-overwrite");
-        std::fs::create_dir_all(tmp.join("ai")).unwrap();
+        std::fs::create_dir_all(tmp.join("docs")).unwrap();
 
         // Pre-create a CLAUDE.md with custom content
         std::fs::write(tmp.join("CLAUDE.md"), "Custom content").unwrap();
@@ -788,6 +777,7 @@ command = "manual-command"
         std::fs::create_dir_all(&tpl).unwrap();
         std::fs::write(tpl.join("CLAUDE.md"), "Template content").unwrap();
         std::fs::write(tpl.join("GEMINI.md"), "Template content").unwrap();
+        std::fs::write(tpl.join("AGENTS.md"), "Read docs/AGENTS.md").unwrap();
 
         std::env::set_var("KRONN_TEMPLATES_DIR", tpl.to_string_lossy().to_string());
         super::super::mcp_scanner::ensure_redirectors_public(&tmp.to_string_lossy());
@@ -799,11 +789,9 @@ command = "manual-command"
             "Existing file should not be overwritten"
         );
 
-        // GEMINI.md should be created (was missing)
-        assert!(
-            tmp.join("GEMINI.md").exists(),
-            "Missing GEMINI.md should be created"
-        );
+        // Claude was detected from the existing file; Gemini was not.
+        assert!(!tmp.join("GEMINI.md").exists());
+        assert!(tmp.join("AGENTS.md").exists());
 
         cleanup(&tmp);
         let _ = std::fs::remove_dir_all(&tpl);

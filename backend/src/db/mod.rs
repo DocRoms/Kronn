@@ -33,6 +33,18 @@ pub mod worker_offers;
 pub mod worker_reviews;
 pub mod workflows;
 
+pub fn portable_library_records(
+    conn: &rusqlite::Connection,
+) -> anyhow::Result<(
+    Vec<crate::models::QuickPrompt>,
+    Vec<crate::models::Workflow>,
+)> {
+    Ok((
+        quick_prompts::list_quick_prompts(conn)?,
+        workflows::list_workflows(conn)?,
+    ))
+}
+
 #[cfg(test)]
 #[path = "tests.rs"]
 mod tests;

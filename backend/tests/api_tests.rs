@@ -12770,7 +12770,106 @@ mod cold_api_handlers_tests {
         )
         .await;
         assert_eq!(st, StatusCode::OK);
-        assert!(json.get("success").is_some());
+        assert_eq!(json["success"], true);
+        assert_eq!(json["data"]["created"], serde_json::json!(["AGENTS.md"]));
+        assert!(repo.join("AGENTS.md").is_file());
+        for absent in [
+            "CLAUDE.md",
+            "GEMINI.md",
+            ".cursorrules",
+            ".windsurfrules",
+            ".clinerules",
+            ".github/copilot-instructions.md",
+            ".kiro/steering/instructions.md",
+        ] {
+            assert!(
+                !repo.join(absent).exists(),
+                "created absent adapter {absent}"
+            );
+        }
+        let body = std::fs::read_to_string(repo.join("AGENTS.md")).unwrap();
+        assert!(!body.contains("{{"), "{body}");
+        assert!(!body.contains("ai/index.md"), "{body}");
+        assert!(!body.contains("[ex:"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn redirectors_sync_installs_only_detected_subset() {
+        let (_dir, repo) = seed_repo("redirectors-subset");
+        std::fs::write(repo.join("CLAUDE.md"), "# Existing Claude rules\n").unwrap();
+        std::fs::create_dir_all(repo.join(".cursor/rules")).unwrap();
+        std::fs::write(repo.join(".cursor/rules/custom.mdc"), "existing\n").unwrap();
+        let state = test_state();
+        let pid = seed_project_with_repo(&state, &repo).await;
+        let app = build_router_with_auth(state, false);
+
+        let (st, json) = post_json(
+            app,
+            &format!("/api/projects/{}/redirectors/sync", pid),
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(json["success"], true);
+        assert_eq!(
+            json["data"]["created"],
+            serde_json::json!([
+                "AGENTS.md",
+                ".cursorrules",
+                ".cursor/rules/repo-instructions.mdc"
+            ])
+        );
+        assert!(json["data"]["already_present"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("CLAUDE.md")));
+        assert_eq!(
+            std::fs::read_to_string(repo.join("CLAUDE.md")).unwrap(),
+            "# Existing Claude rules\n"
+        );
+        assert!(!repo.join("GEMINI.md").exists());
+        assert!(!repo.join(".windsurfrules").exists());
+    }
+
+    #[tokio::test]
+    async fn redirectors_sync_repairs_recognized_template_without_touching_user_content() {
+        let (_dir, repo) = seed_repo("redirectors-upgrade");
+        let old_template = include_str!("../../templates/CLAUDE.md")
+            .replace(
+                "Test: {{TEST_CMD}}",
+                "Test: {{TEST_CMD}} [ex: \"cargo test && npm test\"]",
+            )
+            .replace(
+                "Lint: {{LINT_CMD}}",
+                "Lint: {{LINT_CMD}} [ex: \"cargo clippy && npx tsc --noEmit\"]",
+            );
+        let prefix = "<!-- user prefix stays -->\n";
+        let suffix = "\n## User rules\nKeep {{USER_TOKEN}} byte-identical.\n";
+        std::fs::write(
+            repo.join("CLAUDE.md"),
+            format!("{prefix}{old_template}{suffix}"),
+        )
+        .unwrap();
+        let state = test_state();
+        let pid = seed_project_with_repo(&state, &repo).await;
+        let app = build_router_with_auth(state, false);
+
+        let (st, json) = post_json(
+            app,
+            &format!("/api/projects/{}/redirectors/sync", pid),
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(json["success"], true);
+        assert_eq!(json["data"]["updated"], serde_json::json!(["CLAUDE.md"]));
+        let body = std::fs::read_to_string(repo.join("CLAUDE.md")).unwrap();
+        assert!(body.starts_with(prefix), "{body}");
+        assert!(body.ends_with(suffix), "{body}");
+        assert!(!body.contains("{{TEST_CMD}}"), "{body}");
+        assert!(!body.contains("{{DO_NOT_1}}"), "{body}");
+        assert!(!body.contains("[ex:"), "{body}");
+        assert!(body.contains("{{USER_TOKEN}}"), "{body}");
     }
 
     // ── workflows.rs cold edge endpoints ─────────────────────────────

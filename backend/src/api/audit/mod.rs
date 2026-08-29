@@ -1,6 +1,6 @@
 // AI Audit pipeline split into one file per concern
 // (TD-20260417-audit-monolith). The big static prompt definitions
-// (`PROMPT_PREAMBLE`, `ANALYSIS_STEPS`, `AUDIT_REDIRECTOR_FILES`)
+// (`PROMPT_PREAMBLE`, `ANALYSIS_STEPS`)
 // live here because every sub-module reads from them, and they are
 // the single source of truth for what "the audit" actually does.
 // Sub-modules are re-exported via `pub use *::*` so every existing
@@ -1227,17 +1227,6 @@ pub(crate) fn kind_to_steps(kind: crate::models::AuditKind) -> &'static [Analysi
         AuditKind::Custom => &[],
     }
 }
-
-/// Files installed by the audit template (to be removed on cancel).
-pub(crate) const AUDIT_REDIRECTOR_FILES: &[&str] = &[
-    "CLAUDE.md",
-    "GEMINI.md",
-    "AGENTS.md",
-    ".cursorrules",
-    ".windsurfrules",
-    ".clinerules",
-    ".github/copilot-instructions.md",
-];
 
 #[cfg(test)]
 mod kind_dispatch_tests {

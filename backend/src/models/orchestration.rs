@@ -889,7 +889,15 @@ impl Default for OrchestrationResiliencePolicy {
             activity_timeout_secs: None,
             review_timeout_secs: None,
             human_wait_timeout_secs: None,
-            cancellation_cleanup_policy: CancellationCleanupPolicy::Preserve,
+            // KT-514 — a task keeps at most one live execution, so every prior
+            // attempt of a relaunched task is already terminal. Preserving each
+            // cancelled checkout by default is what let 18 worktrees pile up on a
+            // single task until the sandbox guard blocked every worker. The
+            // default now reclaims the clean checkout (the branch and its commits
+            // survive — `git worktree remove` never touches the ref); an operator
+            // who wants the working tree kept for inspection still opts into
+            // `Preserve` explicitly.
+            cancellation_cleanup_policy: CancellationCleanupPolicy::RemoveIfClean,
         }
     }
 }
@@ -1688,6 +1696,17 @@ pub fn review_decision_v1_schema() -> serde_json::Value {
 mod tests {
     use super::TaskExecutionStatus::{self, *};
     use super::TaskWorkerScope;
+
+    /// KT-514 — a cancellation with no explicit policy must reclaim the clean
+    /// checkout (branch preserved) rather than hoard it. This default is what
+    /// stops a relaunched task from stacking one worktree per attempt.
+    #[test]
+    fn default_cancellation_policy_reclaims_the_clean_checkout() {
+        assert_eq!(
+            super::OrchestrationResiliencePolicy::default().cancellation_cleanup_policy,
+            super::CancellationCleanupPolicy::RemoveIfClean,
+        );
+    }
 
     #[test]
     fn prelocalized_worker_scope_is_small_relative_and_inclusive() {
