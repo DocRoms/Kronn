@@ -5536,6 +5536,33 @@ fn worker_project_refusal(
     None
 }
 
+/// KT-515 — refuse a native/HTTP worker whose provider has an open quota
+/// escalation (see `provider_has_open_quota_exhaustion`). A `cli` worker is
+/// untouched: its own joined-session presence already carries that signal.
+/// `exclude_exec_id` is forwarded verbatim so a reassignment of the exact
+/// execution that raised the escalation can retry the same provider.
+fn worker_quota_refusal(
+    conn: &rusqlite::Connection,
+    worker: &MessageTarget,
+    exclude_exec_id: Option<&str>,
+) -> Result<Option<crate::models::CampaignTaskReason>> {
+    if !matches!(
+        worker.kind,
+        MessageTargetKind::DiscussionAgent | MessageTargetKind::Agent
+    ) {
+        return Ok(None);
+    }
+    let provider = crate::db::orchestration::agent_type_to_db(&worker.agent_type);
+    if crate::db::orchestration::provider_has_open_quota_exhaustion(
+        conn,
+        &provider,
+        exclude_exec_id,
+    )? {
+        return Ok(Some(fixed_worker_reason("quota_exhausted")));
+    }
+    Ok(None)
+}
+
 /// Validate the worker identity at the shared launch boundary. HTTP/MCP
 /// preflight calls this for a useful refusal, but provisioning calls it again
 /// before creating any execution or worktree: internal callers and campaigns
@@ -5546,6 +5573,9 @@ fn worker_launch_refusal(
     worker: &MessageTarget,
 ) -> Result<Option<crate::models::CampaignTaskReason>> {
     if let Some(reason) = worker_static_refusal(worker) {
+        return Ok(Some(reason));
+    }
+    if let Some(reason) = worker_quota_refusal(conn, worker, None)? {
         return Ok(Some(reason));
     }
     let refusal = match worker.kind {
@@ -7123,6 +7153,14 @@ pub(crate) async fn reassign_native_execution(
     let (view, replaced_dispatch_id) = state
         .db
         .with_conn(move |conn| {
+            // Refuse tôt (KT-515): before starting the transaction, and before
+            // creating any new dispatch/worktree, if the target provider still
+            // has an open quota escalation elsewhere. Excluding this exact
+            // execution lets the human explicitly retry the same provider that
+            // raised it once they know the quota is back.
+            if let Some(reason) = worker_quota_refusal(conn, &selection.target, Some(&id))? {
+                bail!("{}: {}", reason.code, reason.detail);
+            }
             let transaction = conn.unchecked_transaction()?;
             let replaced_dispatch_id =
                 crate::db::orchestration::get_task_execution(&transaction, &id)?
@@ -7599,6 +7637,11 @@ fn fixed_worker_reason(code: &str) -> crate::models::CampaignTaskReason {
         "copilot_preflight_timed_out" => {
             "Copilot did not finish its bounded account probe; retry later or reassign the execution."
         }
+        "quota_exhausted" => {
+            "This provider's plan/credit quota was recently reported exhausted by a real dispatch \
+             attempt and the escalation is still open; reassign the affected execution (or wait for \
+             it to be resolved) before relying on this worker again."
+        }
         _ => "The worker is unavailable for a stable, backend-classified reason.",
     };
     preparation_reason(code, detail)
@@ -7613,19 +7656,10 @@ fn build_task_worker_catalogue(
     )],
     http_reachability: &[(AgentType, bool)],
     cli_preflight: &[(AgentType, crate::agents::runner::CopilotTaskWorkerPreflight)],
+    quota_exhausted: &[(AgentType, bool)],
 ) -> crate::models::TaskWorkerCatalogue {
     let mut workers = Vec::new();
-    let native_agents = [
-        AgentType::Ollama,
-        AgentType::LiteLlm,
-        AgentType::Nvidia,
-        AgentType::ClaudeCode,
-        AgentType::Codex,
-        AgentType::GeminiCli,
-        AgentType::Kiro,
-        AgentType::CopilotCli,
-        AgentType::Vibe,
-    ];
+    let native_agents = CATALOGUED_PROVIDERS;
 
     for agent in native_agents {
         let http = crate::agents::runner::is_http_chat_agent(&agent);
@@ -7698,6 +7732,13 @@ fn build_task_worker_catalogue(
                     reasons.push(fixed_worker_reason(code));
                 }
             }
+        }
+        if quota_exhausted
+            .iter()
+            .find(|(kind, _)| kind == &agent)
+            .is_some_and(|(_, exhausted)| *exhausted)
+        {
+            reasons.push(fixed_worker_reason("quota_exhausted"));
         }
         let worker = if http {
             MessageTarget::discussion_agent(agent.clone()).with_tier(ModelTier::Default)
@@ -7828,6 +7869,43 @@ async fn bounded_cli_worker_preflight(
     vec![(AgentType::CopilotCli, status)]
 }
 
+/// KT-515 — native/HTTP providers eligible for the `agent_list` catalogue.
+/// Kept in one place so the quota-exhaustion query below and
+/// `build_task_worker_catalogue`'s `native_agents` list can never drift apart.
+const CATALOGUED_PROVIDERS: [AgentType; 9] = [
+    AgentType::Ollama,
+    AgentType::LiteLlm,
+    AgentType::Nvidia,
+    AgentType::ClaudeCode,
+    AgentType::Codex,
+    AgentType::GeminiCli,
+    AgentType::Kiro,
+    AgentType::CopilotCli,
+    AgentType::Vibe,
+];
+
+/// One cheap read per catalogued provider: does it have an open, unresolved
+/// quota escalation (KT-515)? No live process is spawned — this is a bounded
+/// SQL preflight over already-recorded dispatch history.
+async fn bounded_provider_quota_state(state: &AppState) -> Vec<(AgentType, bool)> {
+    state
+        .db
+        .with_read_conn(move |conn| {
+            CATALOGUED_PROVIDERS
+                .iter()
+                .map(|agent| {
+                    let provider = crate::db::orchestration::agent_type_to_db(agent);
+                    let exhausted = crate::db::orchestration::provider_has_open_quota_exhaustion(
+                        conn, &provider, None,
+                    )?;
+                    Ok((agent.clone(), exhausted))
+                })
+                .collect::<Result<Vec<_>>>()
+        })
+        .await
+        .unwrap_or_default()
+}
+
 pub(crate) async fn task_worker_catalogue_for_discussion(
     state: &AppState,
     parent_discussion_id: &str,
@@ -7852,12 +7930,14 @@ pub(crate) async fn task_worker_catalogue_for_discussion(
     crate::agents::apply_configured_status(&mut detections, &config);
     let reachability = bounded_http_worker_reachability(state).await;
     let cli_preflight = bounded_cli_worker_preflight(&detections).await;
+    let quota_state = bounded_provider_quota_state(state).await;
     Ok(build_task_worker_catalogue(
         &config,
         &detections,
         &joined,
         &reachability,
         &cli_preflight,
+        &quota_state,
     ))
 }
 
@@ -9144,6 +9224,7 @@ mod tests {
                 (AgentType::Nvidia, false),
             ],
             &[],
+            &[],
         );
 
         for entry in &catalogue.workers {
@@ -9230,6 +9311,7 @@ mod tests {
                 AgentType::CopilotCli,
                 crate::agents::runner::CopilotTaskWorkerPreflight::AuthInvalid,
             )],
+            &[],
         );
         let copilot = catalogue
             .workers
@@ -9256,6 +9338,7 @@ mod tests {
                 AgentType::CopilotCli,
                 crate::agents::runner::CopilotTaskWorkerPreflight::TimedOut,
             )],
+            &[],
         );
         let copilot = timed_out
             .workers
@@ -9269,6 +9352,88 @@ mod tests {
                     .detail
                     .contains("did not finish its bounded account probe")
         }));
+    }
+
+    // ── KT-515 — honest availability while a real dispatch reported quota
+    // exhaustion. `build_task_worker_catalogue` is pure, so these assert the
+    // catalogue reaction to the bounded `quota_exhausted` signal directly; the
+    // DB-derived signal itself is covered in `db::orchestration_tests`. ──
+
+    fn codex_detection(installed: bool) -> crate::models::AgentDetection {
+        crate::models::AgentDetection {
+            name: "Codex".into(),
+            agent_type: AgentType::Codex,
+            installed,
+            enabled: true,
+            path: Some("codex".into()),
+            version: None,
+            latest_version: None,
+            origin: "test".into(),
+            install_command: None,
+            host_managed: false,
+            host_label: None,
+            runtime_available: installed,
+            auth_ready: Some(true),
+            auth_setup_command: None,
+            rtk_available: false,
+            rtk_hook_configured: false,
+            runtime_warning: None,
+        }
+    }
+
+    #[test]
+    fn worker_catalogue_refuses_codex_while_its_quota_escalation_is_open() {
+        let detections = [codex_detection(true)];
+        let catalogue = build_task_worker_catalogue(
+            &crate::core::config::default_config(),
+            &detections,
+            &[],
+            &[],
+            &[],
+            &[(AgentType::Codex, true)],
+        );
+        let codex = catalogue
+            .workers
+            .iter()
+            .find(|entry| entry.worker.agent_type == AgentType::Codex)
+            .expect("Codex entry");
+        assert!(!codex.available);
+        assert!(
+            codex.configured && codex.reachable,
+            "transport/auth are fine — only the quota signal must gate availability"
+        );
+        assert!(codex
+            .reasons
+            .iter()
+            .any(|reason| reason.code == "quota_exhausted"));
+        for reason in &codex.reasons {
+            assert!(
+                !reason.detail.to_lowercase().contains("api key"),
+                "quota reason must never leak a secret-shaped detail"
+            );
+        }
+    }
+
+    #[test]
+    fn worker_catalogue_offers_codex_once_no_open_quota_escalation_remains() {
+        let detections = [codex_detection(true)];
+        let catalogue = build_task_worker_catalogue(
+            &crate::core::config::default_config(),
+            &detections,
+            &[],
+            &[],
+            &[],
+            &[(AgentType::Codex, false)],
+        );
+        let codex = catalogue
+            .workers
+            .iter()
+            .find(|entry| entry.worker.agent_type == AgentType::Codex)
+            .expect("Codex entry");
+        assert!(
+            codex.available,
+            "recovered quota must not stay hidden: {codex:#?}"
+        );
     }
 
     // ── KT-319 tranche 1 — delivery/review contracts + brief (pure). ──
@@ -13806,6 +13971,184 @@ mod tests {
             count(&db, "SELECT COUNT(*) FROM task_executions").await,
             0,
             "refusal happens before execution/worktree/dispatch creation"
+        );
+    }
+
+    /// KT-515 — puts an unrelated Codex execution in `Escalated` with the exact
+    /// `quota_exhausted:Codex` marker, mirroring what
+    /// `escalate_execution_for_dispatch_quota` leaves behind after a real
+    /// dispatch failure, without needing a live dispatch job.
+    async fn seed_open_codex_quota_escalation(
+        db: &Database,
+        project_id: &str,
+        parent_id: &str,
+    ) -> String {
+        let project_id = project_id.to_string();
+        let parent_id = parent_id.to_string();
+        db.with_conn(move |conn| {
+            let poisoned = create_todo_task(conn, &project_id, "Codex poison");
+            let mut input =
+                crate::models::LaunchSingleTaskInput::new(&poisoned.summary.id, &parent_id);
+            input.worker_agent_type = Some(crate::db::orchestration::agent_type_to_db(
+                &AgentType::Codex,
+            ));
+            let execution =
+                crate::db::orchestration::launch_single_task(conn, &input, &backend_actor())?
+                    .execution;
+            crate::db::orchestration::transition_execution(
+                conn,
+                &execution.id,
+                TaskExecutionStatus::Provisioning,
+                &backend_actor(),
+                serde_json::json!({}),
+            )?;
+            crate::db::orchestration::transition_execution(
+                conn,
+                &execution.id,
+                TaskExecutionStatus::Working,
+                &backend_actor(),
+                serde_json::json!({}),
+            )?;
+            crate::db::orchestration::transition_execution(
+                conn,
+                &execution.id,
+                TaskExecutionStatus::Escalated,
+                &backend_actor(),
+                serde_json::json!({}),
+            )?;
+            let now = chrono::Utc::now().to_rfc3339();
+            conn.execute(
+                "INSERT INTO task_execution_recovery (
+                     task_execution_id, recovery_action, recovery_reason, last_activity_at,
+                     assignment_generation, watchdog_redispatches, human_wait_started_at,
+                     pending, updated_at
+                 ) VALUES (?1, 'await_human', 'quota_exhausted:Codex', ?2, 0, 0, ?2, 0, ?2)
+                 ON CONFLICT(task_execution_id) DO UPDATE SET
+                     recovery_reason = excluded.recovery_reason, pending = 0, updated_at = ?2",
+                rusqlite::params![execution.id, now],
+            )?;
+            Ok(execution.id)
+        })
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn preflight_and_launch_refuse_codex_while_its_quota_escalation_is_open() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (task_ref, parent_id, project_id) = seed(&db, repo.path()).await;
+        let task_for_link = task_ref.clone();
+        let parent_for_link = parent_id.clone();
+        db.with_conn(move |conn| {
+            crate::db::planning::link_discussion(
+                conn,
+                &task_for_link,
+                &crate::models::LinkPlanningDiscussionRequest {
+                    discussion_id: parent_for_link,
+                    placement: crate::models::PlanningPlacement::Active,
+                    is_primary: false,
+                    position: None,
+                    actor: test_actor(),
+                },
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        seed_open_codex_quota_escalation(&db, &project_id, &parent_id).await;
+
+        let task_for_prepare = task_ref.clone();
+        let parent_for_prepare = parent_id.clone();
+        let preparation = db
+            .with_conn(move |conn| {
+                prepare_task_execution(
+                    conn,
+                    &task_for_prepare,
+                    &parent_for_prepare,
+                    &MessageTarget::agent(AgentType::Codex),
+                )
+            })
+            .await
+            .unwrap();
+        assert!(!preparation.launchable);
+        assert!(preparation
+            .reasons
+            .iter()
+            .any(|reason| reason.code == "quota_exhausted"));
+
+        let error = provision_single_task_execution(
+            &db,
+            ProvisionInput {
+                task_reference: task_ref,
+                parent_discussion_id: parent_id,
+                worker: MessageTarget::agent(AgentType::Codex),
+                base_rev: Some("main".into()),
+                idempotency_key: Some("codex-quota-refusal".into()),
+            },
+        )
+        .await
+        .expect_err("launch must refuse a provider with an open quota escalation");
+        assert!(matches!(
+            error,
+            ProvisionError::NotLaunchable(ref reason) if reason.contains("quota_exhausted")
+        ));
+        assert_eq!(
+            count(&db, "SELECT COUNT(*) FROM task_executions").await,
+            1,
+            "only the pre-seeded escalated execution exists — the refused launch created none"
+        );
+    }
+
+    #[tokio::test]
+    async fn reassignment_refuses_a_target_with_another_open_quota_escalation() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let (task_ref, parent_id, project_id) = seed(&db, repo.path()).await;
+        let initial = provision_single_task_execution(
+            &db,
+            ProvisionInput {
+                task_reference: task_ref,
+                parent_discussion_id: parent_id.clone(),
+                worker: native_worker(),
+                base_rev: Some("main".into()),
+                idempotency_key: Some("reassignment-quota-refusal".into()),
+            },
+        )
+        .await
+        .unwrap();
+        seed_open_codex_quota_escalation(&db, &project_id, &parent_id).await;
+
+        let state = AppState::new_defaults(
+            std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::core::config::default_config(),
+            )),
+            db.clone(),
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        );
+        let result = reassign_native_execution(
+            &state,
+            &initial.id,
+            crate::models::CampaignWorkerSelection {
+                target: MessageTarget::agent(AgentType::Codex),
+                model: None,
+                profile_id: None,
+            },
+            "try Codex instead",
+        )
+        .await;
+        let Err(error) = result else {
+            panic!("reassignment must refuse a provider with an unrelated open quota escalation");
+        };
+        assert!(
+            error.to_string().contains("quota_exhausted"),
+            "unexpected error: {error}"
+        );
+        let untouched = exec_of(&db, &initial.id).await;
+        assert_eq!(
+            untouched.worker_agent_type.as_deref(),
+            Some("ClaudeCode"),
+            "the refused reassignment must not have mutated the current worker"
         );
     }
 
