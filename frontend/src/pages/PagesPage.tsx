@@ -3,7 +3,7 @@ import {
   Activity, Archive, CheckCircle2, CheckSquare2, ChevronDown, ChevronRight,
   Braces, Clock3, Database, Download, ExternalLink, FileCode2, FileDown, GitCompare,
   History, ListChecks, Loader2, MessageSquare, Pencil, Play, RefreshCw,
-  RotateCcw, Save, Star, Table2, Trash2, Workflow, X,
+  PanelsTopLeft, RotateCcw, Save, Star, Table2, Trash2, Workflow, X,
 } from 'lucide-react';
 import type {
   LivePage, LivePageDetail, LivePageDiscussionLink, LivePagePublication,
@@ -27,7 +27,12 @@ import { HtmlCodeEditor, HtmlRevisionDiff } from '../components/HtmlCodeEditor';
 import { useT } from '../lib/I18nContext';
 import { useAsyncGuard } from '../hooks/useAsyncGuard';
 import { userError } from '../lib/userError';
-import { standaloneLivePageUrl } from '../lib/live-page-navigation';
+import {
+  livePageMosaicLayouts,
+  standaloneLivePageMosaicUrl,
+  standaloneLivePageUrl,
+  type LivePageMosaicLayout,
+} from '../lib/live-page-navigation';
 import './DiscussionsPage.css';
 import './PagesPage.css';
 
@@ -166,6 +171,7 @@ export function PagesPage({
   const [exportResult, setExportResult] = useState<{ url: string; filename: string } | null>(null);
   const exportMenuRef = useDismissibleDetails<HTMLDetailsElement>();
   const refreshMenuRef = useDismissibleDetails<HTMLDetailsElement>();
+  const mosaicMenuRef = useDismissibleDetails<HTMLDetailsElement>();
   const [selectedDatasetId, setSelectedDatasetId] = useState<string | null>(null);
   const [datasetExportBusy, setDatasetExportBusy] = useState(false);
   const iframeRef = useRef<HTMLIFrameElement>(null);
@@ -504,6 +510,22 @@ export function PagesPage({
     0,
   ) ?? 0;
   const comparisonRevision = revisions.find(revision => revision.id === comparisonRevisionId) ?? null;
+  const selectedMosaicIds = useMemo(() => [...selectedIds], [selectedIds]);
+  const mosaicLayouts = useMemo(
+    () => livePageMosaicLayouts(selectedMosaicIds.length),
+    [selectedMosaicIds.length],
+  );
+  const mosaicLayoutLabel = useCallback((layout: LivePageMosaicLayout) => {
+    switch (layout) {
+      case 'two-columns': return t('pages.mosaic.layout.twoColumns');
+      case 'two-rows': return t('pages.mosaic.layout.twoRows');
+      case 'three-top': return t('pages.mosaic.layout.threeTop');
+      case 'three-bottom': return t('pages.mosaic.layout.threeBottom');
+      case 'three-left': return t('pages.mosaic.layout.threeLeft');
+      case 'three-right': return t('pages.mosaic.layout.threeRight');
+      default: return t('pages.mosaic.layout.auto');
+    }
+  }, [t]);
   const document = useMemo(
     () => revisionHtml ? buildSandboxDocument(revisionHtml, bridgeChannel) : '',
     [bridgeChannel, revisionHtml],
@@ -557,6 +579,44 @@ export function PagesPage({
           <div className="disc-sidebar-header-actions">
             {selectionMode ? (
               <>
+                <details className="live-pages-mosaic-menu" ref={mosaicMenuRef}>
+                  <summary
+                    aria-label={selectedIds.size >= 2
+                      ? t('pages.mosaic.open', selectedIds.size)
+                      : t('pages.mosaic.minimum')}
+                    aria-disabled={selectedIds.size < 2}
+                    title={selectedIds.size >= 2
+                      ? t('pages.mosaic.open', selectedIds.size)
+                      : t('pages.mosaic.minimum')}
+                    onClick={event => {
+                      if (selectedIds.size < 2) event.preventDefault();
+                    }}
+                  >
+                    <PanelsTopLeft size={14} />
+                  </summary>
+                  {selectedIds.size >= 2 && (
+                    <div className="live-pages-mosaic-popover">
+                      <strong>{t('pages.mosaic.chooseLayout')}</strong>
+                      {mosaicLayouts.map(layout => (
+                        <a
+                          key={layout}
+                          href={standaloneLivePageMosaicUrl(selectedMosaicIds, layout)}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          onClick={() => {
+                            if (mosaicMenuRef.current) mosaicMenuRef.current.open = false;
+                            leaveSelectionMode();
+                          }}
+                        >
+                          <span className="live-pages-mosaic-layout-preview" data-layout={layout} aria-hidden="true">
+                            <i /><i /><i />
+                          </span>
+                          <span>{mosaicLayoutLabel(layout)}</span>
+                        </a>
+                      ))}
+                    </div>
+                  )}
+                </details>
                 <button type="button" className="disc-icon-btn" onClick={() => void runBulkAction('archive', [...selectedIds])} disabled={bulkBusy || selectedIds.size === 0} title={t('pages.archive')} aria-label={t('pages.archive')}>
                   {bulkBusy ? <Loader2 size={14} className="spin" /> : <Archive size={14} />}
                 </button>

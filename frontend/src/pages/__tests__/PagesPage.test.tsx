@@ -164,6 +164,36 @@ describe('PagesPage', () => {
     expect(row).toHaveAttribute('aria-checked', 'true');
   });
 
+  it('opens selected Pages in one external mosaic tab with count-specific presets', async () => {
+    const page2: LivePage = { ...page, id: 'page-2', title: 'Audience', slug: 'audience' };
+    const page3: LivePage = { ...page, id: 'page-3', title: 'Acquisition', slug: 'acquisition' };
+    vi.mocked(pagesApi.list).mockResolvedValue([page, page2, page3]);
+
+    render(<PagesPage />);
+    await screen.findByTestId('live-page-frame');
+    fireEvent.click(screen.getByRole('button', { name: 'pages.bulk.start' }));
+    fireEvent.click(getCanonicalPageRow('Adobe Signals'));
+    fireEvent.click(getCanonicalPageRow('Audience'));
+    fireEvent.click(getCanonicalPageRow('Acquisition'));
+
+    const mosaicMenu = screen.getByLabelText('pages.mosaic.open:3');
+    expect(mosaicMenu).toHaveAttribute('aria-disabled', 'false');
+    fireEvent.click(mosaicMenu);
+
+    const auto = screen.getByRole('link', { name: 'pages.mosaic.layout.auto' });
+    expect(auto).toHaveAttribute(
+      'href',
+      `${window.location.origin}${window.location.pathname}#pages/mosaic?page=page-1&page=page-2&page=page-3&layout=auto`,
+    );
+    expect(auto).toHaveAttribute('target', '_blank');
+    expect(auto).toHaveAttribute('rel', 'noopener noreferrer');
+    expect(screen.getByRole('link', { name: 'pages.mosaic.layout.threeTop' })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'pages.mosaic.layout.threeBottom' })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'pages.mosaic.layout.threeLeft' })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'pages.mosaic.layout.threeRight' })).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'pages.mosaic.layout.twoColumns' })).toBeNull();
+  });
+
   it('renders authored HTML in a script-only opaque sandbox', async () => {
     const onNavigateWorkflow = vi.fn();
     render(<PagesPage onNavigateWorkflow={onNavigateWorkflow} />);
