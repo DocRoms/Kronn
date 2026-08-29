@@ -48,6 +48,26 @@ pub struct UpsertConnectionRequest {
     pub api_key: Option<String>,
 }
 
+/// A non-persisting probe for a saved connection or the form currently being
+/// edited. `api_key` is write-only; omitting it for a saved connection reuses
+/// its stored credential without returning it to the browser.
+#[derive(Debug, Deserialize)]
+pub struct TestConnectionRequest {
+    pub endpoint: Option<String>,
+    #[serde(default)]
+    pub api_key: Option<String>,
+    #[serde(default)]
+    pub connection_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TestConnectionResponse {
+    pub ok: bool,
+    pub status: String,
+    pub models: Vec<String>,
+    pub hint: Option<String>,
+}
+
 fn clean(value: Option<String>) -> Option<String> {
     value
         .map(|v| v.trim().to_string())
@@ -92,6 +112,137 @@ fn normalize_endpoint(raw: Option<String>) -> Option<String> {
     } else {
         Some(base.to_string())
     }
+}
+
+fn probe_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(6))
+        .connect_timeout(std::time::Duration::from_secs(3))
+        .build()
+        .unwrap_or_default()
+}
+
+async fn probe_models(endpoint: &str, api_key: Option<&str>) -> TestConnectionResponse {
+    let mut request = probe_client().get(format!("{endpoint}/v1/models"));
+    if let Some(key) = api_key.filter(|key| !key.trim().is_empty()) {
+        request = request.bearer_auth(key);
+    }
+    match request.send().await {
+        Ok(response) if response.status().is_success() => {
+            let body: serde_json::Value = response.json().await.unwrap_or_default();
+            let models = model_ids_from_body(&body);
+            TestConnectionResponse {
+                ok: true,
+                status: "success".into(),
+                hint: models.is_empty().then(|| "The endpoint responded but returned no usable models. Check this account or endpoint.".into()),
+                models,
+            }
+        }
+        Ok(response) if matches!(response.status().as_u16(), 401 | 403) => TestConnectionResponse {
+            ok: false,
+            status: "auth_error".into(),
+            models: vec![],
+            hint: Some(
+                "The endpoint rejected the credentials. Check the API key and its permissions."
+                    .into(),
+            ),
+        },
+        Ok(response) => TestConnectionResponse {
+            ok: false,
+            status: "http_error".into(),
+            models: vec![],
+            hint: Some(format!(
+                "The endpoint returned HTTP {} while loading models.",
+                response.status().as_u16()
+            )),
+        },
+        Err(error) if error.is_timeout() => TestConnectionResponse {
+            ok: false,
+            status: "timeout".into(),
+            models: vec![],
+            hint: Some(
+                "The endpoint did not respond in time. Check its URL and availability.".into(),
+            ),
+        },
+        Err(_) => TestConnectionResponse {
+            ok: false,
+            status: "transport_error".into(),
+            models: vec![],
+            hint: Some(
+                "Kronn could not reach this endpoint. Check the URL and network access.".into(),
+            ),
+        },
+    }
+}
+
+fn model_ids_from_body(body: &serde_json::Value) -> Vec<String> {
+    body["data"]
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|model| model["id"].as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// POST /api/external-api/connections/test
+///
+/// Validate the OpenAI-compatible models endpoint without saving form data.
+/// The response contains only model ids and generic actionable status text,
+/// never a submitted key or an upstream response body.
+pub async fn test(
+    State(state): State<AppState>,
+    Json(req): Json<TestConnectionRequest>,
+) -> Json<ApiResponse<TestConnectionResponse>> {
+    let Some(endpoint) = normalize_endpoint(req.endpoint) else {
+        return Json(ApiResponse::ok(TestConnectionResponse {
+            ok: false,
+            status: "invalid_url".into(),
+            models: vec![],
+            hint: Some("Enter a valid endpoint before testing the connection.".into()),
+        }));
+    };
+    if reqwest::Url::parse(&endpoint).is_err() {
+        return Json(ApiResponse::ok(TestConnectionResponse {
+            ok: false,
+            status: "invalid_url".into(),
+            models: vec![],
+            hint: Some("Enter a valid endpoint before testing the connection.".into()),
+        }));
+    }
+
+    let stored_key = if req.api_key.is_none() {
+        match req.connection_id.as_deref() {
+            Some(connection_id) => {
+                let lookup_id = connection_id.to_string();
+                match state
+                    .db
+                    .with_read_conn(move |conn| store::get(conn, &lookup_id))
+                    .await
+                {
+                    Ok(Some(connection)) => state
+                        .config
+                        .read()
+                        .await
+                        .tokens
+                        .active_key_for(&connection.credential_slug)
+                        .map(str::to_string),
+                    _ => None,
+                }
+            }
+            None => None,
+        }
+    } else {
+        None
+    };
+    let key = req
+        .api_key
+        .as_deref()
+        .or(stored_key.as_deref())
+        .filter(|key| !key.trim().is_empty());
+    Json(ApiResponse::ok(probe_models(&endpoint, key).await))
 }
 
 fn view(connection: ExternalApiConnection, config: &AppConfig) -> ConnectionView {
@@ -451,5 +602,15 @@ mod tests {
         );
         set_credential(&mut cfg, "conn-groq-1234", "Groq", "");
         assert_eq!(cfg.tokens.active_key_for("conn-groq-1234"), None);
+    }
+
+    #[test]
+    fn model_catalogue_keeps_only_usable_ids() {
+        let models = model_ids_from_body(&serde_json::json!({
+            "data": [{"id": "model-a"}, {"name": "ignored"}, {"id": "model-b"}]
+        }));
+        assert_eq!(models, vec!["model-a", "model-b"]);
+        assert!(model_ids_from_body(&serde_json::json!({"data": []})).is_empty());
+        assert!(model_ids_from_body(&serde_json::json!({})).is_empty());
     }
 }

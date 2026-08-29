@@ -2509,6 +2509,15 @@
   display: flex;
   gap: var(--kr-sp-2);
 }
+.set-ext-api-test-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--kr-sp-2);
+}
+.set-ext-api-test-actions .set-hint {
+  margin: 0;
+}
 .set-ext-api-add {
   align-self: flex-start;
 }

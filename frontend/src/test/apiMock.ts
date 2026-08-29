@@ -583,6 +583,7 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
         has_credential: false,
       }),
       remove: resolve(null),
+      test: resolve({ ok: false, status: 'transport_error', models: [], hint: null }),
     },
 
     debugApi: {

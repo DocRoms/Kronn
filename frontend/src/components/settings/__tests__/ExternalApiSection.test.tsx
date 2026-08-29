@@ -12,11 +12,12 @@ import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/re
 import { buildApiMock } from '../../../test/apiMock';
 import type { ExternalApiConnectionView } from '../../../lib/api';
 
-const { listMock, createMock, updateMock, removeMock } = vi.hoisted(() => ({
+const { listMock, createMock, updateMock, removeMock, testMock } = vi.hoisted(() => ({
   listMock: vi.fn(),
   createMock: vi.fn(),
   updateMock: vi.fn(),
   removeMock: vi.fn(),
+  testMock: vi.fn(),
 }));
 
 vi.mock('../../../lib/api', () =>
@@ -26,6 +27,7 @@ vi.mock('../../../lib/api', () =>
       create: createMock as never,
       update: updateMock as never,
       remove: removeMock as never,
+      test: testMock as never,
     },
   }),
 );
@@ -66,6 +68,7 @@ beforeEach(() => {
   createMock.mockResolvedValue(conn({}));
   updateMock.mockResolvedValue(conn({}));
   removeMock.mockResolvedValue(null);
+  testMock.mockResolvedValue({ ok: true, status: 'success', models: ['model-a', 'model-b'], hint: null });
 });
 
 afterEach(() => {
@@ -202,5 +205,39 @@ describe('ExternalApiSection', () => {
       display_name: 'Groq Prod',
       api_key: null,
     }));
+  });
+
+  it('loads tested models into every tier selector without saving the draft', async () => {
+    renderSection();
+    fireEvent.click(await screen.findByTestId('ext-api-add-connection'));
+    expect(screen.getByTestId('ext-api-test-required')).toBeTruthy();
+    expect((screen.getByTestId('ext-api-tier-default') as HTMLSelectElement).disabled).toBe(true);
+
+    fireEvent.click(screen.getByTestId('ext-api-test'));
+    await waitFor(() => expect(testMock).toHaveBeenCalledWith({ endpoint: 'http://localhost:4000', api_key: null }));
+    expect(createMock).not.toHaveBeenCalled();
+    expect((screen.getByTestId('ext-api-tier-default') as HTMLSelectElement).disabled).toBe(false);
+    expect(screen.getAllByRole('option', { name: 'model-a' })).toHaveLength(3);
+  });
+
+  it('invalidates tested models when endpoint, key, or preset changes', async () => {
+    renderSection();
+    fireEvent.click(await screen.findByTestId('ext-api-add-connection'));
+    fireEvent.click(screen.getByTestId('ext-api-test'));
+    await waitFor(() => expect(screen.getAllByRole('option', { name: 'model-a' })).toHaveLength(3));
+
+    fireEvent.change(screen.getByTestId('ext-api-endpoint'), { target: { value: 'https://new.example.test' } });
+    expect(screen.getByTestId('ext-api-test-required')).toBeTruthy();
+    expect((screen.getByTestId('ext-api-tier-default') as HTMLSelectElement).disabled).toBe(true);
+
+    fireEvent.click(screen.getByTestId('ext-api-test'));
+    await waitFor(() => expect(screen.getAllByRole('option', { name: 'model-a' })).toHaveLength(3));
+    fireEvent.change(screen.getByTestId('ext-api-key'), { target: { value: 'new-key' } });
+    expect(screen.getByTestId('ext-api-test-required')).toBeTruthy();
+
+    fireEvent.click(screen.getByTestId('ext-api-test'));
+    await waitFor(() => expect(screen.getAllByRole('option', { name: 'model-a' })).toHaveLength(3));
+    fireEvent.click(screen.getByTestId('ext-api-preset-nvidia'));
+    expect(screen.getByTestId('ext-api-test-required')).toBeTruthy();
   });
 });
