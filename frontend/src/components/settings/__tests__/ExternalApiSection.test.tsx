@@ -312,17 +312,25 @@ describe('ExternalApiSection', () => {
     }));
   });
 
-  it('ignores a draft response that arrives after the connection changes', async () => {
+  it('immediately starts a replacement draft test after invalidation and ignores the old response', async () => {
     let resolveProbe!: (result: { ok: boolean; status: 'success'; models: string[]; hint: null }) => void;
     testMock.mockImplementationOnce(() => new Promise(resolve => { resolveProbe = resolve; }));
+    testMock.mockResolvedValueOnce({ ok: true, status: 'success', models: ['new-model'], hint: null });
     renderSection();
     fireEvent.click(await screen.findByTestId('ext-api-add-connection'));
     fireEvent.click(screen.getByTestId('ext-api-test'));
     fireEvent.change(screen.getByTestId('ext-api-endpoint'), { target: { value: 'https://changed.example.test' } });
-    resolveProbe({ ok: true, status: 'success', models: ['stale-model'], hint: null });
 
-    await waitFor(() => expect(screen.getByTestId('ext-api-test-required')).toBeTruthy());
+    // The original request is still pending, but invalidation releases the
+    // visual and imperative guards so testing the changed endpoint is possible.
+    await waitFor(() => expect(screen.getByTestId('ext-api-test')).not.toBeDisabled());
+    fireEvent.click(screen.getByTestId('ext-api-test'));
+    await waitFor(() => expect(testMock).toHaveBeenCalledTimes(2));
+    expect(await screen.findAllByRole('option', { name: 'new-model' })).toHaveLength(3);
+
+    resolveProbe({ ok: true, status: 'success', models: ['stale-model'], hint: null });
     expect(screen.queryByRole('option', { name: 'stale-model' })).toBeNull();
+    expect((screen.getByTestId('ext-api-tier-default') as HTMLSelectElement).disabled).toBe(false);
   });
 
   it('uses one synchronous guard for draft and saved test clicks', async () => {

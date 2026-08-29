@@ -301,20 +301,30 @@ export function ExternalApiSection({ t, toast, modelCostSuffix }: ExternalApiSec
   const [savedTests, setSavedTests] = useState<Record<string, ExternalApiConnectionTestResult | null>>({});
   const [testingSavedId, setTestingSavedId] = useState<string | null>(null);
   // State updates do not protect two synchronous clicks: retain the in-flight
-  // state outside React so draft and saved probes share one bounded request.
-  const testInFlightRef = useRef(false);
+  // request outside React so draft and saved probes share one bounded request.
+  // Invalidating a form must release this lock immediately: the old request
+  // may never settle, and its eventual completion must not clear a newer run.
+  const activeTestRef = useRef<{ id: number; scope: 'draft' | 'saved' } | null>(null);
+  const testRequestIdRef = useRef(0);
   const draftTestGenerationRef = useRef(0);
   const savedTestGenerationRef = useRef(0);
 
   const invalidateSavedTests = () => {
     savedTestGenerationRef.current += 1;
+    if (activeTestRef.current?.scope === 'saved') activeTestRef.current = null;
     setSavedTests({});
     setTestingSavedId(null);
   };
 
-  const changeConnection = (updater: (prev: FormState) => FormState) => {
+  const invalidateDraftTest = () => {
     draftTestGenerationRef.current += 1;
+    if (activeTestRef.current?.scope === 'draft') activeTestRef.current = null;
+    setTesting(false);
     setTestResult(null);
+  };
+
+  const changeConnection = (updater: (prev: FormState) => FormState) => {
+    invalidateDraftTest();
     // Models come from the exact endpoint/key/preset just tested. Never keep
     // a previous catalogue selection after any of those inputs changes.
     setForm(prev => {
@@ -329,8 +339,9 @@ export function ExternalApiSection({ t, toast, modelCostSuffix }: ExternalApiSec
   };
 
   const testConnection = async () => {
-    if (testInFlightRef.current) return;
-    testInFlightRef.current = true;
+    if (activeTestRef.current) return;
+    const request = { id: ++testRequestIdRef.current, scope: 'draft' as const };
+    activeTestRef.current = request;
     const generation = ++draftTestGenerationRef.current;
     setTesting(true);
     try {
@@ -345,14 +356,17 @@ export function ExternalApiSection({ t, toast, modelCostSuffix }: ExternalApiSec
         setTestResult({ ok: false, status: 'transport_error', models: [], hint: userError(e) });
       }
     } finally {
-      if (draftTestGenerationRef.current === generation) setTesting(false);
-      testInFlightRef.current = false;
+      if (activeTestRef.current?.id === request.id) {
+        activeTestRef.current = null;
+        if (draftTestGenerationRef.current === generation) setTesting(false);
+      }
     }
   };
 
   const testSavedConnection = async (connection: ExternalApiConnectionView) => {
-    if (testInFlightRef.current) return;
-    testInFlightRef.current = true;
+    if (activeTestRef.current) return;
+    const request = { id: ++testRequestIdRef.current, scope: 'saved' as const };
+    activeTestRef.current = request;
     const generation = ++savedTestGenerationRef.current;
     setTestingSavedId(connection.id);
     setSavedTests(prev => ({ ...prev, [connection.id]: null }));
@@ -374,8 +388,10 @@ export function ExternalApiSection({ t, toast, modelCostSuffix }: ExternalApiSec
         }));
       }
     } finally {
-      if (savedTestGenerationRef.current === generation) setTestingSavedId(null);
-      testInFlightRef.current = false;
+      if (activeTestRef.current?.id === request.id) {
+        activeTestRef.current = null;
+        if (savedTestGenerationRef.current === generation) setTestingSavedId(null);
+      }
     }
   };
 
@@ -394,9 +410,8 @@ export function ExternalApiSection({ t, toast, modelCostSuffix }: ExternalApiSec
   }, [load]);
 
   const startAdd = () => {
-    draftTestGenerationRef.current += 1;
+    invalidateDraftTest();
     setEditingId(null);
-    setTestResult(null);
     setForm(emptyForm());
     // Seed the default preset's endpoint so the field is never blank on open.
     setForm(prev => ({ ...prev, endpoint: PRESET_ENDPOINTS[prev.origin_preset] }));
@@ -404,19 +419,17 @@ export function ExternalApiSection({ t, toast, modelCostSuffix }: ExternalApiSec
   };
 
   const startEdit = (c: ExternalApiConnectionView) => {
-    draftTestGenerationRef.current += 1;
+    invalidateDraftTest();
     invalidateSavedTests();
     setAdding(false);
     setEditingId(c.id);
-    setTestResult(null);
     setForm(formFromConnection(c));
   };
 
   const cancel = () => {
-    draftTestGenerationRef.current += 1;
+    invalidateDraftTest();
     setAdding(false);
     setEditingId(null);
-    setTestResult(null);
   };
 
   const submitCreate = async () => {
