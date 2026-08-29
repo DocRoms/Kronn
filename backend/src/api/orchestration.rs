@@ -3079,7 +3079,7 @@ pub async fn deliver_worker_manifest(
         exec,
         &alias,
         Some(source_session_id.to_string()),
-        None,
+        crate::db::orchestration::DeliveryDispatchExpectation::Unconstrained,
         manifest_json,
         DeliveryManifestAuthorship::Full,
     )
@@ -3175,9 +3175,16 @@ pub(crate) async fn deliver_native_worker_manifest(
     db: &Database,
     task_execution_id: &str,
     caller: NativeExecutionCaller<'_>,
+    expected_dispatch_job_id: &str,
     manifest_json: &str,
 ) -> Result<DeliverOutcome, ProvisionError> {
-    let Some(execution) = native_worker_execution_for_caller(db, task_execution_id, caller).await?
+    let Some(execution) = spawned_native_worker_execution_for_caller(
+        db,
+        task_execution_id,
+        expected_dispatch_job_id,
+        caller,
+    )
+    .await?
     else {
         return Ok(DeliverOutcome::NotAddressed);
     };
@@ -3186,7 +3193,7 @@ pub(crate) async fn deliver_native_worker_manifest(
         execution,
         caller.alias,
         caller.actor_session_id.map(str::to_string),
-        None,
+        crate::db::orchestration::DeliveryDispatchExpectation::Exact(expected_dispatch_job_id),
         manifest_json,
         DeliveryManifestAuthorship::NativeProjection,
     )
@@ -3198,7 +3205,7 @@ async fn deliver_authorized_worker_manifest(
     exec: TaskExecution,
     alias: &str,
     actor_session_id: Option<String>,
-    expected_dispatch_job_id: Option<&str>,
+    dispatch_expectation: crate::db::orchestration::DeliveryDispatchExpectation<'_>,
     manifest_json: &str,
     authorship: DeliveryManifestAuthorship,
 ) -> Result<DeliverOutcome, ProvisionError> {
@@ -3326,7 +3333,12 @@ async fn deliver_authorized_worker_manifest(
         let (eid, attempt) = (exec.id.clone(), exec.attempt_no);
         let alias = alias.to_string();
         let actor_session_id = actor_session_id.clone();
-        let expected_dispatch_job_id = expected_dispatch_job_id.map(str::to_string);
+        let expected_dispatch_job_id = match dispatch_expectation {
+            crate::db::orchestration::DeliveryDispatchExpectation::Unconstrained => None,
+            crate::db::orchestration::DeliveryDispatchExpectation::Exact(dispatch_job_id) => {
+                Some(dispatch_job_id.to_string())
+            }
+        };
         let (parent, head, mj) = (
             exec.parent_discussion_id.clone(),
             manifest.head_sha.clone(),
@@ -3338,7 +3350,16 @@ async fn deliver_authorized_worker_manifest(
                 &crate::db::orchestration::DeliveryCheckpoint {
                     exec_id: &eid,
                     attempt_no: attempt,
-                    expected_dispatch_job_id: expected_dispatch_job_id.as_deref(),
+                    dispatch_expectation: match expected_dispatch_job_id.as_deref() {
+                        Some(dispatch_job_id) => {
+                            crate::db::orchestration::DeliveryDispatchExpectation::Exact(
+                                dispatch_job_id,
+                            )
+                        }
+                        None => {
+                            crate::db::orchestration::DeliveryDispatchExpectation::Unconstrained
+                        }
+                    },
                     head_sha: &head,
                     manifest_json: &mj,
                     parent_discussion_id: &parent,
@@ -8722,8 +8743,14 @@ pub async fn commit_spawned_worker(
             )
         })
         .await;
-    match lease {
-        Ok(crate::db::orchestration::SpawnedCommitLeaseOutcome::Acquired) => {}
+    let lease_id = match lease {
+        Ok(crate::db::orchestration::SpawnedCommitLeaseOutcome::Acquired { lease_id }) => lease_id,
+        Ok(crate::db::orchestration::SpawnedCommitLeaseOutcome::AlreadySettled) => {
+            return Json(ApiResponse::ok(serde_json::json!({
+                "already_committed": true,
+                "message": "the current worker commit already completed; continue with delivery"
+            })));
+        }
         Ok(crate::db::orchestration::SpawnedCommitLeaseOutcome::NotCurrent) => {
             return Json(ApiResponse::err_coded(
                 ApiErrorCode::NotFound,
@@ -8742,30 +8769,119 @@ pub async fn commit_spawned_worker(
                 format!("unable to reserve worker commit authority: {error}"),
             ))
         }
-    }
+    };
     let files = request.files;
     let message = request.message;
-    let committed = tokio::task::spawn_blocking(move || {
-        crate::api::agent_workspace_tools::git_commit_payload(&root, &files, &message)
-    })
-    .await;
-    let release_execution_id = execution.id.clone();
-    let release_dispatch_job_id = dispatch_job_id.to_string();
-    if let Err(error) = state
-        .db
-        .with_conn(move |conn| {
-            crate::db::orchestration::release_spawned_commit_lease(
-                conn,
-                &release_execution_id,
-                &release_dispatch_job_id,
-            )
+    let supervisor = spawn_spawned_commit_supervisor(
+        state.db.clone(),
+        execution.id,
+        dispatch_job_id.to_string(),
+        lease_id,
+        move || crate::api::agent_workspace_tools::git_commit_payload(&root, &files, &message),
+    );
+    match supervisor.await {
+        Ok((committed, release_error)) => spawned_commit_response(committed, release_error),
+        Err(error) => Json(ApiResponse::err_coded(
+            ApiErrorCode::Internal,
+            format!("worker commit supervisor failed: {error}"),
+        )),
+    }
+}
+
+async fn retry_spawned_commit_lease_release<F, Fut>(mut release: F) -> Result<(), String>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<bool>>,
+{
+    let delays = [0, 50, 250, 1_000];
+    let mut last_error = None;
+    for delay_ms in delays {
+        if delay_ms > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+        }
+        match release().await {
+            Ok(true) => return Ok(()),
+            Ok(false) => {
+                return Err("spawned commit lease token no longer owns the execution".to_string())
+            }
+            Err(error) => last_error = Some(error.to_string()),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| "spawned commit lease release failed".to_string()))
+}
+
+type SpawnedCommitTaskResult = Result<Result<serde_json::Value, String>, tokio::task::JoinError>;
+
+fn spawn_spawned_commit_supervisor<F>(
+    db: std::sync::Arc<Database>,
+    execution_id: String,
+    dispatch_job_id: String,
+    lease_id: String,
+    git_operation: F,
+) -> tokio::task::JoinHandle<(SpawnedCommitTaskResult, Option<String>)>
+where
+    F: FnOnce() -> Result<serde_json::Value, String> + Send + 'static,
+{
+    tokio::spawn(async move {
+        let committed = tokio::task::spawn_blocking(git_operation).await;
+        if matches!(committed, Ok(Ok(_))) {
+            let settle_db = db.clone();
+            let settle_execution_id = execution_id.clone();
+            let settle_dispatch_job_id = dispatch_job_id.clone();
+            let settle_lease_id = lease_id.clone();
+            if let Err(error) = retry_spawned_commit_lease_release(|| {
+                let db = settle_db.clone();
+                let execution_id = settle_execution_id.clone();
+                let dispatch_job_id = settle_dispatch_job_id.clone();
+                let lease_id = settle_lease_id.clone();
+                async move {
+                    db.with_conn(move |conn| {
+                        crate::db::orchestration::settle_spawned_commit_lease(
+                            conn,
+                            &execution_id,
+                            &dispatch_job_id,
+                            &lease_id,
+                        )
+                    })
+                    .await
+                }
+            })
+            .await
+            {
+                tracing::warn!("unable to mark successful worker commit lease settled: {error}");
+            }
+        }
+        let release_error = retry_spawned_commit_lease_release(|| {
+            let db = db.clone();
+            let execution_id = execution_id.clone();
+            let dispatch_job_id = dispatch_job_id.clone();
+            let lease_id = lease_id.clone();
+            async move {
+                db.with_conn(move |conn| {
+                    crate::db::orchestration::release_spawned_commit_lease(
+                        conn,
+                        &execution_id,
+                        &dispatch_job_id,
+                        &lease_id,
+                    )
+                })
+                .await
+            }
         })
         .await
-    {
-        return Json(ApiResponse::err_coded(
-            ApiErrorCode::Internal,
-            format!("unable to release worker commit authority: {error}"),
-        ));
+        .err();
+        (committed, release_error)
+    })
+}
+
+fn spawned_commit_response(
+    committed: Result<Result<serde_json::Value, String>, tokio::task::JoinError>,
+    release_error: Option<String>,
+) -> Json<ApiResponse<serde_json::Value>> {
+    if let Some(error) = release_error {
+        tracing::warn!(
+            "unable to release worker commit authority: {error}; a settled lease can be reclaimed by reassignment or backend restart recovery"
+        );
     }
     match committed {
         Ok(Ok(payload)) => Json(ApiResponse::ok(payload)),
@@ -8908,7 +9024,7 @@ pub async fn deliver(
                     execution,
                     &alias,
                     Some(source_message_id.to_string()),
-                    Some(dispatch_job_id),
+                    crate::db::orchestration::DeliveryDispatchExpectation::Exact(dispatch_job_id),
                     &manifest_json,
                     DeliveryManifestAuthorship::NativeProjection,
                 )
@@ -10579,22 +10695,11 @@ mod tests {
             crate::DEFAULT_MAX_CONCURRENT_AGENTS,
         );
 
-        let lease_exec_id = exec_id.clone();
-        let lease_dispatch = stale_dispatch.clone();
-        let lease = db
-            .with_conn(move |conn| {
-                crate::db::orchestration::acquire_spawned_commit_lease(
-                    conn,
-                    &lease_exec_id,
-                    &lease_dispatch,
-                )
-            })
-            .await
-            .unwrap();
-        assert_eq!(
-            lease,
-            crate::db::orchestration::SpawnedCommitLeaseOutcome::Acquired
-        );
+        let lease_id = match acquire_test_spawned_commit_lease(&db, &exec_id, &stale_dispatch).await
+        {
+            crate::db::orchestration::SpawnedCommitLeaseOutcome::Acquired { lease_id } => lease_id,
+            other => panic!("expected lease, got {other:?}"),
+        };
         let blocked = match reassign_native_execution(
             &state,
             &exec_id,
@@ -10612,17 +10717,7 @@ mod tests {
         };
         assert!(blocked.to_string().contains("commit in progress"));
 
-        let release_exec_id = exec_id.clone();
-        let release_dispatch = stale_dispatch.clone();
-        db.with_conn(move |conn| {
-            crate::db::orchestration::release_spawned_commit_lease(
-                conn,
-                &release_exec_id,
-                &release_dispatch,
-            )
-        })
-        .await
-        .unwrap();
+        settle_test_spawned_commit_lease(&db, &exec_id, &stale_dispatch, &lease_id).await;
         reassign_native_execution(
             &state,
             &exec_id,
@@ -10642,7 +10737,7 @@ mod tests {
             stale_execution,
             "Claude Code",
             Some("stale-worker".into()),
-            Some(&stale_dispatch),
+            crate::db::orchestration::DeliveryDispatchExpectation::Exact(&stale_dispatch),
             &stale_manifest,
             DeliveryManifestAuthorship::NativeProjection,
         )
@@ -10687,6 +10782,262 @@ mod tests {
             delivered.success,
             "the replacement dispatch must still deliver"
         );
+    }
+
+    #[tokio::test]
+    async fn spawned_commit_lease_uses_exact_tokens_and_restart_recovery() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (task_ref, parent_id, _) = seed(&db, repo.path()).await;
+        let execution = provision_single_task_execution(
+            &db,
+            ProvisionInput {
+                task_reference: task_ref,
+                parent_discussion_id: parent_id,
+                worker: native_worker(),
+                base_rev: Some("main".into()),
+                idempotency_key: Some("spawned-commit-lease-liveness".into()),
+            },
+        )
+        .await
+        .unwrap();
+        let dispatch = execution.dispatch_job_id.unwrap();
+        let first_lease = match acquire_test_spawned_commit_lease(&db, &execution.id, &dispatch)
+            .await
+        {
+            crate::db::orchestration::SpawnedCommitLeaseOutcome::Acquired { lease_id } => lease_id,
+            other => panic!("expected lease, got {other:?}"),
+        };
+        assert_eq!(
+            acquire_test_spawned_commit_lease(&db, &execution.id, &dispatch).await,
+            crate::db::orchestration::SpawnedCommitLeaseOutcome::Busy
+        );
+        assert!(
+            !release_test_spawned_commit_lease(&db, &execution.id, &dispatch, "wrong-token",).await,
+            "a foreign token must not delete the live lease"
+        );
+        assert!(
+            release_test_spawned_commit_lease(&db, &execution.id, &dispatch, &first_lease).await
+        );
+        let second_lease = match acquire_test_spawned_commit_lease(&db, &execution.id, &dispatch)
+            .await
+        {
+            crate::db::orchestration::SpawnedCommitLeaseOutcome::Acquired { lease_id } => lease_id,
+            other => panic!("expected successor lease, got {other:?}"),
+        };
+        assert_ne!(first_lease, second_lease);
+        assert!(
+            !release_test_spawned_commit_lease(&db, &execution.id, &dispatch, &first_lease).await,
+            "a delayed release must not clear its successor"
+        );
+        settle_test_spawned_commit_lease(&db, &execution.id, &dispatch, &second_lease).await;
+        assert_eq!(
+            acquire_test_spawned_commit_lease(&db, &execution.id, &dispatch).await,
+            crate::db::orchestration::SpawnedCommitLeaseOutcome::AlreadySettled,
+            "a retry after Git completed must not run a second commit"
+        );
+        let recovered = db
+            .with_conn(crate::db::orchestration::recover_spawned_commit_leases_after_restart)
+            .await
+            .unwrap();
+        assert_eq!(recovered, 1);
+        assert_eq!(
+            db.with_conn(crate::db::orchestration::recover_spawned_commit_leases_after_restart)
+                .await
+                .unwrap(),
+            0,
+            "restart recovery is idempotent"
+        );
+    }
+
+    #[tokio::test]
+    async fn settled_lease_from_previous_dispatch_is_replaced_for_native_rework() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (task_ref, parent_id, _) = seed(&db, repo.path()).await;
+        let execution = provision_single_task_execution(
+            &db,
+            ProvisionInput {
+                task_reference: task_ref,
+                parent_discussion_id: parent_id,
+                worker: native_worker(),
+                base_rev: Some("main".into()),
+                idempotency_key: Some("settled-lease-native-rework".into()),
+            },
+        )
+        .await
+        .unwrap();
+        let first_dispatch = execution.dispatch_job_id.clone().unwrap();
+        let first_lease =
+            match acquire_test_spawned_commit_lease(&db, &execution.id, &first_dispatch).await {
+                crate::db::orchestration::SpawnedCommitLeaseOutcome::Acquired { lease_id } => {
+                    lease_id
+                }
+                other => panic!("expected first lease, got {other:?}"),
+            };
+        settle_test_spawned_commit_lease(&db, &execution.id, &first_dispatch, &first_lease).await;
+
+        let exec_id = execution.id.clone();
+        let child_id = execution.sub_discussion_id.clone().unwrap();
+        let second_dispatch = Uuid::new_v4().to_string();
+        let dedupe = format!("settled-lease-native-rework:{exec_id}");
+        let dispatch_id = second_dispatch.clone();
+        db.with_conn(move |conn| {
+            let job = crate::db::agent_dispatch::enqueue_for_latest_user(
+                conn,
+                crate::db::agent_dispatch::NewLatestUserDispatch {
+                    id: &dispatch_id,
+                    discussion_id: &child_id,
+                    dedupe_key: &dedupe,
+                    agent_override: Some(&AgentType::Ollama),
+                    chain_prompt_ids: &[],
+                    batch_item: None,
+                    group_id: None,
+                    group_concurrency_limit: None,
+                },
+            )?;
+            crate::db::orchestration::attach_execution_dispatch(conn, &exec_id, &job.id)
+        })
+        .await
+        .unwrap();
+
+        assert!(matches!(
+            acquire_test_spawned_commit_lease(&db, &execution.id, &second_dispatch).await,
+            crate::db::orchestration::SpawnedCommitLeaseOutcome::Acquired { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn database_reopen_clears_crash_leftover_commit_lease() {
+        let repo = init_repo();
+        let database_dir = tempfile::tempdir().unwrap();
+        let database_path = database_dir.path().join("restart.sqlite");
+        let db = std::sync::Arc::new(Database::open_path(&database_path).unwrap());
+        let (task_ref, parent_id, _) = seed(&db, repo.path()).await;
+        let execution = provision_single_task_execution(
+            &db,
+            ProvisionInput {
+                task_reference: task_ref,
+                parent_discussion_id: parent_id,
+                worker: native_worker(),
+                base_rev: Some("main".into()),
+                idempotency_key: Some("spawned-commit-restart-cleanup".into()),
+            },
+        )
+        .await
+        .unwrap();
+        let dispatch = execution.dispatch_job_id.unwrap();
+        assert!(matches!(
+            acquire_test_spawned_commit_lease(&db, &execution.id, &dispatch).await,
+            crate::db::orchestration::SpawnedCommitLeaseOutcome::Acquired { .. }
+        ));
+        assert_eq!(
+            count(&db, "SELECT COUNT(*) FROM task_execution_commit_leases").await,
+            1
+        );
+        drop(db);
+
+        let reopened = Database::open_path_for_backend_boot(&database_path).unwrap();
+        assert_eq!(
+            count(
+                &reopened,
+                "SELECT COUNT(*) FROM task_execution_commit_leases"
+            )
+            .await,
+            0,
+            "database startup must clear a lease owned by the dead backend"
+        );
+    }
+
+    #[tokio::test]
+    async fn request_cancellation_does_not_strand_supervised_commit_lease() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let (task_ref, parent_id, _) = seed(&db, repo.path()).await;
+        let execution = provision_single_task_execution(
+            &db,
+            ProvisionInput {
+                task_reference: task_ref,
+                parent_discussion_id: parent_id,
+                worker: native_worker(),
+                base_rev: Some("main".into()),
+                idempotency_key: Some("spawned-commit-cancelled-request".into()),
+            },
+        )
+        .await
+        .unwrap();
+        let dispatch = execution.dispatch_job_id.unwrap();
+        let lease_id = match acquire_test_spawned_commit_lease(&db, &execution.id, &dispatch).await
+        {
+            crate::db::orchestration::SpawnedCommitLeaseOutcome::Acquired { lease_id } => lease_id,
+            other => panic!("expected lease, got {other:?}"),
+        };
+        let (git_started_tx, git_started_rx) = tokio::sync::oneshot::channel();
+        let (unblock_git_tx, unblock_git_rx) = std::sync::mpsc::channel();
+        let supervisor_db = db.clone();
+        let execution_id = execution.id.clone();
+        let outer_request = tokio::spawn(async move {
+            let supervisor = spawn_spawned_commit_supervisor(
+                supervisor_db,
+                execution_id,
+                dispatch,
+                lease_id,
+                move || {
+                    let _ = git_started_tx.send(());
+                    unblock_git_rx.recv().unwrap();
+                    Ok(serde_json::json!({ "commit": "detached" }))
+                },
+            );
+            supervisor.await
+        });
+        git_started_rx.await.unwrap();
+        outer_request.abort();
+        let _ = outer_request.await;
+        unblock_git_tx.send(()).unwrap();
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if count(&db, "SELECT COUNT(*) FROM task_execution_commit_leases").await == 0 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the detached supervisor must release after Git completes");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn spawned_commit_release_retries_one_transient_delete_failure() {
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let retry_attempts = attempts.clone();
+        let release = tokio::spawn(async move {
+            retry_spawned_commit_lease_release(move || {
+                let attempt = retry_attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async move {
+                    if attempt == 0 {
+                        anyhow::bail!("simulated one-shot SQLite DELETE failure");
+                    }
+                    Ok(true)
+                }
+            })
+            .await
+        });
+        tokio::task::yield_now().await;
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
+        tokio::time::advance(std::time::Duration::from_millis(50)).await;
+        assert!(release.await.unwrap().is_ok());
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn successful_spawned_commit_is_not_masked_by_release_failure() {
+        let Json(response) = spawned_commit_response(
+            Ok(Ok(serde_json::json!({ "commit": "abc123" }))),
+            Some("simulated release failure".into()),
+        );
+        assert!(response.success);
+        assert_eq!(response.data.unwrap()["commit"], "abc123");
     }
 
     #[tokio::test]
@@ -10897,11 +11248,14 @@ mod tests {
         for execution in [&first_execution, &second_execution] {
             let child_id = execution.sub_discussion_id.clone().expect("worker room");
             let dispatch_job_id = execution.dispatch_job_id.clone().expect("worker dispatch");
+            let lookup_dispatch_job_id = dispatch_job_id.clone();
             let trigger_message_id = db
                 .with_conn(move |conn| {
-                    Ok(crate::db::agent_dispatch::get(conn, &dispatch_job_id)?
-                        .expect("dispatch exists")
-                        .trigger_message_id)
+                    Ok(
+                        crate::db::agent_dispatch::get(conn, &lookup_dispatch_job_id)?
+                            .expect("dispatch exists")
+                            .trigger_message_id,
+                    )
                 })
                 .await
                 .unwrap();
@@ -10916,6 +11270,7 @@ mod tests {
                     alias: "Claude Code",
                     actor_session_id: Some("kt-482-worker"),
                 },
+                &dispatch_job_id,
                 &manifest,
             )
             .await
@@ -13755,6 +14110,65 @@ mod tests {
         .to_string()
     }
 
+    async fn acquire_test_spawned_commit_lease(
+        db: &Database,
+        exec_id: &str,
+        dispatch_job_id: &str,
+    ) -> crate::db::orchestration::SpawnedCommitLeaseOutcome {
+        let exec_id = exec_id.to_string();
+        let dispatch_job_id = dispatch_job_id.to_string();
+        db.with_conn(move |conn| {
+            crate::db::orchestration::acquire_spawned_commit_lease(conn, &exec_id, &dispatch_job_id)
+        })
+        .await
+        .unwrap()
+    }
+
+    async fn release_test_spawned_commit_lease(
+        db: &Database,
+        exec_id: &str,
+        dispatch_job_id: &str,
+        lease_id: &str,
+    ) -> bool {
+        let exec_id = exec_id.to_string();
+        let dispatch_job_id = dispatch_job_id.to_string();
+        let lease_id = lease_id.to_string();
+        db.with_conn(move |conn| {
+            crate::db::orchestration::release_spawned_commit_lease(
+                conn,
+                &exec_id,
+                &dispatch_job_id,
+                &lease_id,
+            )
+        })
+        .await
+        .unwrap()
+    }
+
+    async fn settle_test_spawned_commit_lease(
+        db: &Database,
+        exec_id: &str,
+        dispatch_job_id: &str,
+        lease_id: &str,
+    ) {
+        let exec_id = exec_id.to_string();
+        let dispatch_job_id = dispatch_job_id.to_string();
+        let lease_id = lease_id.to_string();
+        assert!(
+            db.with_conn(move |conn| {
+                crate::db::orchestration::settle_spawned_commit_lease(
+                    conn,
+                    &exec_id,
+                    &dispatch_job_id,
+                    &lease_id,
+                )
+            })
+            .await
+            .unwrap(),
+            "the exact active lease must be marked settled"
+        );
+    }
+
     #[tokio::test]
     async fn native_worker_delivery_uses_child_room_and_exact_provider_identity() {
         let repo = init_repo();
@@ -13773,12 +14187,15 @@ mod tests {
         .await
         .unwrap();
         let child = execution.sub_discussion_id.clone().unwrap();
+        let dispatch_job_id = execution.dispatch_job_id.clone().unwrap();
+        let lookup_dispatch_job_id = dispatch_job_id.clone();
         let dispatch_trigger = {
-            let dispatch_job_id = execution.dispatch_job_id.clone().unwrap();
             db.with_conn(move |conn| {
-                Ok(crate::db::agent_dispatch::get(conn, &dispatch_job_id)?
-                    .unwrap()
-                    .trigger_message_id)
+                Ok(
+                    crate::db::agent_dispatch::get(conn, &lookup_dispatch_job_id)?
+                        .unwrap()
+                        .trigger_message_id,
+                )
             })
             .await
             .unwrap()
@@ -13808,6 +14225,7 @@ mod tests {
                     alias: "native worker",
                     actor_session_id: Some("native-delivery-turn"),
                 },
+                &dispatch_job_id,
                 &manifest,
             )
             .await
@@ -13825,6 +14243,7 @@ mod tests {
                 alias: "Claude Code",
                 actor_session_id: Some("native-delivery-turn"),
             },
+            &dispatch_job_id,
             &manifest,
         )
         .await
@@ -13874,12 +14293,15 @@ mod tests {
         .await
         .unwrap();
         let child = execution.sub_discussion_id.clone().unwrap();
+        let dispatch_job_id = execution.dispatch_job_id.clone().unwrap();
+        let lookup_dispatch_job_id = dispatch_job_id.clone();
         let dispatch_trigger = {
-            let dispatch_job_id = execution.dispatch_job_id.clone().unwrap();
             db.with_conn(move |conn| {
-                Ok(crate::db::agent_dispatch::get(conn, &dispatch_job_id)?
-                    .unwrap()
-                    .trigger_message_id)
+                Ok(
+                    crate::db::agent_dispatch::get(conn, &lookup_dispatch_job_id)?
+                        .unwrap()
+                        .trigger_message_id,
+                )
             })
             .await
             .unwrap()
@@ -13904,6 +14326,7 @@ mod tests {
                 alias: "Claude Code",
                 actor_session_id: Some("native-delivery-turn"),
             },
+            &dispatch_job_id,
             &projected,
         )
         .await
@@ -13934,6 +14357,7 @@ mod tests {
                 alias: "Claude Code",
                 actor_session_id: Some("native-delivery-turn"),
             },
+            &dispatch_job_id,
             &forged_mechanics.to_string(),
         )
         .await
@@ -13977,6 +14401,7 @@ mod tests {
                 alias: "Claude Code",
                 actor_session_id: Some("native-delivery-turn"),
             },
+            &dispatch_job_id,
             &drifted,
         )
         .await
@@ -14008,6 +14433,7 @@ mod tests {
                 alias: "Claude Code",
                 actor_session_id: Some("native-delivery-turn"),
             },
+            &dispatch_job_id,
             &pre_migration,
         )
         .await
@@ -14589,12 +15015,15 @@ mod tests {
         .await
         .unwrap();
         let child = execution.sub_discussion_id.clone().unwrap();
+        let dispatch_job_id = execution.dispatch_job_id.clone().unwrap();
+        let lookup_dispatch_job_id = dispatch_job_id.clone();
         let dispatch_trigger = {
-            let dispatch_job_id = execution.dispatch_job_id.clone().unwrap();
             db.with_conn(move |conn| {
-                Ok(crate::db::agent_dispatch::get(conn, &dispatch_job_id)?
-                    .unwrap()
-                    .trigger_message_id)
+                Ok(
+                    crate::db::agent_dispatch::get(conn, &lookup_dispatch_job_id)?
+                        .unwrap()
+                        .trigger_message_id,
+                )
             })
             .await
             .unwrap()
@@ -14610,6 +15039,7 @@ mod tests {
                 alias: "Claude Code",
                 actor_session_id: Some("native-delivery-turn"),
             },
+            &dispatch_job_id,
             &manifest,
         )
         .await
@@ -16423,6 +16853,7 @@ mod tests {
                 alias: "Ollama",
                 actor_session_id: Some("native-rework-1"),
             },
+            &dispatch_id,
             &manifest,
         )
         .await
@@ -16453,15 +16884,44 @@ mod tests {
             second_dispatch, dispatch_id,
             "each rework gets a new dispatch"
         );
+        let second_dispatch_for_lookup = second_dispatch.clone();
         let second_trigger = db
             .with_conn(move |conn| {
-                Ok(crate::db::agent_dispatch::get(conn, &second_dispatch)?
-                    .context("second native rework dispatch vanished")?
-                    .trigger_message_id)
+                Ok(
+                    crate::db::agent_dispatch::get(conn, &second_dispatch_for_lookup)?
+                        .context("second native rework dispatch vanished")?
+                        .trigger_message_id,
+                )
             })
             .await
             .unwrap();
         let manifest = projected_manifest_for_execution(&db, &exec_id).await;
+        let stale = deliver_native_worker_manifest(
+            &db,
+            &exec_id,
+            NativeExecutionCaller {
+                discussion_id: &child_id,
+                agent_type: &AgentType::Ollama,
+                source_message_id: Some(&trigger_message_id),
+                alias: "Ollama",
+                actor_session_id: Some("stale-native-rework-1"),
+            },
+            &dispatch_id,
+            &manifest,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(stale, DeliverOutcome::NotAddressed));
+        let execution_for_delivery = exec_id.clone();
+        assert!(
+            db.with_conn(move |conn| {
+                crate::db::worker_deliveries::get_delivery(conn, &execution_for_delivery, 2)
+            })
+            .await
+            .unwrap()
+            .is_none(),
+            "the stale dispatch must not create the current attempt delivery"
+        );
         let delivered = deliver_native_worker_manifest(
             &db,
             &exec_id,
@@ -16472,6 +16932,7 @@ mod tests {
                 alias: "Ollama",
                 actor_session_id: Some("native-rework-2"),
             },
+            &second_dispatch,
             &manifest,
         )
         .await

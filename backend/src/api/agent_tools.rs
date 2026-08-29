@@ -1443,6 +1443,9 @@ impl KronnToolExecutor {
                     Err(error) => return fail(call, format!("manifest is not JSON: {error}")),
                 };
                 let actor_session_id = self.actor_session_id();
+                let Some(source_dispatch_job_id) = self.source_dispatch_job_id.as_deref() else {
+                    return fail(call, "execution not found or caller is not a party");
+                };
                 match crate::api::orchestration::deliver_native_worker_manifest(
                     &self.state.db,
                     &execution_id,
@@ -1453,6 +1456,7 @@ impl KronnToolExecutor {
                         alias: &self.actor_id,
                         actor_session_id: actor_session_id.as_deref(),
                     },
+                    source_dispatch_job_id,
                     &manifest_json,
                 )
                 .await

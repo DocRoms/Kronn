@@ -1540,11 +1540,23 @@ pub fn attach_execution_dispatch(conn: &Connection, exec_id: &str, job_id: &str)
 /// Result of reserving the non-transactional Git commit boundary for a spawned
 /// CLI worker. The lease is keyed by the immutable dispatch that launched that
 /// process; reassignment refuses while it exists.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SpawnedCommitLeaseOutcome {
-    Acquired,
+    Acquired {
+        lease_id: String,
+    },
+    /// Git completed for this exact dispatch but its lease deletion did not.
+    /// Do not run Git again; the worker can continue to delivery.
+    AlreadySettled,
     NotCurrent,
     Busy,
+}
+
+/// No commit process from the previous backend can still be live: startup owns
+/// the data-directory lock before opening SQLite. Clear crash leftovers before
+/// any dispatcher or request handler can observe them.
+pub fn recover_spawned_commit_leases_after_restart(conn: &Connection) -> Result<usize> {
+    Ok(conn.execute("DELETE FROM task_execution_commit_leases", [])?)
 }
 
 pub fn acquire_spawned_commit_lease(
@@ -1553,43 +1565,98 @@ pub fn acquire_spawned_commit_lease(
     dispatch_job_id: &str,
 ) -> Result<SpawnedCommitLeaseOutcome> {
     in_savepoint(conn, |conn| {
+        let lease_id = Uuid::new_v4().to_string();
         let inserted = conn.execute(
             "INSERT OR IGNORE INTO task_execution_commit_leases \
-                 (task_execution_id, dispatch_job_id, created_at) \
-             SELECT id, ?2, ?3 FROM task_executions \
+                 (task_execution_id, dispatch_job_id, lease_id, created_at) \
+             SELECT id, ?2, ?3, ?4 FROM task_executions \
               WHERE id = ?1 AND status = 'Working' AND dispatch_job_id = ?2",
-            params![exec_id, dispatch_job_id, Utc::now().to_rfc3339()],
+            params![exec_id, dispatch_job_id, lease_id, Utc::now().to_rfc3339(),],
         )?;
         if inserted == 1 {
-            return Ok(SpawnedCommitLeaseOutcome::Acquired);
+            return Ok(SpawnedCommitLeaseOutcome::Acquired { lease_id });
         }
-        let current: Option<String> = conn
+        let current: Option<(String, Option<String>, Option<String>, Option<String>)> = conn
             .query_row(
-                "SELECT dispatch_job_id FROM task_executions \
-                  WHERE id = ?1 AND status = 'Working'",
+                "SELECT e.dispatch_job_id, l.dispatch_job_id, l.lease_id, l.settled_at \
+                 FROM task_executions e \
+                 LEFT JOIN task_execution_commit_leases l ON l.task_execution_id = e.id \
+                 WHERE e.id = ?1 AND e.status = 'Working'",
                 [exec_id],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .optional()?;
-        Ok(if current.as_deref() == Some(dispatch_job_id) {
-            SpawnedCommitLeaseOutcome::Busy
-        } else {
-            SpawnedCommitLeaseOutcome::NotCurrent
+        Ok(match current {
+            Some((current_dispatch, _, _, _)) if current_dispatch != dispatch_job_id => {
+                SpawnedCommitLeaseOutcome::NotCurrent
+            }
+            Some((_, Some(lease_dispatch), _, Some(_))) if lease_dispatch == dispatch_job_id => {
+                SpawnedCommitLeaseOutcome::AlreadySettled
+            }
+            Some((_, Some(lease_dispatch), Some(previous_lease_id), Some(_))) => {
+                // A settled lease belongs to a completed Git operation.  If a
+                // rework attached a new dispatch before cleanup retried, reap
+                // only that old lease and reserve the current dispatch in the
+                // same savepoint.
+                let reaped = conn.execute(
+                    "DELETE FROM task_execution_commit_leases \
+                      WHERE task_execution_id = ?1 AND dispatch_job_id = ?2 \
+                        AND lease_id = ?3 AND settled_at IS NOT NULL",
+                    params![exec_id, lease_dispatch, previous_lease_id],
+                )?;
+                anyhow::ensure!(
+                    reaped == 1,
+                    "settled commit lease changed during replacement"
+                );
+                let acquired = conn.execute(
+                    "INSERT INTO task_execution_commit_leases \
+                         (task_execution_id, dispatch_job_id, lease_id, created_at) \
+                     SELECT id, ?2, ?3, ?4 FROM task_executions \
+                      WHERE id = ?1 AND status = 'Working' AND dispatch_job_id = ?2",
+                    params![exec_id, dispatch_job_id, lease_id, Utc::now().to_rfc3339()],
+                )?;
+                anyhow::ensure!(
+                    acquired == 1,
+                    "current dispatch changed during commit lease replacement"
+                );
+                SpawnedCommitLeaseOutcome::Acquired { lease_id }
+            }
+            Some((_, _, _, None)) => SpawnedCommitLeaseOutcome::Busy,
+            _ => SpawnedCommitLeaseOutcome::NotCurrent,
         })
     })
+}
+
+/// Record that Git has returned successfully before attempting the best-effort
+/// lease deletion. This is the only state a reassignment may reclaim: no Git
+/// process remains live once this write is committed.
+pub fn settle_spawned_commit_lease(
+    conn: &Connection,
+    exec_id: &str,
+    dispatch_job_id: &str,
+    lease_id: &str,
+) -> Result<bool> {
+    let updated = conn.execute(
+        "UPDATE task_execution_commit_leases SET settled_at = ?4 \
+          WHERE task_execution_id = ?1 AND dispatch_job_id = ?2 AND lease_id = ?3 \
+            AND settled_at IS NULL",
+        params![exec_id, dispatch_job_id, lease_id, Utc::now().to_rfc3339()],
+    )?;
+    Ok(updated == 1)
 }
 
 pub fn release_spawned_commit_lease(
     conn: &Connection,
     exec_id: &str,
     dispatch_job_id: &str,
-) -> Result<()> {
-    conn.execute(
+    lease_id: &str,
+) -> Result<bool> {
+    let deleted = conn.execute(
         "DELETE FROM task_execution_commit_leases \
-          WHERE task_execution_id = ?1 AND dispatch_job_id = ?2",
-        params![exec_id, dispatch_job_id],
+          WHERE task_execution_id = ?1 AND dispatch_job_id = ?2 AND lease_id = ?3",
+        params![exec_id, dispatch_job_id, lease_id],
     )?;
-    Ok(())
+    Ok(deleted == 1)
 }
 
 pub fn get_execution_for_dispatch(
@@ -2266,13 +2333,21 @@ pub fn commit_cli_rework_checkpoint(
 /// bare UPDATE), records the queryable `review_requested` obligation and posts the
 /// principal-targeted review request into the PARENT room. Nothing is visible until
 /// commit; any raced move rolls the whole commit back.
+pub enum DeliveryDispatchExpectation<'a> {
+    /// The caller is a joined CLI worker whose durable session identity is the
+    /// authorization boundary. Its execution may still have a native dispatch;
+    /// this variant deliberately imposes no dispatch-column constraint.
+    Unconstrained,
+    Exact(&'a str),
+}
+
 pub struct DeliveryCheckpoint<'a> {
     pub exec_id: &'a str,
     pub attempt_no: u32,
     /// Spawned CLI workers pin the immutable dispatch that started their
     /// process. The delivery transaction compares it with the current row so
     /// an intervening rework cannot accept a stale worker's manifest.
-    pub expected_dispatch_job_id: Option<&'a str>,
+    pub dispatch_expectation: DeliveryDispatchExpectation<'a>,
     /// The exact HEAD delivered (denormalized onto the delivery row for the DoD-5 check).
     pub head_sha: &'a str,
     /// The full validated DeliveryManifest v1 bytes.
@@ -2330,7 +2405,13 @@ pub fn commit_delivery_checkpoint(
     let Some((current, dispatch_job_id)) = current else {
         return Ok(DeliveryCheckpointOutcome::ExecutionRaced);
     };
-    if input.expected_dispatch_job_id != dispatch_job_id.as_deref() {
+    let dispatch_matches = match input.dispatch_expectation {
+        DeliveryDispatchExpectation::Unconstrained => true,
+        DeliveryDispatchExpectation::Exact(expected) => {
+            dispatch_job_id.as_deref() == Some(expected)
+        }
+    };
+    if !dispatch_matches {
         return Ok(DeliveryCheckpointOutcome::ExecutionRaced);
     }
     let status = TaskExecutionStatus::from_str(&current)?;
@@ -4264,6 +4345,15 @@ pub fn reassign_execution_worker(
                 execution.status.as_str()
             );
         }
+        // A lease marked settled proves its supervised Git operation already
+        // returned. Reap it before deciding whether a live commit still bars
+        // reassignment; this recovers a transient DELETE failure without ever
+        // crossing a running Git boundary.
+        conn.execute(
+            "DELETE FROM task_execution_commit_leases \
+              WHERE task_execution_id = ?1 AND settled_at IS NOT NULL",
+            [exec_id],
+        )?;
         let commit_in_progress: bool = conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM task_execution_commit_leases \
               WHERE task_execution_id = ?1)",
