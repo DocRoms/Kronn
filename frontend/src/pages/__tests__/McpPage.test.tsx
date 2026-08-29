@@ -190,14 +190,15 @@ describe('McpPage', () => {
     );
 
     const card = screen.getByRole('button', { name: 'GitHub Main — Voir les détails' });
-    expect(card).toHaveAttribute('data-kind', 'mcp');
-    expect(card.querySelector('.mcp-plugin-card-identity')).toHaveTextContent('GitHub MainGitHub');
-    expect(card.querySelector('.mcp-plugin-card-meta')).toHaveTextContent(/1 projet\s+1/);
-    expect(card.querySelector('.mcp-plugin-card-footer')).toHaveTextContent('MCP');
-    expect(container.querySelector('[data-config-id="c1"]')).toBe(card);
+    const pluginCard = container.querySelector('[data-config-id="c1"]');
+    expect(pluginCard).toHaveAttribute('data-kind', 'mcp');
+    expect(pluginCard?.querySelector('.mcp-plugin-card-identity')).toHaveTextContent('GitHub MainGitHub');
+    expect(pluginCard?.querySelector('.mcp-plugin-card-meta')).toHaveTextContent(/1 projet\s+1/);
+    expect(pluginCard?.querySelector('.mcp-plugin-card-footer')).toHaveTextContent('MCP');
+    expect(card).toHaveClass('collection-shell-row-button');
   });
 
-  it('opens plugin details as a non-blocking side panel and renders the real probe result', async () => {
+  it('opens plugin details in the shared collection detail pane and renders the real probe result', async () => {
     const server = makeServer('mcp-fastly', 'Fastly');
     const config = makeConfig('fastly-config', 'mcp-fastly', 'Fastly');
     const overview: McpOverview = {
@@ -225,11 +226,9 @@ describe('McpPage', () => {
     wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
     fireEvent.click(screen.getByRole('button', { name: 'Fastly — Voir les détails' }));
 
-    // Side panel, not a modal: no backdrop is mounted, and the page reserves
-    // the panel's width instead of letting it cover the cards.
-    expect(document.querySelector('[data-testid="mcp-plugin-panel"]')).not.toBeNull();
+    expect(document.querySelector('.collection-shell')).not.toBeNull();
+    expect(document.querySelector('.mcp-detail-inline')).not.toBeNull();
     expect(document.querySelector('.mcp-modal-overlay')).toBeNull();
-    expect(document.querySelector('.mcp-page-with-panel')).not.toBeNull();
     expect(document.querySelector('[data-testid="mcp-plugin-probe"]')).not.toBeNull();
 
     const probeButton = screen.getByRole('button', { name: 'Tester' });
@@ -299,24 +298,7 @@ describe('McpPage', () => {
     expect(warning).toHaveTextContent('api-microsoft-365');
   });
 
-  it('anchors the plugin panel below the list controls boundary', async () => {
-    const rectAt = (bottom: number) => ({
-      x: 0,
-      y: 0,
-      width: 1000,
-      height: bottom,
-      top: 0,
-      right: 1000,
-      bottom,
-      left: 0,
-      toJSON: () => ({}),
-    }) as DOMRect;
-    const rectSpy = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect')
-      .mockImplementation(function measurePluginChrome(this: HTMLElement) {
-        if (this.classList.contains('mcp-list-boundary')) return rectAt(264);
-        if (this.classList.contains('mcp-page-header')) return rectAt(96);
-        return rectAt(0);
-      });
+  it('uses shared collection search and selection for plugin details', async () => {
     const overview: McpOverview = {
       servers: [makeServer('github', 'GitHub')],
       configs: [makeConfig('github-config', 'github', 'GitHub')],
@@ -325,16 +307,29 @@ describe('McpPage', () => {
       incomplete_configs: [],
     };
 
-    try {
-      wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
-      await act(async () => {});
-      fireEvent.click(screen.getByRole('button', { name: 'GitHub — Voir les détails' }));
+    wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
+    const search = screen.getByRole('textbox', { name: 'Rechercher un plugin ou un projet...' });
+    fireEvent.change(search, { target: { value: 'missing' } });
+    expect(screen.queryByRole('button', { name: 'GitHub — Voir les détails' })).toBeNull();
+    fireEvent.change(search, { target: { value: 'github' } });
+    fireEvent.click(screen.getByRole('button', { name: 'GitHub — Voir les détails' }));
+    expect(document.querySelector('.collection-shell-row[data-selected="true"]')).not.toBeNull();
+    expect(document.querySelector('.mcp-detail-inline')).not.toBeNull();
+  });
 
-      expect(screen.getByTestId('mcp-list-boundary')).toBeTruthy();
-      expect(screen.getByTestId('mcp-plugin-panel')).toHaveStyle({ top: '264px' });
-    } finally {
-      rectSpy.mockRestore();
-    }
+  it('exposes plugin actions through the shared collection menu', () => {
+    const overview: McpOverview = {
+      servers: [makeServer('github', 'GitHub')],
+      configs: [makeConfig('github-config', 'github', 'GitHub')],
+      customized_contexts: [],
+      incompatibilities: [],
+      incomplete_configs: [],
+    };
+
+    wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
+    fireEvent.click(screen.getByRole('button', { name: 'GitHub — Voir les détails' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Plus d’actions' }));
+    expect(screen.getByRole('menuitem', { name: 'Supprimer cette config' })).toBeTruthy();
   });
 
   it('shows real plugin capabilities and persists only selectable preferences', async () => {
@@ -435,13 +430,13 @@ describe('McpPage', () => {
 
     wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
     fireEvent.click(screen.getByRole('button', { name: 'Alpha — Voir les détails' }));
-    expect(document.querySelector('[data-testid="mcp-plugin-panel"]')).toHaveAttribute('aria-label', 'Alpha');
+    expect(document.querySelector('[data-testid="mcp-plugin-detail"]')).toHaveAttribute('aria-label', 'Alpha');
 
     // No close step: the second card is reachable because nothing blocks it.
     fireEvent.click(screen.getByRole('button', { name: 'Bravo — Voir les détails' }));
-    const panels = document.querySelectorAll('[data-testid="mcp-plugin-panel"]');
-    expect(panels).toHaveLength(1);
-    expect(panels[0]).toHaveAttribute('aria-label', 'Bravo');
+    const details = document.querySelectorAll('[data-testid="mcp-plugin-detail"]');
+    expect(details).toHaveLength(1);
+    expect(details[0]).toHaveAttribute('aria-label', 'Bravo');
   });
 
   it('combines plugin type filtering with criterion and direction sorting', () => {
@@ -963,8 +958,8 @@ describe('McpPage', () => {
     expect(screen.getByPlaceholderText('Non enregistré — session CLI locale utilisée')).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: 'Direct API — Voir les détails' }));
-    expect(container.querySelector('[data-testid="mcp-plugin-panel"]')).toHaveTextContent('Identifiants utilisés par l’API');
-    expect(container.querySelector('[data-testid="mcp-plugin-panel"]')).toHaveTextContent('Utilisé directement par Kronn');
+    expect(container.querySelector('[data-testid="mcp-plugin-detail"]')).toHaveTextContent('Identifiants utilisés par l’API');
+    expect(container.querySelector('[data-testid="mcp-plugin-detail"]')).toHaveTextContent('Utilisé directement par Kronn');
   });
 
   it('shows community badge for third-party MCP in registry', () => {
