@@ -2570,7 +2570,7 @@ export interface UpsertExternalApiConnection {
 
 export interface ExternalApiConnectionTestResult {
   ok: boolean;
-  status: 'success' | 'invalid_url' | 'auth_error' | 'http_error' | 'timeout' | 'transport_error';
+  status: 'success' | 'invalid_url' | 'credential_required' | 'auth_error' | 'http_error' | 'timeout' | 'transport_error';
   models: string[];
   hint: string | null;
 }
@@ -2582,7 +2582,7 @@ export const externalApi = {
   update: (id: string, body: UpsertExternalApiConnection) =>
     api<ExternalApiConnectionView>('PUT', `/external-api/connections/${id}`, body),
   remove: (id: string) => api<null>('DELETE', `/external-api/connections/${id}`),
-  test: (body: { endpoint: string | null; api_key: string | null; connection_id?: string }) =>
+  test: (body: { endpoint: string | null; api_key: string | null; connection_id?: string; origin_preset?: ExternalApiPreset }) =>
     api<ExternalApiConnectionTestResult>('POST', '/external-api/connections/test', body),
 };
 

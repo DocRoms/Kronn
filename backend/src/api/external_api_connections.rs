@@ -58,6 +58,11 @@ pub struct TestConnectionRequest {
     pub api_key: Option<String>,
     #[serde(default)]
     pub connection_id: Option<String>,
+    /// The saved connection's provider context. A stored credential is only
+    /// reusable when this still matches the persisted connection as well as
+    /// its canonical endpoint.
+    #[serde(default)]
+    pub origin_preset: Option<ExternalApiConnectionPreset>,
 }
 
 #[derive(Debug, Serialize)]
@@ -222,13 +227,29 @@ pub async fn test(
                     .with_read_conn(move |conn| store::get(conn, &lookup_id))
                     .await
                 {
-                    Ok(Some(connection)) => state
-                        .config
-                        .read()
-                        .await
-                        .tokens
-                        .active_key_for(&connection.credential_slug)
-                        .map(str::to_string),
+                    Ok(Some(connection))
+                        if connection.endpoint.as_deref() == Some(endpoint.as_str())
+                            && req.origin_preset == Some(connection.origin_preset) =>
+                    {
+                        state
+                            .config
+                            .read()
+                            .await
+                            .tokens
+                            .active_key_for(&connection.credential_slug)
+                            .map(str::to_string)
+                    }
+                    Ok(Some(_)) => {
+                        return Json(ApiResponse::ok(TestConnectionResponse {
+                            ok: false,
+                            status: "credential_required".into(),
+                            models: vec![],
+                            hint: Some(
+                                "The endpoint or provider changed. Enter the API key again before testing."
+                                    .into(),
+                            ),
+                        }));
+                    }
                     _ => None,
                 }
             }

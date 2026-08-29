@@ -298,6 +298,8 @@ export function ExternalApiSection({ t, toast, modelCostSuffix }: ExternalApiSec
   const [submitting, setSubmitting] = useState(false);
   const [testResult, setTestResult] = useState<ExternalApiConnectionTestResult | null>(null);
   const [testing, setTesting] = useState(false);
+  const [savedTests, setSavedTests] = useState<Record<string, ExternalApiConnectionTestResult | null>>({});
+  const [testingSavedId, setTestingSavedId] = useState<string | null>(null);
 
   const changeConnection = (updater: (prev: FormState) => FormState) => {
     setTestResult(null);
@@ -310,12 +312,33 @@ export function ExternalApiSection({ t, toast, modelCostSuffix }: ExternalApiSec
       setTestResult(await externalApi.test({
         endpoint: form.endpoint.trim() || null,
         api_key: form.keyTouched ? form.api_key : null,
-        ...(editingId ? { connection_id: editingId } : {}),
+        ...(editingId ? { connection_id: editingId, origin_preset: form.origin_preset } : {}),
       }));
     } catch (e) {
       setTestResult({ ok: false, status: 'transport_error', models: [], hint: userError(e) });
     } finally {
       setTesting(false);
+    }
+  };
+
+  const testSavedConnection = async (connection: ExternalApiConnectionView) => {
+    setTestingSavedId(connection.id);
+    setSavedTests(prev => ({ ...prev, [connection.id]: null }));
+    try {
+      const result = await externalApi.test({
+        endpoint: connection.endpoint,
+        api_key: null,
+        connection_id: connection.id,
+        origin_preset: connection.origin_preset,
+      });
+      setSavedTests(prev => ({ ...prev, [connection.id]: result }));
+    } catch (e) {
+      setSavedTests(prev => ({
+        ...prev,
+        [connection.id]: { ok: false, status: 'transport_error', models: [], hint: userError(e) },
+      }));
+    } finally {
+      setTestingSavedId(null);
     }
   };
 
@@ -473,6 +496,16 @@ export function ExternalApiSection({ t, toast, modelCostSuffix }: ExternalApiSec
                     <button
                       type="button"
                       className="set-icon-btn"
+                      disabled={!c.endpoint || testingSavedId === c.id}
+                      onClick={() => void testSavedConnection(c)}
+                      aria-label={t('config.extApi.testConnection')}
+                      data-testid={`ext-api-test-saved-${c.id}`}
+                    >
+                      {testingSavedId === c.id ? <Loader2 size={11} className="spin" /> : <Check size={11} />}
+                    </button>
+                    <button
+                      type="button"
+                      className="set-icon-btn"
                       onClick={() => startEdit(c)}
                       aria-label={t('common.save')}
                       data-testid={`ext-api-edit-${c.id}`}
@@ -491,6 +524,20 @@ export function ExternalApiSection({ t, toast, modelCostSuffix }: ExternalApiSec
                   </div>
                 </div>
                 {c.endpoint && <code className="set-ext-api-conn-endpoint">{c.endpoint}</code>}
+                {savedTests[c.id] ? (
+                  <p className="set-hint" data-testid={`ext-api-saved-test-result-${c.id}`} data-status={savedTests[c.id]?.status}>
+                    {savedTests[c.id]?.hint ?? (
+                      savedTests[c.id]?.models.length
+                        ? t('config.extApi.modelsLoaded', savedTests[c.id]?.models.length ?? 0)
+                        : t('config.extApi.noModels')
+                    )}
+                  </p>
+                ) : null}
+                {savedTests[c.id]?.ok && savedTests[c.id]?.models.length ? (
+                  <div className="set-ext-api-conn-models" data-testid={`ext-api-saved-models-${c.id}`}>
+                    {savedTests[c.id]?.models.map(model => <code key={model}>{model}</code>)}
+                  </div>
+                ) : null}
                 {renderTiers(c)}
               </div>
             ),
