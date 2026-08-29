@@ -38,6 +38,15 @@ export interface CollectionListContext<TItem> {
   canMultiSelect: boolean;
   isMultiSelected: (item: TItem) => boolean;
   toggleMultiSelection: (id: CollectionItemId) => void;
+  /** Props for the one focusable control representing an item in a custom
+   * list. Spread these onto the row button so grouped/nested renderers keep
+   * the shell's activation, selection semantics, and roving keyboard target. */
+  getRowProps: (item: TItem) => {
+    className: string;
+    role: 'listitem';
+    'aria-selected': boolean;
+    onClick: () => void;
+  };
 }
 
 export interface CollectionShellSlots<TItem> {
@@ -74,6 +83,8 @@ export interface CollectionShellProps<TItem> {
   actions?: CollectionAction<TItem>[];
   slots: CollectionShellSlots<TItem>;
   isMobile?: boolean;
+  /** For surfaces whose detail pane is already composed by the caller. */
+  sidebarOnly?: boolean;
   sidebarOpen?: boolean;
   onSidebarOpenChange?: (open: boolean) => void;
   labels: {
@@ -95,7 +106,7 @@ export interface CollectionShellProps<TItem> {
 export function CollectionShell<TItem>({
   ariaLabel, items, getId, getLabel, isFavorite, onToggleFavorite, filters = [],
   persistence, selectedId, onSelect, selectedIds, onSelectedIdsChange, actions = [],
-  slots, isMobile = false, sidebarOpen = true, onSidebarOpenChange, labels,
+  slots, isMobile = false, sidebarOnly = false, sidebarOpen = true, onSidebarOpenChange, labels,
 }: CollectionShellProps<TItem>) {
   const searchRef = useRef<HTMLInputElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -164,12 +175,14 @@ export function CollectionShell<TItem>({
       searchRef.current?.focus();
       return;
     }
-    if (textControl || (event.key !== 'ArrowDown' && event.key !== 'ArrowUp')) return;
+    if (textControl || !['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
     const rows = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('.collection-shell-row-button'));
     if (rows.length === 0) return;
     const current = rows.indexOf(document.activeElement as HTMLButtonElement);
-    const direction = event.key === 'ArrowDown' ? 1 : -1;
-    const next = current < 0 ? (direction > 0 ? 0 : rows.length - 1) : (current + direction + rows.length) % rows.length;
+    const next = event.key === 'Home' ? 0
+      : event.key === 'End' ? rows.length - 1
+        : current < 0 ? (event.key === 'ArrowDown' ? 0 : rows.length - 1)
+          : (current + (event.key === 'ArrowDown' ? 1 : -1) + rows.length) % rows.length;
     event.preventDefault();
     rows[next]?.focus();
   };
@@ -181,6 +194,12 @@ export function CollectionShell<TItem>({
     canMultiSelect,
     isMultiSelected: item => canMultiSelect && (selectedIds?.has(getId(item)) ?? false),
     toggleMultiSelection,
+    getRowProps: item => ({
+      className: 'collection-shell-row-button',
+      role: 'listitem',
+      'aria-selected': selectedId === getId(item),
+      onClick: () => selectItem(item),
+    }),
   };
 
   const sidebar = (
@@ -217,6 +236,8 @@ export function CollectionShell<TItem>({
       {slots.sidebarFooter}
     </aside>
   );
+
+  if (sidebarOnly) return sidebar;
 
   return <section className="collection-shell" data-mobile={isMobile}>
     {(!isMobile || sidebarOpen) && sidebar}

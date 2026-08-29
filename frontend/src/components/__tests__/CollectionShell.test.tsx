@@ -95,11 +95,11 @@ describe('CollectionShell', () => {
           renderDetail: item => <p>Detail: {item?.name ?? 'none'}</p>,
           beforeSidebarHeader: <div>Custom title row</div>,
           sidebarFooter: <div>Custom footer</div>,
-          renderList: ({ visibleItems, selectItem, isSelected }) => (
+          renderList: ({ visibleItems, getRowProps, isSelected }) => (
             <ul>
               {visibleItems.map(item => (
                 <li key={item.id} data-selected={isSelected(item)}>
-                  <button type="button" onClick={() => selectItem(item)}>Grouped {item.name}</button>
+                  <button type="button" {...getRowProps(item)}>Grouped {item.name}</button>
                 </li>
               ))}
             </ul>
@@ -114,5 +114,32 @@ describe('CollectionShell', () => {
     expect(oneRow.closest('li')).toHaveAttribute('data-selected', 'true');
     fireEvent.click(screen.getByRole('button', { name: 'Grouped Two' }));
     expect(screen.getByText('Detail: Two')).toBeInTheDocument();
+  });
+
+  it('keeps grouped custom rows in the shared keyboard navigation contract', () => {
+    function GroupedFixture() {
+      const [query, setQuery] = useState('');
+      const [favoritesOnly, setFavoritesOnly] = useState(false);
+      const [selectedId, setSelectedId] = useState<string | null>(null);
+      return <CollectionShell<Item>
+        ariaLabel="Keyboard grouped collection" items={items} getId={item => item.id} getLabel={item => item.name}
+        persistence={{ query, onQueryChange: setQuery, favoritesOnly, onFavoritesOnlyChange: setFavoritesOnly }}
+        selectedId={selectedId} onSelect={setSelectedId} labels={labels}
+        slots={{
+          renderDetail: () => null,
+          renderList: ({ visibleItems, getRowProps }) => <div>{visibleItems.map(item => (
+            <section key={item.id}><button type="button" {...getRowProps(item)}>Grouped {item.name}</button></section>
+          ))}</div>,
+        }}
+      />;
+    }
+    render(<GroupedFixture />);
+    const sidebar = screen.getByRole('complementary', { name: 'Keyboard grouped collection' });
+    fireEvent.keyDown(sidebar, { key: 'End' });
+    expect(screen.getByRole('button', { name: 'Grouped Two' })).toHaveFocus();
+    fireEvent.keyDown(sidebar, { key: 'Home' });
+    expect(screen.getByRole('button', { name: 'Grouped One' })).toHaveFocus();
+    fireEvent.keyDown(sidebar, { key: 'ArrowDown' });
+    expect(screen.getByRole('button', { name: 'Grouped Two' })).toHaveFocus();
   });
 });
