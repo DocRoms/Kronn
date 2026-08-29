@@ -397,6 +397,15 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   const [batchQAResult, setBatchQAResult] = useState<{ status: string; items: Array<{ input: unknown; status: string; response?: unknown; error?: string; http_status?: number }>; total: number; succeeded: number; failed: number } | null>(null);
   const [showCreateQE, setShowCreateQE] = useState(false);
   const [editingQE, setEditingQE] = useState<QuickExec | null>(null);
+  const [showAutomationActions, setShowAutomationActions] = useState(false);
+  useEffect(() => {
+    if (!showAutomationActions) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setShowAutomationActions(false);
+    };
+    window.addEventListener('keydown', closeOnEscape);
+    return () => window.removeEventListener('keydown', closeOnEscape);
+  }, [showAutomationActions]);
   const [runningQE, setRunningQE] = useState<QuickExec | null>(null);
   const [runVarsQE, setRunVarsQE] = useState<Record<string, string>>({});
   const [runQEState, setRunQEState] = useState<{ busy: boolean; data: unknown | null; error: string | null }>({ busy: false, data: null, error: null });
@@ -1258,11 +1267,10 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     }
   };
 
-  // Lazy-load API plugins on first switch to the QuickApis tab. Same
-  // pattern as the workflow wizard does on mount, but here only when
-  // the user actually opens the tab — keeps the page light.
+  // Lazy-load API plugins when the Quick APIs tab or the creation chooser
+  // needs to know whether that resource can be created.
   useEffect(() => {
-    if (tab !== 'quickApis' || availableApiPlugins.length > 0) return;
+    if ((tab !== 'quickApis' && !showAutomationActions) || availableApiPlugins.length > 0) return;
     mcpsApi.overview()
       .then(overview => {
         const options: ApiPluginOption[] = [];
@@ -1275,7 +1283,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
       })
       .catch(e => console.warn('Failed to load API plugins:', e));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab]);
+  }, [showAutomationActions, tab]);
 
   const renderTemplate = (template: string, vars: Record<string, string>): string => {
     let rendered = template;
@@ -1700,6 +1708,21 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     setEditingQE(null);
   };
 
+  const openAutomationCreation = (kind: AutomationTab) => {
+    clearAutomationEditors();
+    setShowAutomationActions(false);
+    setSelectedId(null);
+    setDetailWorkflow(null);
+    setSelectedQuickPromptId(null);
+    setSelectedQuickApiId(null);
+    setSelectedQuickExecId(null);
+    setTab(kind);
+    if (kind === 'workflows') setShowCreate(true);
+    else if (kind === 'quickPrompts') setShowCreateQP(true);
+    else if (kind === 'quickApis') setShowCreateQA(true);
+    else setShowCreateQE(true);
+  };
+
   const selectAutomationKind = (kind: AutomationTab) => {
     clearAutomationEditors();
     setTab(kind);
@@ -1778,9 +1801,6 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
       || showCreate || editingWorkflow || showCreateQA || editingQA
       || showCreateQP || editingQP || showCreateQE || editingQE,
   );
-  const currentResourceSelected = Boolean(
-    selectedId || selectedQuickApi || selectedQuickPrompt || selectedQuickExec,
-  );
   const automationContentTitle = detailWorkflow?.name
     ?? selectedQuickApi?.name
     ?? selectedQuickPrompt?.name
@@ -1828,6 +1848,17 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
             <span className="disc-sidebar-header-count">{' · '}{totalAutomationResources}</span>
           </span>
           <div className="disc-sidebar-header-actions">
+            <button
+              type="button"
+              className="disc-icon-btn disc-sidebar-new-btn collection-shell-primary-action"
+              data-tour-id="automation-actions"
+              onClick={() => setShowAutomationActions(true)}
+              aria-label={t('tour.automationActions.title')}
+              title={t('tour.automationActions.title')}
+            >
+              <Plus size={16} />
+              <span className="disc-sidebar-visually-hidden">{t('tour.automationActions.title')}</span>
+            </button>
             <ContextHelp title={t('contextHelp.automation.title')}>
               <p>{t('contextHelp.automation.intro')}</p>
               <ul>
@@ -2091,50 +2122,118 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
       />
 
       <section className="automation-viewer">
-      <div className="flex-between mb-4 automation-page-header">
+      <div className="mb-4 automation-page-header">
         <div className="kr-context-help-title-row">
           <h1 className="wf-h1"><MatrixText text={automationContentTitle} /></h1>
         </div>
-        <div className="flex-row gap-3 automation-header-actions" data-tour-id="automation-actions">
-          {!currentResourceSelected && onNavigateDiscussion && (
-            <button className="wf-create-ai-btn" data-tour-id="automation-ai-btn" title={aiCreation.hint} onClick={handleCreateWithAI}>
-              <Zap size={14} /> {t('wf.createWithAI')}
-            </button>
-          )}
-          <button
-            className="wf-create-btn wf-create-btn-secondary"
-            title={t('imp.globalHint')}
-            onClick={() => setImporting({
-              kind: null,
-              content: '',
-              preview: { name: '' },
-              targetProjectId: '',
-            })}
-          >
-            <Upload size={14} /> {t('wf.import')}
-          </button>
-          {!currentResourceSelected && tab === 'workflows' && (
-            <button className="wf-create-btn" title={t('wf.newHint')} onClick={() => setShowCreate(true)}>
-            <Plus size={14} /> {t('wf.new')}
-            </button>
-          )}
-          {!currentResourceSelected && tab === 'quickPrompts' && (
-            <button className="wf-create-btn" onClick={() => { setShowCreateQP(true); setEditingQP(null); }}>
-              <Plus size={14} /> {t('qp.new')}
-            </button>
-          )}
-          {!currentResourceSelected && tab === 'quickApis' && availableApiPlugins.length > 0 && (
-            <button className="wf-create-btn" onClick={() => setShowCreateQA(true)}>
-              <Plus size={14} /> {t('qa.new')}
-            </button>
-          )}
-          {!currentResourceSelected && tab === 'quickExecs' && (
-            <button className="wf-create-btn" onClick={() => { setShowCreateQE(true); setEditingQE(null); }}>
-              <Plus size={14} /> {t('qe.new')}
-            </button>
-          )}
-        </div>
       </div>
+
+      {showAutomationActions && (
+        <div
+          className="wf-import-modal-backdrop"
+          onClick={() => setShowAutomationActions(false)}
+        >
+          <div
+            className="automation-action-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="automation-action-modal-title"
+            onClick={event => event.stopPropagation()}
+          >
+            <div className="automation-action-modal-header">
+              <div>
+                <h2 id="automation-action-modal-title">{t('tour.automationActions.title')}</h2>
+                <p>{t('tour.automationActions.desc')}</p>
+              </div>
+              <button
+                type="button"
+                className="disc-icon-btn"
+                onClick={() => setShowAutomationActions(false)}
+                aria-label={t('imp.cancel')}
+                title={t('imp.cancel')}
+              >
+                <X size={14} />
+              </button>
+            </div>
+            <div className="automation-action-grid">
+              {onNavigateDiscussion && (
+                <button
+                  type="button"
+                  className="automation-action-option automation-action-option-ai"
+                  data-tour-id="automation-ai-btn"
+                  aria-label={t('wf.createWithAI')}
+                  title={aiCreation.hint}
+                  onClick={() => {
+                    setShowAutomationActions(false);
+                    void handleCreateWithAI();
+                  }}
+                >
+                  <Zap size={18} />
+                  <span><strong>{t('wf.createWithAI')}</strong><small>{aiCreation.hint}</small></span>
+                </button>
+              )}
+              <button
+                type="button"
+                className="automation-action-option"
+                aria-label={t('wf.new')}
+                title={t('wf.newHint')}
+                autoFocus
+                onClick={() => openAutomationCreation('workflows')}
+              >
+                <WorkflowIcon size={18} />
+                <span><strong>{t('wf.new')}</strong><small>{t('wf.newHint')}</small></span>
+              </button>
+              <button
+                type="button"
+                className="automation-action-option"
+                aria-label={t('qp.new')}
+                onClick={() => openAutomationCreation('quickPrompts')}
+              >
+                <MessageSquareText size={18} />
+                <span><strong>{t('qp.new')}</strong><small>{t('qp.emptyHint')}</small></span>
+              </button>
+              {availableApiPlugins.length > 0 && (
+                <button
+                  type="button"
+                  className="automation-action-option"
+                  aria-label={t('qa.new')}
+                  onClick={() => openAutomationCreation('quickApis')}
+                >
+                  <PlugZap size={18} />
+                  <span><strong>{t('qa.new')}</strong><small>{t('qa.emptyHint')}</small></span>
+                </button>
+              )}
+              <button
+                type="button"
+                className="automation-action-option"
+                aria-label={t('qe.new')}
+                onClick={() => openAutomationCreation('quickExecs')}
+              >
+                <TerminalSquare size={18} />
+                <span><strong>{t('qe.new')}</strong><small>{t('qe.formHint')}</small></span>
+              </button>
+              <button
+                type="button"
+                className="automation-action-option"
+                aria-label={t('wf.import')}
+                title={t('imp.globalHint')}
+                onClick={() => {
+                  setShowAutomationActions(false);
+                  setImporting({
+                    kind: null,
+                    content: '',
+                    preview: { name: '' },
+                    targetProjectId: '',
+                  });
+                }}
+              >
+                <Upload size={18} />
+                <span><strong>{t('wf.import')}</strong><small>{t('imp.globalHint')}</small></span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ═══ WORKFLOWS TAB ═══ */}
       {tab === 'workflows' && (<>

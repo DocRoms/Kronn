@@ -3,6 +3,7 @@ import { render, screen, act, cleanup, fireEvent, waitFor, within } from '@testi
 import { I18nProvider } from '../../lib/I18nContext';
 import {
   discussions as discussionsApi,
+  mcps as mcpsApi,
   quickApis as quickApisApi,
   quickExecs as quickExecsApi,
   quickPrompts as quickPromptsApi,
@@ -168,6 +169,16 @@ const wrap = async (ui: React.ReactElement) => {
   return result!;
 };
 
+const openAutomationActions = () => {
+  fireEvent.click(screen.getByRole('button', { name: 'Créer ou importer' }));
+  return screen.getByRole('dialog', { name: 'Créer ou importer' });
+};
+
+const chooseAutomationAction = (name: string) => {
+  const dialog = openAutomationActions();
+  fireEvent.click(within(dialog).getByRole('button', { name }));
+};
+
 describe('WorkflowsPage', () => {
   it('collapses to the shared Discussions-style rail and reopens the sidebar', async () => {
     await wrap(<WorkflowsPage projects={[]} />);
@@ -179,6 +190,39 @@ describe('WorkflowsPage', () => {
     expect(rail).toHaveClass('collection-shell-sidebar-rail');
     fireEvent.click(rail);
     expect(screen.getByRole('complementary', { name: 'Automatisation' })).toBeInTheDocument();
+  });
+
+  it('groups creation and import paths behind one green sidebar action', async () => {
+    vi.mocked(mcpsApi.overview).mockResolvedValueOnce({
+      servers: [{ id: 'api-server', name: 'Configured API', api_spec: {} }],
+      configs: [{ id: 'api-config', server_id: 'api-server' }],
+      customized_contexts: [],
+      incompatibilities: [],
+    } as never);
+
+    await wrap(<WorkflowsPage projects={[]} onNavigateDiscussion={vi.fn()} />);
+
+    const primaryAction = screen.getByRole('button', { name: 'Créer ou importer' });
+    expect(primaryAction).toHaveClass('collection-shell-primary-action', 'disc-sidebar-new-btn');
+    expect(screen.queryByRole('button', { name: 'Importer' })).toBeNull();
+
+    const dialog = openAutomationActions();
+    expect(await within(dialog).findByRole('button', { name: 'Nouveau Quick API' })).toBeInTheDocument();
+    expect(within(dialog).getByRole('button', { name: "Créer avec l'IA" })).toBeInTheDocument();
+    expect(within(dialog).getByRole('button', { name: 'Nouveau workflow' })).toBeInTheDocument();
+    expect(within(dialog).getByRole('button', { name: 'Nouveau prompt' })).toBeInTheDocument();
+    expect(within(dialog).getByRole('button', { name: 'Nouveau Quick Exec' })).toBeInTheDocument();
+    expect(within(dialog).getByRole('button', { name: 'Importer' })).toBeInTheDocument();
+
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(screen.queryByRole('dialog', { name: 'Créer ou importer' })).toBeNull();
+
+    openAutomationActions();
+    fireEvent.click(document.querySelector('.wf-import-modal-backdrop') as HTMLElement);
+    expect(screen.queryByRole('dialog', { name: 'Créer ou importer' })).toBeNull();
+
+    chooseAutomationAction('Nouveau prompt');
+    expect(screen.getByRole('heading', { name: 'Nouveau prompt' })).toBeInTheDocument();
   });
 
   it('uses one searchable sidebar ordered Workflow → API → Prompt → Exec', async () => {
@@ -414,7 +458,7 @@ describe('WorkflowsPage', () => {
     // Without agentAccess
     const { unmount: u1 } = await wrap(<WorkflowsPage projects={[]} />);
     expect(screen.getByText('Automatisation')).toBeDefined();
-    expect(screen.getByText('Nouveau workflow')).toBeDefined();
+    expect(screen.getByRole('button', { name: 'Créer ou importer' })).toBeDefined();
     u1();
 
     // With restricted agentAccess
@@ -426,7 +470,7 @@ describe('WorkflowsPage', () => {
       />
     );
     expect(screen.getByText('Automatisation')).toBeDefined();
-    expect(screen.getByText('Nouveau workflow')).toBeDefined();
+    expect(screen.getByRole('button', { name: 'Créer ou importer' })).toBeDefined();
     u2();
 
     // With full access agentAccess
@@ -438,7 +482,7 @@ describe('WorkflowsPage', () => {
       />
     );
     expect(screen.getByText('Automatisation')).toBeDefined();
-    expect(screen.getByText('Nouveau workflow')).toBeDefined();
+    expect(screen.getByRole('button', { name: 'Créer ou importer' })).toBeDefined();
   });
 
   // ─── Mobile responsive ─────────────────────────────────────────────────
@@ -460,7 +504,7 @@ describe('WorkflowsPage', () => {
 
     // Page title and create button should still render on mobile
     expect(screen.getByText('Automatisation')).toBeDefined();
-    expect(screen.getByText('Nouveau workflow')).toBeDefined();
+    expect(screen.getByRole('button', { name: 'Créer ou importer' })).toBeDefined();
 
     // The layout should use column direction on mobile (flex-direction: column)
     // Just verify no crash and content is accessible
@@ -712,8 +756,7 @@ describe('WorkflowsPage', () => {
     );
 
     // Click "Nouveau workflow" to open wizard
-    const newBtn = screen.getByText(/Nouveau workflow/);
-    await act(async () => { fireEvent.click(newBtn); });
+    chooseAutomationAction('Nouveau workflow');
 
     // Wizard starts in simple mode (3 steps: infos → task → summary)
     // Fill workflow name on step 0
@@ -738,8 +781,7 @@ describe('WorkflowsPage', () => {
     );
 
     // Click "Nouveau workflow" to open wizard
-    const newBtn = screen.getByText(/Nouveau workflow/);
-    await act(async () => { fireEvent.click(newBtn); });
+    chooseAutomationAction('Nouveau workflow');
 
     // The "Suivant" button should be disabled since name is empty
     const nextBtns = screen.getAllByText(/Suivant/);
@@ -753,8 +795,7 @@ describe('WorkflowsPage', () => {
     );
 
     // Click "Nouveau workflow" to open wizard
-    const newBtn = screen.getByText(/Nouveau workflow/);
-    await act(async () => { fireEvent.click(newBtn); });
+    chooseAutomationAction('Nouveau workflow');
 
     // Switch to advanced mode (wizard starts in simple mode)
     const advBtn = screen.getByText(/Avancé/);
@@ -804,8 +845,7 @@ describe('WorkflowsPage', () => {
     );
 
     // Click "Nouveau workflow" to open wizard
-    const newBtn = screen.getByText(/Nouveau workflow/);
-    await act(async () => { fireEvent.click(newBtn); });
+    chooseAutomationAction('Nouveau workflow');
 
     // Wizard starts in simple mode — should show "Simple" and "Avancé" toggles
     expect(screen.getByText(/Simple/)).toBeDefined();
@@ -1466,12 +1506,13 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
       fireEvent.click(screen.getByRole('button', { name: /Quick APIs \(0\)/ }));
     });
 
-    expect(screen.getByRole('button', { name: 'Importer' })).toHaveAttribute(
+    const actionDialog = openAutomationActions();
+    expect(within(actionDialog).getByRole('button', { name: 'Importer' })).toHaveAttribute(
       'title',
       expect.stringContaining('Le type est détecté automatiquement'),
     );
     await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: /Créer avec l'IA/ }));
+      fireEvent.click(within(actionDialog).getByRole('button', { name: /Créer avec l'IA/ }));
     });
 
     await waitFor(() => expect(discussionsApi.create).toHaveBeenCalledWith(
@@ -1484,7 +1525,7 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
     ));
     expect(onNavigateDiscussion).toHaveBeenCalledWith('disc-qa-architect');
 
-    fireEvent.click(screen.getByRole('button', { name: 'Importer' }));
+    chooseAutomationAction('Importer');
     const globalModalTitle = screen.getByRole('heading', { name: 'Importer dans Automation' });
     const modal = globalModalTitle.closest('.wf-import-modal');
     expect(modal).not.toBeNull();
@@ -1532,7 +1573,8 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
     fireEvent.click(screen.getByRole('button', { name: /Quick Prompts \(1\)/ }));
     fireEvent.click(screen.getByRole('button', { name: 'Ouvrir Selected prompt' }));
 
-    expect(screen.getByRole('button', { name: 'Importer' })).toBeInTheDocument();
+    const actionDialog = openAutomationActions();
+    expect(within(actionDialog).getByRole('button', { name: 'Importer' })).toBeInTheDocument();
   });
 
   it('routes Quick Prompt and Quick Exec files through their existing import APIs', async () => {
@@ -1543,7 +1585,7 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
     );
 
     const importFile = async (content: string, filename: string, expectedTitle: string) => {
-      fireEvent.click(screen.getByRole('button', { name: 'Importer' }));
+      chooseAutomationAction('Importer');
       const file = new File([content], filename, { type: 'application/json' });
       Object.defineProperty(file, 'text', { value: vi.fn().mockResolvedValue(content) });
       await act(async () => {
@@ -1580,7 +1622,7 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
     const { container } = await wrap(
       <WorkflowsPage projects={[]} installedAgentTypes={[]} agentAccess={fullConfig} />,
     );
-    fireEvent.click(screen.getByRole('button', { name: 'Importer' }));
+    chooseAutomationAction('Importer');
     const input = container.querySelector<HTMLInputElement>('input[type="file"]')!;
 
     const invalidContent = JSON.stringify({ kind: 'kronn.unknown', item: {} });
@@ -1617,7 +1659,7 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
     const { container } = await wrap(
       <WorkflowsPage projects={[]} installedAgentTypes={[]} agentAccess={fullConfig} />,
     );
-    fireEvent.click(screen.getByRole('button', { name: 'Importer' }));
+    chooseAutomationAction('Importer');
     const content = JSON.stringify({
       kind: 'kronn.workflow',
       version: 3,
