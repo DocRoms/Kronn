@@ -466,11 +466,11 @@ describe('NewDiscussionForm — creation flow layout', () => {
     prompt.setSelectionRange(2, 2);
 
     const dispatched = fireEvent.paste(prompt, {
-      clipboardData: { getData: () => 'first\r\n\r\n> already quoted' },
+      clipboardData: { getData: () => 'first\r\n\r\n>\r\n> already quoted' },
     });
 
     expect(dispatched).toBe(false);
-    await waitFor(() => expect(prompt).toHaveValue('> first\n> \n> already quoted'));
+    await waitFor(() => expect(prompt).toHaveValue('> first\n> \n>\n> already quoted'));
   });
 
   it('leaves single-line pastes to the browser', () => {

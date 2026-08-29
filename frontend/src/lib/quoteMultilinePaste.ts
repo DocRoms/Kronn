@@ -21,6 +21,6 @@ export function quoteMultilinePaste(currentLine: string, pasted: string): string
   // The first line follows the quote marker already present at the caret.
   // Preserve continuation lines that the clipboard has already quoted.
   return lines.map((line, index) => (
-    index === 0 || /^>\s/.test(line) ? line : `> ${line}`
+    index === 0 || /^\s*>/.test(line) ? line : `> ${line}`
   )).join('\n');
 }

@@ -19,7 +19,7 @@ describe('quoteMultilinePaste', () => {
   });
 
   it('preserves blank lines and continuation lines that are already quoted', () => {
-    expect(quoteMultilinePaste('> ', 'a\n\n> b\nc')).toBe('a\n> \n> b\n> c');
+    expect(quoteMultilinePaste('> ', 'a\n\n>\n> b\nc')).toBe('a\n> \n>\n> b\n> c');
   });
 
   it('returns null for a single-line paste (let the native paste run)', () => {
