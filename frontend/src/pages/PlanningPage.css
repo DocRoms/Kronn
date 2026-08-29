@@ -61,6 +61,23 @@
 .planning-sidebar-summary span { display: flex; align-items: baseline; gap: 3px; }
 .planning-sidebar-summary strong { color: var(--kr-text-primary); }
 
+.planning-sidebar-row .disc-item-open { min-width: 0; }
+
+.planning-sidebar-row .disc-item > input {
+  flex: 0 0 auto;
+  margin-left: var(--kr-sp-3);
+}
+
+.planning-sidebar-parent {
+  overflow: hidden;
+  color: var(--kr-text-ghost);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.planning-sidebar-star { color: var(--kr-warning); }
+
 .collection-shell-sidebar .planning-filters select { min-width: 0; flex: 1 1 120px; }
 
 .planning-filters {

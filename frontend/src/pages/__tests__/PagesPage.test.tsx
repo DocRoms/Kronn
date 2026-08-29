@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { LivePage, LivePageDetail, LivePagePublication } from '../../types/generated';
 
@@ -58,6 +58,11 @@ vi.mock('../../lib/live-page-sandbox', async importOriginal => ({
 import { docs as docsApi, pages as pagesApi, workflows as workflowsApi } from '../../lib/api';
 import { requestRenderedPageHtml } from '../../lib/live-page-sandbox';
 import { PagesPage } from '../PagesPage';
+
+function getCanonicalPageRow(title: string): HTMLElement {
+  const section = screen.getByText('pages.filter.active').closest('.disc-sidebar-section') as HTMLElement;
+  return within(section).getByLabelText(`pages.open:${title}`);
+}
 
 beforeEach(() => {
   localStorage.removeItem('kronn:pageNavigation');
@@ -238,7 +243,7 @@ describe('PagesPage', () => {
       title: 'Production health',
     }));
     expect(await screen.findByRole('heading', { name: 'Production health' })).toBeInTheDocument();
-    expect(screen.getByLabelText('pages.open:Production health')).toBeInTheDocument();
+    expect(getCanonicalPageRow('Production health')).toBeInTheDocument();
 
     view.unmount();
     const persisted = { ...detail, title: 'Production health' };
@@ -277,7 +282,7 @@ describe('PagesPage', () => {
 
     expect(await screen.findByRole('alert')).toHaveTextContent('Backend unavailable');
     expect(input).toHaveValue('Adobe Signals');
-    expect(screen.getByLabelText('pages.open:Adobe Signals')).toBeInTheDocument();
+    expect(getCanonicalPageRow('Adobe Signals')).toBeInTheDocument();
   });
 
   it('exports the data-materialized Page DOM as PDF from the header', async () => {
@@ -398,6 +403,46 @@ describe('PagesPage', () => {
     expect(screen.getByRole('alert')).toHaveTextContent('Network unavailable');
   });
 
+  it('orders recent shortcuts, excludes favorites, and keeps the complete canonical Page list', async () => {
+    const favorite = {
+      ...page,
+      id: 'favorite-page',
+      title: 'Favorite Page',
+      slug: 'favorite-page',
+      pinned: true,
+      updated_at: '2026-08-31T10:00:00Z',
+    };
+    const recentPages = Array.from({ length: 11 }, (_, index) => ({
+      ...page,
+      id: `recent-page-${index}`,
+      title: `Recent Page ${index}`,
+      slug: `recent-page-${index}`,
+      updated_at: `2026-08-${String(30 - index).padStart(2, '0')}T10:00:00Z`,
+    }));
+    vi.mocked(pagesApi.list).mockResolvedValue([favorite, ...recentPages]);
+
+    render(<PagesPage />);
+    await screen.findByTestId('live-page-frame');
+
+    const favoriteSection = screen.getByText('pages.filter.favorites').closest('.disc-sidebar-section') as HTMLElement;
+    const recentSection = screen.getByText('disc.recent').closest('.disc-sidebar-section') as HTMLElement;
+    const canonicalSection = screen.getByText('pages.filter.active').closest('.disc-sidebar-section') as HTMLElement;
+    expect([...recentSection.querySelectorAll('.disc-item-title-text')].map(node => node.textContent))
+      .toEqual(recentPages.slice(0, 10).map(item => item.title));
+    expect(within(recentSection).queryByText(favorite.title)).toBeNull();
+    expect(within(favoriteSection).getByText(favorite.title)).toBeInTheDocument();
+    expect(within(canonicalSection).getByText(favorite.title)).toBeInTheDocument();
+    expect(canonicalSection.querySelectorAll('.live-page-row')).toHaveLength(12);
+
+    const recentToggle = within(recentSection).getByRole('button', { name: /disc\.recent/ });
+    fireEvent.click(recentToggle);
+    expect(recentToggle).toHaveAttribute('aria-expanded', 'false');
+    expect(within(recentSection).queryByText('Recent Page 0')).toBeNull();
+    await waitFor(() => expect(JSON.parse(
+      localStorage.getItem('kronn:pageCollapsedSections') ?? '[]',
+    )).toContain('recent'));
+  });
+
   it('searches, favorites and archives Pages with the library interactions', async () => {
     const other = { ...page, id: 'page-2', title: 'Jira Delivery', slug: 'jira-delivery' };
     vi.mocked(pagesApi.list).mockResolvedValue([page, other]);
@@ -405,7 +450,7 @@ describe('PagesPage', () => {
     await screen.findByTestId('live-page-frame');
 
     fireEvent.change(screen.getByLabelText('pages.search'), { target: { value: 'Jira' } });
-    expect(screen.getByText('Jira Delivery')).toBeInTheDocument();
+    expect(screen.getAllByText('Jira Delivery').length).toBeGreaterThan(0);
     expect(screen.queryByLabelText('pages.open:Adobe Signals')).not.toBeInTheDocument();
     fireEvent.change(screen.getByLabelText('pages.search'), { target: { value: '' } });
 
@@ -416,12 +461,12 @@ describe('PagesPage', () => {
       // The Page appears in both Favorites and the complete list, but each row
       // must render one star only: the stateful favorite action itself.
       const rows = Array.from(container.querySelectorAll('.live-page-row'));
-      expect(rows).toHaveLength(3);
+      expect(rows).toHaveLength(4);
       expect(rows.every(row => row.querySelectorAll('.lucide-star').length === 1)).toBe(true);
     });
 
     fireEvent.click(screen.getByLabelText('pages.bulk.start'));
-    fireEvent.click(screen.getByLabelText('pages.open:Adobe Signals'));
+    fireEvent.click(getCanonicalPageRow('Adobe Signals'));
     vi.stubGlobal('confirm', vi.fn(() => true));
     fireEvent.click(screen.getByTitle('pages.archive'));
     await waitFor(() => expect(pagesApi.update).toHaveBeenCalledWith(page.id, { archived: true }));
@@ -434,8 +479,9 @@ describe('PagesPage', () => {
     render(<PagesPage />);
 
     await screen.findByTestId('live-page-frame');
-    const first = screen.getByLabelText('pages.open:Adobe Signals');
-    const second = screen.getByLabelText('pages.open:Jira Delivery');
+    const recentSection = screen.getByText('disc.recent').closest('.disc-sidebar-section') as HTMLElement;
+    const first = within(recentSection).getByLabelText('pages.open:Adobe Signals');
+    const second = within(recentSection).getByLabelText('pages.open:Jira Delivery');
     expect(first).toHaveAttribute('aria-current', 'true');
 
     first.focus();
@@ -471,7 +517,7 @@ describe('PagesPage', () => {
     expect(activeSection).toHaveAttribute('aria-expanded', 'false');
     fireEvent.change(screen.getByLabelText('pages.search'), { target: { value: 'Adobe' } });
     expect(activeSection).toHaveAttribute('aria-expanded', 'true');
-    expect(screen.getByLabelText('pages.open:Adobe Signals')).toBeInTheDocument();
+    expect(getCanonicalPageRow('Adobe Signals')).toBeInTheDocument();
     expect(JSON.parse(localStorage.getItem('kronn:pageCollapsedSections') ?? '[]')).toEqual(['pages', 'archives']);
     fireEvent.change(screen.getByLabelText('pages.search'), { target: { value: '' } });
     expect(activeSection).toHaveAttribute('aria-expanded', 'false');

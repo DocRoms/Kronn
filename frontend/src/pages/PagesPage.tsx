@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity, Archive, CheckCircle2, CheckSquare2, ChevronDown, ChevronRight,
-  Braces, Database, Download, ExternalLink, FileCode2, FileDown, GitCompare,
+  Braces, Clock3, Database, Download, ExternalLink, FileCode2, FileDown, GitCompare,
   History, ListChecks, Loader2, MessageSquare, Pencil, Play, RefreshCw,
   RotateCcw, Save, Star, Table2, Trash2, Workflow, X,
 } from 'lucide-react';
@@ -32,7 +32,7 @@ import './PagesPage.css';
 const REFRESH_MS = 30_000;
 const PAGE_NAVIGATION_STORAGE_KEY = 'kronn:pageNavigation';
 const PAGE_COLLAPSED_STORAGE_KEY = 'kronn:pageCollapsedSections';
-const PAGE_SECTIONS = new Set(['favorites', 'pages', 'archives']);
+const PAGE_SECTIONS = new Set(['favorites', 'recent', 'pages', 'archives']);
 
 interface PageNavigationPreference {
   resourceId: string | null;
@@ -59,6 +59,13 @@ function readCollapsedPageSections(): Set<string> {
   } catch {
     return new Set(['archives']);
   }
+}
+
+function byMostRecentlyUpdated(
+  left: Pick<LivePage, 'updated_at'>,
+  right: Pick<LivePage, 'updated_at'>,
+): number {
+  return Date.parse(right.updated_at) - Date.parse(left.updated_at);
 }
 
 function channelId(): string {
@@ -567,7 +574,16 @@ export function PagesPage({
           renderList: ({ visibleItems, getRowProps }) => {
             const visibleActive = visibleItems.filter(page => !page.archived);
             const visibleFavorites = selectionMode ? [] : visibleActive.filter(page => page.pinned);
+            const visibleRecent = selectionMode
+              ? []
+              : visibleActive
+                .filter(page => !page.pinned)
+                .sort(byMostRecentlyUpdated)
+                .slice(0, 10);
             const visibleArchived = visibleItems.filter(page => page.archived);
+            const collapsedInCurrentMode = (section: string) => (
+              !selectionMode && isSectionCollapsed(section)
+            );
             const row = (page: LivePage, keyPrefix: string) => {
               const rowProps = getRowProps(page);
               return <div className="disc-swipe-wrap live-page-row" key={`${keyPrefix}-${page.id}`}>
@@ -592,24 +608,35 @@ export function PagesPage({
             </div>
           )}
 
+          {visibleRecent.length > 0 && (
+            <div className="disc-sidebar-section disc-sidebar-recent" data-expanded={!isSectionCollapsed('recent')}>
+              <button type="button" className="disc-group-btn" data-no-border="true" onClick={() => toggleSection('recent')} aria-expanded={!isSectionCollapsed('recent')}>
+                <ChevronRight size={10} className="disc-chevron" data-expanded={!isSectionCollapsed('recent')} />
+                <Clock3 size={10} />
+                <span>{t('disc.recent')}</span><span className="disc-group-count">{visibleRecent.length}</span>
+              </button>
+              {!isSectionCollapsed('recent') && visibleRecent.map(page => row(page, 'recent'))}
+            </div>
+          )}
+
           {visibleActive.length > 0 && (
-            <div className="disc-sidebar-section disc-sidebar-projects" data-expanded={!isSectionCollapsed('pages')}>
-              <button type="button" className="disc-group-btn" data-no-border="true" onClick={() => toggleSection('pages')} aria-expanded={!isSectionCollapsed('pages')}>
-                <ChevronRight size={10} className="disc-chevron" data-expanded={!isSectionCollapsed('pages')} />
+            <div className="disc-sidebar-section disc-sidebar-projects" data-expanded={!collapsedInCurrentMode('pages')}>
+              <button type="button" className="disc-group-btn" data-no-border="true" onClick={() => toggleSection('pages')} aria-expanded={!collapsedInCurrentMode('pages')}>
+                <ChevronRight size={10} className="disc-chevron" data-expanded={!collapsedInCurrentMode('pages')} />
                 <FileCode2 size={10} />
                 <span>{t('pages.filter.active')}</span><span className="disc-group-count">{visibleActive.length}</span>
               </button>
-              {!isSectionCollapsed('pages') && visibleActive.map(page => row(page, 'page'))}
+              {!collapsedInCurrentMode('pages') && visibleActive.map(page => row(page, 'page'))}
             </div>
           )}
 
           {visibleArchived.length > 0 && (
-            <div className="disc-sidebar-section disc-sidebar-archives" data-expanded={!isSectionCollapsed('archives')}>
-              <button type="button" className="disc-group-btn" data-variant="archive" onClick={() => toggleSection('archives')} aria-expanded={!isSectionCollapsed('archives')}>
-                <ChevronRight size={10} className="disc-chevron" data-expanded={!isSectionCollapsed('archives')} />
+            <div className="disc-sidebar-section disc-sidebar-archives" data-expanded={!collapsedInCurrentMode('archives')}>
+              <button type="button" className="disc-group-btn" data-variant="archive" onClick={() => toggleSection('archives')} aria-expanded={!collapsedInCurrentMode('archives')}>
+                <ChevronRight size={10} className="disc-chevron" data-expanded={!collapsedInCurrentMode('archives')} />
                 <Archive size={10} /><span>{t('pages.filter.archived')}</span><span className="disc-group-count">{visibleArchived.length}</span>
               </button>
-              {!isSectionCollapsed('archives') && visibleArchived.map(page => row(page, 'archive'))}
+              {!collapsedInCurrentMode('archives') && visibleArchived.map(page => row(page, 'archive'))}
             </div>
           )}
 

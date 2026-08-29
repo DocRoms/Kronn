@@ -4,13 +4,15 @@ import {
   Check,
   ChevronRight,
   Circle,
+  Clock3,
   Filter,
+  Folder,
   GitBranch,
-  GripVertical,
   History,
   Link2,
   Loader2,
   Plus,
+  Star,
   Target,
   X,
 } from 'lucide-react';
@@ -22,6 +24,7 @@ import { userError } from '../lib/userError';
 import { CopyIdPill } from '../components/CopyIdPill';
 import { ContextHelp } from '../components/ContextHelp';
 import { CollectionShell } from '../components/CollectionShell';
+import { FavoriteToggle } from '../components/FavoriteToggle';
 import { usePersistentIdSet } from '../hooks/usePersistentIdSet';
 import type { ToastFn } from '../hooks/useToast';
 import type {
@@ -32,6 +35,7 @@ import type {
   PlanningTaskSummary,
   Project,
 } from '../types/generated';
+import './DiscussionsPage.css';
 import './PlanningPage.css';
 
 interface Props {
@@ -44,6 +48,25 @@ interface Props {
 
 const PRIORITIES: PlanningTaskPriority[] = ['critical', 'high', 'normal', 'low'];
 const ACTIVE_STATUSES: PlanningTaskStatus[] = ['idea', 'todo', 'in_progress', 'blocked'];
+const PLANNING_COLLAPSED_STORAGE_KEY = 'kronn:planningCollapsedSections';
+
+function readCollapsedPlanningSections(): Set<string> {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(PLANNING_COLLAPSED_STORAGE_KEY) ?? '[]') as unknown;
+    return Array.isArray(parsed)
+      ? new Set(parsed.filter((section): section is string => typeof section === 'string'))
+      : new Set();
+  } catch {
+    return new Set();
+  }
+}
+
+function byMostRecentlyUpdated(
+  left: Pick<PlanningTaskSummary, 'updated_at'>,
+  right: Pick<PlanningTaskSummary, 'updated_at'>,
+): number {
+  return Date.parse(right.updated_at) - Date.parse(left.updated_at);
+}
 
 function titleTokens(value: string): Set<string> {
   return new Set(
@@ -82,7 +105,7 @@ export function PlanningPage({
   const [saving, setSaving] = useState(false);
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [tasksLoaded, setTasksLoaded] = useState(false);
-  const [favoritesOnly, setFavoritesOnly] = useState(false);
+  const [collapsedSections, setCollapsedSections] = useState<Set<string>>(readCollapsedPlanningSections);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const createTriggerRef = useRef<HTMLButtonElement>(null);
   const createTitleRef = useRef<HTMLInputElement>(null);
@@ -93,6 +116,28 @@ export function PlanningPage({
   const { ids: favoriteIds, toggle: toggleFavorite } = usePersistentIdSet('kronn:collection-favorites:planning', taskIds, tasksLoaded);
   const activeFilterCount = [status, priorityFilter, projectId, withDiscussion, tag]
     .filter(Boolean).length;
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(PLANNING_COLLAPSED_STORAGE_KEY, JSON.stringify([...collapsedSections]));
+    } catch {
+      // localStorage may be unavailable in private/restricted browser modes.
+    }
+  }, [collapsedSections]);
+
+  const isSectionCollapsed = useCallback(
+    (section: string) => !search.trim() && collapsedSections.has(section),
+    [collapsedSections, search],
+  );
+
+  const toggleSection = useCallback((section: string) => {
+    setCollapsedSections(previous => {
+      const next = new Set(previous);
+      if (next.has(section)) next.delete(section);
+      else next.add(section);
+      return next;
+    });
+  }, []);
 
   const fetchTasks = useCallback(async (cursor?: number) => {
     const append = cursor !== undefined;
@@ -251,44 +296,6 @@ export function PlanningPage({
     }
   };
 
-  const renderCard = (task: PlanningTaskSummary, selected: boolean) => (
-    <div
-      className="planning-card"
-      data-selected={selected}
-      data-status={task.status}
-    >
-      <GripVertical size={13} className="planning-grip" />
-      <span className="planning-check" aria-hidden="true">
-        {task.status === 'done' ? <Check size={13} /> : <Circle size={13} />}
-      </span>
-      <div className="planning-card-main">
-        {task.parent_reference && (
-          <div className="planning-card-parent">
-            {task.parent_reference} · {task.parent_title}
-          </div>
-        )}
-        <div className="planning-card-title">{task.title}</div>
-        <div className="planning-card-meta">
-          <span>{task.reference}</span>
-          <span className="planning-status" data-status={task.status}>
-            {t(`planning.status.${task.status}`)}
-          </span>
-          {task.total_subtasks > 0 && (
-            <span>{task.completed_subtasks}/{task.total_subtasks}</span>
-          )}
-          {task.project_ids.map(id => (
-            <span key={id}>{projects.find(project => project.id === id)?.name ?? id.slice(0, 8)}</span>
-          ))}
-          {task.discussion_ids.length > 0 && (
-            <span><Link2 size={10} /> {task.discussion_ids.length}</span>
-          )}
-          {task.tags.map(value => <span className="planning-tag" key={value}>{value}</span>)}
-        </div>
-      </div>
-      <ChevronRight size={14} className="planning-card-chevron" />
-    </div>
-  );
-
   return (
     <div className="planning-page">
       <div className="planning-shell">
@@ -321,13 +328,11 @@ export function PlanningPage({
           items={tasks}
           getId={task => task.id}
           getLabel={task => `${task.title} ${task.reference} ${task.tags.join(' ')}`}
-          isFavorite={task => favoriteIds.has(task.id)}
-          onToggleFavorite={task => toggleFavorite(task.id)}
           persistence={{
             query: search,
             onQueryChange: setSearch,
-            favoritesOnly,
-            onFavoritesOnlyChange: setFavoritesOnly,
+            favoritesOnly: false,
+            onFavoritesOnlyChange: () => {},
           }}
           selectedId={selectedId}
           onSelect={id => selectTask(id)}
@@ -397,8 +402,122 @@ export function PlanningPage({
                 <span><strong>{completedTasks.length}</strong>{t('planning.doneCount')}</span>
               </div>
             </>,
-            renderEmpty: () => <div className="planning-state"><Target size={24} /> {t('planning.emptyBacklog')}</div>,
-            renderItem: (task, { selected }) => renderCard(task, selected),
+            renderList: ({
+              visibleItems,
+              canMultiSelect,
+              isMultiSelected,
+              toggleMultiSelection,
+              getRowProps,
+            }) => {
+              const favorites = canMultiSelect
+                ? []
+                : visibleItems.filter(task => favoriteIds.has(task.id));
+              const recent = canMultiSelect
+                ? []
+                : visibleItems
+                  .filter(task => !favoriteIds.has(task.id))
+                  .sort(byMostRecentlyUpdated)
+                  .slice(0, 10);
+              const projectNames = new Map(projects.map(project => [project.id, project.name]));
+              const projectIds = new Set(visibleItems.flatMap(task => task.project_ids));
+              const projectGroups = [...projectIds]
+                .map(id => ({
+                  id,
+                  label: projectNames.get(id) ?? id.slice(0, 8),
+                  tasks: visibleItems.filter(task => task.project_ids.includes(id)),
+                }))
+                .sort((left, right) => left.label.localeCompare(right.label));
+              const generalTasks = visibleItems.filter(task => task.project_ids.length === 0);
+              const collapsedInCurrentMode = (section: string) => (
+                !canMultiSelect && isSectionCollapsed(section)
+              );
+
+              const row = (task: PlanningTaskSummary, keyPrefix: string) => {
+                const rowProps = getRowProps(task);
+                const multiSelected = isMultiSelected(task);
+                return <div className="disc-swipe-wrap planning-sidebar-row" key={`${keyPrefix}-${task.id}`}>
+                  <div className="disc-item" data-active={task.id === selectedId} data-selected={multiSelected} data-status={task.status}>
+                    {canMultiSelect && <input
+                      type="checkbox"
+                      aria-label={`${task.title} ${t('collection.selectItem')}`}
+                      checked={multiSelected}
+                      onChange={() => toggleMultiSelection(task.id)}
+                    />}
+                    <button type="button" {...rowProps} className={`${rowProps.className} disc-item-open`}>
+                      <span className="disc-item-content">
+                        {task.parent_reference && <span className="planning-sidebar-parent">{task.parent_reference} · {task.parent_title}</span>}
+                        <span className="disc-item-title"><span className="disc-item-title-text">{task.title}</span></span>
+                        <span className="disc-item-meta">
+                          <span className="planning-ref">{task.reference}</span>
+                          <span className="planning-status" data-status={task.status}>{t(`planning.status.${task.status}`)}</span>
+                          {task.total_subtasks > 0 && <span>{task.completed_subtasks}/{task.total_subtasks}</span>}
+                        </span>
+                      </span>
+                    </button>
+                    {!canMultiSelect && <div className="disc-item-actions"><FavoriteToggle
+                      active={favoriteIds.has(task.id)}
+                      onToggle={() => toggleFavorite(task.id)}
+                      activeLabel={t('wf.unpin')}
+                      inactiveLabel={t('wf.pin')}
+                      itemName={task.title}
+                    /></div>}
+                  </div>
+                </div>;
+              };
+
+              const group = (key: string, label: string, groupTasks: PlanningTaskSummary[]) => {
+                if (groupTasks.length === 0) return null;
+                const collapsed = collapsedInCurrentMode(key);
+                return <div key={key} data-planning-group={key}>
+                  <button
+                    type="button"
+                    className="disc-group-btn"
+                    data-no-border="true"
+                    onClick={() => toggleSection(key)}
+                    aria-expanded={!collapsed}
+                  >
+                    <ChevronRight size={10} className="disc-chevron" data-expanded={!collapsed} />
+                    <Target size={10} />
+                    <span>{label}</span><span className="disc-group-count">{groupTasks.length}</span>
+                  </button>
+                  {!collapsed && groupTasks.map(task => row(task, key))}
+                </div>;
+              };
+
+              return <div className="disc-sidebar-list planning-sidebar-list">
+                {favorites.length > 0 && <div className="disc-sidebar-section disc-sidebar-favorites" data-expanded={!isSectionCollapsed('favorites')}>
+                  <button type="button" className="disc-group-btn" data-no-border="true" onClick={() => toggleSection('favorites')} aria-expanded={!isSectionCollapsed('favorites')}>
+                    <ChevronRight size={10} className="disc-chevron" data-expanded={!isSectionCollapsed('favorites')} />
+                    <Star size={10} className="planning-sidebar-star" fill="currentColor" />
+                    <span>{t('disc.favorites')}</span><span className="disc-group-count">{favorites.length}</span>
+                  </button>
+                  {!isSectionCollapsed('favorites') && favorites.map(task => row(task, 'favorite'))}
+                </div>}
+
+                {recent.length > 0 && <div className="disc-sidebar-section disc-sidebar-recent" data-expanded={!isSectionCollapsed('recent')}>
+                  <button type="button" className="disc-group-btn" data-no-border="true" onClick={() => toggleSection('recent')} aria-expanded={!isSectionCollapsed('recent')}>
+                    <ChevronRight size={10} className="disc-chevron" data-expanded={!isSectionCollapsed('recent')} />
+                    <Clock3 size={10} />
+                    <span>{t('disc.recent')}</span><span className="disc-group-count">{recent.length}</span>
+                  </button>
+                  {!isSectionCollapsed('recent') && recent.map(task => row(task, 'recent'))}
+                </div>}
+
+                {visibleItems.length > 0 && <div className="disc-sidebar-section disc-sidebar-projects" data-expanded={!collapsedInCurrentMode('projects')}>
+                  <button type="button" className="disc-group-btn" data-no-border="true" onClick={() => toggleSection('projects')} aria-expanded={!collapsedInCurrentMode('projects')}>
+                    <ChevronRight size={10} className="disc-chevron" data-expanded={!collapsedInCurrentMode('projects')} />
+                    <Folder size={10} />
+                    <span>{t('projects.title')}</span><span className="disc-group-count">{visibleItems.length}</span>
+                  </button>
+                  {!collapsedInCurrentMode('projects') && <div className="disc-project-tree">
+                    {group('general', t('disc.general'), generalTasks)}
+                    {projectGroups.map(project => group(`project:${project.id}`, project.label, project.tasks))}
+                  </div>}
+                </div>}
+
+                {visibleItems.length === 0 && <div className="disc-empty"><Target size={24} /> {t('planning.emptyBacklog')}</div>}
+              </div>;
+            },
             renderDetail: () => {
               if (!selectedId && !detailLoading) {
                 return <div className="planning-detail-empty-hint">{t('planning.selectHint')}</div>;

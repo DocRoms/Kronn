@@ -28,7 +28,7 @@ vi.mock('../../lib/I18nContext', () => ({
 }));
 
 import { PlanningPage } from '../PlanningPage';
-import type { PlanningTaskDetail, PlanningTaskSummary } from '../../types/generated';
+import type { PlanningTaskDetail, PlanningTaskSummary, Project } from '../../types/generated';
 
 function summary(overrides: Partial<PlanningTaskSummary> = {}): PlanningTaskSummary {
   return {
@@ -65,6 +65,14 @@ function detail(task: PlanningTaskSummary = summary()): PlanningTaskDetail {
     blocking: [],
     events: [],
   };
+}
+
+async function findCanonicalTaskRow(title: string): Promise<HTMLButtonElement> {
+  const matches = await screen.findAllByText(title);
+  const match = matches.find(node => node.closest('.disc-sidebar-projects'));
+  const row = match?.closest<HTMLButtonElement>('button.collection-shell-row-button');
+  if (!row) throw new Error(`Missing canonical Planning row: ${title}`);
+  return row;
 }
 
 describe('PlanningPage', () => {
@@ -107,21 +115,74 @@ describe('PlanningPage', () => {
         onNavigateDiscussion={vi.fn()}
       />,
     );
-    expect(await screen.findByText('Upgrade PHP')).toBeInTheDocument();
+    expect(await findCanonicalTaskRow('Upgrade PHP')).toBeInTheDocument();
     expect(container.querySelector('.collection-shell-sidebar')).not.toBeNull();
-    expect(screen.getByText('Old task')).toBeInTheDocument();
+    expect(await findCanonicalTaskRow('Old task')).toBeInTheDocument();
+  });
+
+  it('orders favorite and recent shortcuts while keeping the complete project tree', async () => {
+    const favorite = summary({
+      id: 'favorite-task', reference: 'KT-100', title: 'Favorite task',
+      project_ids: ['project-alpha'], updated_at: '2026-08-31T10:00:00Z',
+    });
+    const recentTasks = Array.from({ length: 11 }, (_, index) => summary({
+      id: `recent-${index}`,
+      reference: `KT-${index + 101}`,
+      title: `Recent ${index}`,
+      project_ids: index === 0
+        ? ['project-alpha', 'project-beta']
+        : index === 1 ? ['project-beta'] : [],
+      updated_at: `2026-08-${String(30 - index).padStart(2, '0')}T10:00:00Z`,
+    }));
+    const projects = [
+      { id: 'project-alpha', name: 'Alpha' },
+      { id: 'project-beta', name: 'Beta' },
+    ] as Project[];
+    localStorage.setItem('kronn:collection-favorites:planning', JSON.stringify([favorite.id]));
+    mocks.list.mockResolvedValueOnce({ items: [favorite, ...recentTasks], next_cursor: null });
+
+    render(<PlanningPage projects={projects} discussions={[]} toast={vi.fn()} onNavigateDiscussion={vi.fn()} />);
+    await findCanonicalTaskRow(favorite.title);
+
+    const favoriteSection = screen.getByText('disc.favorites').closest('.disc-sidebar-section') as HTMLElement;
+    const recentSection = screen.getByText('disc.recent').closest('.disc-sidebar-section') as HTMLElement;
+    const projectsSection = screen.getByText('projects.title').closest('.disc-sidebar-section') as HTMLElement;
+    expect([...recentSection.querySelectorAll('.disc-item-title-text')].map(node => node.textContent))
+      .toEqual(recentTasks.slice(0, 10).map(task => task.title));
+    expect(within(recentSection).queryByText(favorite.title)).toBeNull();
+    expect(within(favoriteSection).getByText(favorite.title)).toBeInTheDocument();
+    expect(within(projectsSection).getAllByText(favorite.title)).toHaveLength(1);
+
+    const alpha = projectsSection.querySelector<HTMLElement>('[data-planning-group="project:project-alpha"]')!;
+    const beta = projectsSection.querySelector<HTMLElement>('[data-planning-group="project:project-beta"]')!;
+    const general = projectsSection.querySelector<HTMLElement>('[data-planning-group="general"]')!;
+    expect(within(alpha).getByText('Recent 0')).toBeInTheDocument();
+    expect(within(beta).getByText('Recent 0')).toBeInTheDocument();
+    expect(within(general).getByText('Recent 2')).toBeInTheDocument();
+
+    const alphaToggle = within(alpha).getByRole('button', { name: /Alpha/ });
+    fireEvent.click(alphaToggle);
+    expect(alphaToggle).toHaveAttribute('aria-expanded', 'false');
+    expect(within(alpha).queryByText(favorite.title)).toBeNull();
+    await waitFor(() => expect(JSON.parse(
+      localStorage.getItem('kronn:planningCollapsedSections') ?? '[]',
+    )).toContain('project:project-alpha'));
+
+    const betaRecentRow = within(beta).getByText('Recent 0')
+      .closest<HTMLButtonElement>('button.collection-shell-row-button')!;
+    fireEvent.click(betaRecentRow);
+    await waitFor(() => expect(mocks.get).toHaveBeenCalledWith('recent-0'));
+    expect(betaRecentRow).toHaveAttribute('aria-current', 'true');
   });
 
   it('uses the shared title, favorites, collapse, and bulk archive flow', async () => {
     render(<PlanningPage projects={[]} discussions={[]} toast={vi.fn()} onNavigateDiscussion={vi.fn()} />);
-    await screen.findByText('Upgrade PHP');
+    const taskRow = await findCanonicalTaskRow('Upgrade PHP');
     expect(screen.getByText('planning.title')).toHaveTextContent('planning.title · 2');
-    fireEvent.click(screen.getByRole('button', { name: /collection\.favorites · Upgrade PHP/ }));
+    fireEvent.click(within(taskRow.closest('.disc-item') as HTMLElement).getByRole('button', { name: /wf\.pin · Upgrade PHP/ }));
     expect(localStorage.getItem('kronn:collection-favorites:planning')).toContain('task-1');
-    fireEvent.click(screen.getByRole('button', { name: 'collection.favorites' }));
-    expect(screen.getByText('Upgrade PHP')).toBeInTheDocument();
-    expect(screen.queryByText('Old task')).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: 'collection.favorites' }));
+    const favoriteSection = screen.getByText('disc.favorites').closest('.disc-sidebar-section') as HTMLElement;
+    expect(within(favoriteSection).getByText('Upgrade PHP')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'collection.moreActions' }));
     fireEvent.click(screen.getByRole('menuitem', { name: 'collection.selectMultiple' }));
     fireEvent.click(screen.getByRole('checkbox', { name: /Upgrade PHP.*collection\.selectItem/ }));
@@ -145,10 +206,8 @@ describe('PlanningPage', () => {
       />,
     );
 
-    const first = (await screen.findAllByRole('button', { name: /Upgrade PHP/ }))
-      .find(button => button.classList.contains('collection-shell-row-button'))!;
-    const second = screen.getAllByRole('button', { name: /Old task/ })
-      .find(button => button.classList.contains('collection-shell-row-button'))!;
+    const first = await findCanonicalTaskRow('Upgrade PHP');
+    const second = await findCanonicalTaskRow('Old task');
     first.focus();
     fireEvent.keyDown(first, { key: 'ArrowDown' });
     expect(second).toHaveFocus();
@@ -167,7 +226,7 @@ describe('PlanningPage', () => {
         onNavigateDiscussion={vi.fn()}
       />,
     );
-    await screen.findByText('Upgrade PHP');
+    await findCanonicalTaskRow('Upgrade PHP');
     expect(screen.queryByPlaceholderText('planning.newIdea')).toBeNull();
 
     const trigger = screen.getByRole('button', { name: 'planning.quickCreate' });
@@ -202,7 +261,7 @@ describe('PlanningPage', () => {
         onNavigateDiscussion={vi.fn()}
       />,
     );
-    await screen.findByText('Upgrade PHP');
+    await findCanonicalTaskRow('Upgrade PHP');
     const trigger = screen.getByRole('button', { name: 'planning.quickCreate' });
 
     fireEvent.click(trigger);
@@ -231,7 +290,7 @@ describe('PlanningPage', () => {
         onNavigateDiscussion={vi.fn()}
       />,
     );
-    await screen.findByText('Upgrade PHP');
+    await findCanonicalTaskRow('Upgrade PHP');
 
     const search = screen.getByRole('textbox', { name: 'planning.search' });
     fireEvent.keyDown(window, { key: '/' });
@@ -272,7 +331,7 @@ describe('PlanningPage', () => {
         onNavigateDiscussion={vi.fn()}
       />,
     );
-    fireEvent.click(await screen.findByText('Upgrade PHP'));
+    fireEvent.click(await findCanonicalTaskRow('Upgrade PHP'));
     await waitFor(() => expect(mocks.get).toHaveBeenCalledWith('task-1'));
     expect(await screen.findByDisplayValue('Move the runtime forward.')).toBeInTheDocument();
     const panel = screen.getByRole('complementary', { name: 'planning.taskActions' });
@@ -313,7 +372,7 @@ describe('PlanningPage', () => {
         onNavigateDiscussion={vi.fn()}
       />,
     );
-    await screen.findByText('Upgrade PHP');
+    await findCanonicalTaskRow('Upgrade PHP');
     await waitFor(() => expect(mocks.get).toHaveBeenCalledWith(outsideFirstPage.id));
     expect(await screen.findByDisplayValue('Move the runtime forward.')).toBeInTheDocument();
     expect(screen.getByRole('complementary', { name: 'planning.taskActions' })).toBeInTheDocument();
@@ -359,7 +418,7 @@ describe('PlanningPage', () => {
       />,
     );
 
-    fireEvent.click(await screen.findByText('Upgrade PHP'));
+    fireEvent.click(await findCanonicalTaskRow('Upgrade PHP'));
     fireEvent.click(await screen.findByText('feature/kt-140'));
 
     expect(onNavigateDiscussion).toHaveBeenCalledWith('disc-2');
@@ -393,7 +452,7 @@ describe('PlanningPage', () => {
         onNavigateDiscussion={vi.fn()}
       />,
     );
-    fireEvent.click(await screen.findByText('Upgrade PHP'));
+    fireEvent.click(await findCanonicalTaskRow('Upgrade PHP'));
     const input = await screen.findByPlaceholderText('planning.addSubtask');
     fireEvent.change(input, { target: { value: 'Update CI image' } });
     fireEvent.keyDown(input, { key: 'Enter' });
@@ -428,7 +487,7 @@ describe('PlanningPage', () => {
       />,
     );
 
-    fireEvent.click(await screen.findByText('Upgrade PHP'));
+    fireEvent.click(await findCanonicalTaskRow('Upgrade PHP'));
     fireEvent.click(await screen.findByText('planning.unblock'));
 
     await waitFor(() => expect(mocks.update).toHaveBeenCalledWith('task-1', {
@@ -460,7 +519,7 @@ describe('PlanningPage', () => {
       />,
     );
 
-    fireEvent.click(await screen.findByText('Upgrade PHP'));
+    fireEvent.click(await findCanonicalTaskRow('Upgrade PHP'));
     fireEvent.click(await screen.findByRole('button', {
       name: 'planning.removeBlocker:KT-9',
     }));
