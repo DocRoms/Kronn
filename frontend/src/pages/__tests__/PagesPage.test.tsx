@@ -106,6 +106,16 @@ describe('PagesPage', () => {
       .toHaveClass('disc-sidebar', 'live-pages-list');
   });
 
+  it('uses checkbox semantics for transient Page bulk selection', async () => {
+    render(<PagesPage />);
+    await screen.findByTestId('live-page-frame');
+    fireEvent.click(screen.getByRole('button', { name: 'pages.bulk.start' }));
+    const row = screen.getByRole('checkbox', { name: 'pages.open:Adobe Signals' });
+    expect(row).toHaveAttribute('aria-checked', 'false');
+    fireEvent.click(row);
+    expect(row).toHaveAttribute('aria-checked', 'true');
+  });
+
   it('renders authored HTML in a script-only opaque sandbox', async () => {
     const onNavigateWorkflow = vi.fn();
     render(<PagesPage onNavigateWorkflow={onNavigateWorkflow} />);
@@ -372,6 +382,25 @@ describe('PagesPage', () => {
     vi.stubGlobal('confirm', vi.fn(() => true));
     fireEvent.click(screen.getByTitle('pages.archive'));
     await waitFor(() => expect(pagesApi.update).toHaveBeenCalledWith(page.id, { archived: true }));
+  });
+
+  it('keeps keyboard navigation, active-row state, and empty state in the custom sidebar renderer', async () => {
+    const other = { ...page, id: 'page-2', title: 'Jira Delivery', slug: 'jira-delivery' };
+    vi.mocked(pagesApi.list).mockResolvedValue([page, other]);
+    vi.mocked(pagesApi.get).mockImplementation(async id => id === other.id ? { ...detail, ...other } : detail);
+    render(<PagesPage />);
+
+    await screen.findByTestId('live-page-frame');
+    const first = screen.getByLabelText('pages.open:Adobe Signals');
+    const second = screen.getByLabelText('pages.open:Jira Delivery');
+    expect(first).toHaveAttribute('aria-current', 'true');
+
+    first.focus();
+    fireEvent.keyDown(first, { key: 'ArrowDown' });
+    expect(second).toHaveFocus();
+
+    fireEvent.change(screen.getByLabelText('pages.search'), { target: { value: 'No match' } });
+    expect(screen.getByText('pages.noSearchResults')).toBeInTheDocument();
   });
 
   it('restores the selected Page and collapsed sidebar sections', async () => {

@@ -1,13 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { useState } from 'react';
 import { CollectionShell } from '../CollectionShell';
 
 type Item = { id: string; name: string; favorite: boolean; archived?: boolean };
 const items: Item[] = [{ id: 'one', name: 'One', favorite: true }, { id: 'two', name: 'Two', favorite: false, archived: true }];
 const labels = { search: 'Search', favorites: 'Favorites', clearFilters: 'Clear filters', moreActions: 'More actions', openCollection: 'Open collection', closeCollection: 'Close collection', selectItem: 'selected' };
+const collectionShellCss = readFileSync(resolve(process.cwd(), 'src/components/CollectionShell.css'), 'utf8');
 
-function Fixture({ mobile = false }: { mobile?: boolean }) {
+function Fixture({ mobile = false, ariaLabel = 'Test collection' }: { mobile?: boolean; ariaLabel?: string }) {
   const [query, setQuery] = useState('');
   const [favoritesOnly, setFavoritesOnly] = useState(false);
   const [filter, setFilter] = useState<string | null>(null);
@@ -15,7 +18,7 @@ function Fixture({ mobile = false }: { mobile?: boolean }) {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [sidebarOpen, setSidebarOpen] = useState(true);
   return <CollectionShell<Item>
-    ariaLabel="Test collection" items={items} getId={item => item.id} getLabel={item => item.name} isFavorite={item => item.favorite}
+    ariaLabel={ariaLabel} items={items} getId={item => item.id} getLabel={item => item.name} isFavorite={item => item.favorite}
     filters={[{ id: 'archived', label: 'Archived', matches: item => !!item.archived }]}
     persistence={{ query, onQueryChange: setQuery, favoritesOnly, onFavoritesOnlyChange: setFavoritesOnly, activeFilterId: filter, onActiveFilterIdChange: setFilter }}
     selectedId={selectedId} onSelect={setSelectedId} selectedIds={selectedIds} onSelectedIdsChange={setSelectedIds}
@@ -28,6 +31,8 @@ function Fixture({ mobile = false }: { mobile?: boolean }) {
 describe('CollectionShell', () => {
   it('filters, favorites, and renders the shared empty state', () => {
     render(<Fixture />);
+    expect(screen.getByRole('list')).toBeInTheDocument();
+    expect(screen.getAllByRole('listitem')).toHaveLength(2);
     fireEvent.click(screen.getByRole('button', { name: 'Favorites' }));
     expect(screen.getByRole('button', { name: 'One' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Two' })).toBeNull();
@@ -43,9 +48,31 @@ describe('CollectionShell', () => {
     fireEvent.click(screen.getByRole('checkbox', { name: 'Two selected' }));
     const trigger = screen.getByRole('button', { name: 'More actions' });
     fireEvent.click(trigger);
+    expect(trigger).toHaveAttribute('aria-haspopup', 'menu');
     await waitFor(() => expect(screen.getByRole('menuitem', { name: 'Archive selected' })).toHaveFocus());
     fireEvent.keyDown(window, { key: 'Escape' });
     await waitFor(() => expect(trigger).toHaveFocus());
+  });
+
+  it('removes deleted ids from an active bulk selection after the list refreshes', () => {
+    function RefreshingFixture() {
+      const [currentItems, setCurrentItems] = useState(items);
+      const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set(['one', 'two', 'deleted']));
+      return <>
+        <button type="button" onClick={() => setCurrentItems([items[0]])}>Refresh</button>
+        <output>{[...selectedIds].sort().join(',')}</output>
+        <CollectionShell<Item>
+          ariaLabel="Refreshing collection" items={currentItems} getId={item => item.id} getLabel={item => item.name}
+          persistence={{ query: '', onQueryChange: () => {}, favoritesOnly: false, onFavoritesOnlyChange: () => {} }}
+          selectedId={null} onSelect={() => {}} selectedIds={selectedIds} onSelectedIdsChange={setSelectedIds} labels={labels}
+          slots={{ renderDetail: () => null }}
+        />
+      </>;
+    }
+    render(<RefreshingFixture />);
+    expect(screen.getByText('one,two')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    expect(screen.getByText('one', { selector: 'output' })).toBeInTheDocument();
   });
 
   it('restores menu-trigger focus after an action or outside pointer dismissal', async () => {
@@ -53,6 +80,7 @@ describe('CollectionShell', () => {
     const trigger = screen.getByRole('button', { name: 'More actions' });
 
     fireEvent.click(trigger);
+    expect(trigger).toHaveAttribute('aria-controls');
     fireEvent.click(screen.getByRole('menuitem', { name: 'Archive selected' }));
     await waitFor(() => expect(trigger).toHaveFocus());
     expect(screen.getByText('Detail: One')).toBeInTheDocument();
@@ -61,6 +89,34 @@ describe('CollectionShell', () => {
     fireEvent.pointerDown(document.body);
     await waitFor(() => expect(trigger).toHaveFocus());
     expect(screen.queryByRole('menuitem', { name: 'Archive selected' })).toBeNull();
+  });
+
+  it('moves through enabled action-menu items with Arrow keys, Home, and End', async () => {
+    function MenuFixture() {
+      const [query, setQuery] = useState('');
+      const [favoritesOnly, setFavoritesOnly] = useState(false);
+      return <CollectionShell<Item>
+        ariaLabel="Menu collection" items={items} getId={item => item.id} getLabel={item => item.name}
+        persistence={{ query, onQueryChange: setQuery, favoritesOnly, onFavoritesOnlyChange: setFavoritesOnly }}
+        selectedId="one" onSelect={() => {}}
+        actions={[
+          { id: 'first', label: 'First action', onSelect: () => {} },
+          { id: 'disabled', label: 'Disabled action', disabled: () => true, onSelect: () => {} },
+          { id: 'last', label: 'Last action', onSelect: () => {} },
+        ]}
+        labels={labels} slots={{ renderDetail: () => null }}
+      />;
+    }
+    render(<MenuFixture />);
+    fireEvent.click(screen.getByRole('button', { name: 'More actions' }));
+    const menu = screen.getByRole('menu', { name: 'More actions' });
+    expect(screen.getByRole('menuitem', { name: 'First action' })).toHaveFocus();
+    fireEvent.keyDown(menu, { key: 'End' });
+    expect(screen.getByRole('menuitem', { name: 'Last action' })).toHaveFocus();
+    fireEvent.keyDown(menu, { key: 'ArrowDown' });
+    expect(screen.getByRole('menuitem', { name: 'First action' })).toHaveFocus();
+    fireEvent.keyDown(menu, { key: 'Home' });
+    expect(screen.getByRole('menuitem', { name: 'First action' })).toHaveFocus();
   });
 
   it('supports the shared slash and arrow-key sidebar shortcuts', () => {
@@ -80,6 +136,17 @@ describe('CollectionShell', () => {
     expect(screen.queryByRole('complementary', { name: 'Test collection' })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Open collection' }));
     expect(screen.getByRole('complementary', { name: 'Test collection' })).toBeInTheDocument();
+  });
+
+  it('closes an open mobile sidebar on Escape', () => {
+    render(<Fixture mobile />);
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(screen.queryByRole('complementary', { name: 'Test collection' })).toBeNull();
+  });
+
+  it('keeps explicit accent focus indicators for the search and every shared button control', () => {
+    expect(collectionShellCss).toMatch(/\.collection-shell-search:focus-within\s*\{[^}]*outline:\s*2px solid var\(--kr-accent\)/);
+    expect(collectionShellCss).toMatch(/\.collection-shell-open:focus-visible[^{]*\{[^}]*outline:\s*2px solid var\(--kr-accent\)/);
   });
 
   it('lets a caller render custom grouped list markup from the filtered items, plus header/footer slots', () => {

@@ -54,6 +54,7 @@
 .text-muted     { color: var(--kr-text-muted); }
 .text-faint     { color: var(--kr-text-faint); }
 .text-dim       { color: var(--kr-text-dim); }
+pre .text-dim   { color: var(--kr-text-primary); }
 .text-ghost     { color: var(--kr-text-ghost); }
 .text-accent    { color: var(--kr-accent); }
 .text-success   { color: var(--kr-success); }

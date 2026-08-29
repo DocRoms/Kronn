@@ -74,6 +74,40 @@ describe('ProjectList — missing-path banner', () => {
 
     expect(screen.getAllByTestId(/^project-list-item-/)).toHaveLength(3);
     expect(screen.getAllByTestId(/^card-/)).toHaveLength(1);
+    expect(screen.getByRole('complementary', { name: 'projects.title' })).toHaveClass('collection-shell-sidebar');
+  });
+
+  it('selects a project through the shared flat-list row contract', () => {
+    const onSetExpandedId = vi.fn();
+    render(
+      <ProjectList
+        projects={[proj('p1', 'Alpha', '/repos/alpha', true), proj('p2', 'Beta', '/repos/beta', true)]}
+        discussions={[]}
+        discussionsByProject={{}}
+        driftByProject={{}}
+        agents={[]}
+        allSkills={[]}
+        mcpConfigs={[]}
+        workflows={[]}
+        configLanguage="fr"
+        toast={noop}
+        onNavigate={noop}
+        onSetDiscPrefill={noop}
+        onAutoRunDiscussion={noop}
+        onOpenDiscussion={noop}
+        onRefetch={noop}
+        onRefetchDiscussions={noop}
+        onRefetchSkills={noop}
+        onRefetchDrift={noop}
+        expandedId={null}
+        onSetExpandedId={onSetExpandedId}
+      />,
+    );
+
+    const alphaRow = screen.getByTestId('project-list-item-p1').closest('li')?.querySelector('button');
+    expect(alphaRow).toHaveAttribute('aria-current', 'true');
+    fireEvent.click(screen.getByTestId('project-list-item-p2'));
+    expect(onSetExpandedId).toHaveBeenCalledWith('p2');
   });
 
   it('hides the banner when every path resolves', () => {

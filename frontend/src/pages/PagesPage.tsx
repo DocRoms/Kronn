@@ -566,7 +566,7 @@ export function PagesPage({
               const rowProps = getRowProps(page);
               return <div className="disc-swipe-wrap live-page-row" key={`${keyPrefix}-${page.id}`}>
                 <div className="disc-item" data-active={page.id === selectedId} data-selected={selectedIds.has(page.id)}>
-                  <button type="button" {...rowProps} className={`${rowProps.className} disc-item-open`} aria-label={t('pages.open', page.title)}>
+                  <button type="button" {...rowProps} className={`${rowProps.className} disc-item-open`} aria-label={t('pages.open', page.title)} role={selectionMode ? 'checkbox' : undefined} aria-checked={selectionMode ? selectedIds.has(page.id) : undefined}>
                     {selectionMode && <span className="disc-item-selection-box" data-selected={selectedIds.has(page.id)} aria-hidden="true">{selectedIds.has(page.id) && <CheckSquare2 size={12} />}</span>}
                     <span className="disc-item-content"><span className="disc-item-title"><span className="disc-item-title-text">{page.title}</span></span><span className="disc-item-meta"><span className="disc-item-meta-summary">{page.slug}</span></span></span>
                   </button>

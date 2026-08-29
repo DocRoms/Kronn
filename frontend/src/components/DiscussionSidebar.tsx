@@ -772,6 +772,8 @@ export function DiscussionSidebar({
       }}
       selectedId={activeId}
       onSelect={id => onSelect(id, 0)}
+      selectedIds={selectedIds}
+      onSelectedIdsChange={setSelectedIds}
       sidebarOnly
       sidebarClassName="disc-sidebar"
       isMobile={isMobile}
