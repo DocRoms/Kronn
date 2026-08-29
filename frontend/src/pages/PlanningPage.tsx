@@ -361,17 +361,15 @@ export function PlanningPage({
           slots={{
             sidebarHeaderEnd: <button
               type="button"
-              className="collection-shell-search-action"
-              data-active={filtersOpen}
+              className="collection-shell-search-action collection-shell-search-action-icon"
+              data-active={filtersOpen || activeFilterCount > 0}
               onClick={() => setFiltersOpen(value => !value)}
               aria-expanded={filtersOpen}
-              aria-controls="planning-search-options"
+              aria-controls={filtersOpen ? 'planning-search-options' : undefined}
               aria-label={t('planning.filters')}
               title={t('planning.filters')}
             >
-              <Filter size={14} />
-              <span>{t('planning.filters')}</span>
-              {activeFilterCount > 0 && <strong>{activeFilterCount}</strong>}
+              <Filter size={14} aria-hidden="true" />
             </button>,
             afterSidebarHeader: <>
               {filtersOpen && <div id="planning-search-options" className="collection-shell-search-options planning-filters">

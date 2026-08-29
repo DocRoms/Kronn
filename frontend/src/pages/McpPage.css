@@ -41,24 +41,12 @@
 }
 
 .mcp-page .collection-shell-search-options .list-controls {
-  display: grid;
   min-width: 0;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  justify-content: stretch;
-  gap: 7px;
 }
 
 .mcp-page .collection-shell-search-options .list-control {
+  flex: 1;
   min-width: 0;
-}
-
-.mcp-page .collection-shell-search-options .list-control:first-child {
-  grid-column: 1 / -1;
-}
-
-.mcp-page .collection-shell-search-options .list-control:last-of-type {
-  grid-column: 1;
 }
 
 .mcp-page .collection-shell-search-options .list-control select {

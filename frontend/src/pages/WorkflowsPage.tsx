@@ -17,7 +17,7 @@ import {
   Clock, GitBranch, Zap, Eye, Layers, X, Square,
   ToggleLeft, ToggleRight, Star,
   Upload, Download, AlertTriangle, Workflow as WorkflowIcon,
-  PlugZap, MessageSquareText, TerminalSquare, SlidersHorizontal,
+  PlugZap, MessageSquareText, TerminalSquare, Filter,
 } from 'lucide-react';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { WorkflowDetail } from '../components/workflows/WorkflowDetail';
@@ -1877,8 +1877,8 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
           sidebarHeaderEnd: <button
             ref={automationProjectFilterButtonRef}
             type="button"
-            className="collection-shell-search-action"
-            data-active={automationProjectFilter !== 'all'}
+            className="collection-shell-search-action collection-shell-search-action-icon"
+            data-active={showAutomationProjectFilter || automationProjectFilter !== 'all'}
             onClick={() => setShowAutomationProjectFilter(open => !open)}
             onKeyDown={event => {
               if (event.key === 'Escape' && showAutomationProjectFilter) {
@@ -1891,9 +1891,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
             aria-expanded={showAutomationProjectFilter}
             aria-controls={showAutomationProjectFilter ? 'automation-project-filter-options' : undefined}
           >
-            <SlidersHorizontal size={12} aria-hidden="true" />
-            <span>{t('disc.sidebar.filters')}</span>
-            {automationProjectFilter !== 'all' && <strong aria-hidden="true">1</strong>}
+            <Filter size={14} aria-hidden="true" />
           </button>,
           afterSidebarHeader: showAutomationProjectFilter ? <div
             id="automation-project-filter-options"

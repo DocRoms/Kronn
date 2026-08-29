@@ -554,7 +554,10 @@ describe('DiscussionSidebar — global search entry point', () => {
     const quickInput = document.querySelector('.disc-search-input') as HTMLInputElement;
     fireEvent.change(quickInput, { target: { value: 'banana' } });
     expect(screen.getAllByRole('textbox')).toHaveLength(1);
-    expect(screen.getByTestId('disc-open-global-search')).toBeVisible();
+    const advancedSearch = screen.getByTestId('disc-open-global-search');
+    expect(advancedSearch).toBeVisible();
+    expect(advancedSearch.querySelector('span')).toBeNull();
+    expect(advancedSearch.querySelector('.lucide-funnel')).toBeInTheDocument();
     fireEvent.keyDown(quickInput, { key: 'Enter' });
     expect(onOpenGlobalSearch).toHaveBeenCalledTimes(1);
 

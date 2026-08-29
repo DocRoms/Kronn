@@ -242,18 +242,22 @@ describe('PlanningPage', () => {
     expect(search).toHaveValue('');
 
     const filterButton = within(searchHeader).getByRole('button', { name: 'planning.filters' });
-    expect(filterButton).toHaveClass('collection-shell-search-action');
+    expect(filterButton).toHaveClass('collection-shell-search-action', 'collection-shell-search-action-icon');
+    expect(filterButton.querySelector('span')).toBeNull();
     expect(filterButton).toHaveAttribute('aria-expanded', 'false');
+    expect(filterButton).not.toHaveAttribute('aria-controls');
     expect(screen.queryByRole('combobox', { name: 'planning.allStatuses' })).toBeNull();
 
     fireEvent.click(filterButton);
     expect(filterButton).toHaveAttribute('aria-expanded', 'true');
+    expect(filterButton).toHaveAttribute('aria-controls', 'planning-search-options');
     expect(screen.getByRole('combobox', { name: 'planning.allStatuses' })).toBeInTheDocument();
     expect(screen.getByRole('combobox', { name: 'planning.allProjects' })).toBeInTheDocument();
     expect(screen.getByRole('combobox', { name: 'planning.allLinks' })).toBeInTheDocument();
 
     fireEvent.change(screen.getByRole('combobox', { name: 'planning.allStatuses' }), { target: { value: 'todo' } });
-    expect(filterButton.querySelector('strong')).toHaveTextContent('1');
+    expect(filterButton).toHaveAttribute('data-active', 'true');
+    expect(filterButton.querySelector('strong')).toBeNull();
     await waitFor(() => expect(mocks.list).toHaveBeenLastCalledWith(expect.objectContaining({ status: 'todo' })));
     fireEvent.click(filterButton);
     expect(screen.queryByRole('combobox', { name: 'planning.allStatuses' })).toBeNull();

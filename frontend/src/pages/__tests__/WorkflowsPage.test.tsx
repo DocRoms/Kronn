@@ -265,6 +265,8 @@ describe('WorkflowsPage', () => {
     expect(within(sidebar).getByRole('textbox', { name: 'Rechercher une automatisation…' })).toHaveFocus();
 
     const projectFilterButton = within(sidebar).getByRole('button', { name: 'Filtrer les automatisations par projet' });
+    expect(projectFilterButton).toHaveClass('collection-shell-search-action-icon');
+    expect(projectFilterButton.querySelector('span')).toBeNull();
     expect(projectFilterButton).toHaveAttribute('aria-expanded', 'false');
     expect(projectFilterButton).not.toHaveAttribute('aria-controls');
     expect(within(sidebar).queryByRole('combobox', { name: 'Filtrer les automatisations par projet' })).toBeNull();
@@ -281,7 +283,7 @@ describe('WorkflowsPage', () => {
       target: { value: 'p-alpha' },
     });
     expect(projectFilterButton).toHaveAttribute('data-active', 'true');
-    expect(projectFilterButton).toHaveTextContent('1');
+    expect(projectFilterButton.querySelector('strong')).toBeNull();
 
     fireEvent.keyDown(projectFilter, { key: 'Escape' });
     expect(projectFilterButton).toHaveAttribute('aria-expanded', 'false');

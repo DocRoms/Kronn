@@ -20,6 +20,7 @@
 .collection-shell-search-clear:focus-visible { outline: 2px solid var(--kr-accent); outline-offset: 3px; }
 .collection-shell-search-actions { display: flex; min-width: 0; flex: 0 0 auto; align-items: stretch; gap: 7px; }
 .collection-shell-search-action { display: inline-flex; min-height: 36px; flex-shrink: 0; align-items: center; justify-content: center; gap: 5px; padding: 0 9px; border: 1px solid rgba(var(--kr-accent-rgb), 0.45); border-radius: var(--kr-r-md); background: var(--kr-accent-bg); color: var(--kr-accent-text); font: inherit; font-size: var(--kr-fs-xs); font-weight: 600; cursor: pointer; }
+.collection-shell-search-action-icon { width: 36px; min-width: 36px; padding: 0; }
 .collection-shell-search-action strong { min-width: 16px; padding: 1px 5px; border-radius: 999px; background: var(--kr-accent); color: var(--kr-text-on-accent, #fff); font-size: 9px; }
 .collection-shell-search-action:hover, .collection-shell-search-action:focus-visible, .collection-shell-search-action[data-active="true"] { border-color: var(--kr-accent); background: rgba(var(--kr-accent-rgb), 0.2); outline: 2px solid transparent; }
 .collection-shell-search-options { display: grid; gap: 7px; padding: 0 12px 8px; border-bottom: 1px solid var(--kr-border-ghost); background: var(--kr-bg-surface); }

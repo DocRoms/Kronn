@@ -11,7 +11,8 @@ import { usePersistentIdSet } from '../hooks/usePersistentIdSet';
 import type { Project, AgentDetection, AuditProgress, DriftCheckResponse, Discussion, Skill, McpConfigDisplay, WorkflowSummary } from '../types/generated';
 import {
   Folder, ChevronRight, AlertTriangle,
-  MessageSquare, Workflow, Puzzle, ShieldCheck, Loader2, FileCode, Clock, Plus, SlidersHorizontal, Trash2,
+  MessageSquare, Workflow, Puzzle, ShieldCheck, Loader2, FileCode, Clock, Plus,
+  ArrowUpDown, Filter, Star, Trash2,
 } from 'lucide-react';
 import { MatrixText } from './MatrixText';
 
@@ -84,6 +85,7 @@ export function ProjectList({
   const [projectFilter, setProjectFilter] = useState<ProjectFilter>('visible');
   const [projectSort, setProjectSort] = useState<ProjectSort>('name');
   const [projectSortReversed, setProjectSortReversed] = useState(false);
+  const [filterOptionsOpen, setFilterOptionsOpen] = useState(false);
   const [sortOptionsOpen, setSortOptionsOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [favoritesOnly, setFavoritesOnly] = useState(false);
@@ -265,6 +267,7 @@ export function ProjectList({
           onSidebarOpenChange={setSidebarOpen}
           globalSearchShortcut
           showSearchClear
+          showControls={false}
           labels={{
             search: t('projects.search'),
             favorites: t('collection.favorites'),
@@ -278,21 +281,45 @@ export function ProjectList({
             selectedCount: count => t('collection.selectedCount', count),
           }}
           slots={{
-            sidebarHeaderEnd: <button
-              type="button"
-              className="collection-shell-search-action"
-              data-active={sortOptionsOpen}
-              onClick={() => setSortOptionsOpen(open => !open)}
-              aria-expanded={sortOptionsOpen}
-              aria-controls="project-search-options"
-              aria-label={t('projects.master.sort')}
-              title={t('projects.master.sort')}
-            >
-              <SlidersHorizontal size={14} />
-              <span>{t('projects.master.sort')}</span>
-            </button>,
+            sidebarHeaderEnd: <>
+              <button
+                type="button"
+                className="collection-shell-search-action collection-shell-search-action-icon"
+                data-active={filterOptionsOpen || favoritesOnly || projectFilter !== 'visible'}
+                onClick={() => {
+                  setFilterOptionsOpen(open => !open);
+                  setSortOptionsOpen(false);
+                }}
+                aria-expanded={filterOptionsOpen}
+                aria-controls={filterOptionsOpen ? 'project-filter-options' : undefined}
+                aria-label={t('projects.master.filter')}
+                title={t('projects.master.filter')}
+              >
+                <Filter size={14} aria-hidden="true" />
+              </button>
+              <button
+                type="button"
+                className="collection-shell-search-action collection-shell-search-action-icon"
+                data-active={sortOptionsOpen || projectSort !== 'name' || projectSortReversed}
+                onClick={() => {
+                  setSortOptionsOpen(open => !open);
+                  setFilterOptionsOpen(false);
+                }}
+                aria-expanded={sortOptionsOpen}
+                aria-controls={sortOptionsOpen ? 'project-sort-options' : undefined}
+                aria-label={t('projects.master.sort')}
+                title={t('projects.master.sort')}
+              >
+                <ArrowUpDown size={14} aria-hidden="true" />
+              </button>
+            </>,
             afterSidebarHeader: <>
-              {sortOptionsOpen && <div id="project-search-options" className="collection-shell-search-options">
+              {filterOptionsOpen && <div id="project-filter-options" className="collection-shell-search-options collection-shell-controls">
+                <button type="button" className="collection-shell-filter" data-active={favoritesOnly} aria-pressed={favoritesOnly} onClick={() => setFavoritesOnly(value => !value)}><Star size={14} />{t('collection.favorites')}</button>
+                {projectFilters.map(filter => <button key={filter.id} type="button" className="collection-shell-filter" data-active={filter.id === projectFilter} aria-pressed={filter.id === projectFilter} onClick={() => setProjectFilter(filter.id === projectFilter ? 'all' : filter.id as ProjectFilter)}>{filter.label}</button>)}
+                {(favoritesOnly || projectFilter !== 'all') && <button type="button" className="collection-shell-clear" onClick={() => { setFavoritesOnly(false); setProjectFilter('all'); }}>{t('collection.clearFilters')}</button>}
+              </div>}
+              {sortOptionsOpen && <div id="project-sort-options" className="collection-shell-search-options">
                 <ListControls
                   sortLabel={t('projects.master.sort')}
                   sortValue={projectSort}

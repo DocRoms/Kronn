@@ -23,7 +23,7 @@ import {
   Puzzle, Plus, Trash2, Eye, Check, RefreshCw, Square, CheckSquare, Minus,
   X, Key, Pencil, FileText, ExternalLink, Save,
   Plug, Globe, Info, Sparkles, Upload, Download, ChevronRight, Terminal, AlertTriangle,
-  SlidersHorizontal,
+  ArrowUpDown, Filter,
 } from 'lucide-react';
 import { HostSyncChip } from '../components/HostSyncChip';
 import { HostSyncPreview } from '../components/HostSyncPreview';
@@ -273,7 +273,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
     } catch { return false; }
   });
   const [mcpKindFilter, setMcpKindFilter] = useState<'all' | 'mcp' | 'api' | 'cli'>('all');
-  const [mcpSearchOptionsOpen, setMcpSearchOptionsOpen] = useState(false);
+  const [mcpSearchPanel, setMcpSearchPanel] = useState<'filters' | 'sort' | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [favoritesOnly, setFavoritesOnly] = useState(false);
   const [selectedConfigIds, setSelectedConfigIds] = useState<Set<string>>(new Set());
@@ -2914,19 +2914,29 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                 }}
                 slots={{
                   afterSidebarHeader: <>
-                    {totalConfigs > 1 && mcpSearchOptionsOpen && (
-                      <div id="mcp-search-options" className="collection-shell-search-options">
+                    {totalConfigs > 1 && mcpSearchPanel === 'filters' && (
+                      <div id="mcp-filter-options" className="collection-shell-search-options">
+                        <div className="list-controls">
+                          <label className="list-control">
+                            <Filter size={12} aria-hidden="true" />
+                            <span>{t('automation.filter.label')}</span>
+                            <select
+                              value={mcpKindFilter}
+                              onChange={event => setMcpKindFilter(event.target.value as typeof mcpKindFilter)}
+                              aria-label={t('mcp.filterKind')}
+                            >
+                              <option value="all">{t('mcp.kindFilter.all')}</option>
+                              <option value="mcp">{t('mcp.kindFilter.mcp')}</option>
+                              <option value="api">{t('mcp.kindFilter.api')}</option>
+                              <option value="cli">{t('mcp.kindFilter.cli')}</option>
+                            </select>
+                          </label>
+                        </div>
+                      </div>
+                    )}
+                    {totalConfigs > 1 && mcpSearchPanel === 'sort' && (
+                      <div id="mcp-sort-options" className="collection-shell-search-options">
                         <ListControls
-                          filterLabel={t('automation.filter.label')}
-                          filterAriaLabel={t('mcp.filterKind')}
-                          filterValue={mcpKindFilter}
-                          filterOptions={[
-                            { value: 'all', label: t('mcp.kindFilter.all') },
-                            { value: 'mcp', label: t('mcp.kindFilter.mcp') },
-                            { value: 'api', label: t('mcp.kindFilter.api') },
-                            { value: 'cli', label: t('mcp.kindFilter.cli') },
-                          ]}
-                          onFilterChange={setMcpKindFilter}
                           sortLabel={t('automation.sort.label')}
                           sortAriaLabel={t('mcp.sortLabel')}
                           sortValue={mcpSort}
@@ -2953,19 +2963,32 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                       </div>
                     </div>
                   </>,
-                  sidebarHeaderEnd: totalConfigs > 1 ? <button
-                    type="button"
-                    className="collection-shell-search-action"
-                    data-active={mcpSearchOptionsOpen || undefined}
-                    onClick={() => setMcpSearchOptionsOpen(open => !open)}
-                    aria-label={t('mcp.searchOptions')}
-                    aria-expanded={mcpSearchOptionsOpen}
-                    aria-controls="mcp-search-options"
-                    title={t('mcp.searchOptions')}
-                  >
-                    <SlidersHorizontal size={14} aria-hidden="true" />
-                    <span>{t('disc.sidebar.filters')}</span>
-                  </button> : undefined,
+                  sidebarHeaderEnd: totalConfigs > 1 ? <>
+                    <button
+                      type="button"
+                      className="collection-shell-search-action collection-shell-search-action-icon"
+                      data-active={mcpSearchPanel === 'filters' || mcpKindFilter !== 'all'}
+                      onClick={() => setMcpSearchPanel(panel => panel === 'filters' ? null : 'filters')}
+                      aria-label={t('mcp.filterKind')}
+                      aria-expanded={mcpSearchPanel === 'filters'}
+                      aria-controls={mcpSearchPanel === 'filters' ? 'mcp-filter-options' : undefined}
+                      title={t('mcp.filterKind')}
+                    >
+                      <Filter size={14} aria-hidden="true" />
+                    </button>
+                    <button
+                      type="button"
+                      className="collection-shell-search-action collection-shell-search-action-icon"
+                      data-active={mcpSearchPanel === 'sort' || mcpSort !== 'name' || mcpSortReversed}
+                      onClick={() => setMcpSearchPanel(panel => panel === 'sort' ? null : 'sort')}
+                      aria-label={t('mcp.sortLabel')}
+                      aria-expanded={mcpSearchPanel === 'sort'}
+                      aria-controls={mcpSearchPanel === 'sort' ? 'mcp-sort-options' : undefined}
+                      title={t('mcp.sortLabel')}
+                    >
+                      <ArrowUpDown size={14} aria-hidden="true" />
+                    </button>
+                  </> : undefined,
                   renderItem: config => <>
                     <span className="sr-only">{`${config.label} — ${t('mcp.openDetails')}`}</span>
                     {renderPlugin(config, false)}

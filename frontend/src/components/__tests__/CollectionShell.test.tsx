@@ -250,6 +250,7 @@ describe('CollectionShell', () => {
     expect(collectionShellCss).toMatch(/\.collection-shell-search\s*\{[^}]*min-height:\s*36px[^}]*border:\s*1px solid var\(--kr-border-light\)[^}]*background:\s*var\(--kr-bg-input\)/);
     expect(collectionShellCss).toMatch(/\.collection-shell-search:focus-within\s*\{[^}]*border-color:\s*var\(--kr-accent\)[^}]*box-shadow:\s*0 0 0 2px rgba\(var\(--kr-accent-rgb\), 0\.12\)/);
     expect(collectionShellCss).toMatch(/\.collection-shell-search-action\s*\{[^}]*min-height:\s*36px[^}]*background:\s*var\(--kr-accent-bg\)/);
+    expect(collectionShellCss).toMatch(/\.collection-shell-search-action-icon\s*\{[^}]*width:\s*36px[^}]*padding:\s*0/);
     expect(collectionShellCss).toMatch(/\.collection-shell-open:focus-visible[^{]*\{[^}]*outline:\s*2px solid var\(--kr-accent\)/);
     expect(collectionShellCss).toMatch(/\.collection-shell-collapse-button:focus-visible\s*\{[^}]*outline:\s*2px solid var\(--kr-accent\)/);
     expect(collectionShellCss).toMatch(/\.collection-shell-sidebar-rail:focus-visible\s*\{[^}]*outline:\s*2px solid var\(--kr-accent\)/);

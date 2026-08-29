@@ -175,6 +175,7 @@ describe('ProjectList — missing-path banner', () => {
     expect(screen.getByText('projects.title').closest('.collection-shell-title')).toHaveTextContent('projects.title · 2');
     fireEvent.click(screen.getByRole('button', { name: /collection\.favorites · Alpha/ }));
     expect(localStorage.getItem('kronn:collection-favorites:projects')).toContain('p1');
+    fireEvent.click(screen.getByRole('button', { name: 'projects.master.filter' }));
     fireEvent.click(screen.getByRole('button', { name: 'collection.favorites' }));
     expect(screen.getByTestId('project-list-item-p1')).toBeInTheDocument();
     expect(screen.queryByTestId('project-list-item-p2')).toBeNull();
@@ -210,7 +211,7 @@ describe('ProjectList — missing-path banner', () => {
     expect(onAddProject).toHaveBeenCalledOnce();
   });
 
-  it('keeps sorting behind a compact search action and exposes inline search clearing', () => {
+  it('separates icon-only filtering and sorting beside the shared search', () => {
     renderList([
       proj('p1', 'Alpha', '/repos/alpha', true),
       proj('p2', 'Beta', '/repos/beta', true),
@@ -225,12 +226,25 @@ describe('ProjectList — missing-path banner', () => {
     fireEvent.click(within(searchHeader).getByRole('button', { name: 'collection.clearFilters' }));
     expect(search).toHaveValue('');
 
+    const filterButton = within(searchHeader).getByRole('button', { name: 'projects.master.filter' });
     const sortButton = within(searchHeader).getByRole('button', { name: 'projects.master.sort' });
-    expect(sortButton).toHaveClass('collection-shell-search-action');
+    expect(filterButton).toHaveClass('collection-shell-search-action', 'collection-shell-search-action-icon');
+    expect(sortButton).toHaveClass('collection-shell-search-action', 'collection-shell-search-action-icon');
+    expect(filterButton.querySelector('span')).toBeNull();
+    expect(sortButton.querySelector('span')).toBeNull();
+    expect(filterButton).toHaveAttribute('aria-expanded', 'false');
     expect(sortButton).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByRole('button', { name: 'projects.master.filter.attention' })).toBeNull();
     expect(screen.queryByRole('combobox', { name: 'projects.master.sort' })).toBeNull();
 
+    fireEvent.click(filterButton);
+    expect(filterButton).toHaveAttribute('aria-expanded', 'true');
+    expect(sortButton).toHaveAttribute('aria-expanded', 'false');
+    fireEvent.click(screen.getByRole('button', { name: 'projects.master.filter.attention' }));
+    expect(filterButton).toHaveAttribute('data-active', 'true');
+
     fireEvent.click(sortButton);
+    expect(filterButton).toHaveAttribute('aria-expanded', 'false');
     expect(sortButton).toHaveAttribute('aria-expanded', 'true');
     const sortSelect = screen.getByRole('combobox', { name: 'projects.master.sort' });
     const directionButton = screen.getByRole('button', { name: 'projects.master.sort.direction' });

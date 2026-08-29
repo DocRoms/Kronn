@@ -405,12 +405,16 @@ describe('McpPage', () => {
     );
     const search = screen.getByRole('textbox', { name: 'Rechercher un plugin ou un projet...' });
     const searchHeader = search.closest('.collection-shell-header');
-    const optionsTrigger = screen.getByRole('button', { name: 'Filtres et tri de la recherche' });
+    const filterTrigger = screen.getByRole('button', { name: 'Filtrer les plugins par type' });
+    const sortTrigger = screen.getByRole('button', { name: 'Trier les plugins' });
 
-    expect(optionsTrigger).toHaveClass('collection-shell-search-action');
-    expect(optionsTrigger).not.toHaveClass('collection-shell-icon');
-    expect(optionsTrigger).toHaveTextContent('Filtres');
-    expect(optionsTrigger).toHaveAttribute('aria-expanded', 'false');
+    expect(filterTrigger).toHaveClass('collection-shell-search-action', 'collection-shell-search-action-icon');
+    expect(sortTrigger).toHaveClass('collection-shell-search-action', 'collection-shell-search-action-icon');
+    expect(filterTrigger).not.toHaveClass('collection-shell-icon');
+    expect(filterTrigger.querySelector('span')).toBeNull();
+    expect(sortTrigger.querySelector('span')).toBeNull();
+    expect(filterTrigger).toHaveAttribute('aria-expanded', 'false');
+    expect(sortTrigger).toHaveAttribute('aria-expanded', 'false');
     expect(searchHeader?.querySelector('.list-controls')).toBeNull();
     expect(document.querySelector('.collection-shell-search-options')).toBeNull();
 
@@ -424,12 +428,13 @@ describe('McpPage', () => {
     fireEvent.click(clearSearch!);
     expect(search).toHaveValue('');
 
-    fireEvent.click(optionsTrigger);
-    expect(optionsTrigger).toHaveAttribute('aria-expanded', 'true');
-    const options = document.querySelector('.collection-shell-search-options');
-    expect(options).toBe(searchHeader?.nextElementSibling);
-    expect(options?.nextElementSibling).toHaveClass('mcp-collection-toolbar');
-    expect(options?.querySelector('.list-controls')).not.toBeNull();
+    fireEvent.click(filterTrigger);
+    expect(filterTrigger).toHaveAttribute('aria-expanded', 'true');
+    expect(sortTrigger).toHaveAttribute('aria-expanded', 'false');
+    const filterOptions = document.querySelector('.collection-shell-search-options');
+    expect(filterOptions).toBe(searchHeader?.nextElementSibling);
+    expect(filterOptions?.nextElementSibling).toHaveClass('mcp-collection-toolbar');
+    expect(filterOptions?.querySelector('.list-controls')).not.toBeNull();
 
     fireEvent.change(screen.getByRole('combobox', { name: 'Filtrer les plugins par type' }), {
       target: { value: 'api' },
@@ -440,14 +445,20 @@ describe('McpPage', () => {
     fireEvent.change(screen.getByRole('combobox', { name: 'Filtrer les plugins par type' }), {
       target: { value: 'all' },
     });
+
+    fireEvent.click(sortTrigger);
+    expect(filterTrigger).toHaveAttribute('aria-expanded', 'false');
+    expect(sortTrigger).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.queryByRole('combobox', { name: 'Filtrer les plugins par type' })).toBeNull();
+    expect(screen.getByRole('combobox', { name: 'Trier les plugins' })).toBeInTheDocument();
     const rowLabels = () => [...container.querySelectorAll('.collection-shell-row-button')]
       .map(row => row.textContent);
     expect(rowLabels()[0]).toContain('Chartbeat');
     fireEvent.click(screen.getByRole('button', { name: 'Inverser l’ordre' }));
     expect(rowLabels()[0]).toContain('GitHub');
 
-    fireEvent.click(optionsTrigger);
-    expect(optionsTrigger).toHaveAttribute('aria-expanded', 'false');
+    fireEvent.click(sortTrigger);
+    expect(sortTrigger).toHaveAttribute('aria-expanded', 'false');
     expect(document.querySelector('.collection-shell-search-options')).toBeNull();
   });
 
@@ -462,9 +473,9 @@ describe('McpPage', () => {
     expect(panelRule).toContain('overflow-x: clip');
     expect(panelRule).not.toContain('padding:');
     expect(panelRule).not.toContain('background:');
-    expect(controlsRule).toContain('grid-template-columns: minmax(0, 1fr) auto');
-    expect(controlsRule).toContain('align-items: center');
-    expect(controlRule).not.toContain('display: grid');
+    expect(controlsRule).toContain('min-width: 0');
+    expect(controlsRule).not.toContain('display: grid');
+    expect(controlRule).toContain('flex: 1');
     expect(selectRule).toContain('flex: 1');
     expect(selectRule).toContain('min-width: 0');
     expect(selectRule).toContain('max-width: 100%');
@@ -670,8 +681,8 @@ describe('McpPage', () => {
     ).filter((id): id is string => id !== undefined);
 
     expect(cardOrder()).toEqual(['api-config', 'cli-config', 'mcp-config']);
-    fireEvent.click(screen.getByRole('button', { name: 'Filtres et tri de la recherche' }));
-    fireEvent.change(screen.getByLabelText('Trier les plugins'), {
+    fireEvent.click(screen.getByRole('button', { name: 'Trier les plugins' }));
+    fireEvent.change(screen.getByRole('combobox', { name: 'Trier les plugins' }), {
       target: { value: 'kind' },
     });
     expect(cardOrder()).toEqual(['mcp-config', 'api-config', 'cli-config']);
@@ -679,7 +690,8 @@ describe('McpPage', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Inverser l’ordre' }));
     expect(cardOrder()).toEqual(['cli-config', 'api-config', 'mcp-config']);
 
-    fireEvent.change(screen.getByLabelText('Filtrer les plugins par type'), {
+    fireEvent.click(screen.getByRole('button', { name: 'Filtrer les plugins par type' }));
+    fireEvent.change(screen.getByRole('combobox', { name: 'Filtrer les plugins par type' }), {
       target: { value: 'api' },
     });
     expect(cardOrder()).toEqual(['api-config']);

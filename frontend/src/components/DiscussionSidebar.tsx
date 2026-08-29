@@ -12,7 +12,7 @@ import { formatRelativeTime } from '../lib/relativeTime';
 import type { ToastFn } from '../hooks/useToast';
 import {
   Folder, ChevronRight, Plus, X, MessageSquare, Archive, Search,
-  SlidersHorizontal, Users2, Trash2, Star, CheckCheck, Columns3, ListChecks, LogIn,
+  Filter, Users2, Trash2, Star, CheckCheck, Columns3, ListChecks, LogIn,
   Loader2, Upload, CircleDot, Clock3, MoreHorizontal, ChevronDown,
 } from 'lucide-react';
 
@@ -1033,10 +1033,9 @@ export function DiscussionSidebar({
               title={t('disc.globalSearch.open')}
               data-testid="disc-open-global-search"
               data-tour-id="global-search-open"
+              data-active={sourceFilter ? 'true' : undefined}
             >
-              <SlidersHorizontal size={12} />
-              <span>{t('disc.sidebar.filters')}</span>
-              {sourceFilter && <strong>1</strong>}
+              <Filter size={14} aria-hidden="true" />
             </button>
           )}
         </div>
