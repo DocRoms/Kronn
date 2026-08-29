@@ -524,6 +524,7 @@ export function PagesPage({
     <div className="live-pages" data-testid="live-pages-page">
       <CollectionShell<LivePage>
         sidebarOnly
+        sidebarClassName="disc-sidebar live-pages-list"
         ariaLabel={t('pages.title')}
         items={pages}
         getId={page => page.id}

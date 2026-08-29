@@ -28,6 +28,15 @@ export interface CollectionAction<TItem> {
   disabled?: (items: TItem[]) => boolean;
 }
 
+/** Props for a custom row's native focusable control. The caller owns any
+ * list-item wrapper; the shell deliberately does not override the control's
+ * native button role. */
+export interface CollectionRowProps {
+  className: string;
+  'aria-current'?: 'true';
+  onClick: () => void;
+}
+
 /** Context handed to `renderList` — the already-filtered items plus the
  * selection helpers a caller needs to keep custom (grouped, nested) markup
  * wired to the shell's shared query/favorites/selection state. */
@@ -40,13 +49,8 @@ export interface CollectionListContext<TItem> {
   toggleMultiSelection: (id: CollectionItemId) => void;
   /** Props for the one focusable control representing an item in a custom
    * list. Spread these onto the row button so grouped/nested renderers keep
-   * the shell's activation, selection semantics, and roving keyboard target. */
-  getRowProps: (item: TItem) => {
-    className: string;
-    role: 'listitem';
-    'aria-selected': boolean;
-    onClick: () => void;
-  };
+   * the shell's activation, current-item state, and roving keyboard target. */
+  getRowProps: (item: TItem) => CollectionRowProps;
 }
 
 export interface CollectionShellSlots<TItem> {
@@ -57,6 +61,9 @@ export interface CollectionShellSlots<TItem> {
   /** Rendered above the shared search/controls row — lets a domain page keep
    * its own title/count/bulk-toolbar without a local shell reimplementation. */
   beforeSidebarHeader?: React.ReactNode;
+  /** Rendered immediately after the shared search row. Useful for a domain
+   * selector that must retain its own full-width layout. */
+  afterSidebarHeader?: React.ReactNode;
   /** Full override of the list body. Receives the already query/favorites/
    * filter-narrowed items so a caller can render grouped or nested markup
    * (project trees, resource kinds…) while still sharing the filtering and
@@ -75,6 +82,8 @@ export interface CollectionShellProps<TItem> {
   isFavorite?: (item: TItem) => boolean;
   onToggleFavorite?: (item: TItem) => void;
   filters?: CollectionFilter<TItem>[];
+  /** A domain-owned filter whose control is rendered in a slot. */
+  itemFilter?: (item: TItem) => boolean;
   persistence: CollectionPersistence;
   selectedId: CollectionItemId | null;
   onSelect: (id: CollectionItemId) => void;
@@ -85,6 +94,15 @@ export interface CollectionShellProps<TItem> {
   isMobile?: boolean;
   /** For surfaces whose detail pane is already composed by the caller. */
   sidebarOnly?: boolean;
+  /** Domain CSS hook for a sidebar that keeps pre-existing visual treatment. */
+  sidebarClassName?: string;
+  /** Enables the established page-wide `/` shortcut in addition to the
+   * sidebar-local shortcut. */
+  globalSearchShortcut?: boolean;
+  /** Shows a clear affordance that changes only the search query. */
+  showSearchClear?: boolean;
+  /** Hide the generic chip bar when a surface owns its filtering controls. */
+  showControls?: boolean;
   sidebarOpen?: boolean;
   onSidebarOpenChange?: (open: boolean) => void;
   labels: {
@@ -104,9 +122,9 @@ export interface CollectionShellProps<TItem> {
  * filtering, selection, responsive sidebar and context-menu behaviour.
  */
 export function CollectionShell<TItem>({
-  ariaLabel, items, getId, getLabel, isFavorite, onToggleFavorite, filters = [],
+  ariaLabel, items, getId, getLabel, isFavorite, onToggleFavorite, filters = [], itemFilter,
   persistence, selectedId, onSelect, selectedIds, onSelectedIdsChange, actions = [],
-  slots, isMobile = false, sidebarOnly = false, sidebarOpen = true, onSidebarOpenChange, labels,
+  slots, isMobile = false, sidebarOnly = false, sidebarClassName = '', globalSearchShortcut = false, showSearchClear = false, showControls = true, sidebarOpen = true, onSidebarOpenChange, labels,
 }: CollectionShellProps<TItem>) {
   const searchRef = useRef<HTMLInputElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -123,11 +141,12 @@ export function CollectionShell<TItem>({
   const visibleItems = useMemo(() => {
     const query = persistence.query.trim().toLocaleLowerCase();
     return items.filter(item => {
+      if (itemFilter && !itemFilter(item)) return false;
       if (persistence.favoritesOnly && !isFavorite?.(item)) return false;
       if (activeFilter && !activeFilter.matches(item)) return false;
       return !query || getLabel(item).toLocaleLowerCase().includes(query);
     });
-  }, [activeFilter, getLabel, isFavorite, items, persistence.favoritesOnly, persistence.query]);
+  }, [activeFilter, getLabel, isFavorite, itemFilter, items, persistence.favoritesOnly, persistence.query]);
 
   const actionItems = useMemo(() => {
     if (!canMultiSelect || (selectedIds?.size ?? 0) === 0) return selectedId == null
@@ -154,6 +173,18 @@ export function CollectionShell<TItem>({
     };
   }, [closeMenu, menuOpen]);
 
+  useEffect(() => {
+    if (!globalSearchShortcut) return;
+    const focusSearch = (event: KeyboardEvent) => {
+      const target = event.target;
+      if (event.key !== '/' || (target instanceof HTMLElement && target.matches('input, textarea, select, [contenteditable="true"]'))) return;
+      event.preventDefault();
+      searchRef.current?.focus();
+    };
+    window.addEventListener('keydown', focusSearch);
+    return () => window.removeEventListener('keydown', focusSearch);
+  }, [globalSearchShortcut]);
+
   const selectItem = (item: TItem) => {
     onSelect(getId(item));
     if (isMobile) onSidebarOpenChange?.(false);
@@ -176,7 +207,10 @@ export function CollectionShell<TItem>({
       return;
     }
     if (textControl || !['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
-    const rows = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('.collection-shell-row-button'));
+    const rows = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('.collection-shell-row-button'))
+      .filter(row => !row.disabled && !row.closest('[hidden], [aria-hidden="true"]')
+        && window.getComputedStyle(row).display !== 'none'
+        && window.getComputedStyle(row).visibility !== 'hidden');
     if (rows.length === 0) return;
     const current = rows.indexOf(document.activeElement as HTMLButtonElement);
     const next = event.key === 'Home' ? 0
@@ -196,28 +230,29 @@ export function CollectionShell<TItem>({
     toggleMultiSelection,
     getRowProps: item => ({
       className: 'collection-shell-row-button',
-      role: 'listitem',
-      'aria-selected': selectedId === getId(item),
+      'aria-current': selectedId === getId(item) ? 'true' : undefined,
       onClick: () => selectItem(item),
     }),
   };
 
   const sidebar = (
-    <aside className="collection-shell-sidebar" data-mobile={isMobile} aria-label={ariaLabel} onKeyDown={onSidebarKeyDown}>
+    <aside className={`collection-shell-sidebar ${sidebarClassName}`.trim()} data-mobile={isMobile} aria-label={ariaLabel} onKeyDown={onSidebarKeyDown}>
       {slots.beforeSidebarHeader}
       <header className="collection-shell-header">
         <div className="collection-shell-search">
           <Search size={15} aria-hidden="true" />
           <input ref={searchRef} value={persistence.query} onChange={event => persistence.onQueryChange(event.target.value)} aria-label={labels.search} placeholder={labels.search} />
+          {showSearchClear && persistence.query && <button type="button" className="collection-shell-icon" onClick={() => persistence.onQueryChange('')} aria-label={labels.clearFilters}><X size={15} /></button>}
         </div>
         {isMobile && <button type="button" className="collection-shell-icon" onClick={() => onSidebarOpenChange?.(false)} aria-label={labels.closeCollection}><X size={17} /></button>}
         {slots.sidebarHeaderEnd}
       </header>
-      <div className="collection-shell-controls">
+      {slots.afterSidebarHeader}
+      {showControls && <div className="collection-shell-controls">
         {isFavorite && <button type="button" className="collection-shell-filter" data-active={persistence.favoritesOnly} aria-pressed={persistence.favoritesOnly} onClick={() => persistence.onFavoritesOnlyChange(!persistence.favoritesOnly)}><Star size={14} />{labels.favorites}</button>}
         {filters.map(filter => <button key={filter.id} type="button" className="collection-shell-filter" data-active={filter.id === persistence.activeFilterId} aria-pressed={filter.id === persistence.activeFilterId} onClick={() => persistence.onActiveFilterIdChange?.(filter.id === persistence.activeFilterId ? null : filter.id)}>{filter.label}</button>)}
         {(persistence.query || persistence.favoritesOnly || persistence.activeFilterId) && <button type="button" className="collection-shell-clear" onClick={() => { persistence.onQueryChange(''); persistence.onFavoritesOnlyChange(false); persistence.onActiveFilterIdChange?.(null); }}>{labels.clearFilters}</button>}
-      </div>
+      </div>}
       <div className="collection-shell-list" role="list">
         {slots.renderList ? slots.renderList(listContext) : <>
           {visibleItems.map(item => {
@@ -226,7 +261,7 @@ export function CollectionShell<TItem>({
             const selected = selectedId === id;
             return <div key={id} className="collection-shell-row" data-selected={selected} data-multi-selected={multiSelected} role="listitem">
               {canMultiSelect && <input type="checkbox" aria-label={`${getLabel(item)} ${labels.selectItem}`} checked={multiSelected} onChange={() => toggleMultiSelection(id)} />}
-              <button type="button" className="collection-shell-row-button" onClick={() => selectItem(item)}>{slots.renderItem?.(item, { selected, multiSelected }) ?? getLabel(item)}</button>
+              <button type="button" className="collection-shell-row-button" aria-current={selected ? 'true' : undefined} onClick={() => selectItem(item)}>{slots.renderItem?.(item, { selected, multiSelected }) ?? getLabel(item)}</button>
               {isFavorite && onToggleFavorite && <button type="button" className="collection-shell-favorite" aria-label={`${labels.favorites} · ${getLabel(item)}`} aria-pressed={isFavorite(item)} onClick={() => onToggleFavorite(item)}><Star size={14} fill={isFavorite(item) ? 'currentColor' : 'none'} /></button>}
             </div>;
           })}

@@ -142,4 +142,47 @@ describe('CollectionShell', () => {
     fireEvent.keyDown(sidebar, { key: 'ArrowDown' });
     expect(screen.getByRole('button', { name: 'Grouped Two' })).toHaveFocus();
   });
+
+  it('keeps a custom row a native button while excluding disabled and hidden rows from keyboard navigation', () => {
+    function GroupedFixture() {
+      const [query, setQuery] = useState('');
+      const [favoritesOnly, setFavoritesOnly] = useState(false);
+      const [selectedId, setSelectedId] = useState<string | null>('one');
+      return <CollectionShell<Item>
+        ariaLabel="Accessible grouped collection" items={items} getId={item => item.id} getLabel={item => item.name}
+        persistence={{ query, onQueryChange: setQuery, favoritesOnly, onFavoritesOnlyChange: setFavoritesOnly }}
+        selectedId={selectedId} onSelect={setSelectedId} labels={labels}
+        slots={{
+          renderDetail: () => null,
+          renderList: ({ visibleItems, getRowProps }) => <ul>
+            <li><button type="button" {...getRowProps(visibleItems[0])}>Enabled row</button></li>
+            <li><button type="button" className="collection-shell-row-button" disabled>Disabled row</button></li>
+            <li hidden><button type="button" className="collection-shell-row-button">Hidden row</button></li>
+          </ul>,
+        }}
+      />;
+    }
+    render(<GroupedFixture />);
+    const sidebar = screen.getByRole('complementary', { name: 'Accessible grouped collection' });
+    const enabled = screen.getByRole('button', { name: 'Enabled row' });
+    expect(enabled).toHaveAttribute('aria-current', 'true');
+    fireEvent.keyDown(sidebar, { key: 'End' });
+    expect(enabled).toHaveFocus();
+  });
+
+  it('can retain a page-wide slash shortcut when requested', () => {
+    function GlobalShortcutFixture() {
+      const [query, setQuery] = useState('');
+      const [favoritesOnly, setFavoritesOnly] = useState(false);
+      return <CollectionShell<Item>
+        ariaLabel="Global shortcut collection" items={items} getId={item => item.id} getLabel={item => item.name}
+        persistence={{ query, onQueryChange: setQuery, favoritesOnly, onFavoritesOnlyChange: setFavoritesOnly }}
+        selectedId={null} onSelect={() => {}} globalSearchShortcut labels={labels}
+        slots={{ renderDetail: () => null }}
+      />;
+    }
+    render(<GlobalShortcutFixture />);
+    fireEvent.keyDown(window, { key: '/' });
+    expect(screen.getByRole('textbox', { name: 'Search' })).toHaveFocus();
+  });
 });
