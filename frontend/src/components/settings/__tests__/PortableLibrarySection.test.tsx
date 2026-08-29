@@ -15,10 +15,15 @@ vi.mock('../../../lib/I18nContext', () => ({
 describe('PortableLibrarySection', () => {
   it('selects a DB project, exposes provenance and runs project operations', async () => {
     render(<PortableLibrarySection projects={[{ id: 'p1', name: 'Project One' } as never]} toast={vi.fn()} />);
+    expect(screen.getByText('config.portableLibrary.whatTitle')).toBeInTheDocument();
+    expect(screen.getByLabelText('config.portableLibrary.flowAria')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'config.portableLibrary.actionSync' })).not.toBeInTheDocument();
     fireEvent.change(screen.getByLabelText('config.portableLibrary.scopeAria'), { target: { value: 'p1' } });
     await screen.findByText('review');
     expect(screen.getByText('skills/review/SKILL.md')).toBeInTheDocument();
-    expect(screen.getByText('config.portableLibrary.drift: drifted')).toBeInTheDocument();
+    expect(screen.getByText('config.portableLibrary.status.drifted')).toBeInTheDocument();
+    expect(screen.getByText('config.portableLibrary.kind.skill')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'config.portableLibrary.actionApprove' })).toBeDisabled();
     fireEvent.click(screen.getByRole('button', { name: 'config.portableLibrary.actionSync' }));
     await waitFor(() => expect(portableLibrary.sync).toHaveBeenCalledWith('p1'));
   });

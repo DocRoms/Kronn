@@ -232,14 +232,26 @@ pub fn backfill_legacy_config(conn: &Connection, config: &AppConfig) -> Result<(
         ExternalApiConnectionPreset::LiteLlm,
         &config.agents.model_tiers.lite_llm,
     )?;
+    let nvidia_endpoint =
+        crate::api::nvidia::resolve_base_url_pub(config.agents.nvidia.base_url.as_deref());
     insert_legacy(
         conn,
         LEGACY_NVIDIA_ID,
         "NVIDIA",
         "nvidia",
-        config.agents.nvidia.base_url.as_deref(),
+        Some(&nvidia_endpoint),
         ExternalApiConnectionPreset::Nvidia,
         &config.agents.model_tiers.nvidia,
+    )?;
+    // Early versions of the named-connection migration persisted NVIDIA's
+    // optional config value verbatim. With no explicit override that produced
+    // a NULL endpoint, even though the provider has a real hosted default.
+    // Repair only the canonical legacy row and never overwrite a user edit.
+    conn.execute(
+        "UPDATE external_api_connections
+         SET endpoint = ?2
+         WHERE id = ?1 AND (endpoint IS NULL OR trim(endpoint) = '')",
+        params![LEGACY_NVIDIA_ID, nvidia_endpoint],
     )?;
     Ok(())
 }
@@ -460,6 +472,62 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(persisted_secret_count, 0);
+    }
+
+    #[tokio::test]
+    async fn bootstrap_repairs_only_a_missing_legacy_nvidia_endpoint() {
+        let database = crate::db::Database::open_in_memory().unwrap();
+        database
+            .with_conn(|conn| {
+                insert_legacy(
+                    conn,
+                    LEGACY_NVIDIA_ID,
+                    "NVIDIA",
+                    "nvidia",
+                    None,
+                    ExternalApiConnectionPreset::Nvidia,
+                    &ModelTierConfig::default(),
+                )
+            })
+            .await
+            .unwrap();
+
+        let config = default_config();
+        crate::bootstrap_external_api_connections(&database, &config)
+            .await
+            .unwrap();
+        let repaired = database
+            .with_conn(|conn| get(conn, LEGACY_NVIDIA_ID))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            repaired.endpoint.as_deref(),
+            Some("https://integrate.api.nvidia.com")
+        );
+
+        database
+            .with_conn(|conn| {
+                conn.execute(
+                    "UPDATE external_api_connections SET endpoint = ?2 WHERE id = ?1",
+                    params![LEGACY_NVIDIA_ID, "https://nim.example.test"],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        crate::bootstrap_external_api_connections(&database, &config)
+            .await
+            .unwrap();
+        let preserved = database
+            .with_conn(|conn| get(conn, LEGACY_NVIDIA_ID))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            preserved.endpoint.as_deref(),
+            Some("https://nim.example.test")
+        );
     }
 
     #[tokio::test]

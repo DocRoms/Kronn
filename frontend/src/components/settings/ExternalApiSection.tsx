@@ -81,11 +81,19 @@ function emptyForm(): FormState {
   };
 }
 
+/** Legacy NVIDIA rows may predate the named-connection store and therefore
+ *  carry no persisted endpoint. Presets are executable defaults, not merely
+ *  form placeholders, so keep those migrated rows visible and editable. */
+function endpointForConnection(c: ExternalApiConnectionView): string | null {
+  const saved = c.endpoint?.trim();
+  return saved || PRESET_ENDPOINTS[c.origin_preset] || null;
+}
+
 function formFromConnection(c: ExternalApiConnectionView): FormState {
   return {
     display_name: c.display_name,
     mention_alias: c.mention_alias,
-    endpoint: c.endpoint ?? '',
+    endpoint: endpointForConnection(c) ?? '',
     origin_preset: c.origin_preset,
     economy_model: c.economy_model ?? '',
     default_model: c.default_model ?? '',
@@ -400,7 +408,7 @@ export function ExternalApiSection({ t, toast, modelCostSuffix }: ExternalApiSec
     setSavedTests(prev => ({ ...prev, [connection.id]: null }));
     try {
       const result = await externalApi.test({
-        endpoint: connection.endpoint,
+        endpoint: endpointForConnection(connection),
         api_key: null,
         connection_id: connection.id,
         origin_preset: connection.origin_preset,
@@ -599,7 +607,7 @@ export function ExternalApiSection({ t, toast, modelCostSuffix }: ExternalApiSec
                     <button
                       type="button"
                       className="set-icon-btn"
-                      disabled={!c.endpoint || testingSavedId === c.id}
+                      disabled={!endpointForConnection(c) || testingSavedId === c.id}
                       onClick={() => void testSavedConnection(c)}
                       aria-label={t('config.extApi.testConnection')}
                       data-testid={`ext-api-test-saved-${c.id}`}
@@ -626,12 +634,14 @@ export function ExternalApiSection({ t, toast, modelCostSuffix }: ExternalApiSec
                     </button>
                   </div>
                 </div>
-                {c.endpoint && (
+                {endpointForConnection(c) && (
                   <div className="set-ext-api-conn-endpoint-row">
                     <Link2 size={13} aria-hidden="true" />
                     <span>
                       <small>{t('liteLlm.endpointLabel')}</small>
-                      <code className="set-ext-api-conn-endpoint" title={c.endpoint}>{c.endpoint}</code>
+                      <code className="set-ext-api-conn-endpoint" title={endpointForConnection(c) ?? undefined}>
+                        {endpointForConnection(c)}
+                      </code>
                     </span>
                   </div>
                 )}

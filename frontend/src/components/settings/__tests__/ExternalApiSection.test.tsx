@@ -139,6 +139,34 @@ describe('ExternalApiSection', () => {
     expect(endpoint().value).toBe('');
   });
 
+  it('restores the hosted NVIDIA endpoint for a legacy connection that stored none', async () => {
+    listMock.mockResolvedValue([
+      conn({
+        id: 'external-api-nvidia',
+        display_name: 'NVIDIA',
+        mention_alias: 'nvidia',
+        origin_preset: 'nvidia',
+        endpoint: null,
+      }),
+    ]);
+    renderSection();
+
+    const card = await screen.findByRole('group', { name: 'NVIDIA' });
+    expect(within(card).getByText('https://integrate.api.nvidia.com')).toBeInTheDocument();
+    const testButton = within(card).getByTestId('ext-api-test-saved-external-api-nvidia');
+    expect(testButton).not.toBeDisabled();
+    fireEvent.click(testButton);
+    await waitFor(() => expect(testMock).toHaveBeenCalledWith({
+      endpoint: 'https://integrate.api.nvidia.com',
+      api_key: null,
+      connection_id: 'external-api-nvidia',
+      origin_preset: 'nvidia',
+    }));
+
+    fireEvent.click(within(card).getByTestId('ext-api-edit-external-api-nvidia'));
+    expect(screen.getByTestId('ext-api-endpoint')).toHaveValue('https://integrate.api.nvidia.com');
+  });
+
   it('adds a third compatible service from the UI via the generic Other preset (DoD 3)', async () => {
     renderSection();
     fireEvent.click(await screen.findByTestId('ext-api-add-connection'));
