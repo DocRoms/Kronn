@@ -134,13 +134,25 @@ async fn probe_models(endpoint: &str, api_key: Option<&str>) -> TestConnectionRe
     }
     match request.send().await {
         Ok(response) if response.status().is_success() => {
-            let body: serde_json::Value = response.json().await.unwrap_or_default();
-            let models = model_ids_from_body(&body);
-            TestConnectionResponse {
-                ok: true,
-                status: "success".into(),
-                hint: models.is_empty().then(|| "The endpoint responded but returned no usable models. Check this account or endpoint.".into()),
-                models,
+            match response.json::<serde_json::Value>().await {
+                Ok(body) if model_ids_from_body(&body).is_some() => {
+                    let models = model_ids_from_body(&body).expect("checked above");
+                    TestConnectionResponse {
+                    ok: true,
+                    status: "success".into(),
+                    hint: models.is_empty().then(|| "The endpoint responded but returned no usable models. Check this account or endpoint.".into()),
+                    models,
+                    }
+                }
+                _ => TestConnectionResponse {
+                    ok: false,
+                    status: "invalid_catalogue".into(),
+                    models: vec![],
+                    hint: Some(
+                        "The endpoint responded, but its model catalogue is not OpenAI-compatible. Check the endpoint and provider settings."
+                            .into(),
+                    ),
+                },
             }
         }
         Ok(response) if matches!(response.status().as_u16(), 401 | 403) => TestConnectionResponse {
@@ -180,16 +192,18 @@ async fn probe_models(endpoint: &str, api_key: Option<&str>) -> TestConnectionRe
     }
 }
 
-fn model_ids_from_body(body: &serde_json::Value) -> Vec<String> {
-    body["data"]
-        .as_array()
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|model| model["id"].as_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default()
+fn model_ids_from_body(body: &serde_json::Value) -> Option<Vec<String>> {
+    body["data"].as_array().and_then(|items| {
+        items
+            .iter()
+            .map(|model| {
+                model["id"]
+                    .as_str()
+                    .filter(|id| !id.trim().is_empty())
+                    .map(str::to_string)
+            })
+            .collect()
+    })
 }
 
 /// POST /api/external-api/connections/test
@@ -626,12 +640,19 @@ mod tests {
     }
 
     #[test]
-    fn model_catalogue_keeps_only_usable_ids() {
+    fn model_catalogue_accepts_a_valid_empty_list_and_rejects_invalid_shapes() {
         let models = model_ids_from_body(&serde_json::json!({
-            "data": [{"id": "model-a"}, {"name": "ignored"}, {"id": "model-b"}]
+            "data": [{"id": "model-a"}, {"id": "model-b"}]
         }));
-        assert_eq!(models, vec!["model-a", "model-b"]);
-        assert!(model_ids_from_body(&serde_json::json!({"data": []})).is_empty());
-        assert!(model_ids_from_body(&serde_json::json!({})).is_empty());
+        assert_eq!(models, Some(vec!["model-a".into(), "model-b".into()]));
+        assert_eq!(
+            model_ids_from_body(&serde_json::json!({"data": []})),
+            Some(vec![])
+        );
+        assert_eq!(model_ids_from_body(&serde_json::json!({})), None);
+        assert_eq!(
+            model_ids_from_body(&serde_json::json!({"data": [{"name": "missing-id"}]})),
+            None
+        );
     }
 }

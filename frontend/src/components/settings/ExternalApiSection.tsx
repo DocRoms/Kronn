@@ -11,7 +11,7 @@
 // own endpoint, mention alias and per-tier models, so several connections
 // (e.g. NVIDIA and Groq) coexist with fully independent settings.
 
-import { useCallback, useEffect, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { externalApi } from '../../lib/api';
 import type {
   ExternalApiConnectionView,
@@ -300,28 +300,60 @@ export function ExternalApiSection({ t, toast, modelCostSuffix }: ExternalApiSec
   const [testing, setTesting] = useState(false);
   const [savedTests, setSavedTests] = useState<Record<string, ExternalApiConnectionTestResult | null>>({});
   const [testingSavedId, setTestingSavedId] = useState<string | null>(null);
+  // State updates do not protect two synchronous clicks: retain the in-flight
+  // state outside React so draft and saved probes share one bounded request.
+  const testInFlightRef = useRef(false);
+  const draftTestGenerationRef = useRef(0);
+  const savedTestGenerationRef = useRef(0);
+
+  const invalidateSavedTests = () => {
+    savedTestGenerationRef.current += 1;
+    setSavedTests({});
+    setTestingSavedId(null);
+  };
 
   const changeConnection = (updater: (prev: FormState) => FormState) => {
+    draftTestGenerationRef.current += 1;
     setTestResult(null);
-    setForm(updater);
+    // Models come from the exact endpoint/key/preset just tested. Never keep
+    // a previous catalogue selection after any of those inputs changes.
+    setForm(prev => {
+      const next = updater(prev);
+      return {
+        ...next,
+        economy_model: '',
+        default_model: '',
+        reasoning_model: '',
+      };
+    });
   };
 
   const testConnection = async () => {
+    if (testInFlightRef.current) return;
+    testInFlightRef.current = true;
+    const generation = ++draftTestGenerationRef.current;
     setTesting(true);
     try {
-      setTestResult(await externalApi.test({
+      const result = await externalApi.test({
         endpoint: form.endpoint.trim() || null,
         api_key: form.keyTouched ? form.api_key : null,
         ...(editingId ? { connection_id: editingId, origin_preset: form.origin_preset } : {}),
-      }));
+      });
+      if (draftTestGenerationRef.current === generation) setTestResult(result);
     } catch (e) {
-      setTestResult({ ok: false, status: 'transport_error', models: [], hint: userError(e) });
+      if (draftTestGenerationRef.current === generation) {
+        setTestResult({ ok: false, status: 'transport_error', models: [], hint: userError(e) });
+      }
     } finally {
-      setTesting(false);
+      if (draftTestGenerationRef.current === generation) setTesting(false);
+      testInFlightRef.current = false;
     }
   };
 
   const testSavedConnection = async (connection: ExternalApiConnectionView) => {
+    if (testInFlightRef.current) return;
+    testInFlightRef.current = true;
+    const generation = ++savedTestGenerationRef.current;
     setTestingSavedId(connection.id);
     setSavedTests(prev => ({ ...prev, [connection.id]: null }));
     try {
@@ -331,18 +363,24 @@ export function ExternalApiSection({ t, toast, modelCostSuffix }: ExternalApiSec
         connection_id: connection.id,
         origin_preset: connection.origin_preset,
       });
-      setSavedTests(prev => ({ ...prev, [connection.id]: result }));
+      if (savedTestGenerationRef.current === generation) {
+        setSavedTests(prev => ({ ...prev, [connection.id]: result }));
+      }
     } catch (e) {
-      setSavedTests(prev => ({
-        ...prev,
-        [connection.id]: { ok: false, status: 'transport_error', models: [], hint: userError(e) },
-      }));
+      if (savedTestGenerationRef.current === generation) {
+        setSavedTests(prev => ({
+          ...prev,
+          [connection.id]: { ok: false, status: 'transport_error', models: [], hint: userError(e) },
+        }));
+      }
     } finally {
-      setTestingSavedId(null);
+      if (savedTestGenerationRef.current === generation) setTestingSavedId(null);
+      testInFlightRef.current = false;
     }
   };
 
   const load = useCallback(async () => {
+    invalidateSavedTests();
     try {
       setConnections(await externalApi.list());
     } catch (e) {
@@ -356,6 +394,7 @@ export function ExternalApiSection({ t, toast, modelCostSuffix }: ExternalApiSec
   }, [load]);
 
   const startAdd = () => {
+    draftTestGenerationRef.current += 1;
     setEditingId(null);
     setTestResult(null);
     setForm(emptyForm());
@@ -365,6 +404,8 @@ export function ExternalApiSection({ t, toast, modelCostSuffix }: ExternalApiSec
   };
 
   const startEdit = (c: ExternalApiConnectionView) => {
+    draftTestGenerationRef.current += 1;
+    invalidateSavedTests();
     setAdding(false);
     setEditingId(c.id);
     setTestResult(null);
@@ -372,6 +413,7 @@ export function ExternalApiSection({ t, toast, modelCostSuffix }: ExternalApiSec
   };
 
   const cancel = () => {
+    draftTestGenerationRef.current += 1;
     setAdding(false);
     setEditingId(null);
     setTestResult(null);
@@ -408,6 +450,7 @@ export function ExternalApiSection({ t, toast, modelCostSuffix }: ExternalApiSec
   const remove = async (c: ExternalApiConnectionView) => {
     if (!confirm(t('config.extApi.deleteConfirm', c.display_name))) return;
     try {
+      invalidateSavedTests();
       await externalApi.remove(c.id);
       await load();
     } catch (e) {

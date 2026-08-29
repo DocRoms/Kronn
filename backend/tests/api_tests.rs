@@ -5774,6 +5774,45 @@ async fn external_api_test_route_maps_auth_empty_and_transport_failures_without_
     assert_eq!(empty["data"]["status"], "success");
     assert_eq!(empty["data"]["models"], serde_json::json!([]));
 
+    let malformed_upstream = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("not-json"))
+        .mount(&malformed_upstream)
+        .await;
+    let (_, malformed) = post_json(
+        app.clone(),
+        "/api/external-api/connections/test",
+        serde_json::json!({ "endpoint": malformed_upstream.uri(), "api_key": "submitted-secret" }),
+    )
+    .await;
+    assert_eq!(malformed["data"]["status"], "invalid_catalogue");
+    assert_eq!(malformed["data"]["models"], serde_json::json!([]));
+    assert!(!malformed.to_string().contains("submitted-secret"));
+
+    let incompatible_catalogue_upstream = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "models": [{"name": "not-openai-compatible"}]
+        })))
+        .mount(&incompatible_catalogue_upstream)
+        .await;
+    let (_, incompatible_catalogue) = post_json(
+        app.clone(),
+        "/api/external-api/connections/test",
+        serde_json::json!({ "endpoint": incompatible_catalogue_upstream.uri(), "api_key": null }),
+    )
+    .await;
+    assert_eq!(
+        incompatible_catalogue["data"]["status"],
+        "invalid_catalogue"
+    );
+    assert_eq!(
+        incompatible_catalogue["data"]["models"],
+        serde_json::json!([])
+    );
+
     let (_, transport) = post_json(
         app.clone(),
         "/api/external-api/connections/test",

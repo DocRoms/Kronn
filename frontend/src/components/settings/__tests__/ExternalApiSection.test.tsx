@@ -286,4 +286,71 @@ describe('ExternalApiSection', () => {
     fireEvent.click(screen.getByTestId('ext-api-preset-nvidia'));
     expect(screen.getByTestId('ext-api-test-required')).toBeTruthy();
   });
+
+  it('clears all selected tiers after connection details change, so save cannot retain stale models', async () => {
+    renderSection();
+    fireEvent.click(await screen.findByTestId('ext-api-add-connection'));
+    fireEvent.change(screen.getByTestId('ext-api-display-name'), { target: { value: 'Catalogue' } });
+    fireEvent.change(screen.getByTestId('ext-api-mention-alias'), { target: { value: 'catalogue' } });
+    fireEvent.click(screen.getByTestId('ext-api-test'));
+    await waitFor(() => expect(screen.getByTestId('ext-api-tier-default')).not.toBeDisabled());
+    fireEvent.change(screen.getByTestId('ext-api-tier-economy'), { target: { value: 'model-a' } });
+    fireEvent.change(screen.getByTestId('ext-api-tier-default'), { target: { value: 'model-b' } });
+    fireEvent.change(screen.getByTestId('ext-api-tier-reasoning'), { target: { value: 'model-a' } });
+
+    fireEvent.change(screen.getByTestId('ext-api-endpoint'), { target: { value: 'https://changed.example.test' } });
+    expect((screen.getByTestId('ext-api-tier-economy') as HTMLSelectElement).value).toBe('');
+    expect((screen.getByTestId('ext-api-tier-default') as HTMLSelectElement).value).toBe('');
+    expect((screen.getByTestId('ext-api-tier-reasoning') as HTMLSelectElement).value).toBe('');
+    fireEvent.click(screen.getByTestId('ext-api-save'));
+
+    await waitFor(() => expect(createMock).toHaveBeenCalledTimes(1));
+    expect(createMock).toHaveBeenCalledWith(expect.objectContaining({
+      economy_model: null,
+      default_model: null,
+      reasoning_model: null,
+    }));
+  });
+
+  it('ignores a draft response that arrives after the connection changes', async () => {
+    let resolveProbe!: (result: { ok: boolean; status: 'success'; models: string[]; hint: null }) => void;
+    testMock.mockImplementationOnce(() => new Promise(resolve => { resolveProbe = resolve; }));
+    renderSection();
+    fireEvent.click(await screen.findByTestId('ext-api-add-connection'));
+    fireEvent.click(screen.getByTestId('ext-api-test'));
+    fireEvent.change(screen.getByTestId('ext-api-endpoint'), { target: { value: 'https://changed.example.test' } });
+    resolveProbe({ ok: true, status: 'success', models: ['stale-model'], hint: null });
+
+    await waitFor(() => expect(screen.getByTestId('ext-api-test-required')).toBeTruthy());
+    expect(screen.queryByRole('option', { name: 'stale-model' })).toBeNull();
+  });
+
+  it('uses one synchronous guard for draft and saved test clicks', async () => {
+    listMock.mockResolvedValue([
+      conn({ id: 'saved-1', endpoint: 'https://saved.example.test' }),
+      conn({ id: 'saved-2', endpoint: 'https://saved-two.example.test' }),
+    ]);
+    testMock.mockImplementationOnce(() => new Promise(() => undefined));
+    renderSection();
+    const first = await screen.findByTestId('ext-api-test-saved-saved-1');
+    const second = screen.getByTestId('ext-api-test-saved-saved-2');
+    fireEvent.click(first);
+    fireEvent.click(first);
+    fireEvent.click(second);
+    expect(testMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('ignores a saved result after editing that connection', async () => {
+    let resolveProbe!: (result: { ok: boolean; status: 'success'; models: string[]; hint: null }) => void;
+    listMock.mockResolvedValue([conn({ id: 'saved-1', endpoint: 'https://saved.example.test' })]);
+    testMock.mockImplementationOnce(() => new Promise(resolve => { resolveProbe = resolve; }));
+    renderSection();
+    fireEvent.click(await screen.findByTestId('ext-api-test-saved-saved-1'));
+    fireEvent.click(screen.getByTestId('ext-api-edit-saved-1'));
+    resolveProbe({ ok: true, status: 'success', models: ['stale-model'], hint: null });
+
+    await waitFor(() => expect(screen.getByTestId('ext-api-form')).toBeTruthy());
+    fireEvent.click(screen.getByTestId('ext-api-cancel'));
+    expect(screen.queryByTestId('ext-api-saved-test-result-saved-1')).toBeNull();
+  });
 });
