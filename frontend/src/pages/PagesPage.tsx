@@ -526,6 +526,50 @@ export function PagesPage({
       default: return t('pages.mosaic.layout.auto');
     }
   }, [t]);
+  const positionMosaicMenu = useCallback(() => {
+    const menu = mosaicMenuRef.current;
+    const trigger = menu?.querySelector('summary');
+    const popover = menu?.querySelector<HTMLElement>('.live-pages-mosaic-popover');
+    if (!menu || !trigger || !popover) return;
+
+    const viewportMargin = 8;
+    const triggerGap = 6;
+    const preferredWidth = 224;
+    const triggerRect = trigger.getBoundingClientRect();
+    const width = Math.min(preferredWidth, Math.max(0, window.innerWidth - viewportMargin * 2));
+    const desiredHeight = Math.min(
+      popover.scrollHeight || 260,
+      Math.max(0, window.innerHeight - viewportMargin * 2),
+    );
+    const availableBelow = Math.max(
+      0,
+      window.innerHeight - viewportMargin - triggerRect.bottom - triggerGap,
+    );
+    const availableAbove = Math.max(0, triggerRect.top - viewportMargin - triggerGap);
+    const opensUp = desiredHeight > availableBelow && availableAbove > availableBelow;
+    const maxHeight = opensUp ? availableAbove : availableBelow;
+    const renderedHeight = Math.min(desiredHeight, maxHeight);
+    const left = Math.min(
+      Math.max(viewportMargin, triggerRect.right - width),
+      Math.max(viewportMargin, window.innerWidth - viewportMargin - width),
+    );
+    const top = opensUp
+      ? Math.max(viewportMargin, triggerRect.top - triggerGap - renderedHeight)
+      : triggerRect.bottom + triggerGap;
+
+    menu.dataset.placement = opensUp ? 'up' : 'down';
+    menu.style.setProperty('--mosaic-popover-left', `${left}px`);
+    menu.style.setProperty('--mosaic-popover-top', `${top}px`);
+    menu.style.setProperty('--mosaic-popover-width', `${width}px`);
+    menu.style.setProperty('--mosaic-popover-max-height', `${maxHeight}px`);
+  }, [mosaicMenuRef]);
+  useEffect(() => {
+    const reposition = () => {
+      if (mosaicMenuRef.current?.open) positionMosaicMenu();
+    };
+    window.addEventListener('resize', reposition);
+    return () => window.removeEventListener('resize', reposition);
+  }, [mosaicMenuRef, positionMosaicMenu]);
   const document = useMemo(
     () => revisionHtml ? buildSandboxDocument(revisionHtml, bridgeChannel) : '',
     [bridgeChannel, revisionHtml],
@@ -579,7 +623,11 @@ export function PagesPage({
           <div className="disc-sidebar-header-actions">
             {selectionMode ? (
               <>
-                <details className="live-pages-mosaic-menu" ref={mosaicMenuRef}>
+                <details
+                  className="live-pages-mosaic-menu"
+                  ref={mosaicMenuRef}
+                  onToggle={event => { if (event.currentTarget.open) positionMosaicMenu(); }}
+                >
                   <summary
                     aria-label={selectedIds.size >= 2
                       ? t('pages.mosaic.open', selectedIds.size)

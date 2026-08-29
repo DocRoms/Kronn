@@ -101,6 +101,7 @@ beforeEach(() => {
 afterEach(() => {
   localStorage.removeItem('kronn:pageNavigation');
   localStorage.removeItem('kronn:pageCollapsedSections');
+  vi.unstubAllGlobals();
 });
 
 describe('PagesPage', () => {
@@ -177,8 +178,21 @@ describe('PagesPage', () => {
     fireEvent.click(getCanonicalPageRow('Acquisition'));
 
     const mosaicMenu = screen.getByLabelText('pages.mosaic.open:3');
+    const mosaicDetails = mosaicMenu.closest('details') as HTMLDetailsElement;
+    const mosaicPopover = mosaicDetails.querySelector('.live-pages-mosaic-popover') as HTMLElement;
+    vi.stubGlobal('innerWidth', 360);
+    vi.stubGlobal('innerHeight', 180);
+    vi.spyOn(mosaicMenu, 'getBoundingClientRect').mockReturnValue({
+      x: 300, y: 140, top: 140, right: 328, bottom: 168, left: 300,
+      width: 28, height: 28, toJSON: () => ({}),
+    });
+    Object.defineProperty(mosaicPopover, 'scrollHeight', { configurable: true, value: 240 });
     expect(mosaicMenu).toHaveAttribute('aria-disabled', 'false');
     fireEvent.click(mosaicMenu);
+    await waitFor(() => expect(mosaicDetails).toHaveAttribute('data-placement', 'up'));
+    expect(mosaicDetails.style.getPropertyValue('--mosaic-popover-top')).toBe('8px');
+    expect(mosaicDetails.style.getPropertyValue('--mosaic-popover-left')).toBe('104px');
+    expect(mosaicDetails.style.getPropertyValue('--mosaic-popover-max-height')).toBe('126px');
 
     const auto = screen.getByRole('link', { name: 'pages.mosaic.layout.auto' });
     expect(auto).toHaveAttribute(
@@ -192,6 +206,7 @@ describe('PagesPage', () => {
     expect(screen.getByRole('link', { name: 'pages.mosaic.layout.threeLeft' })).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'pages.mosaic.layout.threeRight' })).toBeInTheDocument();
     expect(screen.queryByRole('link', { name: 'pages.mosaic.layout.twoColumns' })).toBeNull();
+    vi.unstubAllGlobals();
   });
 
   it('renders authored HTML in a script-only opaque sandbox', async () => {

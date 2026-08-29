@@ -41,15 +41,18 @@
 .live-pages-mosaic-menu[open] > summary { border-color: var(--kr-border-medium); background: var(--kr-bg-hover); color: var(--kr-accent); }
 .live-pages-mosaic-menu > summary[aria-disabled='true'] { cursor: not-allowed; opacity: .42; }
 .live-pages-mosaic-popover {
-  position: absolute;
+  position: fixed;
   z-index: 30;
-  top: calc(100% + 6px);
-  right: 0;
+  top: var(--mosaic-popover-top, 48px);
+  left: var(--mosaic-popover-left, 8px);
   display: flex;
-  width: 224px;
+  width: var(--mosaic-popover-width, 224px);
+  max-height: var(--mosaic-popover-max-height, calc(100vh - 16px));
   flex-direction: column;
   gap: 3px;
   padding: 7px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   border: 1px solid var(--kr-border-medium);
   border-radius: var(--kr-r-md);
   background: var(--kr-bg-raised);
