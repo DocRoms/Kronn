@@ -56,21 +56,6 @@
   padding: 0 24px 12px;
 }
 
-.planning-search {
-  display: flex;
-  align-items: center;
-  flex: 1;
-  min-width: 160px;
-  max-width: 390px;
-  gap: 7px;
-  padding: 7px 9px;
-  border: 1px solid var(--kr-border);
-  border-radius: var(--kr-r-md);
-  background: var(--kr-bg-surface);
-  color: var(--kr-text-muted);
-}
-
-.planning-search input,
 .planning-create input {
   width: 100%;
   border: 0;
@@ -155,11 +140,11 @@
   padding: 5px 8px;
 }
 
-.planning-workspace {
-  display: flex;
+.planning-shell {
   flex: 1;
   min-height: 0;
   border-top: 1px solid var(--kr-border);
+  overflow: hidden;
 }
 
 .planning-backlog {
@@ -361,20 +346,23 @@
   margin: 18px auto 0;
 }
 
-.planning-detail {
-  position: sticky;
-  top: 52px;
-  width: min(480px, 44vw);
-  height: calc(100vh - 52px);
-  align-self: flex-start;
-  flex-shrink: 0;
+.planning-detail-empty-hint {
   display: flex;
+  min-height: 240px;
+  align-items: center;
+  justify-content: center;
+  color: var(--kr-text-faint);
+}
+
+.planning-detail {
+  display: flex;
+  height: 100%;
   flex-direction: column;
   min-height: 0;
   overflow: hidden;
-  border-left: 1px solid var(--kr-border);
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-lg);
   background: var(--kr-bg-surface);
-  box-shadow: -10px 0 24px rgba(0, 0, 0, 0.08);
   animation: planning-panel-enter 180ms ease-out;
 }
 
@@ -789,15 +777,5 @@
   }
   .planning-backlog {
     padding: 14px 16px 32px;
-  }
-  .planning-detail {
-    position: fixed;
-    z-index: 30;
-    inset: auto 0 0 auto;
-    top: 52px;
-    height: calc(100vh - 52px);
-    align-self: auto;
-    width: min(100%, 480px);
-    box-shadow: var(--kr-shadow-xl);
   }
 }

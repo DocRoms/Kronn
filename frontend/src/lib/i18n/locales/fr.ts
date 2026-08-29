@@ -1226,6 +1226,7 @@ const fr: TranslationDict = {
   'planning.withoutDiscussion': 'Sans discussion',
   'planning.allTags': 'Toutes les étiquettes',
   'planning.emptyBacklog': 'Aucune tâche active avec ces filtres.',
+  'planning.selectHint': 'Sélectionnez une tâche pour afficher ses détails.',
   'planning.dropHere': 'Déposer ici pour changer la priorité',
   'planning.loadMore': 'Charger la suite',
   'planning.saved': 'Tâche mise à jour',
@@ -4120,6 +4121,14 @@ Termine par [SIGNAL: OK].`,
   'common.actionFailed': "Échec de l'opération : {0}",
   'common.seeMore': 'Voir plus',
   'common.seeLess': 'Voir moins',
+
+  // ── Shared collection shell (sidebar de collection + vue détaillée) ──
+  'collection.favorites': 'Favoris',
+  'collection.clearFilters': 'Effacer les filtres',
+  'collection.moreActions': 'Plus d’actions',
+  'collection.openCollection': 'Ouvrir la liste',
+  'collection.closeCollection': 'Fermer la liste',
+  'collection.selectItem': 'sélectionné',
 
   // Workflow execution guards (0.7.0)
   'wf.guards.title': 'Limites d\'exécution',

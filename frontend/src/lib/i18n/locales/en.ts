@@ -1216,6 +1216,7 @@ const en: TranslationDict = {
   'planning.withoutDiscussion': 'Without discussion',
   'planning.allTags': 'All tags',
   'planning.emptyBacklog': 'No active task matches these filters.',
+  'planning.selectHint': 'Select a task to see its details.',
   'planning.dropHere': 'Drop here to change priority',
   'planning.loadMore': 'Load more',
   'planning.saved': 'Task updated',
@@ -4107,6 +4108,14 @@ End with [SIGNAL: OK].`,
   'common.actionFailed': 'Action failed: {0}',
   'common.seeMore': 'See more',
   'common.seeLess': 'See less',
+
+  // ── Shared collection shell (collection sidebar + detail view) ──
+  'collection.favorites': 'Favorites',
+  'collection.clearFilters': 'Clear filters',
+  'collection.moreActions': 'More actions',
+  'collection.openCollection': 'Open collection',
+  'collection.closeCollection': 'Close collection',
+  'collection.selectItem': 'selected',
 
   // Workflow execution guards (0.7.0)
   'wf.guards.title': 'Execution limits',

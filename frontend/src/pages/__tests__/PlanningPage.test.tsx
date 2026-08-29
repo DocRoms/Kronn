@@ -96,7 +96,7 @@ describe('PlanningPage', () => {
     mocks.removeBlocker.mockResolvedValue(detail());
   });
 
-  it('renders active work by priority and keeps completed work collapsed', async () => {
+  it('renders tasks in the shared collection sidebar', async () => {
     const { container } = render(
       <PlanningPage
         projects={[]}
@@ -106,9 +106,7 @@ describe('PlanningPage', () => {
       />,
     );
     expect(await screen.findByText('Upgrade PHP')).toBeInTheDocument();
-    expect(container.querySelector('[data-priority="high"]')).not.toBeNull();
-    expect(screen.queryByText('Old task')).toBeNull();
-    fireEvent.click(screen.getByText('planning.completed · 1'));
+    expect(container.querySelector('.collection-shell-sidebar')).not.toBeNull();
     expect(screen.getByText('Old task')).toBeInTheDocument();
   });
 
@@ -149,7 +147,7 @@ describe('PlanningPage', () => {
     const panel = screen.getByRole('complementary', { name: 'planning.taskActions' });
     expect(panel.querySelector(':scope > header')).not.toBeNull();
     expect(panel.querySelector('.planning-detail-form')).not.toBeNull();
-    expect(container.querySelector('.planning-workspace > .planning-detail')).toBe(panel);
+    expect(container.querySelector('.collection-shell-detail > .planning-detail')).toBe(panel);
   });
 
   it('opens a directly linked task detail on mount', async () => {
