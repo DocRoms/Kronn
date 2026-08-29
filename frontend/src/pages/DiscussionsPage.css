@@ -190,7 +190,8 @@
    tree while later rows/cards are painted over it. Lift the complete section
    while one of its rows owns a popover, then temporarily disable containment
    on that row so the menu actually reaches the foreground. */
-.disc-sidebar-section:has(.disc-swipe-wrap[data-menu-open="true"]) {
+.disc-sidebar-section:has(.disc-swipe-wrap[data-menu-open="true"]),
+.disc-sidebar-section:has(.disc-item-more-btn[aria-expanded="true"]) {
   position: relative;
   z-index: 60;
 }
@@ -954,7 +955,8 @@
   border-radius: 8px;
 }
 
-.disc-swipe-wrap[data-menu-open="true"] {
+.disc-swipe-wrap[data-menu-open="true"],
+.disc-swipe-wrap:has(.disc-item-more-btn[aria-expanded="true"]) {
   overflow: visible;
   content-visibility: visible;
   contain-intrinsic-size: none;
