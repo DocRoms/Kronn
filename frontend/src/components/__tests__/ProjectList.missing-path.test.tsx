@@ -6,7 +6,7 @@
 // ProjectCard is stubbed — this exercises the list's own logic only.
 
 import { beforeEach, describe, it, expect, vi } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import type { Project } from '../../types/generated';
 
 vi.mock('../../lib/I18nContext', () => ({
@@ -208,5 +208,42 @@ describe('ProjectList — missing-path banner', () => {
     expect(addButton).toHaveAttribute('data-tour-id', 'new-project-btn');
     fireEvent.click(addButton);
     expect(onAddProject).toHaveBeenCalledOnce();
+  });
+
+  it('keeps sorting behind a compact search action and exposes inline search clearing', () => {
+    renderList([
+      proj('p1', 'Alpha', '/repos/alpha', true),
+      proj('p2', 'Beta', '/repos/beta', true),
+    ]);
+
+    const search = screen.getByRole('textbox', { name: 'projects.search' });
+    fireEvent.keyDown(window, { key: '/' });
+    expect(search).toHaveFocus();
+
+    fireEvent.change(search, { target: { value: 'Alpha' } });
+    const searchHeader = search.closest<HTMLElement>('.collection-shell-header')!;
+    fireEvent.click(within(searchHeader).getByRole('button', { name: 'collection.clearFilters' }));
+    expect(search).toHaveValue('');
+
+    const sortButton = within(searchHeader).getByRole('button', { name: 'projects.master.sort' });
+    expect(sortButton).toHaveClass('collection-shell-search-action');
+    expect(sortButton).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByRole('combobox', { name: 'projects.master.sort' })).toBeNull();
+
+    fireEvent.click(sortButton);
+    expect(sortButton).toHaveAttribute('aria-expanded', 'true');
+    const sortSelect = screen.getByRole('combobox', { name: 'projects.master.sort' });
+    const directionButton = screen.getByRole('button', { name: 'projects.master.sort.direction' });
+    expect(sortSelect).toHaveValue('name');
+    expect(directionButton).toHaveAttribute('aria-pressed', 'false');
+    fireEvent.change(sortSelect, { target: { value: 'status' } });
+    fireEvent.click(directionButton);
+    expect(directionButton).toHaveAttribute('aria-pressed', 'true');
+
+    fireEvent.click(sortButton);
+    expect(screen.queryByRole('combobox', { name: 'projects.master.sort' })).toBeNull();
+    fireEvent.click(sortButton);
+    expect(screen.getByRole('combobox', { name: 'projects.master.sort' })).toHaveValue('status');
+    expect(screen.getByRole('button', { name: 'projects.master.sort.direction' })).toHaveAttribute('aria-pressed', 'true');
   });
 });

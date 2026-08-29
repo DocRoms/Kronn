@@ -91,6 +91,8 @@ export function PlanningPage({
   const creatingRef = useRef(false);
   const taskIds = useMemo(() => tasks.map(task => task.id), [tasks]);
   const { ids: favoriteIds, toggle: toggleFavorite } = usePersistentIdSet('kronn:collection-favorites:planning', taskIds, tasksLoaded);
+  const activeFilterCount = [status, priorityFilter, projectId, withDiscussion, tag]
+    .filter(Boolean).length;
 
   const fetchTasks = useCallback(async (cursor?: number) => {
     const append = cursor !== undefined;
@@ -342,6 +344,8 @@ export function PlanningPage({
           isMobile={isMobile}
           sidebarOpen={sidebarOpen}
           onSidebarOpenChange={setSidebarOpen}
+          globalSearchShortcut
+          showSearchClear
           labels={{
             search: t('planning.search'),
             favorites: t('collection.favorites'),
@@ -355,17 +359,22 @@ export function PlanningPage({
             selectedCount: count => t('collection.selectedCount', count),
           }}
           slots={{
+            sidebarHeaderEnd: <button
+              type="button"
+              className="collection-shell-search-action"
+              data-active={filtersOpen}
+              onClick={() => setFiltersOpen(value => !value)}
+              aria-expanded={filtersOpen}
+              aria-controls="planning-search-options"
+              aria-label={t('planning.filters')}
+              title={t('planning.filters')}
+            >
+              <Filter size={14} />
+              <span>{t('planning.filters')}</span>
+              {activeFilterCount > 0 && <strong>{activeFilterCount}</strong>}
+            </button>,
             afterSidebarHeader: <>
-              <div className="planning-sidebar-summary">
-                <span><strong>{activeTasks.length}</strong>{t('planning.activeCount')}</span>
-                <span><strong>{completedTasks.length}</strong>{t('planning.doneCount')}</span>
-              </div>
-              <div className="planning-toolbar">
-                <button type="button" className="btn btn-sm" data-active={filtersOpen} onClick={() => setFiltersOpen(value => !value)}>
-                  <Filter size={14} /> {t('planning.filters')}
-                </button>
-              </div>
-              {filtersOpen && <div className="planning-filters">
+              {filtersOpen && <div id="planning-search-options" className="collection-shell-search-options planning-filters">
                 <select value={status} onChange={event => setStatus(event.target.value as PlanningTaskStatus | '')} aria-label={t('planning.allStatuses')}>
                   <option value="">{t('planning.allStatuses')}</option>
                   {(['idea', 'todo', 'in_progress', 'blocked', 'done', 'archived'] as PlanningTaskStatus[]).map(value => <option key={value} value={value}>{t(`planning.status.${value}`)}</option>)}
@@ -385,6 +394,10 @@ export function PlanningPage({
                   <option value="">{t('planning.allTags')}</option>{tags.map(value => <option key={value} value={value}>{value}</option>)}
                 </select>}
               </div>}
+              <div className="planning-sidebar-summary">
+                <span><strong>{activeTasks.length}</strong>{t('planning.activeCount')}</span>
+                <span><strong>{completedTasks.length}</strong>{t('planning.doneCount')}</span>
+              </div>
             </>,
             renderEmpty: () => <div className="planning-state"><Target size={24} /> {t('planning.emptyBacklog')}</div>,
             renderItem: (task, { selected }) => renderCard(task, selected),

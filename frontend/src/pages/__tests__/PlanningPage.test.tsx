@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 
 const mocks = vi.hoisted(() => ({
   list: vi.fn(),
@@ -233,10 +233,30 @@ describe('PlanningPage', () => {
     );
     await screen.findByText('Upgrade PHP');
 
-    fireEvent.click(screen.getByRole('button', { name: 'planning.filters' }));
+    const search = screen.getByRole('textbox', { name: 'planning.search' });
+    fireEvent.keyDown(window, { key: '/' });
+    expect(search).toHaveFocus();
+    fireEvent.change(search, { target: { value: 'Upgrade' } });
+    const searchHeader = search.closest<HTMLElement>('.collection-shell-header')!;
+    fireEvent.click(within(searchHeader).getByRole('button', { name: 'collection.clearFilters' }));
+    expect(search).toHaveValue('');
+
+    const filterButton = within(searchHeader).getByRole('button', { name: 'planning.filters' });
+    expect(filterButton).toHaveClass('collection-shell-search-action');
+    expect(filterButton).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByRole('combobox', { name: 'planning.allStatuses' })).toBeNull();
+
+    fireEvent.click(filterButton);
+    expect(filterButton).toHaveAttribute('aria-expanded', 'true');
     expect(screen.getByRole('combobox', { name: 'planning.allStatuses' })).toBeInTheDocument();
     expect(screen.getByRole('combobox', { name: 'planning.allProjects' })).toBeInTheDocument();
     expect(screen.getByRole('combobox', { name: 'planning.allLinks' })).toBeInTheDocument();
+
+    fireEvent.change(screen.getByRole('combobox', { name: 'planning.allStatuses' }), { target: { value: 'todo' } });
+    expect(filterButton.querySelector('strong')).toHaveTextContent('1');
+    await waitFor(() => expect(mocks.list).toHaveBeenLastCalledWith(expect.objectContaining({ status: 'todo' })));
+    fireEvent.click(filterButton);
+    expect(screen.queryByRole('combobox', { name: 'planning.allStatuses' })).toBeNull();
   });
 
   it('opens the full detail only after a task is selected', async () => {

@@ -11,7 +11,7 @@ import { usePersistentIdSet } from '../hooks/usePersistentIdSet';
 import type { Project, AgentDetection, AuditProgress, DriftCheckResponse, Discussion, Skill, McpConfigDisplay, WorkflowSummary } from '../types/generated';
 import {
   Folder, ChevronRight, AlertTriangle,
-  MessageSquare, Workflow, Puzzle, ShieldCheck, Loader2, FileCode, Clock, Plus, Trash2,
+  MessageSquare, Workflow, Puzzle, ShieldCheck, Loader2, FileCode, Clock, Plus, SlidersHorizontal, Trash2,
 } from 'lucide-react';
 import { MatrixText } from './MatrixText';
 
@@ -84,6 +84,7 @@ export function ProjectList({
   const [projectFilter, setProjectFilter] = useState<ProjectFilter>('visible');
   const [projectSort, setProjectSort] = useState<ProjectSort>('name');
   const [projectSortReversed, setProjectSortReversed] = useState(false);
+  const [sortOptionsOpen, setSortOptionsOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [favoritesOnly, setFavoritesOnly] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -262,6 +263,8 @@ export function ProjectList({
           isMobile={isMobile}
           sidebarOpen={sidebarOpen}
           onSidebarOpenChange={setSidebarOpen}
+          globalSearchShortcut
+          showSearchClear
           labels={{
             search: t('projects.search'),
             favorites: t('collection.favorites'),
@@ -275,26 +278,43 @@ export function ProjectList({
             selectedCount: count => t('collection.selectedCount', count),
           }}
           slots={{
-            afterSidebarHeader: <div className="project-list-toolbar">
-              <span className="dash-meta">
-                {aiCount}/{visibleProjects.length} {t('projects.aiReady')}
-                {hiddenProjects.length > 0 && <> + {hiddenProjects.length} {hiddenProjects.length > 1 ? t('projects.hiddenPlural') : t('projects.hidden')}</>}
-              </span>
-              <ListControls
-                sortLabel={t('projects.master.sort')}
-                sortValue={projectSort}
-                sortOptions={[
-                  { value: 'name', label: t('projects.master.sort.name') },
-                  { value: 'updated', label: t('projects.master.sort.updated') },
-                  { value: 'status', label: t('projects.master.sort.status') },
-                  { value: 'techDebt', label: t('projects.master.sort.techDebt') },
-                ]}
-                onSortChange={setProjectSort}
-                reversed={projectSortReversed}
-                onToggleDirection={() => setProjectSortReversed(value => !value)}
-                directionLabel={t('projects.master.sort.direction')}
-              />
-            </div>,
+            sidebarHeaderEnd: <button
+              type="button"
+              className="collection-shell-search-action"
+              data-active={sortOptionsOpen}
+              onClick={() => setSortOptionsOpen(open => !open)}
+              aria-expanded={sortOptionsOpen}
+              aria-controls="project-search-options"
+              aria-label={t('projects.master.sort')}
+              title={t('projects.master.sort')}
+            >
+              <SlidersHorizontal size={14} />
+              <span>{t('projects.master.sort')}</span>
+            </button>,
+            afterSidebarHeader: <>
+              {sortOptionsOpen && <div id="project-search-options" className="collection-shell-search-options">
+                <ListControls
+                  sortLabel={t('projects.master.sort')}
+                  sortValue={projectSort}
+                  sortOptions={[
+                    { value: 'name', label: t('projects.master.sort.name') },
+                    { value: 'updated', label: t('projects.master.sort.updated') },
+                    { value: 'status', label: t('projects.master.sort.status') },
+                    { value: 'techDebt', label: t('projects.master.sort.techDebt') },
+                  ]}
+                  onSortChange={setProjectSort}
+                  reversed={projectSortReversed}
+                  onToggleDirection={() => setProjectSortReversed(value => !value)}
+                  directionLabel={t('projects.master.sort.direction')}
+                />
+              </div>}
+              <div className="project-list-toolbar">
+                <span className="dash-meta">
+                  {aiCount}/{visibleProjects.length} {t('projects.aiReady')}
+                  {hiddenProjects.length > 0 && <> + {hiddenProjects.length} {hiddenProjects.length > 1 ? t('projects.hiddenPlural') : t('projects.hidden')}</>}
+                </span>
+              </div>
+            </>,
             renderDetail: () => (
               selectedProject ? (
                 <ProjectCard
