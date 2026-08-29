@@ -233,7 +233,7 @@ pub fn acquire_data_dir_lock() -> Result<std::fs::File> {
     acquire_lock_in(&dir)
 }
 
-fn acquire_lock_in(dir: &std::path::Path) -> Result<std::fs::File> {
+pub(crate) fn acquire_lock_in(dir: &std::path::Path) -> Result<std::fs::File> {
     use fs2::FileExt;
     std::fs::create_dir_all(dir)?;
     let lock_path = dir.join(".kronn.lock");
@@ -258,6 +258,63 @@ fn acquire_lock_in(dir: &std::path::Path) -> Result<std::fs::File> {
         )
     })?;
     Ok(f)
+}
+
+/// Duplicate the backend lock for a child which may outlive this process.
+///
+/// A spawned Git process can survive an ungraceful backend exit.  Keeping this
+/// descriptor open across `exec` means the replacement backend cannot acquire
+/// the data-directory lock and therefore cannot reap that Git operation's
+/// commit lease while Git (or one of its hooks) is still alive.
+#[cfg(unix)]
+pub(crate) fn inherit_data_dir_lock_for_child(lock: &std::fs::File) -> Result<std::fs::File> {
+    use std::os::fd::AsRawFd;
+
+    let child_lock = lock
+        .try_clone()
+        .context("duplicate data-directory lock for Git child")?;
+    let fd = child_lock.as_raw_fd();
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if flags == -1 {
+        return Err(std::io::Error::last_os_error())
+            .context("read Git child lock descriptor flags");
+    }
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) } == -1 {
+        return Err(std::io::Error::last_os_error())
+            .context("make Git child lock descriptor inheritable");
+    }
+    Ok(child_lock)
+}
+
+#[cfg(windows)]
+pub(crate) fn inherit_data_dir_lock_for_child(lock: &std::fs::File) -> Result<std::fs::File> {
+    use std::os::windows::io::AsRawHandle;
+
+    const HANDLE_FLAG_INHERIT: u32 = 0x0000_0001;
+    extern "system" {
+        fn SetHandleInformation(handle: *mut std::ffi::c_void, mask: u32, flags: u32) -> i32;
+    }
+
+    let child_lock = lock
+        .try_clone()
+        .context("duplicate data-directory lock for Git child")?;
+    let inherited = unsafe {
+        SetHandleInformation(
+            child_lock.as_raw_handle().cast(),
+            HANDLE_FLAG_INHERIT,
+            HANDLE_FLAG_INHERIT,
+        )
+    };
+    if inherited == 0 {
+        return Err(std::io::Error::last_os_error())
+            .context("make Git child lock handle inheritable");
+    }
+    Ok(child_lock)
+}
+
+#[cfg(not(any(unix, windows)))]
+pub(crate) fn inherit_data_dir_lock_for_child(_: &std::fs::File) -> Result<std::fs::File> {
+    anyhow::bail!("this platform cannot safely inherit the data-directory lock into Git")
 }
 
 /// Restrict a path to owner-only access on Unix; no-op on Windows.

@@ -8772,12 +8772,20 @@ pub async fn commit_spawned_worker(
     };
     let files = request.files;
     let message = request.message;
+    let data_dir_lock = state.data_dir_lock.clone();
     let supervisor = spawn_spawned_commit_supervisor(
         state.db.clone(),
         execution.id,
         dispatch_job_id.to_string(),
         lease_id,
-        move || crate::api::agent_workspace_tools::git_commit_payload(&root, &files, &message),
+        move || {
+            crate::api::agent_workspace_tools::git_commit_payload_with_data_dir_lock(
+                &root,
+                &files,
+                &message,
+                data_dir_lock.as_deref(),
+            )
+        },
     );
     match supervisor.await {
         Ok((committed, release_error)) => spawned_commit_response(committed, release_error),
@@ -10947,6 +10955,81 @@ mod tests {
             0,
             "database startup must clear a lease owned by the dead backend"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn surviving_git_child_blocks_restart_reap_until_it_exits() {
+        let repo = init_repo();
+        let database_dir = tempfile::tempdir().unwrap();
+        let database_path = database_dir.path().join("restart.sqlite");
+        let db = std::sync::Arc::new(Database::open_path(&database_path).unwrap());
+        let (task_ref, parent_id, _) = seed(&db, repo.path()).await;
+        let execution = provision_single_task_execution(
+            &db,
+            ProvisionInput {
+                task_reference: task_ref,
+                parent_discussion_id: parent_id,
+                worker: native_worker(),
+                base_rev: Some("main".into()),
+                idempotency_key: Some("surviving-git-child-keeps-data-lock".into()),
+            },
+        )
+        .await
+        .unwrap();
+        let dispatch = execution.dispatch_job_id.unwrap();
+        assert!(matches!(
+            acquire_test_spawned_commit_lease(&db, &execution.id, &dispatch).await,
+            crate::db::orchestration::SpawnedCommitLeaseOutcome::Acquired { .. }
+        ));
+        drop(db);
+
+        let backend_lock = crate::core::config::acquire_lock_in(database_dir.path()).unwrap();
+        let inherited_lock =
+            crate::core::config::inherit_data_dir_lock_for_child(&backend_lock).unwrap();
+        let release = database_dir.path().join("release-git-child");
+        let mut git_child = crate::core::cmd::sync_cmd("sh")
+            .args([
+                "-c",
+                "while [ ! -e \"$1\" ]; do sleep 0.01; done",
+                "--",
+                release.to_str().unwrap(),
+            ])
+            .spawn()
+            .unwrap();
+        drop(inherited_lock);
+        drop(backend_lock);
+
+        assert!(
+            crate::core::config::acquire_lock_in(database_dir.path()).is_err(),
+            "a replacement backend must not acquire the lock or reap leases while a Git child survives"
+        );
+        let still_live = Database::open_path(&database_path).unwrap();
+        assert_eq!(
+            count(
+                &still_live,
+                "SELECT COUNT(*) FROM task_execution_commit_leases"
+            )
+            .await,
+            1,
+            "the blocked replacement has not reaped the active child lease"
+        );
+        drop(still_live);
+
+        std::fs::write(&release, "done\n").unwrap();
+        assert!(git_child.wait().unwrap().success());
+        let replacement_lock = crate::core::config::acquire_lock_in(database_dir.path()).unwrap();
+        let reopened = Database::open_path_for_backend_boot(&database_path).unwrap();
+        assert_eq!(
+            count(
+                &reopened,
+                "SELECT COUNT(*) FROM task_execution_commit_leases"
+            )
+            .await,
+            0,
+            "once the Git child exits, backend boot may recover its lease"
+        );
+        drop(replacement_lock);
     }
 
     #[tokio::test]

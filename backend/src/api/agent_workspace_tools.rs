@@ -530,6 +530,15 @@ pub fn git_log_payload(
 /// Every path is validated before the first `git add`, so a refused final entry
 /// cannot leave earlier entries staged.
 pub fn git_commit_payload(root: &Path, files: &[String], message: &str) -> Result<Value, String> {
+    git_commit_payload_with_data_dir_lock(root, files, message, None)
+}
+
+pub fn git_commit_payload_with_data_dir_lock(
+    root: &Path,
+    files: &[String],
+    message: &str,
+    data_dir_lock: Option<&std::fs::File>,
+) -> Result<Value, String> {
     let message = message.trim();
     if message.is_empty() {
         return Err("refused: commit message cannot be empty".into());
@@ -564,8 +573,14 @@ pub fn git_commit_payload(root: &Path, files: &[String], message: &str) -> Resul
         normalized.insert(relative.to_string_lossy().to_string());
     }
     let normalized: Vec<String> = normalized.into_iter().collect();
-    let committed =
-        crate::api::git_ops::run_git_commit(&canonical_root, &normalized, message, false, false)?;
+    let committed = crate::api::git_ops::run_git_commit_with_child_lock(
+        &canonical_root,
+        &normalized,
+        message,
+        false,
+        false,
+        data_dir_lock,
+    )?;
     Ok(json!({
         "hash": committed.hash,
         "message": committed.message,

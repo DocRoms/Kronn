@@ -226,6 +226,9 @@ pub struct AppState {
     /// call time and return a 503 if the bundled/runtime sidecar could
     /// not be started.
     pub docs_sidecar: Arc<crate::core::docs_sidecar::DocsSidecar>,
+    /// Production-only data-directory lock. Spawned Git commits inherit a
+    /// duplicate of this handle so a replacement backend waits for Git/hooks.
+    pub data_dir_lock: Option<Arc<std::fs::File>>,
 }
 
 impl AppState {
@@ -260,7 +263,13 @@ impl AppState {
             git_language_cache: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             agent_dispatch_notify: Arc::new(tokio::sync::Notify::new()),
             docs_sidecar: Arc::new(crate::core::docs_sidecar::DocsSidecar::new()),
+            data_dir_lock: None,
         }
+    }
+
+    pub fn with_data_dir_lock(mut self, data_dir_lock: std::fs::File) -> Self {
+        self.data_dir_lock = Some(Arc::new(data_dir_lock));
+        self
     }
 }
 
