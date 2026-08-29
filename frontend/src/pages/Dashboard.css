@@ -1965,6 +1965,25 @@ html[data-density="large"] .dash-main {
   width: 100%;
 }
 
+.project-sidebar-state-icon[data-tone='success'] { color: var(--kr-success); }
+.project-sidebar-state-icon[data-tone='warning'] { color: var(--kr-warning); }
+.project-sidebar-state-icon[data-tone='running'] { color: var(--kr-cyan); }
+.project-sidebar-state-icon[data-tone='info'] { color: var(--kr-accent); }
+.project-sidebar-state-icon[data-tone='error'] { color: var(--kr-error); }
+
+.project-sidebar-meta-count {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 2px;
+  color: var(--kr-text-faint);
+  font-size: 10px;
+}
+
+.project-sidebar-row .disc-item[data-hidden='true'] {
+  opacity: 0.72;
+}
+
 .project-list-card {
   position: relative;
   display: flex;

@@ -28,19 +28,19 @@ import { ProjectList } from '../ProjectList';
 
 const noop = () => {};
 
-function proj(id: string, name: string, path: string, path_exists?: boolean): Project {
+function proj(id: string, name: string, path: string, path_exists?: boolean, updatedAt = '2026-01-01T00:00:00Z'): Project {
   return {
     id, name, path,
     repo_url: null, token_override: null,
     ai_config: { detected: false, configs: [] },
     audit_status: 'NoTemplate', ai_todo_count: 0, tech_debt_count: 0,
     needs_docs_migration: false, path_exists,
-    created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z',
+    created_at: '2026-01-01T00:00:00Z', updated_at: updatedAt,
   } as Project;
 }
 
 function renderList(projects: Project[]) {
-  render(
+  return render(
     <ProjectList
       projects={projects}
       discussions={[]}
@@ -79,7 +79,7 @@ describe('ProjectList — missing-path banner', () => {
       proj('p3', 'Gamma', '/repos/gamma', true),
     ]);
 
-    expect(screen.getAllByTestId(/^project-list-item-/)).toHaveLength(3);
+    expect(within(screen.getByTestId('project-section-all')).getAllByTestId(/^project-list-item-/)).toHaveLength(3);
     expect(screen.getAllByTestId(/^card-/)).toHaveLength(1);
     expect(screen.getByRole('complementary', { name: 'projects.title' })).toHaveClass('collection-shell-sidebar');
   });
@@ -111,9 +111,9 @@ describe('ProjectList — missing-path banner', () => {
       />,
     );
 
-    const alphaRow = screen.getByTestId('project-list-item-p1').closest('li')?.querySelector('button');
+    const alphaRow = screen.getByTestId('project-list-item-p1').querySelector('.disc-item-open');
     expect(alphaRow).toHaveAttribute('aria-current', 'true');
-    fireEvent.click(screen.getByTestId('project-list-item-p2'));
+    fireEvent.click(screen.getByTestId('project-list-item-p2').querySelector('.disc-item-open')!);
     expect(onSetExpandedId).toHaveBeenCalledWith('p2');
   });
 
@@ -173,7 +173,7 @@ describe('ProjectList — missing-path banner', () => {
       />,
     );
     expect(screen.getByText('projects.title').closest('.collection-shell-title')).toHaveTextContent('projects.title · 2');
-    fireEvent.click(screen.getByRole('button', { name: /collection\.favorites · Alpha/ }));
+    fireEvent.click(within(screen.getByTestId('project-section-all')).getByRole('button', { name: /wf\.pin · Alpha/ }));
     expect(localStorage.getItem('kronn:collection-favorites:projects')).toContain('p1');
     fireEvent.click(screen.getByRole('button', { name: 'projects.master.filter' }));
     fireEvent.click(screen.getByRole('button', { name: 'collection.favorites' }));
@@ -190,6 +190,59 @@ describe('ProjectList — missing-path banner', () => {
     fireEvent.click(screen.getByRole('button', { name: 'collection.closeCollection' }));
     expect(screen.queryByRole('complementary', { name: 'projects.title' })).toBeNull();
     expect(screen.getByRole('button', { name: 'collection.openCollection' })).toHaveClass('collection-shell-sidebar-rail');
+  });
+
+  it('renders persistent Favorites, Recent, and canonical All sections', async () => {
+    localStorage.setItem('kronn:collection-favorites:projects', JSON.stringify(['p12']));
+    const projects = Array.from({ length: 12 }, (_, index) => {
+      const number = index + 1;
+      const suffix = String(number).padStart(2, '0');
+      return proj(
+        `p${number}`,
+        `Project ${suffix}`,
+        `/repos/project-${suffix}`,
+        true,
+        `2026-01-${suffix}T00:00:00Z`,
+      );
+    });
+    const view = renderList(projects);
+
+    const favorites = screen.getByTestId('project-section-favorites');
+    const recent = screen.getByTestId('project-section-recent');
+    const all = screen.getByTestId('project-section-all');
+    expect([...all.parentElement!.children].map(section => section.getAttribute('data-section')))
+      .toEqual(['favorites', 'recent', 'all']);
+    expect(within(favorites).getByText('Project 12')).toBeInTheDocument();
+    expect(within(recent).getAllByText(/^Project /).map(node => node.textContent)).toEqual([
+      'Project 11', 'Project 10', 'Project 09', 'Project 08', 'Project 07',
+      'Project 06', 'Project 05', 'Project 04', 'Project 03', 'Project 02',
+    ]);
+    expect(within(recent).queryByText('Project 12')).toBeNull();
+    expect(within(all).getAllByTestId(/^project-list-item-/)).toHaveLength(12);
+
+    const favoriteCanonicalRow = within(all).getByTestId('project-list-item-p12');
+    expect(favoriteCanonicalRow.querySelector('.disc-item')).toBeInTheDocument();
+    expect(favoriteCanonicalRow.querySelector('.disc-item-meta-summary')).toHaveTextContent('/repos/project-12');
+    expect(within(favoriteCanonicalRow).getByRole('button', { name: 'wf.unpin · Project 12' }))
+      .toHaveClass('kr-favorite-toggle');
+    expect(within(all).getByTestId('project-list-item-p1').querySelector('.disc-item'))
+      .toHaveAttribute('data-active', 'true');
+
+    const recentToggle = within(recent).getByRole('button', { name: /disc\.recent/ });
+    fireEvent.click(recentToggle);
+    expect(recentToggle).toHaveAttribute('aria-expanded', 'false');
+    expect(within(recent).queryByText('Project 11')).toBeNull();
+    expect(localStorage.getItem('kronn:project-sidebar-collapsed-sections')).toContain('recent');
+
+    view.unmount();
+    renderList(projects);
+    const persistedRecent = screen.getByTestId('project-section-recent');
+    expect(within(persistedRecent).getByRole('button', { name: /disc\.recent/ })).toHaveAttribute('aria-expanded', 'false');
+    expect(within(persistedRecent).queryByText('Project 11')).toBeNull();
+
+    fireEvent.change(screen.getByRole('textbox', { name: 'projects.search' }), { target: { value: 'Project 11' } });
+    await waitFor(() => expect(within(persistedRecent).getByText('Project 11')).toBeInTheDocument());
+    expect(within(persistedRecent).getByRole('button', { name: /disc\.recent/ })).toHaveAttribute('aria-expanded', 'true');
   });
 
   it('opens the existing add-project flow from the primary header action', () => {

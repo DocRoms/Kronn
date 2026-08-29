@@ -1,9 +1,11 @@
 import '../pages/Dashboard.css';
-import { useState, useMemo, useDeferredValue, useEffect, useRef, useCallback } from 'react';
+import '../pages/DiscussionsPage.css';
+import { useState, useMemo, useDeferredValue, useEffect, useRef, useCallback, type ReactNode } from 'react';
 import { useT } from '../lib/I18nContext';
 import { getProjectGroup, isHiddenPath, isValidationDisc } from '../lib/constants';
 import { useIsMobile } from '../hooks/useMediaQuery';
 import { ProjectCard } from './ProjectCard';
+import { FavoriteToggle } from './FavoriteToggle';
 import { ListControls } from './ListControls';
 import { CollectionShell, type CollectionFilter } from './CollectionShell';
 import { projects as projectsApi } from '../lib/api';
@@ -12,13 +14,28 @@ import type { Project, AgentDetection, AuditProgress, DriftCheckResponse, Discus
 import {
   Folder, ChevronRight, AlertTriangle,
   MessageSquare, Workflow, Puzzle, ShieldCheck, Loader2, FileCode, Clock, Plus,
-  ArrowUpDown, Filter, Star, Trash2,
+  ArrowUpDown, CheckSquare2, Filter, Star, Trash2,
 } from 'lucide-react';
 import { MatrixText } from './MatrixText';
 
 const isAiReady = (p: Project) => p.audit_status !== 'NoTemplate';
 type ProjectFilter = 'visible' | 'attention' | 'validated' | 'missing' | 'hidden' | 'all';
 type ProjectSort = 'name' | 'updated' | 'status' | 'techDebt';
+type ProjectSidebarSection = 'favorites' | 'recent' | 'all';
+
+const PROJECT_COLLAPSED_SECTIONS_KEY = 'kronn:project-sidebar-collapsed-sections';
+const PROJECT_SIDEBAR_SECTIONS = new Set<ProjectSidebarSection>(['favorites', 'recent', 'all']);
+
+function readCollapsedProjectSections(): Set<ProjectSidebarSection> {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(PROJECT_COLLAPSED_SECTIONS_KEY) ?? '[]');
+    return new Set(Array.isArray(parsed)
+      ? parsed.filter((value): value is ProjectSidebarSection => PROJECT_SIDEBAR_SECTIONS.has(value as ProjectSidebarSection))
+      : []);
+  } catch {
+    return new Set();
+  }
+}
 
 const PROJECT_STATUS_RANK: Record<Project['audit_status'], number> = {
   NoTemplate: 0,
@@ -90,9 +107,27 @@ export function ProjectList({
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [favoritesOnly, setFavoritesOnly] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [collapsedSections, setCollapsedSections] = useState(readCollapsedProjectSections);
   const projectIds = useMemo(() => projects.map(project => project.id), [projects]);
   const { ids: favoriteIds, toggle: toggleFavorite } = usePersistentIdSet('kronn:collection-favorites:projects', projectIds);
   const shellRootRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(PROJECT_COLLAPSED_SECTIONS_KEY, JSON.stringify([...collapsedSections]));
+    } catch {
+      // Section collapsing remains usable in memory when storage is unavailable.
+    }
+  }, [collapsedSections]);
+
+  const toggleSection = useCallback((section: ProjectSidebarSection) => {
+    setCollapsedSections(current => {
+      const next = new Set(current);
+      if (next.has(section)) next.delete(section);
+      else next.add(section);
+      return next;
+    });
+  }, []);
 
   // Search input vs derived filter — useDeferredValue lets the keystroke
   // commit immediately on the input, while the heavy filter / sort /
@@ -375,76 +410,150 @@ export function ProjectList({
                 </div>
               )
             ),
-            renderEmpty: () => (
-              <div className="project-list-empty">
-                <Folder size={30} />
-                <p className="dash-empty-text">
-                  {projectSearch ? t('projects.emptySearch') : t('projects.emptyHint')}
-                </p>
-              </div>
-            ),
-            renderItem: (proj, { selected: isRowSelected }) => {
-              const projHidden = isHiddenPath(proj.path);
-              const projDiscussions = discussionsByProject[proj.id] ?? [];
-              const liveAudit = activeAudits.some(audit => audit.project_id === proj.id);
-              const validating = proj.audit_status === 'Audited'
-                && projDiscussions.some(discussion => isValidationDisc(discussion.title) && !discussion.archived);
-              const projectMcpCount = mcpConfigs.filter(config => config.is_global || config.project_ids.includes(proj.id)).length;
-              const projectWorkflowCount = workflows.filter(workflow => workflow.project_id === proj.id).length;
-              const staleCount = driftByProject[proj.id]?.stale_sections.length ?? 0;
-              const status = liveAudit
-                ? { label: t('projects.master.status.auditRunning'), tone: 'running', icon: <Loader2 size={10} className="spin" /> }
-                : validating
-                  ? { label: t('projects.status.validating'), tone: 'running', icon: <Loader2 size={10} className="spin" /> }
-                  : proj.audit_status === 'Validated'
-                    ? { label: t('projects.master.status.validated'), tone: 'success', icon: <ShieldCheck size={10} /> }
-                    : proj.audit_status === 'Audited'
-                      ? { label: t('projects.master.status.toValidate'), tone: 'warning', icon: <ShieldCheck size={10} /> }
-                      : proj.audit_status === 'Bootstrapped'
-                        ? { label: t('projects.status.bootstrapped'), tone: 'info', icon: <FileCode size={10} /> }
-                        : { label: t('projects.master.status.toPrepare'), tone: 'muted', icon: <FileCode size={10} /> };
-              return (
-                <div
-                  id={`project-${proj.id}`}
-                  className="project-list-card"
-                  data-active={isRowSelected}
-                  data-hidden={projHidden}
-                  data-testid={`project-list-item-${proj.id}`}
-                >
-                          <span className="project-list-card-rail" data-tone={status.tone} />
-                          <span className="project-list-card-head">
-                            <span className="project-list-card-name">{proj.name}</span>
-                            <ChevronRight size={13} className="project-list-card-chevron" />
-                          </span>
-                          <span className="project-list-card-path" title={proj.path}>{proj.path}</span>
-                          <span className="project-list-card-status">
-                            <span className="project-status-chip" data-tone={status.tone}>
-                              {status.icon}
-                              {status.label}
-                            </span>
-                            {proj.path_exists === false && (
-                              <span className="project-alert-chip" data-tone="error">
-                                <AlertTriangle size={9} /> {t('projects.master.pathMissing')}
-                              </span>
-                            )}
-                            {(proj.tech_debt_count ?? 0) > 0 && (
-                              <span className="project-alert-chip" data-tone="warning">
-                                <AlertTriangle size={9} /> {proj.tech_debt_count} TD
-                              </span>
-                            )}
-                            {staleCount > 0 && (
-                              <span className="project-alert-chip" data-tone="warning">
-                                <Clock size={9} /> {t('projects.master.stale', staleCount)}
-                              </span>
-                            )}
-                          </span>
-                          <span className="project-list-card-meta">
-                            <span><MessageSquare size={11} /> {projDiscussions.length}</span>
-                            <span><Puzzle size={11} /> {projectMcpCount}</span>
-                            <span><Workflow size={11} /> {projectWorkflowCount}</span>
-                          </span>
-                </div>
+            renderList: ({
+              visibleItems, getRowProps, isSelected, canMultiSelect,
+              isMultiSelected, toggleMultiSelection,
+            }) => {
+              const favoriteProjects = canMultiSelect
+                ? []
+                : visibleItems.filter(project => favoriteIds.has(project.id));
+              const recentProjects = canMultiSelect
+                ? []
+                : visibleItems
+                  .filter(project => !favoriteIds.has(project.id))
+                  .sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime())
+                  .slice(0, 10);
+              const sectionCollapsed = (section: ProjectSidebarSection) => (
+                !projectSearch.trim() && !canMultiSelect && collapsedSections.has(section)
               );
+              const row = (proj: Project, section: ProjectSidebarSection) => {
+                const rowProps = getRowProps(proj);
+                const active = isSelected(proj);
+                const multiSelected = isMultiSelected(proj);
+                const projHidden = isHiddenPath(proj.path);
+                const projDiscussions = discussionsByProject[proj.id] ?? [];
+                const liveAudit = activeAudits.some(audit => audit.project_id === proj.id);
+                const validating = proj.audit_status === 'Audited'
+                  && projDiscussions.some(discussion => isValidationDisc(discussion.title) && !discussion.archived);
+                const projectMcpCount = mcpConfigs.filter(config => config.is_global || config.project_ids.includes(proj.id)).length;
+                const projectWorkflowCount = workflows.filter(workflow => workflow.project_id === proj.id).length;
+                const staleCount = driftByProject[proj.id]?.stale_sections.length ?? 0;
+                const status = liveAudit
+                  ? { label: t('projects.master.status.auditRunning'), tone: 'running', icon: <Loader2 size={10} className="spin" /> }
+                  : validating
+                    ? { label: t('projects.status.validating'), tone: 'running', icon: <Loader2 size={10} className="spin" /> }
+                    : proj.audit_status === 'Validated'
+                      ? { label: t('projects.master.status.validated'), tone: 'success', icon: <ShieldCheck size={10} /> }
+                      : proj.audit_status === 'Audited'
+                        ? { label: t('projects.master.status.toValidate'), tone: 'warning', icon: <ShieldCheck size={10} /> }
+                        : proj.audit_status === 'Bootstrapped'
+                          ? { label: t('projects.status.bootstrapped'), tone: 'info', icon: <FileCode size={10} /> }
+                          : { label: t('projects.master.status.toPrepare'), tone: 'muted', icon: <FileCode size={10} /> };
+                return <div
+                  key={`${section}-${proj.id}`}
+                  id={section === 'all' ? `project-${proj.id}` : undefined}
+                  className="disc-swipe-wrap project-sidebar-row"
+                  data-testid={section === 'all' ? `project-list-item-${proj.id}` : `project-list-item-${section}-${proj.id}`}
+                >
+                  <div className="disc-item" data-active={active} data-selected={multiSelected} data-hidden={projHidden}>
+                    <button
+                      type="button"
+                      {...rowProps}
+                      className={`${rowProps.className} disc-item-open`}
+                      onClick={canMultiSelect ? () => toggleMultiSelection(proj.id) : rowProps.onClick}
+                      role={canMultiSelect ? 'checkbox' : undefined}
+                      aria-checked={canMultiSelect ? multiSelected : undefined}
+                      aria-label={canMultiSelect ? `${proj.name} ${t('collection.selectItem')}` : undefined}
+                    >
+                      {canMultiSelect && <span className="disc-item-selection-box" data-selected={multiSelected} aria-hidden="true">
+                        {multiSelected && <CheckSquare2 size={12} />}
+                      </span>}
+                      <span className="disc-item-content">
+                        <span className="disc-item-title">
+                          <span className="disc-item-title-text">{proj.name}</span>
+                          <span className="disc-item-state-cluster">
+                            <span className="disc-item-state-icon project-sidebar-state-icon" data-tone={status.tone} title={status.label} aria-label={status.label}>
+                              {status.icon}
+                            </span>
+                            {proj.path_exists === false && <span className="disc-item-state-icon project-sidebar-state-icon" data-tone="error" title={t('projects.master.pathMissing')} aria-label={t('projects.master.pathMissing')}><AlertTriangle size={10} /></span>}
+                            {(proj.tech_debt_count ?? 0) > 0 && <span className="disc-item-state-icon project-sidebar-state-icon" data-tone="warning" title={`${proj.tech_debt_count} TD`} aria-label={`${proj.tech_debt_count} TD`}><AlertTriangle size={10} /></span>}
+                            {staleCount > 0 && <span className="disc-item-state-icon project-sidebar-state-icon" data-tone="warning" title={t('projects.master.stale', staleCount)} aria-label={t('projects.master.stale', staleCount)}><Clock size={10} /></span>}
+                          </span>
+                        </span>
+                        <span className="disc-item-meta">
+                          <span className="disc-item-meta-summary" title={proj.path}>{proj.path}</span>
+                          <span className="project-sidebar-meta-count" title={t('nav.discussions')}><MessageSquare size={10} />{projDiscussions.length}</span>
+                          <span className="project-sidebar-meta-count" title={t('nav.mcps')}><Puzzle size={10} />{projectMcpCount}</span>
+                          <span className="project-sidebar-meta-count" title={t('nav.workflows')}><Workflow size={10} />{projectWorkflowCount}</span>
+                        </span>
+                      </span>
+                    </button>
+                    {!canMultiSelect && <div className="disc-item-actions">
+                      <FavoriteToggle
+                        active={favoriteIds.has(proj.id)}
+                        onToggle={() => toggleFavorite(proj.id)}
+                        activeLabel={t('wf.unpin')}
+                        inactiveLabel={t('wf.pin')}
+                        itemName={proj.name}
+                      />
+                    </div>}
+                  </div>
+                </div>;
+              };
+              const sectionHeader = (
+                section: ProjectSidebarSection,
+                icon: ReactNode,
+                label: string,
+                count: number,
+              ) => {
+                const collapsed = sectionCollapsed(section);
+                return <button
+                  type="button"
+                  className="disc-group-btn"
+                  data-no-border="true"
+                  onClick={() => toggleSection(section)}
+                  aria-expanded={!collapsed}
+                >
+                  <ChevronRight size={10} className="disc-chevron" data-expanded={!collapsed} />
+                  {icon}
+                  <span>{label}</span>
+                  <span className="disc-group-count">{count}</span>
+                </button>;
+              };
+              return <div className="disc-sidebar-list project-sidebar-list">
+                {favoriteProjects.length > 0 && <div
+                  className="disc-sidebar-section disc-sidebar-favorites"
+                  data-section="favorites"
+                  data-testid="project-section-favorites"
+                  data-expanded={!sectionCollapsed('favorites')}
+                >
+                  {sectionHeader('favorites', <Star size={10} fill="currentColor" />, t('disc.favorites'), favoriteProjects.length)}
+                  {!sectionCollapsed('favorites') && favoriteProjects.map(project => row(project, 'favorites'))}
+                </div>}
+                {recentProjects.length > 0 && <div
+                  className="disc-sidebar-section disc-sidebar-recent"
+                  data-section="recent"
+                  data-testid="project-section-recent"
+                  data-expanded={!sectionCollapsed('recent')}
+                >
+                  {sectionHeader('recent', <Clock size={10} />, t('disc.recent'), recentProjects.length)}
+                  {!sectionCollapsed('recent') && recentProjects.map(project => row(project, 'recent'))}
+                </div>}
+                <div
+                  className="disc-sidebar-section disc-sidebar-projects"
+                  data-section="all"
+                  data-testid="project-section-all"
+                  data-expanded={!sectionCollapsed('all')}
+                >
+                  {sectionHeader('all', <Folder size={10} />, t('pages.filter.active'), visibleItems.length)}
+                  {!sectionCollapsed('all') && (visibleItems.length > 0
+                    ? visibleItems.map(project => row(project, 'all'))
+                    : <div className="project-list-empty">
+                      <Folder size={30} />
+                      <p className="dash-empty-text">{projectSearch ? t('projects.emptySearch') : t('projects.emptyHint')}</p>
+                    </div>)}
+                </div>
+              </div>;
             },
           }}
         />
