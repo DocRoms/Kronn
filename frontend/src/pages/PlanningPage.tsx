@@ -100,6 +100,7 @@ export function PlanningPage({
         limit: 100,
       });
       setTasks(previous => append ? [...previous, ...result.items] : result.items);
+      if (!append) setTasksLoaded(true);
     } catch (cause) {
       toast(userError(cause), 'error');
     }
