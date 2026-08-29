@@ -1,6 +1,6 @@
-// Template installation: idempotent copy of `templates/docs/`,
-// `templates/CLAUDE.md`, the root redirector files, and the bootstrap
-// prompt injection at the top of the entry doc. The helpers
+// Template installation: idempotent copy of `templates/docs/`, the shared
+// `AGENTS.md` entry point, detected agent adapters, and the bootstrap prompt
+// injection at the top of the entry doc. The helpers
 // (`resolve_templates_dir`, `copy_dir_nondestructive`,
 // `ensure_agent_writable_subfolders`, `inject_bootstrap_prompt`) are
 // `pub(crate)` because `api::audit` reuses them during the audit pipeline.
@@ -34,128 +34,123 @@ pub async fn install_template(
     let project_path_str = project.path.clone();
 
     // Run filesystem I/O on blocking thread pool
-    let install_result =
-        tokio::task::spawn_blocking(move || -> Result<(), String> {
-            let project_path = scanner::resolve_host_path(&project_path_str);
-            if !project_path.exists() {
-                return Err(format!(
-                    "Project path not found: {}",
-                    project_path.display()
-                ));
-            }
+    let install_result = tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let project_path = scanner::resolve_host_path(&project_path_str);
+        if !project_path.exists() {
+            return Err(format!(
+                "Project path not found: {}",
+                project_path.display()
+            ));
+        }
 
-            // Permission check on whichever doc-folder the project already
-            // has (`docs/`, legacy `ai/`, or alt `doc/`). Fresh projects
-            // skip this — there's nothing to check yet.
-            let existing_docs = crate::core::scanner::detect_docs_dir(&project_path);
-            if existing_docs.exists() {
-                if let Err(e) = crate::api::audit::check_ai_dir_permissions(&existing_docs) {
-                    let folder_name = existing_docs
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("docs");
-                    return Err(format!(
+        // Snapshot target-specific agent integrations before Kronn creates
+        // any instruction file. The shared AGENTS.md is always installed;
+        // vendor adapters are created only for agents already declared by
+        // the repository.
+        let detected_adapters = crate::core::root_agent_files::detect_agent_adapters(&project_path);
+
+        // Permission check on whichever doc-folder the project already
+        // has (`docs/`, legacy `ai/`, or alt `doc/`). Fresh projects
+        // skip this — there's nothing to check yet.
+        let existing_docs = crate::core::scanner::detect_docs_dir(&project_path);
+        if existing_docs.exists() {
+            if let Err(e) = crate::api::audit::check_ai_dir_permissions(&existing_docs) {
+                let folder_name = existing_docs
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("docs");
+                return Err(format!(
                     "{}/ directory exists but has permission issues that could not be fixed: {}. \
                      Run: sudo chown -R $(id -u):$(id -g) {}/{}/",
-                    folder_name, e, project_path.display(), folder_name
-                ));
-                }
-            }
-
-            let template_dir = resolve_templates_dir();
-            if !template_dir.exists() {
-                return Err(format!(
-                    "Templates directory not found: {}",
-                    template_dir.display()
+                    folder_name,
+                    e,
+                    project_path.display(),
+                    folder_name
                 ));
             }
+        }
 
-            // 0.7.1+ : ship the modern `docs/AGENTS.md` convention. Fresh
-            // projects always get docs/; legacy `ai/` projects keep their
-            // layout until the operator clicks Migrate.
-            let docs_template = template_dir.join("docs");
-            let docs_target = if existing_docs.exists() {
-                existing_docs
-            } else {
-                project_path.join("docs")
-            };
-            let mut created_files = Vec::new();
-            if docs_template.is_dir() {
-                created_files.extend(copy_dir_nondestructive(&docs_template, &docs_target)?);
-            }
-            // 0.8.7 — copy the anti-hallu spec embedded in the binary into
-            // the project's `docs/conventions/` so any agent running on this
-            // project (with or without Kronn) can open the convention
-            // locally. Idempotent : skip if already present (re-install
-            // doesn't clobber user edits ; PR3 endpoint `/anti-hallu/inject`
-            // is the explicit re-sync path).
-            let conventions_dir = docs_target.join("conventions");
-            let spec_path = conventions_dir.join("agents-md-format-v1.md");
-            // no-follow primitive: a symlinked conventions/ (or dangling spec
-            // link) must never route this write outside the project.
-            if let Err(e) = crate::core::fs_guard::guarded_write_new(
-                &project_path,
-                &spec_path,
-                crate::core::anti_halluc::SPEC_AGENTS_MD_V1.as_bytes(),
-            ) {
-                tracing::warn!("anti-hallu spec not installed: {e}");
-            }
-            ensure_agent_writable_subfolders(&project_path, &docs_target);
-            // Human-friendly landing page for `docs/`. Idempotent, best-effort.
-            if let Err(e) =
-                crate::core::docs_migration::ensure_docs_index(&project_path, &docs_target)
-            {
-                tracing::warn!("docs index not installed: {e}");
-            }
+        let template_dir = resolve_templates_dir();
+        if !template_dir.exists() {
+            return Err(format!(
+                "Templates directory not found: {}",
+                template_dir.display()
+            ));
+        }
 
-            // The FULL redirector set — every agent-context file the templates
-            // ship (not just the 4 managed-block ones): a Gemini/Copilot user
-            // got no entry point at all before this.
-            for filename in &[
-                "CLAUDE.md",
-                ".cursorrules",
-                ".windsurfrules",
-                ".clinerules",
-                "AGENTS.md",
-                "GEMINI.md",
-                ".github/copilot-instructions.md",
-            ] {
-                let src = template_dir.join(filename);
-                let dst = project_path.join(filename);
-                if src.exists() {
-                    // no-follow: a symlinked .github/ (or dangling dst link)
-                    // must never route the copy outside the project.
-                    match crate::core::fs_guard::guarded_copy_new(&project_path, &src, &dst) {
-                        Ok(true) => created_files.push(dst),
-                        Ok(false) => {}
-                        Err(e) => tracing::warn!("Failed to copy {}: {}", filename, e),
-                    }
-                }
-            }
+        // 0.7.1+ : ship the modern `docs/AGENTS.md` convention. Fresh
+        // projects always get docs/; legacy `ai/` projects keep their
+        // layout until the operator clicks Migrate.
+        let docs_template = template_dir.join("docs");
+        let docs_target = if existing_docs.exists() {
+            existing_docs
+        } else {
+            project_path.join("docs")
+        };
+        let mut created_files = Vec::new();
+        if docs_template.is_dir() {
+            created_files.extend(copy_dir_nondestructive(&docs_template, &docs_target)?);
+        }
+        // 0.8.7 — copy the anti-hallu spec embedded in the binary into
+        // the project's `docs/conventions/` so any agent running on this
+        // project (with or without Kronn) can open the convention
+        // locally. Idempotent : skip if already present (re-install
+        // doesn't clobber user edits ; PR3 endpoint `/anti-hallu/inject`
+        // is the explicit re-sync path).
+        let conventions_dir = docs_target.join("conventions");
+        let spec_path = conventions_dir.join("agents-md-format-v1.md");
+        // no-follow primitive: a symlinked conventions/ (or dangling spec
+        // link) must never route this write outside the project.
+        if let Err(e) = crate::core::fs_guard::guarded_write_new(
+            &project_path,
+            &spec_path,
+            crate::core::anti_halluc::SPEC_AGENTS_MD_V1.as_bytes(),
+        ) {
+            tracing::warn!("anti-hallu spec not installed: {e}");
+        }
+        ensure_agent_writable_subfolders(&project_path, &docs_target);
+        // Human-friendly landing page for `docs/`. Idempotent, best-effort.
+        if let Err(e) = crate::core::docs_migration::ensure_docs_index(&project_path, &docs_target)
+        {
+            tracing::warn!("docs index not installed: {e}");
+        }
 
-            // Pre-fill template placeholders with filesystem-derived defaults —
-            // scoped EXCLUSIVELY to the files this very call created (ownership
-            // by construction, Codex A2): a pre-existing docs/ tree or root file
-            // is user content and is never walked.
-            let _ = crate::core::docs_migration::prefill_files(&project_path, &created_files);
+        let adapter_report = crate::core::root_agent_files::install_detected_agent_files(
+            &project_path,
+            &template_dir,
+            &detected_adapters,
+        );
+        created_files.extend(crate::core::root_agent_files::created_agent_paths(
+            &project_path,
+            &adapter_report,
+        ));
+        for failure in adapter_report.failed {
+            tracing::warn!("Agent instruction install failed: {failure}");
+        }
 
-            // Resolve the entry file via detect_docs_entry so this code path
-            // works for fresh installs (docs/AGENTS.md), legacy projects
-            // (ai/index.md), and projects on the `doc/` singular convention.
-            // The bootstrap prompt is only injected into an entry file THIS
-            // call created (Codex A2) — a pre-existing user AGENTS.md is not
-            // ours to rewrite, prompt block or not.
-            let entry_file = crate::core::scanner::detect_docs_entry(&project_path);
-            if entry_file.exists() && created_files.contains(&entry_file) {
-                inject_bootstrap_prompt(&entry_file);
-            }
+        // Pre-fill template placeholders with filesystem-derived defaults —
+        // scoped EXCLUSIVELY to the files this very call created (ownership
+        // by construction, Codex A2): a pre-existing docs/ tree or root file
+        // is user content and is never walked.
+        let _ = crate::core::docs_migration::prefill_files(&project_path, &created_files);
 
-            runner::fix_file_ownership(&project_path);
+        // Resolve the entry file via detect_docs_entry so this code path
+        // works for fresh installs (docs/AGENTS.md), legacy projects
+        // (ai/index.md), and projects on the `doc/` singular convention.
+        // The bootstrap prompt is only injected into an entry file THIS
+        // call created (Codex A2) — a pre-existing user AGENTS.md is not
+        // ours to rewrite, prompt block or not.
+        let entry_file = crate::core::scanner::detect_docs_entry(&project_path);
+        if entry_file.exists() && created_files.contains(&entry_file) {
+            inject_bootstrap_prompt(&entry_file);
+        }
 
-            Ok(())
-        })
-        .await
-        .unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
+        runner::fix_file_ownership(&project_path);
+
+        Ok(())
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
 
     if let Err(e) = install_result {
         return Json(ApiResponse::err(e));

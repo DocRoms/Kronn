@@ -1216,6 +1216,7 @@ const es: TranslationDict = {
   'planning.withoutDiscussion': 'Sin conversación',
   'planning.allTags': 'Todas las etiquetas',
   'planning.emptyBacklog': 'Ninguna tarea activa coincide con estos filtros.',
+  'planning.selectHint': 'Seleccione una tarea para ver sus detalles.',
   'planning.dropHere': 'Suelte aquí para cambiar la prioridad',
   'planning.loadMore': 'Cargar más',
   'planning.saved': 'Tarea actualizada',
@@ -2287,6 +2288,28 @@ const es: TranslationDict = {
   'config.resetConfirm': "ATENCIÓN: esto eliminará toda la configuración (claves de proveedores IA, preferencias, agentes).\n\nRecuerde:\n- Exportar sus datos (Config → Base de datos → Exportar)\n- Guardar sus claves API y su token de autenticación\n\nEsta acción es irreversible. ¿Continuar?",
   'config.reset': 'Restablecer configuración',
   'config.configFile': 'Archivo de config',
+
+  // ── Biblioteca de agentes portable ──
+  'config.portableLibrary.navLabel': 'Biblioteca portable',
+  'config.portableLibrary.title': 'Biblioteca de agentes portable',
+  'config.portableLibrary.hint': 'Gestiona los recursos globales y de proyecto `.agents`, la deriva, la confianza y la migración de recursos existentes.',
+  'config.portableLibrary.scope': 'Ámbito',
+  'config.portableLibrary.scopeAria': 'Ámbito de la biblioteca portable',
+  'config.portableLibrary.scopeGlobal': 'Global',
+  'config.portableLibrary.search': 'Buscar',
+  'config.portableLibrary.searchAria': 'Buscar en la biblioteca portable',
+  'config.portableLibrary.drift': 'Deriva',
+  'config.portableLibrary.trust': 'Confianza',
+  'config.portableLibrary.trustApproved': 'aprobada',
+  'config.portableLibrary.trustRequired': 'aprobación requerida',
+  'config.portableLibrary.actionSync': 'Sincronizar',
+  'config.portableLibrary.actionCheck': 'Verificar (frozen)',
+  'config.portableLibrary.actionApprove': 'Aprobar',
+  'config.portableLibrary.actionMigrate': 'Migrar',
+  'config.portableLibrary.actionExport': 'Exportar .agents',
+  'config.portableLibrary.actionImport': 'Importar .agents',
+  'config.portableLibrary.actionDone': '{0} completado',
+  'config.portableLibrary.importInvalid': 'Archivo de biblioteca portable no válido',
 
   // ── Plugins ──
   'mcp.title': 'Plugins',
@@ -4107,6 +4130,14 @@ Termina con [SIGNAL: OK].`,
   'common.actionFailed': 'Error en la operación: {0}',
   'common.seeMore': 'Ver más',
   'common.seeLess': 'Ver menos',
+
+  // ── Shell de colección compartido (barra lateral + vista de detalle) ──
+  'collection.favorites': 'Favoritos',
+  'collection.clearFilters': 'Borrar filtros',
+  'collection.moreActions': 'Más acciones',
+  'collection.openCollection': 'Abrir la lista',
+  'collection.closeCollection': 'Cerrar la lista',
+  'collection.selectItem': 'seleccionado',
 
   // Workflow execution guards (0.7.0)
   'wf.guards.title': 'Límites de ejecución',

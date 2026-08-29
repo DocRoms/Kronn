@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Archive,
   Check,
-  ChevronDown,
   ChevronRight,
   Circle,
   Filter,
@@ -12,16 +11,17 @@ import {
   Link2,
   Loader2,
   Plus,
-  Search,
   Target,
   X,
 } from 'lucide-react';
 import { planning } from '../lib/api';
 import { queueDiscussionWorkspaceTarget } from '../lib/discussion-navigation';
 import { useT } from '../lib/I18nContext';
+import { useIsMobile } from '../hooks/useMediaQuery';
 import { userError } from '../lib/userError';
 import { CopyIdPill } from '../components/CopyIdPill';
 import { ContextHelp } from '../components/ContextHelp';
+import { CollectionShell } from '../components/CollectionShell';
 import type { ToastFn } from '../hooks/useToast';
 import type {
   Discussion,
@@ -62,17 +62,15 @@ export function PlanningPage({
   onNavigateDiscussion,
 }: Props) {
   const { t } = useT();
+  const isMobile = useIsMobile();
+  const [sidebarOpen, setSidebarOpen] = useState(true);
   const [tasks, setTasks] = useState<PlanningTaskSummary[]>([]);
-  const [nextCursor, setNextCursor] = useState<number | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [loadingMore, setLoadingMore] = useState(false);
   const [search, setSearch] = useState('');
   const [status, setStatus] = useState<PlanningTaskStatus | ''>('');
   const [priorityFilter, setPriorityFilter] = useState<PlanningTaskPriority | ''>('');
   const [projectId, setProjectId] = useState('');
   const [withDiscussion, setWithDiscussion] = useState<'' | 'yes' | 'no'>('');
   const [tag, setTag] = useState('');
-  const [showCompleted, setShowCompleted] = useState(false);
   const [quickTitle, setQuickTitle] = useState('');
   const [quickPriority, setQuickPriority] = useState<PlanningTaskPriority>('normal');
   const [creating, setCreating] = useState(false);
@@ -80,13 +78,10 @@ export function PlanningPage({
   const [detail, setDetail] = useState<PlanningTaskDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(Boolean(initialSelectedTaskId));
   const [saving, setSaving] = useState(false);
-  const [draggedId, setDraggedId] = useState<string | null>(null);
   const [filtersOpen, setFiltersOpen] = useState(false);
 
   const fetchTasks = useCallback(async (cursor?: number) => {
     const append = cursor !== undefined;
-    if (append) setLoadingMore(true);
-    else setLoading(true);
     try {
       const result = await planning.list({
         search: search.trim() || undefined,
@@ -99,12 +94,8 @@ export function PlanningPage({
         limit: 100,
       });
       setTasks(previous => append ? [...previous, ...result.items] : result.items);
-      setNextCursor(result.next_cursor);
     } catch (cause) {
       toast(userError(cause), 'error');
-    } finally {
-      setLoading(false);
-      setLoadingMore(false);
     }
   }, [priorityFilter, projectId, search, status, tag, toast, withDiscussion]);
 
@@ -181,63 +172,16 @@ export function PlanningPage({
     return updated;
   };
 
-  const moveTask = async (
-    taskId: string,
-    priority: PlanningTaskPriority,
-    beforeTaskId?: string,
-  ) => {
-    const band = tasks
-      .filter(task => task.priority === priority && task.id !== taskId)
-      .sort((a, b) => a.rank - b.rank);
-    const beforeIndex = beforeTaskId ? band.findIndex(task => task.id === beforeTaskId) : band.length;
-    const previous = beforeIndex > 0 ? band[beforeIndex - 1] : undefined;
-    const next = beforeIndex >= 0 && beforeIndex < band.length ? band[beforeIndex] : undefined;
-    let rank = 1024;
-    if (previous && next) rank = Math.floor((previous.rank + next.rank) / 2);
-    else if (previous) rank = previous.rank + 1024;
-    else if (next) rank = next.rank - 1024;
-    try {
-      await updateTask(taskId, { priority, rank });
-      // The backend atomically rebalances the whole priority band so ranks
-      // never collapse after repeated midpoint inserts. Reload the compact
-      // list to keep every sibling's local rank aligned with that rebalance.
-      await fetchTasks();
-    } catch (cause) {
-      toast(userError(cause), 'error');
-      await fetchTasks();
-    }
-  };
-
-  const renderCard = (task: PlanningTaskSummary) => (
-    <article
-      key={task.id}
+  const renderCard = (task: PlanningTaskSummary, selected: boolean) => (
+    <div
       className="planning-card"
-      data-selected={selectedId === task.id}
+      data-selected={selected}
       data-status={task.status}
-      draggable
-      onDragStart={() => setDraggedId(task.id)}
-      onDragEnd={() => setDraggedId(null)}
-      onDragOver={event => event.preventDefault()}
-      onDrop={event => {
-        event.preventDefault();
-        if (draggedId && draggedId !== task.id) {
-          void moveTask(draggedId, task.priority, task.id);
-        }
-      }}
-      onClick={() => selectTask(task.id)}
     >
       <GripVertical size={13} className="planning-grip" />
-      <button
-        type="button"
-        className="planning-check"
-        onClick={event => {
-          event.stopPropagation();
-          void updateTask(task.id, { status: task.status === 'done' ? 'todo' : 'done' });
-        }}
-        aria-label={task.status === 'done' ? t('planning.markTodo') : t('planning.markDone')}
-      >
+      <span className="planning-check" aria-hidden="true">
         {task.status === 'done' ? <Check size={13} /> : <Circle size={13} />}
-      </button>
+      </span>
       <div className="planning-card-main">
         {task.parent_reference && (
           <div className="planning-card-parent">
@@ -246,11 +190,7 @@ export function PlanningPage({
         )}
         <div className="planning-card-title">{task.title}</div>
         <div className="planning-card-meta">
-          <CopyIdPill
-            id={task.id}
-            label={task.reference}
-            title={t('planning.copyTaskId', task.reference)}
-          />
+          <span>{task.reference}</span>
           <span className="planning-status" data-status={task.status}>
             {t(`planning.status.${task.status}`)}
           </span>
@@ -267,7 +207,7 @@ export function PlanningPage({
         </div>
       </div>
       <ChevronRight size={14} className="planning-card-chevron" />
-    </article>
+    </div>
   );
 
   return (
@@ -296,14 +236,6 @@ export function PlanningPage({
       </header>
 
       <div className="planning-toolbar">
-        <label className="planning-search">
-          <Search size={14} />
-          <input
-            value={search}
-            onChange={event => setSearch(event.target.value)}
-            placeholder={t('planning.search')}
-          />
-        </label>
         <button
           type="button"
           className="btn btn-sm"
@@ -380,174 +312,154 @@ export function PlanningPage({
         </div>
       )}
 
-      <div className="planning-workspace">
-        <main className="planning-backlog">
-          {loading && <div className="planning-state"><Loader2 size={17} className="spin" /> {t('common.loading')}</div>}
-          {!loading && activeTasks.length === 0 && (
-            <div className="planning-state"><Target size={24} /> {t('planning.emptyBacklog')}</div>
-          )}
-          {!loading && PRIORITIES.map(priority => {
-            const items = activeTasks
-              .filter(task => task.priority === priority)
-              .sort((a, b) => a.rank - b.rank);
-            return (
-              <section
-                className="planning-band"
-                data-priority={priority}
-                key={priority}
-                onDragOver={event => event.preventDefault()}
-                onDrop={event => {
-                  event.preventDefault();
-                  if (draggedId) void moveTask(draggedId, priority);
-                }}
-              >
-                <header>
-                  <span className="planning-priority-mark" />
-                  <h2>{t(`planning.priority.${priority}`)}</h2>
-                  <span>{items.length}</span>
-                </header>
-                <div className="planning-band-list">
-                  {items.map(renderCard)}
-                  {items.length === 0 && <div className="planning-band-empty">{t('planning.dropHere')}</div>}
-                </div>
-              </section>
-            );
-          })}
-
-          {completedTasks.length > 0 && (
-            <section className="planning-completed">
-              <button type="button" onClick={() => setShowCompleted(value => !value)}>
-                {showCompleted ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                <Check size={14} />
-                {t('planning.completed')} · {completedTasks.length}
-              </button>
-              {showCompleted && <div>{completedTasks.map(renderCard)}</div>}
-            </section>
-          )}
-          {nextCursor !== null && (
-            <button
-              type="button"
-              className="btn planning-load-more"
-              onClick={() => void fetchTasks(nextCursor)}
-              disabled={loadingMore}
-            >
-              {loadingMore ? <Loader2 size={14} className="spin" /> : t('planning.loadMore')}
-            </button>
-          )}
-        </main>
-
-        {(selectedId || detailLoading) && (
-          <aside className="planning-detail" aria-label={t('planning.taskActions')}>
-            <header>
-              {detail && (
-                <CopyIdPill
-                  id={detail.id}
-                  label={detail.reference}
-                  title={t('planning.copyTaskId', detail.reference)}
-                />
-              )}
-              <button type="button" className="planning-detail-close" onClick={() => {
-                setSelectedId(null);
-                setDetail(null);
-                setDetailLoading(false);
-              }} aria-label={t('common.close')}><X size={16} /></button>
-            </header>
-            {detailLoading && <div className="planning-state"><Loader2 size={16} className="spin" /></div>}
-            {detail && (
-              <PlanningDetailForm
-                key={detail.id}
-                task={detail}
-                projects={projects}
-                discussions={discussions}
-                saving={saving}
-                onNavigateDiscussion={onNavigateDiscussion}
-                onOpenTask={selectTask}
-                onToggleDod={async (dodId, completed) => {
-                  try {
-                    const refreshed = await planning.updateDod(detail.id, dodId, { completed });
-                    setDetail(refreshed);
-                    setTasks(previous => previous.map(item => item.id === refreshed.id ? refreshed : item));
-                  } catch (cause) {
-                    toast(userError(cause), 'error');
-                    throw cause;
-                  }
-                }}
-                onAddBlocker={async blockerTaskId => {
-                  try {
-                    const refreshed = await planning.addBlocker(detail.id, {
-                      blocker_task_id: blockerTaskId,
-                    });
-                    setDetail(refreshed);
-                    setTasks(previous => previous.map(item => item.id === refreshed.id ? refreshed : item));
-                    toast(t('planning.blockerAdded'), 'success');
-                  } catch (cause) {
-                    toast(userError(cause), 'error');
-                    throw cause;
-                  }
-                }}
-                onRemoveBlocker={async blockerTaskId => {
-                  try {
-                    const refreshed = await planning.removeBlocker(detail.id, blockerTaskId);
-                    setDetail(refreshed);
-                    setTasks(previous => previous.map(item => item.id === refreshed.id ? refreshed : item));
-                    toast(t('planning.blockerRemoved'), 'success');
-                  } catch (cause) {
-                    toast(userError(cause), 'error');
-                    throw cause;
-                  }
-                }}
-                onLinkDiscussion={async discussionId => {
-                  try {
-                    await planning.linkDiscussion(detail.id, {
-                      discussion_id: discussionId,
-                      placement: 'active',
-                      is_primary: false,
-                    });
-                    const refreshed = await planning.get(detail.id);
-                    setDetail(refreshed);
-                    setTasks(previous => previous.map(item => item.id === refreshed.id ? refreshed : item));
-                    toast(t('planning.discussionLinked'), 'success');
-                  } catch (cause) {
-                    toast(userError(cause), 'error');
-                    throw cause;
-                  }
-                }}
-                onCreateSubtask={async title => {
-                  try {
-                    const created = await planning.create({
-                      title,
-                      status: 'todo',
-                      priority: detail.priority,
-                      parent_id: detail.id,
-                      project_ids: detail.project_ids,
-                    });
-                    const refreshed = await planning.get(detail.id);
-                    setDetail(refreshed);
-                    setTasks(previous => [
-                      ...previous.map(item => item.id === refreshed.id ? refreshed : item),
-                      created,
-                    ]);
-                    toast(t('planning.subtaskCreated'), 'success');
-                  } catch (cause) {
-                    toast(userError(cause), 'error');
-                    throw cause;
-                  }
-                }}
-                onSave={async patch => {
-                  setSaving(true);
-                  try {
-                    await updateTask(detail.id, patch);
-                    toast(t('planning.saved'), 'success');
-                  } catch (cause) {
-                    toast(userError(cause), 'error');
-                  } finally {
-                    setSaving(false);
-                  }
-                }}
-              />
-            )}
-          </aside>
-        )}
+      <div className="planning-shell">
+        <CollectionShell<PlanningTaskSummary>
+          ariaLabel={t('planning.title')}
+          items={tasks}
+          getId={task => task.id}
+          getLabel={task => `${task.title} ${task.reference} ${task.tags.join(' ')}`}
+          persistence={{
+            query: search,
+            onQueryChange: setSearch,
+            favoritesOnly: false,
+            onFavoritesOnlyChange: () => {},
+          }}
+          selectedId={selectedId}
+          onSelect={id => selectTask(id)}
+          isMobile={isMobile}
+          sidebarOpen={sidebarOpen}
+          onSidebarOpenChange={setSidebarOpen}
+          labels={{
+            search: t('planning.search'),
+            favorites: t('collection.favorites'),
+            clearFilters: t('collection.clearFilters'),
+            moreActions: t('collection.moreActions'),
+            openCollection: t('collection.openCollection'),
+            closeCollection: t('collection.closeCollection'),
+            selectItem: t('collection.selectItem'),
+          }}
+          slots={{
+            renderEmpty: () => <div className="planning-state"><Target size={24} /> {t('planning.emptyBacklog')}</div>,
+            renderItem: (task, { selected }) => renderCard(task, selected),
+            renderDetail: () => {
+              if (!selectedId && !detailLoading) {
+                return <div className="planning-detail-empty-hint">{t('planning.selectHint')}</div>;
+              }
+              return (
+                <aside className="planning-detail" aria-label={t('planning.taskActions')}>
+                  <header>
+                    {detail && (
+                      <CopyIdPill
+                        id={detail.id}
+                        label={detail.reference}
+                        title={t('planning.copyTaskId', detail.reference)}
+                      />
+                    )}
+                    <button type="button" className="planning-detail-close" onClick={() => {
+                      setSelectedId(null);
+                      setDetail(null);
+                      setDetailLoading(false);
+                    }} aria-label={t('common.close')}><X size={16} /></button>
+                  </header>
+                  {detailLoading && <div className="planning-state"><Loader2 size={16} className="spin" /></div>}
+                  {detail && (
+                    <PlanningDetailForm
+                      key={detail.id}
+                      task={detail}
+                      projects={projects}
+                      discussions={discussions}
+                      saving={saving}
+                      onNavigateDiscussion={onNavigateDiscussion}
+                      onOpenTask={selectTask}
+                      onToggleDod={async (dodId, completed) => {
+                        try {
+                          const refreshed = await planning.updateDod(detail.id, dodId, { completed });
+                          setDetail(refreshed);
+                          setTasks(previous => previous.map(item => item.id === refreshed.id ? refreshed : item));
+                        } catch (cause) {
+                          toast(userError(cause), 'error');
+                          throw cause;
+                        }
+                      }}
+                      onAddBlocker={async blockerTaskId => {
+                        try {
+                          const refreshed = await planning.addBlocker(detail.id, {
+                            blocker_task_id: blockerTaskId,
+                          });
+                          setDetail(refreshed);
+                          setTasks(previous => previous.map(item => item.id === refreshed.id ? refreshed : item));
+                          toast(t('planning.blockerAdded'), 'success');
+                        } catch (cause) {
+                          toast(userError(cause), 'error');
+                          throw cause;
+                        }
+                      }}
+                      onRemoveBlocker={async blockerTaskId => {
+                        try {
+                          const refreshed = await planning.removeBlocker(detail.id, blockerTaskId);
+                          setDetail(refreshed);
+                          setTasks(previous => previous.map(item => item.id === refreshed.id ? refreshed : item));
+                          toast(t('planning.blockerRemoved'), 'success');
+                        } catch (cause) {
+                          toast(userError(cause), 'error');
+                          throw cause;
+                        }
+                      }}
+                      onLinkDiscussion={async discussionId => {
+                        try {
+                          await planning.linkDiscussion(detail.id, {
+                            discussion_id: discussionId,
+                            placement: 'active',
+                            is_primary: false,
+                          });
+                          const refreshed = await planning.get(detail.id);
+                          setDetail(refreshed);
+                          setTasks(previous => previous.map(item => item.id === refreshed.id ? refreshed : item));
+                          toast(t('planning.discussionLinked'), 'success');
+                        } catch (cause) {
+                          toast(userError(cause), 'error');
+                          throw cause;
+                        }
+                      }}
+                      onCreateSubtask={async title => {
+                        try {
+                          const created = await planning.create({
+                            title,
+                            status: 'todo',
+                            priority: detail.priority,
+                            parent_id: detail.id,
+                            project_ids: detail.project_ids,
+                          });
+                          const refreshed = await planning.get(detail.id);
+                          setDetail(refreshed);
+                          setTasks(previous => [
+                            ...previous.map(item => item.id === refreshed.id ? refreshed : item),
+                            created,
+                          ]);
+                          toast(t('planning.subtaskCreated'), 'success');
+                        } catch (cause) {
+                          toast(userError(cause), 'error');
+                          throw cause;
+                        }
+                      }}
+                      onSave={async patch => {
+                        setSaving(true);
+                        try {
+                          await updateTask(detail.id, patch);
+                          toast(t('planning.saved'), 'success');
+                        } catch (cause) {
+                          toast(userError(cause), 'error');
+                        } finally {
+                          setSaving(false);
+                        }
+                      }}
+                    />
+                  )}
+                </aside>
+              );
+            },
+          }}
+        />
       </div>
     </div>
   );

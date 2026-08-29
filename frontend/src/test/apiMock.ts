@@ -48,6 +48,7 @@ export const API_NAMESPACES = [
   'skills',
   'profiles',
   'directives',
+  'portableLibrary',
   'stats',
   'ollama',
   'liteLlm',
@@ -104,6 +105,7 @@ interface DefaultMock {
   skills: Record<string, AnyFn>;
   profiles: Record<string, AnyFn>;
   directives: Record<string, AnyFn>;
+  portableLibrary: Record<string, AnyFn>;
   stats: Record<string, AnyFn>;
   ollama: Record<string, AnyFn>;
   liteLlm: Record<string, AnyFn>;
@@ -516,6 +518,16 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       create: resolve({}),
       update: resolve({}),
       delete: resolve(true),
+    },
+
+    portableLibrary: {
+      state: resolve({ scope: 'global', items: [], drift: 'not_applicable', approved: false }),
+      sync: resolve({ created: [], modified: [], deleted: [], unchanged: [] }),
+      check: resolve({}),
+      approve: resolve(true),
+      migrate: resolve({ created: [], unchanged: [] }),
+      export: resolve([]),
+      import: resolve({ created: [], modified: [], deleted: [], unchanged: [] }),
     },
 
     stats: {

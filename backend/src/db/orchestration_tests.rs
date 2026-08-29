@@ -1311,6 +1311,129 @@ fn hard_quota_creates_an_immediate_human_wait_checkpoint() {
     assert!(!recovery.pending);
 }
 
+// ── KT-515 — `provider_has_open_quota_exhaustion`: the honest availability
+// signal behind `agent_list`, launch preflight and reassignment. ──
+
+/// Launches a task pinned to `provider` and drives it to `Working`, mirroring
+/// the shape `commit_provisioning_checkpoint` leaves behind — without the full
+/// dispatch/discussion apparatus `hard_quota_creates_an_immediate_human_wait_checkpoint`
+/// needs to exercise `escalate_execution_for_dispatch_quota` itself.
+fn launch_working_execution_for(
+    conn: &Connection,
+    task_id: &str,
+    number: i64,
+    provider: &str,
+) -> String {
+    seed_task(conn, task_id, number);
+    let mut input = LaunchSingleTaskInput::new(task_id, DISC);
+    input.worker_agent_type = Some(provider.to_string());
+    let execution = launch_single_task(conn, &input, &backend_actor())
+        .unwrap()
+        .execution;
+    transition_execution(
+        conn,
+        &execution.id,
+        TaskExecutionStatus::Provisioning,
+        &backend_actor(),
+        serde_json::json!({}),
+    )
+    .unwrap();
+    transition_execution(
+        conn,
+        &execution.id,
+        TaskExecutionStatus::Working,
+        &backend_actor(),
+        serde_json::json!({}),
+    )
+    .unwrap();
+    execution.id
+}
+
+/// Moves `exec_id` to `Escalated` and stamps `reason` on its recovery row,
+/// exactly as `escalate_execution_for_dispatch_quota` does but without
+/// requiring a real dispatch job — lets each scenario below name its own
+/// `recovery_reason` directly.
+fn escalate_with_reason(conn: &Connection, exec_id: &str, reason: &str) {
+    transition_execution(
+        conn,
+        exec_id,
+        TaskExecutionStatus::Escalated,
+        &backend_actor(),
+        serde_json::json!({}),
+    )
+    .unwrap();
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO task_execution_recovery (
+             task_execution_id, recovery_action, recovery_reason, last_activity_at,
+             assignment_generation, watchdog_redispatches, human_wait_started_at,
+             pending, updated_at
+         ) VALUES (?1, 'await_human', ?2, ?3, 0, 0, ?3, 0, ?3)
+         ON CONFLICT(task_execution_id) DO UPDATE SET
+             recovery_action = 'await_human', recovery_reason = excluded.recovery_reason,
+             activity_deadline_at = NULL, review_deadline_at = NULL,
+             total_deadline_at = NULL, human_wait_started_at = ?3,
+             pending = 0, updated_at = ?3",
+        params![exec_id, reason, now],
+    )
+    .unwrap();
+}
+
+#[test]
+fn quota_signal_is_absent_without_any_escalation() {
+    let conn = setup();
+    launch_working_execution_for(&conn, "t-quota-none", 1220, "Codex");
+    assert!(!provider_has_open_quota_exhaustion(&conn, "Codex", None).unwrap());
+}
+
+#[test]
+fn quota_signal_is_true_after_a_hard_quota_escalation_and_excludable_by_execution() {
+    let conn = setup();
+    let exec_id = launch_working_execution_for(&conn, "t-quota-hit", 1221, "Codex");
+    escalate_with_reason(&conn, &exec_id, "quota_exhausted:Codex");
+
+    assert!(provider_has_open_quota_exhaustion(&conn, "Codex", None).unwrap());
+    // A different provider is unaffected.
+    assert!(!provider_has_open_quota_exhaustion(&conn, "ClaudeCode", None).unwrap());
+    // Reassigning the exact escalated execution back to Codex must not see
+    // its own still-open row as a refusal (KT-515 self-exclusion).
+    assert!(!provider_has_open_quota_exhaustion(&conn, "Codex", Some(&exec_id)).unwrap());
+}
+
+#[test]
+fn quota_signal_ignores_a_non_quota_escalation_reason() {
+    let conn = setup();
+    let exec_id = launch_working_execution_for(&conn, "t-quota-timeout", 1222, "Codex");
+    // Same terminal shape (Escalated) as a real quota rejection, but the
+    // upstream failure here is a bounded activity timeout — never quota.
+    escalate_with_reason(&conn, &exec_id, "activity_timeout");
+    assert!(!provider_has_open_quota_exhaustion(&conn, "Codex", None).unwrap());
+}
+
+#[test]
+fn quota_signal_clears_once_the_escalated_execution_is_reassigned_away() {
+    let conn = setup();
+    let exec_id = launch_working_execution_for(&conn, "t-quota-recovers", 1223, "Codex");
+    escalate_with_reason(&conn, &exec_id, "quota_exhausted:Codex");
+    assert!(provider_has_open_quota_exhaustion(&conn, "Codex", None).unwrap());
+
+    // Mirrors `reassign_native_execution`: Escalated -> Working plus clearing
+    // the recovery row's pending flag. `recovery_reason` deliberately keeps
+    // its old value (like production does) — only the execution status is
+    // what this signal actually keys on.
+    transition_execution(
+        &conn,
+        &exec_id,
+        TaskExecutionStatus::Working,
+        &backend_actor(),
+        serde_json::json!({ "recovery": "worker_reassigned" }),
+    )
+    .unwrap();
+    clear_execution_recovery(&conn, &exec_id, "worker_reassigned").unwrap();
+
+    assert!(!provider_has_open_quota_exhaustion(&conn, "Codex", None).unwrap());
+}
+
 #[test]
 fn campaign_candidates_preserve_plan_order_and_explain_every_refusal() {
     let conn = setup();

@@ -11,6 +11,32 @@ Release notes for 0.9.3 and earlier are available in the
 
 ## [Unreleased]
 
+### Added
+
+- Settings now has a Portable library card that manages the global/project
+  `.agents` catalog end to end: scope by project, search, drift and TOFU trust
+  status, sync/check/approve, one-click migration of existing Skills,
+  Directives, Quick Prompts and Workflows into `.agents`, and JSON export/import.
+  The backing `/api/portable-library*` endpoints resolve project scope by
+  `project_id`. See
+  [portable agent library operations](docs/operations/portable-agent-library.md).
+
+### Fixed
+
+- `POST /api/portable-library/import` no longer requires a carrier project to
+  import global-scope items: each item is routed to the global or project root
+  matching its own declared `scope`, and only project-scope items require a
+  resolvable `project_id`. The Settings import control is no longer disabled
+  while the Global scope is selected.
+
+### Documentation
+
+- Added the portable `.agents` operator guide covering global/project
+  precedence, bootstrap and deterministic sync, frozen checks and TOFU
+  approval, workflow variables/secrets/execution, container fallback,
+  migration rollback, and error recovery. See
+  [portable agent library operations](docs/operations/portable-agent-library.md).
+
 ## [0.11.0] - 2026-08-22
 
 ### Added
@@ -50,6 +76,16 @@ Release notes for 0.9.3 and earlier are available in the
   response shape and the parameter names that actually work.
 
 ### Fixed
+
+- Audit/template installation now creates the shared `AGENTS.md` entry point
+  unconditionally but emits Claude, Gemini, Cursor, Windsurf, Cline, Copilot,
+  Kiro and Vibe instruction adapters only when the target repository already
+  declares that integration or the user explicitly launches it for bootstrap
+  or audit. Generated adapters are rendered without raw placeholders or
+  example commands, and a bounded upgrade repairs only recognizable
+  Kronn-managed template ranges while preserving user content.
+  Localized briefing prompts now consistently reference the canonical `docs/`
+  tree instead of the retired `ai/` path.
 
 - The orchestration bridge no longer makes every principal session pay for the
   full Ollama worker methodology and duplicated scope schemas in its MCP

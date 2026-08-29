@@ -470,60 +470,13 @@
   opacity: 1;
 }
 
-/* ── Search bar ─────────────────────────────────────────── */
-.mcp-list-toolbar {
-  display: flex;
-  align-items: center;
-  gap: var(--kr-sp-5);
-  margin-bottom: var(--kr-sp-6);
-}
-
-.mcp-list-boundary {
-  width: 100%;
-  margin-bottom: var(--kr-sp-8);
-  border-top: 1px solid var(--kr-border);
-}
-
-.mcp-search-wrap {
-  position: relative;
-  display: flex;
-  flex: 1;
-  align-items: center;
-  min-width: 220px;
-}
-
-.mcp-search-icon {
-  position: absolute;
-  left: 10px;
-  top: 50%;
-  transform: translateY(-50%);
-  color: var(--kr-text-ghost);
-  pointer-events: none;
-}
-
-.mcp-search-input {
-  padding-left: 32px;
-  flex: 1;
-  min-width: 0;
-}
-
-.mcp-search-clear {
-  position: absolute;
-  right: var(--kr-sp-3);
-  top: 50%;
-  transform: translateY(-50%);
-  background: none;
-  border: none;
-  cursor: pointer;
-  color: var(--kr-text-dim);
-  padding: 2px;
-}
-
-/* ── Installed plugins grid ─────────────────────────────── */
-.mcp-installed-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-  gap: var(--kr-sp-5);
+/* ── Installed plugins collection ───────────────────────── */
+.mcp-plugin-shell {
+  height: calc(100dvh - 260px);
+  min-height: 440px;
+  border: 1px solid var(--kr-border-light);
+  border-radius: var(--kr-r-lg);
+  overflow: hidden;
 }
 
 .mcp-filter-empty {
@@ -867,19 +820,6 @@
     justify-content: flex-start;
   }
 
-  .mcp-installed-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .mcp-list-toolbar {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
-  .mcp-search-wrap {
-    width: 100%;
-  }
-
 }
 
 /* ── Inline detail panel (spans full grid width) ───────── */
@@ -1208,88 +1148,6 @@
   display: flex;
   flex-direction: column;
   gap: var(--kr-sp-6);
-}
-
-/* Plugin detail panel — same mechanics as the discussion tool panels
-   (Plan / Code / Settings): a right-hand panel with no backdrop, so the
-   plugin list stays clickable and picking another card swaps the panel
-   content instead of forcing a close first. */
-.mcp-plugin-panel,
-.mcp-page-with-panel {
-  --mcp-panel-w: min(640px, 44vw);
-}
-
-.mcp-plugin-panel {
-  position: fixed;
-  inset: 0 0 0 auto;
-  z-index: 40;
-  box-sizing: border-box;
-  grid-column: auto;
-  width: var(--mcp-panel-w);
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  /* Panel chrome, not card chrome: square edges, neutral border, and the
-     padding moved onto the header/body so the header can stay put. */
-  padding: 0;
-  border-radius: 0;
-  border-color: var(--kr-border);
-  border-right: 0;
-  box-shadow: -10px 0 24px rgba(0, 0, 0, 0.08);
-  animation: mcp-panel-enter 180ms ease-out;
-}
-
-.mcp-plugin-panel .mcp-detail-header {
-  flex: 0 0 auto;
-  align-items: center;
-  gap: var(--kr-sp-4);
-  margin-bottom: 0;
-  padding: var(--kr-sp-5) var(--kr-sp-7);
-  border-bottom: 1px solid var(--kr-border);
-  background: var(--kr-bg-surface);
-}
-
-.mcp-plugin-panel .mcp-detail-body {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  padding: var(--kr-sp-7);
-}
-
-/* The page keeps the panel's width free so no card ends up hidden
-   underneath it — the grid reflows instead of being covered.
-   The page HEADER is deliberately excluded: reserving the room on the page
-   root squeezed the title and the counters too, which read as the whole page
-   shrinking rather than a panel opening beside the content (same contract as
-   the Planning page, where the header spans the full width and the panel opens
-   below it). */
-.mcp-page-with-panel > *:not(.mcp-page-header) {
-  padding-right: var(--mcp-panel-w);
-}
-
-@keyframes mcp-panel-enter {
-  from { transform: translateX(24px); opacity: 0.7; }
-  to { transform: translateX(0); opacity: 1; }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .mcp-plugin-panel {
-    animation: none;
-  }
-}
-
-/* Narrow screens can't afford a split view: the panel takes the width and
-   the page stops reserving room for it. */
-@media (max-width: 760px) {
-  .mcp-plugin-panel {
-    width: min(100%, 480px);
-    box-shadow: var(--kr-shadow-xl);
-  }
-
-  .mcp-page-with-panel > *:not(.mcp-page-header) {
-    padding-right: 0;
-  }
 }
 
 /* ── Plugin readiness diagnostics ─────────────────────── */

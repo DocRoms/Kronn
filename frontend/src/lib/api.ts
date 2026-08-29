@@ -2389,6 +2389,42 @@ export const directives = {
   delete: (id: string) => api<boolean>('DELETE', `/directives/${id}`),
 };
 
+export type PortableLibraryItem = {
+  kind: 'skill' | 'directive' | 'quick_prompt' | 'workflow';
+  id: string;
+  scope: 'global' | 'project';
+  source: string;
+  content_sha256: string;
+  content: string;
+  data?: unknown;
+};
+
+export type PortableLibraryState = {
+  scope: 'global' | 'project';
+  project_id?: string;
+  items: PortableLibraryItem[];
+  drift: 'clean' | 'drifted' | 'unsynced' | 'not_applicable';
+  approved: boolean;
+};
+
+const portableQuery = (projectId?: string, search?: string) => {
+  const params = new URLSearchParams();
+  if (projectId) params.set('project_id', projectId);
+  if (search) params.set('search', search);
+  const value = params.toString();
+  return value ? `?${value}` : '';
+};
+
+export const portableLibrary = {
+  state: (projectId?: string, search?: string) => api<PortableLibraryState>('GET', `/portable-library${portableQuery(projectId, search)}`),
+  sync: (projectId: string) => api<unknown>('POST', `/portable-library/sync${portableQuery(projectId)}`),
+  check: (projectId: string) => api<unknown>('POST', `/portable-library/check${portableQuery(projectId)}`),
+  approve: (projectId: string) => api<boolean>('POST', `/portable-library/approve${portableQuery(projectId)}`),
+  migrate: (projectId?: string) => api<{ created: string[]; unchanged: string[] }>('POST', `/portable-library/migrate${portableQuery(projectId)}`),
+  export: (projectId?: string) => api<PortableLibraryItem[]>('GET', `/portable-library/export${portableQuery(projectId)}`),
+  import: (projectId: string | undefined, items: PortableLibraryItem[]) => api<unknown>('POST', '/portable-library/import', { project_id: projectId || undefined, items }),
+};
+
 // ─── Stats ──────────────────────────────────────────────────────────────────
 
 export const stats = {

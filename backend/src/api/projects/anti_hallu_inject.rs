@@ -158,6 +158,7 @@ pub async fn inject(
 pub struct RedirectorsSyncResponse {
     pub status: &'static str,
     pub created: Vec<String>,
+    pub updated: Vec<String>,
     pub already_present: Vec<String>,
     pub failed: Vec<String>,
 }
@@ -191,52 +192,21 @@ pub async fn sync_redirectors(
         )));
     }
 
-    let mut created = Vec::new();
-    let mut already_present = Vec::new();
-    let mut failed = Vec::new();
-
-    for filename in crate::api::audit::AUDIT_REDIRECTOR_FILES {
-        let src = template_dir.join(filename);
-        let dst = project_path.join(filename);
-        if !src.exists() {
-            // Template file missing in the binary — should not happen, but
-            // skip rather than fail the whole call.
-            continue;
-        }
-        if dst.exists() {
-            already_present.push((*filename).to_string());
-            continue;
-        }
-        if let Some(parent) = dst.parent() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                failed.push(format!("{filename}: mkdir failed: {e}"));
-                continue;
-            }
-        }
-        match std::fs::copy(&src, &dst) {
-            Ok(_) => created.push((*filename).to_string()),
-            Err(e) => failed.push(format!("{filename}: copy failed: {e}")),
-        }
-    }
-
-    // Kiro steering (nested path, kept consistent with bootstrap.rs)
-    let kiro_src = template_dir.join(".kiro/steering/instructions.md");
-    let kiro_dst = project_path.join(".kiro/steering/instructions.md");
-    if kiro_src.exists() && !kiro_dst.exists() {
-        if let Some(parent) = kiro_dst.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        match std::fs::copy(&kiro_src, &kiro_dst) {
-            Ok(_) => created.push(".kiro/steering/instructions.md".to_string()),
-            Err(e) => failed.push(format!(".kiro/steering/instructions.md: copy failed: {e}")),
-        }
-    } else if kiro_dst.exists() {
-        already_present.push(".kiro/steering/instructions.md".to_string());
-    }
+    let detected = crate::core::root_agent_files::detect_agent_adapters(&project_path);
+    let report = crate::core::root_agent_files::install_detected_agent_files(
+        &project_path,
+        &template_dir,
+        &detected,
+    );
+    let created = report.created;
+    let updated = report.updated;
+    let already_present = report.already_present;
+    let failed = report.failed;
 
     Json(ApiResponse::ok(RedirectorsSyncResponse {
         status: if failed.is_empty() { "ok" } else { "partial" },
         created,
+        updated,
         already_present,
         failed,
     }))

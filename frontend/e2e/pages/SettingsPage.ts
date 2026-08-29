@@ -87,4 +87,42 @@ export class SettingsPage {
   attributionLine(card: Locator): Locator {
     return card.locator('div').filter({ hasText: /Adapted from .+ \(.+\)\./ }).first();
   }
+
+  // ─── Portable library section ───────────────────────────────────────
+  get portableLibrarySection(): Locator {
+    return this.page.locator('#settings-portable-library');
+  }
+
+  get portableScopeSelect(): Locator {
+    return this.portableLibrarySection.locator('select');
+  }
+
+  /** Selects the given project id in the scope dropdown, or `''` for Global. */
+  async selectPortableScope(projectId: string) {
+    await this.portableScopeSelect.selectOption(projectId);
+  }
+
+  portableActionButton(name: RegExp | string): Locator {
+    return this.portableLibrarySection.getByRole('button', { name });
+  }
+
+  get portableImportLabel(): Locator {
+    return this.portableLibrarySection.locator('label', { hasText: /Import/i });
+  }
+
+  get portableImportInput(): Locator {
+    return this.portableLibrarySection.locator('input[type="file"]');
+  }
+
+  portableItemCard(id: string): Locator {
+    return this.portableLibrarySection.locator('.set-capability-card', { hasText: id });
+  }
+
+  get portableDriftChip(): Locator {
+    return this.portableLibrarySection.locator('.set-summary-chip').first();
+  }
+
+  get portableTrustChip(): Locator {
+    return this.portableLibrarySection.locator('.set-summary-chip').nth(1);
+  }
 }

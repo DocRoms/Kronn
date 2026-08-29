@@ -1462,39 +1462,14 @@ fn ensure_redirectors(project_path: &str) {
         return;
     }
 
-    // Simple redirector files (flat)
-    let redirectors = [
-        "CLAUDE.md",
-        "GEMINI.md",
-        "AGENTS.md",
-        ".cursorrules",
-        ".windsurfrules",
-        ".clinerules",
-    ];
-
-    for filename in &redirectors {
-        let src = template_dir.join(filename);
-        let dst = project_dir.join(filename);
-        if src.exists() && !dst.exists() {
-            let _ = std::fs::copy(&src, &dst);
-        }
-    }
-
-    // Nested redirectors (need parent dir creation)
-    let nested = [
-        ".github/copilot-instructions.md",
-        ".kiro/steering/instructions.md",
-    ];
-
-    for subpath in &nested {
-        let src = template_dir.join(subpath);
-        let dst = project_dir.join(subpath);
-        if src.exists() && !dst.exists() {
-            if let Some(parent) = dst.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            let _ = std::fs::copy(&src, &dst);
-        }
+    let detected = crate::core::root_agent_files::detect_agent_adapters(project_dir);
+    let report = crate::core::root_agent_files::install_detected_agent_files(
+        project_dir,
+        &template_dir,
+        &detected,
+    );
+    for failure in report.failed {
+        tracing::warn!("Agent instruction sync failed: {failure}");
     }
 }
 
