@@ -180,6 +180,8 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
   const [addMcpGlobal, setAddMcpGlobal] = useState(false);
   const [addVisibleFields, setAddVisibleFields] = useState<Set<string>>(new Set());
   const addMcpRef = useRef<HTMLDivElement>(null);
+  const addMcpTriggerRef = useRef<HTMLButtonElement>(null);
+  const addMcpWasOpenRef = useRef(false);
   // Custom API form state. Only meaningful when addMcpSelected === 'api-custom'.
   // The shape mirrors `CustomApiPayload` in generated.ts so submit can
   // forward it as-is via `custom_spec`.
@@ -281,6 +283,16 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
     } catch { /* localStorage disabled (incognito / quota) — sort defaults to A→Z on next load */ }
   }, [mcpSortReversed]);
   const [selectedConfigId, setSelectedConfigId] = useState<string | null>(initialSelectedConfigId ?? null);
+  useEffect(() => {
+    if (showAddMcp) {
+      addMcpWasOpenRef.current = true;
+      return;
+    }
+    if (addMcpWasOpenRef.current) {
+      addMcpWasOpenRef.current = false;
+      addMcpTriggerRef.current?.focus();
+    }
+  }, [showAddMcp]);
   // Endpoints that keep failing, grouped by plugin. A spec is written once and
   // never re-checked against the API, so when it drifts nothing says so — this
   // reads the call log Kronn already keeps. Failure to load is not worth an
@@ -376,6 +388,28 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
     setImportJsonText('');
     setImportJsonError(null);
     setImportJsonLoading(false);
+  };
+
+  const handleAddMcpModalKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      resetAddMcp();
+      return;
+    }
+    if (event.key !== 'Tab') return;
+    const focusable = [...(addMcpRef.current?.querySelectorAll<HTMLElement>(
+      'button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), a[href], [tabindex]:not([tabindex="-1"])',
+    ) ?? [])];
+    if (focusable.length === 0) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
   };
 
   /** 0.8.6 — Discriminated-union helpers for the auth picker. The
@@ -1727,12 +1761,27 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
 
       {/* ── Add MCP from registry ── */}
       {showAddMcp && (
-        <div ref={addMcpRef} className="mcp-card mcp-add-panel">
+        <div
+          className="mcp-add-modal-backdrop"
+          data-testid="mcp-add-modal-backdrop"
+          role="presentation"
+          onMouseDown={event => {
+            if (event.target === event.currentTarget) resetAddMcp();
+          }}
+        >
+          <div
+            ref={addMcpRef}
+            className="mcp-card mcp-add-panel mcp-add-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="mcp-add-modal-title"
+            onKeyDown={handleAddMcpModalKeyDown}
+          >
           <div className="mcp-add-header">
-            <h3 className="mcp-add-title">
+            <h3 id="mcp-add-modal-title" className="mcp-add-title">
               {addMcpSelected ? t('mcp.configure', selectedDef?.name ?? addMcpLabel) : t('mcp.addTitle')}
             </h3>
-            <button className="mcp-icon-btn" onClick={() => { setShowAddMcp(false); setAddMcpSelected(null); }} aria-label="Close">
+            <button type="button" className="mcp-icon-btn" onClick={resetAddMcp} aria-label={t('common.close')}>
               <X size={14} />
             </button>
           </div>
@@ -2171,6 +2220,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
               </div>
             </>
           )}
+          </div>
         </div>
       )}
 
@@ -2816,7 +2866,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                     <ul><li>{t('contextHelp.plugins.mcp')}</li><li>{t('contextHelp.plugins.api')}</li><li>{t('contextHelp.plugins.cli')}</li></ul>
                     <p className="kr-context-help-agent-note">{t('contextHelp.plugins.agents')}</p>
                   </ContextHelp>
-                  <button type="button" className="collection-shell-icon collection-shell-primary-action" data-tour-id="add-plugin-btn" onClick={() => { setShowAddMcp(true); setAddMcpSelected(null); setAddMcpSearch(''); }} aria-label={t('mcp.add')} title={t('mcp.addTitle')}><Plus size={16} /></button>
+                  <button ref={addMcpTriggerRef} type="button" className="collection-shell-icon collection-shell-primary-action" data-tour-id="add-plugin-btn" onClick={() => { setShowAddMcp(true); setAddMcpSelected(null); setAddMcpSearch(''); }} aria-label={t('mcp.add')} title={t('mcp.addTitle')}><Plus size={16} /></button>
                 </>}
                 items={visibleConfigs}
                 getId={config => config.id}

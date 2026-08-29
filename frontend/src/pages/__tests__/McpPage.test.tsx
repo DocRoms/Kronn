@@ -210,6 +210,30 @@ describe('McpPage', () => {
     expect(screen.getByRole('button', { name: 'Ouvrir la liste' })).toHaveClass('collection-shell-sidebar-rail');
   });
 
+  it('opens plugin creation in an accessible modal and restores focus when it closes', () => {
+    const overview: McpOverview = {
+      servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [],
+    };
+    wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
+    const trigger = getAddPluginButton();
+
+    fireEvent.click(trigger);
+    const dialog = screen.getByRole('dialog', { name: 'Ajouter un plugin' });
+    expect(dialog).toHaveAttribute('aria-modal', 'true');
+    expect(dialog).toHaveClass('mcp-add-modal');
+    expect(dialog.parentElement).toHaveClass('mcp-add-modal-backdrop');
+    expect(dialog.querySelector('input')).toHaveFocus();
+
+    fireEvent.keyDown(dialog, { key: 'Escape' });
+    expect(screen.queryByRole('dialog', { name: 'Ajouter un plugin' })).toBeNull();
+    expect(trigger).toHaveFocus();
+
+    fireEvent.click(trigger);
+    fireEvent.mouseDown(screen.getByTestId('mcp-add-modal-backdrop'));
+    expect(screen.queryByRole('dialog', { name: 'Ajouter un plugin' })).toBeNull();
+    expect(trigger).toHaveFocus();
+  });
+
   it('uses the shared identity, metadata, and action hierarchy on plugin cards', () => {
     const configs = [
       makeConfig('c1', 'github', 'GitHub', {

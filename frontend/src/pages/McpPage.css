@@ -165,9 +165,27 @@
 }
 
 /* ── Add MCP panel ──────────────────────────────────────── */
+.mcp-add-modal-backdrop {
+  position: fixed;
+  inset: 56px 0 0;
+  z-index: var(--kr-z-modal);
+  display: grid;
+  place-items: center;
+  padding: var(--kr-sp-8);
+  background: rgba(5, 8, 14, 0.52);
+  backdrop-filter: blur(3px);
+}
+
 .mcp-add-panel {
-  margin-bottom: var(--kr-sp-9);
+  margin: 0;
   border-color: var(--kr-accent-border);
+}
+
+.mcp-add-modal {
+  width: min(960px, calc(100vw - 64px));
+  max-height: calc(100dvh - 104px);
+  overflow-y: auto;
+  box-shadow: var(--kr-shadow-lg);
 }
 
 .mcp-add-header {
@@ -182,6 +200,23 @@
   font-weight: 600;
   color: var(--kr-accent);
   margin: 0;
+}
+
+@media (max-width: 700px) {
+  .mcp-add-modal-backdrop {
+    align-items: end;
+    padding: 0;
+  }
+
+  .mcp-add-modal {
+    width: 100%;
+    max-height: calc(100dvh - 56px);
+    border-right: 0;
+    border-bottom: 0;
+    border-left: 0;
+    border-radius: var(--kr-r-2xl) var(--kr-r-2xl) 0 0;
+    padding: var(--kr-sp-6);
+  }
 }
 
 /* ── Category filter pills ──────────────────────────────── */
