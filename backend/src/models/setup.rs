@@ -477,11 +477,10 @@ impl HttpEndpoints {
         match agent_type {
             AgentType::Nvidia => self.nvidia.as_deref(),
             AgentType::LiteLlm => self.lite_llm.as_deref(),
-            // Ollama shares the HTTP chat path but resolves its host from
-            // `ollama_base_url_pub()` and never reads this slot
-            // [agents/runner.rs, the non-openai-wire branch]; CLI agents never
-            // reach that path at all. `None` is therefore the honest answer for
-            // both, not a fallback.
+            // Ollama shares the HTTP chat path but this production config has
+            // no Ollama endpoint slot: the runner therefore falls back to
+            // OLLAMA_HOST/Docker/localhost. CLI agents never reach that path.
+            // `None` is the honest answer for both, not a fallback.
             AgentType::Ollama
             | AgentType::ClaudeCode
             | AgentType::Codex

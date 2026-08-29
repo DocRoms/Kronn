@@ -4606,7 +4606,7 @@ async fn start_ollama_http(
             );
             (base, body, 0, None, None, None)
         } else {
-            let base = crate::api::ollama::ollama_base_url_pub();
+            let base = crate::api::ollama::resolve_base_url_pub(http_base_url);
             // 0.11.0 — ctx cap auto-derived from THE MODEL (its trained context via
             // /api/show, cached), clamped to a RAM-safe ceiling. Zero configuration:
             // a user who pulled qwen3:32b gets its real window instead of a silent 8K
