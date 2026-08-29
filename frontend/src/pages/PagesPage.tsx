@@ -20,7 +20,7 @@ import {
 import { formatRelativeTime } from '../lib/relativeTime';
 import { CopyIdPill } from '../components/CopyIdPill';
 import { FavoriteToggle } from '../components/FavoriteToggle';
-import { CollectionShell } from '../components/CollectionShell';
+import { CollectionShell, CollectionSidebarCollapseButton } from '../components/CollectionShell';
 import { HtmlCodeEditor, HtmlRevisionDiff } from '../components/HtmlCodeEditor';
 import { useT } from '../lib/I18nContext';
 import { useAsyncGuard } from '../hooks/useAsyncGuard';
@@ -128,6 +128,7 @@ export function PagesPage({
   );
   const [detail, setDetail] = useState<LivePageDetail | null>(null);
   const [loading, setLoading] = useState(true);
+  const [sidebarOpen, setSidebarOpen] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [linkedWorkflows, setLinkedWorkflows] = useState<LivePageWorkflowLink[]>([]);
   const [recentPublications, setRecentPublications] = useState<LivePagePublication[]>([]);
@@ -534,7 +535,9 @@ export function PagesPage({
         onSelect={id => { const page = pages.find(item => item.id === id); if (page) void select(page); }}
         selectedIds={selectedIds}
         onSelectedIdsChange={setSelectedIds}
-        labels={{ search: t('pages.search'), favorites: t('pages.filter.favorites'), clearFilters: t('pages.clearSearch'), moreActions: t('pages.title'), openCollection: t('pages.title'), closeCollection: t('pages.title'), selectItem: t('pages.bulk.selected', 1) }}
+        sidebarOpen={sidebarOpen}
+        onSidebarOpenChange={setSidebarOpen}
+        labels={{ search: t('pages.search'), favorites: t('pages.filter.favorites'), clearFilters: t('pages.clearSearch'), moreActions: t('pages.title'), openCollection: t('collection.openCollection'), closeCollection: t('collection.closeCollection'), selectItem: t('pages.bulk.selected', 1) }}
         slots={{
           beforeSidebarHeader: <div className="disc-sidebar-header" data-selection-mode={selectionMode}>
           <span className="disc-sidebar-header-title">
@@ -554,6 +557,7 @@ export function PagesPage({
               <>
                 <button type="button" className="disc-icon-btn" onClick={() => setSelectionMode(true)} title={t('pages.bulk.start')} aria-label={t('pages.bulk.start')}><ListChecks size={16} /></button>
                 <button type="button" className="disc-icon-btn" onClick={() => void refresh()} title={t('pages.refresh')} aria-label={t('pages.refresh')}><RefreshCw size={15} className={loading ? 'spin' : undefined} /></button>
+                <CollectionSidebarCollapseButton label={t('collection.closeCollection')} onCollapse={() => setSidebarOpen(false)} />
               </>
             )}
           </div>

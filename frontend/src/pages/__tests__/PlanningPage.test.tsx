@@ -132,6 +132,7 @@ describe('PlanningPage', () => {
     expect(mocks.update).toHaveBeenCalledWith('task-done', { status: 'archived' });
     fireEvent.click(screen.getByRole('button', { name: 'collection.closeCollection' }));
     expect(screen.queryByRole('complementary', { name: 'planning.title' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'collection.openCollection' })).toHaveClass('collection-shell-sidebar-rail');
   });
 
   it('keeps Planning task rows in the shared keyboard and active-row contract', async () => {

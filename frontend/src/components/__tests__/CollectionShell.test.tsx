@@ -83,10 +83,49 @@ describe('CollectionShell', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Delete selection' }));
     await waitFor(() => expect(screen.getByText('one,two', { selector: 'output' })).toBeInTheDocument());
     expect(screen.queryByRole('checkbox')).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: 'Close collection' }));
+    const collapse = screen.getByRole('button', { name: 'Close collection' });
+    expect(collapse).toHaveClass('collection-shell-collapse-button');
+    fireEvent.click(collapse);
     expect(screen.queryByRole('complementary', { name: 'Managed collection' })).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: 'Open collection' }));
+    const rail = screen.getByRole('button', { name: 'Open collection' });
+    expect(rail).toHaveClass('collection-shell-sidebar-rail');
+    await waitFor(() => expect(rail).toHaveFocus());
+    fireEvent.click(rail);
     expect(screen.getByRole('complementary', { name: 'Managed collection' })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Close collection' })).toHaveFocus());
+  });
+
+  it('uses the same full-height rail when the caller composes the detail beside a sidebar-only shell', async () => {
+    function SidebarOnlyFixture() {
+      const [sidebarOpen, setSidebarOpen] = useState(true);
+      return <div className="host-layout">
+        <CollectionShell<Item>
+          sidebarOnly
+          ariaLabel="Sidebar-only collection"
+          title="Pages"
+          items={items}
+          getId={item => item.id}
+          getLabel={item => item.name}
+          persistence={{ query: '', onQueryChange: () => {}, favoritesOnly: false, onFavoritesOnlyChange: () => {} }}
+          selectedId="one"
+          onSelect={() => {}}
+          sidebarOpen={sidebarOpen}
+          onSidebarOpenChange={setSidebarOpen}
+          labels={labels}
+          slots={{ renderDetail: () => null }}
+        />
+        <main>External detail</main>
+      </div>;
+    }
+
+    render(<SidebarOnlyFixture />);
+    fireEvent.click(screen.getByRole('button', { name: 'Close collection' }));
+    expect(screen.queryByRole('complementary', { name: 'Sidebar-only collection' })).toBeNull();
+    const rail = screen.getByRole('button', { name: 'Open collection' });
+    expect(rail).toHaveClass('collection-shell-sidebar-rail');
+    await waitFor(() => expect(rail).toHaveFocus());
+    fireEvent.click(rail);
+    expect(screen.getByRole('complementary', { name: 'Sidebar-only collection' })).toBeInTheDocument();
   });
 
   it('removes deleted ids from an active bulk selection after the list refreshes', () => {
@@ -182,6 +221,8 @@ describe('CollectionShell', () => {
   it('keeps explicit accent focus indicators for the search and every shared button control', () => {
     expect(collectionShellCss).toMatch(/\.collection-shell-search:focus-within\s*\{[^}]*outline:\s*2px solid var\(--kr-accent\)/);
     expect(collectionShellCss).toMatch(/\.collection-shell-open:focus-visible[^{]*\{[^}]*outline:\s*2px solid var\(--kr-accent\)/);
+    expect(collectionShellCss).toMatch(/\.collection-shell-collapse-button:focus-visible\s*\{[^}]*outline:\s*2px solid var\(--kr-accent\)/);
+    expect(collectionShellCss).toMatch(/\.collection-shell-sidebar-rail:focus-visible\s*\{[^}]*outline:\s*2px solid var\(--kr-accent\)/);
   });
 
   it('lets a caller render custom grouped list markup from the filtered items, plus header/footer slots', () => {

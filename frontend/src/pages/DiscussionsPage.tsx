@@ -20,6 +20,7 @@ import { TestModeModal } from '../components/TestModeModal';
 import type { TestModeBlocker } from '../types/extensions';
 import { ChatHeader } from '../components/ChatHeader';
 import { DiscussionSidebar } from '../components/DiscussionSidebar';
+import { CollectionSidebarRail } from '../components/CollectionShell';
 import { NewDiscussionForm } from '../components/NewDiscussionForm';
 import type { NewDiscConfig } from '../components/NewDiscussionForm';
 import { AgentQuestionForm } from '../components/AgentQuestionForm';
@@ -390,6 +391,7 @@ export function DiscussionsPage({
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
     try { return localStorage.getItem('kronn:sidebarCollapsed') === 'true'; } catch { return false; }
   });
+  const [focusCollapsedSidebarRail, setFocusCollapsedSidebarRail] = useState(false);
   const [activeDiscussionId, setActiveDiscussionId] = useState<string | null>(initialActiveDiscussionId ?? null);
   const [showNewDiscussion, setShowNewDiscussion] = useState(false);
   const [showGitPanel, setShowGitPanel] = useState(false);
@@ -2998,9 +3000,15 @@ export function DiscussionsPage({
     <div className="disc-root">
       {/* Sidebar — collapsed mode shows a thin rail with expand button */}
       {!isMobile && (sidebarCollapsed || gitPanelExpanded) ? (
-        <div className="disc-sidebar-rail" onClick={() => setSidebarCollapsed(false)} title="Expand sidebar">
-          <ChevronRight size={16} />
-        </div>
+        <CollectionSidebarRail
+          className="disc-sidebar-rail"
+          label={t('disc.openSidebar')}
+          focusOnMount={focusCollapsedSidebarRail}
+          onOpen={() => {
+            setFocusCollapsedSidebarRail(false);
+            setSidebarCollapsed(false);
+          }}
+        />
       ) : (!isMobile || sidebarOpen) ? (
         <DiscussionSidebar
           discussions={allDiscussions}
@@ -3161,7 +3169,10 @@ export function DiscussionsPage({
             if (next.has(runId)) next.delete(runId); else next.add(runId);
             return next;
           })}
-          onCollapse={() => setSidebarCollapsed(true)}
+          onCollapse={() => {
+            setFocusCollapsedSidebarRail(true);
+            setSidebarCollapsed(true);
+          }}
         />
       ) : null}
 

@@ -69,6 +69,15 @@ afterEach(() => {
 });
 
 describe('DiscussionSidebar — bulk selection', () => {
+  it('uses the shared collection collapse control on desktop', () => {
+    const props = { ...makeProps(), onCollapse: vi.fn() };
+    render(<DiscussionSidebar {...props} />);
+    const collapse = screen.getByRole('button', { name: 'disc.closeSidebar' });
+    expect(collapse).toHaveClass('collection-shell-collapse-button');
+    fireEvent.click(collapse);
+    expect(props.onCollapse).toHaveBeenCalledOnce();
+  });
+
   it('opens a free comparison only after at least two discussions are selected', async () => {
     const props = makeProps();
     render(<DiscussionSidebar {...props} />);

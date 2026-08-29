@@ -188,5 +188,6 @@ describe('ProjectList — missing-path banner', () => {
     expect(onRefetch).toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: 'collection.closeCollection' }));
     expect(screen.queryByRole('complementary', { name: 'projects.title' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'collection.openCollection' })).toHaveClass('collection-shell-sidebar-rail');
   });
 });

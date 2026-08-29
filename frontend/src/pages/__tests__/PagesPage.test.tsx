@@ -106,6 +106,19 @@ describe('PagesPage', () => {
       .toHaveClass('disc-sidebar', 'live-pages-list');
   });
 
+  it('collapses to the shared Discussions-style rail and reopens the sidebar', async () => {
+    render(<PagesPage />);
+    await screen.findByTestId('live-page-frame');
+    const collapse = screen.getByRole('button', { name: 'collection.closeCollection' });
+    expect(collapse).toHaveClass('collection-shell-collapse-button');
+    fireEvent.click(collapse);
+    expect(screen.queryByRole('complementary', { name: 'pages.title' })).toBeNull();
+    const rail = screen.getByRole('button', { name: 'collection.openCollection' });
+    expect(rail).toHaveClass('collection-shell-sidebar-rail');
+    fireEvent.click(rail);
+    expect(screen.getByRole('complementary', { name: 'pages.title' })).toBeInTheDocument();
+  });
+
   it('uses checkbox semantics for transient Page bulk selection', async () => {
     render(<PagesPage />);
     await screen.findByTestId('live-page-frame');

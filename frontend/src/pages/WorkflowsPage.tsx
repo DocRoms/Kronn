@@ -39,7 +39,7 @@ import { FavoriteToggle } from '../components/FavoriteToggle';
 import { ListControls } from '../components/ListControls';
 import { CopyIdPill } from '../components/CopyIdPill';
 import { ContextHelp } from '../components/ContextHelp';
-import { CollectionShell } from '../components/CollectionShell';
+import { CollectionShell, CollectionSidebarCollapseButton } from '../components/CollectionShell';
 import {
   sortQuickApis,
   sortQuickPrompts,
@@ -242,6 +242,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     postImprovedQpId ? 'quickPrompts' : initialAutomationNavigation.tab,
   );
   const [automationQuery, setAutomationQuery] = useState('');
+  const [sidebarOpen, setSidebarOpen] = useState(true);
   const [automationProjectFilter, setAutomationProjectFilter] = useState('all');
   const [collapsedAutomationSections, setCollapsedAutomationSections] = useState<Set<AutomationSection>>(
     readCollapsedAutomationSections,
@@ -1817,23 +1818,28 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
         globalSearchShortcut
         showSearchClear
         showControls={false}
-        labels={{ search: t('automation.search'), favorites: t('disc.favorites'), clearFilters: t('automation.clearSearch'), moreActions: t('wf.title'), openCollection: t('wf.title'), closeCollection: t('wf.title'), selectItem: t('automation.openResource', '') }}
+        sidebarOpen={sidebarOpen}
+        onSidebarOpenChange={setSidebarOpen}
+        labels={{ search: t('automation.search'), favorites: t('disc.favorites'), clearFilters: t('automation.clearSearch'), moreActions: t('wf.title'), openCollection: t('collection.openCollection'), closeCollection: t('collection.closeCollection'), selectItem: t('automation.openResource', '') }}
         slots={{
           beforeSidebarHeader: <div className="disc-sidebar-header" data-tour-id="automation-library">
           <span className="disc-sidebar-header-title">
             {t('wf.title')}
             <span className="disc-sidebar-header-count">{' · '}{totalAutomationResources}</span>
           </span>
-          <ContextHelp title={t('contextHelp.automation.title')}>
-            <p>{t('contextHelp.automation.intro')}</p>
-            <ul>
-              <li>{t('contextHelp.automation.wf')}</li>
-              <li>{t('contextHelp.automation.qa')}</li>
-              <li>{t('contextHelp.automation.qp')}</li>
-              <li>{t('contextHelp.automation.qe')}</li>
-            </ul>
-            <p className="kr-context-help-agent-note">{t('contextHelp.automation.mcp')}</p>
-          </ContextHelp>
+          <div className="disc-sidebar-header-actions">
+            <ContextHelp title={t('contextHelp.automation.title')}>
+              <p>{t('contextHelp.automation.intro')}</p>
+              <ul>
+                <li>{t('contextHelp.automation.wf')}</li>
+                <li>{t('contextHelp.automation.qa')}</li>
+                <li>{t('contextHelp.automation.qp')}</li>
+                <li>{t('contextHelp.automation.qe')}</li>
+              </ul>
+              <p className="kr-context-help-agent-note">{t('contextHelp.automation.mcp')}</p>
+            </ContextHelp>
+            <CollectionSidebarCollapseButton label={t('collection.closeCollection')} onCollapse={() => setSidebarOpen(false)} />
+          </div>
           </div>,
           afterSidebarHeader: <div className="automation-sidebar-search">
             <select

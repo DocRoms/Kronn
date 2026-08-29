@@ -169,6 +169,18 @@ const wrap = async (ui: React.ReactElement) => {
 };
 
 describe('WorkflowsPage', () => {
+  it('collapses to the shared Discussions-style rail and reopens the sidebar', async () => {
+    await wrap(<WorkflowsPage projects={[]} />);
+    const collapse = screen.getByRole('button', { name: 'Fermer la liste' });
+    expect(collapse).toHaveClass('collection-shell-collapse-button');
+    fireEvent.click(collapse);
+    expect(screen.queryByRole('complementary', { name: 'Automatisation' })).toBeNull();
+    const rail = screen.getByRole('button', { name: 'Ouvrir la liste' });
+    expect(rail).toHaveClass('collection-shell-sidebar-rail');
+    fireEvent.click(rail);
+    expect(screen.getByRole('complementary', { name: 'Automatisation' })).toBeInTheDocument();
+  });
+
   it('uses one searchable sidebar ordered Workflow → API → Prompt → Exec', async () => {
     const alpha = {
       id: 'wf-alpha', name: 'Alpha report', project_id: 'p-alpha', project_name: 'Alpha',

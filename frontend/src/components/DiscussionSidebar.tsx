@@ -3,7 +3,7 @@ import '../pages/DiscussionsPage.css';
 import { SwipeableDiscItem } from './SwipeableDiscItem';
 import { unseenBasis } from '../lib/discussionUiUtils';
 import { GlobalSearchPanel } from './GlobalSearchPanel';
-import { CollectionShell } from './CollectionShell';
+import { CollectionShell, CollectionSidebarCollapseButton } from './CollectionShell';
 import type { Discussion, Project, Contact, BatchRunSummary, ExecutionDiscussionLink, MessageSearchHit } from '../types/generated';
 import { projects as projectsApi } from '../lib/api';
 import { getProjectGroup, isHiddenPath } from '../lib/constants';
@@ -11,7 +11,7 @@ import { gravatarUrl } from '../lib/gravatar';
 import { formatRelativeTime } from '../lib/relativeTime';
 import type { ToastFn } from '../hooks/useToast';
 import {
-  Folder, ChevronLeft, ChevronRight, Plus, X, MessageSquare, Archive, Search,
+  Folder, ChevronRight, Plus, X, MessageSquare, Archive, Search,
   SlidersHorizontal, Users2, Trash2, Star, CheckCheck, Columns3, ListChecks, LogIn,
   Loader2, Upload, CircleDot, Clock3, MoreHorizontal, ChevronDown,
 } from 'lucide-react';
@@ -953,12 +953,17 @@ export function DiscussionSidebar({
                 )}
               </div>
               {isMobile && (
-                <button className="disc-icon-btn" onClick={onClose} aria-label="Close sidebar"><X size={16} /></button>
+                <CollectionSidebarCollapseButton
+                  isMobile
+                  label={t('disc.closeSidebar')}
+                  onCollapse={onClose}
+                />
               )}
               {!isMobile && onCollapse && (
-                <button className="disc-icon-btn" onClick={onCollapse} aria-label="Collapse sidebar" title="Collapse sidebar">
-                  <ChevronLeft size={16} />
-                </button>
+                <CollectionSidebarCollapseButton
+                  label={t('disc.closeSidebar')}
+                  onCollapse={onCollapse}
+                />
               )}
             </>
           )}

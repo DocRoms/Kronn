@@ -167,6 +167,58 @@ export interface CollectionShellProps<TItem> {
   };
 }
 
+interface CollectionSidebarCollapseButtonProps {
+  isMobile?: boolean;
+  label: string;
+  onCollapse: () => void;
+  focusOnMount?: boolean;
+}
+
+/** The single close/collapse control used by every collection sidebar. */
+export function CollectionSidebarCollapseButton({
+  isMobile = false,
+  label,
+  onCollapse,
+  focusOnMount = false,
+}: CollectionSidebarCollapseButtonProps) {
+  return <button
+    type="button"
+    className="collection-shell-collapse-button"
+    onClick={onCollapse}
+    aria-label={label}
+    title={label}
+    autoFocus={focusOnMount}
+  >
+    {isMobile ? <X size={16} /> : <ChevronLeft size={16} />}
+  </button>;
+}
+
+interface CollectionSidebarRailProps {
+  label: string;
+  onOpen: () => void;
+  className?: string;
+  focusOnMount?: boolean;
+}
+
+/** Discussions-style full-height desktop rail, kept keyboard accessible. */
+export function CollectionSidebarRail({
+  label,
+  onOpen,
+  className = '',
+  focusOnMount = false,
+}: CollectionSidebarRailProps) {
+  return <button
+    type="button"
+    className={`collection-shell-sidebar-rail ${className}`.trim()}
+    onClick={onOpen}
+    aria-label={label}
+    title={label}
+    autoFocus={focusOnMount}
+  >
+    <ChevronRight size={16} />
+  </button>;
+}
+
 /**
  * Typed, domain-neutral master/detail primitive. Callers provide their item
  * rendering and persistence policy while this component owns the shared
@@ -185,6 +237,8 @@ export function CollectionShell<TItem>({
   const [menuOpen, setMenuOpen] = useState(false);
   const [selectionMode, setSelectionMode] = useState(false);
   const [actionBusy, setActionBusy] = useState(false);
+  const [focusRailOnMount, setFocusRailOnMount] = useState(false);
+  const [focusCollapseOnMount, setFocusCollapseOnMount] = useState(false);
   const canMultiSelect = selectedIds != null && onSelectedIdsChange != null;
   const managedSelection = title != null && canMultiSelect;
   const multiSelectionVisible = canMultiSelect && (!managedSelection || selectionMode);
@@ -204,6 +258,16 @@ export function CollectionShell<TItem>({
   const focusSearch = useCallback(() => {
     searchRef.current?.focus();
   }, [searchRef]);
+  const collapseSidebar = useCallback(() => {
+    setFocusRailOnMount(true);
+    setFocusCollapseOnMount(false);
+    onSidebarOpenChange?.(false);
+  }, [onSidebarOpenChange]);
+  const openSidebar = useCallback(() => {
+    setFocusRailOnMount(false);
+    setFocusCollapseOnMount(true);
+    onSidebarOpenChange?.(true);
+  }, [onSidebarOpenChange]);
 
   const visibleItems = useMemo(() => {
     const query = persistence.query.trim().toLocaleLowerCase();
@@ -384,7 +448,12 @@ export function CollectionShell<TItem>({
                 <button type="button" role="menuitem" onClick={() => { setSelectionMode(true); closeMenu(false); }}><ListChecks size={14} />{labels.selectMultiple ?? labels.selectItem}</button>
               </div>}
             </div>}
-            {onSidebarOpenChange && <button type="button" className="collection-shell-icon" onClick={() => onSidebarOpenChange(false)} aria-label={labels.closeCollection} title={labels.closeCollection}>{isMobile ? <X size={17} /> : <ChevronLeft size={17} />}</button>}
+            {onSidebarOpenChange && <CollectionSidebarCollapseButton
+              isMobile={isMobile}
+              label={labels.closeCollection}
+              onCollapse={collapseSidebar}
+              focusOnMount={focusCollapseOnMount}
+            />}
           </>}
         </div>
       </div>}
@@ -421,12 +490,16 @@ export function CollectionShell<TItem>({
     </aside>
   );
 
-  if (sidebarOnly) return sidebar;
+  if (sidebarOnly) return sidebarOpen
+    ? sidebar
+    : <CollectionSidebarRail label={labels.openCollection} onOpen={openSidebar} focusOnMount={focusRailOnMount} />;
 
   return <section className="collection-shell" data-mobile={isMobile}>
-    {sidebarOpen && sidebar}
+    {sidebarOpen
+      ? sidebar
+      : !isMobile && <CollectionSidebarRail label={labels.openCollection} onOpen={openSidebar} focusOnMount={focusRailOnMount} />}
     <div className="collection-shell-detail">
-      {!sidebarOpen && <button type="button" className="collection-shell-open" onClick={() => onSidebarOpenChange?.(true)} aria-label={labels.openCollection}>{isMobile ? <Menu size={18} /> : <ChevronRight size={18} />}</button>}
+      {!sidebarOpen && isMobile && <button type="button" className="collection-shell-open" onClick={openSidebar} aria-label={labels.openCollection}><Menu size={18} /></button>}
       {title == null && actions.length > 0 && <div className="collection-shell-actions" ref={menuRef}>
         <button ref={menuTriggerRef} type="button" className="collection-shell-icon" onClick={() => setMenuOpen(open => !open)} aria-label={labels.moreActions} aria-haspopup="menu" aria-expanded={menuOpen} aria-controls={menuOpen ? menuId : undefined}><MoreHorizontal size={17} /></button>
         {menuOpen && <div id={menuId} className="collection-shell-menu" role="menu" aria-label={labels.moreActions} onKeyDown={onMenuKeyDown}>{actions.map(action => <button key={action.id} type="button" role="menuitem" disabled={action.disabled?.(actionItems)} onClick={() => { void runAction(action); closeMenu(true); }}>{action.label}</button>)}</div>}

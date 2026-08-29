@@ -198,6 +198,7 @@ describe('McpPage', () => {
     expect(mcpsApi.deleteConfig).toHaveBeenCalledTimes(2);
     fireEvent.click(screen.getByRole('button', { name: 'Fermer la liste' }));
     expect(screen.queryByRole('complementary', { name: 'Plugins' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Ouvrir la liste' })).toHaveClass('collection-shell-sidebar-rail');
   });
 
   it('uses the shared identity, metadata, and action hierarchy on plugin cards', () => {
