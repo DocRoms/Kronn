@@ -57,12 +57,12 @@ pub struct AuditMcpFilterReport {
 /// are lowercased to make the [`is_allowed`] lookup case-insensitive
 /// regardless of how the user wrote them in `.mcp.json` or in the
 /// env var.
-fn build_allowlist() -> HashSet<String> {
+fn build_allowlist(extra: Option<&str>) -> HashSet<String> {
     let mut set: HashSet<String> = AUDIT_MCP_ALLOWLIST
         .iter()
         .map(|s| s.to_lowercase())
         .collect();
-    if let Ok(extra) = std::env::var(AUDIT_MCP_EXTRA_ENV) {
+    if let Some(extra) = extra {
         for raw in extra.split(',') {
             let name = raw.trim();
             if !name.is_empty() {
@@ -86,8 +86,20 @@ pub fn is_allowed(name: &str, allowlist: &HashSet<String>) -> bool {
 /// Servers without a `mcpServers` root key are passed through unchanged
 /// (no servers to filter — the audit will run with 0 MCPs).
 pub fn filter_mcp_json(raw: &str) -> Result<(Value, AuditMcpFilterReport), serde_json::Error> {
+    filter_mcp_json_with_extra(raw, std::env::var(AUDIT_MCP_EXTRA_ENV).ok().as_deref())
+}
+
+/// Apply the audit allowlist with an explicitly supplied extra-server value.
+///
+/// The production wrapper above reads the process environment; this helper
+/// keeps parsing and filtering deterministic for callers that already own
+/// their configuration value, including parallel unit tests.
+fn filter_mcp_json_with_extra(
+    raw: &str,
+    extra: Option<&str>,
+) -> Result<(Value, AuditMcpFilterReport), serde_json::Error> {
     let mut value: Value = serde_json::from_str(raw)?;
-    let allowlist = build_allowlist();
+    let allowlist = build_allowlist(extra);
 
     let mut report = AuditMcpFilterReport {
         kept: Vec::new(),
@@ -265,7 +277,7 @@ mod tests {
             }
         })
         .to_string();
-        let (filtered, report) = filter_mcp_json(&raw).unwrap();
+        let (filtered, report) = filter_mcp_json_with_extra(&raw, None).unwrap();
         let servers = filtered.get("mcpServers").unwrap().as_object().unwrap();
         assert_eq!(servers.len(), 2);
         assert!(servers.contains_key("kronn-internal"));
@@ -298,7 +310,7 @@ mod tests {
             }
         })
         .to_string();
-        let (filtered, report) = filter_mcp_json(&raw).unwrap();
+        let (filtered, report) = filter_mcp_json_with_extra(&raw, None).unwrap();
         let servers = filtered.get("mcpServers").unwrap().as_object().unwrap();
         assert_eq!(
             servers.len(),
@@ -313,14 +325,6 @@ mod tests {
         // Power-user override: `KRONN_AUDIT_MCP_EXTRA=Fastly,Docker`
         // → Fastly + Docker survive alongside the hard-coded set.
         // Whitespace around names tolerated.
-        // SAFETY: tests in this module run sequentially via mutex
-        // (vitest-style) so the env var doesn't leak between tests.
-        let _lock = ENV_LOCK.lock().unwrap();
-        // SAFETY: lock guarantees no concurrent env writers; OK in test ctx.
-        unsafe {
-            std::env::set_var(AUDIT_MCP_EXTRA_ENV, " Fastly , Docker ");
-        }
-
         let raw = json!({
             "mcpServers": {
                 "kronn-internal": {"command": "a"},
@@ -330,24 +334,17 @@ mod tests {
             }
         })
         .to_string();
-        let (_filtered, report) = filter_mcp_json(&raw).unwrap();
+        let (_filtered, report) =
+            filter_mcp_json_with_extra(&raw, Some(" Fastly , Docker ")).unwrap();
         assert!(report.kept.contains(&"kronn-internal".to_string()));
         assert!(report.kept.contains(&"Fastly".to_string()));
         assert!(report.kept.contains(&"Docker".to_string()));
         assert!(report.dropped.contains(&"atlassian".to_string()));
-
-        unsafe {
-            std::env::remove_var(AUDIT_MCP_EXTRA_ENV);
-        }
     }
 
     #[test]
     fn empty_or_missing_env_var_uses_hardcoded_allowlist_only() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        unsafe {
-            std::env::remove_var(AUDIT_MCP_EXTRA_ENV);
-        }
-        let allowlist = build_allowlist();
+        let allowlist = build_allowlist(None);
         assert_eq!(
             allowlist.len(),
             AUDIT_MCP_ALLOWLIST.len(),
@@ -361,19 +358,37 @@ mod tests {
         // silently skipped. Without the .is_empty() filter, the set
         // would gain a `""` entry that matches an MCP server named
         // "" (impossible but defensive).
-        let _lock = ENV_LOCK.lock().unwrap();
-        unsafe {
-            std::env::set_var(AUDIT_MCP_EXTRA_ENV, " , , ");
-        }
-        let allowlist = build_allowlist();
+        let allowlist = build_allowlist(Some(" , , "));
         assert_eq!(
             allowlist.len(),
             AUDIT_MCP_ALLOWLIST.len(),
             "empty / whitespace-only entries in the env var must NOT extend the allowlist"
         );
-        unsafe {
-            std::env::remove_var(AUDIT_MCP_EXTRA_ENV);
-        }
+    }
+
+    #[test]
+    fn injected_extra_allowlists_are_independent_in_parallel() {
+        let raw = json!({
+            "mcpServers": {
+                "Fastly": {"command": "fastly-mcp"},
+                "Docker": {"command": "docker-mcp"},
+            }
+        })
+        .to_string();
+
+        std::thread::scope(|scope| {
+            let fastly = scope.spawn(|| {
+                let (_, report) = filter_mcp_json_with_extra(&raw, Some("Fastly")).unwrap();
+                report
+            });
+            let docker = scope.spawn(|| {
+                let (_, report) = filter_mcp_json_with_extra(&raw, Some("Docker")).unwrap();
+                report
+            });
+
+            assert_eq!(fastly.join().unwrap().kept, vec!["Fastly"]);
+            assert_eq!(docker.join().unwrap().kept, vec!["Docker"]);
+        });
     }
 
     #[test]
@@ -580,10 +595,4 @@ mod tests {
             "Drop on panic must restore the original `.mcp.json`"
         );
     }
-
-    // Single mutex guard for tests that mutate the process-wide env
-    // var. Rust runs unit tests in parallel by default; without this
-    // lock the env-var tests race and randomly fail when one removes
-    // the var while another is reading it.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 }

@@ -12,9 +12,13 @@ use crate::AppState;
 use axum::{extract::State, Json};
 use futures::StreamExt;
 
-/// Public accessor for the runner's HTTP execution path.
-pub fn ollama_base_url_pub() -> String {
-    ollama_base_url()
+/// Resolve the endpoint supplied by the runner, falling back to Ollama's
+/// process-level configuration when no invocation-local endpoint was given.
+///
+/// Production currently supplies `None`; the explicit branch exists so an
+/// isolated invocation (notably a test mock) never has to mutate `OLLAMA_HOST`.
+pub fn resolve_base_url_pub(explicit: Option<&str>) -> String {
+    explicit.map(str::to_owned).unwrap_or_else(ollama_base_url)
 }
 
 /// Resolve the Ollama API base URL.
@@ -368,6 +372,12 @@ pub async fn set_context_override(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_runner_endpoint_is_used_verbatim() {
+        let mock_endpoint = "http://127.0.0.1:43123";
+        assert_eq!(resolve_base_url_pub(Some(mock_endpoint)), mock_endpoint);
+    }
 
     /// KT-405 — an operator's request is never refused for being LARGER than
     /// what Kronn's own figures suggest; it is warned. The floor rejection

@@ -2053,8 +2053,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let previous_host = std::env::var("OLLAMA_HOST").ok();
-        std::env::set_var("OLLAMA_HOST", server.uri());
+        let base_url = server.uri();
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let started = start_ollama_http(
             &AgentType::Ollama,
@@ -2062,7 +2061,7 @@ mod tests {
             "",
             "test-model",
             None,
-            None,
+            Some(&base_url),
             None,
             Some(std::sync::Arc::new(PrelocalizedWorkerTools {
                 inner: WorkerTools { seen: seen.clone() },
@@ -2077,10 +2076,6 @@ mod tests {
             None,
         )
         .await;
-        match previous_host {
-            Some(value) => std::env::set_var("OLLAMA_HOST", value),
-            None => std::env::remove_var("OLLAMA_HOST"),
-        }
 
         let mut process = started.expect("start scoped Ollama worker");
         while process.next_line().await.is_some() {}
@@ -2161,8 +2156,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let previous_host = std::env::var("OLLAMA_HOST").ok();
-        std::env::set_var("OLLAMA_HOST", server.uri());
+        let base_url = server.uri();
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let started = start_ollama_http(
             &AgentType::Ollama,
@@ -2170,7 +2164,7 @@ mod tests {
             "",
             "test-model",
             None,
-            None,
+            Some(&base_url),
             None,
             Some(std::sync::Arc::new(PrelocalizedWorkerTools {
                 inner: WorkerTools { seen: seen.clone() },
@@ -2185,10 +2179,6 @@ mod tests {
             None,
         )
         .await;
-        match previous_host {
-            Some(value) => std::env::set_var("OLLAMA_HOST", value),
-            None => std::env::remove_var("OLLAMA_HOST"),
-        }
 
         let mut process = started.expect("start scoped Ollama worker");
         while process.next_line().await.is_some() {}
@@ -3288,8 +3278,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let prev = std::env::var("OLLAMA_HOST").ok();
-        std::env::set_var("OLLAMA_HOST", server.uri());
+        let base_url = server.uri();
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let started = start_ollama_http(
             &AgentType::Ollama,
@@ -3297,7 +3286,7 @@ mod tests {
             "",
             "test-model",
             None,
-            None,
+            Some(&base_url),
             None,
             Some(std::sync::Arc::new(FakeTools { seen: seen.clone() })),
             None,
@@ -3305,10 +3294,6 @@ mod tests {
             None,
         )
         .await;
-        match prev {
-            Some(v) => std::env::set_var("OLLAMA_HOST", v),
-            None => std::env::remove_var("OLLAMA_HOST"),
-        }
 
         let mut process = started.expect("start");
         let mut out = String::new();
@@ -3397,8 +3382,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let previous_host = std::env::var("OLLAMA_HOST").ok();
-        std::env::set_var("OLLAMA_HOST", server.uri());
+        let base_url = server.uri();
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let started = start_ollama_http(
             &AgentType::Ollama,
@@ -3406,7 +3390,7 @@ mod tests {
             "",
             "test-model",
             None,
-            None,
+            Some(&base_url),
             None,
             Some(std::sync::Arc::new(WorkerTools { seen: seen.clone() })),
             None,
@@ -3414,10 +3398,6 @@ mod tests {
             None,
         )
         .await;
-        match previous_host {
-            Some(value) => std::env::set_var("OLLAMA_HOST", value),
-            None => std::env::remove_var("OLLAMA_HOST"),
-        }
 
         let mut process = started.expect("start");
         while process.next_line().await.is_some() {}
@@ -3462,15 +3442,14 @@ mod tests {
             .mount(&server)
             .await;
 
-        let previous_host = std::env::var("OLLAMA_HOST").ok();
-        std::env::set_var("OLLAMA_HOST", server.uri());
+        let base_url = server.uri();
         let started = start_ollama_http(
             &AgentType::Ollama,
             "complete the worker task",
             "",
             "test-model",
             None,
-            None,
+            Some(&base_url),
             None,
             Some(std::sync::Arc::new(WorkerTools {
                 seen: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -3480,10 +3459,6 @@ mod tests {
             None,
         )
         .await;
-        match previous_host {
-            Some(value) => std::env::set_var("OLLAMA_HOST", value),
-            None => std::env::remove_var("OLLAMA_HOST"),
-        }
 
         let mut process = started.expect("start");
         while process.next_line().await.is_some() {}
@@ -3602,8 +3577,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let previous_host = std::env::var("OLLAMA_HOST").ok();
-        std::env::set_var("OLLAMA_HOST", server.uri());
+        let base_url = server.uri();
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let started = start_ollama_http(
             &AgentType::Ollama,
@@ -3611,7 +3585,7 @@ mod tests {
             "",
             "test-model",
             None,
-            None,
+            Some(&base_url),
             None,
             Some(std::sync::Arc::new(WorkerTools { seen: seen.clone() })),
             None,
@@ -3619,10 +3593,6 @@ mod tests {
             None,
         )
         .await;
-        match previous_host {
-            Some(value) => std::env::set_var("OLLAMA_HOST", value),
-            None => std::env::remove_var("OLLAMA_HOST"),
-        }
 
         let mut process = started.expect("start");
         while process.next_line().await.is_some() {}
@@ -3737,8 +3707,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let previous_host = std::env::var("OLLAMA_HOST").ok();
-        std::env::set_var("OLLAMA_HOST", server.uri());
+        let base_url = server.uri();
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let started = start_ollama_http(
             &AgentType::Ollama,
@@ -3746,7 +3715,7 @@ mod tests {
             "",
             "test-model",
             None,
-            None,
+            Some(&base_url),
             None,
             Some(std::sync::Arc::new(WorkerTools { seen: seen.clone() })),
             None,
@@ -3754,10 +3723,6 @@ mod tests {
             None,
         )
         .await;
-        match previous_host {
-            Some(value) => std::env::set_var("OLLAMA_HOST", value),
-            None => std::env::remove_var("OLLAMA_HOST"),
-        }
 
         let mut process = started.expect("start");
         while process.next_line().await.is_some() {}
@@ -3871,8 +3836,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let previous_host = std::env::var("OLLAMA_HOST").ok();
-        std::env::set_var("OLLAMA_HOST", server.uri());
+        let base_url = server.uri();
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let started = start_ollama_http(
             &AgentType::Ollama,
@@ -3880,7 +3844,7 @@ mod tests {
             "",
             "local-alias:latest",
             None,
-            None,
+            Some(&base_url),
             None,
             Some(std::sync::Arc::new(WorkerTools { seen: seen.clone() })),
             None,
@@ -3888,10 +3852,6 @@ mod tests {
             None,
         )
         .await;
-        match previous_host {
-            Some(value) => std::env::set_var("OLLAMA_HOST", value),
-            None => std::env::remove_var("OLLAMA_HOST"),
-        }
 
         let mut process = started.expect("start");
         while process.next_line().await.is_some() {}
