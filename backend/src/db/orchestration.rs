@@ -1170,15 +1170,12 @@ fn validate_worker_connection(conn: &Connection, execution: &TaskExecution) -> R
         .as_deref()
         .map(agent_type_from_db)
         .transpose()?;
-    let requires_connection = execution.worker_target_kind.is_some()
-        && matches!(
-            persisted_agent,
-            Some(AgentType::LiteLlm | AgentType::Nvidia | AgentType::Custom)
-        );
     let Some(raw_connection_id) = execution.worker_connection_id.as_deref() else {
-        if requires_connection {
-            bail!("external worker target has no connection identifier");
-        }
+        // The public task-worker target returned by `agent_list` identifies an
+        // HTTP provider by its typed provider + transport. It intentionally has
+        // no internal external-api connection id; the runtime is resolved
+        // server-side. A persisted id remains an optional legacy pin and is
+        // validated below when one is present.
         return Ok(());
     };
     let connection_id = raw_connection_id.trim();

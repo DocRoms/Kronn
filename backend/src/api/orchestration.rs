@@ -4862,13 +4862,6 @@ fn worker_target_from_execution(execution: &TaskExecution) -> Result<MessageTarg
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty());
-    let requires_connection = matches!(
-        agent_type,
-        AgentType::LiteLlm | AgentType::Nvidia | AgentType::Custom
-    );
-    if requires_connection && connection_id.is_none() {
-        anyhow::bail!("execution external worker has no connection identifier");
-    }
     let tier = execution
         .worker_model_tier
         .as_deref()
@@ -7147,7 +7140,8 @@ pub(crate) async fn reassign_native_execution(
     if selection.target.kind == MessageTargetKind::Cli {
         bail!("native reassignment cannot target a CLI session");
     }
-    crate::db::orchestration::ensure_task_worker_transport_compatible(&selection.target)?;
+    crate::db::orchestration::ensure_task_worker_transport_compatible(&selection.target)
+        .map_err(|error| anyhow::anyhow!("worker_transport: {error}"))?;
     let id = exec_id.to_string();
     let persisted_reason = reason.to_string();
     let (view, replaced_dispatch_id) = state
@@ -14153,6 +14147,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reassignment_refuses_an_invalid_http_transport_without_mutation() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let (task_ref, parent_id, _) = seed(&db, repo.path()).await;
+        let initial = provision_single_task_execution(
+            &db,
+            ProvisionInput {
+                task_reference: task_ref,
+                parent_discussion_id: parent_id,
+                worker: native_worker(),
+                base_rev: Some("main".into()),
+                idempotency_key: Some("reassignment-invalid-http-transport".into()),
+            },
+        )
+        .await
+        .unwrap();
+        let before = exec_of(&db, &initial.id).await;
+        let recovery_before = db
+            .with_conn({
+                let execution_id = initial.id.clone();
+                move |conn| crate::db::orchestration::get_execution_recovery(conn, &execution_id)
+            })
+            .await
+            .unwrap();
+        let state = AppState::new_defaults(
+            std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::core::config::default_config(),
+            )),
+            db.clone(),
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        );
+
+        let result = reassign_native_execution(
+            &state,
+            &initial.id,
+            crate::models::CampaignWorkerSelection {
+                // LiteLLM is HTTP-only and must use the public
+                // `discussion_agent` transport returned by agent_list.
+                target: MessageTarget::agent(AgentType::LiteLlm),
+                model: None,
+                profile_id: None,
+            },
+            "invalid public worker transport",
+        )
+        .await;
+        let Err(error) = result else {
+            panic!("invalid public worker transport must be refused");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("worker_transport: incompatible worker transport"),
+            "the refusal must explain the stable transport constraint: {error}"
+        );
+
+        let after = exec_of(&db, &initial.id).await;
+        assert_eq!(after.worker_agent_type, before.worker_agent_type);
+        assert_eq!(after.worker_target_kind, before.worker_target_kind);
+        assert_eq!(after.dispatch_job_id, before.dispatch_job_id);
+        let recovery_after = db
+            .with_conn({
+                let execution_id = initial.id.clone();
+                move |conn| crate::db::orchestration::get_execution_recovery(conn, &execution_id)
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            recovery_after
+                .as_ref()
+                .map(|recovery| recovery.assignment_generation),
+            recovery_before
+                .as_ref()
+                .map(|recovery| recovery.assignment_generation),
+            "refusal must precede every reassignment mutation"
+        );
+    }
+
+    #[tokio::test]
     async fn native_review_uses_parent_room_and_preserves_anti_oracle_refusal() {
         let repo = init_repo();
         let db = Database::open_in_memory().unwrap();
@@ -16335,12 +16407,12 @@ mod tests {
         );
     }
 
-    /// KT-492 — `task_exec_reassign` must accept the exact typed `MessageTarget`
-    /// `agent_list` hands back verbatim (kind/agent_type/...), not the internal
-    /// `{target, model, profile_id}` `CampaignWorkerSelection` envelope that used
-    /// to make this endpoint 422 on every copy-pasted worker.
+    /// A principal CLI can copy an HTTP `discussion_agent` target directly from
+    /// `agent_list`: server-side provider resolution must not require an internal
+    /// connection id. This covers the regression from a host `agent` worker to
+    /// LiteLLM and keeps the child room/worktree lineage intact.
     #[tokio::test]
-    async fn task_exec_reassign_endpoint_accepts_the_bare_message_target_worker_from_agent_list() {
+    async fn task_exec_reassign_endpoint_accepts_connectionless_http_worker_from_agent_list() {
         let repo = init_repo();
         let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
         let (task_ref, parent_id, _) = seed(&db, repo.path()).await;
@@ -16390,12 +16462,12 @@ mod tests {
         );
 
         // Exactly the payload copied verbatim from `agent_list` — no
-        // {target, model, profile_id} envelope.
+        // {target, model, profile_id} envelope or internal connection_id.
         let raw = serde_json::json!({
             "source_agent": "ClaudeCode",
             "source_session_id": "reassign-session-1",
-            "worker": {"kind": "agent", "agent_type": "Codex"},
-            "reason": "codex is a stronger fit for this rework",
+            "worker": {"kind": "discussion_agent", "agent_type": "LiteLlm", "tier": "default"},
+            "reason": "LiteLLM is the selected HTTP worker for this rework",
         });
         let request: TaskExecReassignRequest = serde_json::from_value(raw).unwrap();
 
@@ -16403,16 +16475,29 @@ mod tests {
             task_exec_reassign(State(state), Path(execution_id.clone()), Json(request)).await;
         assert!(response.success, "{:?}", response.error);
 
+        let child_for_room = child.clone();
         let worker_room = db
             .with_conn(move |conn| {
-                crate::db::discussions::get_discussion(conn, &child)?
+                crate::db::discussions::get_discussion(conn, &child_for_room)?
                     .context("reassigned child room missing")
             })
             .await
             .unwrap();
-        assert_eq!(worker_room.agent, AgentType::Codex);
+        assert_eq!(worker_room.agent, AgentType::LiteLlm);
         assert_eq!(worker_room.tier, ModelTier::Default);
         assert!(worker_room.pin_first_message);
+
+        let reassigned = exec_of(&db, &execution_id).await;
+        assert_eq!(
+            reassigned.worker_target_kind,
+            Some(MessageTargetKind::DiscussionAgent)
+        );
+        assert_eq!(reassigned.worker_agent_type.as_deref(), Some("LiteLlm"));
+        assert_eq!(reassigned.worker_connection_id, None);
+        assert_eq!(
+            reassigned.sub_discussion_id.as_deref(),
+            Some(child.as_str())
+        );
     }
 
     /// The public `worker` field must round-trip for every `MessageTarget` kind
