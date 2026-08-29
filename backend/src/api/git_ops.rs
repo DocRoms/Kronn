@@ -1184,9 +1184,20 @@ pub fn run_git_commit_with_child_lock(
         .map_err(|error| {
             format!("Failed to inherit data-directory lock for git commit: {error}")
         })?;
-    let commit_output = sync_cmd("git")
-        .args(&commit_args)
-        .current_dir(repo_path)
+    let mut commit_command = sync_cmd("git");
+    commit_command.args(&commit_args).current_dir(repo_path);
+    #[cfg(unix)]
+    if let Some(child_lock) = child_lock.as_ref() {
+        crate::core::config::inherit_data_dir_lock_on_command(&mut commit_command, child_lock);
+    }
+    #[cfg(windows)]
+    if let Some(child_lock) = child_lock.as_ref() {
+        crate::core::config::inherit_data_dir_lock_on_command(&mut commit_command, child_lock)
+            .map_err(|error| {
+                format!("Failed to attach data-directory lock to git commit: {error}")
+            })?;
+    }
+    let commit_output = commit_command
         .output()
         .map_err(|e| format!("Failed to run git commit: {}", e))?;
     drop(child_lock);

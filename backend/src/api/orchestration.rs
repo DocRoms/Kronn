@@ -11004,9 +11004,18 @@ mod tests {
         std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o700)).unwrap();
         std::fs::write(repo.path().join("README.md"), "# changed\n").unwrap();
         assert!(git(repo.path(), &["add", "README.md"]).status.success());
-        let mut git_child = crate::core::cmd::sync_cmd("git")
+        let mut git_command = crate::core::cmd::sync_cmd("git");
+        git_command
             .args(["commit", "--no-gpg-sign", "-m", "blocked hook"])
-            .current_dir(repo.path())
+            .current_dir(repo.path());
+        crate::core::config::inherit_data_dir_lock_on_command(&mut git_command, &inherited_lock);
+        let mut git_child = git_command.spawn().unwrap();
+
+        // Spawn an unrelated long-lived child while the targeted Git child is
+        // alive. The duplicate stays CLOEXEC in the parent, so this child must
+        // not accidentally retain the backend lock.
+        let mut unrelated_child = crate::core::cmd::sync_cmd("sh")
+            .args(["-c", "sleep 30"])
             .spawn()
             .unwrap();
         drop(inherited_lock);
@@ -11040,6 +11049,10 @@ mod tests {
         std::fs::write(&release, "done\n").unwrap();
         assert!(git_child.wait().unwrap().success());
         let replacement_lock = crate::core::config::acquire_lock_in(database_dir.path()).unwrap();
+        assert!(
+            unrelated_child.try_wait().unwrap().is_none(),
+            "the unrelated witness must still be alive when the lock becomes recoverable"
+        );
         let reopened = Database::open_path_for_backend_boot(&database_path).unwrap();
         assert_eq!(
             count(
@@ -11051,6 +11064,8 @@ mod tests {
             "once the Git child exits, backend boot may recover its lease"
         );
         drop(replacement_lock);
+        unrelated_child.kill().unwrap();
+        unrelated_child.wait().unwrap();
     }
 
     #[tokio::test]

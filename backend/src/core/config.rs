@@ -276,48 +276,57 @@ pub(crate) fn acquire_lock_in(dir: &std::path::Path) -> Result<std::fs::File> {
 /// commit lease while Git (or one of its hooks) is still alive.
 #[cfg(unix)]
 pub(crate) fn inherit_data_dir_lock_for_child(lock: &std::fs::File) -> Result<std::fs::File> {
-    use std::os::fd::AsRawFd;
+    lock.try_clone()
+        .context("duplicate data-directory lock for Git child")
+}
 
-    let child_lock = lock
-        .try_clone()
-        .context("duplicate data-directory lock for Git child")?;
-    let fd = child_lock.as_raw_fd();
-    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
-    if flags == -1 {
-        return Err(std::io::Error::last_os_error())
-            .context("read Git child lock descriptor flags");
+/// Make only this command inherit `lock`.
+///
+/// The duplicate remains `FD_CLOEXEC` in the parent. `pre_exec` runs after
+/// `fork`, so clearing the flag there cannot leak the lock into an unrelated
+/// command spawned concurrently by another backend thread.
+#[cfg(unix)]
+pub(crate) fn inherit_data_dir_lock_on_command(
+    command: &mut std::process::Command,
+    lock: &std::fs::File,
+) {
+    use std::os::{fd::AsRawFd, unix::process::CommandExt};
+
+    let fd = lock.as_raw_fd();
+    unsafe {
+        command.pre_exec(move || {
+            let flags = libc::fcntl(fd, libc::F_GETFD);
+            if flags == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
     }
-    if unsafe { libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) } == -1 {
-        return Err(std::io::Error::last_os_error())
-            .context("make Git child lock descriptor inheritable");
-    }
-    Ok(child_lock)
 }
 
 #[cfg(windows)]
 pub(crate) fn inherit_data_dir_lock_for_child(lock: &std::fs::File) -> Result<std::fs::File> {
-    use std::os::windows::io::AsRawHandle;
+    lock.try_clone()
+        .context("duplicate exclusive data-directory handle for Git child")
+}
 
-    const HANDLE_FLAG_INHERIT: u32 = 0x0000_0001;
-    extern "system" {
-        fn SetHandleInformation(handle: *mut std::ffi::c_void, mask: u32, flags: u32) -> i32;
-    }
-
-    let child_lock = lock
+/// Pass the lock to exactly this Windows child through its standard-handle
+/// inheritance list. `std::process` prepares an invocation-local inheritable
+/// duplicate for `Stdio`; the parent lock handle itself never becomes globally
+/// inheritable, so concurrent children cannot retain it.
+#[cfg(windows)]
+pub(crate) fn inherit_data_dir_lock_on_command(
+    command: &mut std::process::Command,
+    lock: &std::fs::File,
+) -> Result<()> {
+    let child_standard_handle = lock
         .try_clone()
-        .context("duplicate exclusive data-directory handle for Git child")?;
-    let inherited = unsafe {
-        SetHandleInformation(
-            child_lock.as_raw_handle().cast(),
-            HANDLE_FLAG_INHERIT,
-            HANDLE_FLAG_INHERIT,
-        )
-    };
-    if inherited == 0 {
-        return Err(std::io::Error::last_os_error())
-            .context("make Git child lock handle inheritable");
-    }
-    Ok(child_lock)
+        .context("duplicate data-directory lock as Git child standard handle")?;
+    command.stdin(std::process::Stdio::from(child_standard_handle));
+    Ok(())
 }
 
 #[cfg(not(any(unix, windows)))]
