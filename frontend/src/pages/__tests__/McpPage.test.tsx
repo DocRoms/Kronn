@@ -92,6 +92,11 @@ const makeProject = (id: string, name: string): Project => ({
 });
 
 const wrap = (ui: React.ReactElement) => render(<I18nProvider>{ui}</I18nProvider>);
+const getAddPluginButton = () => {
+  const button = document.querySelector<HTMLButtonElement>('[data-tour-id="add-plugin-btn"]');
+  if (!button) throw new Error('Add plugin button not found');
+  return button;
+};
 
 describe('McpPage', () => {
   it('keeps the built-in plugin visible when no configurable plugin exists', () => {
@@ -183,7 +188,10 @@ describe('McpPage', () => {
     wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={vi.fn()} />);
     await act(async () => {});
     expect(screen.getByText('Plugins').closest('.collection-shell-title')).toHaveTextContent('Plugins · 2');
-    expect(document.querySelector('[data-tour-id="add-plugin-btn"]')).toHaveClass('collection-shell-primary-action');
+    const addPluginButton = document.querySelector('[data-tour-id="add-plugin-btn"]');
+    expect(addPluginButton).toHaveClass('collection-shell-primary-action');
+    expect(addPluginButton).toHaveAccessibleName('Ajouter');
+    expect(addPluginButton).toHaveTextContent(/^$/);
     fireEvent.click(screen.getByRole('button', { name: /Favoris · GitHub Main/ }));
     expect(localStorage.getItem('kronn:collection-favorites:plugins')).toContain('c1');
     fireEvent.click(screen.getByRole('button', { name: 'Favoris' }));
@@ -638,8 +646,7 @@ describe('McpPage', () => {
     ];
     wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={registry} refetchMcps={noop} />);
 
-    // Click the add button (text depends on i18n default = French "Ajouter")
-    const addBtn = screen.getByText('Ajouter');
+    const addBtn = getAddPluginButton();
     fireEvent.click(addBtn);
 
     // The registry entry should now be visible
@@ -960,7 +967,7 @@ describe('McpPage', () => {
       { id: 'mcp-fastly', name: 'Fastly', description: 'CDN server', transport: { Stdio: { command: 'fastly-mcp', args: [] } }, env_keys: [], tags: ['cdn'], token_url: null, token_help: null, publisher: 'Fastly', official: true },
     ];
     wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={registry} refetchMcps={noop} />);
-    fireEvent.click(screen.getByText('Ajouter'));
+    fireEvent.click(getAddPluginButton());
     expect(document.body.textContent).toContain('Officiel');
     expect(document.body.textContent).toContain('Fastly');
   });
@@ -1041,7 +1048,7 @@ describe('McpPage', () => {
       { id: 'mcp-github', name: 'GitHub', description: 'GitHub server', transport: { Stdio: { command: 'npx', args: ['-y', 'server'] } }, env_keys: ['TOKEN'], tags: ['git'], token_url: null, token_help: null, publisher: 'Anthropic', official: false },
     ];
     wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={registry} refetchMcps={noop} />);
-    fireEvent.click(screen.getByText('Ajouter'));
+    fireEvent.click(getAddPluginButton());
     expect(document.body.textContent).toContain('Communautaire');
     expect(document.body.textContent).toContain('Anthropic');
   });
@@ -1167,7 +1174,7 @@ describe('McpPage', () => {
     wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[customApi]} refetchMcps={noop} />);
 
     // Open the drawer
-    const addBtn = screen.getByText(/Ajouter$/);
+    const addBtn = getAddPluginButton();
     fireEvent.click(addBtn);
 
     // Pinned Custom API tile should be present in the registry grid
@@ -1199,7 +1206,7 @@ describe('McpPage', () => {
 
     wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[customApi]} refetchMcps={noop} />);
 
-    fireEvent.click(screen.getByText(/Ajouter$/));
+    fireEvent.click(getAddPluginButton());
     const tile = document.querySelector('[data-tour-id="custom-api-tile"]') as HTMLElement;
     fireEvent.click(tile);
 
@@ -1772,12 +1779,7 @@ describe('McpPage', () => {
   it('import tile: switches Add panel to JSON paste form', async () => {
     const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [] };
     wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
-    // Open the Add MCP panel (button labeled with FR "Ajouter un plugin").
-    const addBtn = Array.from(document.querySelectorAll('button')).find(b =>
-      (b.textContent ?? '').toLowerCase().includes('ajouter')
-    );
-    expect(addBtn).toBeTruthy();
-    fireEvent.click(addBtn!);
+    fireEvent.click(getAddPluginButton());
     const importTile = document.querySelector('[data-testid="mcp-import-json-tile"]') as HTMLElement | null;
     expect(importTile).not.toBeNull();
     fireEvent.click(importTile!);
@@ -1790,10 +1792,7 @@ describe('McpPage', () => {
     (mcpsApi.createConfig as ReturnType<typeof vi.fn>).mockClear();
     (mcpsApi.createConfig as ReturnType<typeof vi.fn>).mockResolvedValueOnce({});
     wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
-    const addBtn = Array.from(document.querySelectorAll('button')).find(b =>
-      (b.textContent ?? '').toLowerCase().includes('ajouter')
-    );
-    fireEvent.click(addBtn!);
+    fireEvent.click(getAddPluginButton());
     fireEvent.click(document.querySelector('[data-testid="mcp-import-json-tile"]') as HTMLElement);
     const textarea = document.querySelector('[data-testid="mcp-import-json-textarea"]') as HTMLTextAreaElement;
     const validJson = JSON.stringify({
@@ -1830,10 +1829,7 @@ describe('McpPage', () => {
     const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [] };
     const callsBefore = (mcpsApi.createConfig as ReturnType<typeof vi.fn>).mock.calls.length;
     wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
-    const addBtn = Array.from(document.querySelectorAll('button')).find(b =>
-      (b.textContent ?? '').toLowerCase().includes('ajouter')
-    );
-    fireEvent.click(addBtn!);
+    fireEvent.click(getAddPluginButton());
     fireEvent.click(document.querySelector('[data-testid="mcp-import-json-tile"]') as HTMLElement);
     const textarea = document.querySelector('[data-testid="mcp-import-json-textarea"]') as HTMLTextAreaElement;
     fireEvent.change(textarea, { target: { value: '{ not valid json' } });
@@ -1848,10 +1844,7 @@ describe('McpPage', () => {
     const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [] };
     const callsBefore = (mcpsApi.createConfig as ReturnType<typeof vi.fn>).mock.calls.length;
     wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
-    const addBtn = Array.from(document.querySelectorAll('button')).find(b =>
-      (b.textContent ?? '').toLowerCase().includes('ajouter')
-    );
-    fireEvent.click(addBtn!);
+    fireEvent.click(getAddPluginButton());
     fireEvent.click(document.querySelector('[data-testid="mcp-import-json-tile"]') as HTMLElement);
     const textarea = document.querySelector('[data-testid="mcp-import-json-textarea"]') as HTMLTextAreaElement;
     fireEvent.change(textarea, { target: { value: JSON.stringify({ base_url: 'https://x.test' }) } });
@@ -1933,9 +1926,7 @@ describe('McpPage', () => {
       // Locate the "Ajouter" / "Add" CTA via its stable test attribute :
       // `data-tour-id="add-plugin-btn"` was added for the onboarding
       // tour and survives localisation changes.
-      const addBtn = document.querySelector('[data-tour-id="add-plugin-btn"]') as HTMLElement | null;
-      if (!addBtn) throw new Error('Add MCP button not found in DOM');
-      await act(async () => { fireEvent.click(addBtn); });
+      await act(async () => { fireEvent.click(getAddPluginButton()); });
     };
 
     it('renders 4 filter pills (All / MCP / API / CLI) with All active by default', async () => {

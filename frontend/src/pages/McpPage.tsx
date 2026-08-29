@@ -2816,7 +2816,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                     <ul><li>{t('contextHelp.plugins.mcp')}</li><li>{t('contextHelp.plugins.api')}</li><li>{t('contextHelp.plugins.cli')}</li></ul>
                     <p className="kr-context-help-agent-note">{t('contextHelp.plugins.agents')}</p>
                   </ContextHelp>
-                  <button type="button" className="collection-shell-icon collection-shell-primary-action" data-tour-id="add-plugin-btn" onClick={() => { setShowAddMcp(true); setAddMcpSelected(null); setAddMcpSearch(''); }} aria-label={t('mcp.add')} title={t('mcp.addTitle')}><Plus size={16} /><span className="sr-only">{t('mcp.add')}</span></button>
+                  <button type="button" className="collection-shell-icon collection-shell-primary-action" data-tour-id="add-plugin-btn" onClick={() => { setShowAddMcp(true); setAddMcpSelected(null); setAddMcpSearch(''); }} aria-label={t('mcp.add')} title={t('mcp.addTitle')}><Plus size={16} /></button>
                 </>}
                 items={visibleConfigs}
                 getId={config => config.id}
