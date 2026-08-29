@@ -158,29 +158,7 @@ describe('PlanningPage', () => {
     expect(second).toHaveAttribute('aria-current', 'true');
   });
 
-  it('quick creation defaults to an idea and preserves the selected priority', async () => {
-    render(
-      <PlanningPage
-        projects={[]}
-        discussions={[]}
-        toast={vi.fn()}
-        onNavigateDiscussion={vi.fn()}
-      />,
-    );
-    const input = await screen.findByPlaceholderText('planning.newIdea');
-    fireEvent.change(input, { target: { value: 'New idea' } });
-    const selects = screen.getAllByRole('combobox');
-    fireEvent.change(selects[0], { target: { value: 'critical' } });
-    fireEvent.keyDown(input, { key: 'Enter' });
-
-    await waitFor(() => expect(mocks.create).toHaveBeenCalledWith({
-      title: 'New idea',
-      priority: 'critical',
-      status: 'idea',
-    }));
-  });
-
-  it('labels quick creation and filter controls for assistive technology', async () => {
+  it('opens task creation from the compact header action and removes the inline form', async () => {
     render(
       <PlanningPage
         projects={[]}
@@ -190,8 +168,70 @@ describe('PlanningPage', () => {
       />,
     );
     await screen.findByText('Upgrade PHP');
-    expect(screen.getByRole('combobox', { name: 'planning.allPriorities' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'planning.quickCreate' })).toBeInTheDocument();
+    expect(screen.queryByPlaceholderText('planning.newIdea')).toBeNull();
+
+    const trigger = screen.getByRole('button', { name: 'planning.quickCreate' });
+    expect(trigger).toHaveClass('collection-shell-icon', 'collection-shell-primary-action');
+    fireEvent.click(trigger);
+
+    const dialog = screen.getByRole('dialog', { name: 'planning.createTitle' });
+    expect(dialog).toHaveAttribute('aria-modal', 'true');
+    const input = screen.getByRole('textbox', { name: 'planning.taskTitle' });
+    expect(input).toHaveFocus();
+    fireEvent.change(input, { target: { value: 'New idea' } });
+    fireEvent.change(screen.getByRole('combobox', { name: 'planning.priorityField' }), {
+      target: { value: 'critical' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'planning.createAction' }));
+
+    await waitFor(() => expect(mocks.create).toHaveBeenCalledWith({
+      title: 'New idea',
+      priority: 'critical',
+      status: 'idea',
+    }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    expect(trigger).toHaveFocus();
+  });
+
+  it('closes task creation with Escape or the backdrop and restores header focus', async () => {
+    render(
+      <PlanningPage
+        projects={[]}
+        discussions={[]}
+        toast={vi.fn()}
+        onNavigateDiscussion={vi.fn()}
+      />,
+    );
+    await screen.findByText('Upgrade PHP');
+    const trigger = screen.getByRole('button', { name: 'planning.quickCreate' });
+
+    fireEvent.click(trigger);
+    const input = screen.getByRole('textbox', { name: 'planning.taskTitle' });
+    fireEvent.change(input, { target: { value: 'Preserved draft' } });
+    fireEvent.keyDown(input, { key: 'Escape' });
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(trigger).toHaveFocus();
+
+    fireEvent.click(trigger);
+    expect(screen.getByRole('textbox', { name: 'planning.taskTitle' })).toHaveValue('Preserved draft');
+    const backdrop = screen.getByRole('dialog').parentElement;
+    expect(backdrop).toHaveClass('planning-create-modal-backdrop');
+    fireEvent.mouseDown(backdrop!);
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(trigger).toHaveFocus();
+    expect(mocks.create).not.toHaveBeenCalled();
+  });
+
+  it('labels filter controls for assistive technology', async () => {
+    render(
+      <PlanningPage
+        projects={[]}
+        discussions={[]}
+        toast={vi.fn()}
+        onNavigateDiscussion={vi.fn()}
+      />,
+    );
+    await screen.findByText('Upgrade PHP');
 
     fireEvent.click(screen.getByRole('button', { name: 'planning.filters' }));
     expect(screen.getByRole('combobox', { name: 'planning.allStatuses' })).toBeInTheDocument();

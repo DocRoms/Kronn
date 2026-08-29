@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Archive,
   Check,
@@ -74,6 +74,7 @@ export function PlanningPage({
   const [tag, setTag] = useState('');
   const [quickTitle, setQuickTitle] = useState('');
   const [quickPriority, setQuickPriority] = useState<PlanningTaskPriority>('normal');
+  const [createModalOpen, setCreateModalOpen] = useState(false);
   const [creating, setCreating] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(initialSelectedTaskId ?? null);
   const [detail, setDetail] = useState<PlanningTaskDetail | null>(null);
@@ -83,6 +84,11 @@ export function PlanningPage({
   const [tasksLoaded, setTasksLoaded] = useState(false);
   const [favoritesOnly, setFavoritesOnly] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const createTriggerRef = useRef<HTMLButtonElement>(null);
+  const createTitleRef = useRef<HTMLInputElement>(null);
+  const createModalRef = useRef<HTMLElement>(null);
+  const createWasOpenRef = useRef(false);
+  const creatingRef = useRef(false);
   const taskIds = useMemo(() => tasks.map(task => task.id), [tasks]);
   const { ids: favoriteIds, toggle: toggleFavorite } = usePersistentIdSet('kronn:collection-favorites:planning', taskIds, tasksLoaded);
 
@@ -131,6 +137,18 @@ export function PlanningPage({
     return () => { cancelled = true; };
   }, [selectedId, toast]);
 
+  useEffect(() => {
+    if (createModalOpen) {
+      createWasOpenRef.current = true;
+      createTitleRef.current?.focus();
+      return;
+    }
+    if (createWasOpenRef.current) {
+      createWasOpenRef.current = false;
+      createTriggerRef.current?.focus();
+    }
+  }, [createModalOpen]);
+
   const tags = useMemo(
     () => [...new Set(tasks.flatMap(task => task.tags))].sort((a, b) => a.localeCompare(b)),
     [tasks],
@@ -161,17 +179,46 @@ export function PlanningPage({
 
   const createQuickTask = async () => {
     const title = quickTitle.trim();
-    if (!title || creating) return;
+    if (!title || creatingRef.current) return;
+    creatingRef.current = true;
     setCreating(true);
     try {
       const created = await planning.create({ title, priority: quickPriority, status: 'idea' });
       setTasks(previous => [...previous, created]);
       setQuickTitle('');
+      setCreateModalOpen(false);
       toast(t('planning.created'), 'success');
     } catch (cause) {
       toast(userError(cause), 'error');
     } finally {
+      creatingRef.current = false;
       setCreating(false);
+    }
+  };
+
+  const closeCreateModal = () => {
+    if (!creatingRef.current) setCreateModalOpen(false);
+  };
+
+  const handleCreateModalKeyDown = (event: React.KeyboardEvent<HTMLElement>) => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      closeCreateModal();
+      return;
+    }
+    if (event.key !== 'Tab') return;
+    const focusable = [...(createModalRef.current?.querySelectorAll<HTMLElement>(
+      'button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])',
+    ) ?? [])];
+    if (focusable.length === 0) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
     }
   };
 
@@ -247,16 +294,28 @@ export function PlanningPage({
           ariaLabel={t('planning.title')}
           title={<><Target size={17} /> {t('planning.title')}</>}
           titleCount={tasks.length}
-          headerActions={<ContextHelp title={t('contextHelp.planning.title')}>
-            <p>{t('contextHelp.planning.intro')}</p>
-            <ul>
-              <li>{t('contextHelp.planning.global')}</li>
-              <li>{t('contextHelp.planning.discussions')}</li>
-              <li>{t('contextHelp.planning.priority')}</li>
-              <li>{t('contextHelp.planning.orchestration')}</li>
-            </ul>
-            <p className="kr-context-help-agent-note">{t('contextHelp.planning.mcp')}</p>
-          </ContextHelp>}
+          headerActions={<>
+            <button
+              ref={createTriggerRef}
+              type="button"
+              className="collection-shell-icon collection-shell-primary-action"
+              onClick={() => setCreateModalOpen(true)}
+              aria-label={t('planning.quickCreate')}
+              title={t('planning.quickCreate')}
+            >
+              <Plus size={16} />
+            </button>
+            <ContextHelp title={t('contextHelp.planning.title')}>
+              <p>{t('contextHelp.planning.intro')}</p>
+              <ul>
+                <li>{t('contextHelp.planning.global')}</li>
+                <li>{t('contextHelp.planning.discussions')}</li>
+                <li>{t('contextHelp.planning.priority')}</li>
+                <li>{t('contextHelp.planning.orchestration')}</li>
+              </ul>
+              <p className="kr-context-help-agent-note">{t('contextHelp.planning.mcp')}</p>
+            </ContextHelp>
+          </>}
           items={tasks}
           getId={task => task.id}
           getLabel={task => `${task.title} ${task.reference} ${task.tags.join(' ')}`}
@@ -305,20 +364,7 @@ export function PlanningPage({
                 <button type="button" className="btn btn-sm" data-active={filtersOpen} onClick={() => setFiltersOpen(value => !value)}>
                   <Filter size={14} /> {t('planning.filters')}
                 </button>
-                <div className="planning-create">
-                  <input value={quickTitle} onChange={event => setQuickTitle(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') void createQuickTask(); }} placeholder={t('planning.newIdea')} maxLength={240} />
-                  <select value={quickPriority} onChange={event => setQuickPriority(event.target.value as PlanningTaskPriority)} aria-label={t('planning.allPriorities')}>
-                    {PRIORITIES.map(value => <option key={value} value={value}>{t(`planning.priority.${value}`)}</option>)}
-                  </select>
-                  <button type="button" onClick={() => void createQuickTask()} disabled={!quickTitle.trim() || creating} aria-label={t('planning.quickCreate')}>
-                    {creating ? <Loader2 size={14} className="spin" /> : <Plus size={14} />}
-                  </button>
-                </div>
               </div>
-              {quickTitle.trim() && duplicateCandidates.length > 0 && <div className="planning-duplicates">
-                <span>{t('planning.possibleDuplicates')}</span>
-                {duplicateCandidates.map(task => <button type="button" key={task.id} onClick={() => selectTask(task.id)}>{task.reference} · {task.title}</button>)}
-              </div>}
               {filtersOpen && <div className="planning-filters">
                 <select value={status} onChange={event => setStatus(event.target.value as PlanningTaskStatus | '')} aria-label={t('planning.allStatuses')}>
                   <option value="">{t('planning.allStatuses')}</option>
@@ -462,6 +508,80 @@ export function PlanningPage({
           }}
         />
       </div>
+      {createModalOpen && (
+        <div
+          className="planning-create-modal-backdrop"
+          role="presentation"
+          onMouseDown={event => {
+            if (event.target === event.currentTarget) closeCreateModal();
+          }}
+        >
+          <section
+            ref={createModalRef}
+            className="planning-create-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="planning-create-modal-title"
+            aria-describedby="planning-create-modal-hint"
+            onKeyDown={handleCreateModalKeyDown}
+          >
+            <header className="planning-create-modal-header">
+              <div className="planning-create-modal-heading">
+                <span className="planning-create-modal-icon" aria-hidden="true"><Target size={16} /></span>
+                <span>
+                  <strong id="planning-create-modal-title">{t('planning.createTitle')}</strong>
+                  <small id="planning-create-modal-hint">{t('planning.createHint')}</small>
+                </span>
+              </div>
+              <button
+                type="button"
+                className="planning-create-modal-close"
+                onClick={closeCreateModal}
+                disabled={creating}
+                aria-label={t('common.close')}
+              >
+                <X size={16} />
+              </button>
+            </header>
+            <form onSubmit={event => { event.preventDefault(); void createQuickTask(); }}>
+              <div className="planning-create-modal-body">
+                <label htmlFor="planning-create-title">{t('planning.taskTitle')}</label>
+                <input
+                  ref={createTitleRef}
+                  id="planning-create-title"
+                  value={quickTitle}
+                  onChange={event => setQuickTitle(event.target.value)}
+                  placeholder={t('planning.newIdea')}
+                  maxLength={240}
+                  required
+                />
+                <label htmlFor="planning-create-priority">{t('planning.priorityField')}</label>
+                <select
+                  id="planning-create-priority"
+                  value={quickPriority}
+                  onChange={event => setQuickPriority(event.target.value as PlanningTaskPriority)}
+                >
+                  {PRIORITIES.map(value => <option key={value} value={value}>{t(`planning.priority.${value}`)}</option>)}
+                </select>
+                {quickTitle.trim() && duplicateCandidates.length > 0 && <div className="planning-duplicates">
+                  <span>{t('planning.possibleDuplicates')}</span>
+                  {duplicateCandidates.map(task => <button type="button" key={task.id} onClick={() => {
+                    selectTask(task.id);
+                    setCreateModalOpen(false);
+                  }}>{task.reference} · {task.title}</button>)}
+                </div>}
+              </div>
+              <footer className="planning-create-modal-footer">
+                <button type="button" className="btn btn-ghost" onClick={closeCreateModal} disabled={creating}>{t('common.cancel')}</button>
+                <button type="submit" className="planning-create-modal-submit" disabled={!quickTitle.trim() || creating}>
+                  {creating ? <Loader2 size={15} className="spin" /> : <Plus size={15} />}
+                  {t('planning.createAction')}
+                </button>
+              </footer>
+            </form>
+          </section>
+        </div>
+      )}
     </div>
   );
 }
