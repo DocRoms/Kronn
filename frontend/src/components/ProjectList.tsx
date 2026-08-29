@@ -545,7 +545,7 @@ export function ProjectList({
                   data-testid="project-section-all"
                   data-expanded={!sectionCollapsed('all')}
                 >
-                  {sectionHeader('all', <Folder size={10} />, t('pages.filter.active'), visibleItems.length)}
+                  {sectionHeader('all', <Folder size={10} />, t('projects.master.filter.all'), visibleItems.length)}
                   {!sectionCollapsed('all') && (visibleItems.length > 0
                     ? visibleItems.map(project => row(project, 'all'))
                     : <div className="project-list-empty">
