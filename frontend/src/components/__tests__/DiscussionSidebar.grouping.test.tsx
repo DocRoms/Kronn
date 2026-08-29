@@ -116,6 +116,12 @@ beforeEach(() => {
 });
 
 describe('DiscussionSidebar — grouping', () => {
+  it('keeps the shared-shell and discussion sizing classes on the sidebar', () => {
+    render(<DiscussionSidebar {...baseProps} />);
+    expect(screen.getByRole('complementary', { name: 'Discussions' }))
+      .toHaveClass('collection-shell-sidebar', 'disc-sidebar');
+  });
+
   it('nests execution rooms once under their principal and keeps orphans visible', async () => {
     const onSelect = vi.fn();
     const projects = [mkProject('p-1', 'Kronn')];

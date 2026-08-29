@@ -287,8 +287,7 @@ export function CollectionShell<TItem>({
         {filters.map(filter => <button key={filter.id} type="button" className="collection-shell-filter" data-active={filter.id === persistence.activeFilterId} aria-pressed={filter.id === persistence.activeFilterId} onClick={() => persistence.onActiveFilterIdChange?.(filter.id === persistence.activeFilterId ? null : filter.id)}>{filter.label}</button>)}
         {(persistence.query || persistence.favoritesOnly || persistence.activeFilterId) && <button type="button" className="collection-shell-clear" onClick={() => { persistence.onQueryChange(''); persistence.onFavoritesOnlyChange(false); persistence.onActiveFilterIdChange?.(null); }}>{labels.clearFilters}</button>}
       </div>}
-      <div className="collection-shell-list" role={slots.renderList ? undefined : 'list'}>
-        {slots.renderList ? slots.renderList(listContext) : <>
+      {slots.renderList ? slots.renderList(listContext) : <div className="collection-shell-list" role="list">
           {visibleItems.map(item => {
             const id = getId(item);
             const multiSelected = selectedIds?.has(id) ?? false;
@@ -300,8 +299,7 @@ export function CollectionShell<TItem>({
             </div>;
           })}
           {visibleItems.length === 0 && <div className="collection-shell-empty">{slots.renderEmpty?.()}</div>}
-        </>}
-      </div>
+        </div>}
       {slots.sidebarFooter}
     </aside>
   );

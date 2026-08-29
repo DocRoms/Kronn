@@ -110,6 +110,7 @@ describe('CollectionShell', () => {
     render(<GroupedFixture />);
     expect(screen.getByText('Custom title row')).toBeInTheDocument();
     expect(screen.getByText('Custom footer')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Grouped One' }).closest('.collection-shell-list')).toBeNull();
     const oneRow = screen.getByRole('button', { name: 'Grouped One' });
     expect(oneRow.closest('li')).toHaveAttribute('data-selected', 'true');
     fireEvent.click(screen.getByRole('button', { name: 'Grouped Two' }));
