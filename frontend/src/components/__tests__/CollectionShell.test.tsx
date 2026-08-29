@@ -204,6 +204,30 @@ describe('CollectionShell', () => {
     expect(screen.getByRole('button', { name: 'Two' })).toHaveFocus();
   });
 
+  it('uses the Discussions-style search zone with inline clear and compact actions', () => {
+    function SearchFixture() {
+      const [query, setQuery] = useState('draft');
+      return <CollectionShell<Item>
+        ariaLabel="Search collection" items={items} getId={item => item.id} getLabel={item => item.name}
+        persistence={{ query, onQueryChange: setQuery, favoritesOnly: false, onFavoritesOnlyChange: () => {} }}
+        selectedId={null} onSelect={() => {}} showSearchClear labels={labels}
+        slots={{
+          sidebarHeaderEnd: <button type="button" className="collection-shell-search-action">Filters</button>,
+          renderDetail: () => null,
+        }}
+      />;
+    }
+    render(<SearchFixture />);
+    const search = screen.getByRole('textbox', { name: 'Search' });
+    expect(search).toHaveClass('collection-shell-search-input');
+    expect(search).toHaveAttribute('aria-keyshortcuts', '/');
+    expect(search.closest('.collection-shell-header')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Filters' }).parentElement).toHaveClass('collection-shell-search-actions');
+    fireEvent.click(screen.getByRole('button', { name: 'Clear filters' }));
+    expect(search).toHaveValue('');
+    expect(screen.queryByRole('button', { name: 'Clear filters' })).toBeNull();
+  });
+
   it('closes the mobile sidebar after selecting an item and lets it reopen', () => {
     render(<Fixture mobile />);
     fireEvent.click(screen.getByRole('button', { name: 'Two' }));
@@ -222,7 +246,10 @@ describe('CollectionShell', () => {
     expect(collectionShellCss).toMatch(/\.collection-shell\s*\{[^}]*position:\s*relative/);
     expect(collectionShellCss).toMatch(/\.collection-shell-titlebar \.collection-shell-icon\s*\{[^}]*border:\s*1px solid var\(--kr-border\)/);
     expect(collectionShellCss).toMatch(/\.collection-shell-titlebar \.collection-shell-primary-action[^}]*\{[^}]*background:\s*var\(--kr-accent\)/);
-    expect(collectionShellCss).toMatch(/\.collection-shell-search:focus-within\s*\{[^}]*outline:\s*2px solid var\(--kr-accent\)/);
+    expect(collectionShellCss).toMatch(/\.collection-shell-header\s*\{[^}]*padding:\s*10px 12px 8px[^}]*background:\s*var\(--kr-bg-surface\)/);
+    expect(collectionShellCss).toMatch(/\.collection-shell-search\s*\{[^}]*min-height:\s*36px[^}]*border:\s*1px solid var\(--kr-border-light\)[^}]*background:\s*var\(--kr-bg-input\)/);
+    expect(collectionShellCss).toMatch(/\.collection-shell-search:focus-within\s*\{[^}]*border-color:\s*var\(--kr-accent\)[^}]*box-shadow:\s*0 0 0 2px rgba\(var\(--kr-accent-rgb\), 0\.12\)/);
+    expect(collectionShellCss).toMatch(/\.collection-shell-search-action\s*\{[^}]*min-height:\s*36px[^}]*background:\s*var\(--kr-accent-bg\)/);
     expect(collectionShellCss).toMatch(/\.collection-shell-open:focus-visible[^{]*\{[^}]*outline:\s*2px solid var\(--kr-accent\)/);
     expect(collectionShellCss).toMatch(/\.collection-shell-collapse-button:focus-visible\s*\{[^}]*outline:\s*2px solid var\(--kr-accent\)/);
     expect(collectionShellCss).toMatch(/\.collection-shell-sidebar-rail:focus-visible\s*\{[^}]*outline:\s*2px solid var\(--kr-accent\)/);

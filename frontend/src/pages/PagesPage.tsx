@@ -535,6 +535,8 @@ export function PagesPage({
         onSelect={id => { const page = pages.find(item => item.id === id); if (page) void select(page); }}
         selectedIds={selectedIds}
         onSelectedIdsChange={setSelectedIds}
+        globalSearchShortcut
+        showSearchClear
         sidebarOpen={sidebarOpen}
         onSidebarOpenChange={setSidebarOpen}
         labels={{ search: t('pages.search'), favorites: t('pages.filter.favorites'), clearFilters: t('pages.clearSearch'), moreActions: t('pages.title'), openCollection: t('collection.openCollection'), closeCollection: t('collection.closeCollection'), selectItem: t('pages.bulk.selected', 1) }}

@@ -106,6 +106,24 @@ describe('PagesPage', () => {
       .toHaveClass('disc-sidebar', 'live-pages-list');
   });
 
+  it('uses the shared Discussions-style search with shortcut and inline clear', async () => {
+    render(<PagesPage />);
+    await screen.findByTestId('live-page-frame');
+
+    const search = screen.getByRole('textbox', { name: 'pages.search' });
+    expect(search).toHaveClass('collection-shell-search-input');
+    expect(search).toHaveAttribute('aria-keyshortcuts', '/');
+
+    fireEvent.keyDown(window, { key: '/' });
+    expect(search).toHaveFocus();
+
+    fireEvent.change(search, { target: { value: 'Adobe' } });
+    const clear = screen.getByRole('button', { name: 'pages.clearSearch' });
+    expect(clear).toHaveClass('collection-shell-search-clear');
+    fireEvent.click(clear);
+    expect(search).toHaveValue('');
+  });
+
   it('collapses to the shared Discussions-style rail and reopens the sidebar', async () => {
     render(<PagesPage />);
     await screen.findByTestId('live-page-frame');

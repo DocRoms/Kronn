@@ -460,18 +460,20 @@ export function CollectionShell<TItem>({
       {slots.beforeSidebarHeader}
       {slots.renderSearch ? slots.renderSearch(searchContext) : <header className="collection-shell-header">
         <div className="collection-shell-search">
-          <Search size={15} aria-hidden="true" />
-          <input ref={searchRef} value={persistence.query} onChange={event => persistence.onQueryChange(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') onSearchSubmit?.(); }} aria-label={labels.search} placeholder={labels.search} />
-          {showSearchClear && persistence.query && <button type="button" className="collection-shell-icon" onClick={() => persistence.onQueryChange('')} aria-label={labels.clearFilters}><X size={15} /></button>}
+          <Search size={13} className="collection-shell-search-icon" aria-hidden="true" />
+          <input className="collection-shell-search-input" ref={searchRef} value={persistence.query} onChange={event => persistence.onQueryChange(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') onSearchSubmit?.(); }} aria-label={labels.search} aria-keyshortcuts="/" placeholder={labels.search} />
+          {showSearchClear && persistence.query && <button type="button" className="collection-shell-search-clear" onClick={() => persistence.onQueryChange('')} aria-label={labels.clearFilters} title={labels.clearFilters}><X size={10} /></button>}
         </div>
-        {title == null && isMobile && <button type="button" className="collection-shell-icon" onClick={() => onSidebarOpenChange?.(false)} aria-label={labels.closeCollection}><X size={17} /></button>}
-        {slots.sidebarHeaderEnd}
+        {(slots.sidebarHeaderEnd || (title == null && isMobile)) && <div className="collection-shell-search-actions">
+          {slots.sidebarHeaderEnd}
+          {title == null && isMobile && <button type="button" className="collection-shell-icon" onClick={() => onSidebarOpenChange?.(false)} aria-label={labels.closeCollection}><X size={17} /></button>}
+        </div>}
       </header>}
       {slots.afterSidebarHeader}
       {showControls && <div className="collection-shell-controls">
         {isFavorite && <button type="button" className="collection-shell-filter" data-active={persistence.favoritesOnly} aria-pressed={persistence.favoritesOnly} onClick={() => persistence.onFavoritesOnlyChange(!persistence.favoritesOnly)}><Star size={14} />{labels.favorites}</button>}
         {filters.map(filter => <button key={filter.id} type="button" className="collection-shell-filter" data-active={filter.id === persistence.activeFilterId} aria-pressed={filter.id === persistence.activeFilterId} onClick={() => persistence.onActiveFilterIdChange?.(filter.id === persistence.activeFilterId ? null : filter.id)}>{filter.label}</button>)}
-        {(persistence.query || persistence.favoritesOnly || persistence.activeFilterId) && <button type="button" className="collection-shell-clear" onClick={() => { persistence.onQueryChange(''); persistence.onFavoritesOnlyChange(false); persistence.onActiveFilterIdChange?.(null); }}>{labels.clearFilters}</button>}
+        {((!showSearchClear && persistence.query) || persistence.favoritesOnly || persistence.activeFilterId) && <button type="button" className="collection-shell-clear" onClick={() => { persistence.onQueryChange(''); persistence.onFavoritesOnlyChange(false); persistence.onActiveFilterIdChange?.(null); }}>{labels.clearFilters}</button>}
       </div>}
       {slots.renderList ? slots.renderList(listContext) : <ul className="collection-shell-list">
           {visibleItems.map(item => {
