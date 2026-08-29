@@ -11,7 +11,7 @@ use kronn::{
     build_router,
     core::{config, mcp_scanner},
     db::Database,
-    models::ApiKey,
+    models::{ApiKey, AppConfig},
     workflows::WorkflowEngine,
     AppState, DEFAULT_MAX_CONCURRENT_AGENTS,
 };
@@ -522,11 +522,20 @@ fn enrich_path() {
 
 // ── Backend ────────────────────────────────────────────────────────────────
 
+fn desktop_app_state(
+    config: Arc<RwLock<AppConfig>>,
+    database: Arc<Database>,
+    max_agents: usize,
+    data_dir_lock: std::fs::File,
+) -> AppState {
+    AppState::new_defaults(config, database, max_agents).with_data_dir_lock(data_dir_lock)
+}
+
 /// Start the Kronn backend server on a given port (runs in a tokio task)
 async fn start_backend(
     port: u16,
     dist_dir: std::path::PathBuf,
-    _data_dir_lock: std::fs::File,
+    data_dir_lock: std::fs::File,
 ) -> anyhow::Result<()> {
     tracing::info!("Starting embedded Kronn backend on port {}", port);
 
@@ -576,7 +585,7 @@ async fn start_backend(
     // Build state via the shared factory — any new AppState field gets
     // picked up here automatically (see kronn::AppState::new_defaults).
     let config_arc = Arc::new(RwLock::new(app_config));
-    let state = AppState::new_defaults(config_arc, database.clone(), max_agents);
+    let state = desktop_app_state(config_arc, database.clone(), max_agents, data_dir_lock);
 
     // Fire up the kronn-docs sidecar in the background — best-effort,
     // skips gracefully if the Python venv isn't set up.
@@ -991,6 +1000,19 @@ mod enrich_path_tests {
         let timeout = BACKEND_STARTUP_POLL * BACKEND_STARTUP_ATTEMPTS as u32;
         assert!(timeout >= std::time::Duration::from_secs(60));
         assert!(timeout <= std::time::Duration::from_secs(90));
+    }
+
+    #[test]
+    fn desktop_backend_retains_the_data_directory_lock_in_app_state() {
+        let lock = std::fs::File::open(std::env::current_exe().unwrap()).unwrap();
+        let state = desktop_app_state(
+            Arc::new(RwLock::new(config::default_config())),
+            Arc::new(Database::open_in_memory().unwrap()),
+            1,
+            lock,
+        );
+
+        assert!(state.data_dir_lock.is_some());
     }
 
     #[test]

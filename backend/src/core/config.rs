@@ -234,18 +234,26 @@ pub fn acquire_data_dir_lock() -> Result<std::fs::File> {
 }
 
 pub(crate) fn acquire_lock_in(dir: &std::path::Path) -> Result<std::fs::File> {
+    #[cfg(not(windows))]
     use fs2::FileExt;
+    #[cfg(windows)]
+    use std::os::windows::fs::OpenOptionsExt;
     std::fs::create_dir_all(dir)?;
     let lock_path = dir.join(".kronn.lock");
-    let f = std::fs::OpenOptions::new()
+    let mut options = std::fs::OpenOptions::new();
+    options
         .create(true)
         // Pure lock file — its (empty) content is irrelevant, only the flock
         // matters. Explicit no-truncate keeps clippy's suspicious-open-options
         // happy without implying we ever write to it.
         .truncate(false)
-        .write(true)
+        .write(true);
+    #[cfg(windows)]
+    options.share_mode(0);
+    let f = options
         .open(&lock_path)
         .with_context(|| format!("open data-dir lock {}", lock_path.display()))?;
+    #[cfg(not(windows))]
     f.try_lock_exclusive().map_err(|e| {
         anyhow::anyhow!(
             "another Kronn instance is already running against this data directory \
@@ -297,7 +305,7 @@ pub(crate) fn inherit_data_dir_lock_for_child(lock: &std::fs::File) -> Result<st
 
     let child_lock = lock
         .try_clone()
-        .context("duplicate data-directory lock for Git child")?;
+        .context("duplicate exclusive data-directory handle for Git child")?;
     let inherited = unsafe {
         SetHandleInformation(
             child_lock.as_raw_handle().cast(),

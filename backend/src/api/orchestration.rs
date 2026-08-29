@@ -10959,7 +10959,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn surviving_git_child_blocks_restart_reap_until_it_exits() {
+    async fn surviving_git_hook_blocks_restart_reap_until_it_exits() {
         let repo = init_repo();
         let database_dir = tempfile::tempdir().unwrap();
         let database_path = database_dir.path().join("restart.sqlite");
@@ -10987,22 +10987,43 @@ mod tests {
         let backend_lock = crate::core::config::acquire_lock_in(database_dir.path()).unwrap();
         let inherited_lock =
             crate::core::config::inherit_data_dir_lock_for_child(&backend_lock).unwrap();
-        let release = database_dir.path().join("release-git-child");
-        let mut git_child = crate::core::cmd::sync_cmd("sh")
-            .args([
-                "-c",
-                "while [ ! -e \"$1\" ]; do sleep 0.01; done",
-                "--",
-                release.to_str().unwrap(),
-            ])
+        let hook_started = database_dir.path().join("hook-started");
+        let release = database_dir.path().join("release-git-hook");
+        let hooks = repo.path().join(".git/hooks");
+        let hook = hooks.join("pre-commit");
+        std::fs::write(
+            &hook,
+            format!(
+                "#!/bin/sh\n: > '{}'\nwhile [ ! -e '{}' ]; do sleep 0.01; done\n",
+                hook_started.display(),
+                release.display()
+            ),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(repo.path().join("README.md"), "# changed\n").unwrap();
+        assert!(git(repo.path(), &["add", "README.md"]).status.success());
+        let mut git_child = crate::core::cmd::sync_cmd("git")
+            .args(["commit", "--no-gpg-sign", "-m", "blocked hook"])
+            .current_dir(repo.path())
             .spawn()
             .unwrap();
         drop(inherited_lock);
         drop(backend_lock);
 
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !hook_started.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            hook_started.exists(),
+            "the real Git pre-commit hook must start"
+        );
+
         assert!(
             crate::core::config::acquire_lock_in(database_dir.path()).is_err(),
-            "a replacement backend must not acquire the lock or reap leases while a Git child survives"
+            "a replacement backend must not acquire the lock or reap leases while a Git hook survives"
         );
         let still_live = Database::open_path(&database_path).unwrap();
         assert_eq!(
@@ -11012,7 +11033,7 @@ mod tests {
             )
             .await,
             1,
-            "the blocked replacement has not reaped the active child lease"
+            "the blocked replacement has not reaped the active Git-hook lease"
         );
         drop(still_live);
 
