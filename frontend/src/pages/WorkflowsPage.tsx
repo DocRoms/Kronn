@@ -17,7 +17,7 @@ import {
   Clock, GitBranch, Zap, Eye, Layers, X, Square,
   ToggleLeft, ToggleRight, Star,
   Upload, Download, AlertTriangle, Workflow as WorkflowIcon,
-  PlugZap, MessageSquareText, TerminalSquare,
+  PlugZap, MessageSquareText, TerminalSquare, SlidersHorizontal,
 } from 'lucide-react';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { WorkflowDetail } from '../components/workflows/WorkflowDetail';
@@ -244,6 +244,8 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   const [automationQuery, setAutomationQuery] = useState('');
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [automationProjectFilter, setAutomationProjectFilter] = useState('all');
+  const [showAutomationProjectFilter, setShowAutomationProjectFilter] = useState(false);
+  const automationProjectFilterButtonRef = useRef<HTMLButtonElement>(null);
   const [collapsedAutomationSections, setCollapsedAutomationSections] = useState<Set<AutomationSection>>(
     readCollapsedAutomationSections,
   );
@@ -1872,7 +1874,38 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
             <CollectionSidebarCollapseButton label={t('collection.closeCollection')} onCollapse={() => setSidebarOpen(false)} />
           </div>
           </div>,
-          afterSidebarHeader: <div className="automation-sidebar-search">
+          sidebarHeaderEnd: <button
+            ref={automationProjectFilterButtonRef}
+            type="button"
+            className="collection-shell-search-action"
+            data-active={automationProjectFilter !== 'all'}
+            onClick={() => setShowAutomationProjectFilter(open => !open)}
+            onKeyDown={event => {
+              if (event.key === 'Escape' && showAutomationProjectFilter) {
+                event.preventDefault();
+                setShowAutomationProjectFilter(false);
+              }
+            }}
+            aria-label={t('automation.projectFilter')}
+            title={t('automation.projectFilter')}
+            aria-expanded={showAutomationProjectFilter}
+            aria-controls={showAutomationProjectFilter ? 'automation-project-filter-options' : undefined}
+          >
+            <SlidersHorizontal size={12} aria-hidden="true" />
+            <span>{t('disc.sidebar.filters')}</span>
+            {automationProjectFilter !== 'all' && <strong aria-hidden="true">1</strong>}
+          </button>,
+          afterSidebarHeader: showAutomationProjectFilter ? <div
+            id="automation-project-filter-options"
+            className="collection-shell-search-options"
+            onKeyDown={event => {
+              if (event.key === 'Escape') {
+                event.preventDefault();
+                setShowAutomationProjectFilter(false);
+                automationProjectFilterButtonRef.current?.focus();
+              }
+            }}
+          >
             <select
               className="automation-project-filter"
               value={automationProjectFilter}
@@ -1883,7 +1916,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
               <option value="__global__">{t('disc.general')}</option>
               {projects.map(project => <option key={project.id} value={project.id}>{project.name}</option>)}
             </select>
-          </div>,
+          </div> : null,
           renderList: ({ visibleItems, getRowProps }) => {
             const sidebarWorkflows = visibleItems.flatMap(resource => resource.workflow ? [resource.workflow] : []);
             const sidebarQuickApis = visibleItems.flatMap(resource => resource.quickApi ? [resource.quickApi] : []);

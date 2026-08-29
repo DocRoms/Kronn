@@ -264,9 +264,30 @@ describe('WorkflowsPage', () => {
     fireEvent.keyDown(window, { key: '/' });
     expect(within(sidebar).getByRole('textbox', { name: 'Rechercher une automatisation…' })).toHaveFocus();
 
-    fireEvent.change(within(sidebar).getByRole('combobox', { name: 'Filtrer les automatisations par projet' }), {
+    const projectFilterButton = within(sidebar).getByRole('button', { name: 'Filtrer les automatisations par projet' });
+    expect(projectFilterButton).toHaveAttribute('aria-expanded', 'false');
+    expect(projectFilterButton).not.toHaveAttribute('aria-controls');
+    expect(within(sidebar).queryByRole('combobox', { name: 'Filtrer les automatisations par projet' })).toBeNull();
+
+    fireEvent.click(projectFilterButton);
+    expect(projectFilterButton).toHaveAttribute('aria-expanded', 'true');
+    expect(projectFilterButton).toHaveAttribute('aria-controls', 'automation-project-filter-options');
+    const projectFilter = within(sidebar).getByRole('combobox', { name: 'Filtrer les automatisations par projet' });
+    expect(projectFilter.closest('.collection-shell-search-options')).toHaveAttribute(
+      'id',
+      'automation-project-filter-options',
+    );
+    fireEvent.change(projectFilter, {
       target: { value: 'p-alpha' },
     });
+    expect(projectFilterButton).toHaveAttribute('data-active', 'true');
+    expect(projectFilterButton).toHaveTextContent('1');
+
+    fireEvent.keyDown(projectFilter, { key: 'Escape' });
+    expect(projectFilterButton).toHaveAttribute('aria-expanded', 'false');
+    expect(projectFilterButton).toHaveFocus();
+    expect(within(sidebar).queryByRole('combobox', { name: 'Filtrer les automatisations par projet' })).toBeNull();
+
     fireEvent.click(within(sidebar).getByRole('button', { name: 'Effacer la recherche' }));
     expect(within(sidebar).getByRole('button', { name: 'Ouvrir Alpha report' })).toBeInTheDocument();
     expect(within(sidebar).queryByRole('button', { name: 'Ouvrir Beta report' })).toBeNull();

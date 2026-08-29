@@ -27,14 +27,6 @@
   scrollbar-gutter: stable;
 }
 
-.automation-sidebar-search {
-  display: grid;
-  gap: 7px;
-  padding: 0 12px 8px;
-  border-bottom: 1px solid var(--kr-border-ghost);
-  background: var(--kr-bg-surface);
-}
-
 .automation-project-filter {
   width: 100%;
   min-height: 30px;
