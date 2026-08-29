@@ -8,7 +8,7 @@
 //      (the same generic form handles it).
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, cleanup, within } from '@testing-library/react';
 import { buildApiMock } from '../../../test/apiMock';
 import type { ExternalApiConnectionView } from '../../../lib/api';
 
@@ -86,6 +86,9 @@ describe('ExternalApiSection', () => {
         origin_preset: 'nvidia',
         endpoint: 'https://integrate.api.nvidia.com',
         has_credential: true,
+        economy_model: 'nvidia/nano',
+        default_model: 'nvidia/super',
+        reasoning_model: 'nvidia/ultra',
       }),
       conn({
         id: 'groq-1',
@@ -103,6 +106,18 @@ describe('ExternalApiSection', () => {
     const endpoints = cards.map(c => c.querySelector('.set-ext-api-conn-endpoint')?.textContent);
     expect(endpoints).toContain('https://integrate.api.nvidia.com');
     expect(endpoints).toContain('https://api.groq.com/openai/v1');
+
+    const nvidiaCard = screen.getByRole('group', { name: 'NVIDIA' });
+    expect(within(nvidiaCard).getByText('@nvidia')).toBeInTheDocument();
+    expect(within(nvidiaCard).getByText('config.extApi.keyConfigured')).toBeInTheDocument();
+    const tierGroup = within(nvidiaCard).getByRole('group', { name: 'disc.modelTier' });
+    expect(within(tierGroup).getByText('nvidia/nano')).toBeInTheDocument();
+    expect(within(tierGroup).getByText('nvidia/super')).toBeInTheDocument();
+    expect(within(tierGroup).getByText('nvidia/ultra')).toBeInTheDocument();
+    expect(within(nvidiaCard).getByText('https://integrate.api.nvidia.com').closest('.set-ext-api-conn-endpoint-row'))
+      .toBeInTheDocument();
+    expect(screen.getByTestId('ext-api-add-connection').querySelector('.set-ext-api-add-icon'))
+      .toBeInTheDocument();
   });
 
   it('pre-fills the endpoint from the chosen preset (DoD 1)', async () => {

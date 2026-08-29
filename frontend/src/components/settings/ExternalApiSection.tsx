@@ -22,7 +22,19 @@ import type {
 import { userError } from '../../lib/userError';
 import type { ToastFn } from '../../hooks/useToast';
 import { ContextHelp } from '../ContextHelp';
-import { Plus, Trash2, Save, X, Pencil, Loader2, Check, Key } from 'lucide-react';
+import {
+  Check,
+  Key,
+  Link2,
+  Loader2,
+  Pencil,
+  PlugZap,
+  Plus,
+  Save,
+  Server,
+  Trash2,
+  X,
+} from 'lucide-react';
 import '../../pages/SettingsPage.css';
 
 interface ExternalApiSectionProps {
@@ -112,6 +124,7 @@ function ConnectionForm({
   onTest,
   onConnectionChange,
   modelCostSuffix,
+  title,
 }: {
   t: ExternalApiSectionProps['t'];
   form: FormState;
@@ -124,6 +137,7 @@ function ConnectionForm({
   onTest: () => void;
   onConnectionChange: (updater: (prev: FormState) => FormState) => void;
   modelCostSuffix?: (model: string) => string;
+  title: string;
 }) {
   const presets: { id: ExternalApiPreset; label: string }[] = [
     { id: 'litellm', label: 'LiteLLM' },
@@ -140,6 +154,14 @@ function ConnectionForm({
 
   return (
     <div className="set-ext-api-form" data-testid="ext-api-form">
+      <div className="set-ext-api-form-head">
+        <span className="set-ext-api-form-icon" aria-hidden="true"><PlugZap size={16} /></span>
+        <div>
+          <strong>{title}</strong>
+          <small>{t('config.externalApiHelp')}</small>
+        </div>
+      </div>
+
       <div className="set-ext-api-presets" role="radiogroup" aria-label={t('config.extApi.preset')}>
         {presets.map(p => (
           <button
@@ -160,64 +182,67 @@ function ConnectionForm({
               }))
             }
           >
+            <span className="set-ext-api-preset-mark" aria-hidden="true" />
             {p.label}
           </button>
         ))}
       </div>
 
-      <label className="set-litellm-field">
-        <span className="set-litellm-label">{t('config.extApi.displayName')}</span>
-        <input
-          className="set-litellm-input"
-          type="text"
-          value={form.display_name}
-          data-testid="ext-api-display-name"
-          onChange={e => setForm(prev => ({ ...prev, display_name: e.target.value }))}
-          aria-label={t('config.extApi.displayName')}
-        />
-      </label>
+      <div className="set-ext-api-fields">
+        <label className="set-litellm-field">
+          <span className="set-litellm-label">{t('config.extApi.displayName')}</span>
+          <input
+            className="set-litellm-input"
+            type="text"
+            value={form.display_name}
+            data-testid="ext-api-display-name"
+            onChange={e => setForm(prev => ({ ...prev, display_name: e.target.value }))}
+            aria-label={t('config.extApi.displayName')}
+          />
+        </label>
 
-      <label className="set-litellm-field">
-        <span className="set-litellm-label">{t('config.extApi.mentionAlias')}</span>
-        <input
-          className="set-litellm-input"
-          type="text"
-          placeholder="@groq"
-          value={form.mention_alias}
-          data-testid="ext-api-mention-alias"
-          onChange={e => setForm(prev => ({ ...prev, mention_alias: e.target.value }))}
-          aria-label={t('config.extApi.mentionAlias')}
-        />
-        <small className="set-hint">{t('config.extApi.aliasHint')}</small>
-      </label>
+        <label className="set-litellm-field">
+          <span className="set-litellm-label">{t('config.extApi.mentionAlias')}</span>
+          <input
+            className="set-litellm-input"
+            type="text"
+            placeholder="@groq"
+            value={form.mention_alias}
+            data-testid="ext-api-mention-alias"
+            onChange={e => setForm(prev => ({ ...prev, mention_alias: e.target.value }))}
+            aria-label={t('config.extApi.mentionAlias')}
+          />
+          <small className="set-hint">{t('config.extApi.aliasHint')}</small>
+        </label>
 
-      <label className="set-litellm-field">
-        <span className="set-litellm-label">{t('liteLlm.endpointLabel')}</span>
-        <input
-          className="set-litellm-input"
-          type="url"
-          inputMode="url"
-          placeholder="https://api.example.com/v1"
-          value={form.endpoint}
-          data-testid="ext-api-endpoint"
-          onChange={e => onConnectionChange(prev => ({ ...prev, endpoint: e.target.value }))}
-          aria-label={t('liteLlm.endpointLabel')}
-        />
-      </label>
+        <label className="set-litellm-field">
+          <span className="set-litellm-label">{t('liteLlm.endpointLabel')}</span>
+          <input
+            className="set-litellm-input"
+            type="url"
+            inputMode="url"
+            placeholder="https://api.example.com/v1"
+            value={form.endpoint}
+            data-testid="ext-api-endpoint"
+            onChange={e => onConnectionChange(prev => ({ ...prev, endpoint: e.target.value }))}
+            aria-label={t('liteLlm.endpointLabel')}
+          />
+        </label>
 
-      <label className="set-litellm-field">
-        <span className="set-litellm-label">{t('liteLlm.keyLabel')}</span>
-        <input
-          className="set-litellm-input"
-          type="password"
-          autoComplete="off"
-          placeholder={t('liteLlm.keyOptional')}
-          value={form.api_key}
-          data-testid="ext-api-key"
-          onChange={e => onConnectionChange(prev => ({ ...prev, api_key: e.target.value, keyTouched: true }))}
-          aria-label={t('liteLlm.keyLabel')}
-        />
-      </label>
+        <label className="set-litellm-field">
+          <span className="set-litellm-label">{t('liteLlm.keyLabel')}</span>
+          <input
+            className="set-litellm-input"
+            type="password"
+            autoComplete="off"
+            placeholder={t('liteLlm.keyOptional')}
+            value={form.api_key}
+            data-testid="ext-api-key"
+            onChange={e => onConnectionChange(prev => ({ ...prev, api_key: e.target.value, keyTouched: true }))}
+            aria-label={t('liteLlm.keyLabel')}
+          />
+        </label>
+      </div>
 
       <div className="set-ext-api-test-actions">
         <button type="button" className="set-btn-secondary" disabled={!form.endpoint.trim() || testing} onClick={onTest} data-testid="ext-api-test">
@@ -230,46 +255,49 @@ function ConnectionForm({
         ) : <p className="set-hint" data-testid="ext-api-test-required">{t('config.extApi.testRequired')}</p>}
       </div>
 
-      <div className="set-ext-api-tiers">
-        {TIERS.map(tier => {
-          // Explicit per-tier read/write keeps the field keys concrete (no
-          // computed-union key), so the form type stays exact.
-          const value =
-            tier === 'economy'
-              ? form.economy_model
-              : tier === 'default'
-                ? form.default_model
-                : form.reasoning_model;
-          const setValue = (next: string) =>
-            setForm(prev =>
+      <div className="set-ext-api-tier-panel">
+        <div className="set-ext-api-tier-panel-title">{t('disc.modelTier')}</div>
+        <div className="set-ext-api-tiers">
+          {TIERS.map(tier => {
+            // Explicit per-tier read/write keeps the field keys concrete (no
+            // computed-union key), so the form type stays exact.
+            const value =
               tier === 'economy'
-                ? { ...prev, economy_model: next }
+                ? form.economy_model
                 : tier === 'default'
-                  ? { ...prev, default_model: next }
-                  : { ...prev, reasoning_model: next },
+                  ? form.default_model
+                  : form.reasoning_model;
+            const setValue = (next: string) =>
+              setForm(prev =>
+                tier === 'economy'
+                  ? { ...prev, economy_model: next }
+                  : tier === 'default'
+                    ? { ...prev, default_model: next }
+                    : { ...prev, reasoning_model: next },
+              );
+            return (
+              <label className="set-ext-api-tier" key={tier} data-tier={tier}>
+                <span className="set-ext-api-tier-label">
+                  <span aria-hidden="true">{TIER_ICON[tier]}</span> {t(`disc.tier.${tier}`)}
+                </span>
+                <select
+                  className="set-tier-input"
+                  value={value}
+                  data-testid={`ext-api-tier-${tier}`}
+                  onChange={e => setValue(e.target.value)}
+                  aria-label={t(`disc.tier.${tier}`)}
+                  disabled={!testResult?.ok || testResult.models.length === 0}
+                >
+                  <option value="">{testResult?.ok ? t('config.defaultModel') : t('config.extApi.testRequired')}</option>
+                  {testResult?.models.map(model => <option key={model} value={model}>{model}</option>)}
+                </select>
+                {value && modelCostSuffix ? (
+                  <span className="text-2xs text-muted">{modelCostSuffix(value)}</span>
+                ) : null}
+              </label>
             );
-          return (
-            <label className="set-ext-api-tier" key={tier}>
-              <span className="set-ext-api-tier-label">
-                <span aria-hidden="true">{TIER_ICON[tier]}</span> {t(`disc.tier.${tier}`)}
-              </span>
-              <select
-                className="set-tier-input"
-                value={value}
-                data-testid={`ext-api-tier-${tier}`}
-                onChange={e => setValue(e.target.value)}
-                aria-label={t(`disc.tier.${tier}`)}
-                disabled={!testResult?.ok || testResult.models.length === 0}
-              >
-                <option value="">{testResult?.ok ? t('config.defaultModel') : t('config.extApi.testRequired')}</option>
-                {testResult?.models.map(model => <option key={model} value={model}>{model}</option>)}
-              </select>
-              {value && modelCostSuffix ? (
-                <span className="text-2xs text-muted">{modelCostSuffix(value)}</span>
-              ) : null}
-            </label>
-          );
-        })}
+          })}
+        </div>
       </div>
 
       <div className="set-ext-api-form-actions">
@@ -481,12 +509,17 @@ export function ExternalApiSection({ t, toast, modelCostSuffix }: ExternalApiSec
       reasoning: c.reasoning_model,
     };
     return (
-      <div className="set-ext-api-conn-tiers">
+      <div className="set-ext-api-conn-tiers" role="group" aria-label={t('disc.modelTier')}>
         {TIERS.map(tier => (
-          <span key={tier} className="set-ext-api-conn-tier" title={t(`disc.tier.${tier}`)}>
-            <span aria-hidden="true">{TIER_ICON[tier]}</span>{' '}
-            <code>{models[tier] ?? t('config.defaultModel')}</code>
-          </span>
+          <div key={tier} className="set-ext-api-conn-tier" data-tier={tier}>
+            <span className="set-ext-api-conn-tier-label">
+              <span aria-hidden="true">{TIER_ICON[tier]}</span>
+              {t(`disc.tier.${tier}`)}
+            </span>
+            <code title={models[tier] ?? t('config.defaultModel')}>
+              {models[tier] ?? t('config.defaultModel')}
+            </code>
+          </div>
         ))}
       </div>
     );
@@ -495,7 +528,11 @@ export function ExternalApiSection({ t, toast, modelCostSuffix }: ExternalApiSec
   return (
     <div className="set-ext-api-section" data-testid="external-api-section">
       <div className="set-external-api-heading">
-        <span>{t('config.externalApiTitle')}</span>
+        <span className="set-external-api-heading-icon" aria-hidden="true"><PlugZap size={17} /></span>
+        <span className="set-external-api-heading-copy">
+          <strong>{t('config.externalApiTitle')}</strong>
+          <small>{t('config.externalApiHelp')}</small>
+        </span>
         <ContextHelp title={t('config.externalApiTitle')}>
           <p>{t('config.externalApiHelp')}</p>
         </ContextHelp>
@@ -508,7 +545,7 @@ export function ExternalApiSection({ t, toast, modelCostSuffix }: ExternalApiSec
       ) : (
         <div className="set-ext-api-list" data-testid="ext-api-connections">
           {connections.length === 0 && !adding && (
-            <p className="set-hint" data-testid="ext-api-empty">
+            <p className="set-hint set-ext-api-empty" data-testid="ext-api-empty">
               {t('config.extApi.noConnections')}
             </p>
           )}
@@ -528,6 +565,7 @@ export function ExternalApiSection({ t, toast, modelCostSuffix }: ExternalApiSec
                 onTest={() => void testConnection()}
                 onConnectionChange={changeConnection}
                 modelCostSuffix={modelCostSuffix}
+                title={c.display_name}
               />
             ) : (
               <div
@@ -536,19 +574,28 @@ export function ExternalApiSection({ t, toast, modelCostSuffix }: ExternalApiSec
                 data-testid="ext-api-connection"
                 data-connection-id={c.id}
                 data-preset={c.origin_preset}
+                role="group"
+                aria-label={c.display_name}
               >
                 <div className="set-ext-api-conn-head">
-                  <span className="set-ext-api-conn-name">{c.display_name}</span>
-                  <span className="set-ext-api-conn-alias">@{c.mention_alias}</span>
-                  <span className="set-ext-api-conn-preset">{presetLabel(c.origin_preset)}</span>
-                  <span
-                    className="set-ext-api-conn-cred"
-                    data-has-credential={c.has_credential}
-                    title={c.has_credential ? t('common.copied') : t('liteLlm.keyOptional')}
-                  >
-                    {c.has_credential ? <Check size={11} /> : <Key size={11} />}
-                  </span>
+                  <div className="set-ext-api-conn-identity">
+                    <span className="set-ext-api-conn-icon" aria-hidden="true"><Server size={16} /></span>
+                    <span className="set-ext-api-conn-heading">
+                      <span className="set-ext-api-conn-title-row">
+                        <span className="set-ext-api-conn-name">{c.display_name}</span>
+                        <span className="set-ext-api-conn-preset">{presetLabel(c.origin_preset)}</span>
+                      </span>
+                      <span className="set-ext-api-conn-alias">@{c.mention_alias}</span>
+                    </span>
+                  </div>
                   <div className="set-ext-api-conn-actions">
+                    <span
+                      className="set-ext-api-conn-cred"
+                      data-has-credential={c.has_credential}
+                    >
+                      {c.has_credential ? <Check size={11} /> : <Key size={11} />}
+                      {t(c.has_credential ? 'config.extApi.keyConfigured' : 'config.extApi.keyOptionalStatus')}
+                    </span>
                     <button
                       type="button"
                       className="set-icon-btn"
@@ -563,7 +610,7 @@ export function ExternalApiSection({ t, toast, modelCostSuffix }: ExternalApiSec
                       type="button"
                       className="set-icon-btn"
                       onClick={() => startEdit(c)}
-                      aria-label={t('common.save')}
+                      aria-label={t('config.extApi.editConnection')}
                       data-testid={`ext-api-edit-${c.id}`}
                     >
                       <Pencil size={11} />
@@ -579,7 +626,15 @@ export function ExternalApiSection({ t, toast, modelCostSuffix }: ExternalApiSec
                     </button>
                   </div>
                 </div>
-                {c.endpoint && <code className="set-ext-api-conn-endpoint">{c.endpoint}</code>}
+                {c.endpoint && (
+                  <div className="set-ext-api-conn-endpoint-row">
+                    <Link2 size={13} aria-hidden="true" />
+                    <span>
+                      <small>{t('liteLlm.endpointLabel')}</small>
+                      <code className="set-ext-api-conn-endpoint" title={c.endpoint}>{c.endpoint}</code>
+                    </span>
+                  </div>
+                )}
                 {savedTests[c.id] ? (
                   <p className="set-hint" data-testid={`ext-api-saved-test-result-${c.id}`} data-status={savedTests[c.id]?.status}>
                     {savedTests[c.id]?.hint ?? (
@@ -612,6 +667,7 @@ export function ExternalApiSection({ t, toast, modelCostSuffix }: ExternalApiSec
               onTest={() => void testConnection()}
               onConnectionChange={changeConnection}
               modelCostSuffix={modelCostSuffix}
+              title={t('config.extApi.addConnection')}
             />
           ) : (
             <button
@@ -620,7 +676,8 @@ export function ExternalApiSection({ t, toast, modelCostSuffix }: ExternalApiSec
               onClick={startAdd}
               data-testid="ext-api-add-connection"
             >
-              <Plus size={12} /> {t('config.extApi.addConnection')}
+              <span className="set-ext-api-add-icon" aria-hidden="true"><Plus size={15} /></span>
+              <span>{t('config.extApi.addConnection')}</span>
             </button>
           )}
         </div>
