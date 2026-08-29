@@ -256,15 +256,16 @@ describe('Dashboard — project list', () => {
     expect(document.body.textContent!).not.toContain('go-service');
   });
 
-  it('renders "New project" button in nav bar', async () => {
+  it('renders the new-project action in the project aside instead of the global nav', async () => {
     vi.mocked(projectsApi.list).mockResolvedValue([]);
     vi.mocked(discussionsApi.list).mockResolvedValue([]);
 
     await wrap(<Dashboard onReset={vi.fn()} />);
 
-    // The nav bar shows the project-creation button (French: "Ajouter un projet")
-    const body = document.body.textContent!;
-    expect(body).toContain('Ajouter un projet');
+    const newProjectButton = document.querySelector('[data-tour-id="new-project-btn"]');
+    expect(newProjectButton).toBeTruthy();
+    expect(newProjectButton?.closest('.collection-shell-titlebar')).toBeTruthy();
+    expect(newProjectButton?.closest('nav')).toBeNull();
   });
 });
 
@@ -325,9 +326,7 @@ describe('Dashboard — Ctrl+Enter keyboard shortcuts', () => {
 
     await wrap(<Dashboard onReset={vi.fn()} />);
 
-    // Find and click the new project button (contains "Nouveau projet" in FR)
-    const allButtons = Array.from(document.body.querySelectorAll('button'));
-    const newProjectBtn = allButtons.find(b => b.textContent?.includes('Ajouter un projet'));
+    const newProjectBtn = document.querySelector('[data-tour-id="new-project-btn"]') as HTMLButtonElement | null;
     expect(newProjectBtn).toBeTruthy();
 
     await act(async () => { newProjectBtn!.click(); });
@@ -355,8 +354,8 @@ describe('Dashboard — Ctrl+Enter keyboard shortcuts', () => {
     await wrap(<Dashboard onReset={vi.fn()} />);
 
     // Open modal
-    const newProjectBtn = Array.from(document.body.querySelectorAll('button')).find(b => b.textContent?.includes('Ajouter un projet'));
-    await act(async () => { newProjectBtn!.click(); });
+    const newProjectBtn = document.querySelector('[data-tour-id="new-project-btn"]') as HTMLButtonElement;
+    await act(async () => { newProjectBtn.click(); });
 
     // Switch to clone tab
     const cloneTab = Array.from(document.body.querySelectorAll('button')).find(b => b.textContent?.includes('Cloner'));

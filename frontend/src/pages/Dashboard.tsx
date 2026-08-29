@@ -40,7 +40,7 @@ import { ProjectList } from '../components/ProjectList';
 import { TelemetryCoveragePanel } from '../components/TelemetryCoveragePanel';
 import {
   Folder, FolderOpen, Puzzle,
-  Plus, Search, Zap, Settings,
+  Search, Zap, Settings,
   Loader2,
   MessageSquare, X,
   Rocket, Check, Workflow, FileText, ListTodo,
@@ -907,9 +907,6 @@ export function Dashboard({ onReset }: DashboardProps) {
             {isMobile && <span>{runningDiscIds.length}</span>}
           </button>
         )}
-        <button className="dash-scan-btn" data-tour-id="new-project-btn" onClick={() => setShowBootstrap(true)} title={t('projects.bootstrap')}>
-          <Plus size={14} /> {!isMobile && t('projects.bootstrap')}
-        </button>
         <button className="dash-scan-btn" data-tour-id="scan-btn" onClick={handleScan} disabled={scanning} title={t('nav.scan')}>
           {scanning ? <Loader2 size={14} className="spin" /> : <Search size={14} />}
           {!isMobile && (scanning ? t('projects.scanning') : t('nav.scan'))}
@@ -1335,6 +1332,7 @@ export function Dashboard({ onReset }: DashboardProps) {
             workflows={workflowList ?? []}
             configLanguage={configLanguage ?? null}
             toast={toast}
+            onAddProject={() => setShowBootstrap(true)}
             onNavigate={(p) => {
               if (p.startsWith('mcps:')) {
                 setMcpSelectedConfigId(p.split(':')[1]);
