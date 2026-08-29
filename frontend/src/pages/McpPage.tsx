@@ -23,6 +23,7 @@ import {
   Puzzle, Plus, Trash2, Eye, Check, RefreshCw, Square, CheckSquare, Minus,
   X, Key, Pencil, FileText, ExternalLink, Save,
   Plug, Globe, Info, Sparkles, Upload, Download, ChevronRight, Terminal, AlertTriangle,
+  SlidersHorizontal,
 } from 'lucide-react';
 import { HostSyncChip } from '../components/HostSyncChip';
 import { HostSyncPreview } from '../components/HostSyncPreview';
@@ -272,6 +273,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
     } catch { return false; }
   });
   const [mcpKindFilter, setMcpKindFilter] = useState<'all' | 'mcp' | 'api' | 'cli'>('all');
+  const [mcpSearchOptionsOpen, setMcpSearchOptionsOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [favoritesOnly, setFavoritesOnly] = useState(false);
   const [selectedConfigIds, setSelectedConfigIds] = useState<Set<string>>(new Set());
@@ -2896,6 +2898,8 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                 isMobile={isMobile}
                 sidebarOpen={sidebarOpen}
                 onSidebarOpenChange={setSidebarOpen}
+                globalSearchShortcut
+                showSearchClear
                 labels={{
                   search: t('mcp.search'),
                   favorites: t('collection.favorites'),
@@ -2909,42 +2913,56 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                   selectedCount: count => t('collection.selectedCount', count),
                 }}
                 slots={{
-                  afterSidebarHeader: <div className="mcp-collection-toolbar">
-                    <span className="mcp-meta">{servers.length} {servers.length > 1 ? t('mcp.serverPlural') : t('mcp.server')} · {globalConfigs.length} {globalConfigs.length > 1 ? t('mcp.globalPlural') : t('mcp.global')}</span>
-                    <div className="mcp-collection-toolbar-actions">
-                      {totalConfigs > 0 && <button type="button" className="collection-shell-icon" onClick={() => setPortabilityMode('export')} aria-label={t('mcp.portability.export')} title={t('mcp.portability.exportTitle')}><Download size={14} /></button>}
-                      <button type="button" className="collection-shell-icon" onClick={() => setPortabilityMode('import')} aria-label={t('mcp.portability.import')} title={t('mcp.portability.importTitle')}><Upload size={14} /></button>
-                      <button type="button" className="collection-shell-icon" disabled={syncing} onClick={async () => { setSyncing(true); try { await mcpsApi.refresh(); refetchMcps(); } catch (e) { console.warn('Failed to sync MCPs:', e); } finally { setSyncing(false); } }} aria-label={t('mcp.detect')} title={t('mcp.detect')}><RefreshCw size={14} className={syncing ? 'spin' : ''} /></button>
+                  afterSidebarHeader: <>
+                    {totalConfigs > 1 && mcpSearchOptionsOpen && (
+                      <div id="mcp-search-options" className="collection-shell-search-options">
+                        <ListControls
+                          filterLabel={t('automation.filter.label')}
+                          filterAriaLabel={t('mcp.filterKind')}
+                          filterValue={mcpKindFilter}
+                          filterOptions={[
+                            { value: 'all', label: t('mcp.kindFilter.all') },
+                            { value: 'mcp', label: t('mcp.kindFilter.mcp') },
+                            { value: 'api', label: t('mcp.kindFilter.api') },
+                            { value: 'cli', label: t('mcp.kindFilter.cli') },
+                          ]}
+                          onFilterChange={setMcpKindFilter}
+                          sortLabel={t('automation.sort.label')}
+                          sortAriaLabel={t('mcp.sortLabel')}
+                          sortValue={mcpSort}
+                          sortOptions={[
+                            { value: 'name', label: t('automation.sort.name') },
+                            { value: 'kind', label: t('mcp.sortKind') },
+                            { value: 'scope', label: t('mcp.sortScope') },
+                          ]}
+                          onSortChange={setMcpSort}
+                          reversed={mcpSortReversed}
+                          onToggleDirection={() => setMcpSortReversed(value => !value)}
+                          directionLabel={t(mcpSortReversed
+                            ? 'automation.sort.restoreDirection'
+                            : 'automation.sort.reverseDirection')}
+                        />
+                      </div>
+                    )}
+                    <div className="mcp-collection-toolbar">
+                      <span className="mcp-meta">{servers.length} {servers.length > 1 ? t('mcp.serverPlural') : t('mcp.server')} · {globalConfigs.length} {globalConfigs.length > 1 ? t('mcp.globalPlural') : t('mcp.global')}</span>
+                      <div className="mcp-collection-toolbar-actions">
+                        {totalConfigs > 0 && <button type="button" className="collection-shell-icon" onClick={() => setPortabilityMode('export')} aria-label={t('mcp.portability.export')} title={t('mcp.portability.exportTitle')}><Download size={14} /></button>}
+                        <button type="button" className="collection-shell-icon" onClick={() => setPortabilityMode('import')} aria-label={t('mcp.portability.import')} title={t('mcp.portability.importTitle')}><Upload size={14} /></button>
+                        <button type="button" className="collection-shell-icon" disabled={syncing} onClick={async () => { setSyncing(true); try { await mcpsApi.refresh(); refetchMcps(); } catch (e) { console.warn('Failed to sync MCPs:', e); } finally { setSyncing(false); } }} aria-label={t('mcp.detect')} title={t('mcp.detect')}><RefreshCw size={14} className={syncing ? 'spin' : ''} /></button>
+                      </div>
                     </div>
-                  </div>,
-                  sidebarHeaderEnd: totalConfigs > 1 ? (
-                    <ListControls
-                      filterLabel={t('automation.filter.label')}
-                      filterAriaLabel={t('mcp.filterKind')}
-                      filterValue={mcpKindFilter}
-                      filterOptions={[
-                        { value: 'all', label: t('mcp.kindFilter.all') },
-                        { value: 'mcp', label: t('mcp.kindFilter.mcp') },
-                        { value: 'api', label: t('mcp.kindFilter.api') },
-                        { value: 'cli', label: t('mcp.kindFilter.cli') },
-                      ]}
-                      onFilterChange={setMcpKindFilter}
-                      sortLabel={t('automation.sort.label')}
-                      sortAriaLabel={t('mcp.sortLabel')}
-                      sortValue={mcpSort}
-                      sortOptions={[
-                        { value: 'name', label: t('automation.sort.name') },
-                        { value: 'kind', label: t('mcp.sortKind') },
-                        { value: 'scope', label: t('mcp.sortScope') },
-                      ]}
-                      onSortChange={setMcpSort}
-                      reversed={mcpSortReversed}
-                      onToggleDirection={() => setMcpSortReversed(value => !value)}
-                      directionLabel={t(mcpSortReversed
-                        ? 'automation.sort.restoreDirection'
-                        : 'automation.sort.reverseDirection')}
-                    />
-                  ) : undefined,
+                  </>,
+                  sidebarHeaderEnd: totalConfigs > 1 ? <button
+                    type="button"
+                    className="collection-shell-search-action"
+                    data-active={mcpSearchOptionsOpen || undefined}
+                    onClick={() => setMcpSearchOptionsOpen(open => !open)}
+                    aria-label={t('mcp.searchOptions')}
+                    aria-expanded={mcpSearchOptionsOpen}
+                    aria-controls="mcp-search-options"
+                    title={t('mcp.searchOptions')}
+                  ><SlidersHorizontal size={15} /></button> : undefined,
                   renderItem: config => <>
                     <span className="sr-only">{`${config.label} — ${t('mcp.openDetails')}`}</span>
                     {renderPlugin(config, false)}

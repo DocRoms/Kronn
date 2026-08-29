@@ -2,6 +2,8 @@
 // If the default locale changes, these assertions must be updated.
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, cleanup, fireEvent, act } from '@testing-library/react';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { I18nProvider } from '../../lib/I18nContext';
 
 // Mock API
@@ -383,6 +385,84 @@ describe('McpPage', () => {
     expect(document.querySelector('.mcp-detail-inline')).not.toBeNull();
   });
 
+  it('keeps plugin search compact and reveals filtering and sorting below it', () => {
+    const githubServer = makeServer('github', 'GitHub');
+    const chartbeatServer = makeServer('api-chartbeat', 'Chartbeat');
+    chartbeatServer.transport = 'ApiOnly';
+    const overview: McpOverview = {
+      servers: [githubServer, chartbeatServer],
+      configs: [
+        makeConfig('github-config', 'github', 'GitHub'),
+        makeConfig('chartbeat-config', 'api-chartbeat', 'Chartbeat'),
+      ],
+      customized_contexts: [],
+      incompatibilities: [],
+      incomplete_configs: [],
+    };
+
+    const { container } = wrap(
+      <McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />,
+    );
+    const search = screen.getByRole('textbox', { name: 'Rechercher un plugin ou un projet...' });
+    const searchHeader = search.closest('.collection-shell-header');
+    const optionsTrigger = screen.getByRole('button', { name: 'Filtres et tri de la recherche' });
+
+    expect(optionsTrigger).toHaveClass('collection-shell-search-action');
+    expect(optionsTrigger).not.toHaveClass('collection-shell-icon');
+    expect(optionsTrigger).toHaveAttribute('aria-expanded', 'false');
+    expect(searchHeader?.querySelector('.list-controls')).toBeNull();
+    expect(document.querySelector('.collection-shell-search-options')).toBeNull();
+
+    fireEvent.keyDown(window, { key: '/' });
+    expect(search).toHaveFocus();
+    fireEvent.change(search, { target: { value: 'missing' } });
+    const clearSearch = searchHeader?.querySelector<HTMLButtonElement>(
+      'button[aria-label="Effacer les filtres"]',
+    );
+    expect(clearSearch).not.toBeNull();
+    fireEvent.click(clearSearch!);
+    expect(search).toHaveValue('');
+
+    fireEvent.click(optionsTrigger);
+    expect(optionsTrigger).toHaveAttribute('aria-expanded', 'true');
+    const options = document.querySelector('.collection-shell-search-options');
+    expect(options).toBe(searchHeader?.nextElementSibling);
+    expect(options?.nextElementSibling).toHaveClass('mcp-collection-toolbar');
+    expect(options?.querySelector('.list-controls')).not.toBeNull();
+
+    fireEvent.change(screen.getByRole('combobox', { name: 'Filtrer les plugins par type' }), {
+      target: { value: 'api' },
+    });
+    expect(screen.getByRole('button', { name: 'Chartbeat — Voir les détails' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'GitHub — Voir les détails' })).toBeNull();
+
+    fireEvent.change(screen.getByRole('combobox', { name: 'Filtrer les plugins par type' }), {
+      target: { value: 'all' },
+    });
+    const rowLabels = () => [...container.querySelectorAll('.collection-shell-row-button')]
+      .map(row => row.textContent);
+    expect(rowLabels()[0]).toContain('Chartbeat');
+    fireEvent.click(screen.getByRole('button', { name: 'Inverser l’ordre' }));
+    expect(rowLabels()[0]).toContain('GitHub');
+
+    fireEvent.click(optionsTrigger);
+    expect(optionsTrigger).toHaveAttribute('aria-expanded', 'false');
+    expect(document.querySelector('.collection-shell-search-options')).toBeNull();
+  });
+
+  it('contains plugin search options without imposing an intrinsic sidebar width', () => {
+    const css = readFileSync(resolve(process.cwd(), 'src/pages/McpPage.css'), 'utf8');
+    const panelRule = css.match(/\.mcp-page \.collection-shell-search-options\s*\{([^}]+)\}/)?.[1] ?? '';
+    const controlsRule = css.match(/\.mcp-page \.collection-shell-search-options \.list-controls\s*\{([^}]+)\}/)?.[1] ?? '';
+    const selectRule = css.match(/\.mcp-page \.collection-shell-search-options \.list-control select\s*\{([^}]+)\}/)?.[1] ?? '';
+
+    expect(panelRule).toContain('min-width: 0');
+    expect(panelRule).toContain('overflow-x: clip');
+    expect(controlsRule).toContain('grid-template-columns: minmax(0, 1fr) auto');
+    expect(selectRule).toContain('min-width: 0');
+    expect(selectRule).toContain('max-width: 100%');
+  });
+
   it('keeps plugin rows in the shared keyboard and active-row contract', () => {
     const overview: McpOverview = {
       servers: [makeServer('github', 'GitHub'), makeServer('slack', 'Slack')],
@@ -583,6 +663,7 @@ describe('McpPage', () => {
     ).filter((id): id is string => id !== undefined);
 
     expect(cardOrder()).toEqual(['api-config', 'cli-config', 'mcp-config']);
+    fireEvent.click(screen.getByRole('button', { name: 'Filtres et tri de la recherche' }));
     fireEvent.change(screen.getByLabelText('Trier les plugins'), {
       target: { value: 'kind' },
     });

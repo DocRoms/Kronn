@@ -2336,6 +2336,7 @@ const zh: TranslationDict = {
   "mcp.search": "搜索插件或项目...",
   "mcp.clearSearch": "清除搜索",
   "mcp.searchRegistry": "搜索插件...",
+  "mcp.searchOptions": "搜索筛选和排序",
   "mcp.filterKind": "按类型筛选插件",
   "mcp.sortLabel": "排序插件",
   "mcp.sortKind": "插件类型",

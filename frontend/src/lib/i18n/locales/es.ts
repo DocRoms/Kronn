@@ -2371,6 +2371,7 @@ const es: TranslationDict = {
   'mcp.search': 'Buscar plugin o proyecto...',
   'mcp.clearSearch': 'Borrar la búsqueda',
   'mcp.searchRegistry': 'Buscar plugin...',
+  'mcp.searchOptions': 'Filtros y orden de búsqueda',
   'mcp.filterKind': 'Filtrar plugins por tipo',
   'mcp.sortLabel': 'Ordenar plugins',
   'mcp.sortKind': 'Tipo de plugin',
