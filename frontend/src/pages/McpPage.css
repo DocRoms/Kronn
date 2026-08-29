@@ -4,7 +4,9 @@
   display: flex;
   height: calc(100vh - 56px);
   min-height: 0;
-  margin: -24px -20px;
+  margin:
+    calc(-1 * var(--dash-main-padding-block))
+    calc(-1 * var(--dash-main-padding-inline));
   flex-direction: column;
 }
 

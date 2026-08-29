@@ -3,12 +3,12 @@
 /* ── Unified Automation library shell ────────────────── */
 .automation-page {
   display: flex;
-  width: 100%;
-  height: calc(100dvh - 128px);
-  min-height: 520px;
+  height: calc(100vh - 56px);
+  min-height: 0;
+  margin:
+    calc(-1 * var(--dash-main-padding-block))
+    calc(-1 * var(--dash-main-padding-inline));
   overflow: hidden;
-  border: 1px solid var(--kr-border-light);
-  border-radius: var(--kr-r-xl);
   background: var(--kr-bg-base);
 }
 

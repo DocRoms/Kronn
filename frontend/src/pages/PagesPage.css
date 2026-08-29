@@ -1,6 +1,10 @@
 .live-pages {
   display: flex;
-  height: calc(100vh - 54px);
+  height: calc(100vh - 56px);
+  min-height: 0;
+  margin:
+    calc(-1 * var(--dash-main-padding-block))
+    calc(-1 * var(--dash-main-padding-inline));
   overflow: hidden;
   background: var(--kr-bg-base);
 }

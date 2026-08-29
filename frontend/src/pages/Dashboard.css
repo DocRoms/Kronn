@@ -236,19 +236,22 @@
    on a 13" laptop AND full-width on a 32" desktop without changing
    anything else. See `lib/LayoutDensityContext.tsx`. */
 .dash-main {
+  --dash-main-padding-block: var(--kr-sp-9);
+  --dash-main-padding-inline: var(--kr-sp-8);
+
   max-width: 1000px;
   margin: 0 auto;
-  padding: var(--kr-sp-9) var(--kr-sp-8);
+  padding: var(--dash-main-padding-block) var(--dash-main-padding-inline);
 }
 html[data-density="medium"] .dash-main {
   max-width: 1400px;
 }
 html[data-density="large"] .dash-main {
+  --dash-main-padding-inline: var(--kr-sp-9);
+
   max-width: none;
   /* Slightly tighter side padding at full width — at 2000px+, the
      default 32px feels cramped vs 48px which breathes properly. */
-  padding-left: var(--kr-sp-9);
-  padding-right: var(--kr-sp-9);
 }
 
 .dash-loading-bar {
