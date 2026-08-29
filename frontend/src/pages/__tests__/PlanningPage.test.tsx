@@ -110,6 +110,27 @@ describe('PlanningPage', () => {
     expect(screen.getByText('Old task')).toBeInTheDocument();
   });
 
+  it('keeps Planning task rows in the shared keyboard and active-row contract', async () => {
+    render(
+      <PlanningPage
+        projects={[]}
+        discussions={[]}
+        toast={vi.fn()}
+        onNavigateDiscussion={vi.fn()}
+      />,
+    );
+
+    const first = await screen.findByRole('button', { name: /Upgrade PHP/ });
+    const second = screen.getByRole('button', { name: /Old task/ });
+    first.focus();
+    fireEvent.keyDown(first, { key: 'ArrowDown' });
+    expect(second).toHaveFocus();
+
+    fireEvent.click(second);
+    await waitFor(() => expect(mocks.get).toHaveBeenCalledWith('task-done'));
+    expect(second).toHaveAttribute('aria-current', 'true');
+  });
+
   it('quick creation defaults to an idea and preserves the selected priority', async () => {
     render(
       <PlanningPage
@@ -130,6 +151,25 @@ describe('PlanningPage', () => {
       priority: 'critical',
       status: 'idea',
     }));
+  });
+
+  it('labels quick creation and filter controls for assistive technology', async () => {
+    render(
+      <PlanningPage
+        projects={[]}
+        discussions={[]}
+        toast={vi.fn()}
+        onNavigateDiscussion={vi.fn()}
+      />,
+    );
+    await screen.findByText('Upgrade PHP');
+    expect(screen.getByRole('combobox', { name: 'planning.allPriorities' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'planning.quickCreate' })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'planning.filters' }));
+    expect(screen.getByRole('combobox', { name: 'planning.allStatuses' })).toBeInTheDocument();
+    expect(screen.getByRole('combobox', { name: 'planning.allProjects' })).toBeInTheDocument();
+    expect(screen.getByRole('combobox', { name: 'planning.allLinks' })).toBeInTheDocument();
   });
 
   it('opens the full detail only after a task is selected', async () => {
@@ -163,6 +203,48 @@ describe('PlanningPage', () => {
 
     await waitFor(() => expect(mocks.get).toHaveBeenCalledWith('task-1'));
     expect(await screen.findByDisplayValue('Move the runtime forward.')).toBeInTheDocument();
+  });
+
+  it('keeps a valid initial selection that is outside the first loaded task page', async () => {
+    const outsideFirstPage = summary({
+      id: 'task-outside-first-page',
+      reference: 'KT-101',
+      title: 'Outside first page',
+    });
+    mocks.list.mockResolvedValueOnce({ items: [summary()], next_cursor: null });
+    mocks.get.mockResolvedValueOnce(detail(outsideFirstPage));
+    render(
+      <PlanningPage
+        initialSelectedTaskId={outsideFirstPage.id}
+        projects={[]}
+        discussions={[]}
+        toast={vi.fn()}
+        onNavigateDiscussion={vi.fn()}
+      />,
+    );
+    await screen.findByText('Upgrade PHP');
+    await waitFor(() => expect(mocks.get).toHaveBeenCalledWith(outsideFirstPage.id));
+    expect(await screen.findByDisplayValue('Move the runtime forward.')).toBeInTheDocument();
+    expect(screen.getByRole('complementary', { name: 'planning.taskActions' })).toBeInTheDocument();
+  });
+
+  it('clears a directly linked selection when its detail cannot be loaded', async () => {
+    const toast = vi.fn();
+    mocks.get.mockRejectedValueOnce(new Error('Task no longer exists'));
+    render(
+      <PlanningPage
+        initialSelectedTaskId="missing-task"
+        projects={[]}
+        discussions={[]}
+        toast={toast}
+        onNavigateDiscussion={vi.fn()}
+      />,
+    );
+
+    await waitFor(() => expect(mocks.get).toHaveBeenCalledWith('missing-task'));
+    expect(await screen.findByText('planning.selectHint')).toBeInTheDocument();
+    expect(screen.queryByRole('complementary', { name: 'planning.taskActions' })).toBeNull();
+    expect(toast).toHaveBeenCalled();
   });
 
   it('opens a linked discussion with the exact workspace selected for its Git panel', async () => {

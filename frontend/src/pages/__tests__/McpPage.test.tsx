@@ -317,6 +317,46 @@ describe('McpPage', () => {
     expect(document.querySelector('.mcp-detail-inline')).not.toBeNull();
   });
 
+  it('keeps plugin rows in the shared keyboard and active-row contract', () => {
+    const overview: McpOverview = {
+      servers: [makeServer('github', 'GitHub'), makeServer('slack', 'Slack')],
+      configs: [
+        makeConfig('github-config', 'github', 'GitHub'),
+        makeConfig('slack-config', 'slack', 'Slack'),
+      ],
+      customized_contexts: [],
+      incompatibilities: [],
+      incomplete_configs: [],
+    };
+
+    wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
+    const github = screen.getByRole('button', { name: 'GitHub — Voir les détails' });
+    const slack = screen.getByRole('button', { name: 'Slack — Voir les détails' });
+
+    github.focus();
+    fireEvent.keyDown(github, { key: 'ArrowDown' });
+    expect(slack).toHaveFocus();
+    fireEvent.click(slack);
+    expect(slack).toHaveAttribute('aria-current', 'true');
+    expect(document.querySelector('.mcp-detail-inline')).not.toBeNull();
+  });
+
+  it('clears a plugin selection when filtering hides its configuration', () => {
+    const overview: McpOverview = {
+      servers: [makeServer('github', 'GitHub')],
+      configs: [makeConfig('github-config', 'github', 'GitHub')],
+      customized_contexts: [], incompatibilities: [], incomplete_configs: [],
+    };
+
+    wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
+    fireEvent.click(screen.getByRole('button', { name: 'GitHub — Voir les détails' }));
+    expect(document.querySelector('.mcp-detail-inline')).not.toBeNull();
+    act(() => {
+      fireEvent.change(screen.getByRole('textbox', { name: 'Rechercher un plugin ou un projet...' }), { target: { value: 'missing' } });
+    });
+    expect(document.querySelector('.mcp-detail-inline')).toBeNull();
+  });
+
   it('exposes plugin actions through the shared collection menu', () => {
     const overview: McpOverview = {
       servers: [makeServer('github', 'GitHub')],

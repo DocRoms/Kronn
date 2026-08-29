@@ -1098,6 +1098,15 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
       return mcpSortReversed ? -result : result;
     });
 
+  useEffect(() => {
+    const query = mcpSearch.trim().toLocaleLowerCase();
+    const selectedConfig = visibleConfigs.find(config => config.id === selectedConfigId);
+    const selectedMatchesQuery = selectedConfig && (!query || `${selectedConfig.label} ${selectedConfig.server_name} ${selectedConfig.project_names.join(' ')}`.toLocaleLowerCase().includes(query));
+    if (selectedConfigId && !selectedMatchesQuery) {
+      setSelectedConfigId(null);
+    }
+  }, [mcpSearch, selectedConfigId, visibleConfigs]);
+
   const configsByServer = new Map<string, { serverId: string; serverName: string; configs: McpConfigDisplay[] }>();
   for (const c of configs) {
     const key = c.server_name || c.server_id;

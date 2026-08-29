@@ -111,7 +111,13 @@ export function PlanningPage({
       .then(item => {
         if (!cancelled) setDetail(item);
       })
-      .catch(cause => toast(userError(cause), 'error'))
+      .catch(cause => {
+        if (cancelled) return;
+        setSelectedId(null);
+        setDetail(null);
+        setDetailLoading(false);
+        toast(userError(cause), 'error');
+      })
       .finally(() => {
         if (!cancelled) setDetailLoading(false);
       });
@@ -257,12 +263,13 @@ export function PlanningPage({
           <select
             value={quickPriority}
             onChange={event => setQuickPriority(event.target.value as PlanningTaskPriority)}
+            aria-label={t('planning.allPriorities')}
           >
             {PRIORITIES.map(value => (
               <option key={value} value={value}>{t(`planning.priority.${value}`)}</option>
             ))}
           </select>
-          <button type="button" onClick={() => void createQuickTask()} disabled={!quickTitle.trim() || creating}>
+          <button type="button" onClick={() => void createQuickTask()} disabled={!quickTitle.trim() || creating} aria-label={t('planning.quickCreate')}>
             {creating ? <Loader2 size={14} className="spin" /> : <Plus size={14} />}
           </button>
         </div>
@@ -280,31 +287,32 @@ export function PlanningPage({
 
       {filtersOpen && (
         <div className="planning-filters">
-          <select value={status} onChange={event => setStatus(event.target.value as PlanningTaskStatus | '')}>
+          <select value={status} onChange={event => setStatus(event.target.value as PlanningTaskStatus | '')} aria-label={t('planning.allStatuses')}>
             <option value="">{t('planning.allStatuses')}</option>
             {(['idea', 'todo', 'in_progress', 'blocked', 'done', 'archived'] as PlanningTaskStatus[])
               .map(value => <option key={value} value={value}>{t(`planning.status.${value}`)}</option>)}
           </select>
-          <select value={projectId} onChange={event => setProjectId(event.target.value)}>
+          <select value={projectId} onChange={event => setProjectId(event.target.value)} aria-label={t('planning.allProjects')}>
             <option value="">{t('planning.allProjects')}</option>
             {projects.map(project => <option key={project.id} value={project.id}>{project.name}</option>)}
           </select>
           <select
             value={priorityFilter}
             onChange={event => setPriorityFilter(event.target.value as PlanningTaskPriority | '')}
+            aria-label={t('planning.allPriorities')}
           >
             <option value="">{t('planning.allPriorities')}</option>
             {PRIORITIES.map(value => (
               <option key={value} value={value}>{t(`planning.priority.${value}`)}</option>
             ))}
           </select>
-          <select value={withDiscussion} onChange={event => setWithDiscussion(event.target.value as typeof withDiscussion)}>
+          <select value={withDiscussion} onChange={event => setWithDiscussion(event.target.value as typeof withDiscussion)} aria-label={t('planning.allLinks')}>
             <option value="">{t('planning.allLinks')}</option>
             <option value="yes">{t('planning.withDiscussion')}</option>
             <option value="no">{t('planning.withoutDiscussion')}</option>
           </select>
           {tags.length > 0 && (
-            <select value={tag} onChange={event => setTag(event.target.value)}>
+            <select value={tag} onChange={event => setTag(event.target.value)} aria-label={t('planning.allTags')}>
               <option value="">{t('planning.allTags')}</option>
               {tags.map(value => <option key={value} value={value}>{value}</option>)}
             </select>

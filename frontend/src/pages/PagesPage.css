@@ -134,6 +134,7 @@
 .live-pages-refresh-menu summary:focus-visible { outline: 2px solid var(--kr-accent); outline-offset: 2px; }
 .live-pages-refresh-menu summary[data-state='synced'] { border-color: rgba(var(--kr-success-rgb), 0.3); background: rgba(var(--kr-success-rgb), 0.08); color: var(--kr-success); }
 .live-pages-refresh-menu summary > span { color: inherit; font-size: inherit; }
+.live-pages-refresh-menu summary[data-state='synced'] > span { color: var(--kr-text-primary); }
 .live-pages-refresh-menu summary time { padding-left: 4px; border-left: 1px solid var(--kr-border-medium); color: var(--kr-text-muted); font: 10px var(--kr-font-mono); }
 .live-pages-refresh-chevron { transition: transform 140ms ease; }
 .live-pages-refresh-menu[open] .live-pages-refresh-chevron { transform: rotate(180deg); }

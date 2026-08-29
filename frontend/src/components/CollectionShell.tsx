@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { Menu, MoreHorizontal, Search, Star, X } from 'lucide-react';
 import './CollectionShell.css';
 
@@ -35,6 +35,26 @@ export interface CollectionRowProps {
   className: string;
   'aria-current'?: 'true';
   onClick: () => void;
+}
+
+/**
+ * Keeps transient bulk selection safe when a collection refreshes or deletes
+ * an item for consumers that opt into the selectedIds/onSelectedIdsChange
+ * contract, so those consumers cannot send an invisible/deleted item to a
+ * bulk action.
+ */
+function pruneCollectionSelection(
+  selectedIds: ReadonlySet<CollectionItemId>,
+  availableIds: ReadonlySet<CollectionItemId>,
+): Set<CollectionItemId> {
+  return new Set([...selectedIds].filter(id => availableIds.has(id)));
+}
+
+function sameCollectionSelection(
+  left: ReadonlySet<CollectionItemId>,
+  right: ReadonlySet<CollectionItemId>,
+): boolean {
+  return left.size === right.size && [...left].every(id => right.has(id));
 }
 
 export interface CollectionSearchContext {
@@ -151,9 +171,17 @@ export function CollectionShell<TItem>({
   const searchRef = searchInputRef ?? internalSearchRef;
   const menuRef = useRef<HTMLDivElement>(null);
   const menuTriggerRef = useRef<HTMLButtonElement>(null);
+  const menuId = useId();
   const [menuOpen, setMenuOpen] = useState(false);
   const canMultiSelect = selectedIds != null && onSelectedIdsChange != null;
   const activeFilter = filters.find(filter => filter.id === persistence.activeFilterId);
+
+  useEffect(() => {
+    if (!selectedIds || !onSelectedIdsChange) return;
+    const availableIds = new Set(items.map(getId));
+    const next = pruneCollectionSelection(selectedIds, availableIds);
+    if (!sameCollectionSelection(selectedIds, next)) onSelectedIdsChange(next);
+  }, [getId, items, onSelectedIdsChange, selectedIds]);
 
   const closeMenu = useCallback((restoreTriggerFocus = false) => {
     setMenuOpen(false);
@@ -210,6 +238,17 @@ export function CollectionShell<TItem>({
     return () => window.removeEventListener('keydown', handleGlobalSearchShortcut);
   }, [focusSearch, globalSearchShortcut, shortcutsEnabled]);
 
+  useEffect(() => {
+    if (!isMobile || !sidebarOpen) return;
+    const closeMobileSidebar = (event: KeyboardEvent) => {
+      // A menu owns Escape while it is open so it can restore focus to its
+      // trigger before the sidebar itself is dismissed.
+      if (event.key === 'Escape' && !menuOpen) onSidebarOpenChange?.(false);
+    };
+    window.addEventListener('keydown', closeMobileSidebar);
+    return () => window.removeEventListener('keydown', closeMobileSidebar);
+  }, [isMobile, menuOpen, onSidebarOpenChange, sidebarOpen]);
+
   const selectItem = (item: TItem) => {
     onSelect(getId(item));
     if (isMobile) onSidebarOpenChange?.(false);
@@ -245,6 +284,20 @@ export function CollectionShell<TItem>({
           : (current + (event.key === 'ArrowDown' ? 1 : -1) + rows.length) % rows.length;
     event.preventDefault();
     rows[next]?.focus();
+  };
+
+  const onMenuKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+    const items = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="menuitem"]'))
+      .filter(item => !item.disabled);
+    if (items.length === 0) return;
+    const current = items.indexOf(document.activeElement as HTMLButtonElement);
+    const next = event.key === 'Home' ? 0
+      : event.key === 'End' ? items.length - 1
+        : current < 0 ? (event.key === 'ArrowDown' ? 0 : items.length - 1)
+          : (current + (event.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
+    event.preventDefault();
+    items[next]?.focus();
   };
 
   const listContext: CollectionListContext<TItem> = {
@@ -287,19 +340,19 @@ export function CollectionShell<TItem>({
         {filters.map(filter => <button key={filter.id} type="button" className="collection-shell-filter" data-active={filter.id === persistence.activeFilterId} aria-pressed={filter.id === persistence.activeFilterId} onClick={() => persistence.onActiveFilterIdChange?.(filter.id === persistence.activeFilterId ? null : filter.id)}>{filter.label}</button>)}
         {(persistence.query || persistence.favoritesOnly || persistence.activeFilterId) && <button type="button" className="collection-shell-clear" onClick={() => { persistence.onQueryChange(''); persistence.onFavoritesOnlyChange(false); persistence.onActiveFilterIdChange?.(null); }}>{labels.clearFilters}</button>}
       </div>}
-      {slots.renderList ? slots.renderList(listContext) : <div className="collection-shell-list" role="list">
+      {slots.renderList ? slots.renderList(listContext) : <ul className="collection-shell-list">
           {visibleItems.map(item => {
             const id = getId(item);
             const multiSelected = selectedIds?.has(id) ?? false;
             const selected = selectedId === id;
-            return <div key={id} className="collection-shell-row" data-selected={selected} data-multi-selected={multiSelected} role="listitem">
+            return <li key={id} className="collection-shell-row" data-selected={selected} data-multi-selected={multiSelected}>
               {canMultiSelect && <input type="checkbox" aria-label={`${getLabel(item)} ${labels.selectItem}`} checked={multiSelected} onChange={() => toggleMultiSelection(id)} />}
               <button type="button" className="collection-shell-row-button" aria-current={selected ? 'true' : undefined} onClick={() => selectItem(item)}>{slots.renderItem?.(item, { selected, multiSelected }) ?? getLabel(item)}</button>
               {isFavorite && onToggleFavorite && <button type="button" className="collection-shell-favorite" aria-label={`${labels.favorites} · ${getLabel(item)}`} aria-pressed={isFavorite(item)} onClick={() => onToggleFavorite(item)}><Star size={14} fill={isFavorite(item) ? 'currentColor' : 'none'} /></button>}
-            </div>;
+            </li>;
           })}
-          {visibleItems.length === 0 && <div className="collection-shell-empty">{slots.renderEmpty?.()}</div>}
-        </div>}
+          {visibleItems.length === 0 && <li className="collection-shell-empty">{slots.renderEmpty?.()}</li>}
+        </ul>}
       {slots.sidebarFooter}
     </aside>
   );
@@ -311,8 +364,8 @@ export function CollectionShell<TItem>({
     <div className="collection-shell-detail">
       {isMobile && !sidebarOpen && <button type="button" className="collection-shell-open" onClick={() => onSidebarOpenChange?.(true)} aria-label={labels.openCollection}><Menu size={18} /></button>}
       {actions.length > 0 && <div className="collection-shell-actions" ref={menuRef}>
-        <button ref={menuTriggerRef} type="button" className="collection-shell-icon" onClick={() => setMenuOpen(open => !open)} aria-label={labels.moreActions} aria-expanded={menuOpen}><MoreHorizontal size={17} /></button>
-        {menuOpen && <div className="collection-shell-menu" role="menu" aria-label={labels.moreActions}>{actions.map(action => <button key={action.id} type="button" role="menuitem" disabled={action.disabled?.(actionItems)} onClick={() => { action.onSelect(actionItems); closeMenu(true); }}>{action.label}</button>)}</div>}
+        <button ref={menuTriggerRef} type="button" className="collection-shell-icon" onClick={() => setMenuOpen(open => !open)} aria-label={labels.moreActions} aria-haspopup="menu" aria-expanded={menuOpen} aria-controls={menuOpen ? menuId : undefined}><MoreHorizontal size={17} /></button>
+        {menuOpen && <div id={menuId} className="collection-shell-menu" role="menu" aria-label={labels.moreActions} onKeyDown={onMenuKeyDown}>{actions.map(action => <button key={action.id} type="button" role="menuitem" disabled={action.disabled?.(actionItems)} onClick={() => { action.onSelect(actionItems); closeMenu(true); }}>{action.label}</button>)}</div>}
       </div>}
       {slots.renderDetail(selectedId == null ? null : items.find(item => getId(item) === selectedId) ?? null)}
     </div>
