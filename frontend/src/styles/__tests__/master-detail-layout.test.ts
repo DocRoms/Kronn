@@ -17,6 +17,12 @@ const fullBleedMargin = [
 ];
 
 describe('master/detail page frame', () => {
+  it('contains horizontal page overflow inside the Dashboard viewport', () => {
+    const appRule = ruleBody(readCss('src/pages/Dashboard.css'), '.dash-app');
+
+    expect(appRule).toContain('overflow-x: clip');
+  });
+
   it('exposes the Dashboard padding as the shared full-bleed inset', () => {
     const css = readCss('src/pages/Dashboard.css');
     const defaultRule = ruleBody(css, '.dash-main');

@@ -3,6 +3,7 @@
 /* ── App shell ─────────────────────────────────────────── */
 .dash-app {
   min-height: 100vh;
+  overflow-x: clip;
   background: var(--kr-bg-base);
 }
 

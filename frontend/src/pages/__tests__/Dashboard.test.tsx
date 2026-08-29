@@ -96,6 +96,15 @@ import type { Discussion, Project } from '../../types/generated';
 
 beforeEach(() => {
   vi.useFakeTimers({ shouldAdvanceTime: true });
+  Object.defineProperty(window, 'matchMedia', {
+    writable: true,
+    value: vi.fn().mockImplementation((query: string) => ({
+      matches: false,
+      media: query,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    })),
+  });
 });
 
 afterEach(() => {
@@ -264,7 +273,7 @@ describe('Dashboard — mobile responsive', () => {
     Object.defineProperty(window, 'matchMedia', {
       writable: true,
       value: vi.fn().mockImplementation((query: string) => ({
-        matches: query.includes('767'),
+        matches: query.includes('1099'),
         media: query,
         addEventListener: vi.fn(),
         removeEventListener: vi.fn(),

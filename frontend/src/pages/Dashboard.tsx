@@ -65,7 +65,10 @@ function PageFallback() {
 // Sort score for project readiness
 export function Dashboard({ onReset }: DashboardProps) {
   const { t } = useT();
-  const isMobile = useIsMobile();
+  // The complete desktop nav is wider than a tablet viewport once every
+  // collection route is enabled. Switch to its compact rendering before it
+  // can widen the document and push a page sidebar outside the viewport.
+  const isMobile = useIsMobile(1100);
   const { toast, ToastContainer } = useToast();
   const [page, setPage] = useState<Page>(readDashboardPage);
   const [mcpSelectedConfigId, setMcpSelectedConfigId] = useState<string | null>(null);

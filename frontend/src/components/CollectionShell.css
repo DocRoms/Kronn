@@ -1,4 +1,4 @@
-.collection-shell { display: flex; min-height: 0; height: 100%; overflow: hidden; background: var(--kr-bg-surface); }
+.collection-shell { position: relative; display: flex; min-height: 0; height: 100%; overflow: hidden; background: var(--kr-bg-surface); }
 .collection-shell-sidebar { width: min(360px, 38%); min-width: 260px; display: flex; flex-direction: column; border-right: 1px solid var(--kr-border); background: var(--kr-bg-raised); }
 .collection-shell[data-mobile="true"] .collection-shell-sidebar { position: absolute; inset: 0; z-index: var(--kr-z-modal); width: 100%; min-width: 0; }
 .collection-shell-titlebar, .disc-sidebar-header { position: relative; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 13px 12px 10px; border-bottom: 1px solid var(--kr-border-light); background: var(--kr-bg-surface); }
