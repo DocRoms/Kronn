@@ -205,11 +205,40 @@ describe('WorkflowsPage', () => {
     expect(within(sidebar).getByRole('button', { name: 'Ouvrir Alpha report' })).toBeInTheDocument();
     expect(within(sidebar).queryByRole('button', { name: 'Ouvrir Beta report' })).toBeNull();
 
+    fireEvent.keyDown(window, { key: '/' });
+    expect(within(sidebar).getByRole('textbox', { name: 'Rechercher une automatisation…' })).toHaveFocus();
+
+    fireEvent.change(within(sidebar).getByRole('combobox', { name: 'Filtrer les automatisations par projet' }), {
+      target: { value: 'p-alpha' },
+    });
+    fireEvent.click(within(sidebar).getByRole('button', { name: 'Effacer la recherche' }));
+    expect(within(sidebar).getByRole('button', { name: 'Ouvrir Alpha report' })).toBeInTheDocument();
+    expect(within(sidebar).queryByRole('button', { name: 'Ouvrir Beta report' })).toBeNull();
+
     await act(async () => {
       fireEvent.click(within(sidebar).getByRole('button', { name: 'Ouvrir Alpha report' }));
     });
     await waitFor(() => expect(mockWorkflowsApi.get).toHaveBeenCalledWith('wf-alpha'));
     expect(screen.getByTestId('workflow-detail-pane')).toBeInTheDocument();
+  });
+
+  it('keeps arrow-key navigation on grouped Automation rows rendered by CollectionShell', async () => {
+    const alpha = {
+      id: 'wf-alpha', name: 'Alpha report', project_id: null, project_name: null,
+      trigger_type: 'manual', step_count: 1, misconfigured_step_count: 0,
+      enabled: true, pinned: false, last_run: null, created_at: '2026-01-01T00:00:00Z',
+    } as WorkflowSummary;
+    const beta = { ...alpha, id: 'wf-beta', name: 'Beta report' };
+    mockWorkflowsApi.list.mockResolvedValueOnce([alpha, beta]);
+
+    await wrap(<WorkflowsPage projects={[]} />);
+
+    const sidebar = screen.getByRole('complementary', { name: 'Automatisation' });
+    const alphaButton = within(sidebar).getByRole('button', { name: 'Ouvrir Alpha report' });
+    const betaButton = within(sidebar).getByRole('button', { name: 'Ouvrir Beta report' });
+    alphaButton.focus();
+    fireEvent.keyDown(alphaButton, { key: 'ArrowDown' });
+    expect(betaButton).toHaveFocus();
   });
 
   it('opens a Quick Exec from the shared sidebar in the common detail area', async () => {

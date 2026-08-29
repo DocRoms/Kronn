@@ -9,7 +9,7 @@
 }
 
 /* ── Sidebar ──────────────────────────────────────────── */
-.disc-sidebar {
+.collection-shell-sidebar.disc-sidebar {
   width: 360px;
   min-width: 320px;
   max-width: 460px;

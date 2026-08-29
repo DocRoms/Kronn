@@ -122,7 +122,7 @@ describe('NewDiscussionForm — creation flow layout', () => {
     expect(loadDraft(NEW_DISCUSSION_DRAFT_ID)).toBeNull();
   });
 
-  it('searches a large project list without replacing the native picker contract', () => {
+  it('filters projects by name and path, then supports keyboard and mouse selection', () => {
     const manyProjects = Array.from({ length: 250 }, (_, index) => ({
       ...PROJECT_WITH_REPO,
       id: `project-${index}`,
@@ -131,13 +131,26 @@ describe('NewDiscussionForm — creation flow layout', () => {
     }));
     mount(manyProjects);
 
-    fireEvent.change(screen.getByRole('searchbox', { name: 'disc.searchProjects' }), {
-      target: { value: 'Project 249' },
+    const search = screen.getByRole('searchbox', { name: 'disc.searchProjects' });
+    const picker = screen.getByRole('combobox', { name: 'disc.project' });
+    fireEvent.change(search, {
+      target: { value: 'PROJECT 249' },
     });
 
     expect(screen.getByRole('option', { name: 'Project 249' })).toBeInTheDocument();
     expect(screen.queryByRole('option', { name: 'Project 17' })).toBeNull();
-    expect(screen.getByRole('combobox', { name: 'disc.project' })).toHaveAttribute('data-locked');
+    fireEvent.keyDown(search, { key: 'Enter' });
+    expect(picker).toHaveValue('project-249');
+
+    fireEvent.change(search, { target: { value: '/REPOS/PROJECT-248' } });
+    expect(picker).toHaveValue('');
+    expect(screen.getByRole('option', { name: 'Project 248' })).toBeInTheDocument();
+    fireEvent.change(picker, { target: { value: 'project-248' } });
+    expect(picker).toHaveValue('project-248');
+
+    fireEvent.change(search, { target: { value: 'not-a-project' } });
+    expect(picker).toHaveValue('');
+    expect(screen.getByRole('status')).toHaveTextContent('disc.noMatchingProjects');
   });
 
   it('persists an explicitly selected default project across form mounts', async () => {
@@ -444,6 +457,31 @@ describe('NewDiscussionForm — creation flow layout', () => {
 
     expect(prompt.value).toBe('Bravo 🎉 ');
     expect(screen.getByRole('button', { name: 'disc.composerHelpTitle' })).toBeInTheDocument();
+  });
+
+  it('keeps multiline pastes inside a blockquote without double-quoting', async () => {
+    mount([]);
+    const prompt = screen.getByRole('textbox', { name: 'disc.prompt' }) as HTMLTextAreaElement;
+    fireEvent.change(prompt, { target: { value: '> ' } });
+    prompt.setSelectionRange(2, 2);
+
+    const dispatched = fireEvent.paste(prompt, {
+      clipboardData: { getData: () => 'first\r\n\r\n>\r\n> already quoted' },
+    });
+
+    expect(dispatched).toBe(false);
+    await waitFor(() => expect(prompt).toHaveValue('> first\n> \n>\n> already quoted'));
+  });
+
+  it('leaves single-line pastes to the browser', () => {
+    mount([]);
+    const prompt = screen.getByRole('textbox', { name: 'disc.prompt' }) as HTMLTextAreaElement;
+    fireEvent.change(prompt, { target: { value: '> ' } });
+    prompt.setSelectionRange(2, 2);
+
+    expect(fireEvent.paste(prompt, {
+      clipboardData: { getData: () => 'one line' },
+    })).toBe(true);
   });
 });
 

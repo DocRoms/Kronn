@@ -3,7 +3,7 @@ import {
   Activity, Archive, CheckCircle2, CheckSquare2, ChevronDown, ChevronRight,
   Braces, Database, Download, ExternalLink, FileCode2, FileDown, GitCompare,
   History, ListChecks, Loader2, MessageSquare, Pencil, Play, RefreshCw,
-  RotateCcw, Save, Search, Star, Table2, Trash2, Workflow, X,
+  RotateCcw, Save, Star, Table2, Trash2, Workflow, X,
 } from 'lucide-react';
 import type {
   LivePage, LivePageDetail, LivePageDiscussionLink, LivePagePublication,
@@ -20,6 +20,7 @@ import {
 import { formatRelativeTime } from '../lib/relativeTime';
 import { CopyIdPill } from '../components/CopyIdPill';
 import { FavoriteToggle } from '../components/FavoriteToggle';
+import { CollectionShell } from '../components/CollectionShell';
 import { HtmlCodeEditor, HtmlRevisionDiff } from '../components/HtmlCodeEditor';
 import { useT } from '../lib/I18nContext';
 import { useAsyncGuard } from '../hooks/useAsyncGuard';
@@ -473,13 +474,6 @@ export function PagesPage({
     }
   });
 
-  const matchingPages = useMemo(() => {
-    const needle = query.trim().toLocaleLowerCase();
-    return pages.filter(page => !needle || `${page.title} ${page.slug}`.toLocaleLowerCase().includes(needle));
-  }, [pages, query]);
-  const activePages = matchingPages.filter(page => !page.archived);
-  const favoritePages = selectionMode ? [] : activePages.filter(page => page.pinned);
-  const archivedPages = matchingPages.filter(page => page.archived);
   const isSectionCollapsed = useCallback(
     (section: string) => !query.trim() && collapsedSections.has(section),
     [collapsedSections, query],
@@ -492,39 +486,6 @@ export function PagesPage({
       return next;
     });
   }, []);
-
-  const renderPageRow = (page: LivePage, keyPrefix: string) => (
-    <div className="disc-swipe-wrap live-page-row" key={`${keyPrefix}-${page.id}`}>
-      <div className="disc-item" data-active={page.id === selectedId} data-selected={selectedIds.has(page.id)}>
-        <button type="button" className="disc-item-open" onClick={() => void select(page)} aria-label={t('pages.open', page.title)}>
-          {selectionMode && (
-            <span className="disc-item-selection-box" data-selected={selectedIds.has(page.id)} aria-hidden="true">
-              {selectedIds.has(page.id) && <CheckSquare2 size={12} />}
-            </span>
-          )}
-          <span className="disc-item-content">
-            <span className="disc-item-title">
-              <span className="disc-item-title-text">{page.title}</span>
-            </span>
-            <span className="disc-item-meta">
-              <span className="disc-item-meta-summary">{page.slug}</span>
-            </span>
-          </span>
-        </button>
-        {!selectionMode && (
-          <div className="disc-item-actions">
-            <FavoriteToggle
-              active={page.pinned}
-              onToggle={() => void updatePage(page, { pinned: !page.pinned })}
-              activeLabel={t('pages.unfavorite')}
-              inactiveLabel={t('pages.favorite')}
-              itemName={page.title}
-            />
-          </div>
-        )}
-      </div>
-    </div>
-  );
 
   const revisionHtml = detail?.revision.html ?? '';
   const latestPublication = recentPublications[0] ?? null;
@@ -561,8 +522,21 @@ export function PagesPage({
 
   return (
     <div className="live-pages" data-testid="live-pages-page">
-      <aside className="disc-sidebar live-pages-list" aria-label={t('pages.title')}>
-        <div className="disc-sidebar-header" data-selection-mode={selectionMode}>
+      <CollectionShell<LivePage>
+        sidebarOnly
+        sidebarClassName="disc-sidebar live-pages-list"
+        ariaLabel={t('pages.title')}
+        items={pages}
+        getId={page => page.id}
+        getLabel={page => `${page.title} ${page.slug}`}
+        persistence={{ query, onQueryChange: setQuery, favoritesOnly: false, onFavoritesOnlyChange: () => {} }}
+        selectedId={selectedId}
+        onSelect={id => { const page = pages.find(item => item.id === id); if (page) void select(page); }}
+        selectedIds={selectedIds}
+        onSelectedIdsChange={setSelectedIds}
+        labels={{ search: t('pages.search'), favorites: t('pages.filter.favorites'), clearFilters: t('pages.clearSearch'), moreActions: t('pages.title'), openCollection: t('pages.title'), closeCollection: t('pages.title'), selectItem: t('pages.bulk.selected', 1) }}
+        slots={{
+          beforeSidebarHeader: <div className="disc-sidebar-header" data-selection-mode={selectionMode}>
           <span className="disc-sidebar-header-title">
             {selectionMode ? t('pages.bulk.selected', selectedIds.size) : <>{t('pages.title')}<span className="disc-sidebar-header-count">{' · '}{pages.length}</span></>}
           </span>
@@ -583,55 +557,63 @@ export function PagesPage({
               </>
             )}
           </div>
-        </div>
-
-        <div className="disc-search-wrap">
-          <div className="disc-search-controls">
-            <label className="disc-search-box">
-              <Search size={14} className="disc-search-icon" />
-              <input className="disc-search-input" value={query} onChange={event => setQuery(event.target.value)} placeholder={t('pages.search')} aria-label={t('pages.search')} />
-              {query && <button type="button" className="disc-search-clear" onClick={() => setQuery('')} aria-label={t('pages.clearSearch')}><X size={12} /></button>}
-            </label>
-          </div>
-        </div>
-
-        <div className="disc-sidebar-list live-pages-items">
-          {favoritePages.length > 0 && (
+          </div>,
+          renderList: ({ visibleItems, getRowProps }) => {
+            const visibleActive = visibleItems.filter(page => !page.archived);
+            const visibleFavorites = selectionMode ? [] : visibleActive.filter(page => page.pinned);
+            const visibleArchived = visibleItems.filter(page => page.archived);
+            const row = (page: LivePage, keyPrefix: string) => {
+              const rowProps = getRowProps(page);
+              return <div className="disc-swipe-wrap live-page-row" key={`${keyPrefix}-${page.id}`}>
+                <div className="disc-item" data-active={page.id === selectedId} data-selected={selectedIds.has(page.id)}>
+                  <button type="button" {...rowProps} className={`${rowProps.className} disc-item-open`} aria-label={t('pages.open', page.title)}>
+                    {selectionMode && <span className="disc-item-selection-box" data-selected={selectedIds.has(page.id)} aria-hidden="true">{selectedIds.has(page.id) && <CheckSquare2 size={12} />}</span>}
+                    <span className="disc-item-content"><span className="disc-item-title"><span className="disc-item-title-text">{page.title}</span></span><span className="disc-item-meta"><span className="disc-item-meta-summary">{page.slug}</span></span></span>
+                  </button>
+                  {!selectionMode && <div className="disc-item-actions"><FavoriteToggle active={page.pinned} onToggle={() => void updatePage(page, { pinned: !page.pinned })} activeLabel={t('pages.unfavorite')} inactiveLabel={t('pages.favorite')} itemName={page.title} /></div>}
+                </div>
+              </div>;
+            };
+            return <div className="disc-sidebar-list live-pages-items">
+          {visibleFavorites.length > 0 && (
             <div className="disc-sidebar-section disc-sidebar-favorites" data-expanded={!isSectionCollapsed('favorites')}>
               <button type="button" className="disc-group-btn" data-no-border="true" onClick={() => toggleSection('favorites')} aria-expanded={!isSectionCollapsed('favorites')}>
                 <ChevronRight size={10} className="disc-chevron" data-expanded={!isSectionCollapsed('favorites')} />
                 <Star size={10} className="live-page-group-star" fill="currentColor" />
-                <span>{t('pages.filter.favorites')}</span><span className="disc-group-count">{favoritePages.length}</span>
+                <span>{t('pages.filter.favorites')}</span><span className="disc-group-count">{visibleFavorites.length}</span>
               </button>
-              {!isSectionCollapsed('favorites') && favoritePages.map(page => renderPageRow(page, 'favorite'))}
+              {!isSectionCollapsed('favorites') && visibleFavorites.map(page => row(page, 'favorite'))}
             </div>
           )}
 
-          {activePages.length > 0 && (
+          {visibleActive.length > 0 && (
             <div className="disc-sidebar-section disc-sidebar-projects" data-expanded={!isSectionCollapsed('pages')}>
               <button type="button" className="disc-group-btn" data-no-border="true" onClick={() => toggleSection('pages')} aria-expanded={!isSectionCollapsed('pages')}>
                 <ChevronRight size={10} className="disc-chevron" data-expanded={!isSectionCollapsed('pages')} />
                 <FileCode2 size={10} />
-                <span>{t('pages.filter.active')}</span><span className="disc-group-count">{activePages.length}</span>
+                <span>{t('pages.filter.active')}</span><span className="disc-group-count">{visibleActive.length}</span>
               </button>
-              {!isSectionCollapsed('pages') && activePages.map(page => renderPageRow(page, 'page'))}
+              {!isSectionCollapsed('pages') && visibleActive.map(page => row(page, 'page'))}
             </div>
           )}
 
-          {archivedPages.length > 0 && (
+          {visibleArchived.length > 0 && (
             <div className="disc-sidebar-section disc-sidebar-archives" data-expanded={!isSectionCollapsed('archives')}>
               <button type="button" className="disc-group-btn" data-variant="archive" onClick={() => toggleSection('archives')} aria-expanded={!isSectionCollapsed('archives')}>
                 <ChevronRight size={10} className="disc-chevron" data-expanded={!isSectionCollapsed('archives')} />
-                <Archive size={10} /><span>{t('pages.filter.archived')}</span><span className="disc-group-count">{archivedPages.length}</span>
+                <Archive size={10} /><span>{t('pages.filter.archived')}</span><span className="disc-group-count">{visibleArchived.length}</span>
               </button>
-              {!isSectionCollapsed('archives') && archivedPages.map(page => renderPageRow(page, 'archive'))}
+              {!isSectionCollapsed('archives') && visibleArchived.map(page => row(page, 'archive'))}
             </div>
           )}
 
-          {matchingPages.length === 0 && <div className="disc-empty">{t(query ? 'pages.noSearchResults' : 'pages.empty')}</div>}
-        </div>
-        <div className="disc-sidebar-footer"><span>{t('pages.sidebar.hint')}</span><span><kbd>/</kbd> {t('pages.sidebar.search')}</span></div>
-      </aside>
+          {visibleItems.length === 0 && <div className="disc-empty">{t(query ? 'pages.noSearchResults' : 'pages.empty')}</div>}
+            </div>;
+          },
+          sidebarFooter: <div className="disc-sidebar-footer"><span>{t('pages.sidebar.hint')}</span><span><kbd>/</kbd> {t('pages.sidebar.search')}</span></div>,
+          renderDetail: () => null,
+        }}
+      />
 
       <section className="live-pages-viewer">
         {error && <div className="live-pages-error" role="alert">{error}</div>}

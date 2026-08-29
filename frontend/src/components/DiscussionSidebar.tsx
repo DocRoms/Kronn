@@ -3,6 +3,7 @@ import '../pages/DiscussionsPage.css';
 import { SwipeableDiscItem } from './SwipeableDiscItem';
 import { unseenBasis } from '../lib/discussionUiUtils';
 import { GlobalSearchPanel } from './GlobalSearchPanel';
+import { CollectionShell } from './CollectionShell';
 import type { Discussion, Project, Contact, BatchRunSummary, ExecutionDiscussionLink, MessageSearchHit } from '../types/generated';
 import { projects as projectsApi } from '../lib/api';
 import { getProjectGroup, isHiddenPath } from '../lib/constants';
@@ -263,29 +264,6 @@ export function DiscussionSidebar({
       window.removeEventListener('keydown', closeFromKeyboard);
     };
   }, [openBatchMenuRunId]);
-
-  const handleSidebarKeyboard = (event: React.KeyboardEvent<HTMLDivElement>) => {
-    const target = event.target as HTMLElement;
-    const isTextControl = target.matches('input, textarea, select, [contenteditable="true"]');
-    if (event.key === '/' && !isTextControl && !globalSearchOpen) {
-      event.preventDefault();
-      searchInputRef.current?.focus();
-      return;
-    }
-    if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
-    if (isTextControl) return;
-    const rows = Array.from(
-      event.currentTarget.querySelectorAll<HTMLButtonElement>('.disc-item-open:not([disabled])'),
-    ).filter(row => row.offsetParent !== null);
-    if (rows.length === 0) return;
-    const current = rows.indexOf(document.activeElement as HTMLButtonElement);
-    const direction = event.key === 'ArrowDown' ? 1 : -1;
-    const next = current < 0
-      ? (direction > 0 ? 0 : rows.length - 1)
-      : (current + direction + rows.length) % rows.length;
-    event.preventDefault();
-    rows[next]?.focus();
-  };
 
   const toggleSelection = useCallback((discId: string) => {
     setSelectedIds(previous => {
@@ -660,6 +638,7 @@ export function DiscussionSidebar({
       onStop={onStopDiscussion}
       onTogglePin={onTogglePin}
       t={t}
+      collectionRowClassName="collection-shell-row-button"
       contextLabel={disc.project_id ? projectNameById.get(disc.project_id) : t('disc.noProject')}
       sourceAgents={sourceBindings.get(disc.id)}
       importedBy={importProvenance.get(disc.id) ?? null}
@@ -700,6 +679,7 @@ export function DiscussionSidebar({
           onStop={onStopDiscussion}
           onTogglePin={onTogglePin}
           t={t}
+          collectionRowClassName="collection-shell-row-button"
           sourceAgents={sourceBindings.get(disc.id)}
           importedBy={importProvenance.get(disc.id) ?? null}
         />
@@ -741,6 +721,7 @@ export function DiscussionSidebar({
                     onStop={onStopDiscussion}
                     onTogglePin={onTogglePin}
                     t={t}
+                    collectionRowClassName="collection-shell-row-button"
                     sourceAgents={sourceBindings.get(child.id)}
                     importedBy={importProvenance.get(child.id) ?? null}
                   />
@@ -777,11 +758,40 @@ export function DiscussionSidebar({
   };
 
   return (
-    <div
-      className="disc-sidebar"
-      data-mobile={isMobile}
-      onKeyDown={handleSidebarKeyboard}
-    >
+    <CollectionShell<Discussion>
+      ariaLabel="Discussions"
+      items={discussions}
+      getId={disc => disc.id}
+      getLabel={disc => disc.title}
+      filterQuery={false}
+      persistence={{
+        query: discSearchFilter,
+        onQueryChange: setDiscSearchFilter,
+        favoritesOnly: false,
+        onFavoritesOnlyChange: () => {},
+      }}
+      selectedId={activeId}
+      onSelect={id => onSelect(id, 0)}
+      sidebarOnly
+      sidebarClassName="disc-sidebar"
+      isMobile={isMobile}
+      globalSearchShortcut
+      searchInputRef={searchInputRef}
+      shortcutsEnabled={!globalSearchOpen}
+      showControls={false}
+      onSearchSubmit={onOpenGlobalSearch}
+      labels={{
+        search: t('disc.globalSearch.placeholder'),
+        favorites: t('disc.favorites'),
+        clearFilters: t('disc.searchClear'),
+        moreActions: t('disc.sidebar.moreActions'),
+        openCollection: t('disc.openSidebar'),
+        closeCollection: t('disc.closeSidebar'),
+        selectItem: t('disc.select'),
+      }}
+      slots={{
+        renderDetail: () => null,
+        beforeSidebarHeader: <>
       <div className="disc-sidebar-header" data-selection-mode={selectionMode}>
         <span className="disc-sidebar-header-title">
           {selectionMode ? (
@@ -952,7 +962,9 @@ export function DiscussionSidebar({
           )}
         </div>
       </div>
+        </>,
 
+        renderSearch: ({ value, inputRef, onChange, onSubmit, clear }) => <>
       {globalSearchOpen && onCloseGlobalSearch && onOpenGlobalSearchResult && (
         <GlobalSearchPanel
           projects={projects}
@@ -978,25 +990,25 @@ export function DiscussionSidebar({
           <div className="disc-search-box">
             <Search size={13} className="disc-search-icon" />
             <input
-              ref={searchInputRef}
+              ref={inputRef}
               type="text"
               className="disc-search-input"
-              value={discSearchFilter}
-              onChange={e => setDiscSearchFilter(e.target.value)}
+              value={value}
+              onChange={e => onChange(e.target.value)}
               placeholder={t('disc.globalSearch.placeholder')}
               aria-label={t('disc.globalSearch.placeholder')}
               aria-keyshortcuts="/"
               onKeyDown={event => {
-                if (event.key === 'Enter' && onOpenGlobalSearch) {
+                if (event.key === 'Enter' && onSubmit) {
                   event.preventDefault();
-                  onOpenGlobalSearch();
+                  onSubmit();
                 }
               }}
             />
             {discSearchFilter && (
               <button
                 type="button"
-                onClick={() => setDiscSearchFilter('')}
+                onClick={clear}
                 className="disc-search-clear"
                 aria-label={t('disc.searchClear')}
                 title={t('disc.searchClear')}
@@ -1047,9 +1059,9 @@ export function DiscussionSidebar({
           </select>
         )}
       </div>
+        </>,
 
-      {/* Discussion list grouped by project */}
-      <div className="disc-sidebar-list" hidden={globalSearchOpen}>
+        renderList: () => <div className="disc-sidebar-list" hidden={globalSearchOpen}>
         {followUpDiscussions.length > 0 && (() => {
           const isCollapsed = collapsedGroups.has('__follow_up__');
           return (
@@ -1719,6 +1731,7 @@ export function DiscussionSidebar({
                                           onStop={onStopDiscussion}
                                           onTogglePin={onTogglePin}
                                           t={t}
+                                          collectionRowClassName="collection-shell-row-button"
                                           sourceAgents={sourceBindings.get(disc.id)}
                                           importedBy={importProvenance.get(disc.id) ?? null}
                                         />
@@ -1891,6 +1904,7 @@ export function DiscussionSidebar({
                       onTogglePin={onTogglePin}
                       archiveLabel={t('disc.unarchive')}
                       t={t}
+                      collectionRowClassName="collection-shell-row-button"
                       sourceAgents={sourceBindings.get(disc.id)}
                       importedBy={importProvenance.get(disc.id) ?? null}
                     />
@@ -1909,15 +1923,16 @@ export function DiscussionSidebar({
             })()}
           </div>
         )}
-      </div>
-      <div className="disc-sidebar-footer" hidden={globalSearchOpen}>
-        <span>{t('disc.sidebar.compact')}</span>
-        <span>
-          <kbd>↑↓</kbd> {t('disc.sidebar.navigate')}
-          <span aria-hidden="true"> · </span>
-          <kbd>/</kbd> {t('disc.sidebar.searchShortcut')}
-        </span>
-      </div>
-    </div>
+      </div>,
+        sidebarFooter: !globalSearchOpen ? <div className="disc-sidebar-footer">
+          <span>{t('disc.sidebar.compact')}</span>
+          <span>
+            <kbd>↑↓</kbd> {t('disc.sidebar.navigate')}
+            <span aria-hidden="true"> · </span>
+            <kbd>/</kbd> {t('disc.sidebar.searchShortcut')}
+          </span>
+        </div> : null,
+      }}
+    />
   );
 }

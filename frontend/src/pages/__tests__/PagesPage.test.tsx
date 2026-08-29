@@ -99,6 +99,13 @@ afterEach(() => {
 });
 
 describe('PagesPage', () => {
+  it('keeps the historical responsive sidebar classes on the shared shell', async () => {
+    render(<PagesPage />);
+    await screen.findByTestId('live-page-frame');
+    expect(screen.getByRole('complementary', { name: 'pages.title' }))
+      .toHaveClass('disc-sidebar', 'live-pages-list');
+  });
+
   it('renders authored HTML in a script-only opaque sandbox', async () => {
     const onNavigateWorkflow = vi.fn();
     render(<PagesPage onNavigateWorkflow={onNavigateWorkflow} />);
