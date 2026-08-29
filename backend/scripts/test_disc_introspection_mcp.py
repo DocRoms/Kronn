@@ -440,6 +440,9 @@ class TaskExecPrincipalSurfaceTests(unittest.TestCase):
             props = tools[name]["inputSchema"]["properties"]
             self.assertNotIn("source_agent", props)
             self.assertNotIn("source_session_id", props)
+        worker_description = tools["task_exec_reassign"]["inputSchema"]["properties"]["worker"]["description"]
+        self.assertIn("Native HTTP workers", worker_description)
+        self.assertIn("Custom targets require their connection_id", worker_description)
 
     def test_agent_list_injects_room_identity_and_documents_honest_availability(self):
         http = mock.MagicMock(return_value={

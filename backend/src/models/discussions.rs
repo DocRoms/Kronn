@@ -451,6 +451,9 @@ pub struct MessageTarget {
     pub kind: MessageTargetKind,
     pub agent_type: AgentType,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Pin for a dynamic external connection. It is optional for the native
+    /// HTTP providers copied from `agent_list`, whose configuration is resolved
+    /// server-side from `agent_type`, but mandatory for `Custom` targets.
     pub connection_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cli_session_id: Option<i64>,
