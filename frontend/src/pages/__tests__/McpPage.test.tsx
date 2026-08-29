@@ -409,6 +409,7 @@ describe('McpPage', () => {
 
     expect(optionsTrigger).toHaveClass('collection-shell-search-action');
     expect(optionsTrigger).not.toHaveClass('collection-shell-icon');
+    expect(optionsTrigger).toHaveTextContent('Filtres');
     expect(optionsTrigger).toHaveAttribute('aria-expanded', 'false');
     expect(searchHeader?.querySelector('.list-controls')).toBeNull();
     expect(document.querySelector('.collection-shell-search-options')).toBeNull();
@@ -454,11 +455,17 @@ describe('McpPage', () => {
     const css = readFileSync(resolve(process.cwd(), 'src/pages/McpPage.css'), 'utf8');
     const panelRule = css.match(/\.mcp-page \.collection-shell-search-options\s*\{([^}]+)\}/)?.[1] ?? '';
     const controlsRule = css.match(/\.mcp-page \.collection-shell-search-options \.list-controls\s*\{([^}]+)\}/)?.[1] ?? '';
+    const controlRule = css.match(/\.mcp-page \.collection-shell-search-options \.list-control\s*\{([^}]+)\}/)?.[1] ?? '';
     const selectRule = css.match(/\.mcp-page \.collection-shell-search-options \.list-control select\s*\{([^}]+)\}/)?.[1] ?? '';
 
     expect(panelRule).toContain('min-width: 0');
     expect(panelRule).toContain('overflow-x: clip');
+    expect(panelRule).not.toContain('padding:');
+    expect(panelRule).not.toContain('background:');
     expect(controlsRule).toContain('grid-template-columns: minmax(0, 1fr) auto');
+    expect(controlsRule).toContain('align-items: center');
+    expect(controlRule).not.toContain('display: grid');
+    expect(selectRule).toContain('flex: 1');
     expect(selectRule).toContain('min-width: 0');
     expect(selectRule).toContain('max-width: 100%');
   });

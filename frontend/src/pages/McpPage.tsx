@@ -2962,7 +2962,10 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                     aria-expanded={mcpSearchOptionsOpen}
                     aria-controls="mcp-search-options"
                     title={t('mcp.searchOptions')}
-                  ><SlidersHorizontal size={15} /></button> : undefined,
+                  >
+                    <SlidersHorizontal size={14} aria-hidden="true" />
+                    <span>{t('disc.sidebar.filters')}</span>
+                  </button> : undefined,
                   renderItem: config => <>
                     <span className="sr-only">{`${config.label} — ${t('mcp.openDetails')}`}</span>
                     {renderPlugin(config, false)}

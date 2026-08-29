@@ -38,36 +38,34 @@
 .mcp-page .collection-shell-search-options {
   min-width: 0;
   overflow-x: clip;
-  padding: var(--kr-sp-3);
-  border-bottom: 1px solid var(--kr-border-light);
-  background: var(--kr-bg-surface);
 }
 
 .mcp-page .collection-shell-search-options .list-controls {
   display: grid;
   min-width: 0;
   grid-template-columns: minmax(0, 1fr) auto;
-  align-items: end;
+  align-items: center;
   justify-content: stretch;
-  gap: var(--kr-sp-3);
+  gap: 7px;
 }
 
 .mcp-page .collection-shell-search-options .list-control {
-  display: grid;
   min-width: 0;
-  grid-template-columns: auto minmax(0, 1fr);
-  white-space: normal;
 }
 
 .mcp-page .collection-shell-search-options .list-control:first-child {
   grid-column: 1 / -1;
 }
 
+.mcp-page .collection-shell-search-options .list-control:last-of-type {
+  grid-column: 1;
+}
+
 .mcp-page .collection-shell-search-options .list-control select {
   box-sizing: border-box;
+  flex: 1;
   min-width: 0;
   max-width: 100%;
-  grid-column: 1 / -1;
 }
 
 /* ── Incomplete-config warning banner ───────────────────── */
