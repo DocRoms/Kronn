@@ -5793,6 +5793,55 @@ async fn external_api_test_route_public_catalogue_rejects_an_invalid_key() {
 }
 
 #[tokio::test]
+async fn external_api_test_route_public_catalogue_rejects_non_successful_chat_statuses() {
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    for upstream_status in [404_u16, 429, 500] {
+        let upstream = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{"id": "catalogue-model"}]
+            })))
+            .expect(1)
+            .mount(&upstream)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(header("authorization", "Bearer wrong-secret"))
+            .respond_with(
+                ResponseTemplate::new(upstream_status)
+                    .set_body_string("secret upstream diagnostic"),
+            )
+            .expect(1)
+            .mount(&upstream)
+            .await;
+
+        let (status, response) = post_json(
+            test_app(),
+            "/api/external-api/connections/test",
+            serde_json::json!({
+                "endpoint": upstream.uri(),
+                "api_key": "wrong-secret"
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["data"]["status"], "http_error", "{response}");
+        assert!(response["data"]["models"]
+            .as_array()
+            .is_some_and(Vec::is_empty));
+        assert!(response["data"]["hint"]
+            .as_str()
+            .is_some_and(|hint| hint.contains(&upstream_status.to_string())));
+        assert!(!response.to_string().contains("wrong-secret"));
+        assert!(!response.to_string().contains("secret upstream diagnostic"));
+    }
+}
+
+#[tokio::test]
 async fn external_api_test_route_maps_auth_empty_and_transport_failures_without_upstream_bodies() {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};

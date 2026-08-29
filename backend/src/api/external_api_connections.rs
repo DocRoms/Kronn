@@ -154,9 +154,10 @@ async fn probe_models(endpoint: &str, api_key: Option<&str>) -> TestConnectionRe
 
 /// Minimal authenticated invocation confirming the credential is accepted. A
 /// `max_tokens: 1` request is the smallest billable/no-output probe compatible
-/// with the OpenAI chat contract. Only an explicit 401/403 fails the credential;
-/// any other outcome (including a 4xx about the request shape) means the key was
-/// accepted, so the catalogue result stands. `None` = the credential passed.
+/// with the OpenAI chat contract. A 2xx response confirms the credential;
+/// 401/403 are classified as authentication errors, while every other HTTP
+/// status is a generic probe failure because it does not prove that the
+/// connection is usable. `None` = the credential passed.
 async fn probe_auth(endpoint: &str, api_key: &str, model: &str) -> Option<TestConnectionResponse> {
     let body = serde_json::json!({
         "model": model,
@@ -181,7 +182,16 @@ async fn probe_auth(endpoint: &str, api_key: &str, model: &str) -> Option<TestCo
                 ),
             })
         }
-        Ok(_) => None,
+        Ok(response) if response.status().is_success() => None,
+        Ok(response) => Some(TestConnectionResponse {
+            ok: false,
+            status: "http_error".into(),
+            models: vec![],
+            hint: Some(format!(
+                "The endpoint returned HTTP {} while validating the connection.",
+                response.status().as_u16()
+            )),
+        }),
         Err(error) if error.is_timeout() => Some(TestConnectionResponse {
             ok: false,
             status: "timeout".into(),
