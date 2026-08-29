@@ -5714,6 +5714,20 @@ async fn external_api_test_route_returns_catalogue_without_returning_the_credent
         .expect(1)
         .mount(&upstream)
         .await;
+    // A valid key: the authenticated probe accepts the credential and the
+    // catalogue stands.
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(header(
+            "authorization",
+            "Bearer stored-secret-must-not-leak",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "choices": [{"message": {"role": "assistant", "content": ""}}]
+        })))
+        .expect(1)
+        .mount(&upstream)
+        .await;
     let app = build_router_with_auth(external_api_test_state(upstream.uri()).await, false);
 
     let (status, response) = post_json(
@@ -5735,6 +5749,47 @@ async fn external_api_test_route_returns_catalogue_without_returning_the_credent
         serde_json::json!(["catalogue-model"])
     );
     assert!(!response.to_string().contains("stored-secret-must-not-leak"));
+}
+
+#[tokio::test]
+async fn external_api_test_route_public_catalogue_rejects_an_invalid_key() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    // Provider whose `/v1/models` is public (200 to anyone) but whose chat
+    // endpoint enforces auth. The catalogue read alone would let an invalid key
+    // through; the authenticated probe must fail it.
+    let upstream = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [{"id": "catalogue-model"}]
+        })))
+        .mount(&upstream)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(401).set_body_string("secret upstream diagnostic"))
+        .mount(&upstream)
+        .await;
+    let app = test_app();
+
+    let (status, response) = post_json(
+        app,
+        "/api/external-api/connections/test",
+        serde_json::json!({
+            "endpoint": upstream.uri(),
+            "api_key": "wrong-secret"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(response["data"]["status"], "auth_error", "{response}");
+    assert!(response["data"]["models"]
+        .as_array()
+        .is_some_and(Vec::is_empty));
+    assert!(!response.to_string().contains("wrong-secret"));
+    assert!(!response.to_string().contains("secret upstream diagnostic"));
 }
 
 #[tokio::test]

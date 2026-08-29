@@ -127,7 +127,81 @@ fn probe_client() -> reqwest::Client {
         .unwrap_or_default()
 }
 
+/// Validate a connection in two bounded phases:
+///
+/// 1. discover the OpenAI-compatible catalogue via `GET /v1/models`;
+/// 2. when a key is present and the catalogue is non-empty, confirm the key is
+///    genuinely accepted with a minimal authenticated `POST /v1/chat/completions`.
+///
+/// Phase 2 exists because `/v1/models` is public on several providers
+/// (LiteLLM, some NVIDIA/Groq deployments): a catalogue read alone lets an
+/// invalid key through. The chat call is rejected with 401/403 when the key is
+/// wrong, so an invalid key can no longer pass. Neither phase surfaces an
+/// upstream body or the submitted key.
 async fn probe_models(endpoint: &str, api_key: Option<&str>) -> TestConnectionResponse {
+    let catalogue = fetch_catalogue(endpoint, api_key).await;
+    if catalogue.ok {
+        if let Some(key) = api_key.filter(|key| !key.trim().is_empty()) {
+            if let Some(model) = catalogue.models.first() {
+                if let Some(auth_failure) = probe_auth(endpoint, key, model).await {
+                    return auth_failure;
+                }
+            }
+        }
+    }
+    catalogue
+}
+
+/// Minimal authenticated invocation confirming the credential is accepted. A
+/// `max_tokens: 1` request is the smallest billable/no-output probe compatible
+/// with the OpenAI chat contract. Only an explicit 401/403 fails the credential;
+/// any other outcome (including a 4xx about the request shape) means the key was
+/// accepted, so the catalogue result stands. `None` = the credential passed.
+async fn probe_auth(endpoint: &str, api_key: &str, model: &str) -> Option<TestConnectionResponse> {
+    let body = serde_json::json!({
+        "model": model,
+        "messages": [{"role": "user", "content": "ping"}],
+        "max_tokens": 1,
+        "temperature": 0,
+        "stream": false,
+    });
+    let request = probe_client()
+        .post(format!("{endpoint}/v1/chat/completions"))
+        .bearer_auth(api_key)
+        .json(&body);
+    match request.send().await {
+        Ok(response) if matches!(response.status().as_u16(), 401 | 403) => {
+            Some(TestConnectionResponse {
+                ok: false,
+                status: "auth_error".into(),
+                models: vec![],
+                hint: Some(
+                    "The endpoint rejected the credentials. Check the API key and its permissions."
+                        .into(),
+                ),
+            })
+        }
+        Ok(_) => None,
+        Err(error) if error.is_timeout() => Some(TestConnectionResponse {
+            ok: false,
+            status: "timeout".into(),
+            models: vec![],
+            hint: Some(
+                "The endpoint did not respond in time. Check its URL and availability.".into(),
+            ),
+        }),
+        Err(_) => Some(TestConnectionResponse {
+            ok: false,
+            status: "transport_error".into(),
+            models: vec![],
+            hint: Some(
+                "Kronn could not reach this endpoint. Check the URL and network access.".into(),
+            ),
+        }),
+    }
+}
+
+async fn fetch_catalogue(endpoint: &str, api_key: Option<&str>) -> TestConnectionResponse {
     let mut request = probe_client().get(format!("{endpoint}/v1/models"));
     if let Some(key) = api_key.filter(|key| !key.trim().is_empty()) {
         request = request.bearer_auth(key);
