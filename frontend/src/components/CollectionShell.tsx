@@ -37,6 +37,14 @@ export interface CollectionRowProps {
   onClick: () => void;
 }
 
+export interface CollectionSearchContext {
+  value: string;
+  inputRef: React.RefObject<HTMLInputElement | null>;
+  onChange: (query: string) => void;
+  onSubmit?: () => void;
+  clear: () => void;
+}
+
 /** Context handed to `renderList` — the already-filtered items plus the
  * selection helpers a caller needs to keep custom (grouped, nested) markup
  * wired to the shell's shared query/favorites/selection state. */
@@ -64,6 +72,9 @@ export interface CollectionShellSlots<TItem> {
   /** Rendered immediately after the shared search row. Useful for a domain
    * selector that must retain its own full-width layout. */
   afterSidebarHeader?: React.ReactNode;
+  /** Replaces the standard compact search field while retaining the shell's
+   * query state, focus shortcut and optional submit behaviour. */
+  renderSearch?: (context: CollectionSearchContext) => React.ReactNode;
   /** Full override of the list body. Receives the already query/favorites/
    * filter-narrowed items so a caller can render grouped or nested markup
    * (project trees, resource kinds…) while still sharing the filtering and
@@ -84,6 +95,9 @@ export interface CollectionShellProps<TItem> {
   filters?: CollectionFilter<TItem>[];
   /** A domain-owned filter whose control is rendered in a slot. */
   itemFilter?: (item: TItem) => boolean;
+  /** Set false when the query is submitted to a remote search instead of
+   * narrowing the local collection on every keystroke. */
+  filterQuery?: boolean;
   persistence: CollectionPersistence;
   selectedId: CollectionItemId | null;
   onSelect: (id: CollectionItemId) => void;
@@ -99,12 +113,19 @@ export interface CollectionShellProps<TItem> {
   /** Enables the established page-wide `/` shortcut in addition to the
    * sidebar-local shortcut. */
   globalSearchShortcut?: boolean;
+  /** Uses a domain-owned search field while retaining the shell's shortcut
+   * handling (for example, a search that is submitted to the server). */
+  searchInputRef?: React.RefObject<HTMLInputElement | null>;
   /** Shows a clear affordance that changes only the search query. */
   showSearchClear?: boolean;
+  /** Disables slash/roving-row shortcuts while an alternate sidebar mode is
+   * active. */
+  shortcutsEnabled?: boolean;
   /** Hide the generic chip bar when a surface owns its filtering controls. */
   showControls?: boolean;
   sidebarOpen?: boolean;
   onSidebarOpenChange?: (open: boolean) => void;
+  onSearchSubmit?: () => void;
   labels: {
     search: string;
     favorites: string;
@@ -122,11 +143,12 @@ export interface CollectionShellProps<TItem> {
  * filtering, selection, responsive sidebar and context-menu behaviour.
  */
 export function CollectionShell<TItem>({
-  ariaLabel, items, getId, getLabel, isFavorite, onToggleFavorite, filters = [], itemFilter,
+  ariaLabel, items, getId, getLabel, isFavorite, onToggleFavorite, filters = [], itemFilter, filterQuery = true,
   persistence, selectedId, onSelect, selectedIds, onSelectedIdsChange, actions = [],
-  slots, isMobile = false, sidebarOnly = false, sidebarClassName = '', globalSearchShortcut = false, showSearchClear = false, showControls = true, sidebarOpen = true, onSidebarOpenChange, labels,
+  slots, isMobile = false, sidebarOnly = false, sidebarClassName = '', globalSearchShortcut = false, searchInputRef, showSearchClear = false, shortcutsEnabled = true, showControls = true, sidebarOpen = true, onSidebarOpenChange, onSearchSubmit, labels,
 }: CollectionShellProps<TItem>) {
-  const searchRef = useRef<HTMLInputElement>(null);
+  const internalSearchRef = useRef<HTMLInputElement>(null);
+  const searchRef = searchInputRef ?? internalSearchRef;
   const menuRef = useRef<HTMLDivElement>(null);
   const menuTriggerRef = useRef<HTMLButtonElement>(null);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -137,6 +159,9 @@ export function CollectionShell<TItem>({
     setMenuOpen(false);
     if (restoreTriggerFocus) requestAnimationFrame(() => menuTriggerRef.current?.focus());
   }, []);
+  const focusSearch = useCallback(() => {
+    searchRef.current?.focus();
+  }, [searchRef]);
 
   const visibleItems = useMemo(() => {
     const query = persistence.query.trim().toLocaleLowerCase();
@@ -144,9 +169,9 @@ export function CollectionShell<TItem>({
       if (itemFilter && !itemFilter(item)) return false;
       if (persistence.favoritesOnly && !isFavorite?.(item)) return false;
       if (activeFilter && !activeFilter.matches(item)) return false;
-      return !query || getLabel(item).toLocaleLowerCase().includes(query);
+      return !filterQuery || !query || getLabel(item).toLocaleLowerCase().includes(query);
     });
-  }, [activeFilter, getLabel, isFavorite, itemFilter, items, persistence.favoritesOnly, persistence.query]);
+  }, [activeFilter, filterQuery, getLabel, isFavorite, itemFilter, items, persistence.favoritesOnly, persistence.query]);
 
   const actionItems = useMemo(() => {
     if (!canMultiSelect || (selectedIds?.size ?? 0) === 0) return selectedId == null
@@ -174,16 +199,16 @@ export function CollectionShell<TItem>({
   }, [closeMenu, menuOpen]);
 
   useEffect(() => {
-    if (!globalSearchShortcut) return;
-    const focusSearch = (event: KeyboardEvent) => {
+    if (!globalSearchShortcut || !shortcutsEnabled) return;
+    const handleGlobalSearchShortcut = (event: KeyboardEvent) => {
       const target = event.target;
       if (event.key !== '/' || (target instanceof HTMLElement && target.matches('input, textarea, select, [contenteditable="true"]'))) return;
       event.preventDefault();
-      searchRef.current?.focus();
+      focusSearch();
     };
-    window.addEventListener('keydown', focusSearch);
-    return () => window.removeEventListener('keydown', focusSearch);
-  }, [globalSearchShortcut]);
+    window.addEventListener('keydown', handleGlobalSearchShortcut);
+    return () => window.removeEventListener('keydown', handleGlobalSearchShortcut);
+  }, [focusSearch, globalSearchShortcut, shortcutsEnabled]);
 
   const selectItem = (item: TItem) => {
     onSelect(getId(item));
@@ -199,6 +224,7 @@ export function CollectionShell<TItem>({
   };
 
   const onSidebarKeyDown = (event: React.KeyboardEvent<HTMLElement>) => {
+    if (!shortcutsEnabled) return;
     const target = event.target as HTMLElement;
     const textControl = target.matches('input, textarea, select, [contenteditable="true"]');
     if (event.key === '/' && !textControl) {
@@ -235,25 +261,33 @@ export function CollectionShell<TItem>({
     }),
   };
 
+  const searchContext: CollectionSearchContext = {
+    value: persistence.query,
+    inputRef: searchRef,
+    onChange: persistence.onQueryChange,
+    onSubmit: onSearchSubmit,
+    clear: () => persistence.onQueryChange(''),
+  };
+
   const sidebar = (
     <aside className={`collection-shell-sidebar ${sidebarClassName}`.trim()} data-mobile={isMobile} aria-label={ariaLabel} onKeyDown={onSidebarKeyDown}>
       {slots.beforeSidebarHeader}
-      <header className="collection-shell-header">
+      {slots.renderSearch ? slots.renderSearch(searchContext) : <header className="collection-shell-header">
         <div className="collection-shell-search">
           <Search size={15} aria-hidden="true" />
-          <input ref={searchRef} value={persistence.query} onChange={event => persistence.onQueryChange(event.target.value)} aria-label={labels.search} placeholder={labels.search} />
+          <input ref={searchRef} value={persistence.query} onChange={event => persistence.onQueryChange(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') onSearchSubmit?.(); }} aria-label={labels.search} placeholder={labels.search} />
           {showSearchClear && persistence.query && <button type="button" className="collection-shell-icon" onClick={() => persistence.onQueryChange('')} aria-label={labels.clearFilters}><X size={15} /></button>}
         </div>
         {isMobile && <button type="button" className="collection-shell-icon" onClick={() => onSidebarOpenChange?.(false)} aria-label={labels.closeCollection}><X size={17} /></button>}
         {slots.sidebarHeaderEnd}
-      </header>
+      </header>}
       {slots.afterSidebarHeader}
       {showControls && <div className="collection-shell-controls">
         {isFavorite && <button type="button" className="collection-shell-filter" data-active={persistence.favoritesOnly} aria-pressed={persistence.favoritesOnly} onClick={() => persistence.onFavoritesOnlyChange(!persistence.favoritesOnly)}><Star size={14} />{labels.favorites}</button>}
         {filters.map(filter => <button key={filter.id} type="button" className="collection-shell-filter" data-active={filter.id === persistence.activeFilterId} aria-pressed={filter.id === persistence.activeFilterId} onClick={() => persistence.onActiveFilterIdChange?.(filter.id === persistence.activeFilterId ? null : filter.id)}>{filter.label}</button>)}
         {(persistence.query || persistence.favoritesOnly || persistence.activeFilterId) && <button type="button" className="collection-shell-clear" onClick={() => { persistence.onQueryChange(''); persistence.onFavoritesOnlyChange(false); persistence.onActiveFilterIdChange?.(null); }}>{labels.clearFilters}</button>}
       </div>}
-      <div className="collection-shell-list" role="list">
+      <div className="collection-shell-list" role={slots.renderList ? undefined : 'list'}>
         {slots.renderList ? slots.renderList(listContext) : <>
           {visibleItems.map(item => {
             const id = getId(item);

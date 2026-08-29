@@ -514,6 +514,26 @@ describe('DiscussionSidebar — global search entry point', () => {
     expect(screen.getByText('Banana bread')).toBeInTheDocument();
   });
 
+  it('keeps the page-wide slash shortcut bound to the backend-search field', async () => {
+    render(<DiscussionSidebar {...baseProps} discussions={discussions} />);
+    await waitFor(() => expect(projectsApi.discSources).toHaveBeenCalled());
+
+    fireEvent.keyDown(window, { key: '/' });
+    expect(document.querySelector('.disc-search-input')).toHaveFocus();
+  });
+
+  it('keeps grouped discussion rows in the shared arrow-key navigation', async () => {
+    render(<DiscussionSidebar {...baseProps} discussions={discussions} />);
+    await waitFor(() => expect(projectsApi.discSources).toHaveBeenCalled());
+
+    const sidebar = screen.getByRole('complementary', { name: 'Discussions' });
+    const rows = Array.from(sidebar.querySelectorAll<HTMLButtonElement>('.collection-shell-row-button'));
+    fireEvent.keyDown(sidebar, { key: 'ArrowDown' });
+    expect(rows).toContain(document.activeElement);
+    fireEvent.keyDown(sidebar, { key: 'End' });
+    expect(rows).toContain(document.activeElement);
+  });
+
   it('uses one query when switching from quick to advanced search', async () => {
     const onOpenGlobalSearch = vi.fn();
     const { rerender } = render(
