@@ -9,6 +9,7 @@ import { AGENT_LABELS, AGENT_MENTIONS, MODEL_TIER_ICONS, agentColor, mentionedAg
 import { clearDraft, loadDraft, NEW_DISCUSSION_DRAFT_ID, saveDraft } from '../lib/chat-drafts';
 import { loadDefaultDiscussionProject, saveDefaultDiscussionProject } from '../lib/new-discussion-preferences';
 import { findAgentMentionQuery, type AgentMentionQuery } from '../lib/mention-autocomplete';
+import { quoteMultilinePaste } from '../lib/quoteMultilinePaste';
 import {
   applyEmojiReplacement,
   findEmojiQuery,
@@ -132,12 +133,10 @@ export function NewDiscussionForm({
     const query = projectSearch.trim().toLocaleLowerCase();
     if (!query) return selectableProjects;
     return selectableProjects.filter(project => (
-      project.id === newDiscProjectId
-      || project.name.toLocaleLowerCase().includes(query)
+      project.name.toLocaleLowerCase().includes(query)
       || project.path.toLocaleLowerCase().includes(query)
-      || project.repo_url?.toLocaleLowerCase().includes(query)
     ));
-  }, [newDiscProjectId, projectSearch, selectableProjects]);
+  }, [projectSearch, selectableProjects]);
   const promptMentionedAgents = useMemo(
     () => mentionedAgents(newDiscPrompt),
     [newDiscPrompt],
@@ -340,6 +339,27 @@ export function NewDiscussionForm({
       newDiscPromptRef.current?.focus();
       newDiscPromptRef.current?.setSelectionRange(cursor, cursor);
     });
+  };
+
+  const selectProject = (projectId: string) => {
+    setNewDiscProjectId(projectId);
+    const project = projects.find(candidate => candidate.id === projectId);
+    if (project?.default_skill_ids?.length) setNewDiscSkillIds(project.default_skill_ids);
+    setNewDiscWorkspaceMode('Direct');
+    setNewDiscBranchName('');
+    setNewDiscBaseBranch('main');
+  };
+
+  const handleProjectSearch = (value: string) => {
+    setProjectSearch(value);
+    const query = value.trim().toLocaleLowerCase();
+    if (!query || !newDiscProjectId) return;
+    const selectedProject = selectableProjects.find(project => project.id === newDiscProjectId);
+    const stillVisible = selectedProject && (
+      selectedProject.name.toLocaleLowerCase().includes(query)
+      || selectedProject.path.toLocaleLowerCase().includes(query)
+    );
+    if (!stillVisible) selectProject('');
   };
 
   const handleCreate = async () => {
@@ -616,6 +636,19 @@ export function NewDiscussionForm({
                       if (e.key === 'Escape') { e.preventDefault(); setMentionMatch(null); return; }
                     }
                   }}
+                  onPaste={e => {
+                    const textarea = e.currentTarget;
+                    const start = textarea.selectionStart ?? 0;
+                    const lineStart = textarea.value.lastIndexOf('\n', start - 1) + 1;
+                    const quoted = quoteMultilinePaste(
+                      textarea.value.slice(lineStart, start),
+                      e.clipboardData.getData('text'),
+                    );
+                    if (quoted === null) return;
+                    e.preventDefault();
+                    textarea.setRangeText(quoted, start, textarea.selectionEnd ?? start, 'end');
+                    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+                  }}
                   readOnly={newDiscPrefilled}
                   rows={7}
                   autoFocus={!newDiscPrefilled}
@@ -736,27 +769,28 @@ export function NewDiscussionForm({
                 className="disc-input-styled"
                 type="search"
                 value={projectSearch}
-                onChange={event => setProjectSearch(event.target.value)}
+                onChange={event => handleProjectSearch(event.target.value)}
+                onKeyDown={event => {
+                  if (event.key === 'Enter' && visibleProjects.length === 1) {
+                    event.preventDefault();
+                    selectProject(visibleProjects[0].id);
+                  }
+                }}
                 placeholder={t('disc.searchProjects')}
                 aria-label={t('disc.searchProjects')}
                 disabled={newDiscPrefilled}
                 data-locked={newDiscPrefilled}
               />
             </label>
-            <select className="disc-select-styled" aria-label={t('disc.project')} data-locked={newDiscPrefilled} value={newDiscProjectId} onChange={e => {
-              const pid = e.target.value;
-              setNewDiscProjectId(pid);
-              const proj = projects.find(p => p.id === pid);
-              if (proj?.default_skill_ids?.length) setNewDiscSkillIds(proj.default_skill_ids);
-              setNewDiscWorkspaceMode('Direct');
-              setNewDiscBranchName('');
-              setNewDiscBaseBranch('main');
-            }} disabled={newDiscPrefilled}>
+            <select className="disc-select-styled" aria-label={t('disc.project')} data-locked={newDiscPrefilled} value={newDiscProjectId} onChange={event => selectProject(event.target.value)} disabled={newDiscPrefilled}>
               <option value="">{t('disc.noProject')}</option>
               {visibleProjects.map(p => (
                 <option key={p.id} value={p.id}>{p.name}</option>
               ))}
             </select>
+            {projectSearch.trim() && visibleProjects.length === 0 && (
+              <p className="text-muted" role="status">{t('disc.noMatchingProjects')}</p>
+            )}
             {newDiscProjectId && !newDiscPrefilled && (
               <label className="disc-project-default">
                 <input

@@ -949,6 +949,7 @@ const fr: TranslationDict = {
   'disc.createHint': 'Vous pourrez modifier ces réglages depuis la discussion.',
   'disc.project': 'Projet (optionnel)',
   'disc.searchProjects': 'Rechercher un projet…',
+  'disc.noMatchingProjects': 'Aucun projet correspondant.',
   'disc.defaultProject': 'Utiliser par défaut pour les prochaines discussions',
   'disc.noProject': 'Sans projet',
   'disc.agent': 'Agent',

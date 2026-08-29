@@ -17,6 +17,10 @@
 export function quoteMultilinePaste(currentLine: string, pasted: string): string | null {
   if (!pasted.includes('\n')) return null;        // single line — nothing to do
   if (!/^\s*>\s/.test(currentLine)) return null;   // caret not in a `> ` blockquote
-  // Normalise CRLF so we don't emit "\r\n> "; prefix each subsequent line.
-  return pasted.replace(/\r\n?|\n/g, '\n> ');
+  const lines = pasted.replace(/\r\n?/g, '\n').split('\n');
+  // The first line follows the quote marker already present at the caret.
+  // Preserve continuation lines that the clipboard has already quoted.
+  return lines.map((line, index) => (
+    index === 0 || /^>\s/.test(line) ? line : `> ${line}`
+  )).join('\n');
 }

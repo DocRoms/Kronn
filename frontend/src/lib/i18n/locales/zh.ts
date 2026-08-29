@@ -922,6 +922,7 @@ const zh: TranslationDict = {
   "disc.createHint": "您可以从讨论中更改这些设置。",
   "disc.project": "项目（可选）",
   "disc.searchProjects": "搜索项目…",
+  "disc.noMatchingProjects": "没有匹配的项目。",
   "disc.defaultProject": "设为后续讨论的默认项目",
   "disc.noProject": "无项目",
   "disc.agent": "代理",
