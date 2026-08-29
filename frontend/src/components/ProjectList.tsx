@@ -11,7 +11,7 @@ import { usePersistentIdSet } from '../hooks/usePersistentIdSet';
 import type { Project, AgentDetection, AuditProgress, DriftCheckResponse, Discussion, Skill, McpConfigDisplay, WorkflowSummary } from '../types/generated';
 import {
   Folder, ChevronRight, AlertTriangle,
-  MessageSquare, Workflow, Puzzle, ShieldCheck, Loader2, FileCode, Clock, Trash2,
+  MessageSquare, Workflow, Puzzle, ShieldCheck, Loader2, FileCode, Clock, Plus, Trash2,
 } from 'lucide-react';
 import { MatrixText } from './MatrixText';
 
@@ -49,6 +49,7 @@ export interface ProjectListProps {
   onRefetchDiscussions: () => void;
   onRefetchSkills: () => void;
   onRefetchDrift: (projectId: string) => void;
+  onAddProject?: () => void;
   expandedId: string | null;
   onSetExpandedId: (id: string | null) => void;
 }
@@ -72,6 +73,7 @@ export function ProjectList({
   onRefetchDiscussions,
   onRefetchSkills,
   onRefetchDrift,
+  onAddProject,
   expandedId,
   onSetExpandedId,
 }: ProjectListProps) {
@@ -239,6 +241,16 @@ export function ProjectList({
           onSelect={selectProject}
           selectedIds={selectedIds}
           onSelectedIdsChange={setSelectedIds}
+          headerActions={onAddProject && <button
+            type="button"
+            className="collection-shell-icon collection-shell-primary-action"
+            data-tour-id="new-project-btn"
+            onClick={onAddProject}
+            aria-label={t('projects.bootstrap')}
+            title={t('projects.bootstrap')}
+          >
+            <Plus size={16} />
+          </button>}
           actions={[{
             id: 'delete',
             label: t('collection.deleteSelected'),

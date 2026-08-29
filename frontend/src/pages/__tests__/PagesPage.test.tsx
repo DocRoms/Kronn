@@ -119,6 +119,18 @@ describe('PagesPage', () => {
     expect(screen.getByRole('complementary', { name: 'pages.title' })).toBeInTheDocument();
   });
 
+  it('uses refresh as the primary header action and reloads the Page list', async () => {
+    render(<PagesPage />);
+    await screen.findByTestId('live-page-frame');
+    vi.mocked(pagesApi.list).mockClear();
+
+    const refreshButton = screen.getByRole('button', { name: 'pages.refresh' });
+    expect(refreshButton).toHaveClass('disc-icon-btn', 'collection-shell-primary-action');
+    fireEvent.click(refreshButton);
+
+    await waitFor(() => expect(pagesApi.list).toHaveBeenCalledOnce());
+  });
+
   it('uses checkbox semantics for transient Page bulk selection', async () => {
     render(<PagesPage />);
     await screen.findByTestId('live-page-frame');

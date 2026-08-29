@@ -5,6 +5,8 @@
 // vs plural) and a one-click toggle to filter down to just those projects.
 // ProjectCard is stubbed — this exercises the list's own logic only.
 
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { beforeEach, describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import type { Project } from '../../types/generated';
@@ -27,6 +29,7 @@ vi.mock('../../lib/api', () => ({ projects: { delete: deleteProject } }));
 import { ProjectList } from '../ProjectList';
 
 const noop = () => {};
+const dashboardCss = readFileSync(resolve(process.cwd(), 'src/pages/Dashboard.css'), 'utf8');
 
 function proj(id: string, name: string, path: string, path_exists?: boolean): Project {
   return {
@@ -189,5 +192,30 @@ describe('ProjectList — missing-path banner', () => {
     fireEvent.click(screen.getByRole('button', { name: 'collection.closeCollection' }));
     expect(screen.queryByRole('complementary', { name: 'projects.title' })).toBeNull();
     expect(screen.getByRole('button', { name: 'collection.openCollection' })).toHaveClass('collection-shell-sidebar-rail');
+  });
+
+  it('opens the existing add-project flow from the primary header action', () => {
+    const onAddProject = vi.fn();
+    render(
+      <ProjectList
+        projects={[proj('p1', 'Alpha', '/repos/alpha', true)]}
+        discussions={[]} discussionsByProject={{}} driftByProject={{}} agents={[]} allSkills={[]} mcpConfigs={[]} workflows={[]}
+        configLanguage="fr" toast={noop} onNavigate={noop} onSetDiscPrefill={noop} onAutoRunDiscussion={noop}
+        onOpenDiscussion={noop} onRefetch={noop} onRefetchDiscussions={noop} onRefetchSkills={noop} onRefetchDrift={noop}
+        onAddProject={onAddProject} expandedId={null} onSetExpandedId={noop}
+      />,
+    );
+
+    const addButton = screen.getByRole('button', { name: 'projects.bootstrap' });
+    expect(addButton).toHaveClass('collection-shell-icon', 'collection-shell-primary-action');
+    expect(addButton).toHaveAttribute('data-tour-id', 'new-project-btn');
+    fireEvent.click(addButton);
+    expect(onAddProject).toHaveBeenCalledOnce();
+  });
+
+  it('keeps the project more-actions trigger visibly bordered', () => {
+    expect(dashboardCss).toMatch(
+      /\.project-shell\s+\.collection-shell-title-menu\s*>\s*\.collection-shell-icon\s*\{[^}]*border:\s*1px solid var\(--kr-border\)/s,
+    );
   });
 });

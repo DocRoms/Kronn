@@ -1952,6 +1952,10 @@ html[data-density="large"] .dash-main {
   overflow: hidden;
 }
 
+.project-shell .collection-shell-title-menu > .collection-shell-icon {
+  border: 1px solid var(--kr-border);
+}
+
 .project-list-result-count {
   margin: 0 4px var(--kr-sp-3);
   color: var(--kr-text-faint);
