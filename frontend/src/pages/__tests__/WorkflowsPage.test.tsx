@@ -661,7 +661,7 @@ describe('WorkflowsPage', () => {
     await wrap(<WorkflowsPage projects={[]} />);
 
     const sidebar = screen.getByRole('complementary', { name: 'Automatisation' });
-    expect(within(sidebar).getByRole('button', { name: /Favoris \(1\)/ })).toBeInTheDocument();
+    expect(within(sidebar).getByRole('button', { name: 'Favoris 1' })).toHaveClass('collection-favorites-header');
     expect(within(sidebar).getAllByRole('button', { name: 'Ouvrir Pinned detail' })).toHaveLength(2);
     expect(screen.getByTestId('workflow-detail-pane')).toBeInTheDocument();
   });
@@ -693,8 +693,8 @@ describe('WorkflowsPage', () => {
     await wrap(<WorkflowsPage projects={[]} installedAgentTypes={['Codex']} agentAccess={fullConfig} />);
 
     const sidebar = screen.getByRole('complementary', { name: 'Automatisation' });
-    const favorites = sidebar.querySelector('.automation-favorites-section') as HTMLElement;
-    expect(within(favorites).getByRole('button', { name: /Favoris \(3\)/ })).toBeInTheDocument();
+    const favorites = sidebar.querySelector('.disc-sidebar-favorites') as HTMLElement;
+    expect(within(favorites).getByRole('button', { name: 'Favoris 3' })).toHaveClass('collection-favorites-header');
     expect(within(favorites).getByRole('button', { name: 'Ouvrir API favorite' })).toBeInTheDocument();
     expect(within(favorites).getByRole('button', { name: 'Ouvrir Prompt favori' })).toBeInTheDocument();
     expect(within(favorites).getByRole('button', { name: 'Ouvrir Exec favori' })).toBeInTheDocument();

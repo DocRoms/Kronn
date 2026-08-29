@@ -3,6 +3,7 @@ import '../pages/DiscussionsPage.css';
 import { SwipeableDiscItem } from './SwipeableDiscItem';
 import { unseenBasis } from '../lib/discussionUiUtils';
 import { GlobalSearchPanel } from './GlobalSearchPanel';
+import { CollectionFavoritesHeader } from './CollectionFavoritesHeader';
 import { CollectionShell, CollectionSidebarCollapseButton } from './CollectionShell';
 import type { Discussion, Project, Contact, BatchRunSummary, ExecutionDiscussionLink, MessageSearchHit } from '../types/generated';
 import { projects as projectsApi } from '../lib/api';
@@ -12,7 +13,7 @@ import { formatRelativeTime } from '../lib/relativeTime';
 import type { ToastFn } from '../hooks/useToast';
 import {
   Folder, ChevronRight, Plus, X, MessageSquare, Archive, Search,
-  Filter, Users2, Trash2, Star, CheckCheck, Columns3, ListChecks, LogIn,
+  Filter, Users2, Trash2, CheckCheck, Columns3, ListChecks, LogIn,
   Loader2, Upload, CircleDot, Clock3, MoreHorizontal, ChevronDown,
 } from 'lucide-react';
 
@@ -1291,17 +1292,12 @@ export function DiscussionSidebar({
               className="disc-sidebar-section disc-sidebar-favorites"
               data-expanded={!isCollapsed}
             >
-              <button
-                className="disc-group-btn"
-                data-no-border="true"
-                onClick={() => onToggleGroup('__favorites__')}
-                aria-expanded={!isCollapsed}
-              >
-                <ChevronRight size={10} className="disc-chevron" data-expanded={!isCollapsed} />
-                <Star size={10} style={{ color: 'var(--kr-warning)' }} />
-                <span style={{ fontWeight: 600, fontSize: 'var(--kr-fs-sm)' }}>{t('disc.favorites')}</span>
-                <span className="disc-group-count">{pinned.length}</span>
-              </button>
+              <CollectionFavoritesHeader
+                label={t('disc.favorites')}
+                count={pinned.length}
+                expanded={!isCollapsed}
+                onToggle={() => onToggleGroup('__favorites__')}
+              />
               {!isCollapsed && renderSmartSectionRows(pinned.sort(byLiveThenRecent), 'pin')}
             </div>
           );

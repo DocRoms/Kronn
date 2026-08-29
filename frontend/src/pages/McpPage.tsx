@@ -23,12 +23,13 @@ import {
   Puzzle, Plus, Trash2, Eye, Check, RefreshCw, Square, CheckSquare, Minus,
   X, Key, Pencil, FileText, ExternalLink, Save,
   Plug, Globe, Info, Sparkles, Upload, Download, ChevronRight, Terminal, AlertTriangle,
-  ArrowUpDown, Filter, Folder, Star,
+  ArrowUpDown, Filter, Folder,
 } from 'lucide-react';
 import { HostSyncChip } from '../components/HostSyncChip';
 import { HostSyncPreview } from '../components/HostSyncPreview';
 import { ListControls } from '../components/ListControls';
 import { CollectionShell } from '../components/CollectionShell';
+import { CollectionFavoritesHeader } from '../components/CollectionFavoritesHeader';
 import { CollectionRowActions } from '../components/CollectionRowActions';
 import { CollectionSidebarFooter } from '../components/CollectionSidebarFooter';
 import { PluginPortabilityModal } from '../components/PluginPortabilityModal';
@@ -3165,11 +3166,12 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                     const favoritesCollapsed = isGroupCollapsed('favorites');
                     return <div className="disc-sidebar-list mcp-sidebar-items">
                       {favorites.length > 0 && <div className="disc-sidebar-section disc-sidebar-favorites" data-expanded={!favoritesCollapsed}>
-                        <button type="button" className="disc-group-btn" data-no-border="true" onClick={() => toggleGroup('favorites')} aria-expanded={!favoritesCollapsed}>
-                          <ChevronRight size={10} className="disc-chevron" data-expanded={!favoritesCollapsed} />
-                          <Star size={10} className="mcp-sidebar-group-star" fill="currentColor" />
-                          <span>{t('disc.favorites')}</span><span className="disc-group-count">{favorites.length}</span>
-                        </button>
+                        <CollectionFavoritesHeader
+                          label={t('disc.favorites')}
+                          count={favorites.length}
+                          expanded={!favoritesCollapsed}
+                          onToggle={() => toggleGroup('favorites')}
+                        />
                         {!favoritesCollapsed && favorites.map(config => row(config, 'favorite'))}
                       </div>}
 

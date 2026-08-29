@@ -20,7 +20,6 @@
 
 .live-pages-items .disc-sidebar-section { order: initial; }
 .live-page-row .disc-item-meta-summary { font-family: var(--kr-font-mono); }
-.live-page-group-star { color: var(--kr-warning); }
 .live-page-row .disc-item-open { min-width: 0; }
 
 .live-pages-viewer {

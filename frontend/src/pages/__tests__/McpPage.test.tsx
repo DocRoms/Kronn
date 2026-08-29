@@ -200,6 +200,7 @@ describe('McpPage', () => {
     expect(favoritesSection).toBeInTheDocument();
     expect(within(favoritesSection).getByRole('button', { name: 'GitHub Main — Voir les détails' })).toBeInTheDocument();
     const favoritesHeader = within(favoritesSection).getByRole('button', { name: 'Favoris 1' });
+    expect(favoritesHeader).toHaveClass('collection-favorites-header');
     fireEvent.click(favoritesHeader);
     expect(favoritesHeader).toHaveAttribute('aria-expanded', 'false');
     expect(within(favoritesSection).queryByRole('button', { name: 'GitHub Main — Voir les détails' })).toBeNull();

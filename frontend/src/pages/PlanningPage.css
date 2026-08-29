@@ -76,8 +76,6 @@
   white-space: nowrap;
 }
 
-.planning-sidebar-star { color: var(--kr-warning); }
-
 .collection-shell-sidebar .planning-filters select { min-width: 0; flex: 1 1 120px; }
 
 .planning-filters {

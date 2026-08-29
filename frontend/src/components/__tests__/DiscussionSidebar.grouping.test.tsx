@@ -443,6 +443,7 @@ describe('DiscussionSidebar — pinned / favorites section', () => {
     // Favorites header renders with the pinned count.
     const favHeader = screen.getByText('disc.favorites');
     expect(favHeader).toBeInTheDocument();
+    expect(favHeader.closest('button')).toHaveClass('collection-favorites-header');
 
     // Scope to the favorites <div> (header + its pinned items). The same
     // pinned disc also renders in its project/global group via a `pin-<id>`

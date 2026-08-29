@@ -5,6 +5,7 @@ import { useT } from '../lib/I18nContext';
 import { getProjectGroup, isHiddenPath, isValidationDisc } from '../lib/constants';
 import { useIsMobile } from '../hooks/useMediaQuery';
 import { ProjectCard } from './ProjectCard';
+import { CollectionFavoritesHeader } from './CollectionFavoritesHeader';
 import { CollectionRowActions } from './CollectionRowActions';
 import { CollectionSidebarFooter } from './CollectionSidebarFooter';
 import { ListControls } from './ListControls';
@@ -538,7 +539,12 @@ export function ProjectList({
                   data-testid="project-section-favorites"
                   data-expanded={!sectionCollapsed('favorites')}
                 >
-                  {sectionHeader('favorites', <Star size={10} fill="currentColor" />, t('disc.favorites'), favoriteProjects.length)}
+                  <CollectionFavoritesHeader
+                    label={t('disc.favorites')}
+                    count={favoriteProjects.length}
+                    expanded={!sectionCollapsed('favorites')}
+                    onToggle={() => toggleSection('favorites')}
+                  />
                   {!sectionCollapsed('favorites') && favoriteProjects.map(project => row(project, 'favorites'))}
                 </div>}
                 {recentProjects.length > 0 && <div

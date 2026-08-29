@@ -12,7 +12,6 @@ import {
   Link2,
   Loader2,
   Plus,
-  Star,
   Target,
   X,
 } from 'lucide-react';
@@ -24,6 +23,7 @@ import { userError } from '../lib/userError';
 import { CopyIdPill } from '../components/CopyIdPill';
 import { ContextHelp } from '../components/ContextHelp';
 import { CollectionShell } from '../components/CollectionShell';
+import { CollectionFavoritesHeader } from '../components/CollectionFavoritesHeader';
 import { CollectionRowActions } from '../components/CollectionRowActions';
 import { CollectionSidebarFooter } from '../components/CollectionSidebarFooter';
 import { usePersistentIdSet } from '../hooks/usePersistentIdSet';
@@ -498,11 +498,12 @@ export function PlanningPage({
 
               return <div className="disc-sidebar-list planning-sidebar-list">
                 {favorites.length > 0 && <div className="disc-sidebar-section disc-sidebar-favorites" data-expanded={!isSectionCollapsed('favorites')}>
-                  <button type="button" className="disc-group-btn" data-no-border="true" onClick={() => toggleSection('favorites')} aria-expanded={!isSectionCollapsed('favorites')}>
-                    <ChevronRight size={10} className="disc-chevron" data-expanded={!isSectionCollapsed('favorites')} />
-                    <Star size={10} className="planning-sidebar-star" fill="currentColor" />
-                    <span>{t('disc.favorites')}</span><span className="disc-group-count">{favorites.length}</span>
-                  </button>
+                  <CollectionFavoritesHeader
+                    label={t('disc.favorites')}
+                    count={favorites.length}
+                    expanded={!isSectionCollapsed('favorites')}
+                    onToggle={() => toggleSection('favorites')}
+                  />
                   {!isSectionCollapsed('favorites') && favorites.map(task => row(task, 'favorite'))}
                 </div>}
 

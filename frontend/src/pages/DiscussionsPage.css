@@ -204,6 +204,20 @@
   order: 2;
 }
 
+.collection-favorites-header-star {
+  flex: 0 0 auto;
+  color: var(--kr-warning);
+}
+
+.collection-favorites-header-label {
+  min-width: 0;
+  overflow: hidden;
+  font-size: var(--kr-fs-sm);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .disc-sidebar-recent {
   order: 3;
 }

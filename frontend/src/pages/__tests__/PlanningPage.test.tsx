@@ -145,6 +145,7 @@ describe('PlanningPage', () => {
     await findCanonicalTaskRow(favorite.title);
 
     const favoriteSection = screen.getByText('disc.favorites').closest('.disc-sidebar-section') as HTMLElement;
+    expect(within(favoriteSection).getByRole('button', { name: 'disc.favorites 1' })).toHaveClass('collection-favorites-header');
     const recentSection = screen.getByText('disc.recent').closest('.disc-sidebar-section') as HTMLElement;
     const projectsSection = screen.getByText('projects.title').closest('.disc-sidebar-section') as HTMLElement;
     expect([...recentSection.querySelectorAll('.disc-item-title-text')].map(node => node.textContent))

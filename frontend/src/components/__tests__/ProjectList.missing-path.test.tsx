@@ -236,6 +236,7 @@ describe('ProjectList — missing-path banner', () => {
     const view = renderList(projects);
 
     const favorites = screen.getByTestId('project-section-favorites');
+    expect(within(favorites).getByRole('button', { name: 'disc.favorites 1' })).toHaveClass('collection-favorites-header');
     const recent = screen.getByTestId('project-section-recent');
     const all = screen.getByTestId('project-section-all');
     expect([...all.parentElement!.children].map(section => section.getAttribute('data-section')))

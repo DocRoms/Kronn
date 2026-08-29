@@ -89,10 +89,6 @@
   min-width: 0;
 }
 
-.automation-favorites-section > .automation-kind-button {
-  color: var(--kr-accent);
-}
-
 @media (max-width: 760px) {
   .automation-page {
     display: block;

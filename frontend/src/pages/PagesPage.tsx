@@ -19,6 +19,7 @@ import {
 } from '../lib/live-page-sandbox';
 import { formatRelativeTime } from '../lib/relativeTime';
 import { CopyIdPill } from '../components/CopyIdPill';
+import { CollectionFavoritesHeader } from '../components/CollectionFavoritesHeader';
 import { CollectionRowActions } from '../components/CollectionRowActions';
 import { CollectionSidebarFooter } from '../components/CollectionSidebarFooter';
 import { CollectionShell, CollectionSidebarCollapseButton } from '../components/CollectionShell';
@@ -626,11 +627,12 @@ export function PagesPage({
             return <div className="disc-sidebar-list live-pages-items">
           {visibleFavorites.length > 0 && (
             <div className="disc-sidebar-section disc-sidebar-favorites" data-expanded={!isSectionCollapsed('favorites')}>
-              <button type="button" className="disc-group-btn" data-no-border="true" onClick={() => toggleSection('favorites')} aria-expanded={!isSectionCollapsed('favorites')}>
-                <ChevronRight size={10} className="disc-chevron" data-expanded={!isSectionCollapsed('favorites')} />
-                <Star size={10} className="live-page-group-star" fill="currentColor" />
-                <span>{t('pages.filter.favorites')}</span><span className="disc-group-count">{visibleFavorites.length}</span>
-              </button>
+              <CollectionFavoritesHeader
+                label={t('pages.filter.favorites')}
+                count={visibleFavorites.length}
+                expanded={!isSectionCollapsed('favorites')}
+                onToggle={() => toggleSection('favorites')}
+              />
               {!isSectionCollapsed('favorites') && visibleFavorites.map(page => row(page, 'favorite'))}
             </div>
           )}

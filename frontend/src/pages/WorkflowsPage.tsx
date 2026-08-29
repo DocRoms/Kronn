@@ -35,6 +35,7 @@ import { detectAutomationImport, type AutomationImportKind } from '../lib/automa
 import { AGENT_LABELS, MODEL_TIER_ICONS, agentColor, modelForAgentTier } from '../lib/constants';
 import { MatrixText } from '../components/MatrixText';
 import { AgentSwitchPicker } from '../components/AgentSwitchPicker';
+import { CollectionFavoritesHeader } from '../components/CollectionFavoritesHeader';
 import { CollectionRowActions } from '../components/CollectionRowActions';
 import { CollectionSidebarFooter } from '../components/CollectionSidebarFooter';
 import { ListControls } from '../components/ListControls';
@@ -1932,20 +1933,15 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
         <div className="disc-sidebar-list automation-sidebar-items" data-tour-id="automation-kinds">
           {sidebarFavoriteCount > 0 && (
             <div
-              className="disc-sidebar-section automation-sidebar-section automation-favorites-section"
+              className="disc-sidebar-section disc-sidebar-favorites automation-sidebar-section"
               data-expanded={!isAutomationSectionCollapsed('favorites')}
             >
-              <button
-                type="button"
-                className="disc-group-btn automation-kind-button"
-                onClick={toggleFavoritesSection}
-                aria-expanded={!isAutomationSectionCollapsed('favorites')}
-              >
-                <ChevronRight size={10} className="disc-chevron" data-expanded={!isAutomationSectionCollapsed('favorites')} />
-                <Star size={11} fill="currentColor" />
-                <span>{t('disc.favorites')}</span>
-                <span className="disc-group-count">({sidebarFavoriteCount})</span>
-              </button>
+              <CollectionFavoritesHeader
+                label={t('disc.favorites')}
+                count={sidebarFavoriteCount}
+                expanded={!isAutomationSectionCollapsed('favorites')}
+                onToggle={toggleFavoritesSection}
+              />
               {!isAutomationSectionCollapsed('favorites') && sidebarWorkflows.filter(item => item.pinned).map(workflow => (
                 <AutomationResourceRow
                   key={`favorite-workflow-${workflow.id}`}

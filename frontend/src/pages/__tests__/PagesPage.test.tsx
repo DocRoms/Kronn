@@ -425,6 +425,7 @@ describe('PagesPage', () => {
     await screen.findByTestId('live-page-frame');
 
     const favoriteSection = screen.getByText('pages.filter.favorites').closest('.disc-sidebar-section') as HTMLElement;
+    expect(within(favoriteSection).getByRole('button', { name: 'pages.filter.favorites 1' })).toHaveClass('collection-favorites-header');
     const recentSection = screen.getByText('disc.recent').closest('.disc-sidebar-section') as HTMLElement;
     const canonicalSection = screen.getByText('pages.filter.active').closest('.disc-sidebar-section') as HTMLElement;
     expect([...recentSection.querySelectorAll('.disc-item-title-text')].map(node => node.textContent))
