@@ -220,6 +220,8 @@ describe('CollectionShell', () => {
 
   it('keeps explicit accent focus indicators for the search and every shared button control', () => {
     expect(collectionShellCss).toMatch(/\.collection-shell\s*\{[^}]*position:\s*relative/);
+    expect(collectionShellCss).toMatch(/\.collection-shell-titlebar \.collection-shell-icon\s*\{[^}]*border:\s*1px solid var\(--kr-border\)/);
+    expect(collectionShellCss).toMatch(/\.collection-shell-titlebar \.collection-shell-primary-action[^}]*\{[^}]*background:\s*var\(--kr-accent\)/);
     expect(collectionShellCss).toMatch(/\.collection-shell-search:focus-within\s*\{[^}]*outline:\s*2px solid var\(--kr-accent\)/);
     expect(collectionShellCss).toMatch(/\.collection-shell-open:focus-visible[^{]*\{[^}]*outline:\s*2px solid var\(--kr-accent\)/);
     expect(collectionShellCss).toMatch(/\.collection-shell-collapse-button:focus-visible\s*\{[^}]*outline:\s*2px solid var\(--kr-accent\)/);

@@ -21,7 +21,13 @@
 .collection-shell-filter[data-active="true"] { background: var(--kr-accent-bg); color: var(--kr-text-primary); }
 .collection-shell-clear { margin-left: auto; }
 .collection-shell-icon, .collection-shell-favorite, .collection-shell-open { width: 30px; height: 30px; padding: 0; }
-.collection-shell-titlebar .collection-shell-icon { width: 34px; height: 34px; }
+.collection-shell-titlebar .collection-shell-icon { width: 34px; height: 34px; border: 1px solid var(--kr-border); }
+.collection-shell-titlebar .collection-shell-primary-action,
+.disc-sidebar-header .collection-shell-primary-action { border-color: transparent; background: var(--kr-accent); color: var(--kr-text-on-accent, #fff); }
+.collection-shell-titlebar .collection-shell-primary-action:hover,
+.collection-shell-titlebar .collection-shell-primary-action:focus-visible,
+.disc-sidebar-header .collection-shell-primary-action:hover,
+.disc-sidebar-header .collection-shell-primary-action:focus-visible { background: var(--kr-accent-hover, var(--kr-accent)); color: var(--kr-text-on-accent, #fff); }
 .collection-shell-titlebar .kr-context-help-trigger,
 .disc-sidebar-header .kr-context-help-trigger { width: 34px; height: 34px; padding: 0; border: 1px solid var(--kr-border); border-radius: var(--kr-r-sm); }
 .collection-shell-icon[data-danger="true"] { color: var(--kr-error); }

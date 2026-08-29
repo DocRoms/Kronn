@@ -183,6 +183,7 @@ describe('McpPage', () => {
     wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={vi.fn()} />);
     await act(async () => {});
     expect(screen.getByText('Plugins').closest('.collection-shell-title')).toHaveTextContent('Plugins · 2');
+    expect(document.querySelector('[data-tour-id="add-plugin-btn"]')).toHaveClass('collection-shell-primary-action');
     fireEvent.click(screen.getByRole('button', { name: /Favoris · GitHub Main/ }));
     expect(localStorage.getItem('kronn:collection-favorites:plugins')).toContain('c1');
     fireEvent.click(screen.getByRole('button', { name: 'Favoris' }));
