@@ -5851,6 +5851,92 @@ mod tests {
 
     #[tokio::test]
     #[serial]
+    async fn portable_library_api_global_import_ignores_unknown_project_id() {
+        isolate_config_dir();
+        let state = test_state();
+        let body = serde_json::json!({
+            "project_id": "stale-project-id",
+            "items": [{
+                "kind": "skill",
+                "id": "global-with-stale-carrier",
+                "scope": "global",
+                "source": "skills/global-with-stale-carrier/SKILL.md",
+                "content_sha256": "unused",
+                "content": "---\nname: global-with-stale-carrier\ndescription: Global import\n---\n\nBody.\n",
+                "data": null,
+            }],
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/portable-library/import")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let (status, json) = send(state.clone(), false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["success"], true, "import failed: {json}");
+
+        let req = Request::builder()
+            .uri("/api/portable-library?search=global-with-stale-carrier")
+            .body(Body::empty())
+            .unwrap();
+        let (_, json) = send(state, false, req).await;
+        assert!(json["data"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["id"] == "global-with-stale-carrier"));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn portable_library_api_mixed_import_rejects_atomically_for_unknown_project() {
+        isolate_config_dir();
+        let state = test_state();
+        let body = serde_json::json!({
+            "project_id": "unknown-project",
+            "items": [
+                {
+                    "kind": "skill",
+                    "id": "must-not-be-written",
+                    "scope": "global",
+                    "source": "skills/must-not-be-written/SKILL.md",
+                    "content_sha256": "unused",
+                    "content": "---\nname: must-not-be-written\ndescription: Atomicity probe\n---\n\nBody.\n",
+                    "data": null,
+                },
+                {
+                    "kind": "skill",
+                    "id": "missing-project-item",
+                    "scope": "project",
+                    "source": "skills/missing-project-item/SKILL.md",
+                    "content_sha256": "unused",
+                    "content": "---\nname: missing-project-item\ndescription: Requires project\n---\n\nBody.\n",
+                    "data": null,
+                }
+            ],
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/portable-library/import")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let (status, json) = send(state.clone(), false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["success"], false);
+        assert_eq!(json["error"], "project not found");
+
+        let req = Request::builder()
+            .uri("/api/portable-library?search=must-not-be-written")
+            .body(Body::empty())
+            .unwrap();
+        let (_, json) = send(state, false, req).await;
+        assert!(json["data"]["items"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    #[serial]
     async fn portable_library_api_import_project_scope_requires_project_id() {
         isolate_config_dir();
         let state = test_state();

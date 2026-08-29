@@ -256,11 +256,20 @@ async fn import_inner(
     state: &AppState,
     req: ImportRequest,
 ) -> Result<portable::SyncReport, String> {
-    let (global, project) = roots(state, req.project_id.as_deref()).await?;
     let has_project_item = req
         .items
         .iter()
         .any(|item| item.scope == portable::LibraryScope::Project);
+    // Global-only imports are independent of any carrier project, including
+    // when a stale project_id is supplied by an older client/export flow.
+    let global = crate::core::config::config_dir()
+        .map_err(|e| e.to_string())?
+        .join(".agents");
+    let project = if has_project_item {
+        roots(state, req.project_id.as_deref()).await?.1
+    } else {
+        None
+    };
     if has_project_item && project.is_none() {
         return Err("project_id is required to import project-scope items".to_string());
     }

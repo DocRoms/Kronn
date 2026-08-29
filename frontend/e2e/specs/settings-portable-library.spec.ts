@@ -187,9 +187,9 @@ test.describe('Settings — portable agent library', () => {
 
     // Sync/check/approve are project-scoped operations — disabled while no
     // project is selected.
-    await expect(settings.portableActionButton('Sync')).toBeDisabled();
-    await expect(settings.portableActionButton('Check frozen')).toBeDisabled();
-    await expect(settings.portableActionButton('Approve')).toBeDisabled();
+    await expect(settings.portableActionButton(/Synchroniser|Sync/i)).toBeDisabled();
+    await expect(settings.portableActionButton(/Vérifier.*frozen|Check frozen/i)).toBeDisabled();
+    await expect(settings.portableActionButton(/Approuver|Approve/i)).toBeDisabled();
   });
 
   test('project scope runs sync -> check -> approve -> migrate end-to-end', async ({ page }) => {
@@ -212,18 +212,18 @@ test.describe('Settings — portable agent library', () => {
     await settings.selectPortableScope('proj-1');
 
     await expect(settings.portableDriftChip).toContainText('unsynced');
-    await expect(settings.portableTrustChip).toContainText('approval required');
+    await expect(settings.portableTrustChip).toContainText(/approbation requise|approval required/i);
 
-    await settings.portableActionButton('Sync').click();
+    await settings.portableActionButton(/Synchroniser|Sync/i).click();
     await expect(settings.portableDriftChip).toContainText('clean');
 
-    await settings.portableActionButton('Check frozen').click();
+    await settings.portableActionButton(/Vérifier.*frozen|Check frozen/i).click();
     await expect(section.locator('.set-warning-callout')).toHaveCount(0);
 
-    await settings.portableActionButton('Approve').click();
-    await expect(settings.portableTrustChip).toContainText('approved');
+    await settings.portableActionButton(/Approuver|Approve/i).click();
+    await expect(settings.portableTrustChip).toContainText(/approuvée|approved/i);
 
-    await settings.portableActionButton('Migrate').click();
+    await settings.portableActionButton(/Migrer|Migrate/i).click();
     await expect(section.locator('.set-warning-callout')).toHaveCount(0);
   });
 
