@@ -153,6 +153,13 @@ for (const viewport of VIEWPORTS) {
           await expect(result).toContainText('Kronn · Demo');
           await expect(page.locator('[data-testid="global-search-input"]')).not.toHaveValue('');
         }
+        if (stepId === 'automation-ai') {
+          // The AI action now lives in the consolidated `+` chooser. Reaching
+          // this step proves the tour opened that real modal instead of silently
+          // skipping the now-hidden legacy action.
+          await expect(page.locator('.automation-action-modal')).toBeVisible();
+          await expect(page.locator('[data-tour-id="automation-ai-btn"]')).toBeVisible();
+        }
 
         // The new-discussion modal is opened by two steps and must not survive
         // them: left open it covers the pages the tour goes on to explain.

@@ -28,13 +28,18 @@ Stdlib `unittest` + `unittest.mock` only — zero extra dev deps,
 matches the script's own "no third-party packages" discipline.
 """
 
+import contextlib
 import hashlib
 import io
 import importlib.util
 import json
 import os
 import re
+import select
+import shutil
+import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -428,11 +433,11 @@ class TaskExecPrincipalSurfaceTests(unittest.TestCase):
         self.mod = _load_module()
         self.mod._set_current_disc_id("disc-parent")
 
-    def test_catalogue_covers_prepare_launch_status_cancel_and_reassign(self):
+    def test_catalogue_covers_prepare_launch_status_resume_cancel_and_reassign(self):
         expected = {
             "agent_list",
             "task_exec_prepare", "task_exec_launch", "task_exec_status",
-            "task_exec_cancel", "task_exec_reassign",
+            "task_exec_resume", "task_exec_cancel", "task_exec_reassign",
         }
         tools = {item["name"]: item for item in self.mod.TOOLS}
         self.assertTrue(expected.issubset(tools))
@@ -440,6 +445,9 @@ class TaskExecPrincipalSurfaceTests(unittest.TestCase):
             props = tools[name]["inputSchema"]["properties"]
             self.assertNotIn("source_agent", props)
             self.assertNotIn("source_session_id", props)
+        worker_description = tools["task_exec_reassign"]["inputSchema"]["properties"]["worker"]["description"]
+        self.assertIn("Native HTTP workers", worker_description)
+        self.assertIn("Custom targets require their connection_id", worker_description)
 
     def test_agent_list_injects_room_identity_and_documents_honest_availability(self):
         http = mock.MagicMock(return_value={
@@ -698,14 +706,17 @@ class TaskExecPrincipalSurfaceTests(unittest.TestCase):
             })
         self.assertEqual(http.call_count, 2)
 
-    def test_status_cancel_and_reassign_forward_only_derived_identity(self):
+    def test_status_resume_cancel_and_reassign_forward_only_derived_identity(self):
         http = mock.MagicMock(return_value={"success": True, "data": {"execution": {"id": "e"}}})
-        selection = {"target": {"kind": "cli", "agent_type": "Codex", "cli_session_id": 7}}
+        # KT-492 — the same flat MessageTarget shape agent_list hands back
+        # verbatim, not the legacy {target, model, profile_id} envelope.
+        selection = {"kind": "cli", "agent_type": "Codex", "cli_session_id": 7}
         with mock.patch.object(self.mod, "_agent_type_for_session", return_value="ClaudeCode"), \
             mock.patch.object(self.mod, "_session_id_for_caller", return_value="adhoc-live-a"), \
              mock.patch.object(self.mod, "_http", http):
             self.mod.call_task_exec_status({"task_execution_id": "exec-1"})
             self.mod.call_task_exec_status({"task_reference": "KT/324"})
+            self.mod.call_task_exec_resume({"task_execution_id": "exec-1"})
             self.mod.call_task_exec_cancel({
                 "task_execution_id": "exec-1", "reason": "stop",
                 "cleanup_policy": "preserve",
@@ -718,6 +729,7 @@ class TaskExecPrincipalSurfaceTests(unittest.TestCase):
         http.assert_has_calls([
             mock.call("POST", "/api/orchestration/tool/executions/exec-1/status", identity),
             mock.call("POST", "/api/orchestration/tool/executions/KT%2F324/status", identity),
+            mock.call("POST", "/api/orchestration/tool/executions/exec-1/resume", identity),
             mock.call("POST", "/api/orchestration/tool/executions/exec-1/cancel", {
                 **identity, "reason": "stop", "cleanup_policy": "preserve",
             }),
@@ -725,6 +737,104 @@ class TaskExecPrincipalSurfaceTests(unittest.TestCase):
                 **identity, "worker": selection, "reason": "provider unavailable",
             }),
         ])
+
+    def test_task_exec_reassign_accepts_every_message_target_kind_from_agent_list(self):
+        """KT-492 — `worker` is the flat MessageTarget object copied verbatim
+        from `agent_list`, for every transport it can report: an HTTP provider
+        (discussion_agent), a punctual host CLI (agent) and an exact joined CLI
+        session (cli)."""
+        http = mock.MagicMock(return_value={"success": True, "data": {"execution": {"id": "e"}}})
+        workers = [
+            {"kind": "discussion_agent", "agent_type": "Ollama"},
+            {"kind": "agent", "agent_type": "Codex"},
+            {"kind": "cli", "agent_type": "ClaudeCode", "cli_session_id": 11},
+        ]
+        with mock.patch.object(self.mod, "_agent_type_for_session", return_value="ClaudeCode"), \
+            mock.patch.object(self.mod, "_session_id_for_caller", return_value="adhoc-live-a"), \
+             mock.patch.object(self.mod, "_http", http):
+            for worker in workers:
+                with self.subTest(kind=worker["kind"]):
+                    self.mod.call_task_exec_reassign({
+                        "task_execution_id": "exec-1", "worker": worker,
+                        "reason": "swap worker",
+                    })
+        identity = {"source_agent": "ClaudeCode", "source_session_id": "adhoc-live-a"}
+        http.assert_has_calls([
+            mock.call("POST", "/api/orchestration/tool/executions/exec-1/reassign", {
+                **identity, "worker": worker, "reason": "swap worker",
+            })
+            for worker in workers
+        ])
+
+    def test_task_exec_reassign_refuses_the_legacy_campaign_worker_selection_envelope(self):
+        """The internal backend envelope `{target, model, profile_id}` must be
+        refused with a typed, actionable bridge error before any HTTP call —
+        not a raw 422 from the backend's deserializer."""
+        http = mock.MagicMock()
+        legacy = {
+            "target": {"kind": "discussion_agent", "agent_type": "Ollama"},
+            "model": None,
+            "profile_id": None,
+        }
+        with mock.patch.object(self.mod, "_agent_type_for_session", return_value="ClaudeCode"), \
+            mock.patch.object(self.mod, "_session_id_for_caller", return_value="adhoc-live-a"), \
+             mock.patch.object(self.mod, "_http", http):
+            with self.assertRaises(RuntimeError) as refused:
+                self.mod.call_task_exec_reassign({
+                    "task_execution_id": "exec-1", "worker": legacy,
+                    "reason": "provider unavailable",
+                })
+        self.assertIn("flat MessageTarget", str(refused.exception))
+        self.assertIn("agent_list", str(refused.exception))
+        http.assert_not_called()
+
+    def test_status_advertises_resume_only_for_public_applying_checkpoint(self):
+        identity = {"source_agent": "Codex", "source_session_id": "session-1"}
+        cases = [
+            ({
+                "lineage": {"execution": {
+                    "status": "Blocked", "blocked_from_status": "Applying",
+                    "interrupted_from_status": None,
+                }},
+            }, True),
+            ({
+                "lineage": {"execution": {
+                    "status": "Interrupted", "blocked_from_status": "Applying",
+                    "interrupted_from_status": "Blocked",
+                }},
+            }, True),
+            ({
+                "lineage": {"execution": {
+                    "status": "Blocked", "blocked_from_status": "Provisioning",
+                    "interrupted_from_status": None,
+                }},
+            }, False),
+            ({
+                "lineage": {"execution": {
+                    "status": "AwaitingReview", "blocked_from_status": None,
+                    "interrupted_from_status": None,
+                }},
+            }, False),
+        ]
+        with mock.patch.object(
+            self.mod, "_task_exec_identity", return_value=("Codex", "session-1"),
+        ):
+            for payload, expected in cases:
+                with self.subTest(payload=payload):
+                    with mock.patch.object(self.mod, "_http", return_value={
+                        "success": True, "data": payload,
+                    }) as http:
+                        result = self.mod.call_task_exec_status({
+                            "task_execution_id": "exec-1",
+                        })
+                    self.assertEqual("next_action" in result, expected)
+                    if expected:
+                        self.assertEqual(
+                            result["next_action"]["tool"], "task_exec_resume",
+                        )
+                    http.assert_called_once_with(
+                        "POST", "/api/orchestration/tool/executions/exec-1/status", identity,
+                    )
 
     def test_deliver_and_review_use_the_live_session_like_the_rest_of_the_family(self):
         """KT-378 follow-up — the fix originally reached only five of eight tools.
@@ -906,6 +1016,7 @@ class TaskExecDeliverTests(unittest.TestCase):
             "execution_id": "exec-a",
             "discussion_id": "disc-child-a",
             "agent_type": "Codex",
+            "dispatch_job_id": "dispatch-a",
             "source_message_id": "trigger-a",
         }
 
@@ -954,7 +1065,7 @@ class TaskExecDeliverTests(unittest.TestCase):
         self.assertEqual(self.mod._CURRENT_DISC_ID, "disc-child")
         write_binding.assert_not_called()
 
-    def test_spawned_worker_catalogue_is_exact_commit_then_delivery_surface(self):
+    def test_spawned_worker_catalogue_is_exact_status_commit_delivery_surface(self):
         encoded = json.dumps(self._spawned_context())
         with mock.patch.dict(
             os.environ, {self.mod._TASK_WORKER_CONTEXT_ENV: encoded}, clear=False
@@ -969,10 +1080,13 @@ class TaskExecDeliverTests(unittest.TestCase):
 
         self.assertEqual(
             [tool["name"] for tool in tools],
-            ["task_exec_commit", "task_exec_deliver"],
+            ["task_exec_status", "task_exec_commit", "task_exec_deliver"],
         )
         self.assertEqual(listed["result"]["tools"], tools)
         by_name = {tool["name"]: tool for tool in tools}
+        status_schema = by_name["task_exec_status"]["inputSchema"]
+        self.assertFalse(status_schema["additionalProperties"])
+        self.assertEqual(status_schema["properties"], {})
         commit_schema = by_name["task_exec_commit"]["inputSchema"]
         self.assertFalse(commit_schema["additionalProperties"])
         self.assertEqual(commit_schema["required"], ["files", "message"])
@@ -1010,6 +1124,43 @@ class TaskExecDeliverTests(unittest.TestCase):
         self.assertNotIn("task_execution_id", initialized["result"]["instructions"])
         self.assertIn("opaque DoD ids", initialized["result"]["instructions"])
 
+    def test_spawned_worker_status_uses_runner_context(self):
+        encoded = json.dumps(self._spawned_context())
+        http = mock.MagicMock(return_value={
+            "success": True,
+            "data": {"execution": {"id": "exec-a", "status": "Working"}},
+        })
+        with mock.patch.dict(
+            os.environ, {self.mod._TASK_WORKER_CONTEXT_ENV: encoded}, clear=False
+        ), mock.patch.object(
+            self.mod, "_task_exec_identity", side_effect=AssertionError("must not join")
+        ), mock.patch.object(self.mod, "_http", http):
+            response = self.mod._handle({
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "tools/call",
+                "params": {
+                    "name": "task_exec_status",
+                    "arguments": {"task_execution_id": "forged"},
+                },
+            })
+
+        http.assert_any_call(
+            "POST",
+            "/api/orchestration/tool/executions/exec-a/status",
+            {
+                "spawned_agent": {
+                    "discussion_id": "disc-child-a",
+                    "agent_type": "Codex",
+                    "dispatch_job_id": "dispatch-a",
+                    "source_message_id": "trigger-a",
+                },
+            },
+        )
+        self.assertNotIn("error", response)
+        result = json.loads(response["result"]["content"][0]["text"])
+        self.assertEqual(result["execution"]["status"], "Working")
+
     def test_spawned_worker_ignores_forged_execution_and_uses_runner_context(self):
         encoded = json.dumps(self._spawned_context())
         manifest = {
@@ -1044,6 +1195,7 @@ class TaskExecDeliverTests(unittest.TestCase):
             "spawned_agent": {
                 "discussion_id": "disc-child-a",
                 "agent_type": "Codex",
+                "dispatch_job_id": "dispatch-a",
                 "source_message_id": "trigger-a",
             },
         })
@@ -1079,16 +1231,17 @@ class TaskExecDeliverTests(unittest.TestCase):
                 },
             })
 
-        http.assert_called_once_with("POST", "/api/orchestration/worker-commit", {
+        self.assertIn(mock.call("POST", "/api/orchestration/worker-commit", {
             "task_execution_id": "exec-a",
             "files": ["src/lib.rs"],
             "message": "fix: bounded change",
             "spawned_agent": {
                 "discussion_id": "disc-child-a",
                 "agent_type": "Codex",
+                "dispatch_job_id": "dispatch-a",
                 "source_message_id": "trigger-a",
             },
-        })
+        }), http.call_args_list)
         self.assertEqual(response["result"]["content"][0]["type"], "text")
         self.assertNotIn("error", response)
 
@@ -6556,6 +6709,681 @@ class AuditBridgeHardeningTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 self.mod._require_fresh_bridge("task_exec_launch")
 
+    def test_stale_mutation_returns_typed_error_and_schedules_one_reload(self):
+        self.mod._BRIDGE_SCRIPT_SHA256_AT_LOAD = "outdated-contract"
+        with mock.patch.object(self.mod, "_spawned_task_worker_mode", return_value=False), \
+             mock.patch.object(self.mod, "_http") as http:
+            response = self.mod._handle({
+                "jsonrpc": "2.0",
+                "id": 17,
+                "method": "tools/call",
+                "params": {"name": "agent_list", "arguments": {}},
+            })
+        http.assert_not_called()
+        self.assertTrue(response["result"]["isError"])
+        payload = json.loads(response["result"]["content"][0]["text"])
+        self.assertEqual(payload["error_code"], "bridge_stale")
+        self.assertFalse(payload["mutation_applied"])
+        self.assertEqual(payload["reload"]["status"], "scheduled")
+        self.assertEqual(payload["retry"]["max_attempts"], 1)
+        self.assertTrue(payload["retry"]["same_idempotency_key_required"])
+        self.assertEqual(
+            self.mod._schedule_bridge_reload()["status"],
+            "scheduled",
+            "one loaded process must never schedule an unbounded reload loop",
+        )
+
+    def test_reload_reexec_preserves_stdio_process_contract(self):
+        self.assertEqual(self.mod._schedule_bridge_reload()["status"], "scheduled")
+        artifact_fd = self.mod._BRIDGE_ARTIFACT_FD
+        with mock.patch.object(self.mod.os, "execv") as execv:
+            try:
+                self.assertTrue(self.mod._perform_scheduled_bridge_reload())
+            finally:
+                for key in (
+                    self.mod._BRIDGE_RELOAD_READY_ENV,
+                    self.mod._BRIDGE_RELOAD_HANDOFF_ENV,
+                    self.mod._BRIDGE_RELOAD_HANDOFF_FD_ENV,
+                    self.mod._BRIDGE_RELOAD_HANDOFF_NONCE_ENV,
+                    self.mod._BRIDGE_SOURCE_ENV,
+                    self.mod._BRIDGE_ARTIFACT_FD_ENV,
+                    self.mod._BRIDGE_ARTIFACT_SHA_ENV,
+                ):
+                    self.mod.os.environ.pop(key, None)
+                if self.mod._BRIDGE_ARTIFACT_FD is not None:
+                    os.close(self.mod._BRIDGE_ARTIFACT_FD)
+                    self.mod._BRIDGE_ARTIFACT_FD = None
+        artifact = execv.call_args.args[1][1]
+        self.assertEqual(artifact, f"/dev/fd/{artifact_fd}")
+        execv.assert_called_once_with(self.mod.sys.executable, [self.mod.sys.executable, artifact])
+
+    def test_reload_failure_is_bounded_and_reports_manual_action(self):
+        self.assertEqual(self.mod._schedule_bridge_reload()["status"], "scheduled")
+        with mock.patch.object(
+            self.mod.os, "execv", side_effect=OSError("exec unavailable")
+        ):
+            self.assertFalse(self.mod._perform_scheduled_bridge_reload())
+        response = self.mod._bridge_stale_result(
+            18, "task_exec_launch", "stale contract"
+        )
+        payload = json.loads(response["result"]["content"][0]["text"])
+        self.assertEqual(payload["reload"]["status"], "failed")
+        self.assertFalse(payload["retry"]["allowed"])
+        self.assertIn("manually once", payload["action"])
+
+    def test_reload_is_deferred_while_audit_sse_is_active(self):
+        self.mod._BRIDGE_SCRIPT_SHA256_AT_LOAD = "outdated-contract"
+        self.mod._AUDIT_STREAMS["project-1"] = {"state": "running"}
+        response = self.mod._bridge_stale_result(18, "task_exec_review", "stale")
+        payload = json.loads(response["result"]["content"][0]["text"])
+        self.assertEqual(payload["reload"]["status"], "deferred_active_audit")
+        self.assertFalse(payload["retry"]["allowed"])
+        self.assertIn("active audit", payload["action"])
+
+    def test_reload_handoff_restores_client_identity_without_initialize(self):
+        reloaded = _load_module()
+        nonce = "a" * 64
+        handoff_fd, handoff_path = tempfile.mkstemp(prefix="kronn-mcp-reload-", suffix=".json")
+        with os.fdopen(os.dup(handoff_fd), "w", encoding="utf-8") as handoff:
+            json.dump({
+                "version": reloaded._BRIDGE_HANDOFF_VERSION,
+                "nonce": nonce,
+                "client_info": {"name": "codex-cli", "version": "9.1"},
+                "requests": [{"jsonrpc": "2.0", "id": 8, "method": "ping"}],
+                "cancelled_request_ids": [],
+                "pending_hex": b'{"jsonrpc"'.hex(),
+                "stdin_eof": False,
+            }, handoff)
+        os.unlink(handoff_path)
+        os.set_inheritable(handoff_fd, True)
+        try:
+            with mock.patch.dict(
+                reloaded.os.environ,
+                {reloaded._BRIDGE_RELOAD_HANDOFF_FD_ENV: str(handoff_fd),
+                 reloaded._BRIDGE_RELOAD_HANDOFF_NONCE_ENV: nonce},
+            ):
+                queued = reloaded._restore_reload_handoff()
+        finally:
+            with contextlib.suppress(OSError):
+                os.close(handoff_fd)
+        self.assertEqual(reloaded._agent_type_for_session(), "Codex")
+        self.assertEqual(reloaded._CLIENT_INFO["version"], "9.1")
+        self.assertEqual(queued[0]["id"], 8)
+        self.assertEqual(bytes(reloaded._STDIN_PENDING), b'{"jsonrpc"')
+
+    def test_reload_handoff_rejects_unsafe_files_and_payloads(self):
+        def restore(payload, mode=0o600, *, linked=False):
+            reloaded = _load_module()
+            fd, path = tempfile.mkstemp(prefix="kronn-mcp-reload-")
+            with os.fdopen(os.dup(fd), "wb") as handoff:
+                handoff.write(payload)
+            os.chmod(path, mode)
+            if not linked:
+                os.unlink(path)
+            with mock.patch.dict(
+                reloaded.os.environ, {
+                    reloaded._BRIDGE_RELOAD_HANDOFF_FD_ENV: str(fd),
+                    reloaded._BRIDGE_RELOAD_HANDOFF_NONCE_ENV: "b" * 64,
+                }
+            ):
+                try:
+                    with self.assertRaises((RuntimeError, json.JSONDecodeError)):
+                        reloaded._restore_reload_handoff()
+                finally:
+                    with contextlib.suppress(FileNotFoundError):
+                        os.unlink(path)
+                    with contextlib.suppress(OSError):
+                        os.close(fd)
+
+        # The old pathname transport is rejected, and an inherited descriptor
+        # must be an unlinked private inode with bounded valid contents.
+        reloaded = _load_module()
+        with mock.patch.dict(reloaded.os.environ, {
+            reloaded._BRIDGE_RELOAD_HANDOFF_ENV: "/tmp/kronn-mcp-reload-forged",
+        }):
+            with self.assertRaisesRegex(RuntimeError, "path transport"):
+                reloaded._restore_reload_handoff()
+        restore(b"{}", linked=True)
+        restore(b"{}", mode=0o644)
+        restore(b"x" * (1024 * 1024 + 1))
+
+    def test_preflighted_artifact_is_unlinked_before_exec(self):
+        created = []
+        real_mkstemp = self.mod.tempfile.mkstemp
+        real_unlink = os.unlink
+
+        def record_artifact(*args, **kwargs):
+            created_file = real_mkstemp(*args, **kwargs)
+            if kwargs.get("prefix") == "kronn-mcp-artifact-":
+                created.append(created_file[1])
+            return created_file
+
+        def replace_unlinked_artifact(path):
+            real_unlink(path)
+            if path in created:
+                # An attacker may recreate the old pathname immediately, but
+                # preflight must keep using the already-unlinked descriptor.
+                with open(path, "wb") as replacement:
+                    replacement.write(b"not the preflighted bridge")
+
+        with mock.patch.object(self.mod.tempfile, "mkstemp", side_effect=record_artifact), \
+                mock.patch.object(self.mod.os, "unlink", side_effect=replace_unlinked_artifact):
+            state = self.mod._schedule_bridge_reload()
+        self.assertEqual(state["status"], "scheduled")
+        self.assertEqual(len(created), 1)
+        artifact_fd = self.mod._BRIDGE_ARTIFACT_FD
+        self.assertEqual(os.fstat(artifact_fd).st_nlink, 0)
+        self.assertTrue(os.path.exists(created[0]), "the adversarial replacement was created")
+        try:
+            with mock.patch.object(self.mod.os, "execv") as execv:
+                self.assertTrue(self.mod._perform_scheduled_bridge_reload())
+            execv.assert_called_once_with(
+                self.mod.sys.executable,
+                [self.mod.sys.executable, f"/dev/fd/{artifact_fd}"],
+            )
+        finally:
+            real_unlink(created[0])
+            for key in (self.mod._BRIDGE_RELOAD_HANDOFF_ENV,
+                        self.mod._BRIDGE_RELOAD_HANDOFF_FD_ENV,
+                        self.mod._BRIDGE_RELOAD_HANDOFF_NONCE_ENV,
+                        self.mod._BRIDGE_RELOAD_READY_ENV,
+                        self.mod._BRIDGE_SOURCE_ENV,
+                        self.mod._BRIDGE_ARTIFACT_FD_ENV,
+                        self.mod._BRIDGE_ARTIFACT_SHA_ENV):
+                self.mod.os.environ.pop(key, None)
+            if self.mod._BRIDGE_ARTIFACT_FD is not None:
+                os.close(self.mod._BRIDGE_ARTIFACT_FD)
+                self.mod._BRIDGE_ARTIFACT_FD = None
+
+    def test_artifact_swap_before_unlink_fails_closed_and_closes_descriptor(self):
+        created = []
+        real_mkstemp = self.mod.tempfile.mkstemp
+        real_unlink = os.unlink
+
+        def record_artifact(*args, **kwargs):
+            created_file = real_mkstemp(*args, **kwargs)
+            if kwargs.get("prefix") == "kronn-mcp-artifact-":
+                created.append(created_file)
+            return created_file
+
+        def swap_before_unlink(path):
+            if created and path == created[0][1]:
+                displaced = path + ".displaced"
+                os.rename(path, displaced)
+                with open(path, "wb") as replacement:
+                    replacement.write(b"replacement")
+                real_unlink(path)
+                return
+            real_unlink(path)
+
+        try:
+            with mock.patch.object(self.mod.tempfile, "mkstemp", side_effect=record_artifact), \
+                    mock.patch.object(self.mod.os, "unlink", side_effect=swap_before_unlink):
+                state = self.mod._schedule_bridge_reload()
+            self.assertEqual(state["status"], "failed")
+            self.assertIn("could not be unlinked", state["error"])
+            with self.assertRaises(OSError):
+                os.fstat(created[0][0])
+        finally:
+            for _, path in created:
+                for candidate in (path, path + ".displaced"):
+                    with contextlib.suppress(FileNotFoundError):
+                        real_unlink(candidate)
+
+    def test_handoff_is_unlinked_before_write_despite_path_replacement(self):
+        self.assertEqual(self.mod._schedule_bridge_reload()["status"], "scheduled")
+        created = []
+        real_mkstemp = self.mod.tempfile.mkstemp
+        real_unlink = os.unlink
+
+        def record_handoff(*args, **kwargs):
+            created_file = real_mkstemp(*args, **kwargs)
+            if kwargs.get("prefix") == "kronn-mcp-reload-":
+                created.append(created_file[1])
+            return created_file
+
+        def replace_unlinked_handoff(path):
+            real_unlink(path)
+            if path in created:
+                with open(path, "wb") as replacement:
+                    replacement.write(b'{"forged":true}')
+
+        try:
+            with mock.patch.object(self.mod.tempfile, "mkstemp", side_effect=record_handoff), \
+                    mock.patch.object(self.mod.os, "unlink", side_effect=replace_unlinked_handoff), \
+                    mock.patch.object(self.mod.os, "execv"):
+                self.assertTrue(self.mod._perform_scheduled_bridge_reload())
+            self.assertEqual(len(created), 1)
+            handoff_fd = int(self.mod.os.environ[self.mod._BRIDGE_RELOAD_HANDOFF_FD_ENV])
+            self.assertEqual(os.fstat(handoff_fd).st_nlink, 0)
+            with open(created[0], "rb") as forged:
+                self.assertEqual(forged.read(), b'{"forged":true}')
+        finally:
+            for path in created:
+                with contextlib.suppress(FileNotFoundError):
+                    real_unlink(path)
+            for key in (self.mod._BRIDGE_RELOAD_HANDOFF_ENV,
+                        self.mod._BRIDGE_RELOAD_HANDOFF_FD_ENV,
+                        self.mod._BRIDGE_RELOAD_HANDOFF_NONCE_ENV,
+                        self.mod._BRIDGE_RELOAD_READY_ENV,
+                        self.mod._BRIDGE_SOURCE_ENV,
+                        self.mod._BRIDGE_ARTIFACT_FD_ENV,
+                        self.mod._BRIDGE_ARTIFACT_SHA_ENV):
+                self.mod.os.environ.pop(key, None)
+            if self.mod._BRIDGE_ARTIFACT_FD is not None:
+                os.close(self.mod._BRIDGE_ARTIFACT_FD)
+                self.mod._BRIDGE_ARTIFACT_FD = None
+
+    def test_handoff_swap_before_unlink_fails_closed_and_closes_descriptor(self):
+        self.assertEqual(self.mod._schedule_bridge_reload()["status"], "scheduled")
+        created = []
+        real_mkstemp = self.mod.tempfile.mkstemp
+        real_unlink = os.unlink
+
+        def record_handoff(*args, **kwargs):
+            created_file = real_mkstemp(*args, **kwargs)
+            if kwargs.get("prefix") == "kronn-mcp-reload-":
+                created.append(created_file)
+            return created_file
+
+        def swap_before_unlink(path):
+            if created and path == created[0][1]:
+                displaced = path + ".displaced"
+                os.rename(path, displaced)
+                with open(path, "wb") as replacement:
+                    replacement.write(b"replacement")
+                real_unlink(path)
+                return
+            real_unlink(path)
+
+        try:
+            with mock.patch.object(self.mod.tempfile, "mkstemp", side_effect=record_handoff), \
+                    mock.patch.object(self.mod.os, "unlink", side_effect=swap_before_unlink):
+                self.assertFalse(self.mod._perform_scheduled_bridge_reload())
+            self.assertIn("could not be unlinked", self.mod._BRIDGE_RELOAD_STATE["error"])
+            with self.assertRaises(OSError):
+                os.fstat(created[0][0])
+        finally:
+            for _, path in created:
+                for candidate in (path, path + ".displaced"):
+                    with contextlib.suppress(FileNotFoundError):
+                        real_unlink(candidate)
+
+    def test_reloaded_process_closes_the_inherited_artifact_descriptor(self):
+        fd, path = tempfile.mkstemp(prefix="kronn-mcp-artifact-", suffix=".py")
+        try:
+            os.unlink(path)
+            with mock.patch.dict(self.mod.os.environ, {
+                self.mod._BRIDGE_ARTIFACT_FD_ENV: str(fd),
+            }):
+                self.mod._close_inherited_reload_artifact()
+            with self.assertRaises(OSError):
+                os.fstat(fd)
+        finally:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+
+    def test_reloaded_process_rejects_linked_artifact_and_closes_descriptor(self):
+        fd, path = tempfile.mkstemp(prefix="kronn-mcp-artifact-", suffix=".py")
+        try:
+            with mock.patch.dict(self.mod.os.environ, {
+                self.mod._BRIDGE_ARTIFACT_FD_ENV: str(fd),
+            }):
+                with self.assertRaisesRegex(RuntimeError, "still linked"):
+                    self.mod._close_inherited_reload_artifact()
+            with self.assertRaises(OSError):
+                os.fstat(fd)
+        finally:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(path)
+
+    def test_reload_handoff_rejects_forged_nonce(self):
+        reloaded = _load_module()
+        fd, path = tempfile.mkstemp(prefix="kronn-mcp-reload-", suffix=".json")
+        with os.fdopen(os.dup(fd), "w", encoding="utf-8") as handoff:
+            json.dump({
+                "version": reloaded._BRIDGE_HANDOFF_VERSION,
+                "nonce": "c" * 64,
+                "client_info": {"name": "codex-cli", "version": "1"},
+                "requests": [], "cancelled_request_ids": [],
+                "pending_hex": "", "stdin_eof": False,
+            }, handoff)
+        os.unlink(path)
+        with mock.patch.dict(reloaded.os.environ, {
+            reloaded._BRIDGE_RELOAD_HANDOFF_FD_ENV: str(fd),
+            reloaded._BRIDGE_RELOAD_HANDOFF_NONCE_ENV: "d" * 64,
+        }):
+            with self.assertRaisesRegex(RuntimeError, "authentication failed"):
+                reloaded._restore_reload_handoff()
+        with self.assertRaises(OSError):
+            os.fstat(fd)
+
+    def test_reload_handoff_revalidates_metadata_after_open(self):
+        reloaded = _load_module()
+        nonce = "e" * 64
+        fd, path = tempfile.mkstemp(prefix="kronn-mcp-reload-", suffix=".json")
+        with os.fdopen(os.dup(fd), "w", encoding="utf-8") as handoff:
+            handoff.write("{}")
+        os.unlink(path)
+        opened = os.fstat(fd)
+        changed = mock.Mock(
+            st_dev=opened.st_dev, st_ino=opened.st_ino, st_mode=0o100644,
+            st_uid=opened.st_uid, st_size=opened.st_size,
+        )
+        with mock.patch.dict(reloaded.os.environ, {
+            reloaded._BRIDGE_RELOAD_HANDOFF_FD_ENV: str(fd),
+            reloaded._BRIDGE_RELOAD_HANDOFF_NONCE_ENV: nonce,
+        }), mock.patch.object(reloaded.os, "fstat", return_value=changed):
+            with self.assertRaisesRegex(RuntimeError, "descriptor failed validation"):
+                reloaded._restore_reload_handoff()
+
+    def test_reload_uses_source_path_for_reporting_and_collector(self):
+        source_path = os.path.join(tempfile.gettempdir(), "source", "bridge.py")
+        self.mod._BRIDGE_SOURCE_PATH = source_path
+        self.assertEqual(self.mod.call_bridge_info({})["script_path"], source_path)
+        with mock.patch.object(self.mod.importlib.util, "spec_from_file_location") as spec:
+            self.mod._collect_and_report_telemetry("disc", "session", "vibe")
+        self.assertEqual(spec.call_args.args[1],
+                         os.path.join(os.path.dirname(source_path), "cli_token_collector.py"))
+
+    def test_oversize_handoff_is_removed_before_environment_export(self):
+        self.assertEqual(self.mod._schedule_bridge_reload()["status"], "scheduled")
+        self.mod._REQUEST_QUEUE.put({"jsonrpc": "2.0", "id": 91, "method": "ping",
+                                     "padding": "x" * self.mod._BRIDGE_HANDOFF_MAX_BYTES})
+        created = []
+        real_mkstemp = self.mod.tempfile.mkstemp
+        def recording_mkstemp(*args, **kwargs):
+            result = real_mkstemp(*args, **kwargs)
+            if kwargs.get("prefix") == "kronn-mcp-reload-":
+                created.append(result[1])
+            return result
+        with mock.patch.object(self.mod.tempfile, "mkstemp", side_effect=recording_mkstemp):
+            self.assertFalse(self.mod._perform_scheduled_bridge_reload())
+        self.assertEqual(len(created), 1)
+        self.assertFalse(os.path.exists(created[0]))
+
+    def test_central_guard_blocks_principal_and_worker_mutations(self):
+        self.mod._BRIDGE_SCRIPT_SHA256_AT_LOAD = "outdated-contract"
+        cases = [
+            ("task_exec_review", {"task_execution_id": "e", "decision": {}}),
+            ("task_exec_deliver", {"task_execution_id": "e", "manifest": {}}),
+            ("task_exec_cancel", {"task_execution_id": "e", "reason": "stop"}),
+        ]
+        with mock.patch.object(self.mod, "_http") as http, \
+             mock.patch.object(self.mod, "_spawned_task_worker_mode", return_value=False):
+            for rid, (name, arguments) in enumerate(cases, 30):
+                response = self.mod._handle({
+                    "jsonrpc": "2.0", "id": rid, "method": "tools/call",
+                    "params": {"name": name, "arguments": arguments},
+                })
+                payload = json.loads(response["result"]["content"][0]["text"])
+                self.assertEqual(payload["error_code"], "bridge_stale", name)
+            with mock.patch.object(self.mod, "_spawned_task_worker_mode", return_value=True):
+                response = self.mod._handle({
+                    "jsonrpc": "2.0", "id": 40, "method": "tools/call",
+                    "params": {"name": "task_exec_commit", "arguments": {
+                        "files": ["x"], "message": "m",
+                    }},
+                })
+            payload = json.loads(response["result"]["content"][0]["text"])
+            self.assertEqual(payload["error_code"], "bridge_stale")
+        http.assert_not_called()
+
+    def test_reloaded_main_notifies_tool_list_change_when_ready(self):
+        self.mod._BRIDGE_SCRIPT_SHA256_AT_LOAD = "outdated-contract"
+        self.mod._REQUEST_QUEUE.put({
+            "jsonrpc": "2.0",
+            "id": 19,
+            "method": "tools/call",
+            "params": {"name": "agent_list", "arguments": {}},
+        })
+        self.mod._REQUEST_QUEUE.put(None)
+        stale_sent = []
+        with mock.patch.object(self.mod, "_spawned_task_worker_mode", return_value=False), \
+             mock.patch.object(self.mod, "_stdin_reader"), \
+             mock.patch.object(self.mod, "_send", side_effect=stale_sent.append), \
+             mock.patch.object(
+                 self.mod, "_perform_scheduled_bridge_reload", return_value=False
+             ) as reload_bridge:
+            self.mod.main()
+        self.assertEqual(len(stale_sent), 1)
+        self.assertEqual(stale_sent[0]["result"]["isError"], True)
+        reload_bridge.assert_called_once_with()
+
+        reloaded = _load_module()
+        reloaded._REQUEST_QUEUE.put(None)
+        ready_sent = []
+        with mock.patch.dict(
+            reloaded.os.environ, {reloaded._BRIDGE_RELOAD_READY_ENV: "1"}
+        ), mock.patch.object(reloaded, "_stdin_reader"), \
+             mock.patch.object(reloaded, "_send", side_effect=ready_sent.append):
+            reloaded.main()
+        self.assertEqual(
+            ready_sent,
+            [{"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}],
+        )
+
+    def test_reloaded_bridge_retries_refused_mutation_exactly_once(self):
+        self.mod._BRIDGE_SCRIPT_SHA256_AT_LOAD = "outdated-contract"
+        with mock.patch.object(self.mod, "_spawned_task_worker_mode", return_value=False), \
+             mock.patch.object(self.mod, "_http") as stale_http:
+            refused = self.mod._handle({
+                "jsonrpc": "2.0",
+                "id": 20,
+                "method": "tools/call",
+                "params": {"name": "agent_list", "arguments": {}},
+            })
+        stale_http.assert_not_called()
+        self.assertTrue(refused["result"]["isError"])
+
+        reloaded = _load_module()
+        http = mock.MagicMock(return_value={"success": True, "data": []})
+        with mock.patch.object(reloaded, "_spawned_task_worker_mode", return_value=False), \
+             mock.patch.object(
+                 reloaded, "_task_exec_identity", return_value=("Codex", "session-1")
+             ), mock.patch.object(reloaded, "_disc_id", return_value="disc-1"), \
+             mock.patch.object(reloaded, "_http", http):
+            retried = reloaded._handle({
+                "jsonrpc": "2.0",
+                "id": 21,
+                "method": "tools/call",
+                "params": {"name": "agent_list", "arguments": {}},
+            })
+        self.assertNotIn("isError", retried["result"])
+        http.assert_called_once_with(
+            "POST",
+            "/api/orchestration/tool/workers",
+            {
+                "parent_discussion_id": "disc-1",
+                "source_agent": "Codex",
+                "source_session_id": "session-1",
+            },
+        )
+
+    def test_initialize_advertises_tool_list_change_notifications(self):
+        response = self.mod._handle({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}
+        })
+        self.assertTrue(response["result"]["capabilities"]["tools"]["listChanged"])
+
+    def test_stdio_process_survives_real_reexec_and_serves_fresh_contract(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = Path(tmp) / "bridge.py"
+            shutil.copy2(_SCRIPT, bridge)
+            env = dict(os.environ)
+            for key in (
+                "KRONN_TASK_WORKER_CONTEXT",
+                "KRONN_DISCUSSION_ID",
+                "KRONN_AUTH_TOKEN",
+            ):
+                env.pop(key, None)
+            process = subprocess.Popen(
+                [sys.executable, str(bridge)],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+                env=env,
+            )
+            try:
+                def send(request):
+                    process.stdin.write(json.dumps(request) + "\n")
+                    process.stdin.flush()
+
+                send({
+                    "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                    "params": {"clientInfo": {"name": "codex-cli", "version": "1"}},
+                })
+                initialized = json.loads(process.stdout.readline())
+                self.assertEqual(initialized["id"], 1)
+
+                with bridge.open("a", encoding="utf-8") as script:
+                    script.write("\n# trigger test reload\n")
+                send({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": {"name": "agent_list", "arguments": {}},
+                })
+                # Pipeline a control request before the stale response. The old
+                # reader may consume both lines in one os.read; the handoff must
+                # still deliver this request exactly once after exec.
+                send({"jsonrpc": "2.0", "id": 22, "method": "ping"})
+                refused = json.loads(process.stdout.readline())
+                notification = json.loads(process.stdout.readline())
+                pipelined = json.loads(process.stdout.readline())
+                payload = json.loads(refused["result"]["content"][0]["text"])
+                self.assertEqual(payload["error_code"], "bridge_stale")
+                self.assertEqual(
+                    notification["method"], "notifications/tools/list_changed"
+                )
+                self.assertEqual(pipelined, {"jsonrpc": "2.0", "id": 22, "result": {}})
+
+                send({
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "tools/call",
+                    "params": {"name": "bridge_info", "arguments": {}},
+                })
+                fresh = json.loads(process.stdout.readline())
+                info = json.loads(fresh["result"]["content"][0]["text"])
+                self.assertFalse(info["stale"])
+                self.assertEqual(info["reload"]["status"], "idle")
+            finally:
+                if process.poll() is None:
+                    process.terminate()
+                process.wait(timeout=5)
+                process.stdin.close()
+                process.stdout.close()
+                process.stderr.close()
+
+    def test_real_reexec_restores_fragmented_json_rpc_line(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = Path(tmp) / "bridge.py"
+            shutil.copy2(_SCRIPT, bridge)
+            env = {key: value for key, value in os.environ.items() if key not in {
+                "KRONN_TASK_WORKER_CONTEXT", "KRONN_DISCUSSION_ID", "KRONN_AUTH_TOKEN",
+            }}
+            process = subprocess.Popen(
+                [sys.executable, str(bridge)], stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
+            )
+            try:
+                initialize = json.dumps({
+                    "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                    "params": {"clientInfo": {"name": "codex-cli", "version": "1"}},
+                }).encode() + b"\n"
+                process.stdin.write(initialize)
+                process.stdin.flush()
+                self.assertEqual(json.loads(process.stdout.readline())["id"], 1)
+                with bridge.open("ab") as script:
+                    script.write(b"\n# fragmented reload\n")
+                stale = json.dumps({
+                    "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                    "params": {"name": "agent_list", "arguments": {}},
+                }).encode() + b"\n"
+                ping = json.dumps({"jsonrpc": "2.0", "id": 23, "method": "ping"}).encode()
+                split = len(ping) // 2
+                process.stdin.write(stale + ping[:split])
+                process.stdin.flush()
+                refused = json.loads(process.stdout.readline())
+                self.assertEqual(json.loads(refused["result"]["content"][0]["text"])["error_code"],
+                                 "bridge_stale")
+                self.assertEqual(json.loads(process.stdout.readline())["method"],
+                                 "notifications/tools/list_changed")
+                for byte in ping[split:] + b"\n":
+                    process.stdin.write(bytes([byte]))
+                    process.stdin.flush()
+                self.assertEqual(json.loads(process.stdout.readline()),
+                                 {"jsonrpc": "2.0", "id": 23, "result": {}})
+            finally:
+                if process.poll() is None:
+                    process.terminate()
+                process.wait(timeout=5)
+                process.stdin.close()
+                process.stdout.close()
+                process.stderr.close()
+
+    def test_real_reexec_preserves_queued_mutation_cancellation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = Path(tmp) / "bridge.py"
+            shutil.copy2(_SCRIPT, bridge)
+            env = {key: value for key, value in os.environ.items() if key not in {
+                "KRONN_TASK_WORKER_CONTEXT", "KRONN_DISCUSSION_ID", "KRONN_AUTH_TOKEN",
+            }}
+            process = subprocess.Popen(
+                [sys.executable, str(bridge)], stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1, env=env,
+            )
+            try:
+                def send(request):
+                    process.stdin.write(json.dumps(request) + "\n")
+                    process.stdin.flush()
+
+                send({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                      "params": {"clientInfo": {"name": "codex-cli", "version": "1"}}})
+                self.assertEqual(json.loads(process.stdout.readline())["id"], 1)
+                with bridge.open("a", encoding="utf-8") as script:
+                    script.write("\n# cancelled reload\n")
+                batch = [
+                    {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                     "params": {"name": "agent_list", "arguments": {}}},
+                    {"jsonrpc": "2.0", "id": 24, "method": "tools/call",
+                     "params": {"name": "task_exec_cancel", "arguments": {
+                         "task_execution_id": "must-not-run", "reason": "cancelled"}}},
+                    {"jsonrpc": "2.0", "method": "notifications/cancelled",
+                     "params": {"requestId": 24}},
+                ]
+                process.stdin.write("".join(json.dumps(item) + "\n" for item in batch))
+                process.stdin.flush()
+                refused = json.loads(process.stdout.readline())
+                self.assertEqual(json.loads(refused["result"]["content"][0]["text"])["error_code"],
+                                 "bridge_stale")
+                self.assertEqual(json.loads(process.stdout.readline())["method"],
+                                 "notifications/tools/list_changed")
+                ready, _, _ = select.select([process.stdout], [], [], 0.5)
+                self.assertEqual(ready, [], "cancelled queued mutation must emit no response")
+            finally:
+                if process.poll() is None:
+                    process.terminate()
+                process.wait(timeout=5)
+
+                process.stdin.close()
+                process.stdout.close()
+                process.stderr.close()
+
+    def test_select_fallback_retains_arbitrarily_fragmented_line(self):
+        request = json.dumps({"jsonrpc": "2.0", "id": 25, "method": "ping"}) + "\n"
+        fragments = [request[:3], request[3:11], request[11:29], request[29:]]
+        with mock.patch.object(self.mod.sys, "stdin", iter(fragments)):
+            self.mod._stdin_reader()
+        self.assertEqual(self.mod._REQUEST_QUEUE.get_nowait()["id"], 25)
+        self.assertIsNone(self.mod._REQUEST_QUEUE.get_nowait())
+        self.assertEqual(bytes(self.mod._STDIN_PENDING), b"")
+
     def test_briefing_state_present_and_absent(self):
         import tempfile
         with tempfile.TemporaryDirectory() as tmp:
@@ -7863,7 +8691,7 @@ class PlanningToolTests(unittest.TestCase):
         resp = self.mod._handle(
             {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}
         )
-        self.assertEqual(resp["result"]["serverInfo"]["version"], "0.3.8")
+        self.assertEqual(resp["result"]["serverInfo"]["version"], "0.3.9")
 
     def test_plan_get_defaults_to_current_discussion(self):
         with mock.patch.object(self.mod, "_http", self.fake_http):

@@ -1,9 +1,9 @@
 import type { Page, Locator } from '@playwright/test';
 
 /**
- * Automation page (= "Workflows" page in the codebase). Three sub-tabs:
- * Workflows / Quick Prompts / Quick APIs. Each tab has its own header
- * actions (create button + import button when applicable).
+ * Automation page (= "Workflows" page in the codebase). Resource kinds are
+ * exposed from the sidebar and creation goes through the shared
+ * "Create or import" dialog opened by the green + button.
  */
 export class WorkflowsPage {
   constructor(private readonly page: Page) {}
@@ -22,26 +22,43 @@ export class WorkflowsPage {
     return this.page.getByRole('button', { name: /Quick APIs/i });
   }
 
-  // ─── Header (the flex-between block at the top of the page) ─────────
-  /** Top-of-page header that holds the create + import + "create with AI" buttons.
-   *  Used by regression specs to assert what action buttons are exposed
-   *  on each sub-tab. */
-  get header(): Locator {
-    return this.page.locator('div.flex-between').first();
+  // ─── Unified creation dialog ──────────────────────────────────
+  /** Green + button in the collection sidebar header. */
+  get creationMenuButton(): Locator {
+    return this.page.locator('[data-tour-id="automation-actions"]');
   }
 
-  // ─── Header action buttons (sub-tab-dependent) ──────────────────────
-  /** "Nouveau workflow" / "New workflow" — only visible when on Workflows tab. */
+  /** Accessible chooser opened by the sidebar + button. */
+  get creationDialog(): Locator {
+    return this.page.getByRole('dialog', {
+      name: /Créer ou importer|Create or import|Crear o importar|创建或导入/i,
+    });
+  }
+
+  // ─── Creation choices ──────────────────────────────────────
+  /** "Nouveau workflow" / "New workflow" choice in the creation dialog. */
   get newWorkflowButton(): Locator {
-    return this.header.getByRole('button', { name: /Nouveau workflow|New workflow/i });
+    return this.creationDialog.getByRole('button', {
+      name: /Nouveau workflow|New workflow|Nuevo workflow/i,
+    });
   }
-  /** "Nouveau prompt" — only visible when on Quick Prompts tab. */
+  /** "Nouveau prompt" / "New prompt" choice in the creation dialog. */
   get newPromptButton(): Locator {
-    return this.header.getByRole('button', { name: /Nouveau prompt|New prompt/i });
+    return this.creationDialog.getByRole('button', {
+      name: /Nouveau prompt|New prompt|Nuevo prompt/i,
+    });
   }
-  /** "Nouveau Quick API" — only visible when on Quick APIs tab AND a plugin is wired. */
+  /** "Nouveau Quick API" choice, present when an API plugin is available. */
   get newQuickApiButton(): Locator {
-    return this.header.getByRole('button', { name: /Nouveau Quick API|New Quick API/i });
+    return this.creationDialog.getByRole('button', {
+      name: /Nouveau Quick API|New Quick API|Nueva Quick API/i,
+    });
+  }
+  /** Import choice, always present in the creation dialog. */
+  get importButton(): Locator {
+    return this.creationDialog.getByRole('button', {
+      name: /Importer|Import|Importar/i,
+    });
   }
 
   // ─── Actions ────────────────────────────────────────────────────────
@@ -49,6 +66,21 @@ export class WorkflowsPage {
   async clickQuickApisTab() { await this.tabQuickApis.click(); }
   async clickWorkflowsTab() { await this.tabWorkflows.click(); }
 
+  /** Open the shared automation creation chooser. */
+  async openCreationDialog() {
+    await this.creationMenuButton.click();
+    await this.creationDialog.waitFor({ state: 'visible' });
+  }
+
   /** Open the workflow creation wizard. */
-  async openNewWorkflowWizard() { await this.newWorkflowButton.click(); }
+  async openNewWorkflowWizard() {
+    await this.openCreationDialog();
+    await this.newWorkflowButton.click();
+  }
+
+  /** Open the Quick Prompt creation form. */
+  async openNewQuickPromptForm() {
+    await this.openCreationDialog();
+    await this.newPromptButton.click();
+  }
 }

@@ -185,3 +185,49 @@ TOML
     run secrets_configured
     assert_failure
 }
+
+# ─── sync outcomes (#195) ───────────────────────────────────────────────────
+
+@test "mcp_missing_secrets_for_template reports the exact referenced secret" {
+    local repo="$KRONN_CONFIG_DIR/project"
+    mkdir -p "$repo"
+    printf '{"token":"${GITHUB_PERSONAL_ACCESS_TOKEN}"}\n' > "$repo/.mcp.json.example"
+    printf '[github]\npersonal_access_token = ""\n' > "$KRONN_CONFIG_DIR/secrets.toml"
+
+    run mcp_missing_secrets_for_template "$repo/.mcp.json.example"
+    assert_success
+    assert_output "GITHUB_PERSONAL_ACCESS_TOKEN"
+}
+
+@test "sync_mcp_for_repo refuses missing secrets without truncating the current file" {
+    local repo="$KRONN_CONFIG_DIR/project"
+    mkdir -p "$repo"
+    printf '{"token":"${GITHUB_PERSONAL_ACCESS_TOKEN}"}\n' > "$repo/.mcp.json.example"
+    printf '{"token":"still-good"}\n' > "$repo/.mcp.json"
+    printf '[github]\npersonal_access_token = ""\n' > "$KRONN_CONFIG_DIR/secrets.toml"
+
+    run sync_mcp_for_repo "$repo"
+    assert_failure
+    assert_output --partial "refused: missing secrets GITHUB_PERSONAL_ACCESS_TOKEN"
+    run grep -q 'still-good' "$repo/.mcp.json"
+    assert_success
+}
+
+@test "sync_mcp_for_repo distinguishes unchanged from written" {
+    local repo="$KRONN_CONFIG_DIR/project"
+    mkdir -p "$repo"
+    printf '{"fixed":true}\n' > "$repo/.mcp.json.example"
+    cp "$repo/.mcp.json.example" "$repo/.mcp.json"
+    envsubst() { cat; }
+
+    run sync_mcp_for_repo "$repo"
+    assert_success
+    assert_output --partial "unchanged"
+
+    printf '{"fixed":false}\n' > "$repo/.mcp.json.example"
+    run sync_mcp_for_repo "$repo"
+    assert_success
+    assert_output --partial "written"
+    run grep -q 'false' "$repo/.mcp.json"
+    assert_success
+}

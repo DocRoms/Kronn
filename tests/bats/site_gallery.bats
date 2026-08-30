@@ -37,6 +37,14 @@ assert_file_contains() {
     done
 }
 
+@test "public-site locales do not define the scanline overlay" {
+    local page
+    for page in index.html en.html es.html; do
+        run grep -F "body::after {" "$PROJECT_ROOT/site/$page"
+        assert_failure
+    done
+}
+
 @test "public-site positioning covers deterministic workflows without overstating plugin counts" {
     assert_file_contains "$PROJECT_ROOT/site/index.html" \
         "agentiques ou entièrement déterministes"
