@@ -58,6 +58,9 @@ pub async fn create(
     if req.prompt_template.is_empty() {
         return Json(ApiResponse::err("Prompt template cannot be empty"));
     }
+    if let Err(error) = validate_prompt_variables(&req.variables) {
+        return Json(ApiResponse::err(error));
+    }
 
     let agent = req.agent.unwrap_or(AgentType::ClaudeCode);
     let connection_id = match validate_connection_target(&state, &agent, req.connection_id).await {
@@ -112,6 +115,9 @@ pub async fn update(
         Ok(None) => return Json(ApiResponse::err("Quick prompt not found")),
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
+    if let Err(error) = validate_prompt_variables(&req.variables) {
+        return Json(ApiResponse::err(error));
+    }
 
     let agent = req.agent.unwrap_or(existing.agent.clone());
     let connection_id = match validate_connection_target(&state, &agent, req.connection_id).await {
