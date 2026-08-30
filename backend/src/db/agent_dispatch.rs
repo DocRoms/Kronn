@@ -71,6 +71,13 @@ pub struct AgentDispatchJob {
     pub watchdog_redispatches: u32,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    pub progress_phase: Option<String>,
+    pub progress_detail: Option<String>,
+    pub last_progress_at: Option<DateTime<Utc>>,
+    /// Exact named external API connection selected for this responder.
+    /// `AgentType::Custom` is shared by every non-legacy OpenAI-compatible
+    /// connection, so this identity must survive queueing and retries.
+    pub connection_id: Option<String>,
 }
 
 pub struct NewAgentDispatchJob<'a> {
@@ -123,6 +130,10 @@ fn map_job(row: &Row<'_>) -> rusqlite::Result<AgentDispatchJob> {
         watchdog_redispatches: row.get::<_, i64>(20)?.max(0) as u32,
         created_at: parse_dt(row.get(21)?),
         updated_at: parse_dt(row.get(22)?),
+        progress_phase: row.get(23)?,
+        progress_detail: row.get(24)?,
+        last_progress_at: row.get::<_, Option<String>>(25)?.map(parse_dt),
+        connection_id: row.get(26)?,
     })
 }
 
@@ -130,7 +141,8 @@ const JOB_COLUMNS: &str = "id, discussion_id, trigger_message_id, trigger_sort_o
     dedupe_key, agent_override_json, chain_prompt_ids_json, next_chain_index,
     batch_item, group_id, group_concurrency_limit, status, attempts, turn_attempts,
     available_at, claimed_at, agent_started_at, completed_at, last_error,
-    failure_kind, watchdog_redispatches, created_at, updated_at";
+    failure_kind, watchdog_redispatches, created_at, updated_at,
+    progress_phase, progress_detail, last_progress_at, connection_id";
 
 pub fn list_active_for_discussion(
     conn: &Connection,
@@ -190,6 +202,14 @@ pub fn find_active_for_discussion(
 }
 
 pub fn enqueue(conn: &Connection, new: NewAgentDispatchJob<'_>) -> Result<AgentDispatchJob> {
+    enqueue_with_connection(conn, new, None)
+}
+
+pub fn enqueue_with_connection(
+    conn: &Connection,
+    new: NewAgentDispatchJob<'_>,
+    connection_id: Option<&str>,
+) -> Result<AgentDispatchJob> {
     let now = Utc::now().to_rfc3339();
     let agent_json = new.agent_override.map(serde_json::to_string).transpose()?;
     let chain_json = serde_json::to_string(new.chain_prompt_ids)?;
@@ -197,8 +217,9 @@ pub fn enqueue(conn: &Connection, new: NewAgentDispatchJob<'_>) -> Result<AgentD
         "INSERT INTO agent_dispatch_jobs
          (id, discussion_id, trigger_message_id, trigger_sort_order, dedupe_key,
           agent_override_json, chain_prompt_ids_json, batch_item, group_id,
-          group_concurrency_limit, status, available_at, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'Pending', ?11, ?11, ?11)
+          group_concurrency_limit, status, available_at, created_at, updated_at,
+          connection_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'Pending', ?11, ?11, ?11, ?12)
          ON CONFLICT(dedupe_key) DO NOTHING",
         params![
             new.id,
@@ -212,6 +233,7 @@ pub fn enqueue(conn: &Connection, new: NewAgentDispatchJob<'_>) -> Result<AgentD
             new.group_id,
             new.group_concurrency_limit.map(i64::from),
             now,
+            connection_id,
         ],
     )?;
 
@@ -244,6 +266,14 @@ pub fn enqueue_for_latest_user(
     conn: &Connection,
     new: NewLatestUserDispatch<'_>,
 ) -> Result<AgentDispatchJob> {
+    enqueue_for_latest_user_with_connection(conn, new, None)
+}
+
+pub fn enqueue_for_latest_user_with_connection(
+    conn: &Connection,
+    new: NewLatestUserDispatch<'_>,
+    connection_id: Option<&str>,
+) -> Result<AgentDispatchJob> {
     let trigger = conn
         .query_row(
             "SELECT id, sort_order FROM messages
@@ -254,7 +284,7 @@ pub fn enqueue_for_latest_user(
         )
         .optional()?
         .context("cannot dispatch a discussion without a user message")?;
-    enqueue(
+    enqueue_with_connection(
         conn,
         NewAgentDispatchJob {
             id: new.id,
@@ -268,6 +298,7 @@ pub fn enqueue_for_latest_user(
             group_id: new.group_id,
             group_concurrency_limit: new.group_concurrency_limit,
         },
+        connection_id,
     )
 }
 
@@ -319,7 +350,8 @@ pub fn enqueue_retry(
         [&dedupe_key],
         |row| row.get::<_, bool>(0),
     )?;
-    let job = enqueue(
+    let failed_connection_id = failed.connection_id.clone();
+    let job = enqueue_with_connection(
         conn,
         NewAgentDispatchJob {
             id: new_id,
@@ -333,6 +365,7 @@ pub fn enqueue_retry(
             group_id: None,
             group_concurrency_limit: None,
         },
+        failed_connection_id.as_deref(),
     )?;
     Ok((job, existed))
 }
@@ -679,11 +712,29 @@ pub fn mark_agent_started(conn: &Connection, id: &str) -> Result<bool> {
     let now = Utc::now().to_rfc3339();
     let changed = conn.execute(
         "UPDATE agent_dispatch_jobs
-         SET agent_started_at = COALESCE(agent_started_at, ?2), updated_at = ?2
+         SET agent_started_at = COALESCE(agent_started_at, ?2), updated_at = ?2,
+             progress_phase = 'launching', progress_detail = NULL,
+             last_progress_at = ?2
          WHERE id = ?1 AND status = 'Running'",
         params![id, now],
     )?;
     Ok(changed > 0)
+}
+
+/// Persist a provider/tool boundary without interpreting silence as failure.
+pub fn mark_progress(
+    conn: &Connection,
+    id: &str,
+    phase: &str,
+    detail: Option<&str>,
+) -> Result<bool> {
+    let now = Utc::now().to_rfc3339();
+    Ok(conn.execute(
+        "UPDATE agent_dispatch_jobs SET progress_phase = ?2, progress_detail = ?3,
+             last_progress_at = ?4, updated_at = ?4
+         WHERE id = ?1 AND status = 'Running'",
+        params![id, phase, detail, now],
+    )? > 0)
 }
 
 pub fn mark_completed(conn: &Connection, id: &str) -> Result<bool> {
@@ -1039,6 +1090,45 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    #[test]
+    fn named_connection_survives_queue_claim_and_retry() {
+        let connection = connection();
+        connection
+            .execute(
+                "INSERT INTO external_api_connections
+                 (id, display_name, mention_alias, endpoint, credential_slug, origin_preset)
+                 VALUES ('router', 'OpenRouter', 'openrouter',
+                         'https://openrouter.ai/api', 'conn-router', 'open_router')",
+                [],
+            )
+            .unwrap();
+
+        let queued = enqueue_for_latest_user_with_connection(
+            &connection,
+            NewLatestUserDispatch {
+                id: "router-job",
+                discussion_id: "d1",
+                dedupe_key: "router-turn",
+                agent_override: Some(&AgentType::Custom),
+                chain_prompt_ids: &[],
+                batch_item: None,
+                group_id: None,
+                group_concurrency_limit: None,
+            },
+            Some("router"),
+        )
+        .unwrap();
+        assert_eq!(queued.connection_id.as_deref(), Some("router"));
+        let claimed = claim(&connection, &queued.id).unwrap().unwrap();
+        assert_eq!(claimed.connection_id.as_deref(), Some("router"));
+        mark_failed(&connection, &queued.id, "temporary refusal").unwrap();
+
+        let (retry, existed) =
+            enqueue_retry(&connection, "d1", &queued.id, "retry-once", "router-retry").unwrap();
+        assert!(!existed);
+        assert_eq!(retry.connection_id.as_deref(), Some("router"));
     }
 
     /// The room speaks past a running job, the way an agent's own partial
@@ -1575,6 +1665,11 @@ mod tests {
         assert!(claimed.claimed_at.is_some());
         assert!(claimed.agent_started_at.is_none());
         assert!(mark_agent_started(&connection, "lifecycle-job").unwrap());
+        let launching = get(&connection, "lifecycle-job").unwrap().unwrap();
+        assert_eq!(launching.progress_phase.as_deref(), Some("launching"));
+        assert!(mark_progress(&connection, "lifecycle-job", "upstream_wait", None).unwrap());
+        let upstream = get(&connection, "lifecycle-job").unwrap().unwrap();
+        assert_eq!(upstream.progress_phase.as_deref(), Some("upstream_wait"));
         assert!(mark_completed(&connection, "lifecycle-job").unwrap());
 
         let settled = get(&connection, "lifecycle-job").unwrap().unwrap();

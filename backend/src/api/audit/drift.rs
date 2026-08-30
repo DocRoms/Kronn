@@ -229,6 +229,7 @@ pub async fn partial_audit(
         config.tokens.clone()
     };
 
+    let audit_tier = req.tier.unwrap_or(crate::models::ModelTier::Reasoning);
     let agent_type = req.agent;
     if !super::agent_can_audit(&agent_type) {
         let msg = serde_json::json!({
@@ -480,7 +481,7 @@ pub async fn partial_audit(
             };
             match runner::start_agent_with_config(runner::AgentStartConfig {
                 full_access: true,
-                tier: crate::models::ModelTier::Reasoning,
+                tier: audit_tier,
                 // Drift audit is deliberately CLI-only and consumes the
                 // prepared evidence in its prompt. Native tools stay explicit
                 // here so no future HTTP enablement silently broadens scope.

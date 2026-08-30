@@ -214,6 +214,8 @@ fn sample_project(id: &str, name: &str) -> Project {
         tech_debt_count: 0,
         needs_docs_migration: false,
         path_exists: true,
+        write_access: None,
+        mcp_sync_report: None,
         default_skill_ids: vec![],
         default_profile_id: None,
         briefing_notes: None,
@@ -221,6 +223,30 @@ fn sample_project(id: &str, name: &str) -> Project {
         created_at: now,
         updated_at: now,
     }
+}
+
+#[test]
+fn project_mcp_sync_receipt_roundtrips_through_the_project_view() {
+    let conn = test_db();
+    let project = sample_project("p-sync", "Sync");
+    super::projects::insert_project(&conn, &project).unwrap();
+    super::projects::save_mcp_sync_report(
+        &conn,
+        &project.id,
+        "missing_secrets",
+        Some("GITHUB_PERSONAL_ACCESS_TOKEN"),
+    )
+    .unwrap();
+
+    let loaded = super::projects::get_project(&conn, &project.id)
+        .unwrap()
+        .unwrap();
+    let report = loaded.mcp_sync_report.expect("sync receipt");
+    assert_eq!(report.status, ProjectMcpSyncStatus::MissingSecrets);
+    assert_eq!(
+        report.detail.as_deref(),
+        Some("GITHUB_PERSONAL_ACCESS_TOKEN")
+    );
 }
 
 fn sample_discussion(id: &str, project_id: Option<&str>) -> Discussion {
@@ -3281,6 +3307,7 @@ fn sample_qp_for_batch(id: &str) -> QuickPrompt {
             pattern: None,
         }],
         agent: crate::models::AgentType::ClaudeCode,
+        connection_id: None,
         project_id: None,
         skill_ids: vec![],
         profile_ids: vec![],
@@ -3396,9 +3423,18 @@ fn create_batch_run_persists_each_compare_target_tier() {
         max_tokens: None,
     });
     crate::db::quick_prompts::insert_quick_prompt(&conn, &qp).unwrap();
-    let target = |tier| crate::db::workflows::BatchAgentOverride {
+    let target = |tier: crate::models::ModelTier| crate::db::workflows::BatchAgentOverride {
         agent: crate::models::AgentType::Codex,
         tier,
+        connection_id: None,
+        model: Some(
+            match tier {
+                crate::models::ModelTier::Default => "gpt-default",
+                crate::models::ModelTier::Reasoning => "gpt-reasoning",
+                crate::models::ModelTier::Economy => "gpt-economy",
+            }
+            .into(),
+        ),
     };
 
     let outcome = crate::db::workflows::create_batch_run(
@@ -3447,18 +3483,114 @@ fn create_batch_run_persists_each_compare_target_tier() {
         .unwrap();
     assert_eq!(default_disc.agent, crate::models::AgentType::Codex);
     assert_eq!(default_disc.tier, crate::models::ModelTier::Default);
-    assert_eq!(
-        default_disc.model, None,
-        "provider-specific QP model must not leak into a Compare target"
-    );
+    assert_eq!(default_disc.model.as_deref(), Some("gpt-default"));
     assert_eq!(reasoning_disc.agent, crate::models::AgentType::Codex);
     assert_eq!(reasoning_disc.tier, crate::models::ModelTier::Reasoning);
-    assert_eq!(reasoning_disc.model, None);
+    assert_eq!(reasoning_disc.model.as_deref(), Some("gpt-reasoning"));
+    let default_targets =
+        crate::db::discussions::list_message_targets(&conn, &default_disc.messages[0].id).unwrap();
+    assert_eq!(default_targets.len(), 1);
+    assert_eq!(
+        default_targets[0].agent_type,
+        crate::models::AgentType::Codex
+    );
+    assert_eq!(
+        default_targets[0].tier,
+        Some(crate::models::ModelTier::Default)
+    );
     assert_eq!(classic_disc.agent, crate::models::AgentType::ClaudeCode);
     assert_eq!(
         classic_disc.model.as_deref(),
         Some("claude-provider-only-model")
     );
+}
+
+#[test]
+fn retry_batch_run_preserves_target_intent_but_resolves_the_current_http_model() {
+    let conn = test_db();
+    conn.execute(
+        "INSERT INTO external_api_connections (
+            id, display_name, mention_alias, endpoint, credential_slug, origin_preset,
+            economy_model, default_model, reasoning_model
+         ) VALUES (
+            'router-retry', 'OpenRouter', 'openrouter-retry', 'https://openrouter.ai/api',
+            'router-retry', 'open_router', 'eco-old', 'default-old', 'reasoning-old'
+         )",
+        [],
+    )
+    .unwrap();
+    let qp = sample_qp_for_batch("qp-retry-targets");
+    crate::db::quick_prompts::insert_quick_prompt(&conn, &qp).unwrap();
+    let original = crate::db::workflows::create_batch_run(
+        &conn,
+        crate::db::workflows::CreateBatchRunInput {
+            quick_prompt: &qp,
+            items: vec![crate::db::workflows::BatchItemInput {
+                title: "Translate · OpenRouter · reasoning".into(),
+                prompt: "Translate this exact prompt".into(),
+                agent_override: Some(crate::db::workflows::BatchAgentOverride {
+                    agent: crate::models::AgentType::Custom,
+                    tier: crate::models::ModelTier::Reasoning,
+                    connection_id: Some("router-retry".into()),
+                    model: Some("reasoning-old".into()),
+                }),
+            }],
+            batch_name: Some("🤝 Original comparison".into()),
+            project_id: None,
+            parent_run_id: None,
+            author_pseudo: None,
+            author_avatar_email: None,
+            language: "fr".into(),
+            workspace_mode: "Direct".into(),
+            chain_prompt_ids: Vec::new(),
+            chain_batch_items: Vec::new(),
+            group_concurrency_limit: None,
+        },
+    )
+    .unwrap();
+    let original_discussion =
+        crate::db::discussions::get_discussion(&conn, &original.discussion_ids[0])
+            .unwrap()
+            .unwrap();
+    // Simulate a run created before message_targets persisted connections: the
+    // completed dispatch job remains the historical routing authority.
+    conn.execute(
+        "DELETE FROM message_targets WHERE message_id = ?1",
+        [&original_discussion.messages[0].id],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE external_api_connections
+         SET reasoning_model = 'reasoning-current'
+         WHERE id = 'router-retry'",
+        [],
+    )
+    .unwrap();
+
+    let retried =
+        crate::db::workflows::retry_batch_run(&conn, &original.run_id, None, None).unwrap();
+    let retry_discussion =
+        crate::db::discussions::get_discussion(&conn, &retried.discussion_ids[0])
+            .unwrap()
+            .unwrap();
+    assert_eq!(retry_discussion.agent, crate::models::AgentType::Custom);
+    assert_eq!(retry_discussion.tier, crate::models::ModelTier::Reasoning);
+    assert_eq!(retry_discussion.model.as_deref(), Some("reasoning-current"));
+    assert_eq!(
+        retry_discussion.messages[0].content,
+        "Translate this exact prompt"
+    );
+    let targets =
+        crate::db::discussions::list_message_targets(&conn, &retry_discussion.messages[0].id)
+            .unwrap();
+    assert_eq!(targets.len(), 1);
+    assert_eq!(targets[0].connection_id.as_deref(), Some("router-retry"));
+    assert_eq!(targets[0].tier, Some(crate::models::ModelTier::Reasoning));
+    let dispatch =
+        crate::db::agent_dispatch::find_active_for_discussion(&conn, &retry_discussion.id)
+            .unwrap()
+            .unwrap();
+    assert_eq!(dispatch.connection_id.as_deref(), Some("router-retry"));
 }
 
 #[test]
@@ -3476,6 +3608,8 @@ fn compare_human_and_ai_scores_are_persisted_independently() {
                 agent_override: Some(crate::db::workflows::BatchAgentOverride {
                     agent: crate::models::AgentType::Codex,
                     tier: crate::models::ModelTier::Default,
+                    connection_id: None,
+                    model: None,
                 }),
             }],
             batch_name: Some("Quality comparison".into()),
@@ -4896,6 +5030,7 @@ fn quick_prompt_crud() {
             },
         ],
         agent: crate::models::AgentType::ClaudeCode,
+        connection_id: None,
         project_id: None,
         skill_ids: vec![],
         profile_ids: vec!["coder".into()],
@@ -4970,6 +5105,7 @@ fn quick_prompt_insert_seeds_version_v1() {
         prompt_template: "Initial body".into(),
         variables: vec![],
         agent: crate::models::AgentType::ClaudeCode,
+        connection_id: None,
         project_id: None,
         skill_ids: vec![],
         profile_ids: vec![],
@@ -5003,6 +5139,7 @@ fn quick_prompt_update_snapshots_v2_v3() {
         prompt_template: "v1 body".into(),
         variables: vec![],
         agent: crate::models::AgentType::ClaudeCode,
+        connection_id: None,
         project_id: None,
         skill_ids: vec![],
         profile_ids: vec![],
@@ -5054,6 +5191,7 @@ fn quick_prompt_metrics_aggregates_first_agent_reply_per_version() {
         prompt_template: "v1".into(),
         variables: vec![],
         agent: AgentType::ClaudeCode,
+        connection_id: None,
         project_id: None,
         skill_ids: vec![],
         profile_ids: vec![],
@@ -5190,6 +5328,7 @@ fn quick_prompt_metrics_empty_for_qp_without_launches() {
         prompt_template: "...".into(),
         variables: vec![],
         agent: crate::models::AgentType::ClaudeCode,
+        connection_id: None,
         project_id: None,
         skill_ids: vec![],
         profile_ids: vec![],
@@ -5219,6 +5358,7 @@ fn quick_prompt_delete_version_refuses_current_and_succeeds_on_older() {
         prompt_template: "v1".into(),
         variables: vec![],
         agent: AgentType::ClaudeCode,
+        connection_id: None,
         project_id: None,
         skill_ids: vec![],
         profile_ids: vec![],
@@ -5272,6 +5412,7 @@ fn quick_prompt_delete_version_clears_discussion_lineage() {
         prompt_template: "v1".into(),
         variables: vec![],
         agent: AgentType::ClaudeCode,
+        connection_id: None,
         project_id: None,
         skill_ids: vec![],
         profile_ids: vec![],
@@ -5362,6 +5503,7 @@ fn quick_prompt_metrics_ignores_non_first_agent_replies() {
         prompt_template: "v1".into(),
         variables: vec![],
         agent: AgentType::ClaudeCode,
+        connection_id: None,
         project_id: None,
         skill_ids: vec![],
         profile_ids: vec![],
@@ -5516,6 +5658,7 @@ fn quick_prompt_variables_roundtrip() {
             },
         ],
         agent: crate::models::AgentType::ClaudeCode,
+        connection_id: None,
         project_id: None,
         skill_ids: vec!["security".into()],
         profile_ids: vec![],

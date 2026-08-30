@@ -470,12 +470,17 @@ pub(crate) async fn stream_claimed_dispatch_job(
     let target_tier = {
         let trigger_message_id = job.trigger_message_id.clone();
         let agent_override = job.agent_override.clone();
+        let connection_id = job.connection_id.clone();
         state
             .db
             .with_read_conn(move |conn| {
                 let targets =
                     crate::db::discussions::list_message_targets(conn, &trigger_message_id)?;
-                Ok(dispatch_target_tier(&targets, agent_override.as_ref()))
+                Ok(dispatch_target_tier(
+                    &targets,
+                    agent_override.as_ref(),
+                    connection_id.as_deref(),
+                ))
             })
             .await
             .ok()
@@ -535,8 +540,8 @@ pub(crate) async fn stream_claimed_dispatch_job(
                 defer_runtime_unavailable(&state, &job, &reason).await;
                 return;
             }
-            AgentExecutionOutcome::PreflightFailed => {
-                fail_dispatch_job(&state, &job, "agent execution preflight failed").await;
+            AgentExecutionOutcome::PreflightFailed { diagnostic } => {
+                fail_dispatch_job(&state, &job, &diagnostic).await;
                 return;
             }
         };
@@ -579,6 +584,7 @@ pub(crate) async fn stream_claimed_dispatch_job(
 fn dispatch_target_tier(
     targets: &[crate::models::MessageTarget],
     agent_override: Option<&crate::models::AgentType>,
+    connection_id: Option<&str>,
 ) -> Option<crate::models::ModelTier> {
     targets
         .iter()
@@ -586,8 +592,12 @@ fn dispatch_target_tier(
             Some(agent) => {
                 target.kind == crate::models::MessageTargetKind::Agent
                     && &target.agent_type == agent
+                    && target.connection_id.as_deref() == connection_id
             }
-            None => target.kind == crate::models::MessageTargetKind::DiscussionAgent,
+            None => {
+                target.kind == crate::models::MessageTargetKind::DiscussionAgent
+                    && target.connection_id.as_deref() == connection_id
+            }
         })
         .and_then(|target| target.tier)
 }
@@ -725,7 +735,7 @@ async fn finish_dispatch_turn(
     }
 
     if !execution_succeeded {
-        fail_dispatch_job(state, &job, "agent reported an unsuccessful completion").await;
+        fail_dispatch_job(state, &job, &unsuccessful_completion_diagnostic(&response)).await;
         return;
     }
 
@@ -832,6 +842,20 @@ async fn finish_dispatch_turn(
         }
     }
     state.agent_dispatch_notify.notify_waiters();
+}
+
+fn unsuccessful_completion_diagnostic(response: &str) -> String {
+    let failure_kind = if response.trim().is_empty() {
+        "no_visible_output"
+    } else {
+        "worker_reported_failure"
+    };
+    format!(
+        "task-worker startup/completion failed: phase=worker_completion; \
+         failure_kind={failure_kind}; exit=unsuccessful. The worker did not submit a durable \
+         delivery manifest. Inspect the worker sub-discussion, then use `task_exec_reassign` \
+         to preserve this execution and its worktree while selecting another available worker."
+    )
 }
 
 async fn fail_dispatch_job(
@@ -1077,16 +1101,39 @@ mod chain_render_tests {
         ];
 
         assert_eq!(
-            dispatch_target_tier(&targets, None),
+            dispatch_target_tier(&targets, None, None),
             Some(ModelTier::Reasoning)
         );
         assert_eq!(
-            dispatch_target_tier(&targets, Some(&AgentType::Codex)),
+            dispatch_target_tier(&targets, Some(&AgentType::Codex), None),
             Some(ModelTier::Economy)
         );
         assert_eq!(
-            dispatch_target_tier(&targets, Some(&AgentType::Ollama)),
+            dispatch_target_tier(&targets, Some(&AgentType::Ollama), None),
             None
+        );
+    }
+
+    #[test]
+    fn dispatch_tier_distinguishes_named_custom_connections() {
+        use crate::models::{AgentType, MessageTarget, ModelTier};
+
+        let targets = vec![
+            MessageTarget::agent(AgentType::Custom)
+                .with_connection("openrouter")
+                .with_tier(ModelTier::Reasoning),
+            MessageTarget::agent(AgentType::Custom)
+                .with_connection("groq")
+                .with_tier(ModelTier::Economy),
+        ];
+
+        assert_eq!(
+            dispatch_target_tier(&targets, Some(&AgentType::Custom), Some("openrouter")),
+            Some(ModelTier::Reasoning)
+        );
+        assert_eq!(
+            dispatch_target_tier(&targets, Some(&AgentType::Custom), Some("groq")),
+            Some(ModelTier::Economy)
         );
     }
 

@@ -208,8 +208,8 @@ async fn main() -> anyhow::Result<()> {
     // Exactly ONE backend per data dir. Refuse to start if another instance
     // already holds the lock — prevents two processes (a stale one, or P2P peers
     // sharing a synced dir) racing on config.toml / the key / the DB. Held for
-    // the whole process lifetime; released when `_data_dir_lock` drops at exit.
-    let _data_dir_lock = config::acquire_data_dir_lock().map_err(|e| {
+    // the whole process lifetime; released when the application state drops at exit.
+    let data_dir_lock = config::acquire_data_dir_lock().map_err(|e| {
         tracing::error!("{e}");
         e
     })?;
@@ -232,10 +232,21 @@ async fn main() -> anyhow::Result<()> {
         Err(e) => tracing::error!("Key reconcile failed (booting locked): {e}"),
     }
 
+    match kronn::bootstrap_external_api_connections(&database, &mut app_config).await {
+        Ok(true) => {
+            if let Err(e) = config::save(&app_config).await {
+                tracing::error!("External API runtime configuration reconciliation failed: {e}");
+            }
+        }
+        Ok(false) => {}
+        Err(e) => tracing::error!("External API connection backfill failed: {e}"),
+    }
+
     // Build state via the shared factory — keep both mains in sync when
     // new runtime fields are added to AppState (see lib.rs doc).
     let config_arc = Arc::new(RwLock::new(app_config));
-    let state = AppState::new_defaults(config_arc, database, max_agents);
+    let state =
+        AppState::new_defaults(config_arc, database, max_agents).with_data_dir_lock(data_dir_lock);
 
     // Fire up the kronn-docs sidecar in the background — its start is
     // best-effort (graceful skip if deps are missing) so we don't block

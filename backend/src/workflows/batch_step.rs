@@ -1727,6 +1727,7 @@ mod tests {
                 pattern: None,
             }],
             agent: AgentType::ClaudeCode,
+            connection_id: None,
             project_id: None,
             skill_ids: vec![],
             profile_ids: vec![],

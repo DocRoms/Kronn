@@ -17,15 +17,56 @@
 //!      away from gate_step ; sharing the helper here keeps both
 //!      callsites symmetric.
 //!
-//! All git invocations go through `core::cmd::sync_cmd` (no raw
-//! `std::process::Command`) for Windows / sandbox cross-platform
-//! compliance (cf. `feedback_windows_crossplatform` memory).
+//! All git invocations go through the local `git_cmd` helper (never
+//! `core::cmd::sync_cmd("git")` or raw `std::process::Command` directly):
+//! it applies Windows/sandbox cross-platform compliance (cf.
+//! `feedback_windows_crossplatform` memory) AND strips every inherited
+//! `GIT_*` repo-override env var so `current_dir` is never overruled by
+//! the calling process's own environment (KT-493).
 
 use std::path::Path;
 
 /// Prefix on `WorkflowRun.state` keys storing checkpoint SHAs.
 /// Format : `checkpoint:<gate_step_name>` → 40-char SHA.
 pub const CHECKPOINT_STATE_PREFIX: &str = "checkpoint:";
+
+/// Env vars Git consults to locate the repository/index, independent of
+/// `current_dir`/`-C`. A process that inherits any of these (KT-493 : the
+/// orchestrated task worktree this module's own unit tests ran inside)
+/// silently redirects every git invocation below onto the repo THEY name,
+/// not `project_path` — that's how `commit_checkpoint`'s "not a git repo"
+/// test landed a real `kronn-checkpoint: pre-pre-merge @ run-abc` commit on
+/// the live task branch instead of its throwaway temp dir.
+const GIT_ENV_OVERRIDES: &[&str] = &[
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_COMMON_DIR",
+    "GIT_CEILING_DIRECTORIES",
+    "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+];
+
+/// `sync_cmd("git")` scoped to `project_path`, with every inherited
+/// repo-override env var stripped. Repository discovery is capped at the
+/// requested path's parent so a temporary non-repository nested below the
+/// caller cannot fall back to the caller's `.git`. Every git invocation in
+/// this module — production and test alike — must go through this, never
+/// `sync_cmd("git")` directly.
+fn git_cmd(project_path: &Path) -> std::process::Command {
+    let mut cmd = crate::core::cmd::sync_cmd("git");
+    cmd.current_dir(project_path);
+    for var in GIT_ENV_OVERRIDES {
+        cmd.env_remove(var);
+    }
+    if let Ok(canonical_path) = project_path.canonicalize() {
+        if let Some(parent) = canonical_path.parent() {
+            cmd.env("GIT_CEILING_DIRECTORIES", parent);
+        }
+    }
+    cmd
+}
 
 /// Outcome of the checkpoint commit attempt — kept as a typed enum
 /// so the runner can decide whether the run continues or bails.
@@ -49,9 +90,8 @@ pub enum CheckpointOutcome {
 /// Probe whether `project_path` is a git working tree. Cheap : a
 /// `git rev-parse --is-inside-work-tree` returns "true" in ~5ms.
 fn is_git_repo(project_path: &Path) -> bool {
-    crate::core::cmd::sync_cmd("git")
+    git_cmd(project_path)
         .args(["rev-parse", "--is-inside-work-tree"])
-        .current_dir(project_path)
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
@@ -62,9 +102,8 @@ fn is_git_repo(project_path: &Path) -> bool {
 /// step staged something we haven't committed yet). Auto-commit
 /// here would silently sweep that into the checkpoint. We refuse.
 fn has_staged_changes(project_path: &Path) -> bool {
-    crate::core::cmd::sync_cmd("git")
+    git_cmd(project_path)
         .args(["diff", "--cached", "--quiet"])
-        .current_dir(project_path)
         .output()
         .map(|o| !o.status.success())
         .unwrap_or(false)
@@ -91,10 +130,7 @@ pub fn commit_checkpoint(
         return CheckpointOutcome::StagedChangesPresent;
     }
 
-    let add = crate::core::cmd::sync_cmd("git")
-        .args(["add", "-A"])
-        .current_dir(project_path)
-        .output();
+    let add = git_cmd(project_path).args(["add", "-A"]).output();
     if let Err(e) = add {
         return CheckpointOutcome::GitCommandFailed {
             stderr: e.to_string(),
@@ -109,9 +145,8 @@ pub fn commit_checkpoint(
     }
 
     let message = format!("kronn-checkpoint: pre-{gate_step_name} @ {run_id}");
-    let commit = crate::core::cmd::sync_cmd("git")
+    let commit = git_cmd(project_path)
         .args(["commit", "-m", &message, "--allow-empty"])
-        .current_dir(project_path)
         .output();
     match commit {
         Ok(o) if !o.status.success() => {
@@ -127,10 +162,7 @@ pub fn commit_checkpoint(
         Ok(_) => {}
     }
 
-    let head = crate::core::cmd::sync_cmd("git")
-        .args(["rev-parse", "HEAD"])
-        .current_dir(project_path)
-        .output();
+    let head = git_cmd(project_path).args(["rev-parse", "HEAD"]).output();
     match head {
         Ok(o) if o.status.success() => {
             let sha = String::from_utf8_lossy(&o.stdout).trim().to_string();
@@ -154,9 +186,8 @@ pub fn reset_to_checkpoint(project_path: &Path, sha: &str) -> Result<(), String>
     // TD-20260709 (C) — this can run HOURS after the checkpoint, on a tree a
     // human or another run may have touched since. Uncommitted changes are
     // not ours to destroy: refuse, the caller degrades gracefully.
-    let st = crate::core::cmd::sync_cmd("git")
+    let st = git_cmd(project_path)
         .args(["status", "--porcelain"])
-        .current_dir(project_path)
         .output()
         .map_err(|e| format!("git status spawn failed: {e}"))?;
     if !st.status.success() {
@@ -172,9 +203,8 @@ pub fn reset_to_checkpoint(project_path: &Path, sha: &str) -> Result<(), String>
             String::from_utf8_lossy(&st.stdout).trim_end()
         ));
     }
-    let r = crate::core::cmd::sync_cmd("git")
+    let r = git_cmd(project_path)
         .args(["reset", "--hard", sha])
-        .current_dir(project_path)
         .output()
         .map_err(|e| format!("git reset spawn failed: {e}"))?;
     if !r.status.success() {
@@ -192,40 +222,76 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
+    const INHERITED_CONTEXT_TARGET_ENV: &str = "KRONN_GATE_CHECKPOINT_TEST_TARGET";
+
     fn tmp_repo() -> PathBuf {
         let tmp =
             std::env::temp_dir().join(format!("kronn-checkpoint-test-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&tmp).unwrap();
         // Initialize git + commit-author config so commit doesn't fail
         // in CI sandboxes that have no global git identity.
-        crate::core::cmd::sync_cmd("git")
-            .args(["init", "-q"])
-            .current_dir(&tmp)
-            .output()
-            .unwrap();
-        crate::core::cmd::sync_cmd("git")
+        git_cmd(&tmp).args(["init", "-q"]).output().unwrap();
+        git_cmd(&tmp)
             .args(["config", "user.email", "test@kronn.local"])
-            .current_dir(&tmp)
             .output()
             .unwrap();
-        crate::core::cmd::sync_cmd("git")
+        git_cmd(&tmp)
             .args(["config", "user.name", "Kronn Test"])
-            .current_dir(&tmp)
             .output()
             .unwrap();
         // Seed with one commit so HEAD exists.
         fs::write(tmp.join("README.md"), "init\n").unwrap();
-        crate::core::cmd::sync_cmd("git")
-            .args(["add", "."])
-            .current_dir(&tmp)
-            .output()
-            .unwrap();
-        crate::core::cmd::sync_cmd("git")
+        git_cmd(&tmp).args(["add", "."]).output().unwrap();
+        git_cmd(&tmp)
             .args(["commit", "-q", "-m", "init"])
-            .current_dir(&tmp)
             .output()
             .unwrap();
         tmp
+    }
+
+    /// HEAD sha of `repo`, via a fresh env-scrubbed git call — used to prove
+    /// a repo untouched across a `commit_checkpoint` call elsewhere.
+    fn git_head(repo: &Path) -> String {
+        let out = git_cmd(repo).args(["rev-parse", "HEAD"]).output().unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// `git log --pretty=%s` subjects of `repo`, newest first.
+    fn git_log_subjects(repo: &Path) -> Vec<String> {
+        let out = git_cmd(repo).args(["log", "--pretty=%s"]).output().unwrap();
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn git_status(repo: &Path) -> Vec<u8> {
+        let out = git_cmd(repo)
+            .args(["status", "--porcelain=v1", "-z", "--untracked-files=all"])
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        out.stdout
+    }
+
+    /// Semantic snapshot of the index. Unlike reading `.git/index` directly,
+    /// this also works for linked worktrees and ignores harmless stat-cache
+    /// refreshes while still detecting any accidental `git add`.
+    fn git_index_tree(repo: &Path) -> Vec<u8> {
+        let out = git_cmd(repo).args(["write-tree"]).output().unwrap();
+        assert!(out.status.success());
+        out.stdout
+    }
+
+    /// Tracked worktree changes relative to the index. Untracked paths are
+    /// represented separately by `git_status` above.
+    fn git_worktree_diff(repo: &Path) -> Vec<u8> {
+        let out = git_cmd(repo)
+            .args(["diff", "--binary", "--no-ext-diff"])
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        out.stdout
     }
 
     #[test]
@@ -234,8 +300,22 @@ mod tests {
             std::env::temp_dir().join(format!("kronn-checkpoint-nogit-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&tmp).unwrap();
 
+        let probe = git_cmd(&tmp)
+            .args(["rev-parse", "--show-toplevel"])
+            .output()
+            .unwrap();
+        assert!(
+            !probe.status.success(),
+            "temporary non-repo unexpectedly resolved to {} from {}",
+            String::from_utf8_lossy(&probe.stdout).trim(),
+            tmp.display(),
+        );
+
         let out = commit_checkpoint(&tmp, "pre-merge", "run-abc");
-        assert!(matches!(out, CheckpointOutcome::NotAGitRepo));
+        assert!(
+            matches!(out, CheckpointOutcome::NotAGitRepo),
+            "expected NotAGitRepo, got {out:?}"
+        );
 
         let _ = fs::remove_dir_all(&tmp);
     }
@@ -255,9 +335,8 @@ mod tests {
         assert!(sha.chars().all(|c| c.is_ascii_hexdigit()));
 
         // HEAD message should carry our prefix.
-        let log = crate::core::cmd::sync_cmd("git")
+        let log = git_cmd(&tmp)
             .args(["log", "-1", "--pretty=%s"])
-            .current_dir(&tmp)
             .output()
             .unwrap();
         let msg = String::from_utf8_lossy(&log.stdout);
@@ -286,11 +365,7 @@ mod tests {
         // checkpoint commit. We refuse + surface a typed reason.
         let tmp = tmp_repo();
         fs::write(tmp.join("wip.txt"), "human WIP\n").unwrap();
-        crate::core::cmd::sync_cmd("git")
-            .args(["add", "wip.txt"])
-            .current_dir(&tmp)
-            .output()
-            .unwrap();
+        git_cmd(&tmp).args(["add", "wip.txt"]).output().unwrap();
 
         let out = commit_checkpoint(&tmp, "pre-merge", "run-1");
         assert!(matches!(out, CheckpointOutcome::StagedChangesPresent));
@@ -306,14 +381,9 @@ mod tests {
             other => panic!("expected Committed, got {other:?}"),
         };
         fs::write(tmp.join("oops.txt"), "after\n").unwrap();
-        crate::core::cmd::sync_cmd("git")
-            .args(["add", "."])
-            .current_dir(&tmp)
-            .output()
-            .unwrap();
-        crate::core::cmd::sync_cmd("git")
+        git_cmd(&tmp).args(["add", "."]).output().unwrap();
+        git_cmd(&tmp)
             .args(["commit", "-q", "-m", "after-checkpoint"])
-            .current_dir(&tmp)
             .output()
             .unwrap();
 
@@ -323,13 +393,8 @@ mod tests {
             !tmp.join("oops.txt").exists(),
             "post-reset file must be removed"
         );
-        let head = crate::core::cmd::sync_cmd("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(&tmp)
-            .output()
-            .unwrap();
         assert_eq!(
-            String::from_utf8_lossy(&head.stdout).trim(),
+            git_head(&tmp),
             sha,
             "HEAD must point at the checkpoint sha after reset",
         );
@@ -366,5 +431,94 @@ mod tests {
         let err = reset_to_checkpoint(&tmp, "deadbeefnotreal").unwrap_err();
         assert!(err.contains("git reset --hard"));
         let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// KT-493 regression: reproduce both observed incidents with a simulated
+    /// managed-worktree caller: an empty checkpoint must not add a commit to a
+    /// clean caller, and a caller's uncommitted files must not be captured.
+    #[test]
+    fn commit_checkpoint_ignores_inherited_git_dir_and_work_tree() {
+        // The parent test starts this same test in a dedicated process with a
+        // simulated inherited Git context. Keeping that environment mutation
+        // in the child avoids redirecting Git commands from concurrently
+        // running tests in this test binary.
+        if let Some(target) = std::env::var_os(INHERITED_CONTEXT_TARGET_ENV) {
+            let target = PathBuf::from(target);
+            let out = commit_checkpoint(&target, "pre-merge", "run-abc");
+            assert!(
+                matches!(out, CheckpointOutcome::Committed { .. }),
+                "expected the checkpoint to land in the target repo, got {out:?}"
+            );
+            return;
+        }
+
+        for caller_has_wip in [false, true] {
+            let calling_repo = tmp_repo();
+            let target = tmp_repo();
+            if caller_has_wip {
+                fs::write(calling_repo.join("README.md"), "worker modified this\n").unwrap();
+                fs::write(calling_repo.join("wip.txt"), "worker's uncommitted work\n").unwrap();
+            }
+            let head_before = git_head(&calling_repo);
+            let index_before = git_index_tree(&calling_repo);
+            let worktree_before = git_worktree_diff(&calling_repo);
+            let status_before = git_status(&calling_repo);
+            let readme_before = fs::read(calling_repo.join("README.md")).unwrap();
+            let wip_before = fs::read(calling_repo.join("wip.txt")).ok();
+
+            let child = crate::core::cmd::sync_cmd(std::env::current_exe().unwrap())
+                .arg("commit_checkpoint_ignores_inherited_git_dir_and_work_tree")
+                .arg("--nocapture")
+                .env(INHERITED_CONTEXT_TARGET_ENV, &target)
+                .env("GIT_DIR", calling_repo.join(".git"))
+                .env("GIT_WORK_TREE", &calling_repo)
+                .output()
+                .unwrap();
+            assert!(
+                child.status.success(),
+                "checkpoint child failed (caller_has_wip={caller_has_wip}):\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&child.stdout),
+                String::from_utf8_lossy(&child.stderr),
+            );
+            assert_eq!(
+                git_log_subjects(&target).first().map(String::as_str),
+                Some("kronn-checkpoint: pre-pre-merge @ run-abc"),
+                "the run-abc checkpoint must exist only in the target repo"
+            );
+            assert_eq!(
+                git_head(&calling_repo),
+                head_before,
+                "calling repo HEAD must not move (caller_has_wip={caller_has_wip})"
+            );
+            assert_eq!(
+                git_index_tree(&calling_repo),
+                index_before,
+                "calling repo index must not change (caller_has_wip={caller_has_wip})"
+            );
+            assert_eq!(
+                git_worktree_diff(&calling_repo),
+                worktree_before,
+                "calling repo tracked worktree diff must not change (caller_has_wip={caller_has_wip})"
+            );
+            assert_eq!(
+                git_status(&calling_repo),
+                status_before,
+                "calling repo path/status state must not change (caller_has_wip={caller_has_wip})"
+            );
+            assert!(
+                !git_log_subjects(&calling_repo)
+                    .iter()
+                    .any(|subject| subject.contains("run-abc")),
+                "run-abc must never appear in the calling repo"
+            );
+            assert_eq!(
+                fs::read(calling_repo.join("README.md")).unwrap(),
+                readme_before
+            );
+            assert_eq!(fs::read(calling_repo.join("wip.txt")).ok(), wip_before);
+
+            let _ = fs::remove_dir_all(&calling_repo);
+            let _ = fs::remove_dir_all(&target);
+        }
     }
 }

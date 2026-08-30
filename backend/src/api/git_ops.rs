@@ -1087,6 +1087,19 @@ pub fn run_git_commit(
     amend: bool,
     sign: bool,
 ) -> Result<GitCommitResponse, String> {
+    run_git_commit_with_child_lock(repo_path, files, message, amend, sign, None)
+}
+
+/// Stage and commit explicit paths, optionally retaining the backend's
+/// data-directory lock in Git and any hook descendants across backend death.
+pub fn run_git_commit_with_child_lock(
+    repo_path: &Path,
+    files: &[String],
+    message: &str,
+    amend: bool,
+    sign: bool,
+    data_dir_lock: Option<&std::fs::File>,
+) -> Result<GitCommitResponse, String> {
     // git add each file individually, skip missing files gracefully
     let mut added = 0;
     let clean_files = files
@@ -1163,11 +1176,31 @@ pub fn run_git_commit(
     commit_args.push("--");
     commit_args.extend(clean_files);
 
-    let commit_output = sync_cmd("git")
-        .args(&commit_args)
-        .current_dir(repo_path)
+    // Only `git commit` executes hooks. Keep the inherited descriptor alive
+    // through this spawn; descendants retain it until the whole hook tree exits.
+    let child_lock = data_dir_lock
+        .map(crate::core::config::inherit_data_dir_lock_for_child)
+        .transpose()
+        .map_err(|error| {
+            format!("Failed to inherit data-directory lock for git commit: {error}")
+        })?;
+    let mut commit_command = sync_cmd("git");
+    commit_command.args(&commit_args).current_dir(repo_path);
+    #[cfg(unix)]
+    if let Some(child_lock) = child_lock.as_ref() {
+        crate::core::config::inherit_data_dir_lock_on_command(&mut commit_command, child_lock);
+    }
+    #[cfg(windows)]
+    if let Some(child_lock) = child_lock.as_ref() {
+        crate::core::config::inherit_data_dir_lock_on_command(&mut commit_command, child_lock)
+            .map_err(|error| {
+                format!("Failed to attach data-directory lock to git commit: {error}")
+            })?;
+    }
+    let commit_output = commit_command
         .output()
         .map_err(|e| format!("Failed to run git commit: {}", e))?;
+    drop(child_lock);
 
     if !commit_output.status.success() {
         let stderr = String::from_utf8_lossy(&commit_output.stderr);

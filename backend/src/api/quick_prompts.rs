@@ -9,6 +9,32 @@ use uuid::Uuid;
 use crate::models::*;
 use crate::AppState;
 
+async fn validate_connection_target(
+    state: &AppState,
+    agent: &AgentType,
+    connection_id: Option<String>,
+) -> Result<Option<String>, String> {
+    let Some(connection_id) = connection_id else {
+        return if *agent == AgentType::Custom {
+            Err("A custom external API agent requires a connection".into())
+        } else {
+            Ok(None)
+        };
+    };
+    let lookup_id = connection_id.clone();
+    let connection = state
+        .db
+        .with_read_conn(move |conn| crate::db::external_api_connections::get(conn, &lookup_id))
+        .await
+        .map_err(|error| format!("DB error: {error}"))?
+        .ok_or_else(|| "External API connection not found".to_string())?;
+    let target = crate::db::external_api_connections::target_for_connection(&connection);
+    if target.agent_type != *agent {
+        return Err("The external API connection does not match the selected agent".into());
+    }
+    Ok(Some(connection_id))
+}
+
 /// GET /api/quick-prompts
 pub async fn list(State(state): State<AppState>) -> Json<ApiResponse<Vec<QuickPrompt>>> {
     match state
@@ -33,6 +59,11 @@ pub async fn create(
         return Json(ApiResponse::err("Prompt template cannot be empty"));
     }
 
+    let agent = req.agent.unwrap_or(AgentType::ClaudeCode);
+    let connection_id = match validate_connection_target(&state, &agent, req.connection_id).await {
+        Ok(connection_id) => connection_id,
+        Err(error) => return Json(ApiResponse::err(error)),
+    };
     let now = Utc::now();
     let qp = QuickPrompt {
         id: Uuid::new_v4().to_string(),
@@ -40,7 +71,8 @@ pub async fn create(
         icon: req.icon.unwrap_or_else(|| "⚡".into()),
         prompt_template: req.prompt_template,
         variables: req.variables,
-        agent: req.agent.unwrap_or(AgentType::ClaudeCode),
+        agent,
+        connection_id,
         project_id: req.project_id,
         skill_ids: req.skill_ids,
         profile_ids: req.profile_ids,
@@ -81,6 +113,11 @@ pub async fn update(
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
 
+    let agent = req.agent.unwrap_or(existing.agent.clone());
+    let connection_id = match validate_connection_target(&state, &agent, req.connection_id).await {
+        Ok(connection_id) => connection_id,
+        Err(error) => return Json(ApiResponse::err(error)),
+    };
     let updated = QuickPrompt {
         id: existing.id,
         name: if req.name.is_empty() {
@@ -95,7 +132,8 @@ pub async fn update(
             req.prompt_template
         },
         variables: req.variables,
-        agent: req.agent.unwrap_or(existing.agent),
+        agent,
+        connection_id,
         project_id: req.project_id,
         skill_ids: req.skill_ids,
         profile_ids: req.profile_ids,
@@ -531,6 +569,8 @@ pub struct CompareAgentTarget {
     pub agent: AgentType,
     #[serde(default)]
     pub tier: ModelTier,
+    #[serde(default)]
+    pub connection_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -571,6 +611,7 @@ fn normalize_compare_targets(
             .map(|agent| CompareAgentTarget {
                 agent,
                 tier: fallback_tier,
+                connection_id: None,
             })
             .collect()
     } else {
@@ -579,7 +620,14 @@ fn normalize_compare_targets(
     let mut seen = std::collections::HashSet::new();
     requested
         .into_iter()
-        .filter(|target| seen.insert(format!("{:?}:{:?}", target.agent, target.tier)))
+        .filter(|target| {
+            seen.insert(format!(
+                "{:?}:{}:{:?}",
+                target.agent,
+                target.connection_id.as_deref().unwrap_or_default(),
+                target.tier
+            ))
+        })
         .collect()
 }
 
@@ -634,6 +682,52 @@ pub async fn compare_agents(
     let fallback_tier = req.tier.unwrap_or(qp.tier);
     let targets = normalize_compare_targets(req.targets, req.agents, fallback_tier);
 
+    let resolved_targets = match state
+        .db
+        .with_read_conn(move |conn| {
+            targets
+                .into_iter()
+                .map(|target| {
+                    if let Some(connection_id) = target.connection_id.as_deref() {
+                        let connection = crate::db::external_api_connections::get(
+                            conn,
+                            connection_id,
+                        )?
+                        .ok_or_else(|| anyhow::anyhow!(
+                            "External API connection {connection_id} was not found"
+                        ))?;
+                        let expected = crate::db::external_api_connections::target_for_connection(
+                            &connection,
+                        );
+                        if expected.agent_type != target.agent {
+                            anyhow::bail!(
+                                "External API connection {connection_id} does not match the selected agent"
+                            );
+                        }
+                        let model = match target.tier {
+                            ModelTier::Economy => connection.economy_model.clone(),
+                            ModelTier::Default => connection.default_model.clone(),
+                            ModelTier::Reasoning => connection.reasoning_model.clone(),
+                        };
+                        Ok((target, connection.display_name, model))
+                    } else {
+                        if target.agent == AgentType::Custom {
+                            anyhow::bail!(
+                                "A custom external API target requires a connection_id"
+                            );
+                        }
+                        let label = format!("{:?}", target.agent);
+                        Ok((target, label, None))
+                    }
+                })
+                .collect::<anyhow::Result<Vec<_>>>()
+        })
+        .await
+    {
+        Ok(targets) => targets,
+        Err(error) => return Json(ApiResponse::err(error.to_string())),
+    };
+
     let (author_pseudo, author_avatar_email) = {
         let config = state.config.read().await;
         (
@@ -646,10 +740,9 @@ pub async fn compare_agents(
     // suffixes so same-provider model comparisons remain distinguishable.
     let prompt = req.prompt.clone();
     let qp_display_name = qp.name.clone();
-    let items: Vec<crate::db::workflows::BatchItemInput> = targets
+    let items: Vec<crate::db::workflows::BatchItemInput> = resolved_targets
         .into_iter()
-        .map(|target| {
-            let agent_label = format!("{:?}", target.agent); // ClaudeCode, Codex, …
+        .map(|(target, agent_label, model)| {
             let tier_label = format!("{:?}", target.tier).to_lowercase();
             crate::db::workflows::BatchItemInput {
                 title: format!("{} · {} · {}", qp_display_name, agent_label, tier_label),
@@ -657,6 +750,8 @@ pub async fn compare_agents(
                 agent_override: Some(crate::db::workflows::BatchAgentOverride {
                     agent: target.agent,
                     tier: target.tier,
+                    connection_id: target.connection_id,
+                    model,
                 }),
             }
         })
@@ -721,14 +816,17 @@ mod compare_tests {
                 CompareAgentTarget {
                     agent: AgentType::Codex,
                     tier: ModelTier::Default,
+                    connection_id: None,
                 },
                 CompareAgentTarget {
                     agent: AgentType::Codex,
                     tier: ModelTier::Reasoning,
+                    connection_id: None,
                 },
                 CompareAgentTarget {
                     agent: AgentType::Codex,
                     tier: ModelTier::Default,
+                    connection_id: None,
                 },
             ],
             vec![],

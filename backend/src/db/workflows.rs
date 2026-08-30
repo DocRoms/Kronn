@@ -407,6 +407,10 @@ pub fn delete_batch_run_with_discussions(
 pub struct BatchAgentOverride {
     pub agent: crate::models::AgentType,
     pub tier: crate::models::ModelTier,
+    pub connection_id: Option<String>,
+    /// Concrete model resolved from a named HTTP connection at launch time.
+    /// This remains visible even before a reply arrives or when the call fails.
+    pub model: Option<String>,
 }
 
 /// One row of the batch input — title, fully-rendered prompt, and an
@@ -603,11 +607,16 @@ pub fn create_batch_run(
                 // Classic batches inherit the QP's provider-specific model.
                 // Compare targets must resolve from their own agent+tier pair:
                 // copying e.g. a Claude model override onto Codex is invalid.
-                model: if item.agent_override.is_none() {
-                    qp.agent_settings.as_ref().and_then(|s| s.model.clone())
-                } else {
-                    None
-                },
+                model: item
+                    .agent_override
+                    .as_ref()
+                    .and_then(|target| target.model.clone())
+                    .or_else(|| {
+                        item.agent_override
+                            .is_none()
+                            .then(|| qp.agent_settings.as_ref().and_then(|s| s.model.clone()))
+                            .flatten()
+                    }),
                 pin_first_message: false,
                 summary_cache: None,
                 summary_up_to_msg_idx: None,
@@ -641,12 +650,20 @@ pub fn create_batch_run(
     let tx_result: Result<()> = (|| {
         ensure_batch_placeholder_workflow(conn, &qp.id, &qp.name, qp.project_id.as_deref())?;
         insert_run(conn, &run)?;
-        for (disc, msg, batch_item) in &discussions {
+        for (index, (disc, msg, batch_item)) in discussions.iter().enumerate() {
             crate::db::discussions::insert_discussion(conn, disc)?;
             let trigger_sort_order = crate::db::discussions::insert_message(conn, &disc.id, msg)?;
+            if let Some(target) = input.items[index].agent_override.as_ref() {
+                let mut message_target = crate::models::MessageTarget::agent(target.agent.clone())
+                    .with_tier(target.tier);
+                if let Some(connection_id) = target.connection_id.as_deref() {
+                    message_target = message_target.with_connection(connection_id);
+                }
+                crate::db::discussions::replace_message_targets(conn, &msg.id, &[message_target])?;
+            }
             let job_id = Uuid::new_v4().to_string();
             let dedupe_key = format!("message:{}", msg.id);
-            crate::db::agent_dispatch::enqueue(
+            crate::db::agent_dispatch::enqueue_with_connection(
                 conn,
                 crate::db::agent_dispatch::NewAgentDispatchJob {
                     id: &job_id,
@@ -660,6 +677,11 @@ pub fn create_batch_run(
                     group_id: Some(&run_id),
                     group_concurrency_limit: input.group_concurrency_limit,
                 },
+                input.items[index]
+                    .agent_override
+                    .as_ref()
+                    .and_then(|target| target.connection_id.as_deref())
+                    .or(qp.connection_id.as_deref()),
             )?;
             // Every batch child is owed an agent run. Mark it so a
             // restart before the agent starts (queued, or the HTTP path's
@@ -686,6 +708,152 @@ pub fn create_batch_run(
         discussion_ids,
         batch_total,
     })
+}
+
+/// Recreate a batch from its durable execution intent.
+///
+/// Agent type, tier and named HTTP connection are preserved. The concrete
+/// model is deliberately resolved again from the current connection settings:
+/// a retry should follow today's `economy/default/reasoning` mapping instead
+/// of pinning a model that may have been replaced or removed since the run.
+pub fn retry_batch_run(
+    conn: &Connection,
+    old_run_id: &str,
+    author_pseudo: Option<String>,
+    author_avatar_email: Option<String>,
+) -> Result<CreateBatchRunOutput> {
+    let old_run =
+        get_run(conn, old_run_id)?.ok_or_else(|| anyhow::anyhow!("Batch run not found"))?;
+    if old_run.run_type != "batch" {
+        anyhow::bail!("Only batch runs can be retried");
+    }
+    let qp_id = old_run
+        .workflow_id
+        .strip_prefix(BATCH_WORKFLOW_PREFIX)
+        .ok_or_else(|| anyhow::anyhow!("Batch run is not linked to a Quick Prompt"))?;
+    let qp = crate::db::quick_prompts::get_quick_prompt(conn, qp_id)?
+        .ok_or_else(|| anyhow::anyhow!("Quick Prompt not found"))?;
+    let child_summaries = crate::db::discussions::list_discussions_by_run(conn, old_run_id)?;
+    if child_summaries.is_empty() {
+        anyhow::bail!("Batch run has no child discussions to retry");
+    }
+
+    let project_id = child_summaries[0].project_id.clone();
+    let workspace_mode = child_summaries[0].workspace_mode.clone();
+    let language = child_summaries[0].language.clone();
+    let mut items = Vec::with_capacity(child_summaries.len());
+    for summary in child_summaries {
+        let discussion = crate::db::discussions::get_discussion(conn, &summary.id)?
+            .ok_or_else(|| anyhow::anyhow!("Batch child {} was deleted", summary.id))?;
+        let initial = discussion
+            .messages
+            .iter()
+            .find(|message| message.role == MessageRole::User)
+            .ok_or_else(|| anyhow::anyhow!("Batch child {} has no user prompt", discussion.id))?;
+        let stored_target = crate::db::discussions::list_message_targets(conn, &initial.id)?
+            .into_iter()
+            .find(|target| {
+                matches!(
+                    target.kind,
+                    MessageTargetKind::Agent | MessageTargetKind::DiscussionAgent
+                )
+            });
+        let agent = stored_target
+            .as_ref()
+            .map(|target| target.agent_type.clone())
+            .unwrap_or_else(|| discussion.agent.clone());
+        let tier = stored_target
+            .as_ref()
+            .and_then(|target| target.tier)
+            .unwrap_or(discussion.tier);
+        // New compare runs persist MessageTarget rows. Completed historical
+        // runs still retain the same connection on their dispatch job, so the
+        // fallback keeps those retries ISO too.
+        let connection_id = stored_target
+            .and_then(|target| target.connection_id)
+            .or_else(|| {
+                conn.query_row(
+                    "SELECT connection_id FROM agent_dispatch_jobs
+                     WHERE discussion_id = ?1 AND connection_id IS NOT NULL
+                     ORDER BY created_at ASC LIMIT 1",
+                    [&discussion.id],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .optional()
+                .ok()
+                .flatten()
+                .flatten()
+            });
+        if agent == AgentType::Custom && connection_id.is_none() {
+            anyhow::bail!(
+                "Batch child {} uses a custom provider but its connection is unavailable",
+                discussion.id
+            );
+        }
+        let model = if let Some(connection_id) = connection_id.as_deref() {
+            let connection = crate::db::external_api_connections::get(conn, connection_id)?
+                .ok_or_else(|| {
+                    anyhow::anyhow!("External API connection {connection_id} no longer exists")
+                })?;
+            let expected = crate::db::external_api_connections::target_for_connection(&connection);
+            if expected.agent_type != agent {
+                anyhow::bail!(
+                    "External API connection {connection_id} no longer matches its agent type"
+                );
+            }
+            let model = match tier {
+                ModelTier::Economy => connection.economy_model,
+                ModelTier::Default => connection.default_model,
+                ModelTier::Reasoning => connection.reasoning_model,
+            };
+            Some(model.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "External API connection {} has no model configured for {:?}",
+                    connection.display_name,
+                    tier
+                )
+            })?)
+        } else {
+            None
+        };
+        items.push(BatchItemInput {
+            title: discussion.title,
+            prompt: initial.content.clone(),
+            agent_override: Some(BatchAgentOverride {
+                agent,
+                tier,
+                connection_id,
+                model,
+            }),
+        });
+    }
+
+    let previous_name = old_run.batch_name.unwrap_or_else(|| qp.name.clone());
+    let batch_name = if previous_name.trim_start().starts_with('🤝') {
+        format!(
+            "🤝 Retry · {}",
+            previous_name.trim_start().trim_start_matches('🤝').trim()
+        )
+    } else {
+        format!("Retry · {previous_name}")
+    };
+    create_batch_run(
+        conn,
+        CreateBatchRunInput {
+            quick_prompt: &qp,
+            items,
+            batch_name: Some(batch_name),
+            project_id,
+            parent_run_id: None,
+            author_pseudo,
+            author_avatar_email,
+            language,
+            workspace_mode,
+            chain_prompt_ids: Vec::new(),
+            chain_batch_items: Vec::new(),
+            group_concurrency_limit: None,
+        },
+    )
 }
 
 pub fn insert_workflow(conn: &Connection, wf: &Workflow) -> Result<()> {

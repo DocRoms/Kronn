@@ -29,6 +29,8 @@ fn active_key_for_finds_active() {
     assert_eq!(config.active_key_for("anthropic"), Some("sk-ant-123"));
     assert_eq!(config.active_key_for("openai"), None); // not active
     assert_eq!(config.active_key_for("google"), None); // no key
+    assert!(config.has_active_key_for("anthropic"));
+    assert!(!config.has_active_key_for("openai"));
 }
 
 #[test]

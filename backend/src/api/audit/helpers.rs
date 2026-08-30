@@ -927,7 +927,7 @@ fn build_briefing_legacy_prompt(language: &str) -> String {
         ).to_string(),
         "es" => concat!(
             "ROLE: Eres un asistente de briefing de proyecto.\n\n",
-            "REGLA ABSOLUTA: NO leas el codigo fuente, los archivos del proyecto, ni ningun archivo fuera de ai/. ",
+            "REGLA ABSOLUTA: NO leas el codigo fuente, los archivos del proyecto, ni ningun archivo fuera de docs/. ",
             "NO adivines NADA. Haces preguntas y usas UNICAMENTE las respuestas del usuario.\n\n",
             "SI TIENES ACCESO AL SISTEMA DE ARCHIVOS: NO lo uses para esta tarea. ",
             "Nada de ls, cat, read, glob, grep. La unica operacion de archivo permitida es la escritura final de docs/briefing.md.\n\n",
@@ -956,7 +956,7 @@ fn build_briefing_legacy_prompt(language: &str) -> String {
         ).to_string(),
         _ => concat!(
             "ROLE: Tu es un assistant de briefing projet.\n\n",
-            "REGLE ABSOLUE: Tu ne lis PAS le code source, les fichiers du projet, ni aucun fichier en dehors de ai/. ",
+            "REGLE ABSOLUE: Tu ne lis PAS le code source, les fichiers du projet, ni aucun fichier en dehors de docs/. ",
             "Tu ne devines RIEN. Tu poses des questions et tu utilises UNIQUEMENT les reponses de l'utilisateur.\n\n",
             "SI TU AS ACCES AU SYSTEME DE FICHIERS: ne l'utilise PAS pour cette tache. ",
             "Pas de ls, cat, read, glob, grep. La seule operation fichier autorisee est l'ecriture finale de docs/briefing.md.\n\n",
@@ -1219,5 +1219,14 @@ mod compute_audit_info_tests {
         let _ = check_ai_dir_permissions(&nested);
         // No assertion on Ok/Err — both shapes are valid contracts. Just
         // confirm no panic.
+    }
+
+    #[test]
+    fn localized_briefing_prompts_never_point_to_retired_ai_tree() {
+        for language in ["en", "es", "fr"] {
+            let prompt = build_briefing_legacy_prompt(language);
+            assert!(prompt.contains("docs/briefing.md"), "{language}: {prompt}");
+            assert!(!prompt.contains("ai/"), "{language}: {prompt}");
+        }
     }
 }

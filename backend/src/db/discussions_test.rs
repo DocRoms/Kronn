@@ -1721,6 +1721,88 @@ mod tests {
     }
 
     #[test]
+    fn tombstone_message_preserves_history_and_removes_payload_metadata() {
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("d-tombstone")).unwrap();
+        let mut message = make_message("m-tombstone", MessageRole::User, None);
+        message.content = "Contenu privé à retirer".into();
+        message.tokens_used = 42;
+        message.cost_usd = Some(1.5);
+        insert_message(&conn, "d-tombstone", &message).unwrap();
+        insert_context_file(
+            &conn,
+            "cf-tombstone",
+            "d-tombstone",
+            "secret.txt",
+            "text/plain",
+            10,
+            "secret",
+            Some("/tmp/kronn-tombstone-secret.txt"),
+        )
+        .unwrap();
+        link_pending_context_files_to_message(&conn, "d-tombstone", "m-tombstone").unwrap();
+        replace_message_targets(
+            &conn,
+            "m-tombstone",
+            &[MessageTarget::agent(AgentType::Codex)],
+        )
+        .unwrap();
+
+        let disk_paths = tombstone_message(&conn, "d-tombstone", "m-tombstone").unwrap();
+
+        assert_eq!(disk_paths, vec!["/tmp/kronn-tombstone-secret.txt"]);
+        let messages = list_messages(&conn, "d-tombstone").unwrap();
+        assert_eq!(messages.len(), 1, "the timeline position must remain");
+        assert_eq!(messages[0].id, "m-tombstone");
+        assert_eq!(messages[0].content, DELETED_MESSAGE_CONTENT);
+        assert_eq!(messages[0].tokens_used, 0);
+        assert_eq!(messages[0].cost_usd, None);
+        assert!(list_context_files_for_message(&conn, "m-tombstone")
+            .unwrap()
+            .is_empty());
+        assert!(list_message_targets(&conn, "m-tombstone")
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            get_discussion(&conn, "d-tombstone")
+                .unwrap()
+                .unwrap()
+                .message_count,
+            1
+        );
+
+        assert!(
+            tombstone_message(&conn, "d-tombstone", "m-tombstone")
+                .unwrap()
+                .is_empty(),
+            "repeated deletion must be idempotent"
+        );
+    }
+
+    #[test]
+    fn tombstone_message_refuses_an_active_trigger() {
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("d-active-tombstone")).unwrap();
+        let message = make_message("m-active-tombstone", MessageRole::User, None);
+        insert_message_with_dispatch(
+            &conn,
+            "d-active-tombstone",
+            &message,
+            "dispatch-active-tombstone",
+        )
+        .unwrap();
+
+        let error =
+            tombstone_message(&conn, "d-active-tombstone", "m-active-tombstone").unwrap_err();
+
+        assert!(matches!(error, TombstoneMessageError::DispatchInProgress));
+        assert_eq!(
+            list_messages(&conn, "d-active-tombstone").unwrap()[0].content,
+            "Content of m-active-tombstone",
+        );
+    }
+
+    #[test]
     fn get_context_files_for_prompt_text_only() {
         let conn = test_conn();
         insert_discussion(&conn, &make_discussion("d-prompt")).unwrap();
@@ -2881,6 +2963,57 @@ mod tests {
             list_message_targets(&conn, "a-cli-wake").unwrap(),
             vec![MessageTarget::cli(AgentType::ClaudeCode, cli_pk)],
             "the joined CLI peer must get a durable Cli wake target"
+        );
+    }
+
+    #[test]
+    fn native_agent_message_persists_dynamic_connection_mention_target() {
+        let conn = test_conn();
+        insert_discussion(&conn, &handoff_discussion("d-connection-wake")).unwrap();
+        insert_message(
+            &conn,
+            "d-connection-wake",
+            &make_message("u-connection-wake", MessageRole::User, None),
+        )
+        .unwrap();
+        let now = Utc::now();
+        crate::db::external_api_connections::insert(
+            &conn,
+            &ExternalApiConnection {
+                id: "groq-primary".into(),
+                display_name: "Groq primary".into(),
+                mention_alias: "groq".into(),
+                endpoint: Some("https://api.example.test".into()),
+                credential_slug: "groq-primary-credential".into(),
+                origin_preset: ExternalApiConnectionPreset::Other,
+                economy_model: None,
+                default_model: Some("model".into()),
+                reasoning_model: None,
+                created_at: now,
+                updated_at: now,
+            },
+        )
+        .unwrap();
+        let mut response = agent_reply("a-connection-wake", AgentType::Codex, "u-connection-wake");
+        response.content = "@groq please inspect the persisted target.".into();
+
+        let outcome = insert_native_agent_message_with_handoffs(
+            &conn,
+            "d-connection-wake",
+            &response,
+            true,
+            None,
+            &AgentType::Codex,
+            &[],
+            true,
+            Some(1),
+        )
+        .unwrap();
+
+        assert!(outcome.dispatched_agents.is_empty());
+        assert_eq!(
+            list_message_targets(&conn, "a-connection-wake").unwrap(),
+            vec![MessageTarget::agent(AgentType::Custom).with_connection("groq-primary")]
         );
     }
 

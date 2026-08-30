@@ -625,7 +625,7 @@ pub async fn create_config(
                 include_general: true,
                 config_hash: hash,
                 project_ids: req.project_ids,
-                host_sync: HostSyncMode::None,
+                host_sync: req.host_sync,
             };
 
             db::mcps::insert_config(conn, &config)?;

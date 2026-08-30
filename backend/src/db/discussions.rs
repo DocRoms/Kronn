@@ -6,6 +6,11 @@ use sha2::{Digest, Sha256};
 use super::parse_dt;
 use crate::models::{ModelTier, *};
 
+/// Stable, language-neutral tombstone persisted in place of deleted content.
+/// Keeping the row preserves chronology and reply links; the explanatory text
+/// also reaches agent prompts so a missing turn is never silently inferred.
+pub const DELETED_MESSAGE_CONTENT: &str = "[kronn:message-deleted] Original message removed by the user. Keep this timeline marker and do not infer or reconstruct the missing content.";
+
 // ─── Discussions ────────────────────────────────────────────────────────────
 
 /// Count total discussions (for pagination).
@@ -1223,6 +1228,7 @@ pub fn insert_message_with_targets_and_dispatches_within_tx(
     let mut jobs = Vec::with_capacity(dispatches.len());
     if !dispatches.is_empty() {
         let empty_chain = Vec::new();
+        let mut claimed_target_positions = vec![false; targets.len()];
         for dispatch in dispatches {
             // An explicit orchestration key wins; otherwise the historical
             // caller-scoped `peer:` scheme is preserved verbatim.
@@ -1233,7 +1239,22 @@ pub fn insert_message_with_targets_and_dispatches_within_tx(
                     .map(|agent| format!("peer:{}:{}", msg.id, format_agent_type(agent)))
                     .unwrap_or_else(|| format!("peer:{}", msg.id)),
             };
-            let job = super::agent_dispatch::enqueue(
+            let target_position = targets.iter().enumerate().position(|(index, target)| {
+                if claimed_target_positions[index] {
+                    return false;
+                }
+                match dispatch.agent_override {
+                    Some(agent) => {
+                        target.kind == MessageTargetKind::Agent && &target.agent_type == agent
+                    }
+                    None => target.kind == MessageTargetKind::DiscussionAgent,
+                }
+            });
+            let connection_id = target_position.and_then(|index| {
+                claimed_target_positions[index] = true;
+                targets[index].connection_id.as_deref()
+            });
+            let job = super::agent_dispatch::enqueue_with_connection(
                 tx,
                 super::agent_dispatch::NewAgentDispatchJob {
                     id: dispatch.job_id,
@@ -1247,6 +1268,7 @@ pub fn insert_message_with_targets_and_dispatches_within_tx(
                     group_id: None,
                     group_concurrency_limit: None,
                 },
+                connection_id,
             )?;
             jobs.push(job);
         }
@@ -1475,6 +1497,10 @@ pub fn insert_native_agent_message_with_handoffs(
         } else {
             Vec::new()
         };
+    let connection_mention_targets = {
+        let connections = crate::db::external_api_connections::list(&transaction)?;
+        crate::db::external_api_connections::resolve_connection_mentions(&msg.content, &connections)
+    };
 
     let mut allowed = Vec::new();
     let root =
@@ -1536,6 +1562,10 @@ pub fn insert_native_agent_message_with_handoffs(
         // CLI wake targets ride the same message but never trigger a native
         // dispatch or `awaiting_agent`: the joined peer wakes via wait_for_peer.
         targets.extend(cli_mention_targets.iter().cloned());
+        crate::db::external_api_connections::merge_connection_mention_targets(
+            &mut targets,
+            connection_mention_targets.clone(),
+        );
         if !targets.is_empty() {
             replace_message_targets(&transaction, &msg.id, &targets)?;
         }
@@ -1580,8 +1610,13 @@ pub fn insert_native_agent_message_with_handoffs(
          WHERE id = ?1",
         params![msg.id, child_run_was_success as i64, dispatch_job_id],
     )?;
-    if !cli_mention_targets.is_empty() {
-        replace_message_targets(&transaction, &msg.id, &cli_mention_targets)?;
+    let mut mention_targets = cli_mention_targets;
+    crate::db::external_api_connections::merge_connection_mention_targets(
+        &mut mention_targets,
+        connection_mention_targets,
+    );
+    if !mention_targets.is_empty() {
+        replace_message_targets(&transaction, &msg.id, &mention_targets)?;
     }
     transaction.commit()?;
     Ok(NativeAgentMessageOutcome {
@@ -2302,12 +2337,14 @@ pub fn replace_message_targets(
         };
         conn.execute(
             "INSERT INTO message_targets (
-                 message_id, target_kind, agent_type, cli_session_id, position, model_tier
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                 message_id, target_kind, agent_type, connection_id, cli_session_id, position,
+                 model_tier
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 message_id,
                 target_kind,
                 format_agent_type(&target.agent_type),
+                target.connection_id.as_deref(),
                 target.cli_session_id,
                 position as i64,
                 target.tier.as_ref().map(|tier| match tier {
@@ -2332,7 +2369,7 @@ pub fn replace_message_targets(
 
 pub fn list_message_targets(conn: &Connection, message_id: &str) -> Result<Vec<MessageTarget>> {
     let mut statement = conn.prepare(
-        "SELECT target_kind, agent_type, cli_session_id, model_tier
+        "SELECT target_kind, agent_type, connection_id, cli_session_id, model_tier
          FROM message_targets
          WHERE message_id = ?1
          ORDER BY position ASC",
@@ -2347,8 +2384,9 @@ pub fn list_message_targets(conn: &Connection, message_id: &str) -> Result<Vec<M
             Ok(MessageTarget {
                 kind,
                 agent_type: parse_agent_type(&row.get::<_, String>(1)?),
-                cli_session_id: row.get(2)?,
-                tier: match row.get::<_, Option<String>>(3)?.as_deref() {
+                connection_id: row.get(2)?,
+                cli_session_id: row.get(3)?,
+                tier: match row.get::<_, Option<String>>(4)?.as_deref() {
                     Some("economy") => Some(crate::models::ModelTier::Economy),
                     Some("default") => Some(crate::models::ModelTier::Default),
                     Some("reasoning") => Some(crate::models::ModelTier::Reasoning),
@@ -2369,7 +2407,8 @@ pub fn list_discussion_message_targets(
     discussion_id: &str,
 ) -> Result<std::collections::HashMap<String, Vec<MessageTarget>>> {
     let mut statement = conn.prepare(
-        "SELECT mt.message_id, mt.target_kind, mt.agent_type, mt.cli_session_id, mt.model_tier
+        "SELECT mt.message_id, mt.target_kind, mt.agent_type, mt.connection_id,
+                mt.cli_session_id, mt.model_tier
          FROM message_targets mt
          INNER JOIN messages m ON m.id = mt.message_id
          WHERE m.discussion_id = ?1
@@ -2384,8 +2423,9 @@ pub fn list_discussion_message_targets(
         let target = MessageTarget {
             kind,
             agent_type: parse_agent_type(&row.get::<_, String>(2)?),
-            cli_session_id: row.get(3)?,
-            tier: match row.get::<_, Option<String>>(4)?.as_deref() {
+            connection_id: row.get(3)?,
+            cli_session_id: row.get(4)?,
+            tier: match row.get::<_, Option<String>>(5)?.as_deref() {
                 Some("economy") => Some(crate::models::ModelTier::Economy),
                 Some("default") => Some(crate::models::ModelTier::Default),
                 Some("reasoning") => Some(crate::models::ModelTier::Reasoning),
@@ -2525,6 +2565,106 @@ pub fn delete_last_agent_messages(conn: &Connection, discussion_id: &str) -> Res
 
     update_discussion_timestamp(conn, discussion_id)?;
     Ok(affected as u64)
+}
+
+#[derive(Debug)]
+pub enum TombstoneMessageError {
+    NotFound,
+    DispatchInProgress,
+    Other(anyhow::Error),
+}
+
+impl std::fmt::Display for TombstoneMessageError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound => write!(formatter, "message not found"),
+            Self::DispatchInProgress => write!(formatter, "message still has an active dispatch"),
+            Self::Other(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for TombstoneMessageError {}
+
+impl From<anyhow::Error> for TombstoneMessageError {
+    fn from(error: anyhow::Error) -> Self {
+        Self::Other(error)
+    }
+}
+
+impl From<rusqlite::Error> for TombstoneMessageError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Other(error.into())
+    }
+}
+
+/// Remove a message's payload without removing its position from history.
+///
+/// The stable marker remains visible to humans and enters future agent context.
+/// Message-scoped attachments and routing metadata are removed atomically with
+/// the payload. Disk paths are returned for best-effort cleanup after commit.
+pub fn tombstone_message(
+    conn: &Connection,
+    discussion_id: &str,
+    message_id: &str,
+) -> std::result::Result<Vec<String>, TombstoneMessageError> {
+    let transaction = conn.unchecked_transaction()?;
+    let content = transaction
+        .query_row(
+            "SELECT content FROM messages WHERE id = ?1 AND discussion_id = ?2",
+            params![message_id, discussion_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .ok_or(TombstoneMessageError::NotFound)?;
+
+    if content.starts_with("[kronn:message-deleted]") {
+        transaction.commit()?;
+        return Ok(Vec::new());
+    }
+
+    let dispatch_active: bool = transaction.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM agent_dispatch_jobs
+             WHERE trigger_message_id = ?1 AND status IN ('Pending', 'Running')
+         )",
+        [message_id],
+        |row| row.get(0),
+    )?;
+    if dispatch_active {
+        return Err(TombstoneMessageError::DispatchInProgress);
+    }
+
+    let disk_paths = {
+        let mut statement = transaction.prepare(
+            "SELECT disk_path FROM context_files
+             WHERE discussion_id = ?1 AND message_id = ?2 AND disk_path IS NOT NULL",
+        )?;
+        let rows = statement.query_map(params![discussion_id, message_id], |row| {
+            row.get::<_, String>(0)
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+
+    transaction.execute(
+        "DELETE FROM context_files WHERE discussion_id = ?1 AND message_id = ?2",
+        params![discussion_id, message_id],
+    )?;
+    transaction.execute(
+        "DELETE FROM message_targets WHERE message_id = ?1",
+        [message_id],
+    )?;
+    transaction.execute(
+        "UPDATE messages
+         SET content = ?1, tokens_used = 0, cost_usd = NULL, duration_ms = NULL,
+             lint_report = NULL, target_agent = NULL
+         WHERE id = ?2 AND discussion_id = ?3",
+        params![DELETED_MESSAGE_CONTENT, message_id, discussion_id],
+    )?;
+    invalidate_summary_cache(&transaction, discussion_id)?;
+    update_discussion_timestamp(&transaction, discussion_id)?;
+    transaction.commit()?;
+    Ok(disk_paths)
 }
 
 pub fn delete_dispatch_reply_messages(

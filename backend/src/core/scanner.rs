@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 use super::cmd::async_cmd;
-use crate::models::{AiConfigType, DetectedRepo};
+use crate::models::{AiConfigType, DetectedRepo, ProjectWriteAccess, ProjectWriteAccessStatus};
 
 /// AI config file patterns to look for in repositories
 const AI_CONFIG_PATTERNS: &[(&str, AiConfigType)] = &[
@@ -339,6 +339,89 @@ pub fn resolve_host_path(path: &str) -> PathBuf {
         "resolve_host_path({}): no alias matched (tried {:?}) — returning path as-is",
         path, aliases);
     PathBuf::from(path)
+}
+
+/// Describe whether Kronn can write project-local runtime files.
+///
+/// Docker deliberately exposes the full host home read-only and overlays only
+/// configured repository roots read-write. Existence therefore does not imply
+/// writability: a sibling repo can be scanned successfully but reject every
+/// `.mcp.json` update. Keep that security boundary and make it observable.
+pub fn diagnose_project_write_access(path: &str) -> ProjectWriteAccess {
+    let resolved = resolve_host_path(path);
+    if !resolved.exists() {
+        return ProjectWriteAccess {
+            status: ProjectWriteAccessStatus::Missing,
+            reason: Some("path_missing".into()),
+            writable_roots: writable_repo_roots(),
+        };
+    }
+
+    let roots = writable_repo_roots();
+    let in_docker = std::env::var("KRONN_IN_DOCKER").as_deref() == Ok("1");
+    if in_docker && !roots.is_empty() {
+        let writable = roots.iter().any(|root| {
+            Path::new(path).starts_with(root) || resolved.starts_with(resolve_host_path(root))
+        });
+        return ProjectWriteAccess {
+            status: if writable {
+                ProjectWriteAccessStatus::Writable
+            } else {
+                ProjectWriteAccessStatus::ReadOnly
+            },
+            reason: (!writable).then(|| "outside_rw_perimeter".into()),
+            writable_roots: roots,
+        };
+    }
+
+    // Native mode has no Docker mount boundary. Avoid a mutation probe on a
+    // read path; the filesystem read-only bit is the best side-effect-free
+    // signal and "Unknown" remains available for metadata failures.
+    match std::fs::metadata(&resolved) {
+        Ok(metadata) => ProjectWriteAccess {
+            status: if metadata.permissions().readonly() {
+                ProjectWriteAccessStatus::ReadOnly
+            } else {
+                ProjectWriteAccessStatus::Writable
+            },
+            reason: metadata
+                .permissions()
+                .readonly()
+                .then(|| "filesystem_read_only".into()),
+            writable_roots: roots,
+        },
+        Err(_) => ProjectWriteAccess {
+            status: ProjectWriteAccessStatus::Unknown,
+            reason: Some("permission_unknown".into()),
+            writable_roots: roots,
+        },
+    }
+}
+
+/// Host paths mounted read-write into the backend. The primary root is always
+/// passed by docker-compose; optional roots use the same colon-separated value
+/// already consumed by Makefile's generated override.
+pub fn writable_repo_roots() -> Vec<String> {
+    let mut roots = Vec::new();
+    if let Ok(root) = std::env::var("KRONN_REPOS_DIR") {
+        let root = root.trim();
+        if !root.is_empty() {
+            roots.push(root.trim_end_matches('/').to_string());
+        }
+    }
+    if let Ok(extra) = std::env::var("KRONN_EXTRA_REPOS") {
+        for root in extra
+            .split(':')
+            .map(str::trim)
+            .filter(|root| !root.is_empty())
+        {
+            let root = root.trim_end_matches('/').to_string();
+            if !roots.contains(&root) {
+                roots.push(root);
+            }
+        }
+    }
+    roots
 }
 
 /// Every plausible host-home prefix the caller's path could start with.

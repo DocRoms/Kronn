@@ -302,6 +302,8 @@ pub async fn clone_project(
         tech_debt_count: 0,
         needs_docs_migration: false,
         path_exists: true,
+        write_access: None,
+        mcp_sync_report: None,
         default_skill_ids: vec![],
         default_profile_id: None,
         briefing_notes: None,

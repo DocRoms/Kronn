@@ -20,7 +20,8 @@ pub fn list_projects(conn: &Connection) -> Result<Vec<Project>> {
     let mut stmt = conn.prepare(
         "SELECT id, name, path, repo_url, token_override_json, ai_config_json,
                 created_at, updated_at, default_skill_ids_json, default_profile_id,
-                briefing_notes, linked_repos_json
+                briefing_notes, linked_repos_json,
+                mcp_sync_status, mcp_sync_detail, mcp_synced_at
          FROM projects ORDER BY name",
     )?;
 
@@ -31,6 +32,9 @@ pub fn list_projects(conn: &Connection) -> Result<Vec<Project>> {
             let ai_config_str: String = row.get(5)?;
             let skill_ids_str: String = row.get(8)?;
             let linked_repos_str: String = row.get(11).unwrap_or_else(|_| "[]".into());
+            let sync_status: Option<String> = row.get(12)?;
+            let sync_detail: Option<String> = row.get(13)?;
+            let sync_at: Option<String> = row.get(14)?;
 
             Ok((
                 id.clone(),
@@ -49,6 +53,8 @@ pub fn list_projects(conn: &Connection) -> Result<Vec<Project>> {
                     tech_debt_count: 0,
                     needs_docs_migration: false, // enriched by API layer
                     path_exists: true,
+                    write_access: None,
+                    mcp_sync_report: parse_mcp_sync_report(sync_status, sync_detail, sync_at),
                     default_skill_ids: serde_json::from_str(&skill_ids_str).unwrap_or_default(),
                     default_profile_id: row.get(9)?,
                     briefing_notes: row.get(10)?,
@@ -69,7 +75,8 @@ pub fn get_project(conn: &Connection, id: &str) -> Result<Option<Project>> {
     let mut stmt = conn.prepare(
         "SELECT id, name, path, repo_url, token_override_json, ai_config_json,
                 created_at, updated_at, default_skill_ids_json, default_profile_id,
-                briefing_notes, linked_repos_json
+                briefing_notes, linked_repos_json,
+                mcp_sync_status, mcp_sync_detail, mcp_synced_at
          FROM projects WHERE id = ?1",
     )?;
 
@@ -79,6 +86,9 @@ pub fn get_project(conn: &Connection, id: &str) -> Result<Option<Project>> {
             let ai_config_str: String = row.get(5)?;
             let skill_ids_str: String = row.get(8)?;
             let linked_repos_str: String = row.get(11).unwrap_or_else(|_| "[]".into());
+            let sync_status: Option<String> = row.get(12)?;
+            let sync_detail: Option<String> = row.get(13)?;
+            let sync_at: Option<String> = row.get(14)?;
 
             Ok(Project {
                 id: row.get(0)?,
@@ -95,6 +105,8 @@ pub fn get_project(conn: &Connection, id: &str) -> Result<Option<Project>> {
                 tech_debt_count: 0,
                 needs_docs_migration: false,
                 path_exists: true,
+                write_access: None,
+                mcp_sync_report: parse_mcp_sync_report(sync_status, sync_detail, sync_at),
                 default_skill_ids: serde_json::from_str(&skill_ids_str).unwrap_or_default(),
                 default_profile_id: row.get(9)?,
                 briefing_notes: row.get(10)?,
@@ -106,6 +118,41 @@ pub fn get_project(conn: &Connection, id: &str) -> Result<Option<Project>> {
         .ok();
 
     Ok(project)
+}
+
+fn parse_mcp_sync_report(
+    status: Option<String>,
+    detail: Option<String>,
+    synced_at: Option<String>,
+) -> Option<ProjectMcpSyncReport> {
+    let status = match status?.as_str() {
+        "written" => ProjectMcpSyncStatus::Written,
+        "unchanged" => ProjectMcpSyncStatus::Unchanged,
+        "read_only" => ProjectMcpSyncStatus::ReadOnly,
+        "missing_secrets" => ProjectMcpSyncStatus::MissingSecrets,
+        "failed" => ProjectMcpSyncStatus::Failed,
+        _ => return None,
+    };
+    Some(ProjectMcpSyncReport {
+        status,
+        detail,
+        synced_at: parse_dt(synced_at?),
+    })
+}
+
+pub fn save_mcp_sync_report(
+    conn: &Connection,
+    project_id: &str,
+    status: &str,
+    detail: Option<&str>,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE projects
+            SET mcp_sync_status = ?2, mcp_sync_detail = ?3, mcp_synced_at = ?4
+          WHERE id = ?1",
+        params![project_id, status, detail, Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
 }
 
 /// Batch-load project names by IDs in one query (avoids N+1).

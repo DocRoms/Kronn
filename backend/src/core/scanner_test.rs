@@ -536,4 +536,34 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&tmp);
     }
+
+    #[test]
+    #[serial]
+    fn docker_write_access_uses_the_explicit_rw_perimeter() {
+        let root = tempfile::tempdir().unwrap();
+        let writable = root.path().join("repos/writable");
+        let outside = root.path().join("outside/readonly");
+        std::fs::create_dir_all(&writable).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+
+        std::env::set_var("KRONN_IN_DOCKER", "1");
+        std::env::set_var("KRONN_REPOS_DIR", root.path().join("repos"));
+        std::env::remove_var("KRONN_EXTRA_REPOS");
+        std::env::remove_var("KRONN_HOST_HOME");
+
+        let inside = diagnose_project_write_access(&writable.to_string_lossy());
+        assert_eq!(
+            inside.status,
+            crate::models::ProjectWriteAccessStatus::Writable
+        );
+        let blocked = diagnose_project_write_access(&outside.to_string_lossy());
+        assert_eq!(
+            blocked.status,
+            crate::models::ProjectWriteAccessStatus::ReadOnly
+        );
+        assert_eq!(blocked.reason.as_deref(), Some("outside_rw_perimeter"));
+
+        std::env::remove_var("KRONN_IN_DOCKER");
+        std::env::remove_var("KRONN_REPOS_DIR");
+    }
 }

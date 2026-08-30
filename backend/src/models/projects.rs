@@ -49,6 +49,17 @@ pub struct Project {
     /// where absolute paths don't translate.
     #[serde(default = "default_true")]
     pub path_exists: bool,
+    /// Effective write boundary for project-local files. Computed from the
+    /// configured rw repository mounts (or native filesystem permissions),
+    /// never persisted. A project may be discoverable through the read-only
+    /// home mount while still being impossible to synchronize.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub write_access: Option<ProjectWriteAccess>,
+    /// Last backend project-MCP synchronization receipt. Persisted so a page
+    /// refresh cannot turn a failed/silent sync back into an unknown state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_sync_report: Option<ProjectMcpSyncReport>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub default_skill_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -70,6 +81,46 @@ pub struct Project {
 
 fn default_true() -> bool {
     true
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ProjectWriteAccess {
+    #[serde(default)]
+    pub status: ProjectWriteAccessStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub writable_roots: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub enum ProjectWriteAccessStatus {
+    Writable,
+    ReadOnly,
+    Missing,
+    #[default]
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ProjectMcpSyncReport {
+    pub status: ProjectMcpSyncStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    pub synced_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub enum ProjectMcpSyncStatus {
+    Written,
+    Unchanged,
+    ReadOnly,
+    MissingSecrets,
+    Failed,
 }
 
 /// A companion repository linked to a project. The `location` is
@@ -135,6 +186,90 @@ pub struct DetectedRepo {
     pub ai_configs: Vec<AiConfigType>,
     pub has_project: bool,
     pub hidden: bool,
+}
+
+/// Structured Docker Compose state for one configured project service.
+///
+/// A configured service with no container yet is still returned with
+/// `state = "not_created"`, so the project tab does not confuse "stopped"
+/// with "missing from the list".
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectDockerHostStatus {
+    Configured,
+    Missing,
+    NonLocal,
+    Unknown,
+}
+
+/// Browser endpoint inferred from the resolved Compose configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[ts(export)]
+pub struct ProjectDockerEndpoint {
+    pub url: String,
+    pub host: String,
+    pub host_status: ProjectDockerHostStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[ts(export)]
+pub struct ProjectDockerService {
+    pub service: String,
+    pub container_name: Option<String>,
+    pub image: Option<String>,
+    pub state: String,
+    pub status: Option<String>,
+    pub health: Option<String>,
+    pub ports: Vec<String>,
+    pub endpoints: Vec<ProjectDockerEndpoint>,
+    pub running: bool,
+}
+
+/// Snapshot returned by the project-scoped Docker Compose status endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ProjectDockerStatus {
+    pub compose_present: bool,
+    pub compose_file: Option<String>,
+    pub docker_available: bool,
+    pub daemon_available: bool,
+    pub services: Vec<ProjectDockerService>,
+    pub checked_at: DateTime<Utc>,
+    pub error: Option<String>,
+}
+
+/// Bounded Docker Compose logs returned for one project service.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ProjectDockerLogs {
+    pub service: String,
+    pub output: String,
+    pub fetched_at: DateTime<Utc>,
+}
+
+/// Fleet-wide Compose activity used by project list indicators and filters.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ProjectDockerRunningSummary {
+    pub project_ids: Vec<String>,
+    pub checked_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum ProjectDockerAction {
+    Start,
+    Stop,
+    Restart,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ProjectDockerActionRequest {
+    pub action: ProjectDockerAction,
+    pub service: Option<String>,
 }
 
 // ─── AI Audit ─────────────────────────────────────────────────────────────
@@ -566,6 +701,10 @@ impl AuditKind {
 #[ts(export)]
 pub struct LaunchAuditRequest {
     pub agent: AgentType,
+    /// Model capability selected by the shared agent picker. Missing values
+    /// keep the historical audit behaviour (Reasoning).
+    #[serde(default)]
+    pub tier: Option<crate::models::ModelTier>,
     /// 0.8.2 — Specialized audit type. Omitted/null defaults to `Full`
     /// for backwards-compat (the only kind the UI knows about pre-0.8.2).
     #[serde(default)]
@@ -751,6 +890,10 @@ pub struct DriftSection {
 #[ts(export)]
 pub struct PartialAuditRequest {
     pub agent: AgentType,
+    /// Model capability selected by the shared agent picker. Missing values
+    /// keep the historical partial-audit behaviour (Reasoning).
+    #[serde(default)]
+    pub tier: Option<crate::models::ModelTier>,
     pub steps: Vec<usize>,
 }
 

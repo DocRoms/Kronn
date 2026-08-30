@@ -60,24 +60,26 @@ pub fn bounded(inner: SseStream) -> SseStream {
                     count += 1;
                     yield item;
                     if count >= MAX_EVENTS {
-                        let final_evt = Event::default()
-                            .event("error")
-                            .data(format!(
-                                r#"{{"error":"sse stream cut off after {} events (limit reached)"}}"#,
-                                MAX_EVENTS
-                            ));
+                        let message = format!(
+                            "sse stream cut off after {} events (limit reached)",
+                            MAX_EVENTS
+                        );
+                        let final_evt = Event::default().event("error").data(
+                            serde_json::json!({ "error": message, "message": message }).to_string()
+                        );
                         yield Ok(final_evt);
                         break;
                     }
                 }
                 Ok(None) => break, // stream finished naturally
                 Err(_) => {
-                    let final_evt = Event::default()
-                        .event("error")
-                        .data(format!(
-                            r#"{{"error":"sse stream idle for {}s, server closed"}}"#,
-                            IDLE_TIMEOUT.as_secs()
-                        ));
+                    let message = format!(
+                        "sse stream idle for {}s, server closed",
+                        IDLE_TIMEOUT.as_secs()
+                    );
+                    let final_evt = Event::default().event("error").data(
+                        serde_json::json!({ "error": message, "message": message }).to_string()
+                    );
                     yield Ok(final_evt);
                     break;
                 }
@@ -102,6 +104,26 @@ mod tests {
         // Three input events come through unchanged, no synthetic terminator
         // because the stream ended naturally before any limit.
         assert_eq!(collected.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn event_cap_terminator_supports_generic_and_ollama_error_clients() {
+        use axum::response::IntoResponse;
+        use http_body_util::BodyExt;
+
+        let inner: SseStream = Box::pin(futures::stream::repeat_with(|| evt("tick")));
+        let body = axum::response::sse::Sse::new(bounded(inner))
+            .into_response()
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(text.contains("event: error"), "{text}");
+        assert!(text.contains("\"error\":"), "{text}");
+        assert!(text.contains("\"message\":"), "{text}");
+        assert!(text.contains("limit reached"), "{text}");
     }
 
     #[tokio::test]

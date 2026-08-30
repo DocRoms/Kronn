@@ -194,6 +194,7 @@ pub async fn create_bundle(
             prompt_template: qp.request.prompt_template.clone(),
             variables: qp.request.variables.clone(),
             agent: qp.request.agent.clone().unwrap_or(AgentType::ClaudeCode),
+            connection_id: qp.request.connection_id.clone(),
             project_id: qp.request.project_id.clone(),
             skill_ids: qp.request.skill_ids.clone(),
             profile_ids: qp.request.profile_ids.clone(),

@@ -2053,8 +2053,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let previous_host = std::env::var("OLLAMA_HOST").ok();
-        std::env::set_var("OLLAMA_HOST", server.uri());
+        let base_url = server.uri();
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let started = start_ollama_http(
             &AgentType::Ollama,
@@ -2062,7 +2061,7 @@ mod tests {
             "",
             "test-model",
             None,
-            None,
+            Some(&base_url),
             None,
             Some(std::sync::Arc::new(PrelocalizedWorkerTools {
                 inner: WorkerTools { seen: seen.clone() },
@@ -2077,10 +2076,6 @@ mod tests {
             None,
         )
         .await;
-        match previous_host {
-            Some(value) => std::env::set_var("OLLAMA_HOST", value),
-            None => std::env::remove_var("OLLAMA_HOST"),
-        }
 
         let mut process = started.expect("start scoped Ollama worker");
         while process.next_line().await.is_some() {}
@@ -2161,8 +2156,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let previous_host = std::env::var("OLLAMA_HOST").ok();
-        std::env::set_var("OLLAMA_HOST", server.uri());
+        let base_url = server.uri();
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let started = start_ollama_http(
             &AgentType::Ollama,
@@ -2170,7 +2164,7 @@ mod tests {
             "",
             "test-model",
             None,
-            None,
+            Some(&base_url),
             None,
             Some(std::sync::Arc::new(PrelocalizedWorkerTools {
                 inner: WorkerTools { seen: seen.clone() },
@@ -2185,10 +2179,6 @@ mod tests {
             None,
         )
         .await;
-        match previous_host {
-            Some(value) => std::env::set_var("OLLAMA_HOST", value),
-            None => std::env::remove_var("OLLAMA_HOST"),
-        }
 
         let mut process = started.expect("start scoped Ollama worker");
         while process.next_line().await.is_some() {}
@@ -2886,6 +2876,56 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn named_external_connection_uses_its_endpoint_key_and_model() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(header("authorization", "Bearer router-secret"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(sse(&[
+                r#"{"choices":[{"index":0,"delta":{"content":"OpenRouter OK"}}]}"#,
+            ])))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let tokens = crate::models::TokensConfig {
+            anthropic: None,
+            openai: None,
+            google: None,
+            keys: Vec::new(),
+            disabled_overrides: Vec::new(),
+        };
+        let runtime = ExternalHttpRuntime {
+            display_name: "OpenRouter".into(),
+            mention_alias: "openrouter".into(),
+            endpoint: server.uri(),
+            api_key: Some("router-secret".into()),
+        };
+        let mut process = start_agent_with_config(AgentStartConfig {
+            external_http: Some(&runtime),
+            model_override: Some("z-ai/glm-5.3"),
+            ..AgentStartConfig::new(&AgentType::Custom, "", "hello", &tokens)
+        })
+        .await
+        .expect("named OpenAI-compatible connection should be executable");
+
+        let mut output = String::new();
+        while let Some(chunk) = process.next_line().await {
+            output.push_str(&chunk);
+        }
+        assert_eq!(output, "OpenRouter OK");
+        let requests = server.received_requests().await.expect("request capture");
+        let body: serde_json::Value = serde_json::from_slice(&requests[0].body).expect("JSON body");
+        assert_eq!(body["model"], "z-ai/glm-5.3");
+        assert!(body["messages"][0]["content"]
+            .as_str()
+            .is_some_and(|context| context.contains("@openrouter")));
+    }
+
     /// The whole point of the feature: a model that asks for a tool gets the
     /// result and answers from it, without the caller doing anything.
     #[tokio::test]
@@ -3288,8 +3328,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let prev = std::env::var("OLLAMA_HOST").ok();
-        std::env::set_var("OLLAMA_HOST", server.uri());
+        let base_url = server.uri();
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let started = start_ollama_http(
             &AgentType::Ollama,
@@ -3297,7 +3336,7 @@ mod tests {
             "",
             "test-model",
             None,
-            None,
+            Some(&base_url),
             None,
             Some(std::sync::Arc::new(FakeTools { seen: seen.clone() })),
             None,
@@ -3305,10 +3344,6 @@ mod tests {
             None,
         )
         .await;
-        match prev {
-            Some(v) => std::env::set_var("OLLAMA_HOST", v),
-            None => std::env::remove_var("OLLAMA_HOST"),
-        }
 
         let mut process = started.expect("start");
         let mut out = String::new();
@@ -3397,8 +3432,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let previous_host = std::env::var("OLLAMA_HOST").ok();
-        std::env::set_var("OLLAMA_HOST", server.uri());
+        let base_url = server.uri();
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let started = start_ollama_http(
             &AgentType::Ollama,
@@ -3406,7 +3440,7 @@ mod tests {
             "",
             "test-model",
             None,
-            None,
+            Some(&base_url),
             None,
             Some(std::sync::Arc::new(WorkerTools { seen: seen.clone() })),
             None,
@@ -3414,10 +3448,6 @@ mod tests {
             None,
         )
         .await;
-        match previous_host {
-            Some(value) => std::env::set_var("OLLAMA_HOST", value),
-            None => std::env::remove_var("OLLAMA_HOST"),
-        }
 
         let mut process = started.expect("start");
         while process.next_line().await.is_some() {}
@@ -3462,15 +3492,14 @@ mod tests {
             .mount(&server)
             .await;
 
-        let previous_host = std::env::var("OLLAMA_HOST").ok();
-        std::env::set_var("OLLAMA_HOST", server.uri());
+        let base_url = server.uri();
         let started = start_ollama_http(
             &AgentType::Ollama,
             "complete the worker task",
             "",
             "test-model",
             None,
-            None,
+            Some(&base_url),
             None,
             Some(std::sync::Arc::new(WorkerTools {
                 seen: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -3480,10 +3509,6 @@ mod tests {
             None,
         )
         .await;
-        match previous_host {
-            Some(value) => std::env::set_var("OLLAMA_HOST", value),
-            None => std::env::remove_var("OLLAMA_HOST"),
-        }
 
         let mut process = started.expect("start");
         while process.next_line().await.is_some() {}
@@ -3602,8 +3627,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let previous_host = std::env::var("OLLAMA_HOST").ok();
-        std::env::set_var("OLLAMA_HOST", server.uri());
+        let base_url = server.uri();
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let started = start_ollama_http(
             &AgentType::Ollama,
@@ -3611,7 +3635,7 @@ mod tests {
             "",
             "test-model",
             None,
-            None,
+            Some(&base_url),
             None,
             Some(std::sync::Arc::new(WorkerTools { seen: seen.clone() })),
             None,
@@ -3619,10 +3643,6 @@ mod tests {
             None,
         )
         .await;
-        match previous_host {
-            Some(value) => std::env::set_var("OLLAMA_HOST", value),
-            None => std::env::remove_var("OLLAMA_HOST"),
-        }
 
         let mut process = started.expect("start");
         while process.next_line().await.is_some() {}
@@ -3737,8 +3757,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let previous_host = std::env::var("OLLAMA_HOST").ok();
-        std::env::set_var("OLLAMA_HOST", server.uri());
+        let base_url = server.uri();
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let started = start_ollama_http(
             &AgentType::Ollama,
@@ -3746,7 +3765,7 @@ mod tests {
             "",
             "test-model",
             None,
-            None,
+            Some(&base_url),
             None,
             Some(std::sync::Arc::new(WorkerTools { seen: seen.clone() })),
             None,
@@ -3754,10 +3773,6 @@ mod tests {
             None,
         )
         .await;
-        match previous_host {
-            Some(value) => std::env::set_var("OLLAMA_HOST", value),
-            None => std::env::remove_var("OLLAMA_HOST"),
-        }
 
         let mut process = started.expect("start");
         while process.next_line().await.is_some() {}
@@ -3871,8 +3886,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let previous_host = std::env::var("OLLAMA_HOST").ok();
-        std::env::set_var("OLLAMA_HOST", server.uri());
+        let base_url = server.uri();
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let started = start_ollama_http(
             &AgentType::Ollama,
@@ -3880,7 +3894,7 @@ mod tests {
             "",
             "local-alias:latest",
             None,
-            None,
+            Some(&base_url),
             None,
             Some(std::sync::Arc::new(WorkerTools { seen: seen.clone() })),
             None,
@@ -3888,10 +3902,6 @@ mod tests {
             None,
         )
         .await;
-        match previous_host {
-            Some(value) => std::env::set_var("OLLAMA_HOST", value),
-            None => std::env::remove_var("OLLAMA_HOST"),
-        }
 
         let mut process = started.expect("start");
         while process.next_line().await.is_some() {}
@@ -5180,11 +5190,14 @@ mod tests {
         let (_, tokens) = parse_token_usage(&AgentType::Ollama, "response", &stderr);
         assert_eq!(tokens, 19, "5+2+9+3, not just the first marker's 5+2");
 
-        // Same wire format, same bug surface, for the other two HTTP backends
-        // that share this branch.
+        // Same wire format, same bug surface, for the other HTTP backends
+        // that share this branch. Custom is the durable AgentType used by
+        // OpenRouter and user-defined OpenAI-compatible connections.
         let (_, tokens) = parse_token_usage(&AgentType::LiteLlm, "response", &stderr);
         assert_eq!(tokens, 19);
         let (_, tokens) = parse_token_usage(&AgentType::Nvidia, "response", &stderr);
+        assert_eq!(tokens, 19);
+        let (_, tokens) = parse_token_usage(&AgentType::Custom, "response", &stderr);
         assert_eq!(tokens, 19);
     }
 
@@ -5396,6 +5409,7 @@ Suite de la réponse.";
 
     #[test]
     fn claude_task_worker_uses_fail_closed_workspace_sandbox() {
+        let worktree = tempfile::tempdir().unwrap();
         let (_, _, args, _, _, _) = super::super::agent_command_with_task_worker_policy(
             &AgentType::ClaudeCode,
             "test prompt",
@@ -5403,6 +5417,7 @@ Suite de la réponse.";
             "worker context",
             None,
             true,
+            Some(worktree.path()),
         );
 
         assert!(!args.contains(&"--dangerously-skip-permissions".to_string()));
@@ -5438,12 +5453,371 @@ Suite de la réponse.";
         assert_eq!(settings["sandbox"]["allowUnsandboxedCommands"], false);
         assert_eq!(
             settings["sandbox"]["filesystem"]["allowWrite"],
-            serde_json::json!([])
+            serde_json::json!([worktree.path().canonicalize().unwrap()])
         );
     }
 
     #[test]
-    fn claude_task_worker_allows_exact_commit_then_delivery_tools() {
+    fn claude_task_worker_receipt_proves_unrelated_catalogue_is_not_spawned() {
+        let worktree = tempfile::tempdir().unwrap();
+        let unrelated: Vec<String> = (0..500)
+            .map(|index| {
+                format!(
+                    "/synthetic/unrelated/{}/.kronn/worktrees/task-{index}",
+                    "x".repeat(256)
+                )
+            })
+            .collect();
+        let oversized_catalogue = serde_json::to_vec(&unrelated).unwrap();
+        assert!(
+            oversized_catalogue.len() > MAX_SINGLE_ARG_BYTES,
+            "the synthetic catalogue must exceed Claude's per-argument guard"
+        );
+
+        let (_, _, mut args, _, _, _) = super::super::agent_command_with_task_worker_policy(
+            &AgentType::ClaudeCode,
+            "test prompt",
+            false,
+            "worker context",
+            None,
+            true,
+            Some(worktree.path()),
+        );
+        let mcp_config = r#"{"mcpServers":{"kronn-internal":{}}}"#;
+        super::super::insert_claude_mcp_config(&mut args, mcp_config.into(), true);
+        let stdin_prompt = args.pop().unwrap();
+        let arg_refs: Vec<&std::ffi::OsStr> = args
+            .iter()
+            .map(|arg| std::ffi::OsStr::new(arg.as_str()))
+            .collect();
+        let environment = [(
+            std::ffi::OsStr::new("SYNTHETIC_ENV"),
+            std::ffi::OsStr::new("bounded"),
+        )];
+        let receipt = super::super::invocation_size_receipt(
+            std::ffi::OsStr::new("claude"),
+            &arg_refs,
+            &environment,
+            stdin_prompt.len(),
+        );
+        let settings_index = args.iter().position(|arg| arg == "--settings").unwrap();
+        let settings: serde_json::Value = serde_json::from_str(&args[settings_index + 1]).unwrap();
+
+        assert_eq!(
+            settings["sandbox"]["filesystem"]["allowWrite"],
+            serde_json::json!([worktree.path().canonicalize().unwrap()])
+        );
+        assert_eq!(receipt.settings_bytes, args[settings_index + 1].len());
+        assert_eq!(receipt.mcp_config_bytes, mcp_config.len());
+        assert_eq!(receipt.system_prompt_bytes, "worker context".len());
+        assert_eq!(receipt.stdin_bytes, "test prompt".len());
+        assert!(receipt.settings_bytes < 4096);
+        assert!(receipt.max_argument_bytes < MAX_SINGLE_ARG_BYTES);
+        assert_eq!(receipt.validate_single_argument_limit(), Ok(()));
+        assert!(
+            receipt.argv_payload_bytes + receipt.environment_payload_bytes
+                < oversized_catalogue.len(),
+            "the measured spawn payload must remain independent of the oversized catalogue"
+        );
+    }
+
+    #[test]
+    fn claude_task_worker_refuses_oversized_mcp_config_before_spawn() {
+        let secret_marker = "must-not-leak";
+        let oversized_mcp_config = format!("{}{}", secret_marker, "x".repeat(MAX_SINGLE_ARG_BYTES));
+        let args = [
+            std::ffi::OsStr::new("--print"),
+            std::ffi::OsStr::new("--mcp-config"),
+            std::ffi::OsStr::new(&oversized_mcp_config),
+        ];
+        let receipt =
+            super::super::invocation_size_receipt(std::ffi::OsStr::new("claude"), &args, &[], 0);
+
+        let error = receipt.validate_single_argument_limit().unwrap_err();
+        assert!(error.contains("refused before spawn"));
+        assert!(error.contains("mcp_config_bytes"));
+        assert!(error.contains("max_argument_bytes="));
+        assert!(error.contains("task_exec_reassign"));
+        assert!(!error.contains(secret_marker));
+    }
+
+    #[test]
+    fn claude_task_worker_truncates_system_prompt_within_pre_spawn_limit() {
+        let worktree = tempfile::tempdir().unwrap();
+        let oversized_system_prompt = "é".repeat(MAX_SINGLE_ARG_BYTES);
+        let (_, _, mut args, _, _, _) = super::super::agent_command_with_task_worker_policy(
+            &AgentType::ClaudeCode,
+            "test prompt",
+            false,
+            &oversized_system_prompt,
+            None,
+            true,
+            Some(worktree.path()),
+        );
+        let stdin_prompt = args.pop().unwrap();
+
+        let (original_bytes, truncated_bytes) =
+            super::super::truncate_claude_system_prompt_argument(&mut args).unwrap();
+        let system_prompt_index = args
+            .iter()
+            .position(|argument| argument == "--append-system-prompt")
+            .unwrap();
+        let system_prompt = &args[system_prompt_index + 1];
+        let arg_refs: Vec<&std::ffi::OsStr> = args
+            .iter()
+            .map(|argument| std::ffi::OsStr::new(argument.as_str()))
+            .collect();
+        let receipt = super::super::invocation_size_receipt(
+            std::ffi::OsStr::new("claude"),
+            &arg_refs,
+            &[],
+            stdin_prompt.len(),
+        );
+
+        assert!(original_bytes > MAX_SINGLE_ARG_BYTES);
+        assert_eq!(truncated_bytes, system_prompt.len());
+        assert!(truncated_bytes <= MAX_SINGLE_ARG_BYTES);
+        assert!(system_prompt.ends_with(super::super::CLAUDE_SYSTEM_PROMPT_TRUNCATION_MARKER));
+        assert_eq!(receipt.system_prompt_bytes, truncated_bytes);
+        assert_eq!(receipt.validate_single_argument_limit(), Ok(()));
+    }
+
+    #[test]
+    fn claude_task_worker_auth_probe_accepts_logged_in_status() {
+        assert_eq!(
+            super::super::claude_task_worker_auth_result(br#"{"loggedIn":true}"#, true),
+            Ok(())
+        );
+    }
+
+    fn synthetic_git_worktree_catalogue(extra_worktrees: usize) -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        let main = root.path().join("main");
+        std::fs::create_dir(&main).unwrap();
+        let git = |cwd: &std::path::Path, args: &[&str]| {
+            let output = crate::core::cmd::sync_cmd("git")
+                .args(args)
+                .current_dir(cwd)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {} failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&main, &["init", "-q"]);
+        git(&main, &["config", "user.email", "test@kronn.local"]);
+        git(&main, &["config", "user.name", "Kronn Test"]);
+        std::fs::write(main.join("seed"), "seed").unwrap();
+        git(&main, &["add", "seed"]);
+        git(&main, &["commit", "-qm", "seed"]);
+        for index in 0..extra_worktrees {
+            let path = root.path().join(format!("worktree-{index}"));
+            git(
+                &main,
+                &[
+                    "worktree",
+                    "add",
+                    "-q",
+                    "--detach",
+                    path.to_str().unwrap(),
+                    "HEAD",
+                ],
+            );
+        }
+        root
+    }
+
+    #[test]
+    fn claude_task_worker_accepts_catalogue_below_conservative_bounds() {
+        let repo = synthetic_git_worktree_catalogue(3);
+        let duplicate_checkout = repo.path().join("worktree-0");
+        let receipt = super::super::claude_sandbox_catalogue_receipt(&[
+            repo.path().join("main"),
+            duplicate_checkout,
+        ])
+        .unwrap();
+        assert_eq!(receipt.common_dir_count, 1);
+        assert_eq!(receipt.worktree_count, 4);
+        assert!(receipt.worktree_bytes > 0);
+        assert_eq!(receipt.validate(), Ok(()));
+    }
+
+    #[test]
+    fn claude_task_worker_refuses_large_catalogue_without_leaking_paths() {
+        let repo = synthetic_git_worktree_catalogue(65);
+        std::fs::write(
+            repo.path().join(".claude.json"),
+            br#"{"projects":{"/one/project":{}}}"#,
+        )
+        .unwrap();
+        let secret_path = repo.path().to_string_lossy().to_string();
+        let receipt =
+            super::super::claude_sandbox_catalogue_receipt(&[repo.path().join("main")]).unwrap();
+        let error = receipt.validate().unwrap_err();
+        assert_eq!(receipt.common_dir_count, 1);
+        assert_eq!(receipt.worktree_count, 66);
+        assert!(error.contains("reason_code=claude_sandbox_catalogue_unsafe"));
+        assert!(error.contains("git_common_dir_count=1"));
+        assert!(error.contains("git_worktree_count=66"));
+        assert!(error.contains("git_worktree_bytes="));
+        assert!(error.contains("task_exec_reassign"));
+        assert!(!error.contains(&secret_path));
+        assert!(!error.contains("worktree-0"));
+    }
+
+    #[test]
+    fn claude_current_version_is_not_used_as_sandbox_recovery_evidence() {
+        let source = include_str!("../core/versions.rs");
+        assert!(source.contains("AgentType::ClaudeCode => Some("));
+        assert!(!source.contains("MIN_CLAUDE_TASK_WORKER_VERSION"));
+    }
+
+    #[test]
+    fn claude_task_worker_auth_probe_reassigns_when_logged_out() {
+        let error = super::super::claude_task_worker_auth_result(
+            br#"{"loggedIn":false,"account":"must-not-leak"}"#,
+            false,
+        )
+        .unwrap_err();
+        assert!(error.contains("loggedIn=false"));
+        assert!(error.contains("task_exec_reassign"));
+        assert!(!error.contains("must-not-leak"));
+    }
+
+    #[test]
+    fn claude_task_worker_auth_probe_reassigns_on_malformed_status() {
+        let error = super::super::claude_task_worker_auth_result(b"malformed must-not-leak", true)
+            .unwrap_err();
+        assert!(error.contains("unrecognized response"));
+        assert!(error.contains("task_exec_reassign"));
+        assert!(!error.contains("must-not-leak"));
+    }
+
+    #[test]
+    fn copilot_task_worker_preflight_accepts_a_bounded_account_response() {
+        assert_eq!(
+            super::super::parse_copilot_task_worker_preflight(b"Signed in as octocat", true),
+            CopilotTaskWorkerPreflight::Usable
+        );
+    }
+
+    #[test]
+    fn copilot_task_worker_preflight_classifies_invalid_auth_and_malformed_output() {
+        assert_eq!(
+            super::super::parse_copilot_task_worker_preflight(b"auth error", false),
+            CopilotTaskWorkerPreflight::AuthInvalid
+        );
+        assert_eq!(
+            super::super::parse_copilot_task_worker_preflight(b"", true),
+            CopilotTaskWorkerPreflight::Malformed
+        );
+        let error = super::super::copilot_task_worker_preflight_error(
+            CopilotTaskWorkerPreflight::Malformed,
+        );
+        assert!(error.contains("task_exec_reassign"));
+        assert!(!error.contains("auth error"));
+    }
+
+    #[test]
+    fn copilot_task_worker_preflight_spawn_failure_is_actionable_and_secret_free() {
+        let error = super::super::copilot_task_worker_preflight_error(
+            CopilotTaskWorkerPreflight::SpawnFailed,
+        );
+        assert!(error.contains("could not be invoked"));
+        assert!(error.contains("task_exec_reassign"));
+        assert_eq!(
+            CopilotTaskWorkerPreflight::SpawnFailed.reason_code(),
+            Some("copilot_preflight_spawn_failed")
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn copilot_task_worker_preflight_times_out_and_terminates_the_child() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let pid_file = temp_dir.path().join("copilot-preflight.pid");
+        let script_path = temp_dir.path().join("slow-copilot-preflight.sh");
+        std::fs::write(
+            &script_path,
+            format!(
+                "#!/bin/sh\necho $$ > {}\nwhile :; do :; done\n",
+                pid_file.display()
+            ),
+        )
+        .unwrap();
+
+        let work_dir = temp_dir.path().to_path_buf();
+        let preflight = tokio::spawn(async move {
+            super::super::run_copilot_task_worker_preflight_with_timeout(
+                ("sh".into(), vec![script_path.display().to_string()], false),
+                &work_dir,
+                std::time::Duration::from_millis(100),
+            )
+            .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while !pid_file.exists() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the slow preflight must have started");
+
+        assert_eq!(
+            preflight.await.unwrap(),
+            Err(CopilotTaskWorkerPreflight::TimedOut)
+        );
+        let pid: i32 = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(
+            unsafe { libc::kill(pid, 0) },
+            -1,
+            "the timed-out child must be gone"
+        );
+        assert_eq!(
+            CopilotTaskWorkerPreflight::TimedOut.reason_code(),
+            Some("copilot_preflight_timed_out")
+        );
+    }
+
+    #[test]
+    fn claude_task_worker_command_receipt_contains_sizes_not_values() {
+        let secret_marker = "must-not-leak";
+        let settings = r#"{"sandbox":{"enabled":true}}"#;
+        let mut command = crate::core::cmd::async_cmd("claude");
+        command
+            .args([
+                "--print",
+                "--settings",
+                settings,
+                "--mcp-config",
+                secret_marker,
+                "--append-system-prompt",
+                "bounded context",
+            ])
+            .env("KRONN_RECEIPT_TEST_SECRET", secret_marker);
+
+        let receipt = super::super::command_invocation_size_receipt(&command, Some("stdin prompt"));
+        let rendered = receipt.compact();
+
+        assert_eq!(receipt.settings_bytes, settings.len());
+        assert_eq!(receipt.mcp_config_bytes, secret_marker.len());
+        assert_eq!(receipt.system_prompt_bytes, "bounded context".len());
+        assert_eq!(receipt.stdin_bytes, "stdin prompt".len());
+        assert!(receipt.environment_payload_bytes > secret_marker.len());
+        assert!(!rendered.contains(secret_marker));
+        assert!(!rendered.contains(settings));
+    }
+
+    #[test]
+    fn claude_task_worker_allows_exact_status_commit_and_delivery_tools() {
         let (_, _, args, _, _, _) = super::super::agent_command_with_task_worker_policy(
             &AgentType::ClaudeCode,
             "test prompt",
@@ -5451,6 +5825,7 @@ Suite de la réponse.";
             "worker context",
             None,
             true,
+            None,
         );
 
         let allowed_tools_index = args.iter().position(|arg| arg == "--allowedTools").unwrap();
@@ -5462,6 +5837,7 @@ Suite de la réponse.";
         assert_eq!(
             &args[allowed_tools_index + 1..permission_mode_index],
             [
+                "mcp__kronn-internal__task_exec_status",
                 "mcp__kronn-internal__task_exec_commit",
                 "mcp__kronn-internal__task_exec_deliver",
             ]
@@ -5477,6 +5853,7 @@ Suite de la réponse.";
             "worker context",
             None,
             true,
+            None,
         );
 
         assert!(args.contains(&"--sandbox=workspace-write".to_string()));
@@ -5509,6 +5886,7 @@ Suite de la réponse.";
         assert_eq!(
             internal["enabled_tools"],
             toml::Value::Array(vec![
+                toml::Value::String("task_exec_status".into()),
                 toml::Value::String("task_exec_commit".into()),
                 toml::Value::String("task_exec_deliver".into()),
             ])
@@ -5516,6 +5894,10 @@ Suite de la réponse.";
         assert_eq!(
             internal["default_tools_approval_mode"].as_str(),
             Some("prompt")
+        );
+        assert_eq!(
+            internal["tools"]["task_exec_status"]["approval_mode"].as_str(),
+            Some("approve")
         );
         assert_eq!(
             internal["tools"]["task_exec_commit"]["approval_mode"].as_str(),
@@ -5527,7 +5909,7 @@ Suite de la réponse.";
         );
         assert_eq!(
             internal["tools"].as_table().map(toml::Table::len),
-            Some(2),
+            Some(3),
             "no other worker MCP tool may be auto-approved"
         );
         assert_eq!(
@@ -5563,6 +5945,7 @@ Suite de la réponse.";
                 "worker context",
                 None,
                 true,
+                None,
             );
             assert!(
                 !args.contains(&forbidden.to_string()),
@@ -6866,6 +7249,7 @@ Suite de la réponse.";
             "",
             None,
             true,
+            None,
         );
 
         super::super::insert_claude_mcp_config(&mut args, "/path/to/.mcp.json".into(), true);

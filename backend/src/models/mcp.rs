@@ -293,10 +293,11 @@ pub enum McpSource {
 /// Kronn projects") because the two concepts answer different questions:
 /// `is_global` decides Kronn project visibility; `host_sync` decides
 /// whether Kronn writes the entry into `~/.claude.json` & friends.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub enum HostSyncMode {
     /// Kronn-only. Never written to a host CLI config file.
+    #[default]
     None,
     /// Written to host config files. Not auto-applied to Kronn projects.
     GlobalOnly,
@@ -493,6 +494,10 @@ pub struct CreateMcpConfigRequest {
     pub args_override: Option<Vec<String>>,
     pub is_global: bool,
     pub project_ids: Vec<String>,
+    /// Explicit creation-time host scope. Omitted by older clients => the
+    /// safe existing default (`None`, Kronn-only).
+    #[serde(default)]
+    pub host_sync: HostSyncMode,
     /// Custom API plugin payload. Only honoured when `server_id == "api-custom"`.
     /// The backend materializes a new `McpServer` (API-only, `source = Manual`)
     /// from these fields, then proceeds with the normal config-creation path.

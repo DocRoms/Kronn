@@ -24,6 +24,7 @@ pub mod disc_workspace;
 pub mod discover;
 pub mod discussions;
 pub mod docs;
+pub mod external_api_connections;
 pub mod federation;
 pub mod git_ops;
 pub mod id_resolver;

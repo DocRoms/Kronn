@@ -233,19 +233,27 @@ pub fn acquire_data_dir_lock() -> Result<std::fs::File> {
     acquire_lock_in(&dir)
 }
 
-fn acquire_lock_in(dir: &std::path::Path) -> Result<std::fs::File> {
+pub(crate) fn acquire_lock_in(dir: &std::path::Path) -> Result<std::fs::File> {
+    #[cfg(not(windows))]
     use fs2::FileExt;
+    #[cfg(windows)]
+    use std::os::windows::fs::OpenOptionsExt;
     std::fs::create_dir_all(dir)?;
     let lock_path = dir.join(".kronn.lock");
-    let f = std::fs::OpenOptions::new()
+    let mut options = std::fs::OpenOptions::new();
+    options
         .create(true)
         // Pure lock file — its (empty) content is irrelevant, only the flock
         // matters. Explicit no-truncate keeps clippy's suspicious-open-options
         // happy without implying we ever write to it.
         .truncate(false)
-        .write(true)
+        .write(true);
+    #[cfg(windows)]
+    options.share_mode(0);
+    let f = options
         .open(&lock_path)
         .with_context(|| format!("open data-dir lock {}", lock_path.display()))?;
+    #[cfg(not(windows))]
     f.try_lock_exclusive().map_err(|e| {
         anyhow::anyhow!(
             "another Kronn instance is already running against this data directory \
@@ -258,6 +266,72 @@ fn acquire_lock_in(dir: &std::path::Path) -> Result<std::fs::File> {
         )
     })?;
     Ok(f)
+}
+
+/// Duplicate the backend lock for a child which may outlive this process.
+///
+/// A spawned Git process can survive an ungraceful backend exit.  Keeping this
+/// descriptor open across `exec` means the replacement backend cannot acquire
+/// the data-directory lock and therefore cannot reap that Git operation's
+/// commit lease while Git (or one of its hooks) is still alive.
+#[cfg(unix)]
+pub(crate) fn inherit_data_dir_lock_for_child(lock: &std::fs::File) -> Result<std::fs::File> {
+    lock.try_clone()
+        .context("duplicate data-directory lock for Git child")
+}
+
+/// Make only this command inherit `lock`.
+///
+/// The duplicate remains `FD_CLOEXEC` in the parent. `pre_exec` runs after
+/// `fork`, so clearing the flag there cannot leak the lock into an unrelated
+/// command spawned concurrently by another backend thread.
+#[cfg(unix)]
+pub(crate) fn inherit_data_dir_lock_on_command(
+    command: &mut std::process::Command,
+    lock: &std::fs::File,
+) {
+    use std::os::{fd::AsRawFd, unix::process::CommandExt};
+
+    let fd = lock.as_raw_fd();
+    unsafe {
+        command.pre_exec(move || {
+            let flags = libc::fcntl(fd, libc::F_GETFD);
+            if flags == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+#[cfg(windows)]
+pub(crate) fn inherit_data_dir_lock_for_child(lock: &std::fs::File) -> Result<std::fs::File> {
+    lock.try_clone()
+        .context("duplicate exclusive data-directory handle for Git child")
+}
+
+/// Pass the lock to exactly this Windows child through its standard-handle
+/// inheritance list. `std::process` prepares an invocation-local inheritable
+/// duplicate for `Stdio`; the parent lock handle itself never becomes globally
+/// inheritable, so concurrent children cannot retain it.
+#[cfg(windows)]
+pub(crate) fn inherit_data_dir_lock_on_command(
+    command: &mut std::process::Command,
+    lock: &std::fs::File,
+) -> Result<()> {
+    let child_standard_handle = lock
+        .try_clone()
+        .context("duplicate data-directory lock as Git child standard handle")?;
+    command.stdin(std::process::Stdio::from(child_standard_handle));
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+pub(crate) fn inherit_data_dir_lock_for_child(_: &std::fs::File) -> Result<std::fs::File> {
+    anyhow::bail!("this platform cannot safely inherit the data-directory lock into Git")
 }
 
 /// Restrict a path to owner-only access on Unix; no-op on Windows.
@@ -561,6 +635,27 @@ mod tests {
             last_err.is_none(),
             "lock must be re-acquirable after release: {last_err:?}"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[serial]
+    fn data_dir_lock_resolves_the_configured_data_directory() {
+        let dir = scratch_dir("configured-lock");
+        let previous_data_dir = std::env::var_os("KRONN_DATA_DIR");
+        std::env::set_var("KRONN_DATA_DIR", &dir);
+
+        let first = acquire_data_dir_lock().expect("configured data-dir lock must succeed");
+        assert!(
+            acquire_data_dir_lock().is_err(),
+            "the public lock entry point must protect the configured data directory"
+        );
+        drop(first);
+
+        match previous_data_dir {
+            Some(value) => std::env::set_var("KRONN_DATA_DIR", value),
+            None => std::env::remove_var("KRONN_DATA_DIR"),
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -49,6 +49,7 @@ fn accepted_event(message_id: &str, sort_order: i64, duplicate: bool) -> Event {
 fn same_target_identity(left: &MessageTarget, right: &MessageTarget) -> bool {
     left.kind == right.kind
         && left.agent_type == right.agent_type
+        && left.connection_id == right.connection_id
         && left.cli_session_id == right.cli_session_id
 }
 
@@ -59,16 +60,31 @@ fn same_target_identity(left: &MessageTarget, right: &MessageTarget) -> bool {
 /// `/run` may start local processes, but it must never impersonate a joined
 /// CLI session. An entirely untargeted message keeps the legacy principal
 /// fallback.
-fn native_dispatch_agents_for_targets(targets: &[MessageTarget]) -> Vec<Option<AgentType>> {
+#[derive(Debug, Clone, PartialEq)]
+struct NativeDispatchTarget {
+    agent_override: Option<AgentType>,
+    connection_id: Option<String>,
+}
+
+fn native_dispatch_agents_for_targets(targets: &[MessageTarget]) -> Vec<NativeDispatchTarget> {
     if targets.is_empty() {
-        return vec![None];
+        return vec![NativeDispatchTarget {
+            agent_override: None,
+            connection_id: None,
+        }];
     }
 
     let mut agents = Vec::new();
     for target in targets {
         let candidate = match target.kind {
-            MessageTargetKind::DiscussionAgent => Some(None),
-            MessageTargetKind::Agent => Some(Some(target.agent_type.clone())),
+            MessageTargetKind::DiscussionAgent => Some(NativeDispatchTarget {
+                agent_override: None,
+                connection_id: target.connection_id.clone(),
+            }),
+            MessageTargetKind::Agent => Some(NativeDispatchTarget {
+                agent_override: Some(target.agent_type.clone()),
+                connection_id: target.connection_id.clone(),
+            }),
             MessageTargetKind::Cli => None,
         };
         if let Some(candidate) = candidate {
@@ -90,14 +106,19 @@ fn enqueue_dispatches_for_trigger(
     let targets = crate::db::discussions::list_message_targets(conn, trigger_message_id)?;
     let dispatch_agents = native_dispatch_agents_for_targets(&targets);
     let mut jobs = Vec::with_capacity(dispatch_agents.len());
-    for (position, agent_override) in dispatch_agents.iter().enumerate() {
+    for (position, dispatch_target) in dispatch_agents.iter().enumerate() {
         let job_id = Uuid::new_v4().to_string();
-        let target_key = agent_override
+        let target_key = dispatch_target
+            .agent_override
             .as_ref()
             .map(|agent| format!("{agent:?}"))
             .unwrap_or_else(|| "discussion-agent".to_string());
-        let dedupe_key = format!("force:{run_key}:{position}:{target_key}");
-        let job = crate::db::agent_dispatch::enqueue(
+        let connection_key = dispatch_target
+            .connection_id
+            .as_deref()
+            .unwrap_or("default");
+        let dedupe_key = format!("force:{run_key}:{position}:{target_key}:{connection_key}");
+        let job = crate::db::agent_dispatch::enqueue_with_connection(
             conn,
             crate::db::agent_dispatch::NewAgentDispatchJob {
                 id: &job_id,
@@ -105,12 +126,13 @@ fn enqueue_dispatches_for_trigger(
                 trigger_message_id,
                 trigger_sort_order,
                 dedupe_key: &dedupe_key,
-                agent_override: agent_override.as_ref(),
+                agent_override: dispatch_target.agent_override.as_ref(),
                 chain_prompt_ids: &[],
                 batch_item: None,
                 group_id: None,
                 group_concurrency_limit: None,
             },
+            dispatch_target.connection_id.as_deref(),
         )?;
         jobs.push(job);
     }
@@ -160,12 +182,13 @@ pub(crate) async fn canonical_targets(
             let discussion = crate::db::discussions::get_discussion(conn, &did)?
                 .ok_or_else(|| anyhow::anyhow!("discussion not found"))?;
             let sessions = crate::db::discussion_sessions::list_sessions(conn, &did, false)?;
+            let connections = crate::db::external_api_connections::list(conn)?;
             let no_agent = crate::db::discussions::disc_is_no_agent(conn, &did)?;
-            Ok((discussion, sessions, no_agent))
+            Ok((discussion, sessions, connections, no_agent))
         })
         .await
         .map_err(|error| error.to_string())?;
-    let (discussion, sessions, no_agent) = context;
+    let (discussion, sessions, connections, no_agent) = context;
 
     let mut candidates = if target_all {
         let mut all = if no_agent {
@@ -203,7 +226,22 @@ pub(crate) async fn canonical_targets(
                 canonical
             }
             MessageTargetKind::Agent => {
-                let mut canonical = MessageTarget::agent(target.agent_type);
+                let mut canonical = if let Some(connection_id) = target.connection_id.as_deref() {
+                    let Some(connection) = connections.iter().find(|item| item.id == connection_id)
+                    else {
+                        return Err(format!("unknown connection target {connection_id}"));
+                    };
+                    let canonical =
+                        crate::db::external_api_connections::target_for_connection(connection);
+                    if canonical.agent_type != target.agent_type {
+                        return Err(format!(
+                            "connection target {connection_id} does not match the requested agent"
+                        ));
+                    }
+                    canonical
+                } else {
+                    MessageTarget::agent(target.agent_type)
+                };
                 canonical.tier = target.tier;
                 canonical
             }
@@ -404,10 +442,36 @@ pub async fn send_message(
         };
     }
 
-    let requested_targets = normalized_targets(
+    let mut requested_targets = normalized_targets(
         req.targets.clone(),
         req.target_agents.clone(),
         req.target_agent.clone(),
+    );
+    let content = req.content.clone();
+    let connection_targets = match state
+        .db
+        .with_conn(move |conn| {
+            let connections = crate::db::external_api_connections::list(conn)?;
+            Ok(
+                crate::db::external_api_connections::resolve_connection_mentions(
+                    &content,
+                    &connections,
+                ),
+            )
+        })
+        .await
+    {
+        Ok(targets) => targets,
+        Err(error) => {
+            return sse_events(vec![Event::default().event("error").data(
+                serde_json::json!({ "error": format!("Failed to resolve connection aliases: {error}") })
+                    .to_string(),
+            )]);
+        }
+    };
+    crate::db::external_api_connections::merge_connection_mention_targets(
+        &mut requested_targets,
+        connection_targets,
     );
     let targets = match canonical_targets(&state, &id, requested_targets, req.target_all).await {
         Ok(targets) => targets,
@@ -1279,7 +1343,16 @@ mod tests {
 
         assert_eq!(
             native_dispatch_agents_for_targets(&targets),
-            vec![None, Some(AgentType::ClaudeCode)]
+            vec![
+                NativeDispatchTarget {
+                    agent_override: None,
+                    connection_id: None,
+                },
+                NativeDispatchTarget {
+                    agent_override: Some(AgentType::ClaudeCode),
+                    connection_id: None,
+                },
+            ]
         );
     }
 
@@ -1293,9 +1366,40 @@ mod tests {
 
         assert_eq!(
             native_dispatch_agents_for_targets(&targets),
-            vec![Some(AgentType::Ollama)]
+            vec![NativeDispatchTarget {
+                agent_override: Some(AgentType::Ollama),
+                connection_id: None,
+            }]
         );
-        assert_eq!(native_dispatch_agents_for_targets(&[]), vec![None]);
+        assert_eq!(
+            native_dispatch_agents_for_targets(&[]),
+            vec![NativeDispatchTarget {
+                agent_override: None,
+                connection_id: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn custom_connections_keep_distinct_dispatch_identities() {
+        let targets = vec![
+            MessageTarget::agent(AgentType::Custom).with_connection("openrouter"),
+            MessageTarget::agent(AgentType::Custom).with_connection("groq"),
+        ];
+
+        assert_eq!(
+            native_dispatch_agents_for_targets(&targets),
+            vec![
+                NativeDispatchTarget {
+                    agent_override: Some(AgentType::Custom),
+                    connection_id: Some("openrouter".into()),
+                },
+                NativeDispatchTarget {
+                    agent_override: Some(AgentType::Custom),
+                    connection_id: Some("groq".into()),
+                },
+            ]
+        );
     }
 
     #[test]

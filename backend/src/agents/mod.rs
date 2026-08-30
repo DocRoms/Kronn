@@ -190,7 +190,7 @@ fn detect_host_label() -> String {
     "Unknown".into()
 }
 
-fn host_is_macos() -> bool {
+pub(crate) fn host_is_macos() -> bool {
     if let Ok(os) = std::env::var("KRONN_HOST_OS") {
         return os.eq_ignore_ascii_case("macos");
     }
@@ -443,6 +443,174 @@ pub struct AgentAuthStatus {
     pub setup_command: Option<&'static str>,
 }
 
+#[derive(Debug, Default)]
+struct GeminiAuthSignals {
+    gemini_api_key: bool,
+    google_api_key: bool,
+    vertex_enabled: bool,
+    google_cloud_project: bool,
+    google_cloud_location: bool,
+    application_default_credentials: bool,
+    google_login_enabled: bool,
+    compute_adc: bool,
+}
+
+fn env_present(name: &str) -> bool {
+    std::env::var_os(name).is_some_and(|value| !value.is_empty())
+}
+
+fn env_is_true(name: &str) -> bool {
+    std::env::var_os(name).is_some_and(|value| value == "true")
+}
+
+fn application_default_credentials_exist(
+    explicit_path: Option<std::ffi::OsString>,
+    home: Option<std::path::PathBuf>,
+) -> bool {
+    match explicit_path {
+        Some(path) => !path.is_empty() && std::path::PathBuf::from(path).is_file(),
+        None => home.is_some_and(|home| {
+            home.join(".config/gcloud/application_default_credentials.json")
+                .is_file()
+        }),
+    }
+}
+
+fn gemini_auth_signals(config: &AppConfig) -> GeminiAuthSignals {
+    let kronn_key_enabled = !config
+        .tokens
+        .disabled_overrides
+        .iter()
+        .any(|provider| provider == "google")
+        && config.tokens.has_active_key_for("google");
+    let home = std::env::var_os("KRONN_HOST_HOME")
+        .or_else(|| std::env::var_os("HOME"))
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(std::path::PathBuf::from);
+    let application_default_credentials = application_default_credentials_exist(
+        std::env::var_os("GOOGLE_APPLICATION_CREDENTIALS"),
+        home,
+    );
+    GeminiAuthSignals {
+        gemini_api_key: kronn_key_enabled || env_present("GEMINI_API_KEY"),
+        google_api_key: env_present("GOOGLE_API_KEY"),
+        vertex_enabled: env_is_true("GOOGLE_GENAI_USE_VERTEXAI"),
+        google_cloud_project: env_present("GOOGLE_CLOUD_PROJECT"),
+        google_cloud_location: env_present("GOOGLE_CLOUD_LOCATION"),
+        application_default_credentials,
+        google_login_enabled: env_is_true("GOOGLE_GENAI_USE_GCA"),
+        compute_adc: env_is_true("GEMINI_CLI_USE_COMPUTE_ADC") || env_is_true("CLOUD_SHELL"),
+    }
+}
+
+fn string_map(value: &serde_json::Value) -> bool {
+    value
+        .as_object()
+        .is_some_and(|map| map.values().all(serde_json::Value::is_string))
+}
+
+fn string_array(value: &serde_json::Value) -> bool {
+    value
+        .as_array()
+        .is_some_and(|items| items.iter().all(serde_json::Value::is_string))
+}
+
+fn primitive_map(value: &serde_json::Value) -> bool {
+    value.as_object().is_some_and(|map| {
+        map.values()
+            .all(|value| value.is_string() || value.is_number() || value.is_boolean())
+    })
+}
+
+fn gemini_mcp_entry_valid(value: &serde_json::Value) -> bool {
+    let Some(entry) = value.as_object() else {
+        return false;
+    };
+    entry.iter().all(|(key, value)| match key.as_str() {
+        "command"
+        | "cwd"
+        | "url"
+        | "httpUrl"
+        | "tcp"
+        | "targetAudience"
+        | "targetServiceAccount"
+        | "description" => value.is_string(),
+        "type" => matches!(value.as_str(), Some("stdio" | "sse" | "http")),
+        "authProviderType" => matches!(
+            value.as_str(),
+            Some("dynamic_discovery" | "google_credentials" | "service_account_impersonation")
+        ),
+        "args" | "includeTools" | "excludeTools" => string_array(value),
+        "env" | "headers" => string_map(value),
+        "extension" => primitive_map(value),
+        "timeout" => value.is_number(),
+        "trust" => value.is_boolean(),
+        "oauth" => value.is_object(),
+        _ => false,
+    })
+}
+
+fn gemini_config_and_auth_ready(
+    settings_path: &std::path::Path,
+    oauth_credentials_exist: bool,
+    signals: &GeminiAuthSignals,
+) -> bool {
+    let settings = match std::fs::read_to_string(settings_path) {
+        Ok(raw) => match serde_json::from_str::<serde_json::Value>(&raw) {
+            Ok(value) => value,
+            Err(_) => return false,
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
+        Err(_) => return false,
+    };
+
+    if let Some(servers) = settings.get("mcpServers") {
+        let Some(servers) = servers.as_object() else {
+            return false;
+        };
+        if !servers.values().all(gemini_mcp_entry_valid) {
+            return false;
+        }
+    }
+
+    let selected = settings
+        .pointer("/security/auth/selectedType")
+        .and_then(|value| value.as_str());
+    match selected {
+        Some("oauth-personal") => oauth_credentials_exist,
+        Some("gemini-api-key") => signals.gemini_api_key,
+        Some("vertex-ai") | Some("USE_VERTEX_AI") => {
+            signals.google_cloud_project
+                && signals.google_cloud_location
+                && (signals.google_api_key || signals.application_default_credentials)
+        }
+        Some("compute-default-credentials") | Some("COMPUTE_ADC") => signals.compute_adc,
+        Some(_) => false,
+        None => {
+            signals.gemini_api_key
+                || (signals.vertex_enabled
+                    && signals.google_cloud_project
+                    && signals.google_cloud_location
+                    && (signals.google_api_key || signals.application_default_credentials))
+                || (signals.google_login_enabled && oauth_credentials_exist)
+                || signals.compute_adc
+        }
+    }
+}
+
+fn gemini_auth_ready(config: &AppConfig) -> bool {
+    let home = std::env::var_os("KRONN_HOST_HOME")
+        .or_else(|| std::env::var_os("HOME"))
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(std::path::PathBuf::from);
+    let Some(home) = home else { return false };
+    gemini_config_and_auth_ready(
+        &home.join(".gemini/settings.json"),
+        home.join(".gemini/oauth_creds.json").is_file(),
+        &gemini_auth_signals(config),
+    )
+}
+
 /// Report whether the selected runner can authenticate before Kronn queues it.
 ///
 /// CLI agents own local login state that Kronn must not second-guess. Recent
@@ -450,8 +618,12 @@ pub struct AgentAuthStatus {
 /// remove the old plaintext `~/.vibe/.env`; checking only env/files therefore
 /// rejects a working CLI. Let Vibe resolve its own keyring and surface a real
 /// runtime auth error if that lookup fails.
-pub fn agent_auth_status(agent_type: &AgentType, _config: &AppConfig) -> AgentAuthStatus {
+pub fn agent_auth_status(agent_type: &AgentType, config: &AppConfig) -> AgentAuthStatus {
     match agent_type {
+        AgentType::GeminiCli => AgentAuthStatus {
+            ready: gemini_auth_ready(config),
+            setup_command: Some("gemini"),
+        },
         AgentType::Vibe => AgentAuthStatus {
             ready: true,
             setup_command: Some("vibe --setup"),
@@ -947,7 +1119,6 @@ mod tests {
         for agent in [
             AgentType::ClaudeCode,
             AgentType::Codex,
-            AgentType::GeminiCli,
             AgentType::Kiro,
             AgentType::CopilotCli,
             AgentType::Ollama,
@@ -956,6 +1127,46 @@ mod tests {
             assert!(status.ready, "{agent:?}");
             assert_eq!(status.setup_command, None, "{agent:?}");
         }
+    }
+
+    #[test]
+    #[serial]
+    fn gemini_without_auth_reports_setup_requirement() {
+        const AUTH_ENV: [&str; 8] = [
+            "GEMINI_API_KEY",
+            "GOOGLE_API_KEY",
+            "GOOGLE_APPLICATION_CREDENTIALS",
+            "GOOGLE_GENAI_USE_VERTEXAI",
+            "GOOGLE_CLOUD_PROJECT",
+            "GOOGLE_CLOUD_LOCATION",
+            "GOOGLE_GENAI_USE_GCA",
+            "GEMINI_CLI_USE_COMPUTE_ADC",
+        ];
+        let temp = tempfile::tempdir().unwrap();
+        let original_home = std::env::var_os("KRONN_HOST_HOME");
+        let original_auth = AUTH_ENV.map(std::env::var_os);
+        std::env::set_var("KRONN_HOST_HOME", temp.path());
+        for name in AUTH_ENV {
+            std::env::remove_var(name);
+        }
+
+        let mut config = crate::core::config::default_config();
+        config.tokens.disabled_overrides.push("google".to_string());
+        let status = agent_auth_status(&AgentType::GeminiCli, &config);
+
+        match original_home {
+            Some(value) => std::env::set_var("KRONN_HOST_HOME", value),
+            None => std::env::remove_var("KRONN_HOST_HOME"),
+        }
+        for (name, value) in AUTH_ENV.into_iter().zip(original_auth) {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+
+        assert!(!status.ready);
+        assert_eq!(status.setup_command, Some("gemini"));
     }
 
     #[test]
@@ -1425,5 +1636,208 @@ mod tests {
                 name
             );
         }
+    }
+
+    #[test]
+    fn gemini_preflight_rejects_missing_auth() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings = temp.path().join("settings.json");
+        std::fs::write(&settings, r#"{"mcpServers":{}}"#).unwrap();
+        assert!(!gemini_config_and_auth_ready(
+            &settings,
+            false,
+            &GeminiAuthSignals::default()
+        ));
+    }
+
+    #[test]
+    fn gemini_preflight_accepts_cached_oauth_without_reading_credentials() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings = temp.path().join("settings.json");
+        std::fs::write(
+            &settings,
+            r#"{"security":{"auth":{"selectedType":"oauth-personal"}}}"#,
+        )
+        .unwrap();
+        assert!(gemini_config_and_auth_ready(
+            &settings,
+            true,
+            &GeminiAuthSignals::default()
+        ));
+    }
+
+    #[test]
+    fn gemini_preflight_rejects_any_unknown_mcp_key_even_with_auth() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings = temp.path().join("settings.json");
+        std::fs::write(
+            &settings,
+            r#"{"mcpServers":{"bad":{"command":"x","futureUnknown":true}}}"#,
+        )
+        .unwrap();
+        let signals = GeminiAuthSignals {
+            gemini_api_key: true,
+            ..GeminiAuthSignals::default()
+        };
+        assert!(!gemini_config_and_auth_ready(&settings, false, &signals));
+    }
+
+    #[test]
+    fn gemini_preflight_rejects_wrong_mcp_field_type() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings = temp.path().join("settings.json");
+        std::fs::write(&settings, r#"{"mcpServers":{"bad":{"command":["x"]}}}"#).unwrap();
+        let signals = GeminiAuthSignals {
+            gemini_api_key: true,
+            ..GeminiAuthSignals::default()
+        };
+        assert!(!gemini_config_and_auth_ready(&settings, false, &signals));
+    }
+
+    #[test]
+    fn gemini_preflight_accepts_current_remote_mcp_fields() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings = temp.path().join("settings.json");
+        std::fs::write(
+            &settings,
+            r#"{"mcpServers":{"remote":{"type":"http","httpUrl":"https://example.test/mcp","description":"Remote tools","targetServiceAccount":"worker@example.test","authProviderType":"service_account_impersonation","extension":{"enabled":true,"retries":2,"label":"prod"}},"events":{"type":"sse","url":"https://example.test/events","authProviderType":"dynamic_discovery"},"local":{"type":"stdio","command":"example","authProviderType":"google_credentials"}}}"#,
+        )
+        .unwrap();
+        let signals = GeminiAuthSignals {
+            gemini_api_key: true,
+            ..GeminiAuthSignals::default()
+        };
+        assert!(gemini_config_and_auth_ready(&settings, false, &signals));
+    }
+
+    #[test]
+    fn gemini_preflight_rejects_invalid_mcp_transport_type() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings = temp.path().join("settings.json");
+        std::fs::write(
+            &settings,
+            r#"{"mcpServers":{"bad":{"type":"websocket","url":"https://example.test"}}}"#,
+        )
+        .unwrap();
+        let signals = GeminiAuthSignals {
+            gemini_api_key: true,
+            ..GeminiAuthSignals::default()
+        };
+        assert!(!gemini_config_and_auth_ready(&settings, false, &signals));
+    }
+
+    #[test]
+    fn gemini_preflight_rejects_extension_name_and_invalid_auth_provider_type() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings = temp.path().join("settings.json");
+        let signals = GeminiAuthSignals {
+            gemini_api_key: true,
+            ..GeminiAuthSignals::default()
+        };
+
+        std::fs::write(
+            &settings,
+            r#"{"mcpServers":{"bad":{"command":"x","extensionName":"legacy"}}}"#,
+        )
+        .unwrap();
+        assert!(!gemini_config_and_auth_ready(&settings, false, &signals));
+
+        std::fs::write(
+            &settings,
+            r#"{"mcpServers":{"bad":{"command":"x","authProviderType":"custom"}}}"#,
+        )
+        .unwrap();
+        assert!(!gemini_config_and_auth_ready(&settings, false, &signals));
+    }
+
+    #[test]
+    fn gemini_vertex_requires_routing_and_credential_metadata() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings = temp.path().join("settings.json");
+        std::fs::write(
+            &settings,
+            r#"{"security":{"auth":{"selectedType":"vertex-ai"}}}"#,
+        )
+        .unwrap();
+
+        let api_key_only = GeminiAuthSignals {
+            google_api_key: true,
+            ..GeminiAuthSignals::default()
+        };
+        assert!(!gemini_config_and_auth_ready(
+            &settings,
+            false,
+            &api_key_only
+        ));
+
+        let routing_only = GeminiAuthSignals {
+            google_cloud_project: true,
+            google_cloud_location: true,
+            ..GeminiAuthSignals::default()
+        };
+        assert!(!gemini_config_and_auth_ready(
+            &settings,
+            false,
+            &routing_only
+        ));
+
+        let api_key_with_routing = GeminiAuthSignals {
+            google_api_key: true,
+            google_cloud_project: true,
+            google_cloud_location: true,
+            ..GeminiAuthSignals::default()
+        };
+        assert!(gemini_config_and_auth_ready(
+            &settings,
+            false,
+            &api_key_with_routing
+        ));
+
+        let adc_with_routing = GeminiAuthSignals {
+            application_default_credentials: true,
+            google_cloud_project: true,
+            google_cloud_location: true,
+            ..GeminiAuthSignals::default()
+        };
+        assert!(gemini_config_and_auth_ready(
+            &settings,
+            false,
+            &adc_with_routing
+        ));
+    }
+
+    #[test]
+    fn gemini_auth_signals_require_existing_application_credentials_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let present = temp.path().join("adc.json");
+        std::fs::write(&present, "{}").unwrap();
+        let missing = temp.path().join("missing.json");
+
+        assert!(application_default_credentials_exist(
+            Some(present.into_os_string()),
+            None
+        ));
+        assert!(!application_default_credentials_exist(
+            Some(missing.into_os_string()),
+            None
+        ));
+        assert!(!application_default_credentials_exist(None, None));
+    }
+
+    #[test]
+    fn gemini_explicit_missing_adc_does_not_fall_back_to_home() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcloud = temp.path().join(".config/gcloud");
+        std::fs::create_dir_all(&gcloud).unwrap();
+        std::fs::write(gcloud.join("application_default_credentials.json"), "{}").unwrap();
+
+        assert!(!application_default_credentials_exist(
+            Some(temp.path().join("missing.json").into_os_string()),
+            Some(temp.path().to_path_buf())
+        ));
+        assert!(application_default_credentials_exist(
+            None,
+            Some(temp.path().to_path_buf())
+        ));
     }
 }

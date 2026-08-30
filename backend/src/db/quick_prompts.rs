@@ -23,7 +23,8 @@ use crate::models::{
 //   12 profile_ids_json      ← added in 056
 //   13 directive_ids_json    ← added in 056
 //   14 agent_settings_json   ← added in 070 (nullable)
-//   15 pinned               ← added in 143
+//   15 pinned                ← added in 143
+//   16 connection_id         ← added in 153 (nullable)
 fn row_to_quick_prompt(row: &rusqlite::Row) -> QuickPrompt {
     let variables_json: String = row.get(4).unwrap_or_default();
     let agent_str: String = row.get(5).unwrap_or_default();
@@ -49,6 +50,7 @@ fn row_to_quick_prompt(row: &rusqlite::Row) -> QuickPrompt {
         prompt_template: row.get(3).unwrap_or_default(),
         variables: serde_json::from_str(&variables_json).unwrap_or_default(),
         agent: serde_json::from_str(&format!("\"{}\"", agent_str)).unwrap_or(AgentType::ClaudeCode),
+        connection_id: row.get(16).unwrap_or(None),
         project_id: row.get(6).unwrap_or(None),
         skill_ids: serde_json::from_str(&skill_ids_json).unwrap_or_default(),
         profile_ids: serde_json::from_str(&profile_ids_json).unwrap_or_default(),
@@ -62,7 +64,7 @@ fn row_to_quick_prompt(row: &rusqlite::Row) -> QuickPrompt {
     }
 }
 
-const SELECT_COLUMNS: &str = "id, name, icon, prompt_template, variables_json, agent, project_id, skill_ids_json, tier, created_at, updated_at, description, profile_ids_json, directive_ids_json, agent_settings_json, pinned";
+const SELECT_COLUMNS: &str = "id, name, icon, prompt_template, variables_json, agent, project_id, skill_ids_json, tier, created_at, updated_at, description, profile_ids_json, directive_ids_json, agent_settings_json, pinned, connection_id";
 
 pub fn list_quick_prompts(conn: &Connection) -> Result<Vec<QuickPrompt>> {
     let sql = format!(
@@ -90,8 +92,8 @@ pub fn insert_quick_prompt(conn: &Connection, qp: &QuickPrompt) -> Result<()> {
     let agent_str = serde_json::to_string(&qp.agent)?;
     let tier_str = serde_json::to_string(&qp.tier)?;
     conn.execute(
-        "INSERT INTO quick_prompts (id, name, icon, prompt_template, variables_json, agent, project_id, skill_ids_json, tier, created_at, updated_at, description, profile_ids_json, directive_ids_json, agent_settings_json)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+        "INSERT INTO quick_prompts (id, name, icon, prompt_template, variables_json, agent, project_id, skill_ids_json, tier, created_at, updated_at, description, profile_ids_json, directive_ids_json, agent_settings_json, connection_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
         params![
             qp.id,
             qp.name,
@@ -108,6 +110,7 @@ pub fn insert_quick_prompt(conn: &Connection, qp: &QuickPrompt) -> Result<()> {
             serde_json::to_string(&qp.profile_ids)?,
             serde_json::to_string(&qp.directive_ids)?,
             qp.agent_settings.as_ref().map(serde_json::to_string).transpose()?,
+            qp.connection_id,
         ],
     )?;
     // 0.8.5 — seed the version history with v1 = initial state.
@@ -128,7 +131,8 @@ pub fn update_quick_prompt(conn: &Connection, qp: &QuickPrompt) -> Result<()> {
     conn.execute(
         "UPDATE quick_prompts SET name = ?2, icon = ?3, prompt_template = ?4, variables_json = ?5,
          agent = ?6, project_id = ?7, skill_ids_json = ?8, tier = ?9, updated_at = ?10, description = ?11,
-         profile_ids_json = ?12, directive_ids_json = ?13, agent_settings_json = ?14
+         profile_ids_json = ?12, directive_ids_json = ?13, agent_settings_json = ?14,
+         connection_id = ?15
          WHERE id = ?1",
         params![
             qp.id,
@@ -145,6 +149,7 @@ pub fn update_quick_prompt(conn: &Connection, qp: &QuickPrompt) -> Result<()> {
             serde_json::to_string(&qp.profile_ids)?,
             serde_json::to_string(&qp.directive_ids)?,
             qp.agent_settings.as_ref().map(serde_json::to_string).transpose()?,
+            qp.connection_id,
         ],
     )?;
     Ok(())
@@ -173,8 +178,8 @@ pub fn snapshot_quick_prompt_version(conn: &Connection, qp: &QuickPrompt) -> Res
         "INSERT INTO quick_prompt_versions (
             id, quick_prompt_id, version_index, name, icon, prompt_template, variables_json,
             agent, project_id, skill_ids_json, profile_ids_json, directive_ids_json,
-            tier, description, created_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            tier, description, created_at, connection_id
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
         params![
             uuid::Uuid::new_v4().to_string(),
             qp.id,
@@ -191,6 +196,7 @@ pub fn snapshot_quick_prompt_version(conn: &Connection, qp: &QuickPrompt) -> Res
             tier_str.trim_matches('"'),
             qp.description,
             Utc::now().to_rfc3339(),
+            qp.connection_id,
         ],
     )?;
     Ok(next)
@@ -224,8 +230,8 @@ pub fn insert_quick_prompt_version_row(conn: &Connection, v: &QuickPromptVersion
         "INSERT INTO quick_prompt_versions (
             id, quick_prompt_id, version_index, name, icon, prompt_template, variables_json,
             agent, project_id, skill_ids_json, profile_ids_json, directive_ids_json,
-            tier, description, created_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            tier, description, created_at, connection_id
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
         params![
             v.id,
             v.quick_prompt_id,
@@ -242,6 +248,7 @@ pub fn insert_quick_prompt_version_row(conn: &Connection, v: &QuickPromptVersion
             tier_str.trim_matches('"'),
             v.description,
             v.created_at.to_rfc3339(),
+            v.connection_id,
         ],
     )?;
     Ok(())
@@ -255,7 +262,7 @@ pub fn list_quick_prompt_versions(
     let mut stmt = conn.prepare(
         "SELECT id, quick_prompt_id, version_index, name, icon, prompt_template, variables_json,
                 agent, project_id, skill_ids_json, profile_ids_json, directive_ids_json,
-                tier, description, created_at
+                tier, description, created_at, connection_id
          FROM quick_prompt_versions
          WHERE quick_prompt_id = ?1
          ORDER BY version_index DESC",
@@ -277,6 +284,7 @@ pub fn list_quick_prompt_versions(
             variables: serde_json::from_str(&variables_json).unwrap_or_default(),
             agent: serde_json::from_str(&format!("\"{}\"", agent_str))
                 .unwrap_or(AgentType::ClaudeCode),
+            connection_id: row.get(15)?,
             project_id: row.get(8)?,
             skill_ids: serde_json::from_str(&skill_ids_json).unwrap_or_default(),
             profile_ids: serde_json::from_str(&profile_ids_json).unwrap_or_default(),
@@ -424,6 +432,7 @@ mod tests {
                 pattern: None,
             }],
             agent: AgentType::ClaudeCode,
+            connection_id: None,
             project_id: None,
             skill_ids: vec![],
             profile_ids: vec![],
