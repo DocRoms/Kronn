@@ -4,8 +4,10 @@ The root [`CHANGELOG.md`](../../CHANGELOG.md) is the authoritative source for
 the current and recent Kronn releases. Older notes live in this directory so
 the release-facing changelog stays concise and reviewable.
 
-- [`0.11.0-checklist.md`](0.11.0-checklist.md) is the evidence checklist for
-  the 0.11.0 candidate; it is operational, not a second changelog.
+- [`0.12.0-checklist.md`](0.12.0-checklist.md) is the evidence checklist for
+  the current 0.12.0 candidate. [`0.11.0-checklist.md`](0.11.0-checklist.md)
+  retains the previous candidate's record; both are operational evidence, not
+  competing changelogs.
 
 - [`CHANGELOG-legacy.md`](CHANGELOG-legacy.md) contains the complete historical
   record through 0.9.3. Corrected 0.9.4 through 0.10.0 notes live only in the root

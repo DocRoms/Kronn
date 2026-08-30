@@ -216,7 +216,7 @@ path is the human-gated `kronn-plan-action` fence.
 
 Principal agents that can mutate Planning receive the typed execution lifecycle:
 `agent_list`, `task_exec_prepare`, `task_exec_launch`, `task_exec_status`,
-`task_exec_deliver`, `task_exec_review`, `task_exec_cancel` and
+`task_exec_resume`, `task_exec_deliver`, `task_exec_review`, `task_exec_cancel` and
 `task_exec_reassign`. A principal must preflight before launch and reuse one
 idempotency key after an uncertain response. Native HTTP workers receive a
 narrowed surface: no backlog mutation or execution-status lookup, and
@@ -226,6 +226,17 @@ The optional `validations` passed to `task_exec_launch` are principal-owned and
 persisted on the implicit single-task run. They use the same `ValidationSpec`
 contract as campaign runs and cannot be supplied or changed by the delivery
 manifest.
+
+`task_exec_status` returns `next_action.tool = task_exec_resume` only for a
+publicly recoverable Applying-origin checkpoint. The principal may then call
+`task_exec_resume`, which uses the backend's guarded resume path: it rechecks
+the parent checkout and recorded SHAs, refuses dirty or unrelated states, and
+returns the existing terminal result when the same successful resume is
+retried. The tool cannot advance provisioning- or review-owned checkpoints.
+[src: file: backend/src/api/orchestration.rs:6492-6499]
+[src: file: backend/src/api/orchestration.rs:7955-7997]
+[src: file: backend/scripts/disc-introspection-mcp.py:921-941]
+[src: file: backend/scripts/disc-introspection-mcp.py:5437-5475]
 
 When the worker identity is not already known, call `agent_list()` first and
 copy one returned `worker` object unchanged into `task_exec_prepare`. Native
@@ -240,17 +251,48 @@ keys, endpoints and hostnames are not returned. For Ollama, this discovery does
 not assert that the exact resolved tag is already pulled; a missing tag remains
 a separate, explicit `/api/chat` launch failure.
 
-The stdio bridge fingerprints the script contents it loaded. Before
-`task_exec_prepare`, `task_exec_launch`, `task_exec_reassign` or
-`task_exec_accept_worker_offer`, it compares that fingerprint with the script on
-disk and fails closed before any HTTP request if they differ or cannot be read.
-Reconnect the `kronn-internal` MCP process, restore the room with
-`disc_find_by_session({})`, then retry with the same idempotency key. A changed
-mtime with identical contents is not stale. `task_exec_status` and
-`task_exec_cancel` remain available for recovery, while commit, delivery and
-review remain available to finish an already-authorized execution. If a future
-optional field on one of those finishing tools changes its authorization or
-security boundary, that tool must join the freshness guard before release.
+The stdio bridge fingerprints the script contents it loaded. Every orchestration
+mutation, including principal review/cancel and worker commit/delivery, passes a
+central freshness guard before any HTTP request; recovery status reads remain
+available while the bridge is stale.
+The stale response is typed as `bridge_stale`, confirms that no mutation was
+applied and schedules one preflighted self-reexec over the inherited stdio
+transport. The bridge advertises tool-list change support and emits
+`notifications/tools/list_changed` from the newly loaded process, so the
+notification is both a schema-refresh request and a readiness barrier: an eager
+host cannot race its retry into the stale reader thread. A versioned handoff preserves
+queued requests, relevant cancellation generations, partial JSON-RPC lines and the
+original MCP `clientInfo`; unread bytes remain in the inherited pipe. The handoff is
+written to a bounded private `0600` inode and authenticated with a random nonce carried
+separately in the inherited environment. Both temporary descriptors are unlinked
+immediately after creation, before their first write, and their zero link count is
+verified fail-closed. The replacement therefore reads the exact inherited handoff
+descriptor after validating its type, owner, mode, link count and strict payload schema;
+it never reopens a handoff pathname. The replacement also executes the same unlinked
+artifact descriptor that passed import preflight and a
+final digest check, then closes that bootstrap descriptor once Python has loaded the
+new process image. After reload, source-relative resources and `bridge_info.script_path`
+continue to use the canonical bridge source path rather than the temporary artifact.
+An active audit SSE stream defers the reload with a typed diagnostic
+instead of being killed. Retry the refused mutation once with the same idempotency
+key. If preflight, handoff or reexec fails, the bridge stops automatic attempts and
+reports one precise manual reconnect/recovery action instead.
+`[src: file: backend/scripts/disc-introspection-mcp.py:9525-9553]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:75-95]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:2738-2810]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:10057-10225]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:10228-10256]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:10444-10498]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:10659-10672]`
+
+The replacement process restores the room and durable read cursor through the
+existing binding files; no invitation token is needed. A changed mtime with
+identical contents is not stale. `task_exec_status` remains available for
+recovery; every orchestration mutation stays fail-closed until the fresh bridge
+is ready.
+`[src: file: backend/scripts/disc-introspection-mcp.py:5894-5951]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:6158-6183]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:6347-6415]`
 
 The first transition to this fingerprinted bridge cannot be self-protected by a
 process that loaded the preceding schema. After upgrading to 0.11.0, reconnect
@@ -554,10 +596,21 @@ When a user gives you a `kr-join-…` invite token :
 1. Call `disc_join({token: "kr-join-…"})`. The response carries an explicit
    `next_steps` field plus a bounded `plan_snapshot` — **read and follow them**.
 2. **Introduce yourself via `disc_append({content: "<intro>"})`** even if you're the first / only participant. Replying only in your local terminal is INVISIBLE to peers.
-3. Loop : `disc_wait_for_peer({timeout_secs: 170})` → on each new message,
+3. For a clear, actionable user request that has no matching planned task,
+   check `plan_get` and `task_list` for duplicates before creating exactly one
+   task with `task_create`. If intent, ownership, or scope is ambiguous, submit
+   a human-gated `kronn-plan-action` proposal; do not create or delegate it.
+4. Before launching a clear, independent task, announce its delegation scope in
+   the room. Select an available worker with `agent_list`, then run
+   `task_exec_prepare` and `task_exec_launch` only after a launchable preflight.
+   Do not invent child rooms or launch duplicate executions; observe existing
+   work through `task_exec_status`.
+5. Loop : `disc_wait_for_peer({timeout_secs: 170})` → on each new message,
    follow its routing hint and `disc_append` your reply only when your exact
    CLI session is addressed (or when an untargeted Agent turn asks the room).
-4. Call `disc_leave()` when the task is done or the user says stop.
+6. Call `disc_leave()` when the task is done or the user says stop.
+
+[src: file: backend/src/api/disc_invite.rs:467-570]
 
 The bridge auto-derives your `agent_type` from the MCP `clientInfo.name` handshake (Claude Code → ClaudeCode, Codex → Codex, …) so no env-var prep is needed.
 

@@ -11,6 +11,106 @@ Release notes for 0.9.3 and earlier are available in the
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-08-30
+
+### Added
+
+- Settings now manages any number of named OpenAI-compatible connections in
+  one External API zone. LiteLLM, NVIDIA and OpenRouter have dedicated presets,
+  while `Other` accepts another compatible endpoint; each connection has its
+  own discussion mention alias, credential and Economy / Default / Reasoning
+  model mapping. Existing LiteLLM and NVIDIA settings migrate into named
+  connections.
+
+- Project details include a Docker tab with Compose service status, bounded
+  project and service lifecycle controls, published ports and hosts, host-file
+  diagnostics, one-click URLs and recent logs. Project cards expose a running
+  badge and a matching collection filter.
+
+- Live Pages selected together can open in a standalone mosaic. Two- and
+  three-Page layouts offer explicit arrangements, while larger selections use
+  a responsive grid without merging the Pages' sandboxed runtimes.
+
+- Full audits now finish with a deterministic documentation-optimization gate
+  that measures the context loaded by each detected agent integration and blocks
+  validation when mandatory documentation is oversized, broken or ambiguous.
+
+- Delegated task details expose durable native progress phases, reliable signal
+  timestamps and honest telemetry availability instead of inferring activity
+  from an attached browser stream.
+
+- Ollama model downloads expose streamed pull progress in Settings and can be
+  cancelled while the exact pull is still running, with explicit success and
+  failure outcomes instead of one opaque request.
+
+### Changed
+
+- Projects, Discussions, Planning, Automation, Pages and Plugins now share the
+  same collection sidebar structure: compact header actions, search, separate
+  filter and sort controls, Favorites / Recent / All groupings, row actions,
+  keyboard navigation, responsive collapse behavior and shortcut footer.
+
+- Project details separate Audit, Docs and Code into direct full-height tabs.
+  Audit launch uses the shared agent selector and sixteen-step full-audit
+  briefing, documentation health is explained in plain language, and telemetry
+  coverage moved from project cards to Settings.
+
+- External API connection cards use one compact visual hierarchy for endpoint,
+  credential state and tier mappings, with inline create, edit, test and delete
+  actions. Model mappings stay locked until the current endpoint and credential
+  pass a connection test.
+
+- Agent and project pickers use the same searchable, keyboard-accessible
+  selector across discussions, Quick Prompts, Quick APIs, workflows and audit
+  launch. Quick Prompt comparison has one unambiguous launch action, labels
+  named external providers and lets users copy run identifiers.
+
+- Compatible frontend, backend and desktop dependencies were refreshed for the
+  release. The unused `backoff` dependency and its unmaintained `instant`
+  transitive dependency were removed; the remaining allowed Rust maintenance
+  advisory is inherited from the PDF extraction stack. The release-time CLI
+  freshness registry was also refreshed against each vendor's stable channel.
+
+- The repository-wide duplicated-line ceiling is ratcheted from 4% to 3%
+  against a measured 2.62% candidate baseline, preventing gradual copy-paste
+  growth as the codebase expands.
+
+- Backend coverage floors are ratcheted to 83% for lines, functions and
+  regions, with the security-sensitive key-management module floors tightened
+  to their demonstrated 90–99% range.
+
+### Fixed
+
+- Delegated-task worktrees release shared edit locks deterministically, retain
+  commit authority through bounded recovery and report native provider progress
+  without presenting missing telemetry as a stalled or free session.
+
+- The long-lived `kronn-internal` MCP bridge can reload when its loaded source
+  changes through a versioned, owner-only and size/schema-bounded handoff,
+  without trusting a mutable replacement artifact between verification and
+  execution.
+
+- External connection tests invalidate stale model selections, bound concurrent
+  probes and verify an entered credential with an authenticated minimal request
+  instead of trusting a public model catalogue. Migrated NVIDIA connections
+  retain their executable default endpoint. OpenRouter uses a non-billable key
+  validation endpoint, preserves the full key prefix and upgrades already
+  receipted databases without violating foreign keys.
+
+- Re-running a Quick Prompt comparison preserves each target's provider and
+  reasoning tier instead of collapsing every result onto one agent, while
+  resolving the model currently assigned to that tier.
+
+- Audit/template installation now creates the shared `AGENTS.md` entry point
+  unconditionally but emits Claude, Gemini, Cursor, Windsurf, Cline, Copilot,
+  Kiro and Vibe instruction adapters only when the target repository already
+  declares that integration or the user explicitly launches it for bootstrap
+  or audit. Generated adapters are rendered without raw placeholders or
+  example commands, and a bounded upgrade repairs only recognizable
+  Kronn-managed template ranges while preserving user content.
+  Localized briefing prompts now consistently reference the canonical `docs/`
+  tree instead of the retired `ai/` path.
+
 ## [0.11.0] - 2026-08-22
 
 ### Added

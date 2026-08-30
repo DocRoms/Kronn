@@ -500,6 +500,8 @@ NoTemplate → TemplateInstalled → Audited → Validated
 
 **API endpoints:**
 - `POST /api/projects/bootstrap` — create project from scratch (dir + git init + template + discussion)
+- `GET /api/projects/:id/docker` — inspect the first supported Compose file at the project root (`compose.yaml`, `compose.yml`, `docker-compose.yaml`, then `docker-compose.yml`). The response merges configured services with `docker compose ps -a`, so services without a container remain visible.
+- `POST /api/projects/:id/docker` — run the closed `start`, `stop` or `restart` action against the complete Compose project or one service. The service must be present in `docker compose config --services`; no arbitrary command, Compose path or working directory is accepted from the client. Commands are time-bounded and use the project's original absolute host path when the Docker daemon needs host-visible bind mounts.
 - `GET /api/projects/:id/dependency-updates` — bounded dependency health summary; native read-only manager checks share a pinned Renovate local dry-run fallback when their runtime is unavailable or fails. Results use a six-hour in-memory cache plus a durable manifest-fingerprinted project cache; the configured cadence (weekly by default) is evaluated only when the Overview is opened, so startup never scans repositories. Add `?refresh=true` to bypass both caches.
 - `PUT /api/projects/:id/dependency-updates` — configure the opportunistic dependency-review cadence (`interval_days`, 1–365, or `null` for manual-only). This changes scheduling only and never runs a package update.
 - `GET /api/projects/:id/source-files` — bounded source tree; add `?shallow=true` for the repository-root first pass used by progressive Code-view loading

@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/screenshots/KronnLogo.jpg" alt="Kronn, Many agents. Zero chaos." width="720" />
+  <img src="site/screenshots/workflows.png" alt="Kronn Automation page showing a multi-step pull-request review workflow with deterministic, agent, gate, and notification steps." />
 </p>
 
 <p align="center">
@@ -19,41 +19,41 @@
   <a href="https://github.com/DocRoms/Kronn/commits/main"><img src="https://img.shields.io/github/last-commit/DocRoms/Kronn?label=last%20commit" alt="Last commit" /></a>
 </p>
 
-<p align="center">
-  <img src="docs/screenshots/kronn-projects.en.png" alt="Kronn dashboard, top nav (Projects, Discussions, Planning, Automation, Plugins, Config), and three public-safe demo projects. The selected project shows agent-context health, detected languages, dependency freshness and documentation status." />
-</p>
-
 **Run Claude Code, Codex, Gemini, Ollama (100% local), LiteLLM and 3 other AI coding agents from one self-hosted dashboard, with shared MCPs, secrets, and repeatable workflows.**
 
 **Smaller prompts, more code where code is enough: fewer hallucinations, lower token bill, eco-design by default.**
 
-> **Status: 0.11.0 (current release).** Functional but pre-1.0. Breaking changes happen between minor versions; patch versions are safe.
+> **Status: 0.12.0 (current release).** Functional but pre-1.0. Breaking changes happen between minor versions; patch versions are safe.
 > **License: AGPL-3.0.** Using Kronn locally to build *your own* product is fine; the copyleft only kicks in if you distribute a modified Kronn to others. See [License notes](#license-notes-agpl-3-0).
 
-## What's new in 0.11.0
+## What's new in 0.12.0
 
-- **Durable task delegation:** run a planning task with a selected agent in its
-  own child discussion and isolated Git worktree, while the parent follows,
-  reviews, requests changes, reassigns and integrates through guarded fast-forward.
-- **Multi-agent prompt evaluation:** compare Quick Prompt answers side by side,
-  reorder columns, inspect model/time/token metrics, keep human and AI quality
-  scores, rank by any metric and open a reasoning-agent improvement discussion.
-- **Local and fallback agents as first-class workers:** Ollama, LiteLLM and NVIDIA
-  use Kronn's native tools alongside Codex, Claude, Vibe and the other CLIs, so
-  work can continue locally or during provider rate limits.
-- **Honest bounded tool use:** collection truncation preserves its shape and
-  total, context windows account for tools up front, and non-progressing local
-  tool loops converge to an explicit partial answer instead of running forever.
-- **Resilient multi-agent rooms:** exact CLI-session routing, durable wake/restart
-  recovery and piggyback room messages let parent and worker agents coordinate
-  without relying on one permanently blocking poll.
+- **One collection language everywhere:** Projects, Discussions, Planning,
+  Automation, Pages and Plugins now share the same compact sidebar structure,
+  search, filters, sorting, favorites, row actions and keyboard behavior.
+- **Named external API connections:** manage LiteLLM, NVIDIA, OpenRouter and other
+  OpenAI-compatible endpoints from one Settings zone, test their credentials,
+  map their models to Economy / Default / Reasoning and address each connection
+  by its own discussion alias.
+- **Project details that use the available space:** Audit, Docs and Code are
+  direct full-height tabs, with a current agent selector, clearer documentation
+  health and audit history instead of nested, oversized disclosure blocks.
+- **Docker controls where the project lives:** inspect Compose services, ports,
+  published hosts and logs, start or stop the stack, open reachable hosts and
+  filter the project list to running environments.
+- **Live Page mosaics:** select several Pages and open them together in a
+  standalone two-, three- or responsive multi-tile layout.
+- **More observable delegated work:** native worker progress and deterministic
+  documentation checks make queues, provider activity and audit validation
+  explicit without pretending unavailable telemetry is free or stalled work.
 
-See the complete [0.11.0 release notes](CHANGELOG.md) and the
-[task delegation guide](docs/guides/task-orchestration.md).
+See the complete [0.12.0 release notes](CHANGELOG.md), the
+[external API connection guide](docs/operations/external-api-connections.md)
+and the [task delegation guide](docs/guides/task-orchestration.md).
 
 ## Contents
 
-- [What's new in 0.11.0](#whats-new-in-0110)
+- [What's new in 0.12.0](#whats-new-in-0120)
 - [60-second pitch](#60-second-pitch)
 - [The Kronn way: engineering, not prompting](#the-kronn-way-engineering-not-prompting)
 - [Quick start](#quick-start)
@@ -114,7 +114,7 @@ Download the installer for your OS from [Releases](https://github.com/DocRoms/Kr
 ### From source: one command
 
 ```bash
-git clone --branch 0.11.0 --depth 1 https://github.com/DocRoms/Kronn.git   # latest stable release
+git clone --branch 0.12.0 --depth 1 https://github.com/DocRoms/Kronn.git   # latest stable release
 cd Kronn
 ./kronn start        # guided setup & launch (Docker)
 ```
@@ -145,7 +145,7 @@ app, Docker deployment and a bare `make run-backend` do not require it.
 Requires Docker + Docker Compose. On Windows, WSL2 (Docker Engine inside WSL works, Docker Desktop optional).
 
 ```bash
-git clone --branch 0.11.0 --depth 1 https://github.com/DocRoms/Kronn.git   # latest stable release
+git clone --branch 0.12.0 --depth 1 https://github.com/DocRoms/Kronn.git   # latest stable release
 cd Kronn
 ./kronn start
 # → http://localhost:3140

@@ -16,6 +16,18 @@ stack, not to start a task. Content verbatim.
 - Dev backend only: `make dev-backend` (watchexec with auto-reload).
 - Dev frontend only: `make dev-frontend` (Vite dev server on :5173).
 - After changing Rust models with `#[derive(TS)]`: run `make typegen` to regenerate `frontend/src/types/generated.ts`.
+- The project Docker tab reads the machine's hosts file to flag published
+  domains that are missing or mapped away from loopback. `make start` snapshots
+  `/etc/hosts` into the ignored `.docker/runtime/` directory before mounting it
+  read-only; this avoids Docker Desktop and OrbStack substituting their VM's
+  hosts file. Set `KRONN_HOSTS_FILE` before starting the stack if the source
+  lives elsewhere. Native deployments read the platform default directly.
+  Kronn never modifies the source file. The same tab
+  exposes the latest 200 timestamped Compose log lines for running services;
+  output is bounded server-side and can be refreshed or copied from the UI.
+  Project cards and the "Docker running" project filter use one fleet-wide
+  `docker ps` query keyed by Compose's `working_dir` label, rather than one
+  Docker command per registered project.
 - After `docker compose build`, always restart the gateway: `docker compose restart gateway` or `docker compose down && docker compose up -d`.
 - **macOS Kiro login is opt-in (silent by default)**: `maybe_login_kiro` (`kronn`) says **nothing** about Kiro unless `KRONN_KIRO_LOGIN=1`, which makes it probe + run `make kiro-login`. Decision logic is the pure `kiro_startup_action(os, authenticated, available, opt_in)` in `lib/agents.sh` (tested in `tests/bats/agents.bats`). Non-macOS / no-opt-in both return `skip`. Kiro is no longer auto-installed at boot (see next bullet), so by default there's nothing to log into until the user installs it.
 - **macOS: only mirror agents the user actually installed; never pick a host-mounted Darwin binary.** The container `PATH` includes the host's `~/.local/bin` (`/host-bin/local`), so `which` can resolve a macOS (Mach-O) `claude`/`codex`/… that can't exec in the Linux container (symptom: a version reading "Exec format error"). Invariants:
