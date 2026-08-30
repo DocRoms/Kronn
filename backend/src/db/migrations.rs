@@ -583,6 +583,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "153_quick_prompt_external_connection",
         include_str!("sql/153_quick_prompt_external_connection.sql"),
     ),
+    (
+        "154_execution_variable_snapshots",
+        include_str!("sql/154_execution_variable_snapshots.sql"),
+    ),
 ];
 
 /// Apply one migration inside the caller-owned transaction.
