@@ -116,6 +116,29 @@ beforeEach(() => {
 });
 
 describe('DiscussionSidebar — grouping', () => {
+  it('renders the resolved external provider label instead of the Custom wire type', () => {
+    const discussion = mkDisc({ id: 'openrouter-disc', agent: 'Custom' });
+    render(
+      <DiscussionSidebar
+        {...baseProps}
+        discussions={[discussion]}
+        agentLabels={{ 'openrouter-disc': 'OpenRouter' }}
+      />,
+    );
+
+    expect(screen.getByText(/0 msg · OpenRouter/)).toBeInTheDocument();
+    expect(screen.queryByText(/0 msg · Custom/)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', {
+      name: 'Discussion openrouter-disc — 0 messages, OpenRouter',
+    })).toBeInTheDocument();
+  });
+
+  it('keeps the shared-shell and discussion sizing classes on the sidebar', () => {
+    render(<DiscussionSidebar {...baseProps} />);
+    expect(screen.getByRole('complementary', { name: 'Discussions' }))
+      .toHaveClass('collection-shell-sidebar', 'disc-sidebar');
+  });
+
   it('nests execution rooms once under their principal and keeps orphans visible', async () => {
     const onSelect = vi.fn();
     const projects = [mkProject('p-1', 'Kronn')];
@@ -437,6 +460,7 @@ describe('DiscussionSidebar — pinned / favorites section', () => {
     // Favorites header renders with the pinned count.
     const favHeader = screen.getByText('disc.favorites');
     expect(favHeader).toBeInTheDocument();
+    expect(favHeader.closest('button')).toHaveClass('collection-favorites-header');
 
     // Scope to the favorites <div> (header + its pinned items). The same
     // pinned disc also renders in its project/global group via a `pin-<id>`
@@ -514,6 +538,26 @@ describe('DiscussionSidebar — global search entry point', () => {
     expect(screen.getByText('Banana bread')).toBeInTheDocument();
   });
 
+  it('keeps the page-wide slash shortcut bound to the backend-search field', async () => {
+    render(<DiscussionSidebar {...baseProps} discussions={discussions} />);
+    await waitFor(() => expect(projectsApi.discSources).toHaveBeenCalled());
+
+    fireEvent.keyDown(window, { key: '/' });
+    expect(document.querySelector('.disc-search-input')).toHaveFocus();
+  });
+
+  it('keeps grouped discussion rows in the shared arrow-key navigation', async () => {
+    render(<DiscussionSidebar {...baseProps} discussions={discussions} />);
+    await waitFor(() => expect(projectsApi.discSources).toHaveBeenCalled());
+
+    const sidebar = screen.getByRole('complementary', { name: 'Discussions' });
+    const rows = Array.from(sidebar.querySelectorAll<HTMLButtonElement>('.collection-shell-row-button'));
+    fireEvent.keyDown(sidebar, { key: 'ArrowDown' });
+    expect(rows).toContain(document.activeElement);
+    fireEvent.keyDown(sidebar, { key: 'End' });
+    expect(rows).toContain(document.activeElement);
+  });
+
   it('uses one query when switching from quick to advanced search', async () => {
     const onOpenGlobalSearch = vi.fn();
     const { rerender } = render(
@@ -528,7 +572,10 @@ describe('DiscussionSidebar — global search entry point', () => {
     const quickInput = document.querySelector('.disc-search-input') as HTMLInputElement;
     fireEvent.change(quickInput, { target: { value: 'banana' } });
     expect(screen.getAllByRole('textbox')).toHaveLength(1);
-    expect(screen.getByTestId('disc-open-global-search')).toBeVisible();
+    const advancedSearch = screen.getByTestId('disc-open-global-search');
+    expect(advancedSearch).toBeVisible();
+    expect(advancedSearch.querySelector('span')).toBeNull();
+    expect(advancedSearch.querySelector('.lucide-funnel')).toBeInTheDocument();
     fireEvent.keyDown(quickInput, { key: 'Enter' });
     expect(onOpenGlobalSearch).toHaveBeenCalledTimes(1);
 
@@ -749,6 +796,30 @@ describe('DiscussionSidebar — batch groups', () => {
     expect(pill).not.toBeNull();
     expect(pill!.getAttribute('data-batch-status')).toBe('done');
     expect(pill!.textContent).toContain('2/2');
+  });
+
+  it('copies the complete run id without toggling the run folder', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    });
+    const onToggleBatchRun = vi.fn();
+    render(
+      <DiscussionSidebar
+        {...baseProps}
+        projects={projects}
+        discussions={batchDiscs}
+        batchSummaries={[mkBatchSummary({ run_id: runId, quick_prompt_name: 'Compare agents' })]}
+        onToggleBatchRun={onToggleBatchRun}
+      />
+    );
+    await waitFor(() => expect(projectsApi.discSources).toHaveBeenCalled());
+
+    fireEvent.click(screen.getByRole('button', { name: `disc.batchCopyRunId:${runId}` }));
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(runId));
+    expect(onToggleBatchRun).not.toHaveBeenCalled();
   });
 
   it('shows the durable partial breakdown instead of a success pill', async () => {

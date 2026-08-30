@@ -1711,7 +1711,7 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, onChangeSt
 
   return (
     <div className="wf-detail-panel">
-      <div className="wf-detail-header">
+      <div className="wf-detail-header collection-detail-header">
         <div className="wf-detail-heading">
           <h2 className="text-lg font-bold" style={{ margin: 0 }}>{workflow.name}</h2>
           {/* Short workflow-id pill — same affordance as the disc-id pill:

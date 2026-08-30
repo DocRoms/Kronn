@@ -71,6 +71,19 @@ function closeNewDiscussionForm() {
   card?.querySelector<HTMLElement>('button[aria-label="Close"]')?.click();
 }
 
+/** Open the consolidated Automation creation chooser. The AI action moved
+ * inside this modal when the sidebar header was simplified to a single `+`,
+ * so the tour must reveal the chooser before it can spotlight that action. */
+function openAutomationActions() {
+  if (document.querySelector('.automation-action-modal')) return;
+  document.querySelector<HTMLElement>('[data-tour-id="automation-actions"]')?.click();
+}
+
+/** Put the chooser away before the final step changes page. */
+function closeAutomationActions() {
+  document.querySelector<HTMLElement>('.wf-import-modal-backdrop')?.click();
+}
+
 /** Seeded demo discussion, resolved once per tour run. */
 let demoDiscussion: { id: string; prompt: string } | null = null;
 let demoTypingTimer: ReturnType<typeof setTimeout> | null = null;
@@ -619,6 +632,8 @@ export const TOUR_STEPS: TourStep[] = [
   {
     id: 'automation-ai',
     page: 'workflows',
+    beforeStep: openAutomationActions,
+    afterStep: closeAutomationActions,
     selector: '[data-tour-id="automation-ai-btn"]',
     titleKey: 'tour.automationAi.title',
     descKey: 'tour.automationAi.desc',

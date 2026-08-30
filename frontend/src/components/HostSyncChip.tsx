@@ -1,21 +1,36 @@
 /**
  * Compact, single-line scope chip for the MCP card grid (McpPage cards).
  *
- * Shown when the config has `host_sync !== 'None'` to indicate at a
- * glance that this MCP is exposed to local CLIs (Claude Code / Gemini /
- * Codex / Copilot). Click on the parent card opens the drawer where
+ * Always shown so "global in Kronn" can never be mistaken for "available in
+ * every local CLI". Click on the parent card opens the drawer where
  * the actual checkbox lives — single source of edit (the previous
  * 3-mode radio was removed in the Phase-3 refactor that unified scope
  * Kronn ↔ scope CLI under one model).
  */
 import type { HostSyncMode } from '../types/generated';
+import { useT } from '../lib/I18nContext';
 
 export function HostSyncChip({ mode }: { mode: HostSyncMode }) {
-  if (mode === 'None') return null;
+  const { t } = useT();
+  if (mode === 'None') {
+    return (
+      <span
+        className="badge"
+        title={t('mcp.hostScope.kronnOnlyHint')}
+        style={{
+          background: 'var(--kr-surface-muted, rgba(100, 116, 139, 0.1))',
+          color: 'var(--kr-text-secondary, #64748b)',
+          fontSize: '0.75em',
+        }}
+      >
+        {t('mcp.hostScope.kronnOnly')}
+      </span>
+    );
+  }
   // Both `GlobalOnly` and `MirrorAll` (legacy) collapse to the same
   // user-facing label: this MCP is in your local CLI files.
-  const label = '🌐 CLI local';
-  const tooltip = 'Synchronisé dans ~/.claude.json, ~/.gemini/settings.json, ~/.codex/config.toml, ~/.copilot/mcp-config.json — disponible quand tu utilises ces CLIs hors Kronn.';
+  const label = t('mcp.hostScope.localCli');
+  const tooltip = t('mcp.hostScope.localCliHint');
   return (
     <span
       className="badge"

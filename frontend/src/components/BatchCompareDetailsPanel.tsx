@@ -4,12 +4,14 @@ import {
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { workflows as workflowsApi } from '../lib/api';
-import { AGENT_LABELS, agentColor, modelForAgentTier } from '../lib/constants';
+import { AGENT_LABELS, agentTextColor, modelForAgentTier } from '../lib/constants';
 import type {
   AgentType, BatchCompareDetails, BatchCompareEvaluation, Discussion,
   ModelTier, ModelTiersConfig,
 } from '../types/generated';
 import { AgentSwitchPicker } from './AgentSwitchPicker';
+import type { ExternalApiConnectionView } from '../lib/api';
+import { externalConnectionForDiscussion } from '../lib/externalAgentIdentity';
 
 type RankingMetric = 'weighted' | 'ai' | 'human' | 'duration' | 'tokens';
 type RankingDirection = 'asc' | 'desc';
@@ -18,6 +20,7 @@ interface BatchCompareDetailsPanelProps {
   runId: string;
   discussions: Discussion[];
   availableAgents: AgentType[];
+  externalConnections?: ExternalApiConnectionView[];
   modelTiers?: ModelTiersConfig | null;
   onOpenDiscussion: (discussionId: string) => void;
   onClose: () => void;
@@ -38,6 +41,25 @@ function lastSystemCause(discussion: Discussion) {
     if (message.role === 'System' && message.content.trim()) return message.content.trim();
   }
   return null;
+}
+
+function lastRecordedModel(discussion: Discussion) {
+  for (let index = discussion.messages.length - 1; index >= 0; index -= 1) {
+    const model = discussion.messages[index].model?.trim();
+    if (model) return model;
+  }
+  return null;
+}
+
+function compareAgentLabel(
+  discussion: Discussion,
+  externalConnections: ExternalApiConnectionView[],
+) {
+  if (discussion.agent !== 'Custom') return AGENT_LABELS[discussion.agent] ?? discussion.agent;
+  const connection = externalConnectionForDiscussion(discussion, externalConnections);
+  if (connection) return connection.display_name;
+  const segments = discussion.title.split(' · ');
+  return segments.length >= 3 ? segments.at(-2) || discussion.agent : discussion.agent;
 }
 
 function weightedQuality(
@@ -73,6 +95,7 @@ export function BatchCompareDetailsPanel({
   runId,
   discussions,
   availableAgents,
+  externalConnections = [],
   modelTiers,
   onOpenDiscussion,
   onClose,
@@ -377,13 +400,16 @@ export function BatchCompareDetailsPanel({
               const { discussion, evaluation, answer, value } = entry;
               const manualScore = evaluation?.manual_score ?? null;
               const ai = evaluation?.ai;
-              const agentLabel = AGENT_LABELS[discussion.agent] ?? discussion.agent;
-              const concreteModel = answer?.model ?? modelForAgentTier(
-                discussion.agent,
-                discussion.tier ?? 'default',
-                modelTiers,
-                t('disc.defaultAgentModel'),
-              );
+              const agentLabel = compareAgentLabel(discussion, externalConnections);
+              const concreteModel = answer?.model
+                ?? discussion.model
+                ?? lastRecordedModel(discussion)
+                ?? modelForAgentTier(
+                  discussion.agent,
+                  discussion.tier ?? 'default',
+                  modelTiers,
+                  t('disc.defaultAgentModel'),
+                );
               const weighted = weightedQuality(evaluation, humanWeight);
               const failureCause = answer ? null : lastSystemCause(discussion);
               const tokens = answer?.tokens_used && answer.tokens_used > 0
@@ -396,7 +422,7 @@ export function BatchCompareDetailsPanel({
                 <li key={discussion.id} className="disc-compare-ranking-item">
                   <header>
                     <span className="disc-compare-rank">{value == null ? '—' : `#${index + 1}`}</span>
-                    <strong style={{ color: agentColor(discussion.agent) }}>{agentLabel}</strong>
+                    <strong style={{ color: agentTextColor(discussion.agent) }}>{agentLabel}</strong>
                     <span className="disc-compare-rank-value">{formatRankValue(value)}</span>
                     {partialWeighted && <small>{t('disc.compare.partialQuality')}</small>}
                   </header>

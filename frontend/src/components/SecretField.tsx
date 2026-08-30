@@ -32,6 +32,11 @@ export interface SecretFieldProps {
   onCancelReplace?: () => void;
   /** Fetch the stored value for a read-only peek (the eye in stored mode). Returns the value or null. */
   onRevealStored?: () => Promise<string | null>;
+  /** Optional integration hooks for pages with their own field styling/tests. */
+  inputClassName?: string;
+  buttonClassName?: string;
+  inputTestId?: string;
+  ariaLabel?: string;
 }
 
 const linkStyleBase: CSSProperties = {
@@ -53,6 +58,10 @@ export function SecretField({
   onReplace,
   onCancelReplace,
   onRevealStored,
+  inputClassName = 'input mcp-input-mono',
+  buttonClassName = 'mcp-icon-btn',
+  inputTestId,
+  ariaLabel,
 }: SecretFieldProps) {
   const { t } = useT();
   // Read-only peek of the stored value (stored mode only).
@@ -70,18 +79,20 @@ export function SecretField({
             were silently swallowed, and the save wrote nothing. The eye stays
             a pure read-only peek (it's a sibling button, not the input). */}
         <input
-          className="input mcp-input-mono"
+          className={inputClassName}
           readOnly
           style={{ cursor: 'pointer' }}
           title={t('mcp.custom.replaceValue')}
           type={revealed ? 'text' : 'password'}
           value={revealed ? (peeked ?? '') : '••••••••'}
+          data-testid={inputTestId}
+          aria-label={ariaLabel}
           onChange={() => {}}
           onFocus={() => { setPeeked(null); onReplace?.(); }}
         />
         <button
           type="button"
-          className="mcp-icon-btn"
+          className={buttonClassName}
           title={revealed ? t('mcp.hide') : t('mcp.show')}
           aria-label={revealed ? t('mcp.hide') : t('mcp.show')}
           onClick={async () => {
@@ -118,15 +129,17 @@ export function SecretField({
   return (
     <>
       <input
-        className="input mcp-input-mono"
+        className={inputClassName}
         type={showTyped ? 'text' : 'password'}
         value={value}
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder ?? t('mcp.custom.fieldValue')}
+        data-testid={inputTestId}
+        aria-label={ariaLabel}
       />
       <button
         type="button"
-        className="mcp-icon-btn"
+        className={buttonClassName}
         title={showTyped ? t('mcp.hide') : t('mcp.show')}
         aria-label={showTyped ? t('mcp.hide') : t('mcp.show')}
         onClick={() => setShowTyped((v) => !v)}

@@ -16,7 +16,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, act, cleanup, waitFor } from '@testing-library/react';
 
 const { ollama, config } = vi.hoisted(() => ({
-  ollama: { health: vi.fn(), models: vi.fn(), setContextOverride: vi.fn() },
+  ollama: { health: vi.fn(), models: vi.fn(), pull: vi.fn(), setContextOverride: vi.fn() },
   config: { getModelTiers: vi.fn(), setModelTiers: vi.fn() },
 }));
 
@@ -53,6 +53,7 @@ beforeEach(() => {
     status: 'not_installed', version: null, endpoint: '', models_count: 0, hint: null,
   });
   ollama.models.mockResolvedValue({ models: [] });
+  ollama.pull.mockResolvedValue(undefined);
   ollama.setContextOverride.mockResolvedValue({ model: '', num_ctx: null, warnings: [] });
   config.getModelTiers.mockResolvedValue(baseTiers);
   config.setModelTiers.mockResolvedValue(undefined);
@@ -161,7 +162,11 @@ describe('OllamaCard — per-model context policy', () => {
     expect(screen.getByText('ollama.contextCeiling')).toBeTruthy();
     expect(screen.getByText('ollama.contextOrigin.portable_fallback')).toBeTruthy();
     expect(screen.getByText('ollama.contextFallbackWarning')).toBeTruthy();
-    expect(document.body.textContent).toContain('8,192');
+    // `toLocaleString()` deliberately follows the runtime locale: Quick Exec
+    // may render 8 192 while an English workstation renders 8,192. Assert the
+    // numeric value without coupling this regression test to one separator.
+    const ceilingMetric = screen.getByText('ollama.contextCeiling').closest('span');
+    expect(ceilingMetric?.textContent?.replace(/\D/g, '')).toBe('8192');
   });
 
   it('persists a bounded override and refreshes the effective projection', async () => {
@@ -247,9 +252,13 @@ describe('OllamaCard — per-tier model picker', () => {
 
     await mountCard(model => model === 'llama3.2' ? ' · ≈ $0.00/M observed' : '');
 
-    expect(screen.getAllByRole('option', {
-      name: /llama3\.2.*≈ \$0\.00\/M observed/,
-    })).toHaveLength(3);
+    for (const tier of ['economy', 'default', 'reasoning']) {
+      const input = screen.getByLabelText(`disc.tier.${tier}`);
+      fireEvent.focus(input);
+      expect(screen.getByRole('option', { name: 'llama3.2' }))
+        .toHaveTextContent('≈ $0.00/M observed');
+      fireEvent.keyDown(input, { key: 'Escape' });
+    }
   });
 
   it('choosing a model in the default AND economy selects fires setModelTiers per tier', async () => {
@@ -263,14 +272,22 @@ describe('OllamaCard — per-tier model picker', () => {
     await mountCard();
 
     // Default tier → writes ollama.default (aria-label is the i18n key here).
-    const defSelect = screen.getByLabelText('disc.tier.default') as HTMLSelectElement;
-    await act(async () => { fireEvent.change(defSelect, { target: { value: 'llama3.2' } }); });
+    const defSelect = screen.getByLabelText('disc.tier.default') as HTMLInputElement;
+    await act(async () => {
+      fireEvent.focus(defSelect);
+      fireEvent.change(defSelect, { target: { value: 'llama3.2' } });
+      fireEvent.click(screen.getByRole('option', { name: /llama3\.2/ }));
+    });
     await waitFor(() => expect(config.setModelTiers).toHaveBeenCalled());
     expect(config.setModelTiers.mock.calls[0][0].ollama.default).toBe('llama3.2');
 
     // Economy tier → the NEW capability: writes ollama.economy independently.
-    const ecoSelect = screen.getByLabelText('disc.tier.economy') as HTMLSelectElement;
-    await act(async () => { fireEvent.change(ecoSelect, { target: { value: 'llama3.2' } }); });
+    const ecoSelect = screen.getByLabelText('disc.tier.economy') as HTMLInputElement;
+    await act(async () => {
+      fireEvent.focus(ecoSelect);
+      fireEvent.change(ecoSelect, { target: { value: 'llama3.2' } });
+      fireEvent.click(screen.getByRole('option', { name: /llama3\.2/ }));
+    });
     await waitFor(() => expect(config.setModelTiers.mock.calls.length).toBeGreaterThan(1));
     const last = config.setModelTiers.mock.calls.at(-1)![0];
     expect(last.ollama.economy).toBe('llama3.2');
@@ -291,9 +308,13 @@ describe('OllamaCard — per-tier model picker', () => {
     config.setModelTiers.mockRejectedValue(new Error('500'));
     await mountCard();
 
-    const defSelect = screen.getByLabelText('disc.tier.default') as HTMLSelectElement;
+    const defSelect = screen.getByLabelText('disc.tier.default') as HTMLInputElement;
     expect(defSelect.value).toBe('llama3.2');
-    await act(async () => { fireEvent.change(defSelect, { target: { value: 'qwen2.5-coder:14b' } }); });
+    await act(async () => {
+      fireEvent.focus(defSelect);
+      fireEvent.change(defSelect, { target: { value: 'qwen2.5-coder:14b' } });
+      fireEvent.click(screen.getByRole('option', { name: /qwen2\.5-coder:14b/ }));
+    });
     await waitFor(() => expect(config.setModelTiers).toHaveBeenCalled());
     // Optimistic flip reverted on failure → select shows the original model again.
     await waitFor(() => expect(defSelect.value).toBe('llama3.2'));
@@ -311,6 +332,88 @@ describe('OllamaCard — refresh button', () => {
     const initialHealthCalls = ollama.health.mock.calls.length;
     fireEvent.click(screen.getByLabelText('ollama.refresh'));
     await waitFor(() => expect(ollama.health.mock.calls.length).toBeGreaterThan(initialHealthCalls));
+  });
+});
+
+describe('OllamaCard — direct model downloads', () => {
+  beforeEach(() => {
+    ollama.health.mockResolvedValue({
+      status: 'online', version: '0.12.0', endpoint: 'http://localhost:11434',
+      models_count: 0, hint: null,
+    });
+  });
+
+  it('starts one pull on synchronous double-clicks and renders byte progress', async () => {
+    let resolvePull!: () => void;
+    ollama.pull.mockImplementation((_model: string, handlers: { onProgress: (event: unknown) => void }) => {
+      handlers.onProgress({ status: 'downloading', digest: 'sha256:abc', completed: 1_000_000, total: 4_000_000 });
+      return new Promise<void>(resolve => { resolvePull = resolve; });
+    });
+    await mountCard();
+
+    const button = screen.getAllByRole('button', { name: 'ollama.pullButton' })[0];
+    fireEvent.click(button);
+    fireEvent.click(button);
+    await waitFor(() => expect(ollama.pull).toHaveBeenCalledTimes(1));
+    expect(screen.getByText(/1 MB.*4 MB.*25%/)).toBeTruthy();
+    resolvePull();
+  });
+
+  it('cancels an in-flight pull and leaves it relaunchable', async () => {
+    let receivedSignal!: AbortSignal;
+    ollama.pull.mockImplementation((_model: string, _handlers: unknown, signal: AbortSignal) => new Promise<void>(resolve => {
+      receivedSignal = signal;
+      signal.addEventListener('abort', () => resolve());
+    }));
+    await mountCard();
+
+    fireEvent.click(screen.getAllByRole('button', { name: 'ollama.pullButton' })[0]);
+    await waitFor(() => expect(screen.getByRole('button', { name: 'ollama.pullCancel' })).toBeTruthy());
+    fireEvent.click(screen.getByRole('button', { name: 'ollama.pullCancel' }));
+    await waitFor(() => expect(receivedSignal.aborted).toBe(true));
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'ollama.pullCancel' })).toBeNull());
+  });
+
+  it('refreshes installed models only after a success event', async () => {
+    ollama.pull.mockImplementation(async (_model: string, handlers: { onSuccess: (event: unknown) => void }) => {
+      handlers.onSuccess({ status: 'success', digest: null, completed: null, total: null });
+    });
+    ollama.models
+      .mockResolvedValueOnce({ models: [] })
+      .mockResolvedValueOnce({ models: [installedModel('llama3.2:1b')] });
+    await mountCard();
+    fireEvent.click(screen.getAllByRole('button', { name: 'ollama.pullButton' })[0]);
+    await waitFor(() => expect(ollama.models).toHaveBeenCalledTimes(2));
+    expect(screen.getAllByText(/llama3\.2:1b/).length).toBeGreaterThan(0);
+  });
+
+  it('surfaces a pull error without reporting success', async () => {
+    ollama.pull.mockImplementation(async (_model: string, handlers: { onError: (message: string) => void }) => {
+      handlers.onError('Ollama could not find this model. Check its name and tag, then try again.');
+    });
+    await mountCard();
+    fireEvent.click(screen.getAllByRole('button', { name: 'ollama.pullButton' })[0]);
+    expect(await screen.findByRole('alert')).toHaveTextContent('could not find this model');
+    expect(ollama.models).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('button', { name: 'ollama.pullCancel' })).toBeNull();
+    expect(screen.getAllByRole('button', { name: 'ollama.pullButton' })[0]).not.toBeDisabled();
+  });
+
+  it('keeps a confirmed download successful when refreshing installed models fails', async () => {
+    ollama.pull.mockImplementation(async (_model: string, handlers: { onSuccess: (event: unknown) => void }) => {
+      handlers.onSuccess({ status: 'success', digest: null, completed: null, total: null });
+    });
+    ollama.models
+      .mockResolvedValueOnce({ models: [] })
+      .mockRejectedValueOnce(new Error('refresh unavailable'));
+    await mountCard();
+
+    fireEvent.click(screen.getAllByRole('button', { name: 'ollama.pullButton' })[0]);
+
+    expect(await screen.findByText('success')).toBeTruthy();
+    expect(await screen.findByRole('alert')).toHaveTextContent('downloaded successfully');
+    expect(screen.getByRole('alert')).toHaveTextContent('refresh unavailable');
+    expect(screen.getAllByRole('button', { name: 'ollama.pullButton' })[0]).not.toBeDisabled();
   });
 });
 

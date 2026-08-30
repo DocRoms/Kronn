@@ -18,6 +18,10 @@ describe('quoteMultilinePaste', () => {
     expect(quoteMultilinePaste('> ', 'a\r\nb')).toBe('a\n> b');
   });
 
+  it('preserves blank lines and continuation lines that are already quoted', () => {
+    expect(quoteMultilinePaste('> ', 'a\n\n>\n> b\nc')).toBe('a\n> \n>\n> b\n> c');
+  });
+
   it('returns null for a single-line paste (let the native paste run)', () => {
     expect(quoteMultilinePaste('> ', 'just one line')).toBeNull();
   });

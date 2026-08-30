@@ -48,7 +48,9 @@ describe('StandaloneLivePage', () => {
     expect(frame).not.toHaveAttribute('allow-same-origin');
     expect(frame.getAttribute('srcdoc')).toContain("connect-src 'none'");
     expect(frame.getAttribute('srcdoc')).toContain('<h1>Production health</h1>');
-    expect(linkRelay.connect).toHaveBeenCalledWith((frame as HTMLIFrameElement).contentWindow);
+    await waitFor(() => expect(linkRelay.connect).toHaveBeenCalledWith(
+      (frame as HTMLIFrameElement).contentWindow,
+    ));
     await waitFor(() => expect(document.title).toBe('Production health · Kronn'));
 
     view.unmount();

@@ -47,6 +47,11 @@ const AGENT: AgentDetection = {
   runtime_available: false, rtk_available: false, rtk_hook_configured: false,
 };
 
+const CODEX_AGENT: AgentDetection = {
+  ...AGENT,
+  name: 'Codex', agent_type: 'Codex', path: '/usr/bin/codex',
+};
+
 const DRIFT: DriftCheckResponse = {
   audit_date: '2026-07-20',
   stale_sections: [
@@ -191,13 +196,32 @@ describe('ProjectCard — full audit step_error visibility', () => {
       captured = handlers as FullHandlers;
       await new Promise<void>((resolve) => { release = resolve; });
     });
-    const { props } = renderCard({
+    const { props, container } = renderCard({
       project: { ...PROJECT, audit_status: 'TemplateInstalled' },
       driftStatus: null,
+      agents: [AGENT, CODEX_AGENT],
     });
-    const btn = await screen.findByText(/audit.kindSelector.launchLabel/);
+    const trackerPrerequisite = screen.getByTestId('audit-tracker-prerequisite');
+    const briefingButton = screen.getByTestId('briefing-open-form-btn');
+    expect(trackerPrerequisite.compareDocumentPosition(briefingButton))
+      .toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(container.querySelector('select')).toBeNull();
+    const agentPicker = container.querySelector<HTMLButtonElement>('.kr-agent-switch-btn');
+    expect(agentPicker).not.toBeNull();
+    await act(async () => { fireEvent.click(agentPicker!); });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Codex · disc.tier.economy' }));
+    });
+
+    const btn = await screen.findByText(/audit.startFullAudit/);
     await act(async () => { fireEvent.click(btn); await Promise.resolve(); });
     expect(captured).not.toBeNull();
+    expect(projectsApi.fullAuditStream).toHaveBeenCalledWith(
+      PROJECT.id,
+      expect.objectContaining({ agent: 'Codex', tier: 'economy', kind: 'Full', resume_run_id: null }),
+      expect.any(Object),
+      expect.any(AbortSignal),
+    );
 
     await act(async () => { captured!.onStepError?.('Step 2 (docs/x.md): spawn failed', 2); });
     expect(props.toast).toHaveBeenCalledWith(expect.stringContaining('audit.streamWarning'), 'error');

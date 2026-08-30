@@ -1,14 +1,18 @@
-import { useState, useEffect, useMemo, useRef } from 'react';
+import { useState, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
 import '../pages/DiscussionsPage.css';
 import { ProfileTooltip } from './ProfileTooltip';
-import { AgentSwitchPicker } from './AgentSwitchPicker';
+import { AgentSwitchPicker, type AgentSwitchTarget } from './AgentSwitchPicker';
 import { MarkdownEditor } from './MarkdownComposerTools';
+import { SearchableSelect } from './SearchableSelect';
 import { skills as skillsApi, profiles as profilesApi, directives as directivesApi, config as configApi } from '../lib/api';
-import type { Project, AgentDetection, AgentType, AgentsConfig, Skill, AgentProfile, Directive, ModelTier } from '../types/generated';
-import { AGENT_LABELS, AGENT_MENTIONS, MODEL_TIER_ICONS, agentColor, mentionedAgents, modelForAgentTier, isAgentRestricted as isAgentRestrictedUtil, isUsable, isHiddenPath, RTK_APPLICABLE, isRtkActive } from '../lib/constants';
-import { clearDraft, loadDraft, NEW_DISCUSSION_DRAFT_ID, saveDraft } from '../lib/chat-drafts';
+import type { ExternalApiConnectionView } from '../lib/api';
+import type { Project, AgentDetection, AgentType, AgentsConfig, Skill, AgentProfile, Directive, MessageTarget, ModelTier, ModelTierConfig } from '../types/generated';
+import { AGENT_LABELS, AGENT_MENTIONS, MODEL_TIER_ICONS, agentTextColor, modelForAgentTier, isAgentRestricted as isAgentRestrictedUtil, isUsable, isHiddenPath, RTK_APPLICABLE, isRtkActive } from '../lib/constants';
+import { clearDraft, loadDraft, NEW_DISCUSSION_DRAFT_ID, saveDraft, type DraftRoutingTiers } from '../lib/chat-drafts';
+import { externalAgentTargets } from '../lib/externalAgentIdentity';
 import { loadDefaultDiscussionProject, saveDefaultDiscussionProject } from '../lib/new-discussion-preferences';
 import { findAgentMentionQuery, type AgentMentionQuery } from '../lib/mention-autocomplete';
+import { quoteMultilinePaste } from '../lib/quoteMultilinePaste';
 import {
   applyEmojiReplacement,
   findEmojiQuery,
@@ -21,8 +25,47 @@ import {
   MessageSquare, X, AlertTriangle,
   Settings, Check, Zap, UserCircle, FileText, Paperclip, Image,
   Cpu,
-  Search,
 } from 'lucide-react';
+
+const MENTION_TIER_CHOICES: ModelTier[] = ['economy', 'default', 'reasoning'];
+
+interface LaunchTarget {
+  agent: AgentType;
+  trigger: string;
+  label: string;
+  available: boolean;
+  connectionId?: string;
+  modelTiers?: ModelTierConfig;
+}
+
+function launchTargetKey(target: Pick<LaunchTarget, 'agent' | 'connectionId'>): string {
+  return target.connectionId ? `${target.agent}:${target.connectionId}` : target.agent;
+}
+
+function escapedMention(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function mentionedLaunchTargets(text: string, targets: LaunchTarget[]): LaunchTarget[] {
+  const matches: Array<{ index: number; target: LaunchTarget }> = [];
+  for (const target of targets) {
+    const pattern = new RegExp(
+      `(^|[^\\p{L}\\p{N}_-])${escapedMention(target.trigger)}(?=$|[^\\p{L}\\p{N}_-])`,
+      'giu',
+    );
+    for (const match of text.matchAll(pattern)) {
+      matches.push({ index: (match.index ?? 0) + match[1].length, target });
+    }
+  }
+  matches.sort((left, right) => left.index - right.index);
+  const seen = new Set<string>();
+  return matches.flatMap(({ target }) => {
+    const key = launchTargetKey(target);
+    if (seen.has(key)) return [];
+    seen.add(key);
+    return [target];
+  });
+}
 
 // ─── Public types ────────────────────────────────────────────────────────────
 
@@ -44,6 +87,9 @@ export interface NewDiscConfig {
   targetAgents: AgentType[];
   /** Per-agent reasoning levels selected beside each prompt alias. */
   targetTiers: Partial<Record<AgentType, ModelTier>>;
+  /** Connection-qualified initial routing. Present when at least one dynamic
+   * HTTP provider is selected; native-only callers keep the legacy fields. */
+  initialTargets?: MessageTarget[];
   /** 0.8.6 phase 2 — when `false`, the parent should create the disc
    *  WITHOUT auto-launching an agent (CLI run skipped). The user is
    *  expected to invite agents later via the `[+ Inviter]` header
@@ -56,6 +102,7 @@ export interface NewDiscussionFormProps {
   agents: AgentDetection[];
   configLanguage: string | null;
   agentAccess: AgentsConfig | null;
+  externalConnections?: ExternalApiConnectionView[];
   prefill?: { projectId: string; title: string; prompt: string; locked?: boolean } | null;
   onSubmit: (config: NewDiscConfig) => void;
   onClose: () => void;
@@ -70,6 +117,7 @@ export function NewDiscussionForm({
   projects,
   agents,
   agentAccess,
+  externalConnections = [],
   prefill,
   onSubmit,
   onClose,
@@ -81,10 +129,10 @@ export function NewDiscussionForm({
   const [initialDraft] = useState(() => loadDraft(NEW_DISCUSSION_DRAFT_ID));
   const [newDiscTitle, setNewDiscTitle] = useState('');
   const [newDiscAgent, setNewDiscAgent] = useState<AgentType | ''>('');
+  const [newDiscConnectionId, setNewDiscConnectionId] = useState<string | null>(null);
   const [agentLaunchMode, setAgentLaunchMode] = useState<'selected' | 'prompt'>('selected');
   const [newDiscProjectId, setNewDiscProjectId] = useState<string>('');
   const [defaultProjectId, setDefaultProjectId] = useState(loadDefaultDiscussionProject);
-  const [projectSearch, setProjectSearch] = useState('');
   const [newDiscPrompt, setNewDiscPrompt] = useState(() => initialDraft?.text ?? '');
   const [newDiscPrefilled, setNewDiscPrefilled] = useState(false);
   const [showAdvancedOptions, setShowAdvancedOptions] = useState(false);
@@ -101,7 +149,7 @@ export function NewDiscussionForm({
   // with the user's `ServerConfig.default_model_tier` on mount (0.8.6 phase 4).
   // Strict semantic — only applied at form-open time, never retroactively.
   const [newDiscTier, setNewDiscTier] = useState<'economy' | 'default' | 'reasoning'>('default');
-  const [promptAgentTiers, setPromptAgentTiers] = useState<Partial<Record<AgentType, ModelTier>>>(() => initialDraft?.routingTiers ?? {});
+  const [promptAgentTiers, setPromptAgentTiers] = useState<DraftRoutingTiers>(() => initialDraft?.routingTiers ?? {});
   const [agentHandoffsEnabled, setAgentHandoffsEnabled] = useState<boolean | null>(null);
   // 0.8.6 phase 2 — disc-first refactor. When `false`, the disc is
   // created without launching a CLI ; the user invites agents later
@@ -113,9 +161,12 @@ export function NewDiscussionForm({
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
   const newDiscFileInputRef = useRef<HTMLInputElement>(null);
   const newDiscPromptRef = useRef<HTMLTextAreaElement>(null);
+  const autocompleteRef = useRef<HTMLDivElement>(null);
   const [mentionMatch, setMentionMatch] = useState<AgentMentionQuery | null>(null);
   const mentionQuery = mentionMatch?.query ?? null;
   const [mentionIndex, setMentionIndex] = useState(0);
+  const [mentionTierIndex, setMentionTierIndex] = useState<number | null>(null);
+  const tierKeyConsumedRef = useRef(false);
   const [emojiMatch, setEmojiMatch] = useState<EmojiQuery | null>(null);
   const [emojiSuggestions, setEmojiSuggestions] = useState<EmojiSuggestion[]>([]);
   const [emojiIndex, setEmojiIndex] = useState(0);
@@ -128,31 +179,48 @@ export function NewDiscussionForm({
     () => projects.filter(project => !isHiddenPath(project.path)),
     [projects],
   );
-  const visibleProjects = useMemo(() => {
-    const query = projectSearch.trim().toLocaleLowerCase();
-    if (!query) return selectableProjects;
-    return selectableProjects.filter(project => (
-      project.id === newDiscProjectId
-      || project.name.toLocaleLowerCase().includes(query)
-      || project.path.toLocaleLowerCase().includes(query)
-      || project.repo_url?.toLocaleLowerCase().includes(query)
-    ));
-  }, [newDiscProjectId, projectSearch, selectableProjects]);
-  const promptMentionedAgents = useMemo(
-    () => mentionedAgents(newDiscPrompt),
-    [newDiscPrompt],
-  );
   const installedAgentTypes = useMemo(
     () => new Set(installedAgentsList.map(agent => agent.agent_type)),
     [installedAgentsList],
   );
-  const promptLaunchAgents = promptMentionedAgents.filter(agent => installedAgentTypes.has(agent));
-  const unavailablePromptAgents = promptMentionedAgents.filter(agent => !installedAgentTypes.has(agent));
+  const launchTargets = useMemo<LaunchTarget[]>(() => [
+    ...AGENT_MENTIONS.map(mention => ({
+      agent: mention.type,
+      trigger: mention.trigger,
+      label: mention.label,
+      available: installedAgentTypes.has(mention.type),
+    })),
+    ...externalAgentTargets(externalConnections).map(target => ({
+      ...target,
+      available: true,
+    })),
+  ], [externalConnections, installedAgentTypes]);
+  const availableSwitchTargets = useMemo<AgentSwitchTarget[]>(() =>
+    launchTargets
+      .filter(target => target.available)
+      .map(target => ({
+        agent: target.agent,
+        connectionId: target.connectionId,
+        label: target.label,
+        modelTiers: target.modelTiers,
+      })),
+  [launchTargets]);
+  const promptMentionedTargets = useMemo(
+    () => mentionedLaunchTargets(newDiscPrompt, launchTargets),
+    [launchTargets, newDiscPrompt],
+  );
+  const promptLaunchTargets = promptMentionedTargets.filter(target => target.available);
+  const unavailablePromptTargets = promptMentionedTargets.filter(target => !target.available);
+  const selectedLaunchTarget = launchTargets.find(target => (
+    target.available
+    && target.agent === newDiscAgent
+    && (target.connectionId ?? null) === newDiscConnectionId
+  )) ?? null;
   const effectiveLaunchAgents: AgentType[] = agentLaunchMode === 'prompt'
-    ? promptLaunchAgents
+    ? promptLaunchTargets.map(target => target.agent)
     : (newDiscAgent ? [newDiscAgent] : []);
   const promptModeReady = agentLaunchMode !== 'prompt'
-    || (promptLaunchAgents.length > 0 && unavailablePromptAgents.length === 0);
+    || (promptLaunchTargets.length > 0 && unavailablePromptTargets.length === 0);
   const launchReady = Boolean(newDiscPrompt.trim())
     && (agentLaunchMode === 'prompt' ? promptModeReady : Boolean(newDiscAgent));
 
@@ -206,15 +274,17 @@ export function NewDiscussionForm({
 
   // Auto-select first installed agent if current selection is invalid
   useEffect(() => {
-    if (installedAgentsList.length > 0 && !installedAgentsList.some(a => a.agent_type === newDiscAgent)) {
-      setNewDiscAgent(installedAgentsList[0].agent_type);
-    }
-  }, [installedAgentsList, newDiscAgent]);
+    if (selectedLaunchTarget) return;
+    const fallback = launchTargets.find(target => target.available);
+    if (!fallback) return;
+    setNewDiscAgent(fallback.agent);
+    setNewDiscConnectionId(fallback.connectionId ?? null);
+  }, [launchTargets, selectedLaunchTarget]);
 
   // Canonical mentions own routing while they remain in the prompt. Keeping
   // the single-agent picker locked prevents an accidental click from hiding
   // recipients that are still visibly addressed in the brief.
-  const promptAgentKey = promptMentionedAgents.join(',');
+  const promptAgentKey = promptMentionedTargets.map(launchTargetKey).join(',');
   useEffect(() => {
     const previous = previousPromptAgentsRef.current;
     if (promptAgentKey && promptAgentKey !== previous) {
@@ -281,10 +351,49 @@ export function NewDiscussionForm({
   const [creating, setCreating] = useState(false);
   const creatingRef = useRef(false);
 
+  // The modal footer is fixed outside the scrollable form body. A long agent
+  // list used to open blindly below the prompt and disappear behind that
+  // footer. Measure the actual room on both sides of the editor and constrain
+  // the popover to the larger visible side; its own scroll handles the rest.
+  useLayoutEffect(() => {
+    if (mentionQuery === null && !emojiMatch) return;
+    const popover = autocompleteRef.current;
+    const prompt = newDiscPromptRef.current;
+    const layout = prompt?.closest('.disc-new-layout');
+    const wrap = prompt?.closest('.disc-new-prompt-wrap');
+    if (!popover || !layout || !wrap) return;
+
+    const measure = () => {
+      const layoutRect = layout.getBoundingClientRect();
+      const wrapRect = wrap.getBoundingClientRect();
+      const below = Math.max(0, layoutRect.bottom - wrapRect.bottom - 8);
+      const above = Math.max(0, wrapRect.top - layoutRect.top - 8);
+      const desired = Math.min(320, popover.scrollHeight || 250);
+      const placement = below < desired && above > below ? 'above' : 'below';
+      const available = placement === 'above' ? above : below;
+      popover.dataset.placement = placement;
+      popover.style.maxHeight = `${Math.max(
+        48,
+        Math.min(desired, Math.floor(available)),
+      )}px`;
+    };
+
+    measure();
+    window.addEventListener('resize', measure);
+    layout.addEventListener('scroll', measure, { passive: true });
+    return () => {
+      window.removeEventListener('resize', measure);
+      layout.removeEventListener('scroll', measure);
+    };
+  }, [mentionQuery, emojiMatch, emojiSuggestions.length]);
+
   const refreshPromptAutocomplete = (text: string, cursor: number) => {
     const mention = findAgentMentionQuery(text, cursor);
     setMentionMatch(mention);
-    if (mention) setMentionIndex(0);
+    if (mention) {
+      setMentionIndex(0);
+      setMentionTierIndex(null);
+    }
 
     const emoji = findEmojiQuery(text, cursor);
     const suggestions = emoji ? searchEmojis(emoji.query) : [];
@@ -294,16 +403,18 @@ export function NewDiscussionForm({
   };
 
   const prunePromptAgentTiers = (text: string) => {
-    const activeAgents = new Set(mentionedAgents(text));
+    const activeTargets = new Set(
+      mentionedLaunchTargets(text, launchTargets).map(launchTargetKey),
+    );
     setPromptAgentTiers(previous => Object.fromEntries(
-      Object.entries(previous).filter(([agent]) => activeAgents.has(agent as AgentType)),
-    ) as Partial<Record<AgentType, ModelTier>>);
+      Object.entries(previous).filter(([target]) => activeTargets.has(target)),
+    ));
   };
 
   const applyMentionSuggestion = (
     trigger: string,
     textarea: HTMLTextAreaElement | null,
-    agentType?: AgentType,
+    target?: LaunchTarget,
     tier?: ModelTier,
   ) => {
     const range = mentionMatch;
@@ -313,13 +424,15 @@ export function NewDiscussionForm({
     const next = `${newDiscPrompt.slice(0, range.start)}${trigger}${spacer}${trailing}`;
     const cursor = range.start + trigger.length + spacer.length;
     setNewDiscPrompt(next);
-    if (agentType) {
+    if (target) {
+      const key = launchTargetKey(target);
       setPromptAgentTiers(previous => ({
         ...previous,
-        [agentType]: tier ?? previous[agentType] ?? newDiscTier,
+        [key]: tier ?? previous[key] ?? newDiscTier,
       }));
     }
     setMentionMatch(null);
+    setMentionTierIndex(null);
     requestAnimationFrame(() => {
       textarea?.focus();
       textarea?.setSelectionRange(cursor, cursor);
@@ -340,6 +453,15 @@ export function NewDiscussionForm({
       newDiscPromptRef.current?.focus();
       newDiscPromptRef.current?.setSelectionRange(cursor, cursor);
     });
+  };
+
+  const selectProject = (projectId: string) => {
+    setNewDiscProjectId(projectId);
+    const project = projects.find(candidate => candidate.id === projectId);
+    if (project?.default_skill_ids?.length) setNewDiscSkillIds(project.default_skill_ids);
+    setNewDiscWorkspaceMode('Direct');
+    setNewDiscBranchName('');
+    setNewDiscBaseBranch('main');
   };
 
   const handleCreate = async () => {
@@ -364,15 +486,35 @@ export function NewDiscussionForm({
       const fallbackTitle = launchAgentNow
         ? newDiscPrompt.trim().slice(0, 60)
         : (newDiscPrompt.trim().slice(0, 60) || t('disc.discFirstDefaultTitle'));
+      const submittedTargets = agentLaunchMode === 'prompt'
+        ? promptLaunchTargets
+        : (selectedLaunchTarget?.connectionId ? [selectedLaunchTarget] : []);
+      const primaryTarget = agentLaunchMode === 'prompt'
+        ? promptLaunchTargets[0]
+        : selectedLaunchTarget;
       const primaryAgent = (
-        agentLaunchMode === 'prompt'
-          ? promptLaunchAgents[0]
-          : newDiscAgent
-      || installedAgentsList[0]?.agent_type
-      || 'ClaudeCode') as AgentType;
+        primaryTarget?.agent
+        || newDiscAgent
+        || installedAgentsList[0]?.agent_type
+        || 'ClaudeCode'
+      ) as AgentType;
       const targetTiers = Object.fromEntries(
-        promptLaunchAgents.map(agent => [agent, promptAgentTiers[agent] ?? newDiscTier]),
+        promptLaunchTargets.map(target => [
+          target.agent,
+          promptAgentTiers[launchTargetKey(target)] ?? newDiscTier,
+        ]),
       ) as Partial<Record<AgentType, ModelTier>>;
+      const primaryTier = primaryTarget
+        ? promptAgentTiers[launchTargetKey(primaryTarget)] ?? newDiscTier
+        : newDiscTier;
+      const initialTargets = submittedTargets.map((target, index): MessageTarget => ({
+        kind: index === 0 ? 'discussion_agent' : 'agent',
+        agent_type: target.agent,
+        connection_id: target.connectionId ?? null,
+        tier: agentLaunchMode === 'prompt'
+          ? promptAgentTiers[launchTargetKey(target)] ?? newDiscTier
+          : newDiscTier,
+      }));
       await Promise.resolve(onSubmit({
         title: newDiscTitle.trim() || fallbackTitle,
         // Even when `launchAgentNow=false`, the backend `CreateDiscussionRequest`
@@ -388,14 +530,17 @@ export function NewDiscussionForm({
         profileIds: newDiscProfileIds,
         directiveIds: newDiscDirectiveIds,
         workspaceMode: newDiscWorkspaceMode,
-        tier: agentLaunchMode === 'prompt'
-          ? targetTiers[primaryAgent] ?? newDiscTier
-          : newDiscTier,
+        tier: agentLaunchMode === 'prompt' ? primaryTier : newDiscTier,
         branchName: newDiscBranchName,
         baseBranch: newDiscBaseBranch,
         pendingFiles: pendingFiles.length > 0 ? pendingFiles : undefined,
-        targetAgents: agentLaunchMode === 'prompt' ? promptLaunchAgents : [],
+        targetAgents: agentLaunchMode === 'prompt'
+          ? promptLaunchTargets.map(target => target.agent)
+          : (selectedLaunchTarget?.connectionId ? [selectedLaunchTarget.agent] : []),
         targetTiers: agentLaunchMode === 'prompt' ? targetTiers : {},
+        ...(initialTargets.some(target => target.connection_id)
+          ? { initialTargets }
+          : {}),
         launchAgentNow,
       }));
       clearDraft(NEW_DISCUSSION_DRAFT_ID);
@@ -464,45 +609,57 @@ export function NewDiscussionForm({
             <label className="disc-form-label">{t('disc.prompt')}</label>
             <div className="disc-new-prompt-wrap">
               {mentionQuery !== null && (() => {
-                const matching = AGENT_MENTIONS.filter(mention => (
-                  mention.trigger.slice(1).startsWith(mentionQuery)
+                const matching = launchTargets.filter(target => (
+                  target.trigger.slice(1).startsWith(mentionQuery)
                 ));
-                const available = matching.filter(mention => installedAgentTypes.has(mention.type));
-                const unavailable = matching.filter(mention => !installedAgentTypes.has(mention.type));
+                const available = matching.filter(target => target.available);
+                const unavailable = matching.filter(target => !target.available);
                 if (matching.length === 0) return null;
                 return (
-                  <div className="disc-mention-popover disc-new-autocomplete" role="listbox" aria-label={t('disc.mentionAgents')}>
+                  <div
+                    ref={autocompleteRef}
+                    className="disc-mention-popover disc-new-autocomplete"
+                    role="listbox"
+                    aria-label={t('disc.mentionAgents')}
+                    data-placement="below"
+                    style={{ maxHeight: 250 }}
+                  >
                     {available.length > 0 && (
                       <div className="disc-mention-group">{t('disc.routingAvailableAgents')}</div>
                     )}
-                    {available.map((mention, index) => {
-                      const currentTier = promptAgentTiers[mention.type] ?? newDiscTier;
+                    {available.map((target, index) => {
+                      const targetKey = launchTargetKey(target);
+                      const currentTier = promptAgentTiers[targetKey] ?? newDiscTier;
                       return (
                         <div
-                          key={mention.trigger}
+                          key={targetKey}
                           role="option"
                           aria-selected={index === mentionIndex}
                           className="disc-mention-item"
                           data-highlighted={index === mentionIndex}
-                          onMouseEnter={() => setMentionIndex(index)}
+                          onMouseEnter={() => {
+                            setMentionIndex(index);
+                            setMentionTierIndex(null);
+                          }}
                           onMouseDown={event => {
                             event.preventDefault();
-                            applyMentionSuggestion(mention.trigger, newDiscPromptRef.current, mention.type);
+                            applyMentionSuggestion(target.trigger, newDiscPromptRef.current, target);
                           }}
                         >
                           <div className="disc-mention-main">
-                            <Cpu size={13} style={{ color: agentColor(mention.type) }} />
-                            <span className="font-semibold" style={{ color: agentColor(mention.type) }}>{mention.trigger}</span>
-                            <span className="text-muted">{mention.label}</span>
+                            <Cpu size={13} style={{ color: agentTextColor(target.agent) }} />
+                            <span className="font-semibold" style={{ color: agentTextColor(target.agent) }}>{target.trigger}</span>
+                            <span className="text-muted">{target.label}</span>
                           </div>
                           <span className="disc-mention-tier-choices" aria-label={t('disc.modelTier')}>
                             {(['economy', 'default', 'reasoning'] as const).map(tier => {
-                              const model = modelForAgentTier(
-                                mention.type,
-                                tier,
-                                agentAccess?.model_tiers,
-                                t('disc.defaultAgentModel'),
-                              );
+                              const model = target.modelTiers?.[tier]
+                                ?? modelForAgentTier(
+                                  target.agent,
+                                  tier,
+                                  agentAccess?.model_tiers,
+                                  t('disc.defaultAgentModel'),
+                                );
                               const title = t('disc.routingInvokeTier', t(`disc.tier.${tier}`), model);
                               return (
                                 <button
@@ -511,12 +668,17 @@ export function NewDiscussionForm({
                                   className="disc-mention-tier-choice"
                                   data-tier={tier}
                                   data-current={currentTier === tier}
-                                  aria-label={`${mention.trigger} · ${title}`}
+                                  data-keyboard-selected={
+                                    index === mentionIndex
+                                    && mentionTierIndex !== null
+                                    && MENTION_TIER_CHOICES[mentionTierIndex] === tier
+                                  }
+                                  aria-label={`${target.trigger} · ${title}`}
                                   title={title}
                                   onMouseDown={event => {
                                     event.preventDefault();
                                     event.stopPropagation();
-                                    applyMentionSuggestion(mention.trigger, newDiscPromptRef.current, mention.type, tier);
+                                    applyMentionSuggestion(target.trigger, newDiscPromptRef.current, target, tier);
                                   }}
                                 >
                                   <span aria-hidden="true">{MODEL_TIER_ICONS[tier]}</span>
@@ -530,10 +692,10 @@ export function NewDiscussionForm({
                     {unavailable.length > 0 && (
                       <div className="disc-mention-group">{t('disc.routingDisabledAgent')}</div>
                     )}
-                    {unavailable.map(mention => (
-                      <div key={mention.trigger} className="disc-mention-item disc-mention-item-disabled" aria-disabled="true">
-                        <Cpu size={13} style={{ color: agentColor(mention.type) }} />
-                        <span className="font-semibold">{mention.trigger}</span>
+                    {unavailable.map(target => (
+                      <div key={launchTargetKey(target)} className="disc-mention-item disc-mention-item-disabled" aria-disabled="true">
+                        <Cpu size={13} style={{ color: agentTextColor(target.agent) }} />
+                        <span className="font-semibold">{target.trigger}</span>
                         <span className="text-muted">{t('disc.promptAgentUnavailable')}</span>
                       </div>
                     ))}
@@ -542,7 +704,14 @@ export function NewDiscussionForm({
               })()}
 
               {emojiMatch && emojiSuggestions.length > 0 && (
-                <div className="disc-mention-popover disc-emoji-popover disc-new-autocomplete" role="listbox" aria-label={t('disc.emojiShortcodes')}>
+                <div
+                  ref={autocompleteRef}
+                  className="disc-mention-popover disc-emoji-popover disc-new-autocomplete"
+                  role="listbox"
+                  aria-label={t('disc.emojiShortcodes')}
+                  data-placement="below"
+                  style={{ maxHeight: 250 }}
+                >
                   {emojiSuggestions.map((suggestion, index) => (
                     <button
                       key={suggestion.shortcode}
@@ -593,6 +762,13 @@ export function NewDiscussionForm({
                   }}
                   onClick={e => refreshPromptAutocomplete(e.currentTarget.value, e.currentTarget.selectionStart ?? e.currentTarget.value.length)}
                   onKeyUp={e => {
+                    if (
+                      tierKeyConsumedRef.current
+                      && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')
+                    ) {
+                      tierKeyConsumedRef.current = false;
+                      return;
+                    }
                     if ((mentionQuery !== null || emojiMatch) && ['ArrowUp', 'ArrowDown'].includes(e.key)) return;
                     if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'].includes(e.key)) {
                       refreshPromptAutocomplete(e.currentTarget.value, e.currentTarget.selectionStart ?? e.currentTarget.value.length);
@@ -606,15 +782,54 @@ export function NewDiscussionForm({
                       if (e.key === 'Escape') { e.preventDefault(); setEmojiMatch(null); setEmojiSuggestions([]); return; }
                     }
                     if (mentionQuery !== null) {
-                      const matching = AGENT_MENTIONS.filter(mention => (
-                        installedAgentTypes.has(mention.type)
-                        && mention.trigger.slice(1).startsWith(mentionQuery)
+                      const matching = launchTargets.filter(target => (
+                        target.available
+                        && target.trigger.slice(1).startsWith(mentionQuery)
                       ));
-                      if (e.key === 'ArrowDown') { e.preventDefault(); setMentionIndex(index => Math.min(index + 1, matching.length - 1)); return; }
-                      if (e.key === 'ArrowUp') { e.preventDefault(); setMentionIndex(index => Math.max(index - 1, 0)); return; }
-                      if ((e.key === 'Tab' || e.key === 'Enter') && matching.length > 0) { e.preventDefault(); applyMentionSuggestion(matching[mentionIndex].trigger, e.currentTarget, matching[mentionIndex].type); return; }
-                      if (e.key === 'Escape') { e.preventDefault(); setMentionMatch(null); return; }
+                      if (e.key === 'ArrowDown') { e.preventDefault(); setMentionIndex(index => Math.min(index + 1, matching.length - 1)); setMentionTierIndex(null); return; }
+                      if (e.key === 'ArrowUp') { e.preventDefault(); setMentionIndex(index => Math.max(index - 1, 0)); setMentionTierIndex(null); return; }
+                      const highlighted = matching[mentionIndex];
+                      if (highlighted && (e.key === 'ArrowRight' || e.key === 'ArrowLeft')) {
+                        e.preventDefault();
+                        tierKeyConsumedRef.current = true;
+                        const step = e.key === 'ArrowRight' ? 1 : -1;
+                        setMentionTierIndex(current => {
+                          const effectiveTier = promptAgentTiers[launchTargetKey(highlighted)] ?? newDiscTier;
+                          const from = current ?? MENTION_TIER_CHOICES.indexOf(effectiveTier);
+                          return Math.min(
+                            Math.max(from + step, 0),
+                            MENTION_TIER_CHOICES.length - 1,
+                          );
+                        });
+                        return;
+                      }
+                      if ((e.key === 'Tab' || e.key === 'Enter') && highlighted) {
+                        e.preventDefault();
+                        applyMentionSuggestion(
+                          highlighted.trigger,
+                          e.currentTarget,
+                          highlighted,
+                          mentionTierIndex === null
+                            ? undefined
+                            : MENTION_TIER_CHOICES[mentionTierIndex],
+                        );
+                        return;
+                      }
+                      if (e.key === 'Escape') { e.preventDefault(); setMentionMatch(null); setMentionTierIndex(null); return; }
                     }
+                  }}
+                  onPaste={e => {
+                    const textarea = e.currentTarget;
+                    const start = textarea.selectionStart ?? 0;
+                    const lineStart = textarea.value.lastIndexOf('\n', start - 1) + 1;
+                    const quoted = quoteMultilinePaste(
+                      textarea.value.slice(lineStart, start),
+                      e.clipboardData.getData('text'),
+                    );
+                    if (quoted === null) return;
+                    e.preventDefault();
+                    textarea.setRangeText(quoted, start, textarea.selectionEnd ?? start, 'end');
+                    textarea.dispatchEvent(new Event('input', { bubbles: true }));
                   }}
                   readOnly={newDiscPrefilled}
                   rows={7}
@@ -730,33 +945,22 @@ export function NewDiscussionForm({
         <div className="disc-new-grid">
           <div className="disc-project-picker">
             <label className="disc-form-label">{t('disc.project')}</label>
-            <label className="disc-project-search">
-              <Search size={13} aria-hidden="true" />
-              <input
-                className="disc-input-styled"
-                type="search"
-                value={projectSearch}
-                onChange={event => setProjectSearch(event.target.value)}
-                placeholder={t('disc.searchProjects')}
-                aria-label={t('disc.searchProjects')}
-                disabled={newDiscPrefilled}
-                data-locked={newDiscPrefilled}
-              />
-            </label>
-            <select className="disc-select-styled" aria-label={t('disc.project')} data-locked={newDiscPrefilled} value={newDiscProjectId} onChange={e => {
-              const pid = e.target.value;
-              setNewDiscProjectId(pid);
-              const proj = projects.find(p => p.id === pid);
-              if (proj?.default_skill_ids?.length) setNewDiscSkillIds(proj.default_skill_ids);
-              setNewDiscWorkspaceMode('Direct');
-              setNewDiscBranchName('');
-              setNewDiscBaseBranch('main');
-            }} disabled={newDiscPrefilled}>
-              <option value="">{t('disc.noProject')}</option>
-              {visibleProjects.map(p => (
-                <option key={p.id} value={p.id}>{p.name}</option>
-              ))}
-            </select>
+            <SearchableSelect
+              value={newDiscProjectId}
+              options={selectableProjects.map(project => ({
+                value: project.id,
+                label: project.name,
+                keywords: project.path,
+                description: project.path,
+              }))}
+              onChange={selectProject}
+              label={t('disc.project')}
+              placeholder={t('disc.searchProjects')}
+              emptyLabel={t('disc.noMatchingProjects')}
+              clearLabel={t('disc.noProject')}
+              disabled={newDiscPrefilled}
+              testId="new-disc-project-picker"
+            />
             {newDiscProjectId && !newDiscPrefilled && (
               <label className="disc-project-default">
                 <input
@@ -821,8 +1025,11 @@ export function NewDiscussionForm({
                 ) : newDiscAgent ? (
                   <AgentSwitchPicker
                     currentAgent={newDiscAgent}
+                    currentConnectionId={newDiscConnectionId}
+                    currentTargetLabel={selectedLaunchTarget?.label}
                     currentTier={newDiscTier}
                     availableAgents={installedAgentsList.map(agent => agent.agent_type)}
+                    availableTargets={availableSwitchTargets}
                     modelTiers={agentAccess?.model_tiers}
                     defaultModelLabel={t('disc.defaultAgentModel')}
                     tierLabels={{
@@ -832,9 +1039,10 @@ export function NewDiscussionForm({
                     }}
                     title={t('disc.agentAndMode')}
                     ariaLabel={t('disc.agentAndMode')}
-                    onSelectionChange={async (agent, tier) => {
+                    onTargetSelectionChange={async (target, tier) => {
                       setAgentLaunchMode('selected');
-                      setNewDiscAgent(agent);
+                      setNewDiscAgent(target.agent);
+                      setNewDiscConnectionId(target.connectionId ?? null);
                       setNewDiscTier(tier);
                     }}
                   />
@@ -854,31 +1062,30 @@ export function NewDiscussionForm({
           <div className="disc-prompt-agent-summary" data-testid="prompt-agent-summary">
             <span className="disc-form-hint">{t('disc.promptAgentsDetected')}</span>
             <div className="disc-prompt-agent-chips">
-              {promptMentionedAgents.length === 0 ? (
+              {promptMentionedTargets.length === 0 ? (
                 <span className="disc-form-hint" data-state="missing">
                   {t('disc.promptAgentsMissing')}
                 </span>
-              ) : promptMentionedAgents.map(agent => {
-                const available = installedAgentTypes.has(agent);
-                const mention = AGENT_MENTIONS.find(candidate => candidate.type === agent);
-                const selectedTier = promptAgentTiers[agent] ?? newDiscTier;
-                const selectedModel = modelForAgentTier(
-                  agent,
-                  selectedTier,
-                  agentAccess?.model_tiers,
-                  t('disc.defaultAgentModel'),
-                );
+              ) : promptMentionedTargets.map(target => {
+                const selectedTier = promptAgentTiers[launchTargetKey(target)] ?? newDiscTier;
+                const selectedModel = target.modelTiers?.[selectedTier]
+                  ?? modelForAgentTier(
+                    target.agent,
+                    selectedTier,
+                    agentAccess?.model_tiers,
+                    t('disc.defaultAgentModel'),
+                  );
                 return (
                   <span
-                    key={agent}
+                    key={launchTargetKey(target)}
                     className="disc-prompt-agent-chip"
-                    data-available={available}
-                    title={available
+                    data-available={target.available}
+                    title={target.available
                       ? t('disc.routingInvokeTier', t(`disc.tier.${selectedTier}`), selectedModel)
                       : t('disc.promptAgentUnavailable')}
                   >
-                    <span>{mention?.trigger ?? `@${AGENT_LABELS[agent] ?? agent}`}</span>
-                    {available && (
+                    <span>{target.trigger}</span>
+                    {target.available && (
                       <span className="disc-prompt-agent-tier">
                         <span aria-hidden="true">{MODEL_TIER_ICONS[selectedTier]}</span>
                         {t(`disc.tier.${selectedTier}`)}
@@ -888,17 +1095,17 @@ export function NewDiscussionForm({
                 );
               })}
             </div>
-            {unavailablePromptAgents.length > 0 && (
+            {unavailablePromptTargets.length > 0 && (
               <span className="disc-form-error" role="alert">
                 {t(
                   'disc.promptAgentsUnavailable',
-                  unavailablePromptAgents
-                    .map(agent => AGENT_LABELS[agent] ?? agent)
+                  unavailablePromptTargets
+                    .map(target => target.label)
                     .join(', '),
                 )}
               </span>
             )}
-            {promptLaunchAgents.length > 1 && unavailablePromptAgents.length === 0 && (
+            {promptLaunchTargets.length > 1 && unavailablePromptTargets.length === 0 && (
               <div
                 className="disc-prompt-multi-agent-mode"
                 data-collaboration={agentHandoffsEnabled === true ? 'enabled' : 'disabled'}
@@ -907,7 +1114,7 @@ export function NewDiscussionForm({
                 <MessageSquare size={14} aria-hidden="true" />
                 <span>
                   <strong>{t('disc.multiAgentIndependentTitle')}</strong>
-                  {' '}{t('disc.multiAgentIndependentHint', promptLaunchAgents.length)}
+                  {' '}{t('disc.multiAgentIndependentHint', promptLaunchTargets.length)}
                   {agentHandoffsEnabled !== null && (
                     <small>
                       {agentHandoffsEnabled

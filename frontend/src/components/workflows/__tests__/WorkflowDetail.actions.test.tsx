@@ -172,9 +172,10 @@ describe('WorkflowDetail — header actions', () => {
   });
 
   it('renders the workflow name and the Manual trigger label', () => {
-    renderDetail();
+    const { container } = renderDetail();
     expect(screen.getByText('Ticket Autopilot')).toBeInTheDocument();
     expect(screen.getByText('wf.manual')).toBeInTheDocument();
+    expect(container.querySelector('.wf-detail-header')).toHaveClass('collection-detail-header');
   });
 
   it('shows a Cron trigger label with the schedule', () => {

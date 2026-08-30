@@ -17,13 +17,26 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, act, cleanup, waitFor, within } from '@testing-library/react';
 
-const { usageApi } = vi.hoisted(() => ({
+const { usageApi, telemetryApi } = vi.hoisted(() => ({
   usageApi: {
     get: vi.fn(),
   },
+  telemetryApi: {
+    coverage: vi.fn(),
+  },
 }));
 
-vi.mock('../../../lib/api', () => ({ usage: usageApi }));
+vi.mock('../../../lib/api', () => ({
+  usage: usageApi,
+  telemetry: telemetryApi,
+  measuredRatio: (row: {
+    sessions: number;
+    attributed: number;
+    attributed_without_counters: number;
+  }) => row.sessions === 0
+    ? null
+    : (row.attributed - row.attributed_without_counters) / row.sessions,
+}));
 vi.mock('../../../lib/I18nContext', () => ({
   useT: () => ({
     t: (key: string, ...args: (string | number)[]) =>
@@ -36,6 +49,7 @@ import { UsageSection } from '../UsageSection';
 import { formatPeriod, rowsPerPage } from '../usageFormat';
 
 beforeEach(() => {
+  telemetryApi.coverage.mockResolvedValue([]);
   usageApi.get.mockResolvedValue({
     period_kind: 'daily',
     rows: [
@@ -128,6 +142,12 @@ describe('rowsPerPage()', () => {
 });
 
 describe('UsageSection — mount', () => {
+  it('keeps external token coverage beside the usage report in Settings', async () => {
+    render(<UsageSection />);
+    await waitFor(() => expect(telemetryApi.coverage).toHaveBeenCalledTimes(1));
+    expect(screen.getByTestId('telemetry-coverage-panel')).toBeInTheDocument();
+  });
+
   it('fetches the daily report on mount', async () => {
     render(<UsageSection />);
     await waitFor(() => expect(usageApi.get).toHaveBeenCalledWith('daily'));

@@ -13,6 +13,7 @@ import { usage as usageApi } from '../../lib/api';
 import { useT } from '../../lib/I18nContext';
 import type { UsageReport } from '../../types/generated';
 import { ContextHelp } from '../ContextHelp';
+import { TelemetryCoveragePanel } from '../TelemetryCoveragePanel';
 import { formatPeriod, rowsPerPage } from './usageFormat';
 import {
   ALL_USAGE_FILTER,
@@ -484,6 +485,8 @@ export function UsageSection(_props: UsageSectionProps) {
           {' '}({t('usage.openSource')})
         </span>
       </div>
+
+      <TelemetryCoveragePanel />
     </div>
   );
 }

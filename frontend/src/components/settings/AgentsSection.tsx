@@ -3,9 +3,10 @@ import { config as configApi, agents as agentsApi, usage as usageApi, nvidia as 
 import { userError } from '../../lib/userError';
 import { useAsyncGuard } from '../../hooks/useAsyncGuard';
 import { OllamaCard } from './OllamaCard';
-import { LiteLlmCard } from './LiteLlmCard';
+import { ExternalApiSection } from './ExternalApiSection';
 import { CompressionSection } from './CompressionSection';
 import { ContextHelp } from '../ContextHelp';
+import { SearchableSelect } from '../SearchableSelect';
 import { useApi } from '../../hooks/useApi';
 import type { AgentConfig, AgentDetection, AgentsConfig, AgentType, ModelTiersConfig, UsageReport } from '../../types/generated';
 
@@ -370,7 +371,7 @@ export function AgentsSection({
     let attempts = 0;
     let timer: ReturnType<typeof setTimeout> | null = null;
     const focusTarget = () => {
-      const select = Array.from(document.querySelectorAll<HTMLSelectElement>('[data-model-tier-agent]'))
+      const select = Array.from(document.querySelectorAll<HTMLElement>('[data-model-tier-agent]'))
         .find(element => element.dataset.modelTierAgent === target?.agentType
           && element.dataset.modelTier === target?.tier);
       if (!select && attempts++ < 30) {
@@ -476,7 +477,13 @@ export function AgentsSection({
     );
   };
 
-  const activeAgentCount = agents.filter(agent => agent.enabled && (agent.installed || agent.runtime_available)).length;
+  // KT-339 — LiteLLM and NVIDIA are no longer two standalone fleet cards: they
+  // are connections in the unified External API zone rendered below. Filter
+  // them out of the CLI/agent fleet list so they stop appearing separately.
+  const EXTERNAL_API_AGENTS: AgentType[] = ['LiteLlm', 'Nvidia'];
+  const fleetAgents = agents.filter(agent => !EXTERNAL_API_AGENTS.includes(agent.agent_type));
+
+  const activeAgentCount = fleetAgents.filter(agent => agent.enabled && (agent.installed || agent.runtime_available)).length;
 
   return (
     <div className="set-agents-section">
@@ -703,7 +710,7 @@ export function AgentsSection({
           <div>
             <div className="set-agent-list-title">
               <span className="font-semibold text-base">{t('config.agentFleetTitle')}</span>
-              <span className="set-agent-active-count">{t('config.agentActiveCount', activeAgentCount, agents.length)}</span>
+              <span className="set-agent-active-count">{t('config.agentActiveCount', activeAgentCount, fleetAgents.length)}</span>
             </div>
             <p className="set-hint">{t('config.agentFleetHint')}</p>
           </div>
@@ -803,26 +810,10 @@ export function AgentsSection({
           </div>
         )}
 
-        {agents.map(agent => {
-          // KT-337/KT-339 — LiteLLM and NVIDIA are not two different providers from
-          // Kronn's point of view: they are two connections to the SAME contract
-          // (`{base}/v1/chat/completions`, `/v1/models`, bearer auth, OpenAiCodec).
-          // Grouping them under one heading is the UI those connections will keep
-          // once KT-339 makes them user-definable; only the aliases stay hardcoded
-          // for now, so this costs no model change.
-          const externalApiAgents: AgentType[] = ['LiteLlm', 'Nvidia'];
-          const isFirstExternalApi =
-            agent.agent_type === externalApiAgents[0] ||
-            // If LiteLLM is absent from the list, NVIDIA opens the section.
-            (agent.agent_type === 'Nvidia' && !agents.some(a => a.agent_type === 'LiteLlm'));
-          const externalApiHeading = isFirstExternalApi ? (
-            <div className="set-external-api-heading" key="external-api-heading">
-              <span>{t('config.externalApiTitle')}</span>
-              <ContextHelp title={t('config.externalApiTitle')}>
-                <p>{t('config.externalApiHelp')}</p>
-              </ContextHelp>
-            </div>
-          ) : null;
+        {fleetAgents.map(agent => {
+          // KT-339 — LiteLLM, NVIDIA and any other OpenAI-compatible service are
+          // now named connections in the unified External API zone below, so the
+          // fleet loop never renders them as their own cards.
 
           // Ollama gets its own dedicated card with health check + model picker
           if (agent.agent_type === 'Ollama') {
@@ -841,28 +832,6 @@ export function AgentsSection({
               </div>
             );
           }
-          // LiteLLM is the other server-shaped agent: same dedicated-card
-          // treatment, but connection-first since nothing is auto-detectable.
-          if (agent.agent_type === 'LiteLlm') {
-            return (
-              <div key="litellm-group">
-                {externalApiHeading}
-              <div
-                className="set-agent-row set-agent-row-ollama"
-                data-agent-type="LiteLlm"
-                data-external-api="true"
-                style={{ '--agent-color': agentColor('LiteLlm', mentionColors) } as CSSProperties}
-              >
-                <LiteLlmCard
-                  t={t}
-                  modelCostSuffix={modelCostSuffix}
-                  headerAccessory={<>{renderMentionColorControl('LiteLlm')}{renderConcurrencyControl('LiteLlm')}</>}
-                />
-              </div>
-              </div>
-            );
-          }
-
           const permFlag: Record<string, { flag: string; descKey: string }> = {
             ClaudeCode: { flag: '--dangerously-skip-permissions', descKey: 'config.fullAccess' },
             Codex: { flag: '--sandbox=danger-full-access', descKey: 'config.fullAccess' },
@@ -896,13 +865,9 @@ export function AgentsSection({
 
           return (
           <React.Fragment key={agent.name}>
-          {/* NVIDIA opens (or joins) the external-API zone; every other agent
-              renders on its own as before. */}
-          {agent.agent_type === 'Nvidia' && externalApiHeading}
           <div
             className="set-agent-row"
             data-agent-type={agent.agent_type}
-            data-external-api={agent.agent_type === 'Nvidia' ? 'true' : undefined}
             style={{ '--agent-color': agentColor(agent.agent_type, mentionColors) } as CSSProperties}
           >
             <div className="set-agent-card-header">
@@ -1500,24 +1465,23 @@ export function AgentsSection({
                 return (
                   <div className="flex-row gap-2">
                     <span className="text-2xs" style={{ color: iconColor, width: 14 }} title={field}>{icon}</span>
-                    <select
-                      className="set-tier-select"
-                      data-model-tier-agent={agent.agent_type}
-                      data-model-tier={field}
+                    <SearchableSelect
+                      className="searchable-select--compact set-agent-model-select"
                       value={editing[field]}
-                      onChange={e => saveTiers(field, e.target.value)}
-                      aria-label={t('disc.modelTier') + ' ' + field}
-                    >
-                      {/* Empty value = the backend built-in fallback (passed in
-                          so the label matches runner.rs, not just options[0]).
-                          No fallback = the agent's own default model. */}
-                      <option value="">
-                        {t('config.defaultModel')}{fallback ? ` (${fallback}${modelCostSuffix(fallback)})` : ''}
-                      </option>
-                      {options.map(m => (
-                        <option key={m} value={m}>{m}{modelCostSuffix(m)}</option>
-                      ))}
-                    </select>
+                      options={options.map(model => ({
+                        value: model,
+                        label: model,
+                        keywords: model.replaceAll('/', ' '),
+                        description: modelCostSuffix(model) || undefined,
+                      }))}
+                      onChange={value => void saveTiers(field, value)}
+                      label={`${t('disc.modelTier')} ${field}`}
+                      placeholder={t('config.searchModel')}
+                      emptyLabel={t('config.searchModelEmpty')}
+                      clearLabel={`${t('config.defaultModel')}${fallback ? ` (${fallback}${modelCostSuffix(fallback)})` : ''}`}
+                      dataModelTierAgent={agent.agent_type}
+                      dataModelTier={field}
+                    />
                   </div>
                 );
               };
@@ -1568,6 +1532,16 @@ export function AgentsSection({
           </React.Fragment>
           );
         })}
+
+        {/* KT-339 — unified External API zone: LiteLLM, NVIDIA and any other
+            OpenAI-compatible service live here as named connections. */}
+        <ExternalApiSection
+          t={t}
+          toast={toast}
+          modelCostSuffix={modelCostSuffix}
+          onModelTiersChanged={refetchAgentAccess}
+        />
+
         {/* Best practices links */}
         <div className="set-best-practices">
           <div className="flex-row gap-3 text-sm font-semibold mb-4" style={{ color: 'rgba(var(--kr-accent-rgb), 0.6)' }}>

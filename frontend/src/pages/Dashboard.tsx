@@ -37,10 +37,9 @@ const PagesPage = lazy(() => import('./PagesPage').then(m => ({ default: m.Pages
 import { ActiveRunsPopover } from '../components/workflows/ActiveRunsPopover';
 import { ActiveAuditsPopover } from '../components/ActiveAuditsPopover';
 import { ProjectList } from '../components/ProjectList';
-import { TelemetryCoveragePanel } from '../components/TelemetryCoveragePanel';
 import {
   Folder, FolderOpen, Puzzle,
-  Plus, Search, Zap, Settings,
+  Search, Zap, Settings,
   Loader2,
   MessageSquare, X,
   Rocket, Check, Workflow, FileText, ListTodo,
@@ -65,7 +64,10 @@ function PageFallback() {
 // Sort score for project readiness
 export function Dashboard({ onReset }: DashboardProps) {
   const { t } = useT();
-  const isMobile = useIsMobile();
+  // The complete desktop nav is wider than a tablet viewport once every
+  // collection route is enabled. Switch to its compact rendering before it
+  // can widen the document and push a page sidebar outside the viewport.
+  const isMobile = useIsMobile(1100);
   const { toast, ToastContainer } = useToast();
   const [page, setPage] = useState<Page>(readDashboardPage);
   const [mcpSelectedConfigId, setMcpSelectedConfigId] = useState<string | null>(null);
@@ -139,7 +141,7 @@ export function Dashboard({ onReset }: DashboardProps) {
     delete abortControllers.current[discId];
   }, []);
 
-  const { data: projectList, initialLoading: projectsLoading, refetch } = useApi(() => projectsApi.list(), []);
+  const { data: projectList, initialLoading: projectsLoading, hasLoaded: projectsLoaded, refetch } = useApi(() => projectsApi.list(), []);
 
   // ─── Deep-link: #project-<id> hash → auto-expand + scroll ──────────
   // Used by the CLI: `kronn` opens `http://localhost:3140/#project-<id>`
@@ -904,9 +906,6 @@ export function Dashboard({ onReset }: DashboardProps) {
             {isMobile && <span>{runningDiscIds.length}</span>}
           </button>
         )}
-        <button className="dash-scan-btn" data-tour-id="new-project-btn" onClick={() => setShowBootstrap(true)} title={t('projects.bootstrap')}>
-          <Plus size={14} /> {!isMobile && t('projects.bootstrap')}
-        </button>
         <button className="dash-scan-btn" data-tour-id="scan-btn" onClick={handleScan} disabled={scanning} title={t('nav.scan')}>
           {scanning ? <Loader2 size={14} className="spin" /> : <Search size={14} />}
           {!isMobile && (scanning ? t('projects.scanning') : t('nav.scan'))}
@@ -1314,14 +1313,10 @@ export function Dashboard({ onReset }: DashboardProps) {
 
         {/* ════════ PROJETS ════════ */}
         {page === 'projects' && (<ErrorBoundary mode="zone" label="Projects">
-          {projectsLoading && (
-            <div className="dash-loading-bar">
-              <Loader2 size={14} className="spin" />
-              <span className="text-sm text-muted">{t('projects.loading')}</span>
-            </div>
-          )}
           <ProjectList
             projects={projects}
+            loading={projectsLoading}
+            favoritesReady={projectsLoaded}
             activeAudits={activeAudits}
             discussions={allDiscussions}
             discussionsByProject={discussionsByProject}
@@ -1331,7 +1326,9 @@ export function Dashboard({ onReset }: DashboardProps) {
             mcpConfigs={mcpOverview.configs}
             workflows={workflowList ?? []}
             configLanguage={configLanguage ?? null}
+            modelTiers={agentAccess?.model_tiers ?? null}
             toast={toast}
+            onAddProject={() => setShowBootstrap(true)}
             onNavigate={(p) => {
               if (p.startsWith('mcps:')) {
                 setMcpSelectedConfigId(p.split(':')[1]);
@@ -1356,10 +1353,6 @@ export function Dashboard({ onReset }: DashboardProps) {
             expandedId={expandedId}
             onSetExpandedId={setExpandedId}
           />
-          {/* KT-190 — coverage, not a total. Kronn has no counter of its own
-              for a CLI it never spawned, so a token figure shown alone would
-              look complete while being mostly blind. */}
-          <TelemetryCoveragePanel />
         </ErrorBoundary>)}
 
         {/* ════════ PLANIFICATION ════════ */}
@@ -1385,7 +1378,7 @@ export function Dashboard({ onReset }: DashboardProps) {
         {page === 'mcps' && (
           <ErrorBoundary mode="zone" label="Plugins">
             <Suspense fallback={<PageFallback />}>
-              <McpPage projects={projects} mcpOverview={mcpOverview} mcpRegistry={mcpRegistry} refetchMcps={refetchMcps} initialSelectedConfigId={mcpSelectedConfigId} installedAgentTypes={agents.filter(isUsable).map(a => a.agent_type)} configLanguage={configLanguage ?? undefined} />
+              <McpPage projects={projects} mcpOverview={mcpOverview} mcpRegistry={mcpRegistry} refetchMcps={refetchMcps} favoritesReady={mcpOverviewData !== null} initialSelectedConfigId={mcpSelectedConfigId} installedAgentTypes={agents.filter(isUsable).map(a => a.agent_type)} configLanguage={configLanguage ?? undefined} />
             </Suspense>
           </ErrorBoundary>
         )}

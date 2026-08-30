@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity, Archive, CheckCircle2, CheckSquare2, ChevronDown, ChevronRight,
-  Braces, Database, Download, ExternalLink, FileCode2, FileDown, GitCompare,
+  Braces, Clock3, Database, Download, ExternalLink, FileCode2, FileDown, GitCompare,
   History, ListChecks, Loader2, MessageSquare, Pencil, Play, RefreshCw,
-  RotateCcw, Save, Search, Star, Table2, Trash2, Workflow, X,
+  PanelsTopLeft, RotateCcw, Save, Star, Table2, Trash2, Workflow, X,
 } from 'lucide-react';
 import type {
   LivePage, LivePageDetail, LivePageDiscussionLink, LivePagePublication,
@@ -19,19 +19,27 @@ import {
 } from '../lib/live-page-sandbox';
 import { formatRelativeTime } from '../lib/relativeTime';
 import { CopyIdPill } from '../components/CopyIdPill';
-import { FavoriteToggle } from '../components/FavoriteToggle';
+import { CollectionFavoritesHeader } from '../components/CollectionFavoritesHeader';
+import { CollectionRowActions } from '../components/CollectionRowActions';
+import { CollectionSidebarFooter } from '../components/CollectionSidebarFooter';
+import { CollectionShell, CollectionSidebarCollapseButton } from '../components/CollectionShell';
 import { HtmlCodeEditor, HtmlRevisionDiff } from '../components/HtmlCodeEditor';
 import { useT } from '../lib/I18nContext';
 import { useAsyncGuard } from '../hooks/useAsyncGuard';
 import { userError } from '../lib/userError';
-import { standaloneLivePageUrl } from '../lib/live-page-navigation';
+import {
+  livePageMosaicLayouts,
+  standaloneLivePageMosaicUrl,
+  standaloneLivePageUrl,
+  type LivePageMosaicLayout,
+} from '../lib/live-page-navigation';
 import './DiscussionsPage.css';
 import './PagesPage.css';
 
 const REFRESH_MS = 30_000;
 const PAGE_NAVIGATION_STORAGE_KEY = 'kronn:pageNavigation';
 const PAGE_COLLAPSED_STORAGE_KEY = 'kronn:pageCollapsedSections';
-const PAGE_SECTIONS = new Set(['favorites', 'pages', 'archives']);
+const PAGE_SECTIONS = new Set(['favorites', 'recent', 'pages', 'archives']);
 
 interface PageNavigationPreference {
   resourceId: string | null;
@@ -58,6 +66,13 @@ function readCollapsedPageSections(): Set<string> {
   } catch {
     return new Set(['archives']);
   }
+}
+
+function byMostRecentlyUpdated(
+  left: Pick<LivePage, 'updated_at'>,
+  right: Pick<LivePage, 'updated_at'>,
+): number {
+  return Date.parse(right.updated_at) - Date.parse(left.updated_at);
 }
 
 function channelId(): string {
@@ -127,6 +142,7 @@ export function PagesPage({
   );
   const [detail, setDetail] = useState<LivePageDetail | null>(null);
   const [loading, setLoading] = useState(true);
+  const [sidebarOpen, setSidebarOpen] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [linkedWorkflows, setLinkedWorkflows] = useState<LivePageWorkflowLink[]>([]);
   const [recentPublications, setRecentPublications] = useState<LivePagePublication[]>([]);
@@ -155,6 +171,7 @@ export function PagesPage({
   const [exportResult, setExportResult] = useState<{ url: string; filename: string } | null>(null);
   const exportMenuRef = useDismissibleDetails<HTMLDetailsElement>();
   const refreshMenuRef = useDismissibleDetails<HTMLDetailsElement>();
+  const mosaicMenuRef = useDismissibleDetails<HTMLDetailsElement>();
   const [selectedDatasetId, setSelectedDatasetId] = useState<string | null>(null);
   const [datasetExportBusy, setDatasetExportBusy] = useState(false);
   const iframeRef = useRef<HTMLIFrameElement>(null);
@@ -473,13 +490,6 @@ export function PagesPage({
     }
   });
 
-  const matchingPages = useMemo(() => {
-    const needle = query.trim().toLocaleLowerCase();
-    return pages.filter(page => !needle || `${page.title} ${page.slug}`.toLocaleLowerCase().includes(needle));
-  }, [pages, query]);
-  const activePages = matchingPages.filter(page => !page.archived);
-  const favoritePages = selectionMode ? [] : activePages.filter(page => page.pinned);
-  const archivedPages = matchingPages.filter(page => page.archived);
   const isSectionCollapsed = useCallback(
     (section: string) => !query.trim() && collapsedSections.has(section),
     [collapsedSections, query],
@@ -493,39 +503,6 @@ export function PagesPage({
     });
   }, []);
 
-  const renderPageRow = (page: LivePage, keyPrefix: string) => (
-    <div className="disc-swipe-wrap live-page-row" key={`${keyPrefix}-${page.id}`}>
-      <div className="disc-item" data-active={page.id === selectedId} data-selected={selectedIds.has(page.id)}>
-        <button type="button" className="disc-item-open" onClick={() => void select(page)} aria-label={t('pages.open', page.title)}>
-          {selectionMode && (
-            <span className="disc-item-selection-box" data-selected={selectedIds.has(page.id)} aria-hidden="true">
-              {selectedIds.has(page.id) && <CheckSquare2 size={12} />}
-            </span>
-          )}
-          <span className="disc-item-content">
-            <span className="disc-item-title">
-              <span className="disc-item-title-text">{page.title}</span>
-            </span>
-            <span className="disc-item-meta">
-              <span className="disc-item-meta-summary">{page.slug}</span>
-            </span>
-          </span>
-        </button>
-        {!selectionMode && (
-          <div className="disc-item-actions">
-            <FavoriteToggle
-              active={page.pinned}
-              onToggle={() => void updatePage(page, { pinned: !page.pinned })}
-              activeLabel={t('pages.unfavorite')}
-              inactiveLabel={t('pages.favorite')}
-              itemName={page.title}
-            />
-          </div>
-        )}
-      </div>
-    </div>
-  );
-
   const revisionHtml = detail?.revision.html ?? '';
   const latestPublication = recentPublications[0] ?? null;
   const totalDatasetSize = detail?.datasets.reduce(
@@ -533,6 +510,66 @@ export function PagesPage({
     0,
   ) ?? 0;
   const comparisonRevision = revisions.find(revision => revision.id === comparisonRevisionId) ?? null;
+  const selectedMosaicIds = useMemo(() => [...selectedIds], [selectedIds]);
+  const mosaicLayouts = useMemo(
+    () => livePageMosaicLayouts(selectedMosaicIds.length),
+    [selectedMosaicIds.length],
+  );
+  const mosaicLayoutLabel = useCallback((layout: LivePageMosaicLayout) => {
+    switch (layout) {
+      case 'two-columns': return t('pages.mosaic.layout.twoColumns');
+      case 'two-rows': return t('pages.mosaic.layout.twoRows');
+      case 'three-top': return t('pages.mosaic.layout.threeTop');
+      case 'three-bottom': return t('pages.mosaic.layout.threeBottom');
+      case 'three-left': return t('pages.mosaic.layout.threeLeft');
+      case 'three-right': return t('pages.mosaic.layout.threeRight');
+      default: return t('pages.mosaic.layout.auto');
+    }
+  }, [t]);
+  const positionMosaicMenu = useCallback(() => {
+    const menu = mosaicMenuRef.current;
+    const trigger = menu?.querySelector('summary');
+    const popover = menu?.querySelector<HTMLElement>('.live-pages-mosaic-popover');
+    if (!menu || !trigger || !popover) return;
+
+    const viewportMargin = 8;
+    const triggerGap = 6;
+    const preferredWidth = 224;
+    const triggerRect = trigger.getBoundingClientRect();
+    const width = Math.min(preferredWidth, Math.max(0, window.innerWidth - viewportMargin * 2));
+    const desiredHeight = Math.min(
+      popover.scrollHeight || 260,
+      Math.max(0, window.innerHeight - viewportMargin * 2),
+    );
+    const availableBelow = Math.max(
+      0,
+      window.innerHeight - viewportMargin - triggerRect.bottom - triggerGap,
+    );
+    const availableAbove = Math.max(0, triggerRect.top - viewportMargin - triggerGap);
+    const opensUp = desiredHeight > availableBelow && availableAbove > availableBelow;
+    const maxHeight = opensUp ? availableAbove : availableBelow;
+    const renderedHeight = Math.min(desiredHeight, maxHeight);
+    const left = Math.min(
+      Math.max(viewportMargin, triggerRect.right - width),
+      Math.max(viewportMargin, window.innerWidth - viewportMargin - width),
+    );
+    const top = opensUp
+      ? Math.max(viewportMargin, triggerRect.top - triggerGap - renderedHeight)
+      : triggerRect.bottom + triggerGap;
+
+    menu.dataset.placement = opensUp ? 'up' : 'down';
+    menu.style.setProperty('--mosaic-popover-left', `${left}px`);
+    menu.style.setProperty('--mosaic-popover-top', `${top}px`);
+    menu.style.setProperty('--mosaic-popover-width', `${width}px`);
+    menu.style.setProperty('--mosaic-popover-max-height', `${maxHeight}px`);
+  }, [mosaicMenuRef]);
+  useEffect(() => {
+    const reposition = () => {
+      if (mosaicMenuRef.current?.open) positionMosaicMenu();
+    };
+    window.addEventListener('resize', reposition);
+    return () => window.removeEventListener('resize', reposition);
+  }, [mosaicMenuRef, positionMosaicMenu]);
   const document = useMemo(
     () => revisionHtml ? buildSandboxDocument(revisionHtml, bridgeChannel) : '',
     [bridgeChannel, revisionHtml],
@@ -561,14 +598,73 @@ export function PagesPage({
 
   return (
     <div className="live-pages" data-testid="live-pages-page">
-      <aside className="disc-sidebar live-pages-list" aria-label={t('pages.title')}>
-        <div className="disc-sidebar-header" data-selection-mode={selectionMode}>
+      <CollectionShell<LivePage>
+        sidebarOnly
+        sidebarClassName="disc-sidebar live-pages-list"
+        ariaLabel={t('pages.title')}
+        items={pages}
+        getId={page => page.id}
+        getLabel={page => `${page.title} ${page.slug}`}
+        persistence={{ query, onQueryChange: setQuery, favoritesOnly: false, onFavoritesOnlyChange: () => {} }}
+        selectedId={selectedId}
+        onSelect={id => { const page = pages.find(item => item.id === id); if (page) void select(page); }}
+        selectedIds={selectedIds}
+        onSelectedIdsChange={setSelectedIds}
+        globalSearchShortcut
+        showSearchClear
+        sidebarOpen={sidebarOpen}
+        onSidebarOpenChange={setSidebarOpen}
+        labels={{ search: t('pages.search'), favorites: t('pages.filter.favorites'), clearFilters: t('pages.clearSearch'), moreActions: t('pages.title'), openCollection: t('collection.openCollection'), closeCollection: t('collection.closeCollection'), selectItem: t('pages.bulk.selected', 1) }}
+        slots={{
+          beforeSidebarHeader: <div className="disc-sidebar-header" data-selection-mode={selectionMode}>
           <span className="disc-sidebar-header-title">
             {selectionMode ? t('pages.bulk.selected', selectedIds.size) : <>{t('pages.title')}<span className="disc-sidebar-header-count">{' · '}{pages.length}</span></>}
           </span>
           <div className="disc-sidebar-header-actions">
             {selectionMode ? (
               <>
+                <details
+                  className="live-pages-mosaic-menu"
+                  ref={mosaicMenuRef}
+                  onToggle={event => { if (event.currentTarget.open) positionMosaicMenu(); }}
+                >
+                  <summary
+                    aria-label={selectedIds.size >= 2
+                      ? t('pages.mosaic.open', selectedIds.size)
+                      : t('pages.mosaic.minimum')}
+                    aria-disabled={selectedIds.size < 2}
+                    title={selectedIds.size >= 2
+                      ? t('pages.mosaic.open', selectedIds.size)
+                      : t('pages.mosaic.minimum')}
+                    onClick={event => {
+                      if (selectedIds.size < 2) event.preventDefault();
+                    }}
+                  >
+                    <PanelsTopLeft size={14} />
+                  </summary>
+                  {selectedIds.size >= 2 && (
+                    <div className="live-pages-mosaic-popover">
+                      <strong>{t('pages.mosaic.chooseLayout')}</strong>
+                      {mosaicLayouts.map(layout => (
+                        <a
+                          key={layout}
+                          href={standaloneLivePageMosaicUrl(selectedMosaicIds, layout)}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          onClick={() => {
+                            if (mosaicMenuRef.current) mosaicMenuRef.current.open = false;
+                            leaveSelectionMode();
+                          }}
+                        >
+                          <span className="live-pages-mosaic-layout-preview" data-layout={layout} aria-hidden="true">
+                            <i /><i /><i />
+                          </span>
+                          <span>{mosaicLayoutLabel(layout)}</span>
+                        </a>
+                      ))}
+                    </div>
+                  )}
+                </details>
                 <button type="button" className="disc-icon-btn" onClick={() => void runBulkAction('archive', [...selectedIds])} disabled={bulkBusy || selectedIds.size === 0} title={t('pages.archive')} aria-label={t('pages.archive')}>
                   {bulkBusy ? <Loader2 size={14} className="spin" /> : <Archive size={14} />}
                 </button>
@@ -579,65 +675,125 @@ export function PagesPage({
             ) : (
               <>
                 <button type="button" className="disc-icon-btn" onClick={() => setSelectionMode(true)} title={t('pages.bulk.start')} aria-label={t('pages.bulk.start')}><ListChecks size={16} /></button>
-                <button type="button" className="disc-icon-btn" onClick={() => void refresh()} title={t('pages.refresh')} aria-label={t('pages.refresh')}><RefreshCw size={15} className={loading ? 'spin' : undefined} /></button>
+                <button type="button" className="disc-icon-btn collection-shell-primary-action" onClick={() => void refresh()} title={t('pages.refresh')} aria-label={t('pages.refresh')}><RefreshCw size={15} className={loading ? 'spin' : undefined} /></button>
+                <CollectionSidebarCollapseButton label={t('collection.closeCollection')} onCollapse={() => setSidebarOpen(false)} />
               </>
             )}
           </div>
-        </div>
-
-        <div className="disc-search-wrap">
-          <div className="disc-search-controls">
-            <label className="disc-search-box">
-              <Search size={14} className="disc-search-icon" />
-              <input className="disc-search-input" value={query} onChange={event => setQuery(event.target.value)} placeholder={t('pages.search')} aria-label={t('pages.search')} />
-              {query && <button type="button" className="disc-search-clear" onClick={() => setQuery('')} aria-label={t('pages.clearSearch')}><X size={12} /></button>}
-            </label>
-          </div>
-        </div>
-
-        <div className="disc-sidebar-list live-pages-items">
-          {favoritePages.length > 0 && (
+          </div>,
+          renderList: ({ visibleItems, getRowProps }) => {
+            const visibleActive = visibleItems.filter(page => !page.archived);
+            const visibleFavorites = selectionMode ? [] : visibleActive.filter(page => page.pinned);
+            const visibleRecent = selectionMode
+              ? []
+              : visibleActive
+                .filter(page => !page.pinned)
+                .sort(byMostRecentlyUpdated)
+                .slice(0, 10);
+            const visibleArchived = visibleItems.filter(page => page.archived);
+            const collapsedInCurrentMode = (section: string) => (
+              !selectionMode && isSectionCollapsed(section)
+            );
+            const row = (page: LivePage, keyPrefix: string) => {
+              const rowProps = getRowProps(page);
+              return <div className="disc-swipe-wrap live-page-row" key={`${keyPrefix}-${page.id}`}>
+                <div className="disc-item" data-active={page.id === selectedId} data-selected={selectedIds.has(page.id)}>
+                  <button type="button" {...rowProps} className={`${rowProps.className} disc-item-open`} aria-label={selectionMode ? t('pages.select', page.title) : t('pages.open', page.title)} role={selectionMode ? 'checkbox' : undefined} aria-checked={selectionMode ? selectedIds.has(page.id) : undefined}>
+                    {selectionMode && <span className="disc-item-selection-box" data-selected={selectedIds.has(page.id)} aria-hidden="true">{selectedIds.has(page.id) && <CheckSquare2 size={12} />}</span>}
+                    <span className="disc-item-content"><span className="disc-item-title"><span className="disc-item-title-text">{page.title}</span></span><span className="disc-item-meta"><span className="disc-item-meta-summary">{page.slug}</span></span></span>
+                  </button>
+                  {!selectionMode && <CollectionRowActions
+                    itemName={page.title}
+                    favorite={{
+                      active: page.pinned,
+                      onToggle: () => void updatePage(page, { pinned: !page.pinned }),
+                      activeLabel: t('pages.unfavorite'),
+                      inactiveLabel: t('pages.favorite'),
+                    }}
+                    menuLabel={t('collection.moreActions')}
+                    copyId={page.id}
+                    copyLabel={t('disc.copyId')}
+                    actions={[
+                      {
+                        id: page.archived ? 'restore' : 'archive',
+                        label: t(page.archived ? 'pages.restore' : 'pages.archive'),
+                        icon: page.archived ? <RotateCcw size={12} /> : <Archive size={12} />,
+                        onSelect: () => runBulkAction(page.archived ? 'restore' : 'archive', [page.id]),
+                      },
+                      {
+                        id: 'delete',
+                        label: t('pages.delete'),
+                        icon: <Trash2 size={12} />,
+                        danger: true,
+                        onSelect: () => runBulkAction('delete', [page.id]),
+                      },
+                    ]}
+                  />}
+                </div>
+              </div>;
+            };
+            return <div className="disc-sidebar-list live-pages-items">
+          {visibleFavorites.length > 0 && (
             <div className="disc-sidebar-section disc-sidebar-favorites" data-expanded={!isSectionCollapsed('favorites')}>
-              <button type="button" className="disc-group-btn" data-no-border="true" onClick={() => toggleSection('favorites')} aria-expanded={!isSectionCollapsed('favorites')}>
-                <ChevronRight size={10} className="disc-chevron" data-expanded={!isSectionCollapsed('favorites')} />
-                <Star size={10} className="live-page-group-star" fill="currentColor" />
-                <span>{t('pages.filter.favorites')}</span><span className="disc-group-count">{favoritePages.length}</span>
-              </button>
-              {!isSectionCollapsed('favorites') && favoritePages.map(page => renderPageRow(page, 'favorite'))}
+              <CollectionFavoritesHeader
+                label={t('pages.filter.favorites')}
+                count={visibleFavorites.length}
+                expanded={!isSectionCollapsed('favorites')}
+                onToggle={() => toggleSection('favorites')}
+              />
+              {!isSectionCollapsed('favorites') && visibleFavorites.map(page => row(page, 'favorite'))}
             </div>
           )}
 
-          {activePages.length > 0 && (
-            <div className="disc-sidebar-section disc-sidebar-projects" data-expanded={!isSectionCollapsed('pages')}>
-              <button type="button" className="disc-group-btn" data-no-border="true" onClick={() => toggleSection('pages')} aria-expanded={!isSectionCollapsed('pages')}>
-                <ChevronRight size={10} className="disc-chevron" data-expanded={!isSectionCollapsed('pages')} />
+          {visibleRecent.length > 0 && (
+            <div className="disc-sidebar-section disc-sidebar-recent" data-expanded={!isSectionCollapsed('recent')}>
+              <button type="button" className="disc-group-btn" data-no-border="true" onClick={() => toggleSection('recent')} aria-expanded={!isSectionCollapsed('recent')}>
+                <ChevronRight size={10} className="disc-chevron" data-expanded={!isSectionCollapsed('recent')} />
+                <Clock3 size={10} />
+                <span>{t('disc.recent')}</span><span className="disc-group-count">{visibleRecent.length}</span>
+              </button>
+              {!isSectionCollapsed('recent') && visibleRecent.map(page => row(page, 'recent'))}
+            </div>
+          )}
+
+          {visibleActive.length > 0 && (
+            <div className="disc-sidebar-section disc-sidebar-projects" data-expanded={!collapsedInCurrentMode('pages')}>
+              <button type="button" className="disc-group-btn" data-no-border="true" onClick={() => toggleSection('pages')} aria-expanded={!collapsedInCurrentMode('pages')}>
+                <ChevronRight size={10} className="disc-chevron" data-expanded={!collapsedInCurrentMode('pages')} />
                 <FileCode2 size={10} />
-                <span>{t('pages.filter.active')}</span><span className="disc-group-count">{activePages.length}</span>
+                <span>{t('pages.filter.active')}</span><span className="disc-group-count">{visibleActive.length}</span>
               </button>
-              {!isSectionCollapsed('pages') && activePages.map(page => renderPageRow(page, 'page'))}
+              {!collapsedInCurrentMode('pages') && visibleActive.map(page => row(page, 'page'))}
             </div>
           )}
 
-          {archivedPages.length > 0 && (
-            <div className="disc-sidebar-section disc-sidebar-archives" data-expanded={!isSectionCollapsed('archives')}>
-              <button type="button" className="disc-group-btn" data-variant="archive" onClick={() => toggleSection('archives')} aria-expanded={!isSectionCollapsed('archives')}>
-                <ChevronRight size={10} className="disc-chevron" data-expanded={!isSectionCollapsed('archives')} />
-                <Archive size={10} /><span>{t('pages.filter.archived')}</span><span className="disc-group-count">{archivedPages.length}</span>
+          {visibleArchived.length > 0 && (
+            <div className="disc-sidebar-section disc-sidebar-archives" data-expanded={!collapsedInCurrentMode('archives')}>
+              <button type="button" className="disc-group-btn" data-variant="archive" onClick={() => toggleSection('archives')} aria-expanded={!collapsedInCurrentMode('archives')}>
+                <ChevronRight size={10} className="disc-chevron" data-expanded={!collapsedInCurrentMode('archives')} />
+                <Archive size={10} /><span>{t('pages.filter.archived')}</span><span className="disc-group-count">{visibleArchived.length}</span>
               </button>
-              {!isSectionCollapsed('archives') && archivedPages.map(page => renderPageRow(page, 'archive'))}
+              {!collapsedInCurrentMode('archives') && visibleArchived.map(page => row(page, 'archive'))}
             </div>
           )}
 
-          {matchingPages.length === 0 && <div className="disc-empty">{t(query ? 'pages.noSearchResults' : 'pages.empty')}</div>}
-        </div>
-        <div className="disc-sidebar-footer"><span>{t('pages.sidebar.hint')}</span><span><kbd>/</kbd> {t('pages.sidebar.search')}</span></div>
-      </aside>
+          {visibleItems.length === 0 && <div className="disc-empty">{t(query ? 'pages.noSearchResults' : 'pages.empty')}</div>}
+            </div>;
+          },
+          sidebarFooter: <CollectionSidebarFooter
+            label={t('pages.sidebar.hint')}
+            navigateLabel={t('disc.sidebar.navigate')}
+            searchLabel={t('pages.sidebar.search')}
+          />,
+          renderDetail: () => null,
+        }}
+      />
 
       <section className="live-pages-viewer">
         {error && <div className="live-pages-error" role="alert">{error}</div>}
         {detail ? (
           <>
-            <header className="live-pages-viewer-header">
+            <header className="live-pages-viewer-header collection-detail-header">
               <div className="live-pages-title-block">
                 {editingTitle ? (
                   <form

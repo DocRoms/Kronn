@@ -34,9 +34,11 @@ export function SetupWizard({ initialStatus, onComplete, inDocker = false }: Pro
   const [completing, setCompleting] = useState(false);
   const completingRef = useRef(false);
   const [error, setError] = useState<string | null>(null);
-  const [showManualPath, setShowManualPath] = useState(false);
+  const [showManualPath, setShowManualPath] = useState(true);
   const [showHidden, setShowHidden] = useState(false);
-  const [paths, setPaths] = useState<string[]>([]);
+  const [paths, setPaths] = useState<string[]>(() =>
+    initialStatus?.default_scan_path ? [initialStatus.default_scan_path] : []
+  );
   const [newPath, setNewPath] = useState('');
 
   const installedCount = agents.filter(a => a.installed || a.runtime_available).length;
@@ -198,6 +200,16 @@ export function SetupWizard({ initialStatus, onComplete, inDocker = false }: Pro
                 <button className="btn btn-icon btn-secondary" onClick={refreshAgents} disabled={detecting} title={t('setup.refresh')} aria-label={t('setup.refresh')}>
                   <RefreshCw size={14} style={detecting ? { animation: 'spin 1s linear infinite' } : undefined} />
                 </button>
+              </div>
+
+              <div className="setup-perimeter-note" role="note">
+                <strong>{t('setup.repoPerimeterTitle')}</strong>
+                <p>{t('setup.repoPerimeterDesc')}</p>
+                {paths.length > 0 && (
+                  <div className="setup-perimeter-paths">
+                    {paths.map(path => <code key={path}>{path}</code>)}
+                  </div>
+                )}
               </div>
               {detecting && agents.length === 0 ? (
                 <>

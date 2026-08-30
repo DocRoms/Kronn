@@ -3,7 +3,7 @@ import { useT } from '../../lib/I18nContext';
 import { workflows as workflowsApi } from '../../lib/api';
 import type { WorkflowRun, WorkflowStep, DecideRunRequest, ProducedBranch } from '../../types/generated';
 import { Trash2, ChevronRight, Square, Loader2, Plug, Send, Layers, Shield, Hand, Check, X, RotateCcw, Terminal, GitBranch, Copy, FlaskConical, AlertTriangle, CornerDownRight, Database, Shuffle } from 'lucide-react';
-import { AGENT_LABELS, AGENT_COLORS } from '../../lib/constants';
+import { AGENT_LABELS, agentTextColor } from '../../lib/constants';
 import { parseForeachEnvelope, isZeroTokenItem } from '../../lib/foreach-envelope';
 import { CopyIdPill } from '../CopyIdPill';
 import {
@@ -1045,7 +1045,7 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, on
                     </span>
                   )}
                   {sr.step_kind === 'Agent' && sr.step_agent && (
-                    <span className="text-xs font-semibold" style={{ color: AGENT_COLORS[sr.step_agent] ?? 'var(--kr-text-faint)' }}>
+                    <span className="text-xs font-semibold" style={{ color: agentTextColor(sr.step_agent) }}>
                       {AGENT_LABELS[sr.step_agent] ?? sr.step_agent}
                     </span>
                   )}

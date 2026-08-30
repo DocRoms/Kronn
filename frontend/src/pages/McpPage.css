@@ -1,5 +1,15 @@
 /* McpPage — page-specific styles */
 
+.mcp-page {
+  display: flex;
+  height: calc(100vh - 56px);
+  min-height: 0;
+  margin:
+    calc(-1 * var(--dash-main-padding-block))
+    calc(-1 * var(--dash-main-padding-inline));
+  flex-direction: column;
+}
+
 /* ── Page header ────────────────────────────────────────── */
 .mcp-page-header {
   display: flex;
@@ -11,6 +21,39 @@
 .mcp-header-actions {
   flex-wrap: wrap;
   justify-content: flex-end;
+}
+
+.mcp-collection-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--kr-sp-2);
+  padding: var(--kr-sp-2) var(--kr-sp-3);
+  border-bottom: 1px solid var(--kr-border-light);
+}
+
+.mcp-collection-toolbar .mcp-meta { margin: 0; font-size: var(--kr-fs-2xs); }
+.mcp-collection-toolbar-actions { display: flex; align-items: center; gap: var(--kr-sp-1); }
+
+.mcp-page .collection-shell-search-options {
+  min-width: 0;
+  overflow-x: clip;
+}
+
+.mcp-page .collection-shell-search-options .list-controls {
+  min-width: 0;
+}
+
+.mcp-page .collection-shell-search-options .list-control {
+  flex: 1;
+  min-width: 0;
+}
+
+.mcp-page .collection-shell-search-options .list-control select {
+  box-sizing: border-box;
+  flex: 1;
+  min-width: 0;
+  max-width: 100%;
 }
 
 /* ── Incomplete-config warning banner ───────────────────── */
@@ -143,9 +186,27 @@
 }
 
 /* ── Add MCP panel ──────────────────────────────────────── */
+.mcp-add-modal-backdrop {
+  position: fixed;
+  inset: 56px 0 0;
+  z-index: var(--kr-z-modal);
+  display: grid;
+  place-items: center;
+  padding: var(--kr-sp-8);
+  background: rgba(5, 8, 14, 0.52);
+  backdrop-filter: blur(3px);
+}
+
 .mcp-add-panel {
-  margin-bottom: var(--kr-sp-9);
+  margin: 0;
   border-color: var(--kr-accent-border);
+}
+
+.mcp-add-modal {
+  width: min(960px, calc(100vw - 64px));
+  max-height: calc(100dvh - 104px);
+  overflow-y: auto;
+  box-shadow: var(--kr-shadow-lg);
 }
 
 .mcp-add-header {
@@ -160,6 +221,23 @@
   font-weight: 600;
   color: var(--kr-accent);
   margin: 0;
+}
+
+@media (max-width: 700px) {
+  .mcp-add-modal-backdrop {
+    align-items: end;
+    padding: 0;
+  }
+
+  .mcp-add-modal {
+    width: 100%;
+    max-height: calc(100dvh - 56px);
+    border-right: 0;
+    border-bottom: 0;
+    border-left: 0;
+    border-radius: var(--kr-r-2xl) var(--kr-r-2xl) 0 0;
+    padding: var(--kr-sp-6);
+  }
 }
 
 /* ── Category filter pills ──────────────────────────────── */
@@ -470,60 +548,41 @@
   opacity: 1;
 }
 
-/* ── Search bar ─────────────────────────────────────────── */
-.mcp-list-toolbar {
-  display: flex;
-  align-items: center;
-  gap: var(--kr-sp-5);
-  margin-bottom: var(--kr-sp-6);
+/* ── Installed plugins collection ───────────────────────── */
+.mcp-plugin-shell {
+  height: 100%;
+  min-height: 440px;
+  flex: 1 1 auto;
+  overflow: hidden;
 }
 
-.mcp-list-boundary {
-  width: 100%;
-  margin-bottom: var(--kr-sp-8);
-  border-top: 1px solid var(--kr-border);
+.mcp-sidebar-plugin-icon {
+  display: inline-grid;
+  width: 26px;
+  height: 26px;
+  flex: 0 0 26px;
+  place-items: center;
+  border: 1px solid var(--kr-border-light);
+  border-radius: var(--kr-r-sm);
+  background: var(--kr-bg-surface);
+  color: var(--kr-text-muted);
 }
 
-.mcp-search-wrap {
-  position: relative;
-  display: flex;
-  flex: 1;
-  align-items: center;
-  min-width: 220px;
+.mcp-sidebar-plugin-icon[data-kind='mcp'] { color: var(--kr-purple); }
+.mcp-sidebar-plugin-icon[data-kind='api'] { color: var(--kr-cyan); }
+.mcp-sidebar-plugin-icon[data-kind='cli'] { color: var(--kr-warning); }
+.mcp-sidebar-plugin-icon[data-kind='hybrid'] { color: var(--kr-accent); }
+
+.mcp-sidebar-plugin-row .disc-item-meta {
+  overflow: hidden;
 }
 
-.mcp-search-icon {
-  position: absolute;
-  left: 10px;
-  top: 50%;
-  transform: translateY(-50%);
-  color: var(--kr-text-ghost);
-  pointer-events: none;
-}
-
-.mcp-search-input {
-  padding-left: 32px;
-  flex: 1;
-  min-width: 0;
-}
-
-.mcp-search-clear {
-  position: absolute;
-  right: var(--kr-sp-3);
-  top: 50%;
-  transform: translateY(-50%);
-  background: none;
-  border: none;
-  cursor: pointer;
-  color: var(--kr-text-dim);
-  padding: 2px;
-}
-
-/* ── Installed plugins grid ─────────────────────────────── */
-.mcp-installed-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-  gap: var(--kr-sp-5);
+.mcp-sidebar-plugin-row .mcp-scope-badge,
+.mcp-sidebar-plugin-row .mcp-kind-badge,
+.mcp-sidebar-plugin-row .badge {
+  flex: 0 0 auto;
+  padding: 1px 4px;
+  font-size: 9px;
 }
 
 .mcp-filter-empty {
@@ -867,19 +926,6 @@
     justify-content: flex-start;
   }
 
-  .mcp-installed-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .mcp-list-toolbar {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
-  .mcp-search-wrap {
-    width: 100%;
-  }
-
 }
 
 /* ── Inline detail panel (spans full grid width) ───────── */
@@ -895,9 +941,9 @@
   display: flex;
   align-items: flex-start;
   gap: var(--kr-sp-6);
-  margin-bottom: var(--kr-sp-8);
-  padding-bottom: var(--kr-sp-6);
-  border-bottom: 1px solid var(--kr-border-light);
+  margin: calc(-1 * var(--kr-sp-9)) calc(-1 * var(--kr-sp-9)) var(--kr-sp-8);
+  padding: 18px 20px;
+  border-radius: var(--kr-r-xl) var(--kr-r-xl) 0 0;
 }
 
 .mcp-detail-name {
@@ -1208,88 +1254,6 @@
   display: flex;
   flex-direction: column;
   gap: var(--kr-sp-6);
-}
-
-/* Plugin detail panel — same mechanics as the discussion tool panels
-   (Plan / Code / Settings): a right-hand panel with no backdrop, so the
-   plugin list stays clickable and picking another card swaps the panel
-   content instead of forcing a close first. */
-.mcp-plugin-panel,
-.mcp-page-with-panel {
-  --mcp-panel-w: min(640px, 44vw);
-}
-
-.mcp-plugin-panel {
-  position: fixed;
-  inset: 0 0 0 auto;
-  z-index: 40;
-  box-sizing: border-box;
-  grid-column: auto;
-  width: var(--mcp-panel-w);
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  /* Panel chrome, not card chrome: square edges, neutral border, and the
-     padding moved onto the header/body so the header can stay put. */
-  padding: 0;
-  border-radius: 0;
-  border-color: var(--kr-border);
-  border-right: 0;
-  box-shadow: -10px 0 24px rgba(0, 0, 0, 0.08);
-  animation: mcp-panel-enter 180ms ease-out;
-}
-
-.mcp-plugin-panel .mcp-detail-header {
-  flex: 0 0 auto;
-  align-items: center;
-  gap: var(--kr-sp-4);
-  margin-bottom: 0;
-  padding: var(--kr-sp-5) var(--kr-sp-7);
-  border-bottom: 1px solid var(--kr-border);
-  background: var(--kr-bg-surface);
-}
-
-.mcp-plugin-panel .mcp-detail-body {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  padding: var(--kr-sp-7);
-}
-
-/* The page keeps the panel's width free so no card ends up hidden
-   underneath it — the grid reflows instead of being covered.
-   The page HEADER is deliberately excluded: reserving the room on the page
-   root squeezed the title and the counters too, which read as the whole page
-   shrinking rather than a panel opening beside the content (same contract as
-   the Planning page, where the header spans the full width and the panel opens
-   below it). */
-.mcp-page-with-panel > *:not(.mcp-page-header) {
-  padding-right: var(--mcp-panel-w);
-}
-
-@keyframes mcp-panel-enter {
-  from { transform: translateX(24px); opacity: 0.7; }
-  to { transform: translateX(0); opacity: 1; }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .mcp-plugin-panel {
-    animation: none;
-  }
-}
-
-/* Narrow screens can't afford a split view: the panel takes the width and
-   the page stops reserving room for it. */
-@media (max-width: 760px) {
-  .mcp-plugin-panel {
-    width: min(100%, 480px);
-    box-shadow: var(--kr-shadow-xl);
-  }
-
-  .mcp-page-with-panel > *:not(.mcp-page-header) {
-    padding-right: 0;
-  }
 }
 
 /* ── Plugin readiness diagnostics ─────────────────────── */

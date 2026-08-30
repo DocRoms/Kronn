@@ -1,7 +1,8 @@
 .source-viewer {
   display: grid;
-  height: min(620px, calc(100dvh - 340px));
-  min-height: 420px;
+  height: auto;
+  min-height: 0;
+  flex: 1;
   grid-template-columns: minmax(210px, 30%) minmax(0, 1fr);
   overflow: hidden;
   border: 1px solid var(--kr-border-light);

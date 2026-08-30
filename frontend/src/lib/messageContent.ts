@@ -1,6 +1,7 @@
 const RE_SEED = /<!--KRONN_SEED_START-->\s*([\s\S]*?)\s*<!--KRONN_SEED_END-->/;
 const RE_AGENT_HANDOFF = /^<!-- KRONN_AGENT_HANDOFF:[\s\S]*?-->\s*/;
 const INJECTED_CONTEXT_RE = /<!-- kronn:context title="([^"]*)" -->\n?([\s\S]*?)\n?<!-- \/kronn:context -->/g;
+export const DELETED_MESSAGE_MARKER = '[kronn:message-deleted]';
 
 export type MsgSegment =
   | { kind: 'text'; body: string }
@@ -15,6 +16,10 @@ export function splitMessageSeed(content: string): { visible: string; seed: stri
 
 export function stripAgentHandoff(content: string): string {
   return content.replace(RE_AGENT_HANDOFF, '');
+}
+
+export function isDeletedMessage(content: string): boolean {
+  return content.startsWith(DELETED_MESSAGE_MARKER);
 }
 
 export function splitInjectedContext(content: string): MsgSegment[] {

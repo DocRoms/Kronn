@@ -1,7 +1,8 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { BatchComparePanel } from '../BatchComparePanel';
-import type { Discussion } from '../../types/generated';
+import type { Discussion, MessageTarget } from '../../types/generated';
+import type { ExternalApiConnectionView } from '../../lib/api';
 
 const compareApi = vi.hoisted(() => ({
   get: vi.fn(),
@@ -192,6 +193,67 @@ describe('BatchComparePanel', () => {
     expect(screen.getByRole('alert')).toHaveTextContent('disc.compare.failureReason');
     expect(screen.getByRole('alert')).toHaveTextContent('Vibe authentication is not ready');
     expect(screen.queryByText('disc.compare.noAnswer')).not.toBeInTheDocument();
+  });
+
+  it('identifies a failed OpenRouter target and lets the terminal error override a stale spinner', () => {
+    const failed = discussion('disc-openrouter-failed', 'Custom', 'default', '');
+    failed.title = 'An editable title with no provider identity';
+    failed.awaiting_agent = false;
+    failed.messages = [{
+      id: 'system-openrouter-failed',
+      role: 'System',
+      channel: 'main',
+      content: 'External API error 402 Payment Required: insufficient credits.',
+      agent_type: 'Custom',
+      model: 'z-ai/glm-5.3',
+      timestamp: '2026-08-30T13:50:25Z',
+      tokens_used: 0,
+    }] as Discussion['messages'];
+    (failed as Discussion & { message_targets: Record<string, MessageTarget[]> }).message_targets = {
+      'initial-user-message': [{
+        kind: 'discussion_agent',
+        agent_type: 'Custom',
+        connection_id: 'conn-openrouter',
+        tier: 'default',
+      }],
+    };
+    const openRouterConnection: ExternalApiConnectionView = {
+      id: 'conn-openrouter',
+      display_name: 'OpenRouter',
+      mention_alias: 'openrouter',
+      endpoint: 'https://openrouter.ai/api/v1',
+      credential_slug: 'openrouter',
+      origin_preset: 'open_router',
+      economy_model: 'qwen/qwen3.8-flash',
+      default_model: 'z-ai/glm-5.3',
+      reasoning_model: 'z-ai/glm-5.3',
+      created_at: '2026-08-30T12:00:00Z',
+      updated_at: '2026-08-30T12:00:00Z',
+      has_credential: true,
+    };
+
+    render(
+      <BatchComparePanel
+        runId="run-openrouter"
+        label="Translate article"
+        discussions={[failed]}
+        loading={false}
+        error={null}
+        availableAgents={['Custom']}
+        externalConnections={[openRouterConnection]}
+        runningIds={new Set(['disc-openrouter-failed'])}
+        onRefresh={vi.fn()}
+        onOpenDiscussion={vi.fn()}
+        onClose={vi.fn()}
+        t={(key) => key}
+      />,
+    );
+
+    expect(screen.getByText('OpenRouter')).toBeInTheDocument();
+    expect(screen.getByText('z-ai/glm-5.3')).toBeInTheDocument();
+    expect(screen.getByRole('alert')).toHaveTextContent('402 Payment Required');
+    expect(screen.queryByText('disc.compare.generating')).not.toBeInTheDocument();
+    expect(document.querySelector('.disc-compare-column')).toHaveAttribute('data-running', 'false');
   });
 
   it('opens Details, ranks by every selectable metric and persists a separate human score', async () => {

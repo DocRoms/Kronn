@@ -3,7 +3,7 @@
 // Pins the 0-token désagentified briefing form added in 0.8.4 (#285):
 //   - renders the 6 questions with labels + textarea (Q1-Q5 required, Q6 optional)
 //   - submit blocked while Q1-Q5 has at least one empty field (HTML required)
-//   - on submit, calls saveBriefing(projectId, form) THEN startBriefing(projectId, agent)
+//   - on submit, calls saveBriefing(projectId, form) THEN startBriefing(projectId, agent, tier)
 //   - emits a success toast + onSaved(discussionId) when the disc spawn succeeds
 //   - falls back to a warning toast + onSaved(null) when the spawn fails but save succeeds
 //   - submit button toggles to "saving…" state while in flight + buttons disabled
@@ -45,7 +45,8 @@ describe('BriefingForm (0.8.5)', () => {
         projectId="p-1"
         onClose={() => {}}
         onSaved={() => {}}
-        agent="claude"
+        agent="ClaudeCode"
+        tier="reasoning"
         toast={() => {}}
       />
     );
@@ -70,7 +71,8 @@ describe('BriefingForm (0.8.5)', () => {
         projectId="p-99"
         onClose={() => {}}
         onSaved={onSaved}
-        agent="claude"
+        agent="ClaudeCode"
+        tier="reasoning"
         toast={toast}
       />
     );
@@ -88,7 +90,7 @@ describe('BriefingForm (0.8.5)', () => {
         traps: expect.any(String),
       })
     );
-    expect(projectsApi.startBriefing).toHaveBeenCalledWith('p-99', 'claude');
+    expect(projectsApi.startBriefing).toHaveBeenCalledWith('p-99', 'ClaudeCode', 'reasoning');
     expect(onSaved).toHaveBeenCalledWith('disc-42');
     expect(toast).toHaveBeenCalledWith(expect.any(String), 'success');
   });
@@ -104,7 +106,8 @@ describe('BriefingForm (0.8.5)', () => {
         projectId="p-fail"
         onClose={() => {}}
         onSaved={onSaved}
-        agent="claude"
+        agent="ClaudeCode"
+        tier="reasoning"
         toast={toast}
       />
     );
@@ -130,7 +133,8 @@ describe('BriefingForm (0.8.5)', () => {
         projectId="p-1"
         onClose={() => {}}
         onSaved={() => {}}
-        agent="claude"
+        agent="ClaudeCode"
+        tier="reasoning"
         toast={() => {}}
       />
     );
@@ -156,7 +160,8 @@ describe('BriefingForm (0.8.5)', () => {
         projectId="p-1"
         onClose={onClose}
         onSaved={() => {}}
-        agent="claude"
+        agent="ClaudeCode"
+        tier="reasoning"
         toast={() => {}}
       />
     );

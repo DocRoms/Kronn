@@ -233,6 +233,41 @@
   border: 1px solid rgba(var(--kr-warning-rgb), 0.25);
 }
 
+.setup-perimeter-note {
+  margin: 12px 0 16px;
+  padding: 12px 14px;
+  border: 1px solid var(--kr-border-subtle);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--kr-accent) 6%, var(--kr-bg-surface));
+  color: var(--kr-text-secondary);
+  font-size: 12px;
+}
+
+.setup-perimeter-note strong {
+  display: block;
+  color: var(--kr-text-primary);
+  margin-bottom: 4px;
+}
+
+.setup-perimeter-note p {
+  margin: 0;
+  line-height: 1.45;
+}
+
+.setup-perimeter-paths {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.setup-perimeter-paths code {
+  padding: 3px 7px;
+  border: 1px solid var(--kr-border-subtle);
+  border-radius: 6px;
+  background: var(--kr-bg-raised);
+}
+
 .setup-auth-warning {
   display: flex;
   align-items: center;

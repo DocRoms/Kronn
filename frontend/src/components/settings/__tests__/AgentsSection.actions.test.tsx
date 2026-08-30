@@ -201,14 +201,17 @@ describe('AgentsSection — per-agent concurrency', () => {
     expect(input.placeholder).toBe('1');
   });
 
-  it('shows unlimited for a remote provider and 5 for a CLI', () => {
+  it('drops NVIDIA from the fleet (it moved to the External API zone) and shows 5 for a CLI', () => {
+    // KT-339 \u2014 NVIDIA is now a connection in the unified External API zone,
+    // not a standalone fleet row, so it no longer has a fleet concurrency
+    // control. A CLI still shows its 5-slot default.
     renderSection({
       agents: [
         makeAgent({ name: 'Nvidia', agent_type: 'Nvidia', installed: true }),
         makeAgent({ name: 'AgentClaude', agent_type: 'ClaudeCode', installed: true }),
       ],
     });
-    expect((screen.getByTestId('agent-concurrency-Nvidia') as HTMLInputElement).placeholder).toBe('\u221e');
+    expect(screen.queryByTestId('agent-concurrency-Nvidia')).toBeNull();
     expect((screen.getByTestId('agent-concurrency-ClaudeCode') as HTMLInputElement).placeholder).toBe('5');
   });
 
@@ -502,19 +505,14 @@ describe('AgentsSection — observed model costs', () => {
     });
 
     await waitFor(() => expect(usageGetMock).toHaveBeenCalledWith('monthly'));
-    await waitFor(() => {
-      const sonnetOptions = screen.getAllByRole('option')
-        .filter(option => option.getAttribute('value') === 'sonnet');
-      expect(sonnetOptions.length).toBeGreaterThan(0);
-      expect(sonnetOptions.every(option => (
-        option.textContent?.includes('≈')
-        && option.textContent.includes('config.modelCostObserved:$12.3')
-      ))).toBe(true);
-    });
-
-    const fableOptions = screen.getAllByRole('option')
-      .filter(option => option.getAttribute('value') === 'fable');
-    expect(fableOptions.every(option => !option.textContent?.includes('≈'))).toBe(true);
+    for (const tier of ['economy', 'default', 'reasoning']) {
+      const picker = await screen.findByLabelText(`disc.modelTier ${tier}`);
+      fireEvent.focus(picker);
+      await waitFor(() => expect(screen.getByRole('option', { name: 'sonnet' }))
+        .toHaveTextContent('config.modelCostObserved:$12.3'));
+      expect(screen.getByRole('option', { name: 'fable' })).not.toHaveTextContent('≈');
+      fireEvent.keyDown(picker, { key: 'Escape' });
+    }
     expect(screen.getByRole('button', { name: 'config.modelCostObservedTitle' })).toBeTruthy();
 
     expect(screen.getByTestId('model-cost-display')).toBeTruthy();
@@ -524,19 +522,17 @@ describe('AgentsSection — observed model costs', () => {
     );
     fireEvent.click(screen.getByTestId('model-cost-mode-relative'));
     expect(screen.getByTestId('model-cost-reference')).toHaveValue('claude-sonnet-4-5');
-    const relativeSonnetOptions = screen.getAllByRole('option')
-      .filter(option => option.getAttribute('value') === 'sonnet');
-    expect(relativeSonnetOptions.every(option => option.textContent?.includes('≈ ×1'))).toBe(true);
-    const relativeOpusOptions = screen.getAllByRole('option')
-      .filter(option => option.getAttribute('value') === 'opus');
-    expect(relativeOpusOptions.every(option => option.textContent?.includes('≈ ×2'))).toBe(true);
+    const defaultPicker = screen.getByLabelText('disc.modelTier default');
+    fireEvent.focus(defaultPicker);
+    expect(screen.getByRole('option', { name: 'sonnet' })).toHaveTextContent('≈ ×1');
+    expect(screen.getByRole('option', { name: 'opus' })).toHaveTextContent('≈ ×2');
+    fireEvent.keyDown(defaultPicker, { key: 'Escape' });
 
     fireEvent.change(screen.getByTestId('model-cost-reference'), {
       target: { value: 'claude-opus-4-7' },
     });
-    const rebasedSonnetOptions = screen.getAllByRole('option')
-      .filter(option => option.getAttribute('value') === 'sonnet');
-    expect(rebasedSonnetOptions.every(option => option.textContent?.includes('≈ ×0.5'))).toBe(true);
+    fireEvent.focus(defaultPicker);
+    expect(screen.getByRole('option', { name: 'sonnet' })).toHaveTextContent('≈ ×0.5');
   });
 
   it('offers every known model in every reasoning tier', async () => {
@@ -549,7 +545,9 @@ describe('AgentsSection — observed model costs', () => {
     const expectedModels = ['', 'haiku', 'sonnet', 'fable', 'opus'];
     for (const tier of ['economy', 'default', 'reasoning']) {
       const select = await screen.findByLabelText(`disc.modelTier ${tier}`);
-      expect([...select.querySelectorAll('option')].map(option => option.value)).toEqual(expectedModels);
+      fireEvent.focus(select);
+      expect(screen.getAllByRole('option').map(option => option.dataset.value)).toEqual(expectedModels);
+      fireEvent.keyDown(select, { key: 'Escape' });
     }
   });
 });
@@ -605,7 +603,9 @@ describe('AgentsSection — configurable mention colors', () => {
     expect(card?.querySelector('.set-ollama-header-actions [data-testid="mention-color-Ollama"]')).toBeTruthy();
   });
 
-  it('aligns the LiteLLM mention color with its right-hand header actions', async () => {
+  it('renders LiteLLM in the unified External API zone, not as its own fleet card', async () => {
+    // KT-339 — LiteLLM and NVIDIA are unified into one "External API" zone, so
+    // the standalone LiteLLM fleet card no longer renders.
     const { container } = renderSection({
       agents: [makeAgent({
         name: 'LiteLLM',
@@ -619,8 +619,8 @@ describe('AgentsSection — configurable mention colors', () => {
       await Promise.resolve();
     });
 
-    const card = container.querySelector<HTMLElement>('[data-agent-type="LiteLlm"]');
-    expect(card?.querySelector('.set-ollama-header-actions [data-testid="mention-color-LiteLlm"]')).toBeTruthy();
+    expect(container.querySelector('[data-agent-type="LiteLlm"]')).toBeNull();
+    expect(screen.getByTestId('external-api-section')).toBeTruthy();
   });
 
   it('persists the selected agent color, refreshes config, and notifies renderers', async () => {

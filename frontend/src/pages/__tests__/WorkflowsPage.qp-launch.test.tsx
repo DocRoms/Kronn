@@ -318,6 +318,86 @@ describe('WorkflowsPage — QP launch double-click race', () => {
     ]);
   });
 
+  it('compare mode cannot fall back to a single discussion through Enter or a competing CTA', async () => {
+    mockQuickPromptsApi.list.mockResolvedValue([sampleQpWithVar]);
+    mockQuickPromptsApi.compareAgents.mockResolvedValue({
+      run_id: 'run-enter-compare',
+      batch_total: 2,
+      discussion_ids: [],
+    });
+
+    await wrap(
+      <WorkflowsPage
+        projects={[]}
+        installedAgentTypes={['ClaudeCode', 'Codex']}
+        agentAccess={fullConfig}
+      />,
+    );
+
+    await act(async () => { fireEvent.click(await screen.findByText(/Quick Prompts/)); });
+    await act(async () => { fireEvent.click(await screen.findByTestId('qp-compare-agents-btn')); });
+
+    const ticketInput = await screen.findByPlaceholderText('EW-1234');
+    expect(document.querySelector('.qp-launch-go-btn')).toBeNull();
+    expect(screen.getByTestId('qp-compare-agents-launch')).toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.change(ticketInput, { target: { value: 'EW-9000' } });
+      fireEvent.keyDown(ticketInput, { key: 'Enter' });
+    });
+
+    await waitFor(() => expect(mockQuickPromptsApi.compareAgents).toHaveBeenCalledTimes(1));
+    expect(mockDiscussionsApi.create).not.toHaveBeenCalled();
+    expect(mockQuickPromptsApi.compareAgents).toHaveBeenCalledWith(
+      sampleQpWithVar.id,
+      expect.objectContaining({
+        targets: [
+          { agent: 'ClaudeCode', tier: 'default' },
+          { agent: 'Codex', tier: 'default' },
+        ],
+      }),
+    );
+  });
+
+  it('turns the card launch button into the active compare action without clearing variables', async () => {
+    mockQuickPromptsApi.list.mockResolvedValue([sampleQpWithVar]);
+    mockQuickPromptsApi.compareAgents.mockResolvedValue({
+      run_id: 'run-card-compare',
+      batch_total: 2,
+      discussion_ids: [],
+    });
+
+    await wrap(
+      <WorkflowsPage
+        projects={[]}
+        installedAgentTypes={['ClaudeCode', 'Codex']}
+        agentAccess={fullConfig}
+      />,
+    );
+
+    await act(async () => { fireEvent.click(await screen.findByText(/Quick Prompts/)); });
+    await act(async () => { fireEvent.click(await screen.findByTestId('qp-compare-agents-btn')); });
+
+    const ticketInput = await screen.findByPlaceholderText('EW-1234') as HTMLInputElement;
+    await act(async () => {
+      fireEvent.change(ticketInput, { target: { value: 'EW-9100' } });
+    });
+
+    const cardAction = document.querySelector<HTMLButtonElement>('.qp-card .qp-launch-btn');
+    expect(cardAction).not.toBeNull();
+    expect(cardAction!.textContent).toMatch(/Comparer|Compare|Comparar/);
+
+    await act(async () => { fireEvent.click(cardAction!); });
+
+    await waitFor(() => expect(mockQuickPromptsApi.compareAgents).toHaveBeenCalledTimes(1));
+    expect(mockDiscussionsApi.create).not.toHaveBeenCalled();
+    expect(ticketInput.value).toBe('EW-9100');
+    expect(mockQuickPromptsApi.compareAgents).toHaveBeenCalledWith(
+      sampleQpWithVar.id,
+      expect.objectContaining({ prompt: 'Analyse the ticket EW-9100 and report findings.' }),
+    );
+  });
+
   it('compare-agents fans out POST /run for every child disc (otherwise only the navigated agent works)', async () => {
     // Pin the bug the user reported: pre-fix, `handleCompareAgents`
     // called `onNavigateDiscussion(disc1)` which auto-runs ONLY

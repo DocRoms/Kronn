@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { buildApiMock } from '../../test/apiMock';
 
 vi.mock('../../lib/api', () => buildApiMock());
@@ -69,10 +69,38 @@ afterEach(() => {
 });
 
 describe('DiscussionSidebar — bulk selection', () => {
+  it('uses the shared collection collapse control on desktop', () => {
+    const props = { ...makeProps(), onCollapse: vi.fn() };
+    render(<DiscussionSidebar {...props} />);
+    const collapse = screen.getByRole('button', { name: 'disc.closeSidebar' });
+    expect(collapse).toHaveClass('collection-shell-collapse-button');
+    fireEvent.click(collapse);
+    expect(props.onCollapse).toHaveBeenCalledOnce();
+  });
+
+  it('covers the narrow sidebar rail, empty list, selection, and open actions on the real sidebar', () => {
+    const onClose = vi.fn();
+    const props = { ...makeProps(), isMobile: true, onClose };
+    const view = render(<DiscussionSidebar {...props} discussions={[]} />);
+
+    expect(screen.getByRole('complementary', { name: 'Discussions' })).toHaveClass('collection-shell-sidebar');
+    expect(screen.getByText('disc.empty')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'disc.closeSidebar' }));
+    expect(onClose).toHaveBeenCalledOnce();
+
+    view.rerender(<DiscussionSidebar {...props} />);
+    fireEvent.click(screen.getByRole('button', { name: 'disc.sidebar.moreActions' }));
+    expect(screen.getByRole('group', { name: 'disc.sidebar.moreActions' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'disc.bulk.start' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: /Discussion disc-a/ }));
+    expect(screen.getByText('disc.bulk.selected:1')).toBeInTheDocument();
+  });
+
   it('opens a free comparison only after at least two discussions are selected', async () => {
     const props = makeProps();
     render(<DiscussionSidebar {...props} />);
 
+    expect(screen.getByRole('complementary', { name: 'Discussions' })).toHaveClass('collection-shell-sidebar');
     fireEvent.click(screen.getByRole('button', { name: 'disc.sidebar.moreActions' }));
     fireEvent.click(screen.getByRole('button', { name: 'disc.bulk.start' }));
     const compare = screen.getByRole('button', { name: 'disc.bulk.compare' });
@@ -129,6 +157,30 @@ describe('DiscussionSidebar — bulk selection', () => {
     expect(confirmStub).toHaveBeenCalledWith('disc.bulk.confirmDelete:1');
     expect(props.onBulkDelete).not.toHaveBeenCalled();
     expect(screen.getByText('disc.bulk.selected:1')).toBeInTheDocument();
+  });
+
+  it('prunes a deleted discussion from the live bulk selection after a refresh', async () => {
+    const props = makeProps();
+    const confirmStub = vi.fn(() => true);
+    vi.stubGlobal('confirm', confirmStub);
+    const { rerender } = render(<DiscussionSidebar {...props} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'disc.sidebar.moreActions' }));
+    fireEvent.click(screen.getByRole('button', { name: 'disc.bulk.start' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: /Discussion disc-b/ }));
+    expect(screen.getByText('disc.bulk.selected:1')).toBeInTheDocument();
+
+    await act(async () => {
+      rerender(<DiscussionSidebar {...props} discussions={[makeDiscussion('disc-a')]} />);
+    });
+
+    await waitFor(() => expect(screen.getByText('disc.bulk.selected:0')).toBeInTheDocument());
+    expect(screen.getByRole('button', { name: 'disc.bulk.archive' })).toBeDisabled();
+
+    fireEvent.click(screen.getByRole('checkbox', { name: /Discussion disc-a/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'disc.bulk.archive' }));
+    await waitFor(() => expect(props.onBulkArchive).toHaveBeenCalledWith(['disc-a']));
+    expect(confirmStub).toHaveBeenCalledWith('disc.bulk.confirmArchive:1');
   });
 
   it('moves focus into the header disclosure and restores it on Escape', async () => {

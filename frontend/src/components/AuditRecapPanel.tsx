@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { projects as projectsApi } from '../lib/api';
 import { useT } from '../lib/I18nContext';
 import { ClipboardList, X, ChevronRight, ChevronDown } from 'lucide-react';
+import { AGENT_LABELS } from '../lib/constants';
 import './AuditRecapPanel.css';
 
 type Step = {
@@ -33,6 +34,8 @@ interface Props {
   projectId: string;
   /** Bumped by parent when an audit completes; triggers history refetch. */
   refreshTrigger?: number;
+  /** Audit run explicitly selected by a project-card outcome link. */
+  selectedRunId?: string | null;
 }
 
 interface HistoryResult {
@@ -88,6 +91,7 @@ function kindIcon(kind: string): string {
     case 'Rgaa':          return '♿';
     case 'Database':      return '🗄';
     case 'ApiDesign':     return '🔌';
+    case 'Partial':       return '🔄';
     default:              return '📋';
   }
 }
@@ -101,10 +105,11 @@ function kindIcon(kind: string): string {
  * `--kr-*` tokens so the panel adapts to whichever theme the user
  * picked.
  */
-export default function AuditRecapPanel({ projectId, refreshTrigger }: Props) {
+export default function AuditRecapPanel({ projectId, refreshTrigger, selectedRunId }: Props) {
   const { t, locale } = useT();
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [historyResult, setHistoryResult] = useState<HistoryResult | null>(null);
+  const [latestStepsResult, setLatestStepsResult] = useState<StepsResult | null>(null);
   const [expandedRunId, setExpandedRunId] = useState<string | null>(null);
   const [stepsResult, setStepsResult] = useState<StepsResult | null>(null);
   const [sortKey, setSortKey] = useState<SortKey>('step_index');
@@ -130,16 +135,44 @@ export default function AuditRecapPanel({ projectId, refreshTrigger }: Props) {
     return () => { cancelled = true; };
   }, [projectId, refreshTrigger]);
 
-  // Load steps for the expanded card.
+  const historyKey = `${projectId}:${refreshTrigger ?? 0}`;
+  const historyIsCurrent = historyResult?.key === historyKey;
+  const history = historyIsCurrent ? historyResult.rows : EMPTY_AUDIT_RUNS;
+  const loadingHistory = !historyIsCurrent;
+  // A project-card outcome can refer to a terminal row that is no longer the
+  // first history item (for example, after a newer run has started). Keep the
+  // direct Audit view anchored to that exact durable run when it is available.
+  const latestRun = history.find(run => run.id === selectedRunId) ?? history[0] ?? null;
+
+  // The dedicated Audit tab shows the latest known run directly, so its
+  // per-step details are fetched without waiting for a history drawer click.
   useEffect(() => {
-    if (!expandedRunId) return;
+    if (!latestRun) return;
+    let cancelled = false;
+    const runId = latestRun.id;
+    (async () => {
+      try {
+        const rows = await projectsApi.auditRunSteps(runId);
+        if (!cancelled) setLatestStepsResult({ runId, rows: rows ?? [], error: null });
+      } catch (e) {
+        if (!cancelled) {
+          setLatestStepsResult({ runId, rows: [], error: String((e as Error).message ?? e) });
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [latestRun]);
+
+  // Load steps for an older run expanded in the history drawer. The latest
+  // run reuses the direct-detail request above instead of fetching twice.
+  useEffect(() => {
+    if (!expandedRunId || expandedRunId === latestRun?.id) return;
     let cancelled = false;
     const runId = expandedRunId;
     (async () => {
       try {
-        const rows = await projectsApi.auditRunSteps(expandedRunId);
-        if (cancelled) return;
-        setStepsResult({ runId, rows: rows ?? [], error: null });
+        const rows = await projectsApi.auditRunSteps(runId);
+        if (!cancelled) setStepsResult({ runId, rows: rows ?? [], error: null });
       } catch (e) {
         if (!cancelled) {
           setStepsResult({ runId, rows: [], error: String((e as Error).message ?? e) });
@@ -147,17 +180,21 @@ export default function AuditRecapPanel({ projectId, refreshTrigger }: Props) {
       }
     })();
     return () => { cancelled = true; };
-  }, [expandedRunId]);
+  }, [expandedRunId, latestRun?.id]);
 
-  const historyKey = `${projectId}:${refreshTrigger ?? 0}`;
-  const historyIsCurrent = historyResult?.key === historyKey;
-  const history = historyIsCurrent ? historyResult.rows : EMPTY_AUDIT_RUNS;
-  const loadingHistory = !historyIsCurrent;
-  const stepsAreCurrent = expandedRunId !== null && stepsResult?.runId === expandedRunId;
-  const steps = stepsAreCurrent ? stepsResult.rows : EMPTY_AUDIT_STEPS;
+  const latestStepsAreCurrent = latestRun !== null && latestStepsResult?.runId === latestRun.id;
+  const latestSteps = latestStepsAreCurrent ? latestStepsResult.rows : EMPTY_AUDIT_STEPS;
+  const loadingLatestSteps = latestRun !== null && !latestStepsAreCurrent;
+  const expandedRunIsLatest = expandedRunId !== null && expandedRunId === latestRun?.id;
+  const drawerStepsAreCurrent = expandedRunId !== null && stepsResult?.runId === expandedRunId;
+  const stepsAreCurrent = expandedRunIsLatest ? latestStepsAreCurrent : drawerStepsAreCurrent;
+  const steps = expandedRunIsLatest
+    ? latestSteps
+    : (drawerStepsAreCurrent ? stepsResult?.rows ?? EMPTY_AUDIT_STEPS : EMPTY_AUDIT_STEPS);
   const loadingSteps = expandedRunId !== null && !stepsAreCurrent;
   const error = (historyIsCurrent ? historyResult.error : null)
-    ?? (stepsAreCurrent ? stepsResult.error : null);
+    ?? (latestStepsAreCurrent ? latestStepsResult.error : null)
+    ?? (drawerStepsAreCurrent ? stepsResult?.error ?? null : null);
 
   // Close drawer on Escape.
   useEffect(() => {
@@ -196,25 +233,177 @@ export default function AuditRecapPanel({ projectId, refreshTrigger }: Props) {
     return copy;
   }, [steps, sortKey, sortDir]);
 
+  const sortedLatestSteps = useMemo(() => {
+    const copy = [...latestSteps];
+    copy.sort((a, b) => {
+      const av = (a[sortKey] ?? 0) as number;
+      const bv = (b[sortKey] ?? 0) as number;
+      const cmp = av - bv;
+      return sortDir === 'asc' ? cmp : -cmp;
+    });
+    return copy;
+  }, [latestSteps, sortKey, sortDir]);
+
+  const latestTotalTokens = useMemo(() => {
+    const cumulative = latestSteps
+      .map(step => step.cumulative_tokens)
+      .filter((value): value is number => typeof value === 'number');
+    if (cumulative.length > 0) return Math.max(...cumulative);
+    const perStep = latestSteps
+      .map(step => step.step_tokens)
+      .filter((value): value is number => typeof value === 'number');
+    return perStep.length > 0 ? perStep.reduce((sum, value) => sum + value, 0) : null;
+  }, [latestSteps]);
+
   const toggleSort = (key: SortKey) => {
     if (sortKey === key) setSortDir(sortDir === 'asc' ? 'desc' : 'asc');
     else { setSortKey(key); setSortDir(key === 'step_index' ? 'asc' : 'desc'); }
   };
   const sortMark = (key: SortKey) => sortKey === key ? (sortDir === 'asc' ? ' ▲' : ' ▼') : '';
+  const kindLabel = (kind: string) => kind === 'Partial'
+    ? t('projects.docAi.auditRecap.partialKind')
+    : kind === 'Full' ? t('audit.kind.Full') : kind;
+  const statusLabel = (status: string) => {
+    if (status === 'Completed') return t('projects.docAi.auditRecap.status.completed');
+    if (status === 'Interrupted') return t('projects.docAi.auditRecap.status.interrupted');
+    if (status === 'Running') return t('projects.docAi.auditRecap.status.running');
+    if (status === 'Failed') return t('projects.docAi.auditRecap.status.failed');
+    if (status === 'Cancelled') return t('projects.docAi.auditRecap.status.cancelled');
+    return status;
+  };
 
   if (history.length === 0 && !loadingHistory) return null;
 
   return (
     <>
-      <button
-        type="button"
-        className="arp-cta"
-        data-testid="audit-recap-toggle"
-        onClick={() => setDrawerOpen(true)}
-      >
-        <ClipboardList size={12} />
-        {t('projects.docAi.auditRecap.openDrawer', history.length)}
-      </button>
+      {loadingHistory && (
+        <section className="arp-latest" data-testid="audit-recap-loading">
+          <p>{t('common.loading')}</p>
+        </section>
+      )}
+
+      {latestRun && (
+        <section
+          className="arp-latest"
+          data-testid="audit-recap-latest"
+          data-failed={latestRun.status !== 'Completed' ? 'true' : 'false'}
+        >
+          <header className="arp-latest-header">
+            <div>
+              <h3>{latestRun.kind === 'Partial'
+                ? t('projects.docAi.auditRecap.latestUpdateTitle')
+                : t('projects.docAi.auditRecap.title')}</h3>
+              <div className="arp-run-card-title">
+                <span aria-hidden>{kindIcon(latestRun.kind)}</span>
+                <span>{kindLabel(latestRun.kind)}</span>
+                <span className="arp-run-card-time">
+                  · {fmtRelativeDate(latestRun.started_at, locale)}
+                </span>
+              </div>
+            </div>
+            <span className="arp-latest-status" data-failed={latestRun.status !== 'Completed' ? 'true' : 'false'}>
+              {statusLabel(latestRun.status)}
+            </span>
+          </header>
+
+          <div className="arp-run-meta arp-latest-meta">
+            <span>{AGENT_LABELS[latestRun.agent_type as keyof typeof AGENT_LABELS] ?? latestRun.agent_type}</span>
+            <span title={t('projects.docAi.auditRecap.metaDurationTooltip')}>
+              ⏱ {fmtDuration(latestRun.duration_ms)}
+            </span>
+            {latestTotalTokens !== null && <span>Σ {fmtTokens(latestTotalTokens)} tk</span>}
+            {latestRun.td_total > 0 && (
+              <span title={t('projects.docAi.auditRecap.metaTdTooltip')}>
+                🐛 {latestRun.td_total} TD
+              </span>
+            )}
+            {latestRun.health_score != null && (
+              <span title={t('projects.docAi.auditRecap.metaHealthTooltip')}>
+                ❤ {latestRun.health_score}/100
+              </span>
+            )}
+          </div>
+
+          <div className="arp-latest-steps">
+            {loadingLatestSteps && <p>{t('common.loading')}</p>}
+            {!loadingLatestSteps && latestSteps.length === 0 && (
+              <p data-testid="audit-recap-latest-empty">
+                {t('projects.docAi.auditRecap.empty')}
+              </p>
+            )}
+            {!loadingLatestSteps && latestSteps.length > 0 && (
+              <table className="arp-steps-table" data-testid="audit-recap-latest-table">
+                <thead>
+                  <tr>
+                    <th
+                      className="arp-num"
+                      data-sortable="true"
+                      onClick={() => toggleSort('step_index')}
+                      title={t('projects.docAi.auditRecap.colStepTooltip')}
+                    >
+                      #{sortMark('step_index')}
+                    </th>
+                    <th title={t('projects.docAi.auditRecap.colFileTooltip')}>
+                      {t('projects.docAi.auditRecap.colFile')}
+                    </th>
+                    <th
+                      className="arp-num"
+                      data-sortable="true"
+                      onClick={() => toggleSort('duration_ms')}
+                      title={t('projects.docAi.auditRecap.colDurationTooltip')}
+                    >
+                      {t('projects.docAi.auditRecap.colDuration')}{sortMark('duration_ms')}
+                    </th>
+                    <th
+                      className="arp-num"
+                      data-sortable="true"
+                      onClick={() => toggleSort('step_tokens')}
+                      title={t('projects.docAi.auditRecap.colTokensTooltip')}
+                    >
+                      {t('projects.docAi.auditRecap.colTokens')}{sortMark('step_tokens')}
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {sortedLatestSteps.map(step => {
+                    const failed = !step.cli_success || !!step.step_warning;
+                    return (
+                      <tr
+                        key={step.step_index}
+                        data-failed={failed ? 'true' : 'false'}
+                        data-testid={`audit-recap-latest-row-${step.step_index}`}
+                        title={step.step_warning ?? undefined}
+                      >
+                        <td className="arp-num">{step.step_index}</td>
+                        <td>
+                          {step.file_label}
+                          {step.step_repaired_from_template && (
+                            <span className="arp-repair-icon" title={t('projects.docAi.auditRecap.repairedHint')}>🔧</span>
+                          )}
+                        </td>
+                        <td className="arp-num">{fmtDuration(step.duration_ms)}</td>
+                        <td className="arp-num">{fmtTokens(step.step_tokens)}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </section>
+      )}
+
+      {history.length > 0 && (
+        <button
+          type="button"
+          className="arp-cta"
+          data-testid="audit-recap-toggle"
+          onClick={() => setDrawerOpen(true)}
+        >
+          <ClipboardList size={12} />
+          {t('projects.docAi.auditRecap.openDrawer', history.length)}
+        </button>
+      )}
 
       {drawerOpen && (
         <>
@@ -275,7 +464,7 @@ export default function AuditRecapPanel({ projectId, refreshTrigger }: Props) {
                         data-testid={`audit-recap-filter-${kind}`}
                         onClick={() => setKindFilter(isActive ? null : kind)}
                       >
-                        {kindIcon(kind)} {kind} ({count})
+                        {kindIcon(kind)} {kindLabel(kind)} ({count})
                       </button>
                     );
                   })}
@@ -302,7 +491,7 @@ export default function AuditRecapPanel({ projectId, refreshTrigger }: Props) {
                         <div className="arp-run-card-info">
                           <div className="arp-run-card-title">
                             <span aria-hidden>{kindIcon(run.kind)}</span>
-                            <span>{run.kind}</span>
+                            <span>{kindLabel(run.kind)}</span>
                             <span className="arp-run-card-time">
                               · {fmtRelativeDate(run.started_at, locale)}
                             </span>
@@ -321,7 +510,7 @@ export default function AuditRecapPanel({ projectId, refreshTrigger }: Props) {
                                 ❤ {run.health_score}/100
                               </span>
                             )}
-                            {failed && <span className="arp-run-status-failed">· {run.status}</span>}
+                            {failed && <span className="arp-run-status-failed">· {statusLabel(run.status)}</span>}
                           </div>
                         </div>
                         {isExpanded

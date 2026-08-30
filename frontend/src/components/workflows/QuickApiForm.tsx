@@ -9,7 +9,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Save, X, Plus } from 'lucide-react';
 import { useT } from '../../lib/I18nContext';
-import { Dropdown } from '../Dropdown';
+import { SearchableSelect } from '../SearchableSelect';
 import type {
   AgentType,
   CreateQuickApiRequest,
@@ -271,17 +271,21 @@ export function QuickApiForm({
       </div>
 
       <div className="flex-row gap-4 mb-4">
-        {/* 0.8.6 (#62) — Dropdown migration: theme parity (Firefox/Safari
-            previously rendered <option> with OS chrome ignoring page CSS). */}
-        <Dropdown<string>
+        <SearchableSelect
           value={projectId}
-          options={[
-            { value: '', label: t('wiz.noProject') },
-            ...projects.map(p => ({ value: p.id, label: p.name })),
-          ]}
-          onChange={v => setProjectId(v)}
-          ariaLabel={t('wiz.noProject')}
+          options={projects.map(project => ({
+            value: project.id,
+            label: project.name,
+            keywords: project.path,
+            description: project.path,
+          }))}
+          onChange={setProjectId}
+          label={t('disc.project')}
+          placeholder={t('disc.searchProjects')}
+          emptyLabel={t('disc.noMatchingProjects')}
+          clearLabel={t('disc.noProject')}
           testId="qa-project-picker"
+          className="flex-1"
         />
       </div>
 

@@ -44,9 +44,8 @@ import { HostSyncChip } from '../HostSyncChip';
 
 describe('HostSyncChip', () => {
   it('renders for None mode', () => {
-    const { container } = render(<HostSyncChip mode="None" />);
-    // Even if the chip renders null for None, the render call itself is enough.
-    expect(container).toBeDefined();
+    render(<HostSyncChip mode="None" />);
+    expect(screen.getByText('mcp.hostScope.kronnOnly')).toBeInTheDocument();
   });
   it('renders for GlobalOnly mode', () => {
     const { container } = render(<HostSyncChip mode="GlobalOnly" />);

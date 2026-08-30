@@ -886,7 +886,7 @@ export type BundleQuickApi = { bundle_id: string, name: string, icon: string | n
  * JSON; the wrapped `request` is the same payload `/api/quick-prompts`
  * expects.
  */
-export type BundleQuickPrompt = { bundle_id: string, name: string, icon: string | null, prompt_template: string, variables: Array<PromptVariable>, agent: AgentType | null, project_id: string | null, skill_ids: Array<string>, profile_ids: Array<string>, directive_ids: Array<string>, tier: ModelTier, agent_settings: AgentSettings | null, description: string, };
+export type BundleQuickPrompt = { bundle_id: string, name: string, icon: string | null, prompt_template: string, variables: Array<PromptVariable>, agent: AgentType | null, connection_id: string | null, project_id: string | null, skill_ids: Array<string>, profile_ids: Array<string>, directive_ids: Array<string>, tier: ModelTier, agent_settings: AgentSettings | null, description: string, };
 
 /**
  * Top-level bundle payload. Every section is optional except
@@ -1169,6 +1169,11 @@ discussion_id?: string | null, datasets?: Array<CreateLivePageDataset>, };
 
 export type CreateMcpConfigRequest = { server_id: string, label: string, env: Record<string, string>, args_override?: Array<string> | null, is_global: boolean, project_ids: Array<string>,
 /**
+ * Explicit creation-time host scope. Omitted by older clients => the
+ * safe existing default (`None`, Kronn-only).
+ */
+host_sync?: HostSyncMode,
+/**
  * Custom API plugin payload. Only honoured when `server_id == "api-custom"`.
  * The backend materializes a new `McpServer` (API-only, `source = Manual`)
  * from these fields, then proceeds with the normal config-creation path.
@@ -1198,7 +1203,7 @@ export type CreateQuickApiRequest = { name: string, icon?: string | null, descri
 
 export type CreateQuickExecRequest = { name: string, icon?: string | null, description?: string, project_id?: string | null, command: string, args?: Array<string>, timeout_secs?: number | null, output_format?: CollectQuickExecOutputFormat, variables?: Array<PromptVariable>, };
 
-export type CreateQuickPromptRequest = { name: string, icon?: string | null, prompt_template: string, variables?: Array<PromptVariable>, agent?: AgentType | null, project_id?: string | null, skill_ids?: Array<string>, profile_ids?: Array<string>, directive_ids?: Array<string>, tier?: ModelTier, agent_settings?: AgentSettings | null, description?: string, };
+export type CreateQuickPromptRequest = { name: string, icon?: string | null, prompt_template: string, variables?: Array<PromptVariable>, agent?: AgentType | null, connection_id?: string | null, project_id?: string | null, skill_ids?: Array<string>, profile_ids?: Array<string>, directive_ids?: Array<string>, tier?: ModelTier, agent_settings?: AgentSettings | null, description?: string, };
 
 export type CreateSkillRequest = { name: string, description: string, icon: string, category: SkillCategory, content: string, license?: string | null, allowed_tools?: string | null, };
 
@@ -2153,6 +2158,14 @@ export type ExecutionTimeoutKind = "activity" | "total_duration" | "review_wait"
 export type ExportPluginBundleRequest = { config_ids: Array<string>, include_values?: boolean, passphrase?: string | null, confirmation?: string | null, };
 
 /**
+ * A named OpenAI-compatible API connection. The credential itself stays in
+ * Kronn's encrypted credential store; this model persists only its slug.
+ */
+export type ExternalApiConnection = { id: string, display_name: string, mention_alias: string, endpoint: string | null, credential_slug: string, origin_preset: ExternalApiConnectionPreset, economy_model: string | null, default_model: string | null, reasoning_model: string | null, created_at: string, updated_at: string, };
+
+export type ExternalApiConnectionPreset = "lite_llm" | "nvidia" | "open_router" | "other";
+
+/**
  * Extraction specification for an `ApiCall` step's JSON response.
  * Implements RFC 9535 JSONPath via the `serde_json_path` crate.
  */
@@ -2533,6 +2546,11 @@ export type JsonValue = number | string | boolean | Array<JsonValue> | { [key in
 export type KronnOwnership = { "type": "NotManaged" } | { "type": "ManagedByMarker", "config_id": string } | { "type": "ManagedByHash", "config_id": string };
 
 export type LaunchAuditRequest = { agent: AgentType,
+/**
+ * Model capability selected by the shared agent picker. Missing values
+ * keep the historical audit behaviour (Reasoning).
+ */
+tier?: ModelTier | null,
 /**
  * 0.8.2 — Specialized audit type. Omitted/null defaults to `Full`
  * for backwards-compat (the only kind the UI knows about pre-0.8.2).
@@ -3018,7 +3036,13 @@ author?: string | null,
  */
 since?: string | null, until?: string | null, limit?: number | null, offset?: number | null, };
 
-export type MessageTarget = { kind: MessageTargetKind, agent_type: AgentType, cli_session_id?: number | null,
+export type MessageTarget = { kind: MessageTargetKind, agent_type: AgentType,
+/**
+ * Pin for a dynamic external connection. It is optional for the native
+ * HTTP providers copied from `agent_list`, whose configuration is resolved
+ * server-side from `agent_type`, but mandatory for `Custom` targets.
+ */
+connection_id?: string | null, cli_session_id?: number | null,
 /**
  * Optional per-turn tier override. `None` preserves the historical
  * discussion-wide routing; joined CLI sessions always ignore this field.
@@ -3298,6 +3322,13 @@ context_origin: string, };
 export type OllamaModelsResponse = { models: Array<OllamaModel>, };
 
 /**
+ * Normalized status sent as an SSE `progress` event while Ollama pulls a
+ * model. `completed` and `total` remain optional because several Ollama
+ * stages have no byte counter.
+ */
+export type OllamaPullProgress = { status: string, digest: string | null, completed: number | null, total: number | null, };
+
+/**
  * What happens when `TypedSchema` validation still fails after a
  * single repair attempt. `Continue` = 0.7.0 behavior (warn + raw),
  * `Fail` = 0.8.3 strict mode for contract steps.
@@ -3376,7 +3407,12 @@ next_path: string, max_pages?: number | null, } | { "type": "LinkHeader", page_s
  */
 has_more_path: string, max_pages?: number | null, };
 
-export type PartialAuditRequest = { agent: AgentType, steps: Array<number>, };
+export type PartialAuditRequest = { agent: AgentType,
+/**
+ * Model capability selected by the shared agent picker. Missing values
+ * keep the historical partial-audit behaviour (Reasoning).
+ */
+tier?: ModelTier | null, steps: Array<number>, };
 
 /**
  * A participant enriched with the honest-presence contract (0.9.2-G). Carries
@@ -3779,7 +3815,19 @@ needs_docs_migration: boolean,
  * remap" banner + per-card badge after a cross-OS import (WSL ⇄ macOS),
  * where absolute paths don't translate.
  */
-path_exists: boolean, default_skill_ids?: Array<string>, default_profile_id?: string | null, briefing_notes?: string | null,
+path_exists: boolean,
+/**
+ * Effective write boundary for project-local files. Computed from the
+ * configured rw repository mounts (or native filesystem permissions),
+ * never persisted. A project may be discoverable through the read-only
+ * home mount while still being impossible to synchronize.
+ */
+write_access?: ProjectWriteAccess,
+/**
+ * Last backend project-MCP synchronization receipt. Persisted so a page
+ * refresh cannot turn a failed/silent sync back into an unknown state.
+ */
+mcp_sync_report?: ProjectMcpSyncReport | null, default_skill_ids?: Array<string>, default_profile_id?: string | null, briefing_notes?: string | null,
 /**
  * 0.8.3 — Companion repos that an agent on this project should
  * know about. A typical setup: a frontend project pointing at
@@ -3791,9 +3839,52 @@ path_exists: boolean, default_skill_ids?: Array<string>, default_profile_id?: st
  */
 linked_repos?: Array<LinkedRepo>, created_at: string, updated_at: string, };
 
+export type ProjectDockerAction = "start" | "stop" | "restart";
+
+export type ProjectDockerActionRequest = { action: ProjectDockerAction, service?: string | null, };
+
+/**
+ * Browser endpoint inferred from the resolved Compose configuration.
+ */
+export type ProjectDockerEndpoint = { url: string, host: string, host_status: ProjectDockerHostStatus, };
+
+/**
+ * Structured Docker Compose state for one configured project service.
+ *
+ * A configured service with no container yet is still returned with
+ * `state = "not_created"`, so the project tab does not confuse "stopped"
+ * with "missing from the list".
+ */
+export type ProjectDockerHostStatus = "configured" | "missing" | "non_local" | "unknown";
+
+/**
+ * Bounded Docker Compose logs returned for one project service.
+ */
+export type ProjectDockerLogs = { service: string, output: string, fetched_at: string, };
+
+/**
+ * Fleet-wide Compose activity used by project list indicators and filters.
+ */
+export type ProjectDockerRunningSummary = { project_ids: Array<string>, checked_at: string, };
+
+export type ProjectDockerService = { service: string, container_name: string | null, image: string | null, state: string, status: string | null, health: string | null, ports: Array<string>, endpoints: Array<ProjectDockerEndpoint>, running: boolean, };
+
+/**
+ * Snapshot returned by the project-scoped Docker Compose status endpoint.
+ */
+export type ProjectDockerStatus = { compose_present: boolean, compose_file: string | null, docker_available: boolean, daemon_available: boolean, services: Array<ProjectDockerService>, checked_at: string, error: string | null, };
+
 export type ProjectLanguageStat = { language: string, bytes: number, };
 
+export type ProjectMcpSyncReport = { status: ProjectMcpSyncStatus, detail?: string | null, synced_at: string, };
+
+export type ProjectMcpSyncStatus = "Written" | "Unchanged" | "ReadOnly" | "MissingSecrets" | "Failed";
+
 export type ProjectUsage = { project_id: string, project_name: string, tokens_used: number, cost_usd: number, };
+
+export type ProjectWriteAccess = { status: ProjectWriteAccessStatus, reason?: string | null, writable_roots?: Array<string>, };
+
+export type ProjectWriteAccessStatus = "Writable" | "ReadOnly" | "Missing" | "Unknown";
 
 export type PromptVariable = { name: string, label: string, placeholder: string,
 /**
@@ -3902,6 +3993,13 @@ observed_at?: string | null,
  */
 dedupe_key?: string | null, key_field?: string | null, };
 
+/**
+ * The sole accepted input for a local Ollama pull.  The endpoint never
+ * accepts arbitrary upstream URLs: it always uses Kronn's configured Ollama
+ * base URL.
+ */
+export type PullOllamaModelRequest = { model: string, };
+
 export type QuickApi = { id: string, name: string, icon: string,
 /**
  * Optional human description — shown in the BatchApiCall picker.
@@ -3998,7 +4096,12 @@ summariser: Summariser, };
 
 export type QuickExecStatus = "passed" | "failed" | "timed_out" | "cancelled" | "rejected";
 
-export type QuickPrompt = { id: string, name: string, icon: string, prompt_template: string, variables: Array<PromptVariable>, agent: AgentType, project_id: string | null, skill_ids: Array<string>,
+export type QuickPrompt = { id: string, name: string, icon: string, prompt_template: string, variables: Array<PromptVariable>, agent: AgentType,
+/**
+ * Named external API connection used when `agent` is `Custom` (or when
+ * selecting a specific named HTTP provider instance).
+ */
+connection_id?: string | null, project_id: string | null, skill_ids: Array<string>,
 /**
  * 0.8.5 — optional profile binding (persona injection at launch).
  * Mirrors `WorkflowStep.profile_ids` + `Discussion.profile_ids`. Empty
@@ -4040,7 +4143,7 @@ export type QuickPromptExportEnvelope = { kind: string, version: number, exporte
  */
 quick_prompt: QuickPrompt, };
 
-export type QuickPromptVersion = { id: string, quick_prompt_id: string, version_index: number, name: string, icon: string, prompt_template: string, variables: Array<PromptVariable>, agent: AgentType, project_id: string | null, skill_ids: Array<string>, profile_ids: Array<string>, directive_ids: Array<string>, tier: ModelTier, description: string, created_at: string, };
+export type QuickPromptVersion = { id: string, quick_prompt_id: string, version_index: number, name: string, icon: string, prompt_template: string, variables: Array<PromptVariable>, agent: AgentType, connection_id?: string | null, project_id: string | null, skill_ids: Array<string>, profile_ids: Array<string>, directive_ids: Array<string>, tier: ModelTier, description: string, created_at: string, };
 
 export type QuickPromptVersionMetrics = { version_index: number,
 /**
@@ -5091,7 +5194,7 @@ export type TaskExecution = { id: string, orchestration_run_id: string, task_id:
  * a set kind requires `worker_agent_type`; `Cli` also requires the session id.
  * All NULL until provisioning (KT-318) selects the worker.
  */
-worker_target_kind: MessageTargetKind | null, worker_cli_session_id: number | null, worker_agent_type: string | null, worker_model: string | null, worker_model_tier: string | null, worker_profile_id?: string | null,
+worker_target_kind: MessageTargetKind | null, worker_cli_session_id: number | null, worker_connection_id: string | null, worker_agent_type: string | null, worker_model: string | null, worker_model_tier: string | null, worker_profile_id?: string | null,
 /**
  * Optional principal-authored mechanical scope for a deliberately tiny
  * local-worker edit. It is persisted with the execution and interpreted
@@ -5143,7 +5246,7 @@ export type TaskExecutionAuditEvent = { id: string, action: string, from_status:
  * sourced from the orchestration aggregate; task DoD, manifests, validations
  * and telemetry are joined here so clients never reconstruct lineage from chat.
  */
-export type TaskExecutionDetail = { lineage: TaskExecutionLineage, target_branch: string | null, definition_of_done: Array<PlanningDodItem>, attempts: Array<TaskExecutionAttemptDetail>, validation_runs: Array<TaskExecutionValidationRun>, recovery: TaskExecutionRecovery | null, usage: TaskExecutionUsage, };
+export type TaskExecutionDetail = { lineage: TaskExecutionLineage, target_branch: string | null, definition_of_done: Array<PlanningDodItem>, attempts: Array<TaskExecutionAttemptDetail>, validation_runs: Array<TaskExecutionValidationRun>, recovery: TaskExecutionRecovery | null, usage: TaskExecutionUsage, progress: TaskExecutionProgress, };
 
 /**
  * One journaled transition (ADR §3; DoD-3).
@@ -5209,6 +5312,10 @@ export type TaskExecutionObservability = { lineage: TaskExecutionLineage, metric
  */
 export type TaskExecutionPreparation = { task: PlanningTaskDetail, parent_discussion_id: string, worker: MessageTarget, project_id: string | null, launchable: boolean, reasons: Array<CampaignTaskReason>, active_execution: TaskExecution | null, };
 
+export type TaskExecutionProgress = { phase: TaskExecutionProgressPhase, reason: string | null, queue_position: number | null, queued_since: string | null, process_alive: boolean | null, last_reliable_signal_at: string | null, telemetry_mode: TaskExecutionTelemetryMode, };
+
+export type TaskExecutionProgressPhase = "queued" | "launching" | "upstream_wait" | "tool_activity" | "delivering" | "completed" | "failed" | "unknown";
+
 /**
  * Recovery projection kept separately from the business state machine.
  */
@@ -5227,6 +5334,8 @@ export type TaskExecutionStateDuration = { status: TaskExecutionStatus, duration
  * CHECK stay in lockstep.
  */
 export type TaskExecutionStatus = "Pending" | "Provisioning" | "Blocked" | "Working" | "AwaitingReview" | "Approved" | "ChangesRequested" | "Integrating" | "Validating" | "Applying" | "Escalated" | "Interrupted" | "Done" | "Failed" | "Cancelled";
+
+export type TaskExecutionTelemetryMode = "boundary_only" | "unavailable";
 
 export type TaskExecutionUsage = { duration_ms: number, in_app_tokens: number, in_app_messages: number, in_app_cost_usd: number | null, in_app_cost_is_partial: boolean, cli_traffic_tokens: number | null, cli_billable_tokens: number | null, cli_sessions: number, cli_sessions_measured: number, cli_sessions_unmeasured: number, http: TaskExecutionHttpUsage | null, };
 

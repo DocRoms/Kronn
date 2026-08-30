@@ -61,9 +61,9 @@
 
 .project-code-diff-layout {
   display: grid;
-  height: min(620px, calc(100dvh - 340px));
-  min-height: 420px;
-  flex: 0 0 auto;
+  height: auto;
+  min-height: 0;
+  flex: 1;
   grid-template-columns: minmax(0, 1fr) minmax(220px, 30%);
   overflow: hidden;
   border: 1px solid var(--kr-border);
@@ -242,9 +242,9 @@
    layout so the two diff surfaces behave the same way. */
 .project-code-commit-layout {
   display: grid;
-  height: min(620px, calc(100dvh - 340px));
-  min-height: 420px;
-  flex: 0 0 auto;
+  height: auto;
+  min-height: 0;
+  flex: 1;
   grid-template-columns: minmax(0, 1fr) minmax(200px, 26%);
   grid-template-rows: minmax(0, 1fr);
   overflow: hidden;

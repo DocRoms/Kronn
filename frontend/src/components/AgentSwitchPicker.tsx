@@ -5,17 +5,29 @@ import {
   AGENT_COLORS,
   AGENT_LABELS,
   MODEL_TIER_ICONS,
+  agentTextColor,
   modelForAgentTier,
 } from '../lib/constants';
-import type { AgentType, ModelTier, ModelTiersConfig } from '../types/generated';
+import type { AgentType, ModelTier, ModelTierConfig, ModelTiersConfig } from '../types/generated';
 import './AgentSwitchPicker.css';
+
+export interface AgentSwitchTarget {
+  agent: AgentType;
+  connectionId?: string | null;
+  label?: string;
+  modelTiers?: ModelTierConfig;
+}
 
 interface AgentSwitchPickerProps {
   currentAgent: AgentType;
   availableAgents: AgentType[];
+  currentConnectionId?: string | null;
+  currentTargetLabel?: string;
+  availableTargets?: AgentSwitchTarget[];
   onChange?: (agent: AgentType) => Promise<void>;
   currentTier?: ModelTier;
   onSelectionChange?: (agent: AgentType, tier: ModelTier) => Promise<void>;
+  onTargetSelectionChange?: (target: AgentSwitchTarget, tier: ModelTier) => Promise<void>;
   tierLabels?: Record<ModelTier, string>;
   modelTiers?: ModelTiersConfig | null;
   defaultModelLabel?: string;
@@ -36,9 +48,13 @@ interface AgentSwitchPickerProps {
 export function AgentSwitchPicker({
   currentAgent,
   availableAgents,
+  currentConnectionId,
+  currentTargetLabel,
+  availableTargets,
   onChange,
   currentTier,
   onSelectionChange,
+  onTargetSelectionChange,
   tierLabels,
   modelTiers,
   defaultModelLabel = 'Default agent model',
@@ -56,15 +72,37 @@ export function AgentSwitchPicker({
   const savingRef = useRef(false);
   const rootRef = useRef<HTMLSpanElement>(null);
   const popoverRef = useRef<HTMLSpanElement>(null);
-  const choices = Array.from(new Set<AgentType>([currentAgent, ...availableAgents]));
+  const targetKey = (target: AgentSwitchTarget) => `${target.agent}:${target.connectionId ?? ''}`;
+  const suppliedTargets: AgentSwitchTarget[] = availableTargets
+    ?? availableAgents.map(agent => ({ agent }));
+  const suppliedCurrent = suppliedTargets.find(target =>
+    target.agent === currentAgent
+    && (target.connectionId ?? null) === (currentConnectionId ?? null)
+  );
+  const currentTarget: AgentSwitchTarget = suppliedCurrent ?? {
+    agent: currentAgent,
+    connectionId: currentConnectionId,
+    label: currentTargetLabel,
+  };
+  const choices = [currentTarget, ...suppliedTargets].filter((target, index, targets) =>
+    targets.findIndex(candidate => targetKey(candidate) === targetKey(target)) === index
+  );
   const tierChoices: ModelTier[] = ['economy', 'default', 'reasoning'];
-  const tierPicker = currentTier !== undefined && onSelectionChange !== undefined;
+  const tierPicker = currentTier !== undefined
+    && (onSelectionChange !== undefined || onTargetSelectionChange !== undefined);
   const canChange = tierPicker
     ? choices.length > 1 || tierChoices.length > 1
     : Boolean(onChange) && choices.length > 1;
 
-  const tierTitle = (agent: AgentType, tier: ModelTier) =>
-    `${tierLabels?.[tier] ?? tier} · ${modelForAgentTier(agent, tier, modelTiers, defaultModelLabel)}`;
+  const targetLabel = (target: AgentSwitchTarget) =>
+    target.label ?? AGENT_LABELS[target.agent] ?? target.agent;
+  const targetModel = (target: AgentSwitchTarget, tier: ModelTier) =>
+    target.modelTiers?.[tier]
+    ?? modelForAgentTier(target.agent, tier, modelTiers, defaultModelLabel);
+  const tierTitle = (target: AgentSwitchTarget, tier: ModelTier) =>
+    `${tierLabels?.[tier] ?? tier} · ${targetModel(target, tier)}`;
+  const effectiveSuffix = suffix
+    ?? (tierPicker && currentTier ? targetModel(currentTarget, currentTier) : undefined);
 
   const updatePopoverPosition = useCallback(() => {
     const rect = rootRef.current?.getBoundingClientRect();
@@ -85,18 +123,26 @@ export function AgentSwitchPicker({
     setPopoverPosition({ top, left });
   }, [choices.length, tierPicker]);
 
-  const select = async (agent: AgentType, tier?: ModelTier) => {
+  const select = async (target: AgentSwitchTarget, tier?: ModelTier) => {
     if (savingRef.current) return;
     if (tierPicker) {
-      if (!tier || (agent === currentAgent && tier === currentTier)) return;
-    } else if (!onChange || agent === currentAgent) {
+      if (!tier || (
+        targetKey(target) === targetKey(currentTarget)
+        && tier === currentTier
+      )) return;
+    } else if (!onChange || target.agent === currentAgent) {
       return;
     }
     savingRef.current = true;
     setSaving(true);
     try {
-      if (tierPicker && tier) await onSelectionChange(agent, tier);
-      else if (onChange) await onChange(agent);
+      if (tierPicker && tier && onTargetSelectionChange) {
+        await onTargetSelectionChange(target, tier);
+      } else if (tierPicker && tier && onSelectionChange) {
+        await onSelectionChange(target.agent, tier);
+      } else if (onChange) {
+        await onChange(target.agent);
+      }
       setOpen(false);
     } catch {
       // The caller owns the user-facing error. Keep the picker open so
@@ -138,10 +184,10 @@ export function AgentSwitchPicker({
     return (
       <span
         className={staticClassName ?? 'kr-agent-switch-static'}
-        style={{ color: AGENT_COLORS[currentAgent] ?? 'var(--kr-text-faint)' }}
+        style={{ color: agentTextColor(currentTarget.agent) }}
       >
-        {displayName ?? AGENT_LABELS[currentAgent] ?? currentAgent}
-        {suffix && <span className="kr-agent-switch-suffix"> · {suffix}</span>}
+        {displayName ?? targetLabel(currentTarget)}
+        {effectiveSuffix && <span className="kr-agent-switch-suffix"> · {effectiveSuffix}</span>}
       </span>
     );
   }
@@ -157,9 +203,9 @@ export function AgentSwitchPicker({
       <button
         type="button"
         className="kr-agent-switch-btn"
-        style={{ color: AGENT_COLORS[currentAgent] ?? 'var(--kr-text-faint)' }}
+        style={{ color: agentTextColor(currentTarget.agent) }}
         title={tierPicker && currentTier
-          ? `${title} · ${tierTitle(currentAgent, currentTier)}`
+          ? `${title} · ${tierTitle(currentTarget, currentTier)}`
           : title}
         aria-label={ariaLabel}
         aria-expanded={open}
@@ -170,17 +216,17 @@ export function AgentSwitchPicker({
         }}
       >
         {saving ? <Loader2 size={9} className="spin" /> : <RefreshCw size={9} />}
-        <span>{displayName ?? AGENT_LABELS[currentAgent] ?? currentAgent}</span>
+        <span>{displayName ?? targetLabel(currentTarget)}</span>
         {tierPicker && currentTier && (
           <span
             className="kr-agent-switch-current-tier"
             data-tier={currentTier}
-            title={tierTitle(currentAgent, currentTier)}
+            title={tierTitle(currentTarget, currentTier)}
           >
             {MODEL_TIER_ICONS[currentTier]}
           </span>
         )}
-        {suffix && <span className="kr-agent-switch-suffix"> · {suffix}</span>}
+        {effectiveSuffix && <span className="kr-agent-switch-suffix"> · {effectiveSuffix}</span>}
         <ChevronDown size={9} />
       </button>
       {open && popoverPosition && createPortal(
@@ -190,23 +236,24 @@ export function AgentSwitchPicker({
           role="menu"
           style={popoverPosition}
         >
-          {choices.map(agent => tierPicker ? (
+          {choices.map(target => tierPicker ? (
             <span
-              key={agent}
+              key={targetKey(target)}
               className="kr-agent-switch-tier-row"
               role="group"
-              aria-label={AGENT_LABELS[agent] ?? agent}
+              aria-label={targetLabel(target)}
             >
               <span className="kr-agent-switch-tier-agent">
                 <span
                   className="kr-agent-switch-option-dot"
-                  style={{ background: AGENT_COLORS[agent] ?? 'var(--kr-text-faint)' }}
+                  style={{ background: AGENT_COLORS[target.agent] ?? 'var(--kr-text-faint)' }}
                 />
-                {AGENT_LABELS[agent] ?? agent}
+                {targetLabel(target)}
               </span>
               <span className="kr-agent-switch-tier-choices">
                 {tierChoices.map(tier => {
-                  const selected = agent === currentAgent && tier === currentTier;
+                  const selected = targetKey(target) === targetKey(currentTarget)
+                    && tier === currentTier;
                   const icon = MODEL_TIER_ICONS[tier];
                   const label = tierLabels?.[tier] ?? tier;
                   return (
@@ -217,10 +264,10 @@ export function AgentSwitchPicker({
                       className="kr-agent-switch-tier-option"
                       data-tier={tier}
                       data-current={selected}
-                      aria-label={`${AGENT_LABELS[agent] ?? agent} · ${label}`}
-                      title={tierTitle(agent, tier)}
+                      aria-label={`${targetLabel(target)} · ${label}`}
+                      title={tierTitle(target, tier)}
                       disabled={saving || selected}
-                      onClick={() => void select(agent, tier)}
+                      onClick={() => void select(target, tier)}
                     >
                       <span aria-hidden="true">{icon}</span>
                       <span>{label}</span>
@@ -232,20 +279,20 @@ export function AgentSwitchPicker({
             </span>
           ) : (
             <button
-              key={agent}
+              key={targetKey(target)}
               type="button"
               role="menuitem"
               className="kr-agent-switch-option"
-              data-current={agent === currentAgent}
-              disabled={saving || agent === currentAgent}
-              onClick={() => void select(agent)}
+              data-current={targetKey(target) === targetKey(currentTarget)}
+              disabled={saving || targetKey(target) === targetKey(currentTarget)}
+              onClick={() => void select(target)}
             >
               <span
                 className="kr-agent-switch-option-dot"
-                style={{ background: AGENT_COLORS[agent] ?? 'var(--kr-text-faint)' }}
+                style={{ background: AGENT_COLORS[target.agent] ?? 'var(--kr-text-faint)' }}
               />
-              {AGENT_LABELS[agent] ?? agent}
-              {agent === currentAgent && <Check size={10} />}
+              {targetLabel(target)}
+              {targetKey(target) === targetKey(currentTarget) && <Check size={10} />}
             </button>
           ))}
         </span>,

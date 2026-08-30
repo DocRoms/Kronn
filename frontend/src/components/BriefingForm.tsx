@@ -16,6 +16,7 @@ import { useState } from 'react';
 import { useT } from '../lib/I18nContext';
 import { projects as projectsApi } from '../lib/api';
 import { Save, X, Loader2 } from 'lucide-react';
+import type { AgentType, ModelTier } from '../types/generated';
 
 interface BriefingFormProps {
   projectId: string;
@@ -40,13 +41,15 @@ interface BriefingFormProps {
    * the same dropdown as the audit launch row so the user doesn't have
    * to specify it again here.
    */
-  agent: string;
+  agent: AgentType;
+  /** Reasoning level selected alongside the briefing/audit agent. */
+  tier: ModelTier;
   /** Toast emitter — same shape as the rest of the dashboard. The
    * required (non-optional) kind matches Dashboard's stricter signature. */
   toast: (msg: string, kind: 'success' | 'error' | 'info' | 'warning') => void;
 }
 
-export function BriefingForm({ projectId, onClose, onSaved, agent, toast }: BriefingFormProps) {
+export function BriefingForm({ projectId, onClose, onSaved, agent, tier, toast }: BriefingFormProps) {
   const { t } = useT();
   const [form, setForm] = useState({
     purpose: '',
@@ -86,7 +89,7 @@ export function BriefingForm({ projectId, onClose, onSaved, agent, toast }: Brie
       //    the audit can still pick them up.
       let discId: string | null = null;
       try {
-        const { discussion_id } = await projectsApi.startBriefing(projectId, agent);
+        const { discussion_id } = await projectsApi.startBriefing(projectId, agent, tier);
         discId = discussion_id;
       } catch (spawnErr) {
         console.warn('Briefing review disc could not spawn:', spawnErr);

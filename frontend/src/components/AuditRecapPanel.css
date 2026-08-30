@@ -26,7 +26,73 @@
  */
 
 /* ═══════════════════════════════════════════════════════════════════════
-   CTA button — sits next to the launcher in AI Context.
+   Latest run — visible directly in the dedicated Audit tab.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+.arp-latest {
+  margin-bottom: var(--kr-sp-3);
+  padding: var(--kr-sp-4);
+  border: 1px solid var(--kr-border-medium);
+  border-radius: var(--kr-r-lg);
+  background: var(--kr-bg-elevated);
+  color: var(--kr-text-primary);
+}
+
+.arp-latest[data-failed='true'] {
+  border-color: rgba(var(--kr-error-rgb), 0.4);
+  background: rgba(var(--kr-error-rgb), 0.05);
+}
+
+.arp-latest-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--kr-sp-4);
+}
+
+.arp-latest-header h3 {
+  margin: 0 0 var(--kr-sp-2);
+  color: var(--kr-text-primary);
+  font-size: var(--kr-fs-sm);
+  font-weight: 700;
+}
+
+.arp-latest-status {
+  padding: 2px 7px;
+  border: 1px solid var(--kr-accent-border);
+  border-radius: 999px;
+  background: var(--kr-accent-bg);
+  color: var(--kr-accent-text);
+  font-size: var(--kr-fs-xs);
+  font-weight: 650;
+}
+
+.arp-latest-status[data-failed='true'] {
+  border-color: rgba(var(--kr-error-rgb), 0.35);
+  background: rgba(var(--kr-error-rgb), 0.08);
+  color: var(--kr-error);
+}
+
+.arp-latest-meta {
+  margin-top: var(--kr-sp-3);
+  padding-top: var(--kr-sp-3);
+  border-top: 1px solid var(--kr-border-soft);
+}
+
+.arp-latest-steps {
+  max-height: 360px;
+  margin-top: var(--kr-sp-3);
+  overflow: auto;
+}
+
+.arp-latest-steps p {
+  margin: 0;
+  color: var(--kr-text-secondary);
+  font-size: var(--kr-fs-xs);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   CTA button — opens the complete audit history.
    ═══════════════════════════════════════════════════════════════════════ */
 
 .arp-cta {

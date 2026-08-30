@@ -1,10 +1,8 @@
 // AuditRecapPanel — 0.8.4 (#298 + #332) regression suite.
 //
-// 0.8.4 (#332) refactor: the inline chip strip + step table was
-// replaced with a compact CTA button that opens a side drawer.
-// The drawer shows filter pills + vertical run cards; clicking a
-// card expands its per-step table inline. Tests below pin the
-// new shape:
+// The latest run and its steps are visible directly in the Audit tab. A
+// compact CTA still opens the complete history drawer for older runs.
+// Tests below pin both surfaces:
 //   - hides itself when auditHistory is empty
 //   - shows a "Voir les audits précédents (N)" button when history exists
 //   - clicking the button opens the drawer (overlay + aside)
@@ -105,6 +103,44 @@ describe('AuditRecapPanel (0.8.4 #332 drawer)', () => {
     expect(btn.textContent).toMatch(/2/);
     // Drawer is closed by default.
     expect(screen.queryByTestId('audit-recap-drawer')).toBeNull();
+  });
+
+  it('shows the latest audit details and steps directly without opening history', async () => {
+    (projectsApi.auditHistory as ReturnType<typeof vi.fn>).mockResolvedValueOnce([fullRun]);
+    (projectsApi.auditRunSteps as ReturnType<typeof vi.fn>).mockResolvedValueOnce(sampleSteps);
+
+    wrap(<AuditRecapPanel projectId="p1" />);
+
+    const latest = await screen.findByTestId('audit-recap-latest');
+    expect(latest).toHaveTextContent('Claude Code');
+    expect(await screen.findByTestId('audit-recap-latest-table')).toBeInTheDocument();
+    expect(latest).toHaveTextContent('37.0k');
+    expect(screen.getByTestId('audit-recap-latest-row-3')).toHaveTextContent('docs/architecture.md');
+    expect(screen.queryByTestId('audit-recap-drawer')).toBeNull();
+  });
+
+  it('shows the explicitly selected terminal run when a newer run is still running', async () => {
+    const runningRun = { ...fullRun, id: 'run-running', status: 'Running' };
+    const failedRun = { ...fullRun, id: 'run-failed', status: 'Failed' };
+    (projectsApi.auditHistory as ReturnType<typeof vi.fn>).mockResolvedValueOnce([runningRun, failedRun]);
+    (projectsApi.auditRunSteps as ReturnType<typeof vi.fn>).mockResolvedValueOnce(sampleSteps);
+
+    wrap(<AuditRecapPanel projectId="p1" selectedRunId="run-failed" />);
+
+    const latest = await screen.findByTestId('audit-recap-latest');
+    expect(latest).toHaveTextContent('Échoué');
+    expect(projectsApi.auditRunSteps).toHaveBeenCalledWith('run-failed');
+  });
+
+  it.each([
+    ['Failed', 'Échoué'],
+    ['Cancelled', 'Annulé'],
+  ])('localizes the %s status in the direct audit view', async (status, label) => {
+    (projectsApi.auditHistory as ReturnType<typeof vi.fn>).mockResolvedValueOnce([{ ...fullRun, status }]);
+
+    wrap(<AuditRecapPanel projectId="p1" />);
+
+    expect(await screen.findByTestId('audit-recap-latest')).toHaveTextContent(label);
   });
 
   it('opens the drawer on CTA click + lists one card per run, newest first', async () => {

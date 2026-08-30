@@ -115,6 +115,30 @@ describe('SourceCodeViewer', () => {
     expect(screen.getByText('ignored')).toHaveAttribute('title', 'Git ignored');
   });
 
+  it('selects a deep-linked root configuration file instead of the default source', async () => {
+    vi.mocked(projects.listSourceFiles).mockResolvedValue([
+      { path: 'compose.yaml', name: 'compose.yaml', is_dir: false },
+      {
+        path: 'src',
+        name: 'src',
+        is_dir: true,
+        children: [{ path: 'src/main.rs', name: 'main.rs', is_dir: false }],
+      },
+    ]);
+    vi.mocked(projects.readSourceFile).mockImplementation(async (_id, path) => ({
+      path,
+      content: path === 'compose.yaml' ? 'services:\n  web:' : 'fn main() {}',
+    }));
+
+    render(<SourceCodeViewer projectId="project-1" initialPath="compose.yaml" />);
+
+    await waitFor(() => {
+      expect(projects.readSourceFile).toHaveBeenCalledWith('project-1', 'compose.yaml');
+    });
+    expect(screen.getAllByText('compose.yaml').length).toBeGreaterThan(0);
+    expect(await screen.findByText(/services:/)).toBeInTheDocument();
+  });
+
   it('renders repository-root entries before the complete tree finishes loading', async () => {
     let resolveFull!: (nodes: SourceFileNode[]) => void;
     const fullTree = new Promise<SourceFileNode[]>(resolve => { resolveFull = resolve; });
@@ -122,6 +146,7 @@ describe('SourceCodeViewer', () => {
       if (shallow) {
         return [
           { path: 'src', name: 'src', is_dir: true, children: [] },
+          { path: 'scripts', name: 'scripts', is_dir: true, children: [] },
           { path: 'README.md', name: 'README.md', is_dir: false },
         ];
       }
@@ -145,6 +170,9 @@ describe('SourceCodeViewer', () => {
     });
 
     expect(await screen.findByText('main.rs')).toBeInTheDocument();
+    expect(screen.getByText('scripts')).toBeInTheDocument();
+    expect(screen.getAllByText('README.md')).not.toHaveLength(0);
+    expect(screen.queryByLabelText('projects.source.loadingTreeBackground')).not.toBeInTheDocument();
   });
 
   it('recovers from a transient source-tree failure when Retry succeeds', async () => {
