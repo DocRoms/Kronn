@@ -350,28 +350,30 @@ pub async fn run_qa(
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
 
-    // Validate required variables.
-    for v in &qa.variables {
-        if let Err(error) = v.validate_source() {
-            return Json(ApiResponse::err(error));
-        }
-        if !v.requires_user_input() {
-            continue;
-        }
-        if v.required {
-            let val = req.variables.get(&v.name).map(|s| s.trim()).unwrap_or("");
-            if val.is_empty() {
-                return Json(ApiResponse::err(format!(
-                    "Variable obligatoire manquante : `{}`",
-                    v.name
-                )));
-            }
-        }
-    }
+    let secret = match state.config.read().await.encryption_secret.clone() {
+        Some(secret) => secret,
+        None => return Json(ApiResponse::err("Variable preflight unavailable: encryption key missing")),
+    };
+    let declarations = qa.variables.clone();
+    let supplied = req.variables.clone();
+    let project_id = qa.project_id.clone();
+    let execution_id = req.workflow_run_id.clone().unwrap_or_else(|| Uuid::new_v4().to_string());
+    let prepared = state.db.with_conn(move |conn| crate::core::execution_variables::prepare(conn,
+        crate::core::execution_variables::PrepareRequest {
+            declarations: &declarations, supplied: &supplied, context: &std::collections::HashMap::new(),
+            project_id: project_id.as_deref(), environment_ref: "project_mcp_configs",
+            run_kind: "quick_api", run_id: &execution_id, encryption_secret: &secret,
+            retention_days: crate::core::execution_variables::DEFAULT_RETENTION_DAYS,
+        })).await;
+    let resolved = match prepared {
+        Ok(Ok(prepared)) => prepared.resolved,
+        Ok(Err(failures)) => return Json(ApiResponse::err(format!("preflight_failed:{}", serde_json::to_string(&failures).unwrap_or_default()))),
+        Err(error) => return Json(ApiResponse::err(format!("Variable preflight failed: {error}"))),
+    };
 
     // Build template context from variables.
     let mut ctx = crate::workflows::template::TemplateContext::new();
-    for (k, v) in &req.variables {
+    for (k, v) in &resolved.values {
         ctx.set(k.clone(), v.clone());
     }
 

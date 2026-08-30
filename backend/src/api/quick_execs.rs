@@ -159,9 +159,26 @@ pub async fn run(
         Ok(None) => return Json(ApiResponse::err("Quick Exec not found")),
         Err(error) => return Json(ApiResponse::err(format!("DB error: {error}"))),
     };
-    if let Err(error) = validate_variables(&item.variables, &request.variables) {
-        return Json(ApiResponse::err(error));
-    }
+    let secret = match state.config.read().await.encryption_secret.clone() {
+        Some(secret) => secret,
+        None => return Json(ApiResponse::err("Variable preflight unavailable: encryption key missing")),
+    };
+    let declarations = item.variables.clone();
+    let supplied = request.variables.clone();
+    let selected_project = item.project_id.clone();
+    let execution_id = Uuid::new_v4().to_string();
+    let prepared = state.db.with_conn(move |conn| crate::core::execution_variables::prepare(conn,
+        crate::core::execution_variables::PrepareRequest {
+            declarations: &declarations, supplied: &supplied, context: &std::collections::HashMap::new(),
+            project_id: selected_project.as_deref(), environment_ref: "project_mcp_configs",
+            run_kind: "quick_exec", run_id: &execution_id, encryption_secret: &secret,
+            retention_days: crate::core::execution_variables::DEFAULT_RETENTION_DAYS,
+        })).await;
+    let resolved = match prepared {
+        Ok(Ok(prepared)) => prepared.resolved,
+        Ok(Err(failures)) => return Json(ApiResponse::err(format!("preflight_failed:{}", serde_json::to_string(&failures).unwrap_or_default()))),
+        Err(error) => return Json(ApiResponse::err(format!("Variable preflight failed: {error}"))),
+    };
     let project_id = item.project_id.clone();
     let work_dir = if let Some(project_id) = project_id {
         match state
@@ -178,10 +195,8 @@ pub async fn run(
     };
 
     let mut context = TemplateContext::new();
-    for variable in &item.variables {
-        if let Some(value) = request.variables.get(&variable.name) {
-            context.set(variable.name.clone(), value.clone());
-        }
+    for (name, value) in resolved.values {
+        context.set(name, value);
     }
     let step = WorkflowStep {
         name: item.name.clone(),

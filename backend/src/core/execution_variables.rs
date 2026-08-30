@@ -5,6 +5,25 @@ use serde::{Deserialize, Serialize};
 
 use crate::models::{PromptVariable, PromptVariableSource};
 
+pub const DEFAULT_RETENTION_DAYS: u32 = 30;
+
+pub struct PreparedExecutionVariables {
+    pub resolved: ResolvedVariables,
+    pub snapshot_id: String,
+}
+
+pub struct PrepareRequest<'a> {
+    pub declarations: &'a [PromptVariable],
+    pub supplied: &'a HashMap<String, String>,
+    pub context: &'a HashMap<String, String>,
+    pub project_id: Option<&'a str>,
+    pub environment_ref: &'a str,
+    pub run_kind: &'a str,
+    pub run_id: &'a str,
+    pub encryption_secret: &'a str,
+    pub retention_days: u32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct VariableProvenance {
     pub name: String,
@@ -88,6 +107,58 @@ pub fn resolve(
 
 pub fn expiry(resolved_at: DateTime<Utc>, retention_days: u32) -> Option<DateTime<Utc>> {
     (retention_days > 0).then(|| resolved_at + Duration::days(i64::from(retention_days)))
+}
+
+/// Load only encrypted configuration variables authorized for the selected
+/// project, resolve every declaration as one preflight, and persist one
+/// run-scoped encrypted snapshot before the caller performs side effects.
+pub fn prepare(
+    conn: &rusqlite::Connection,
+    request: PrepareRequest<'_>,
+) -> anyhow::Result<Result<PreparedExecutionVariables, Vec<VariablePreflightFailure>>> {
+    let mut environment: HashMap<String, Vec<(String, String)>> = HashMap::new();
+    if let Some(project_id) = request.project_id {
+        for config in crate::db::mcps::configs_for_project(conn, project_id)? {
+            let values = match crate::db::mcps::decrypt_env(&config.env_encrypted, request.encryption_secret) {
+                Ok(values) => values,
+                Err(_) => continue,
+            };
+            for (name, value) in values {
+                environment.entry(name.clone()).or_default().push((
+                    format!("mcp_config:{}:<env.{name}>", config.id),
+                    value,
+                ));
+            }
+        }
+    }
+    let resolved = match resolve(
+        request.declarations,
+        request.supplied,
+        request.context,
+        &environment,
+        request.project_id,
+        request.environment_ref,
+    ) {
+        Ok(resolved) => resolved,
+        Err(failures) => return Ok(Err(failures)),
+    };
+    let key = crate::core::crypto::parse_secret(request.encryption_secret)
+        .map_err(anyhow::Error::msg)?;
+    let snapshot_id = crate::db::execution_variable_snapshots::insert(
+        conn,
+        crate::db::execution_variable_snapshots::NewSnapshot {
+            run_kind: request.run_kind,
+            run_id: request.run_id,
+            project_id: request.project_id,
+            environment_ref: request.environment_ref,
+            resolved_at: resolved.resolved_at,
+            expires_at: expiry(resolved.resolved_at, request.retention_days),
+            values: &resolved.values,
+            provenance: &resolved.provenance,
+        },
+        &key,
+    )?;
+    Ok(Ok(PreparedExecutionVariables { resolved, snapshot_id }))
 }
 
 fn reference_name(reference: &str) -> Option<&str> {

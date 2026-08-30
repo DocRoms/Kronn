@@ -1529,6 +1529,14 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         )
         .route("/api/quick-execs/import", post(api::quick_execs::import))
         .route(
+            "/api/execution-context/{run_kind}/{run_id}",
+            get(api::execution_variables::metadata),
+        )
+        .route(
+            "/api/execution-context/{run_kind}/{run_id}/reveal",
+            post(api::execution_variables::reveal),
+        )
+        .route(
             "/api/discussions/{id}/agent-resume-jobs",
             get(api::agent_jobs::list_for_discussion),
         )

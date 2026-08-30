@@ -99,6 +99,36 @@ pub fn key_fingerprint_hex(hex_secret: &str) -> Result<String, String> {
     Ok(key_fingerprint(&key))
 }
 
+/// HMAC-SHA-256 with an explicit domain prefix. Used for equality-only
+/// fingerprints of encrypted payloads: unlike a bare plaintext hash, an
+/// offline reader cannot test guesses without the active installation key.
+pub fn keyed_digest(key: &[u8; 32], domain: &[u8], message: &[u8]) -> String {
+    const BLOCK: usize = 64;
+    use sha2::{Digest, Sha256};
+    let mut padded = [0u8; BLOCK];
+    padded[..key.len()].copy_from_slice(key);
+    let mut inner_pad = [0x36u8; BLOCK];
+    let mut outer_pad = [0x5cu8; BLOCK];
+    for index in 0..BLOCK {
+        inner_pad[index] ^= padded[index];
+        outer_pad[index] ^= padded[index];
+    }
+    let mut inner = Sha256::new();
+    inner.update(inner_pad);
+    inner.update(domain);
+    inner.update([0]);
+    inner.update(message);
+    let inner_hash = inner.finalize();
+    let mut outer = Sha256::new();
+    outer.update(outer_pad);
+    outer.update(inner_hash);
+    outer
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 // hex encode/decode (tiny, no extra dep needed)
 mod hex {
     pub fn encode(bytes: &[u8]) -> String {
@@ -136,6 +166,15 @@ mod tests {
             *b = seed.wrapping_add(i as u8);
         }
         k
+    }
+
+    #[test]
+    fn keyed_digest_is_key_and_domain_bound() {
+        let first = keyed_digest(&make_key(1), b"snapshot", b"low-entropy");
+        assert_eq!(first, keyed_digest(&make_key(1), b"snapshot", b"low-entropy"));
+        assert_ne!(first, keyed_digest(&make_key(2), b"snapshot", b"low-entropy"));
+        assert_ne!(first, keyed_digest(&make_key(1), b"other", b"low-entropy"));
+        assert_ne!(first, keyed_digest(&make_key(1), b"snapshot", b"different"));
     }
 
     #[test]

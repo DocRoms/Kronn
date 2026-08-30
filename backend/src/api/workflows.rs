@@ -252,6 +252,7 @@ fn validate_json_data_steps(steps: &[WorkflowStep]) -> Result<(), String> {
 /// "no constraint" (logged, never blocks a launch). This is the net that
 /// stops a typo like `7152` (vs `EW-7152`) from reaching the API as a
 /// literal path param and 404ing.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn validate_launch_variables(
     declared: &[crate::models::PromptVariable],
     provided: &std::collections::HashMap<String, String>,
@@ -2311,15 +2312,33 @@ pub async fn trigger(
     // - Unknown variables (sent but not declared) → silently dropped
     //   (defensive: don't let a stale form smuggle data in).
     let provided_vars = body.map(|Json(b)| b.variables).unwrap_or_default();
-    if let Err(msg) = validate_launch_variables(&wf.variables, &provided_vars) {
-        return sse_error(msg);
-    }
-    let trigger_obj = build_manual_trigger_obj(&provided_vars, Utc::now());
+    let secret = match state.config.read().await.encryption_secret.clone() {
+        Some(secret) => secret,
+        None => return sse_error("Variable preflight unavailable: encryption key missing"),
+    };
+    let run_id = Uuid::new_v4().to_string();
+    let declarations = wf.variables.clone();
+    let supplied = provided_vars;
+    let project_id = wf.project_id.clone();
+    let snapshot_run_id = run_id.clone();
+    let prepared = state.db.with_conn(move |conn| crate::core::execution_variables::prepare(conn,
+        crate::core::execution_variables::PrepareRequest {
+            declarations: &declarations, supplied: &supplied, context: &std::collections::HashMap::new(),
+            project_id: project_id.as_deref(), environment_ref: "project_mcp_configs",
+            run_kind: "workflow", run_id: &snapshot_run_id, encryption_secret: &secret,
+            retention_days: crate::core::execution_variables::DEFAULT_RETENTION_DAYS,
+        })).await;
+    let resolved = match prepared {
+        Ok(Ok(prepared)) => prepared.resolved,
+        Ok(Err(failures)) => return sse_error(format!("preflight_failed:{}", serde_json::to_string(&failures).unwrap_or_default())),
+        Err(error) => return sse_error(format!("Variable preflight failed: {error}")),
+    };
+    let trigger_obj = build_manual_trigger_obj(&resolved.values, resolved.resolved_at);
 
     // Atomic concurrency check + insert in a single transaction (avoids TOCTOU race)
     let now = Utc::now();
     let run = WorkflowRun {
-        id: Uuid::new_v4().to_string(),
+        id: run_id,
         workflow_id: wf.id.clone(),
         status: RunStatus::Pending,
         trigger_context: Some(serde_json::Value::Object(trigger_obj)),

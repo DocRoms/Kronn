@@ -533,6 +533,14 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    match state.db.with_conn(|conn| {
+        kronn::db::execution_variable_snapshots::purge_expired(conn, chrono::Utc::now())
+    }).await {
+        Ok(0) => {}
+        Ok(count) => tracing::info!("Purged {count} expired execution-variable snapshot(s)"),
+        Err(error) => tracing::warn!("Execution-variable snapshot purge failed: {error}"),
+    }
+
     // Reap abandoned MCP sessions (2026-06-08). `count_live_participants` is
     // presence-sticky — any `status='active'` session suppresses Kronn's
     // auto-response (no per-message staleness window, which had wrongly
