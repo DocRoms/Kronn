@@ -1197,6 +1197,27 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
     expect(screen.queryByText('N° de la PR à reviewer')).toBeNull();
   });
 
+  it('masks project variables and does not ask the user to provide them', async () => {
+    mockWorkflowsApi.list.mockResolvedValue([labSummary()]);
+    mockWorkflowsApi.get.mockResolvedValue(labWorkflow({
+      variables: [{
+        name: 'token', label: 'API token', placeholder: '', description: null,
+        required: true, source: 'project_env', source_ref: '<env.API_TOKEN>',
+        allow_manual_override: false,
+      }],
+    } as Partial<Workflow>));
+    mockWorkflowsApi.listRuns.mockResolvedValue([]);
+    mockWorkflowsApi.triggerStream.mockResolvedValue(undefined);
+
+    await wrap(<WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig} />);
+    await act(async () => { fireEvent.click(screen.getAllByText('Lancer')[0]); });
+    expect(await screen.findByLabelText('API token masked project value')).toHaveValue('••••••');
+    expect(screen.getByText(/<env\.API_TOKEN>/)).toBeInTheDocument();
+    const buttons = screen.getAllByText('Lancer');
+    await act(async () => { fireEvent.click(buttons[buttons.length - 1]); });
+    await waitFor(() => expect(mockWorkflowsApi.triggerStream).toHaveBeenCalled());
+  });
+
   it('la popup valide le pattern déclaré AVANT de fermer (le rejet backend était invisible)', async () => {
     mockWorkflowsApi.triggerStream.mockClear();
     mockWorkflowsApi.list.mockResolvedValue([labSummary()]);

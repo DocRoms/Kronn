@@ -32,6 +32,7 @@ pub mod learnings;
 pub mod lite_llm;
 pub mod live_pages;
 pub mod maintenance;
+pub mod execution_variables;
 pub mod mcp_remote;
 pub mod mcps;
 pub mod nvidia;

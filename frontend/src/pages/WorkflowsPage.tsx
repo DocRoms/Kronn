@@ -3886,7 +3886,10 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                 {provided.map(v => (
                   <div key={v.name} className="qp-launch-field mb-3">
                     <label className="qp-launch-label">{v.label || v.name}</label>
-                    <input className="wf-input flex-1" value={v.source_ref ?? ''} readOnly aria-label={`${v.label || v.name} source`} />
+                    <input className="wf-input flex-1" value="••••••" readOnly aria-label={`${v.label || v.name} masked project value`} />
+                    <p className="text-2xs text-ghost mt-1" style={{ margin: '2px 0 0' }}>
+                      {v.source_ref} · resolved securely when the run starts
+                    </p>
                   </div>
                 ))}
               </>}
@@ -3909,7 +3912,8 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                   // Validate required vars are filled.
                   const vars = launchingWorkflow.workflow.variables ?? [];
                   const missing = vars
-                    .filter(v => (v.required ?? true) && !(launchingWorkflow.values[v.name] ?? '').trim())
+                    .filter(v => ((v.source ?? 'user_input') === 'user_input' || v.allow_manual_override)
+                      && (v.required ?? true) && !(launchingWorkflow.values[v.name] ?? '').trim())
                     .map(v => v.label || v.name);
                   if (missing.length > 0) {
                     setLaunchingWorkflow(prev => prev ? {
