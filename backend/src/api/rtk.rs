@@ -5,11 +5,13 @@
 //! `rtk init -g` to wire the user's agent configs, and reads `rtk gain
 //! --format json` for the dashboard counter.
 //!
-//! Neither endpoint writes to agent config files directly — RTK owns the
-//! file format. We stay a thin orchestrator.
+//! RTK owns the agent config format. Kronn only normalizes the absolute
+//! Codex companion path that RTK emits inside Docker so the bind-mounted
+//! config remains valid from the host as well.
 
 use axum::Json;
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 use ts_rs::TS;
 
 use crate::core::cmd::async_cmd;
@@ -116,6 +118,49 @@ fn rtk_uninstall_args_for(agent_type: &AgentType) -> Option<Vec<&'static str>> {
     }
 }
 
+fn normalize_codex_rtk_reference(home: &Path, host_home: Option<&Path>) -> Result<bool, String> {
+    let Some(host_home) = host_home.filter(|path| path.is_absolute() && *path != home) else {
+        return Ok(false);
+    };
+
+    let agents_path = home.join(".codex/AGENTS.md");
+    let content = std::fs::read_to_string(&agents_path)
+        .map_err(|error| format!("read {}: {error}", agents_path.display()))?;
+    let container_reference = format!("@{}", home.join(".codex/RTK.md").display());
+    let host_reference = format!("@{}", host_home.join(".codex/RTK.md").display());
+
+    let mut changed = false;
+    let mut host_reference_seen = false;
+    let mut lines = Vec::new();
+    for line in content.lines() {
+        let normalized = if line.trim() == container_reference {
+            changed = true;
+            host_reference.as_str()
+        } else {
+            line
+        };
+
+        if normalized.trim() == host_reference {
+            if host_reference_seen {
+                changed = true;
+                continue;
+            }
+            host_reference_seen = true;
+        }
+        lines.push(normalized);
+    }
+
+    if !changed {
+        return Ok(false);
+    }
+
+    let mut updated = lines.join("\n");
+    updated.push('\n');
+    crate::core::mcp_scanner::atomic_write(&agents_path, &updated)
+        .map_err(|error| format!("write {}: {error}", agents_path.display()))?;
+    Ok(true)
+}
+
 /// POST /api/rtk/activate
 /// Body: `{ agents: [AgentType, ...] }` — usually the full detected list;
 /// the backend filters to agents RTK actually supports before spawning.
@@ -142,6 +187,7 @@ pub async fn activate(
         ));
     }
     let home = std::env::var("HOME").unwrap_or_else(|_| "<unset>".into());
+    let host_home = std::env::var_os("KRONN_HOST_HOME").map(PathBuf::from);
 
     // Pre-create `$HOME/.config/rtk` — RTK uses this for its own state
     // (config.toml, telemetry). If the dir chain has to be created and
@@ -170,9 +216,23 @@ pub async fn activate(
 
         match async_cmd("rtk").args(&args).output().await {
             Ok(out) => {
-                let success = out.status.success();
+                let mut success = out.status.success();
                 let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-                let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+                let mut stderr = String::from_utf8_lossy(&out.stderr).to_string();
+
+                if success && *agent == AgentType::Codex {
+                    if let Err(error) =
+                        normalize_codex_rtk_reference(Path::new(&home), host_home.as_deref())
+                    {
+                        success = false;
+                        if !stderr.is_empty() && !stderr.ends_with('\n') {
+                            stderr.push('\n');
+                        }
+                        stderr.push_str(&format!(
+                            "RTK activated, but Kronn could not make its Codex instructions host-compatible: {error}"
+                        ));
+                    }
+                }
 
                 if success {
                     tracing::info!("rtk hook activated for {:?}", agent);
@@ -582,6 +642,57 @@ mod tests {
         );
         // Must mirror the install matrix's "unsupported" set.
         assert!(rtk_uninstall_args_for(&AgentType::Kiro).is_none());
+    }
+
+    #[test]
+    fn codex_rtk_reference_uses_host_home_after_docker_activation() {
+        let container_home = tempfile::tempdir().unwrap();
+        let host_home = tempfile::tempdir().unwrap();
+        let codex_dir = container_home.path().join(".codex");
+        std::fs::create_dir_all(&codex_dir).unwrap();
+        let agents_path = codex_dir.join("AGENTS.md");
+        std::fs::write(
+            &agents_path,
+            format!(
+                "@{}\n",
+                container_home.path().join(".codex/RTK.md").display()
+            ),
+        )
+        .unwrap();
+
+        assert!(
+            normalize_codex_rtk_reference(container_home.path(), Some(host_home.path())).unwrap()
+        );
+        assert_eq!(
+            std::fs::read_to_string(agents_path).unwrap(),
+            format!("@{}\n", host_home.path().join(".codex/RTK.md").display())
+        );
+    }
+
+    #[test]
+    fn codex_rtk_reference_deduplicates_a_previous_host_entry() {
+        let container_home = tempfile::tempdir().unwrap();
+        let host_home = tempfile::tempdir().unwrap();
+        let codex_dir = container_home.path().join(".codex");
+        std::fs::create_dir_all(&codex_dir).unwrap();
+        let agents_path = codex_dir.join("AGENTS.md");
+        let host_reference = format!("@{}", host_home.path().join(".codex/RTK.md").display());
+        std::fs::write(
+            &agents_path,
+            format!(
+                "@{}\n{host_reference}\n",
+                container_home.path().join(".codex/RTK.md").display()
+            ),
+        )
+        .unwrap();
+
+        assert!(
+            normalize_codex_rtk_reference(container_home.path(), Some(host_home.path())).unwrap()
+        );
+        assert_eq!(
+            std::fs::read_to_string(agents_path).unwrap(),
+            format!("{host_reference}\n")
+        );
     }
 
     #[test]
