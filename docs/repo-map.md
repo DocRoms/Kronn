@@ -22,6 +22,7 @@ Kronn/
 │       │   ├── mod.rs          # Re-exports
 │       │   ├── setup.rs        # Setup wizard + config endpoints (tokens, language, agents, server config, auth token, ui_language/stt_model/tts_voices for Tauri persistence)
 │       │   ├── projects.rs     # Project CRUD (~1396L) + scan + bootstrap + clone + template install + git ops + defaults
+│       │   ├── projects/docker.rs # Project-scoped Docker Compose status + closed start/stop/restart actions
 │       │   ├── audit.rs        # AI audit pipeline (~1848L) — SSE audit, full_audit, drift, validation, briefing, cancel, skill detection
 │       │   ├── ai_docs.rs      # Read-only docs/source browsers — bounded UTF-8 tree/read/search, per-project folder exclusions + Git metadata
 │       │   ├── discover.rs     # Remote repo discovery (~426L) — GitHub/GitLab multi-source with token from MCPs
@@ -49,7 +50,7 @@ Kronn/
 │       │   └── runner.rs       # Spawns agent CLIs, streams stdout as SSE. Two output modes: Text (line-by-line) and StreamJson (Claude Code stream-json with token tracking). Cross-platform HOME resolution (KRONN_HOST_HOME → HOME → USERPROFILE). COPILOT_HOME for Copilot CLI auth. MCP contexts injected into prompts
 │       ├── db/                 # SQLite persistence layer
 │       │   ├── mod.rs          # Database struct (Mutex<Connection>), with_conn() async accessor, init
-│       │   ├── migrations.rs   # Versioned migration runner (run before Mutex wrap)
+│       │   ├── migrations.rs   # Versioned migration runner (through 153; schema-aware OpenRouter repair runs before Mutex wrap)
 │       │   ├── projects.rs     # Project CRUD operations
 │       │   ├── discussions.rs  # Discussion + message CRUD (+ archive/rename via update_discussion)
 │       │   ├── discussion_workspaces.rs # Managed/external worktrees declared by joined CLI sessions
@@ -187,7 +188,9 @@ Kronn/
 │       │   ├── AiDocViewer.tsx   # AI doc viewer
 │       │   ├── SourceCodeViewer.tsx # Text-source tree/read/search, reversible folder exclusions, syntax/occurrence navigation, branch + blame
 │       │   ├── ProjectList.tsx   # Compact filterable/sortable project master list + responsive detail selection
-│       │   ├── ProjectCard.tsx   # Project detail views — overview, discussions, docs/audit, code and resources
+│       │   ├── ProjectCard.tsx   # Project detail views — overview, discussions, docs/audit, code, Docker, Git and resources
+│       │   ├── ProjectDockerPanel.tsx # Compose status, project/service lifecycle controls, published hosts, host-file diagnostics and logs
+│       │   ├── SearchableSelect.tsx # Shared searchable, keyboard-accessible project/model picker with portaled dropdown
 │       │   └── settings/
 │       │       ├── AgentsSection.tsx  # Agent config (tokens, keys, model tiers, install/uninstall)
 │       │       ├── UsageSection.tsx   # Usage dashboard (summary cards, provider bar, project bars, daily chart, top-5 lists, tokens/cost toggle, disc/wf filter)

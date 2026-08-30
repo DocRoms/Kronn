@@ -47,6 +47,14 @@ links. The library deliberately reuses the Discussion sidebar interaction
 model: search, favorite shortcuts, a canonical active section, multi-selection
 actions and a collapsed archive section.
 
+Multi-selection can also open two or more Pages in one external mosaic route.
+Two-Page presets support columns or rows; three-Page presets place the first
+selected Page above, below, left or right of the other two; four or more Pages
+use a responsive automatic grid. Every tile independently reuses the same
+opaque `sandbox="allow-scripts"` rendering and parent-fed dataset bridge as the
+single standalone Page, so combining reports does not merge their HTML, CSS or
+JavaScript contexts.
+
 A Page may also be linked to one or more Discussions. `created_from` records
 the room where an agent authored the Page; `attached` is an explicit later
 association. These links are independent from Workflow publisher links and are

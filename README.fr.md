@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/screenshots/KronnLogo.jpg" alt="Kronn, Many agents. Zero chaos." width="720" />
+  <img src="site/screenshots/workflows.png" alt="Page Automatisation de Kronn montrant un workflow de revue de pull request multi-étapes avec des steps déterministes, agent, gate et notification." />
 </p>
 
 <p align="center">
@@ -19,41 +19,42 @@
   <a href="https://github.com/DocRoms/Kronn/commits/main"><img src="https://img.shields.io/github/last-commit/DocRoms/Kronn?label=dernier%20commit" alt="Dernier commit" /></a>
 </p>
 
-<p align="center">
-  <img src="docs/screenshots/kronn-projects.png" alt="Dashboard Kronn, nav (Projets, Discussions, Planification, Automatisation, Plugins, Config) et trois projets démo publics. Le projet sélectionné affiche la santé du contexte agent, les langages détectés, la fraîcheur des dépendances et le statut de documentation." />
-</p>
-
 **Pilote Claude Code, Codex, Gemini, Ollama (100 % local), LiteLLM et 3 autres agents IA depuis un seul dashboard self-hosted, avec des MCP partagés, des secrets chiffrés et des workflows répétables.**
 
 **Prompts plus petits, code déterministe quand c'est possible : moins d'hallucinations, facture tokens divisée, écoconception par conception.**
 
-> **Statut : 0.11.0 (version actuelle).** Fonctionnel mais pré-1.0. Les versions mineures peuvent introduire des breaking changes ; les patch versions sont safe.
+> **Statut : 0.12.0 (version actuelle).** Fonctionnel mais pré-1.0. Les versions mineures peuvent introduire des breaking changes ; les patch versions sont safe.
 > **Licence : AGPL-3.0.** Utiliser Kronn localement pour développer *ton propre* produit ne déclenche pas le copyleft ; il ne s'applique que si tu redistribues une version modifiée à d'autres. Voir [Notes sur la licence](#notes-sur-la-licence-agpl-3-0).
 
-## Nouveautés de la 0.11.0
+## Nouveautés de la 0.12.0
 
-- **Délégation durable des tâches :** lance une tâche du Planning avec l’agent
-  choisi dans sa propre sous-discussion et son worktree Git isolé ; le parent
-  suit, revoit, demande des changements, réassigne et intègre en fast-forward protégé.
-- **Évaluation multi-agent des prompts :** compare les réponses d’un Quick Prompt,
-  réordonne les colonnes, inspecte modèle/temps/tokens, conserve séparément les
-  notes humaines et IA, classe chaque métrique et ouvre une discussion d’amélioration.
-- **Agents locaux et de repli :** Ollama, LiteLLM et NVIDIA utilisent les outils
-  natifs de Kronn avec Codex, Claude, Vibe et les autres CLI, pour continuer en
-  local, moins cher ou pendant les rate limits des fournisseurs.
-- **Usage des outils honnête et borné :** les collections tronquées annoncent leur
-  total, la fenêtre de contexte anticipe les outils et les boucles sans progrès
-  convergent vers une réponse partielle explicite au lieu de tourner indéfiniment.
-- **Rooms multi-agent résilientes :** routage par session CLI exacte, reprise
-  durable après redémarrage et messages de room piggyback permettent au parent et
-  au worker de coopérer sans dépendre d’un polling bloquant permanent.
+- **Une même logique de collection partout :** Projets, Discussions,
+  Planification, Automatisation, Pages et Plugins partagent désormais la même
+  sidebar compacte, la recherche, les filtres, le tri, les favoris, les actions
+  de ligne et les raccourcis clavier.
+- **Connexions API externes nommées :** gère LiteLLM, NVIDIA, OpenRouter et d’autres
+  endpoints compatibles OpenAI depuis une seule zone de configuration, teste
+  leurs identifiants, associe leurs modèles aux niveaux Économie / Par défaut /
+  Raisonnement et appelle chaque connexion par son propre alias en discussion.
+- **Des détails projet qui utilisent tout l’espace :** Audit, Docs et Code sont
+  des onglets directs en pleine hauteur, avec le sélecteur d’agent actuel, une
+  santé documentaire plus claire et l’historique d’audit sans blocs imbriqués.
+- **Le contrôle Docker au niveau du projet :** inspecte les services Compose,
+  ports, hosts publiés et logs, démarre ou arrête la stack, ouvre les hosts
+  joignables et filtre les projets dont l’environnement tourne.
+- **Mosaïques de Pages :** sélectionne plusieurs Pages et ouvre-les ensemble
+  dans une vue externe à deux, trois ou plusieurs tuiles responsives.
+- **Un travail délégué plus observable :** la progression native des workers et
+  les contrôles documentaires déterministes rendent explicites les files,
+  l’activité fournisseur et la validation des audits sans inventer de télémétrie.
 
-Voir les [notes complètes de la version 0.11.0](CHANGELOG.md) et le
-[guide de délégation des tâches](docs/guides/task-orchestration.md).
+Voir les [notes complètes de la version 0.12.0](CHANGELOG.md), le
+[guide des connexions API externes](docs/operations/external-api-connections.md)
+et le [guide de délégation des tâches](docs/guides/task-orchestration.md).
 
 ## Sommaire
 
-- [Nouveautés de la 0.11.0](#nouveautés-de-la-0110)
+- [Nouveautés de la 0.12.0](#nouveautés-de-la-0120)
 - [Le pitch en 60 secondes](#le-pitch-en-60-secondes)
 - [L'approche Kronn : de l'ingénierie, pas de l'incantation](#lapproche-kronn--de-lingénierie-pas-de-lincantation)
 - [Démarrage rapide](#démarrage-rapide)
@@ -117,7 +118,7 @@ Télécharge l'installeur pour ton OS depuis [Releases](https://github.com/DocRo
 Requiert Docker + Docker Compose. Sur Windows, WSL2 (Docker Engine dans WSL fonctionne, Docker Desktop optionnel).
 
 ```bash
-git clone --branch 0.11.0 --depth 1 https://github.com/DocRoms/Kronn.git   # dernière release stable
+git clone --branch 0.12.0 --depth 1 https://github.com/DocRoms/Kronn.git   # dernière release stable
 cd Kronn
 ./kronn start
 # → http://localhost:3140
