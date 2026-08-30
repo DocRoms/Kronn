@@ -54,6 +54,7 @@ Documented so future iterations don't rediscover them:
 5. Codex detection path `.codex/config.toml` → wrong, RTK writes to `.codex/AGENTS.md`.
 6. `rtk gain` parser looking at top-level keys → wrong, RTK 0.37 nests under `summary.*`.
 7. Docker container's `rtk` reads `/home/kronn/.config/rtk/` → without bind mount, disjoint from host SQLite, savings counter always zero.
+8. `rtk init -g --codex` inside Docker writes `@/home/kronn/.codex/RTK.md` into the bind-mounted host `~/.codex/AGENTS.md` → Codex on macOS/Linux cannot resolve the container-only path. After a successful Codex activation, Kronn rewrites that exact companion reference to `$KRONN_HOST_HOME/.codex/RTK.md`. The entrypoint's existing host-home symlink keeps the rewritten path valid inside Docker too.
 
 Regression tests in `backend/src/core/rtk_detect.rs::tests` and `backend/src/api/rtk.rs::tests` (incl. embedded real-payload JSON). Don't remove them without a very good reason.
 
