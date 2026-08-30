@@ -16,13 +16,13 @@ cd "$(dirname "$0")/../backend"
 
 # "file-substring : min-region-% : min-line-%"
 TARGETS=(
-  "core/crypto.rs:98:98"
-  "core/config.rs:93:96"
-  "core/keyvault.rs:85:87"
-  "core/keystore.rs:89:91"
-  "core/recovery.rs:92:94"
-  "db/mcps.rs:89:91"
-  "db/migrations.rs:92:94"
+  "core/crypto.rs:99:99"
+  "core/config.rs:94:96"
+  "core/keyvault.rs:91:90"
+  "core/keystore.rs:90:91"
+  "core/recovery.rs:97:98"
+  "db/mcps.rs:93:95"
+  "db/migrations.rs:94:97"
 )
 
 # Reuse the instrumented build/profdata from the repo-wide floor step if it ran;

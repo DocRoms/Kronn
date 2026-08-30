@@ -1,6 +1,6 @@
 {
-  "//": "Code-duplication ceiling. Baseline 2026-05-29 = 3.75% lines (270 clones; rust 4.32% dominates). threshold pinned at 4 = baseline + 0.25 margin so a single trivial clone doesn't break CI, but accumulating copy-paste does. RATCHET DOWN as the AgentIo refactor removes the rust loop duplication (decoder-loop detector + StreamJsonEvent match arms are 3-4× duped) — never raise it.",
-  "threshold": 4,
+  "//": "Code-duplication ceiling. The 0.12.0 candidate measures 2.62% duplicated lines, so the threshold is ratcheted to 3%: enough margin for small fluctuations while refusing sustained copy-paste growth. Lower it again when the measured baseline drops; never raise it to make CI green.",
+  "threshold": 3,
   "minTokens": 50,
   "reporters": ["console"],
   "absolute": true,
