@@ -49,26 +49,34 @@ remain blocking: formatting, clippy, Rust tests, coverage floors, generated
 type drift, safety/budget checks, the frontend build needed by the desktop
 compile check, and the desktop compile check itself. The `ci-quality-gates`
 job fails unless every independent quality job succeeds; configure that job as
-the required branch-protection check. [src: file: .github/workflows/ci-test.yml:48-299] [src: file: .github/workflows/ci-test.yml:731-757]
+the required branch-protection check. [src: file: .github/workflows/ci-test.yml:52-299] [src: file: .github/workflows/ci-test.yml:756-780]
 
 The backend performance observer publishes the duration for every eligible run
 and reports a warning rather than failing a green functional run when the hot
-cache SLO exceeds 15 minutes. It calculates median, p95, and consecutive
-breaches from the latest completed samples. [src: file: .github/workflows/ci-test.yml:759-776] [src: file: scripts/ci/backend_ci_slo.mjs:5-63]
+cache SLO exceeds 15 minutes. Hot measurements restore a bounded
+`backend/target` artifact cache alongside Cargo downloads. Cold measurements use
+a unique cache key per run attempt, restore no compiled artifacts, and are
+reported only for their current run. Historical hot statistics use only
+successful pull-request runs from the same head branch. [src: file: .github/workflows/ci-test.yml:84-108] [src: file: scripts/ci/backend_ci_slo.mjs:43-99]
+The observer's Node unit test runs in the blocking `test-python` gate.
+[src: file: .github/workflows/ci-test.yml:342-363]
 
-Run `CI Tests` manually with `cache_mode=hot` for a warmed-cache measurement
-or `cache_mode=cold` for a run-scoped Cargo-cache measurement. Record the
-published job and step timing table from each run here before comparing a
-change; do not infer cold or hot timings from a different runner class.
+Run `CI Tests` manually with `cache_mode=hot` for a warmed compiled-artifact
+measurement or `cache_mode=cold` for a current-run-only cold measurement.
+Record the published job and step timing table from each run here before
+comparing a change; do not combine cold measurements with historical hot
+statistics or infer timings from a different runner class.
 
 | Measurement | Sample window | Job/step durations | Median | P95 | Consecutive SLO breaches |
 | --- | --- | --- | --- | --- | --- |
 | Before | Pending first representative run | Published in Actions summary | Pending | Pending | Pending |
 | After | Pending first representative run | Published in Actions summary | Pending | Pending | Pending |
 
-Every job in the CI workflow has a 30-minute technical timeout. A timeout is a
-functional failure; the SLO observer does not retry, sleep, or mask it.
-[src: file: .github/workflows/ci-test.yml:29-772]
+Every job in the CI workflow has a 30-minute technical timeout. The required
+aggregate always runs, includes `require-ci-label`, and fails when the label is
+removed or any other gate is skipped or fails. A timeout is a functional
+failure; the SLO observer does not retry, sleep, or mask it.
+[src: file: .github/workflows/ci-test.yml:37-55] [src: file: .github/workflows/ci-test.yml:756-780]
 
 ## Test placement
 

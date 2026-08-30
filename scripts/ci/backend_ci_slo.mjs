@@ -43,6 +43,15 @@ export function summarizeBackendJobs(jobs) {
   };
 }
 
+export function comparableSuccessfulHotRuns(runs, currentRun) {
+  return runs.filter((run) => (
+    run.id !== currentRun.id
+    && run.event === "pull_request"
+    && run.conclusion === "success"
+    && run.head_branch === currentRun.head_branch
+  )).slice(0, HISTORY_LIMIT);
+}
+
 async function githubJson(path) {
   const repository = process.env.GITHUB_REPOSITORY;
   const token = process.env.GITHUB_TOKEN;
@@ -63,18 +72,28 @@ function markdown(summary, currentJob, mode) {
   const currentDuration = currentJob?.durationMs ?? null;
   const status = currentDuration !== null && currentDuration > SLO_MS ? "breach" : "within SLO";
   const stepRows = (currentJob?.steps ?? []).map((step) => `| ${step.name} | ${formatDuration(milliseconds(step.started_at, step.completed_at))} |`);
-  return ["## Backend CI timing", "", `Measurement mode: **${mode}**. The SLO is ${formatDuration(SLO_MS)} for \`${BACKEND_JOB}\`; this report never changes a functional gate.`, "", "| Metric | Value |", "| --- | --- |", `| Current backend critical path | ${formatDuration(currentDuration)} (${status}) |`, `| Sample size | ${summary.samples.length} completed runs |`, `| Median | ${formatDuration(summary.medianMs)} |`, `| P95 | ${formatDuration(summary.p95Ms)} |`, `| Consecutive SLO breaches | ${summary.consecutiveBreaches} |`, "", "### Current backend job steps", "", "| Step | Duration |", "| --- | --- |", ...stepRows, ""].join("\n");
+  const historyDescription = mode === "cold"
+    ? "Current run only; cold measurements are intentionally excluded from historical hot-cache statistics."
+    : "Successful pull-request runs from the same head branch; manual, failed, cancelled, cold, and other-branch runs are excluded.";
+  return ["## Backend CI timing", "", `Measurement mode: **${mode}**. The SLO is ${formatDuration(SLO_MS)} for \`${BACKEND_JOB}\`; this report never changes a functional gate.`, `Historical evidence: ${historyDescription}`, "", "| Metric | Value |", "| --- | --- |", `| Current backend critical path | ${formatDuration(currentDuration)} (${status}; ${mode}) |`, `| Historical hot sample size | ${summary.samples.length} completed runs |`, `| Historical hot median | ${formatDuration(summary.medianMs)} |`, `| Historical hot P95 | ${formatDuration(summary.p95Ms)} |`, `| Historical hot consecutive SLO breaches | ${summary.consecutiveBreaches} |`, "", "### Current backend job steps", "", "| Step | Duration |", "| --- | --- |", ...stepRows, ""].join("\n");
 }
 
 async function main() {
   const runId = process.env.GITHUB_RUN_ID;
   const mode = process.env.CI_CACHE_MODE ?? "hot";
   if (!runId) throw new Error("GITHUB_RUN_ID is required");
-  const [currentJobs, history] = await Promise.all([jobsForRun(runId), githubJson(`/actions/workflows/ci-test.yml/runs?status=completed&per_page=${HISTORY_LIMIT}`)]);
-  const priorRunIds = (history.workflow_runs ?? []).map((run) => String(run.id)).filter((id) => id !== runId).slice(0, HISTORY_LIMIT - 1);
+  const [currentJobs, currentRun, history] = await Promise.all([
+    jobsForRun(runId),
+    githubJson(`/actions/runs/${runId}`),
+    githubJson(`/actions/workflows/ci-test.yml/runs?status=completed&per_page=${HISTORY_LIMIT}`),
+  ]);
+  const comparableRuns = mode === "hot"
+    ? comparableSuccessfulHotRuns(history.workflow_runs ?? [], currentRun)
+    : [];
+  const priorRunIds = comparableRuns.map((run) => String(run.id));
   const priorJobs = await Promise.all(priorRunIds.map(jobsForRun));
   const currentSummary = summarizeBackendJobs(currentJobs);
-  const summary = summarizeBackendJobs([...currentJobs, ...priorJobs.flat()]);
+  const summary = summarizeBackendJobs(priorJobs.flat());
   const report = markdown(summary, currentSummary.samples[0], mode);
   process.stdout.write(`${report}\n`);
   if (process.env.GITHUB_STEP_SUMMARY) await (await import("node:fs/promises")).appendFile(process.env.GITHUB_STEP_SUMMARY, `${report}\n`);

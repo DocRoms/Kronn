@@ -92,6 +92,7 @@ class E2eContainerWorkflowTests(unittest.TestCase):
         workflow = CI_WORKFLOW.read_text()
         self.assertIn("workflow_dispatch:", workflow)
         self.assertIn("options: [hot, cold]", workflow)
+        self.assertIn("unlabeled", workflow)
         self.assertIn("backend-ci-performance:", workflow)
         self.assertIn("ci-quality-gates:", workflow)
         for gate in (
@@ -100,8 +101,33 @@ class E2eContainerWorkflowTests(unittest.TestCase):
             "test-shell", "security-scan", "test-backend-portability",
         ):
             self.assertIn(f"      - {gate}", workflow)
-        self.assertIn("if: always()", workflow)
+        aggregate = re.search(
+            r"^  ci-quality-gates:\n(?P<section>.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)",
+            workflow,
+            re.MULTILINE | re.DOTALL,
+        ).group("section")
+        self.assertIn("if: always()", aggregate)
+        self.assertIn("      - require-ci-label", aggregate)
         self.assertIn("node scripts/ci/backend_ci_slo.mjs", workflow)
+        backend = re.search(
+            r"^  test-backend:\n(?P<section>.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)",
+            workflow,
+            re.MULTILINE | re.DOTALL,
+        ).group("section")
+        self.assertIn("backend/target", backend)
+        cold_cache = re.search(
+            r"Cache cargo registry \(cold, isolated\)(?P<section>.*?)(?=^      - |\Z)",
+            backend,
+            re.DOTALL,
+        ).group("section")
+        self.assertIn("github.run_attempt", cold_cache)
+        self.assertNotIn("restore-keys", cold_cache)
+        python_job = re.search(
+            r"^  test-python:\n(?P<section>.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)",
+            workflow,
+            re.MULTILINE | re.DOTALL,
+        ).group("section")
+        self.assertIn("node scripts/ci/test_backend_ci_slo.mjs", python_job)
 
     def test_backend_readiness_wait_is_posix_and_latched(self):
         workflow = CI_WORKFLOW.read_text()

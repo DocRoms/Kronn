@@ -4,7 +4,7 @@ on:
   pull_request:
     # `opened`/`reopened` exist for the require-ci-label guard below: a fresh
     # PR without the label gets a visible RED check instead of zero runs.
-    types: [opened, reopened, labeled, synchronize]
+    types: [opened, reopened, labeled, unlabeled, synchronize]
   workflow_dispatch:
     inputs:
       cache_mode:
@@ -32,15 +32,20 @@ env:
 jobs:
   # Anti green-by-skip: every other job is gated on the `ci-test` label, so an
   # unlabeled PR used to show all-skipped — which satisfies required status
-  # checks and reads as green. This job INVERTS that: it only runs (and fails)
-  # when the label is missing, making the untested state visibly red.
+  # checks and reads as green. This required job always runs and fails unless
+  # the trigger is a manual measurement or the PR retains the label.
   require-ci-label:
-    if: github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'ci-test')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - name: Fail visibly when the ci-test label is missing
+      - name: Require ci-test label for pull requests
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HAS_CI_TEST_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ci-test') }}
         run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] || [ "$HAS_CI_TEST_LABEL" = "true" ]; then
+            exit 0
+          fi
           echo "::error::This PR has no 'ci-test' label — every CI job was SKIPPED (green-by-skip). Add the label to run the suite."
           exit 1
 
@@ -80,14 +85,26 @@ jobs:
       # sccache setup action downloads a release asset before any test runs;
       # transient GitHub Releases failures used to abort this whole job and
       # its post-step then failed again while looking for an undefined binary.
-      - name: Cache cargo registry
+      - name: Cache cargo registry and backend build (hot)
+        if: github.event_name != 'workflow_dispatch' || inputs.cache_mode == 'hot'
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: cargo-${{ runner.os }}-${{ hashFiles('backend/Cargo.lock') }}-${{ inputs.cache_mode == 'cold' && github.run_id || 'shared' }}
-          restore-keys: cargo-${{ runner.os }}-${{ hashFiles('backend/Cargo.lock') }}-${{ inputs.cache_mode == 'cold' && github.run_id || 'shared' }}
+            backend/target
+          key: cargo-hot-${{ runner.os }}-${{ hashFiles('backend/Cargo.lock') }}
+
+      # A cold measurement may populate an isolated Cargo-download cache, but
+      # it must never restore compiled artifacts or a broad fallback key.
+      - name: Cache cargo registry (cold, isolated)
+        if: github.event_name == 'workflow_dispatch' && inputs.cache_mode == 'cold'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-cold-${{ runner.os }}-${{ hashFiles('backend/Cargo.lock') }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: cargo fmt
         run: cargo fmt --all -- --check
@@ -333,6 +350,14 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+
+      - name: Setup Node.js for CI SLO regression test
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Run backend CI SLO unit test
+        run: node scripts/ci/test_backend_ci_slo.mjs
 
       - name: Run MCP helper tests
         run: python3 -m unittest discover -s backend/scripts -p 'test_*.py' -v
@@ -732,8 +757,9 @@ jobs:
     # Keep every quality job independently parallel, then make their complete
     # result explicit. Configure this one check as required in branch
     # protection: it cannot become green while any listed gate is non-success.
-    if: always() && (github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'ci-test'))
+    if: always()
     needs:
+      - require-ci-label
       - test-backend
       - duplication-check
       - test-python

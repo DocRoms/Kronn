@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { SLO_MS, formatDuration, percentile, summarizeBackendJobs } from "./backend_ci_slo.mjs";
+import { SLO_MS, comparableSuccessfulHotRuns, formatDuration, percentile, summarizeBackendJobs } from "./backend_ci_slo.mjs";
 
 const at = (minutes) => `2026-08-31T00:${String(minutes).padStart(2, "0")}:00Z`;
 const job = (start, end) => ({ name: "test-backend", started_at: at(start), completed_at: at(end) });
@@ -11,3 +11,13 @@ assert.equal(summary.samples.length, 3);
 assert.equal(summary.medianMs, 16 * 60 * 1000);
 assert.equal(summary.p95Ms, 17 * 60 * 1000);
 assert.equal(summary.consecutiveBreaches, 2);
+
+const currentRun = { id: 5, event: "pull_request", conclusion: null, head_branch: "feature/ci" };
+const comparable = comparableSuccessfulHotRuns([
+  { id: 1, event: "pull_request", conclusion: "success", head_branch: "feature/ci" },
+  { id: 2, event: "workflow_dispatch", conclusion: "success", head_branch: "feature/ci" },
+  { id: 3, event: "pull_request", conclusion: "failure", head_branch: "feature/ci" },
+  { id: 4, event: "pull_request", conclusion: "success", head_branch: "other-branch" },
+  currentRun,
+], currentRun);
+assert.deepEqual(comparable.map((run) => run.id), [1]);
