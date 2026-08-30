@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import pathlib
+import re
 import subprocess
 import tempfile
 import unittest
@@ -69,6 +70,39 @@ class AzureDockerWrapperTests(unittest.TestCase):
 
 
 class E2eContainerWorkflowTests(unittest.TestCase):
+    def test_ci_jobs_have_a_hard_thirty_minute_timeout(self):
+        workflow = CI_WORKFLOW.read_text()
+        jobs = (
+            "require-ci-label", "test-backend", "duplication-check", "test-python",
+            "test-docs-sidecar-windows", "test-frontend", "test-e2e", "test-shell",
+            "security-scan", "test-backend-portability", "ci-quality-gates",
+            "backend-ci-performance",
+        )
+        for job in jobs:
+            match = re.search(
+                rf"^  {re.escape(job)}:\n(?P<section>.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)",
+                workflow,
+                re.MULTILINE | re.DOTALL,
+            )
+            self.assertIsNotNone(match, job)
+            section = match.group("section")
+            self.assertIn("timeout-minutes: 30", section, job)
+
+    def test_backend_slo_observer_is_non_blocking_and_uses_hot_cold_measurements(self):
+        workflow = CI_WORKFLOW.read_text()
+        self.assertIn("workflow_dispatch:", workflow)
+        self.assertIn("options: [hot, cold]", workflow)
+        self.assertIn("backend-ci-performance:", workflow)
+        self.assertIn("ci-quality-gates:", workflow)
+        for gate in (
+            "test-backend", "duplication-check", "test-python",
+            "test-docs-sidecar-windows", "test-frontend", "test-e2e",
+            "test-shell", "security-scan", "test-backend-portability",
+        ):
+            self.assertIn(f"      - {gate}", workflow)
+        self.assertIn("if: always()", workflow)
+        self.assertIn("node scripts/ci/backend_ci_slo.mjs", workflow)
+
     def test_backend_readiness_wait_is_posix_and_latched(self):
         workflow = CI_WORKFLOW.read_text()
         self.assertNotIn(

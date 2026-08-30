@@ -5,6 +5,14 @@ on:
     # `opened`/`reopened` exist for the require-ci-label guard below: a fresh
     # PR without the label gets a visible RED check instead of zero runs.
     types: [opened, reopened, labeled, synchronize]
+  workflow_dispatch:
+    inputs:
+      cache_mode:
+        description: "Measurement mode: hot reuses the normal cache; cold uses a run-scoped cargo cache key."
+        required: true
+        default: hot
+        type: choice
+        options: [hot, cold]
 
 # Opt every JS-based action (checkout, setup-node, cache, pnpm/action-setup,
 # setup-python) into the Node 24 runtime ahead of GitHub's 2026-06-02 forced
@@ -27,8 +35,9 @@ jobs:
   # checks and reads as green. This job INVERTS that: it only runs (and fails)
   # when the label is missing, making the untested state visibly red.
   require-ci-label:
-    if: ${{ !contains(github.event.pull_request.labels.*.name, 'ci-test') }}
+    if: github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'ci-test')
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Fail visibly when the ci-test label is missing
         run: |
@@ -36,8 +45,9 @@ jobs:
           exit 1
 
   test-backend:
-    if: contains(github.event.pull_request.labels.*.name, 'ci-test')
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'ci-test')
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: backend
@@ -76,8 +86,8 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: cargo-${{ runner.os }}-${{ hashFiles('backend/Cargo.lock') }}
-          restore-keys: cargo-${{ runner.os }}-
+          key: cargo-${{ runner.os }}-${{ hashFiles('backend/Cargo.lock') }}-${{ inputs.cache_mode == 'cold' && github.run_id || 'shared' }}
+          restore-keys: cargo-${{ runner.os }}-${{ hashFiles('backend/Cargo.lock') }}-${{ inputs.cache_mode == 'cold' && github.run_id || 'shared' }}
 
       - name: cargo fmt
         run: cargo fmt --all -- --check
@@ -289,8 +299,9 @@ jobs:
   # again whenever the measured baseline improves. This is the
   # mechanical guard that stops agents (and humans) from merging dup'd code.
   duplication-check:
-    if: contains(github.event.pull_request.labels.*.name, 'ci-test')
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'ci-test')
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -312,8 +323,9 @@ jobs:
   # cache behaviour, missing-env handling, idempotency-collision guard
   # on `source_session_id`. Stdlib only — zero dev deps, sub-second run.
   test-python:
-    if: contains(github.event.pull_request.labels.*.name, 'ci-test')
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'ci-test')
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -333,8 +345,9 @@ jobs:
   # Exercise the exact Windows release-sidecar path on every tested PR so a
   # broken installer cannot remain hidden until the next version tag.
   test-docs-sidecar-windows:
-    if: contains(github.event.pull_request.labels.*.name, 'ci-test')
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'ci-test')
     runs-on: windows-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
 
@@ -386,8 +399,9 @@ jobs:
           retention-days: 7
 
   test-frontend:
-    if: contains(github.event.pull_request.labels.*.name, 'ci-test')
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'ci-test')
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: frontend
@@ -448,7 +462,7 @@ jobs:
     # 0.6.0 "Create button silent", "JsonData ghost agent", "Quick APIs
     # tab buttons leak" were all UI-only bugs that pure-JS tests can't
     # see).
-    if: contains(github.event.pull_request.labels.*.name, 'ci-test')
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'ci-test')
     runs-on: ubuntu-latest
     # ── Playwright official container ─────────────────────────────────
     # Chromium + chromium_headless_shell + ffmpeg + all OS deps are BAKED
@@ -467,7 +481,7 @@ jobs:
     container:
       image: mcr.microsoft.com/playwright:v1.62.1-noble
       options: --user root
-    timeout-minutes: 40
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -606,8 +620,9 @@ jobs:
           retention-days: 7
 
   test-shell:
-    if: contains(github.event.pull_request.labels.*.name, 'ci-test')
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'ci-test')
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
@@ -620,8 +635,9 @@ jobs:
         run: make test-shell
 
   security-scan:
-    if: contains(github.event.pull_request.labels.*.name, 'ci-test')
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'ci-test')
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -680,12 +696,13 @@ jobs:
   # modules whose behaviour actually differs per platform. Linux stays covered by
   # `test-backend`; this adds the two hosts nothing else runs on.
   test-backend-portability:
-    if: contains(github.event.pull_request.labels.*.name, 'ci-test')
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'ci-test')
     strategy:
       fail-fast: false
       matrix:
         os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: backend
@@ -710,3 +727,46 @@ jobs:
 
       - name: Cleanup authorisation from durable state
         run: cargo test --lib db::orchestration
+
+  ci-quality-gates:
+    # Keep every quality job independently parallel, then make their complete
+    # result explicit. Configure this one check as required in branch
+    # protection: it cannot become green while any listed gate is non-success.
+    if: always() && (github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'ci-test'))
+    needs:
+      - test-backend
+      - duplication-check
+      - test-python
+      - test-docs-sidecar-windows
+      - test-frontend
+      - test-e2e
+      - test-shell
+      - security-scan
+      - test-backend-portability
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Fail when any quality gate did not succeed
+        env:
+          RESULTS: ${{ toJson(needs.*.result) }}
+        run: |
+          echo "Quality gate results: $RESULTS"
+          echo "$RESULTS" | jq -e 'all(.[]; . == "success")'
+
+  backend-ci-performance:
+    # This observer publishes timing evidence but never changes a functional
+    # gate result: an SLO breach is a warning, while a real timeout still fails.
+    if: always() && (github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'ci-test'))
+    needs: [test-backend]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Publish backend critical-path timing
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CI_CACHE_MODE: ${{ inputs.cache_mode || 'hot' }}
+        run: node scripts/ci/backend_ci_slo.mjs

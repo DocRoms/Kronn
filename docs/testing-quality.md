@@ -42,6 +42,34 @@ CI also checks dependency audit, generated-type drift, desktop compilation and
 repository-specific Rust safety lints. `.github/workflows/ci-test.yml` is the
 authoritative job graph.
 
+## Backend CI timing SLO
+
+`test-backend` is the measured backend critical-path job. Its functional gates
+remain blocking: formatting, clippy, Rust tests, coverage floors, generated
+type drift, safety/budget checks, the frontend build needed by the desktop
+compile check, and the desktop compile check itself. The `ci-quality-gates`
+job fails unless every independent quality job succeeds; configure that job as
+the required branch-protection check. [src: file: .github/workflows/ci-test.yml:48-299] [src: file: .github/workflows/ci-test.yml:731-757]
+
+The backend performance observer publishes the duration for every eligible run
+and reports a warning rather than failing a green functional run when the hot
+cache SLO exceeds 15 minutes. It calculates median, p95, and consecutive
+breaches from the latest completed samples. [src: file: .github/workflows/ci-test.yml:759-776] [src: file: scripts/ci/backend_ci_slo.mjs:5-63]
+
+Run `CI Tests` manually with `cache_mode=hot` for a warmed-cache measurement
+or `cache_mode=cold` for a run-scoped Cargo-cache measurement. Record the
+published job and step timing table from each run here before comparing a
+change; do not infer cold or hot timings from a different runner class.
+
+| Measurement | Sample window | Job/step durations | Median | P95 | Consecutive SLO breaches |
+| --- | --- | --- | --- | --- | --- |
+| Before | Pending first representative run | Published in Actions summary | Pending | Pending | Pending |
+| After | Pending first representative run | Published in Actions summary | Pending | Pending | Pending |
+
+Every job in the CI workflow has a 30-minute technical timeout. A timeout is a
+functional failure; the SLO observer does not retry, sleep, or mask it.
+[src: file: .github/workflows/ci-test.yml:29-772]
+
 ## Test placement
 
 | Change | Primary coverage |
