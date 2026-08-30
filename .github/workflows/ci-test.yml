@@ -53,6 +53,8 @@ jobs:
     if: github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'ci-test')
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    outputs:
+      compiled_cache_hit: ${{ steps.cache-backend-hot.outputs.cache-hit }}
     defaults:
       run:
         working-directory: backend
@@ -85,15 +87,37 @@ jobs:
       # sccache setup action downloads a release asset before any test runs;
       # transient GitHub Releases failures used to abort this whole job and
       # its post-step then failed again while looking for an undefined binary.
-      - name: Cache cargo registry and backend build (hot)
+      # Store only reusable debug artifacts in an explicit staging tree. In
+      # particular, never archive llvm-cov-target, debug/incremental, tmp, or
+      # any other transient target subtree: those can be multi-GB and do not
+      # make a warm critical-path measurement representative.
+      - name: Cache cargo registry and bounded backend build (hot)
         if: github.event_name != 'workflow_dispatch' || inputs.cache_mode == 'hot'
+        id: cache-backend-hot
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            backend/target
+            .ci-cache/backend-compiled
           key: cargo-hot-${{ runner.os }}-${{ hashFiles('backend/Cargo.lock') }}
+
+      - name: Restore bounded compiled backend artifacts
+        if: (github.event_name != 'workflow_dispatch' || inputs.cache_mode == 'hot') && steps.cache-backend-hot.outputs.cache-hit == 'true'
+        run: |
+          mkdir -p target/debug
+          cp -a ../.ci-cache/backend-compiled/. target/debug/
+
+      # These visible, mutually exclusive steps are durable evidence in the
+      # Actions jobs API. The observer uses them to exclude first-run warmups
+      # from historical hot-cache statistics.
+      - name: Record compiled cache hit
+        if: (github.event_name != 'workflow_dispatch' || inputs.cache_mode == 'hot') && steps.cache-backend-hot.outputs.cache-hit == 'true'
+        run: echo 'Compiled backend cache restored for this hot measurement.'
+
+      - name: Record compiled cache warmup miss
+        if: (github.event_name != 'workflow_dispatch' || inputs.cache_mode == 'hot') && steps.cache-backend-hot.outputs.cache-hit != 'true'
+        run: echo 'Compiled backend cache was not restored; this run is a warmup and is excluded from hot history.'
 
       # A cold measurement may populate an isolated Cargo-download cache, but
       # it must never restore compiled artifacts or a broad fallback key.
@@ -105,6 +129,10 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
           key: cargo-cold-${{ runner.os }}-${{ hashFiles('backend/Cargo.lock') }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Record cold measurement mode
+        if: github.event_name == 'workflow_dispatch' && inputs.cache_mode == 'cold'
+        run: "echo 'Cold measurement: compiled backend artifacts are never restored or archived.'"
 
       - name: cargo fmt
         run: cargo fmt --all -- --check
@@ -306,6 +334,19 @@ jobs:
       - name: cargo check desktop (type-check only)
         working-directory: desktop/src-tauri
         run: cargo check --lib 2>/dev/null || cargo check 2>&1 | head -40
+
+      # The cache post-step saves this staging directory, not target/. Keep the
+      # selection deliberately bounded to ordinary Cargo debug artifacts.
+      - name: Stage bounded compiled backend artifacts
+        if: github.event_name != 'workflow_dispatch' || inputs.cache_mode == 'hot'
+        run: |
+          mkdir -p ../.ci-cache/backend-compiled
+          for directory in .fingerprint build deps; do
+            if [ -d "target/debug/$directory" ]; then
+              mkdir -p "../.ci-cache/backend-compiled/$directory"
+              cp -a "target/debug/$directory/." "../.ci-cache/backend-compiled/$directory/"
+            fi
+          done
 
   # ── Code-duplication ceiling (jscpd, all 3 languages) ──────────────────
   # Copy-paste detector across Rust + TS/TSX + Python. Baseline 2026-05-29 =
@@ -795,4 +836,5 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           CI_CACHE_MODE: ${{ inputs.cache_mode || 'hot' }}
+          CI_COMPILED_CACHE_HIT: ${{ needs.test-backend.outputs.compiled_cache_hit }}
         run: node scripts/ci/backend_ci_slo.mjs

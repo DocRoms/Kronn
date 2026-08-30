@@ -114,7 +114,18 @@ class E2eContainerWorkflowTests(unittest.TestCase):
             workflow,
             re.MULTILINE | re.DOTALL,
         ).group("section")
-        self.assertIn("backend/target", backend)
+        self.assertIn(".ci-cache/backend-compiled", backend)
+        self.assertIn("Record compiled cache hit", backend)
+        self.assertIn("Record compiled cache warmup miss", backend)
+        self.assertIn("Stage bounded compiled backend artifacts", backend)
+        self.assertIn("CI_COMPILED_CACHE_HIT: ${{ needs.test-backend.outputs.compiled_cache_hit }}", workflow)
+        hot_cache = re.search(
+            r"Cache cargo registry and bounded backend build \(hot\)(?P<section>.*?)(?=^      - |\Z)",
+            backend,
+            re.DOTALL,
+        ).group("section")
+        self.assertNotIn("backend/target", hot_cache)
+        self.assertNotIn("llvm-cov-target", hot_cache)
         cold_cache = re.search(
             r"Cache cargo registry \(cold, isolated\)(?P<section>.*?)(?=^      - |\Z)",
             backend,

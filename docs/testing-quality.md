@@ -53,13 +53,16 @@ the required branch-protection check. [src: file: .github/workflows/ci-test.yml:
 
 The backend performance observer publishes the duration for every eligible run
 and reports a warning rather than failing a green functional run when the hot
-cache SLO exceeds 15 minutes. Hot measurements restore a bounded
-`backend/target` artifact cache alongside Cargo downloads. Cold measurements use
-a unique cache key per run attempt, restore no compiled artifacts, and are
-reported only for their current run. Historical hot statistics use only
-successful pull-request runs from the same head branch. [src: file: .github/workflows/ci-test.yml:84-108] [src: file: scripts/ci/backend_ci_slo.mjs:43-99]
+cache SLO exceeds 15 minutes. Hot measurements restore only a bounded staging
+cache of ordinary Cargo debug artifacts alongside Cargo downloads; coverage,
+incremental, temporary, and other target trees are not archived. A hot request
+that misses that cache is published as `warmup/miss` and excluded from
+historical hot statistics. Cold measurements use a unique cache key per run
+attempt, restore no compiled artifacts, and are reported only for their current
+run. Historical hot statistics use only successful same-branch pull-request
+runs whose job records a restored compiled cache. [src: file: .github/workflows/ci-test.yml:84-157] [src: file: scripts/ci/backend_ci_slo.mjs:47-120]
 The observer's Node unit test runs in the blocking `test-python` gate.
-[src: file: .github/workflows/ci-test.yml:342-363]
+[src: file: .github/workflows/ci-test.yml:383-401]
 
 Run `CI Tests` manually with `cache_mode=hot` for a warmed compiled-artifact
 measurement or `cache_mode=cold` for a current-run-only cold measurement.
