@@ -159,25 +159,51 @@ pub async fn run(
         Ok(None) => return Json(ApiResponse::err("Quick Exec not found")),
         Err(error) => return Json(ApiResponse::err(format!("DB error: {error}"))),
     };
-    let secret = match state.config.read().await.encryption_secret.clone() {
-        Some(secret) => secret,
-        None => return Json(ApiResponse::err("Variable preflight unavailable: encryption key missing")),
+    let (secret, retention_days) = {
+        let config = state.config.read().await;
+        let Some(secret) = config.encryption_secret.clone() else {
+            return Json(ApiResponse::err(
+                "Variable preflight unavailable: encryption key missing",
+            ));
+        };
+        (secret, config.server.execution_variable_retention_days)
     };
     let declarations = item.variables.clone();
     let supplied = request.variables.clone();
     let selected_project = item.project_id.clone();
     let execution_id = Uuid::new_v4().to_string();
-    let prepared = state.db.with_conn(move |conn| crate::core::execution_variables::prepare(conn,
-        crate::core::execution_variables::PrepareRequest {
-            declarations: &declarations, supplied: &supplied, context: &std::collections::HashMap::new(),
-            project_id: selected_project.as_deref(), environment_ref: "project_mcp_configs",
-            run_kind: "quick_exec", run_id: &execution_id, encryption_secret: &secret,
-            retention_days: crate::core::execution_variables::DEFAULT_RETENTION_DAYS,
-        })).await;
+    let prepared = state
+        .db
+        .with_conn(move |conn| {
+            crate::core::execution_variables::prepare(
+                conn,
+                crate::core::execution_variables::PrepareRequest {
+                    declarations: &declarations,
+                    supplied: &supplied,
+                    context: &std::collections::HashMap::new(),
+                    project_id: selected_project.as_deref(),
+                    environment_ref: "project_mcp_configs",
+                    run_kind: "quick_exec",
+                    run_id: &execution_id,
+                    encryption_secret: &secret,
+                    retention_days,
+                },
+            )
+        })
+        .await;
     let resolved = match prepared {
         Ok(Ok(prepared)) => prepared.resolved,
-        Ok(Err(failures)) => return Json(ApiResponse::err(format!("preflight_failed:{}", serde_json::to_string(&failures).unwrap_or_default()))),
-        Err(error) => return Json(ApiResponse::err(format!("Variable preflight failed: {error}"))),
+        Ok(Err(failures)) => {
+            return Json(ApiResponse::err(format!(
+                "preflight_failed:{}",
+                serde_json::to_string(&failures).unwrap_or_default()
+            )))
+        }
+        Err(error) => {
+            return Json(ApiResponse::err(format!(
+                "Variable preflight failed: {error}"
+            )))
+        }
     };
     let project_id = item.project_id.clone();
     let work_dir = if let Some(project_id) = project_id {

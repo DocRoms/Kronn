@@ -480,8 +480,20 @@ pub fn create_batch_run(
     conn: &Connection,
     input: CreateBatchRunInput,
 ) -> Result<CreateBatchRunOutput> {
+    create_batch_run_with_identities(conn, input, None, &[])
+}
+
+/// Variant used by secret-bearing launches: identities are allocated before
+/// the transaction so encrypted snapshots can be durably bound before agent
+/// dispatch rows become visible.
+pub fn create_batch_run_with_identities(
+    conn: &Connection,
+    input: CreateBatchRunInput,
+    assigned_run_id: Option<String>,
+    assigned_discussion_ids: &[String],
+) -> Result<CreateBatchRunOutput> {
     let batch_total = input.items.len() as u32;
-    let run_id = Uuid::new_v4().to_string();
+    let run_id = assigned_run_id.unwrap_or_else(|| Uuid::new_v4().to_string());
     let now = Utc::now();
     let qp = input.quick_prompt;
     // A comparison score is only meaningful for the exact prompt revision it
@@ -543,7 +555,10 @@ pub fn create_batch_run(
         .iter()
         .enumerate()
         .map(|(index, item)| {
-            let disc_id = Uuid::new_v4().to_string();
+            let disc_id = assigned_discussion_ids
+                .get(index)
+                .cloned()
+                .unwrap_or_else(|| Uuid::new_v4().to_string());
             let initial_message = DiscussionMessage {
                 recovered_partial: false,
                 session_tokens_at_message: None,

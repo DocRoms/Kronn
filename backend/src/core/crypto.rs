@@ -171,8 +171,14 @@ mod tests {
     #[test]
     fn keyed_digest_is_key_and_domain_bound() {
         let first = keyed_digest(&make_key(1), b"snapshot", b"low-entropy");
-        assert_eq!(first, keyed_digest(&make_key(1), b"snapshot", b"low-entropy"));
-        assert_ne!(first, keyed_digest(&make_key(2), b"snapshot", b"low-entropy"));
+        assert_eq!(
+            first,
+            keyed_digest(&make_key(1), b"snapshot", b"low-entropy")
+        );
+        assert_ne!(
+            first,
+            keyed_digest(&make_key(2), b"snapshot", b"low-entropy")
+        );
         assert_ne!(first, keyed_digest(&make_key(1), b"other", b"low-entropy"));
         assert_ne!(first, keyed_digest(&make_key(1), b"snapshot", b"different"));
     }

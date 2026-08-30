@@ -64,49 +64,107 @@ pub fn resolve(
 
     for variable in declarations {
         let source = variable.source.clone().unwrap_or_default();
-        let supplied_value = supplied.get(&variable.name).filter(|v| !v.trim().is_empty());
+        let supplied_value = supplied
+            .get(&variable.name)
+            .filter(|v| !v.trim().is_empty());
         let resolved = match source {
             PromptVariableSource::UserInput => supplied_value
                 .cloned()
                 .map(|v| (v, "user_input".to_string(), false)),
-            PromptVariableSource::KronnContext => variable.source_ref.as_deref()
+            PromptVariableSource::KronnContext => variable
+                .source_ref
+                .as_deref()
                 .and_then(reference_name)
                 .and_then(|key| context.get(key))
                 .cloned()
                 .map(|v| (v, variable.source_ref.clone().unwrap_or_default(), false)),
-            PromptVariableSource::ProjectEnv if variable.allow_manual_override && supplied_value.is_some() => {
-                supplied_value.cloned().map(|v| (v, "manual_override".to_string(), true))
+            PromptVariableSource::ProjectEnv
+                if variable.allow_manual_override && supplied_value.is_some() =>
+            {
+                supplied_value
+                    .cloned()
+                    .map(|v| (v, "manual_override".to_string(), true))
             }
-            PromptVariableSource::ProjectEnv => variable.source_ref.as_deref()
+            PromptVariableSource::ProjectEnv => variable
+                .source_ref
+                .as_deref()
                 .and_then(reference_name)
                 .and_then(|key| environment.get(key))
                 .and_then(|matches| (matches.len() == 1).then(|| matches[0].clone()))
                 .map(|(source_ref, value)| (value, source_ref, false)),
         };
         match resolved {
-            Some((value, effective_source_ref, overridden)) if !variable.required || !value.trim().is_empty() => {
+            Some((value, effective_source_ref, overridden))
+                if !variable.required || !value.trim().is_empty() =>
+            {
                 values.insert(variable.name.clone(), value);
-                provenance.push(VariableProvenance { name: variable.name.clone(), source, source_ref: variable.source_ref.clone(), effective_source_ref, overridden });
+                provenance.push(VariableProvenance {
+                    name: variable.name.clone(),
+                    source,
+                    source_ref: variable.source_ref.clone(),
+                    effective_source_ref,
+                    overridden,
+                });
             }
             _ if !variable.required => {}
             _ => {
                 let cause = match source {
-                    PromptVariableSource::ProjectEnv => variable.source_ref.as_deref().and_then(reference_name)
-                        .and_then(|key| environment.get(key)).map_or("missing_source", |m| if m.len() > 1 { "ambiguous_source" } else { "empty_value" }),
+                    PromptVariableSource::ProjectEnv => variable
+                        .source_ref
+                        .as_deref()
+                        .and_then(reference_name)
+                        .and_then(|key| environment.get(key))
+                        .map_or("missing_source", |m| {
+                            if m.len() > 1 {
+                                "ambiguous_source"
+                            } else {
+                                "empty_value"
+                            }
+                        }),
                     PromptVariableSource::KronnContext => "missing_context",
                     PromptVariableSource::UserInput => "missing_user_input",
                 };
-                failures.push(VariablePreflightFailure { name: variable.name.clone(), source_ref: variable.source_ref.clone(), project_id: project_id.map(str::to_owned), environment_ref: environment_ref.to_string(), cause: cause.to_string() });
+                failures.push(VariablePreflightFailure {
+                    name: variable.name.clone(),
+                    source_ref: variable.source_ref.clone(),
+                    project_id: project_id.map(str::to_owned),
+                    environment_ref: environment_ref.to_string(),
+                    cause: cause.to_string(),
+                });
             }
         }
     }
     // Unknown request keys are never propagated to execution.
     values.retain(|key, _| declared.contains(key.as_str()));
-    if failures.is_empty() { Ok(ResolvedVariables { values, provenance, resolved_at: Utc::now() }) } else { Err(failures) }
+    if failures.is_empty() {
+        Ok(ResolvedVariables {
+            values,
+            provenance,
+            resolved_at: Utc::now(),
+        })
+    } else {
+        Err(failures)
+    }
 }
 
 pub fn expiry(resolved_at: DateTime<Utc>, retention_days: u32) -> Option<DateTime<Utc>> {
     (retention_days > 0).then(|| resolved_at + Duration::days(i64::from(retention_days)))
+}
+
+/// Build the allowlisted scalar context available to `<context.NAME>`
+/// declarations. Nested objects and arrays are deliberately excluded.
+pub fn scalar_context(value: &serde_json::Value) -> HashMap<String, String> {
+    value
+        .as_object()
+        .into_iter()
+        .flat_map(|object| object.iter())
+        .filter_map(|(name, value)| match value {
+            serde_json::Value::String(value) => Some((name.clone(), value.clone())),
+            serde_json::Value::Number(value) => Some((name.clone(), value.to_string())),
+            serde_json::Value::Bool(value) => Some((name.clone(), value.to_string())),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Load only encrypted configuration variables authorized for the selected
@@ -116,18 +174,51 @@ pub fn prepare(
     conn: &rusqlite::Connection,
     request: PrepareRequest<'_>,
 ) -> anyhow::Result<Result<PreparedExecutionVariables, Vec<VariablePreflightFailure>>> {
+    let key =
+        crate::core::crypto::parse_secret(request.encryption_secret).map_err(anyhow::Error::msg)?;
+    if let Some(snapshot_id) = crate::db::execution_variable_snapshots::snapshot_id_for_run(
+        conn,
+        request.run_kind,
+        request.run_id,
+    )? {
+        let metadata = crate::db::execution_variable_snapshots::metadata(
+            conn,
+            request.run_kind,
+            request.run_id,
+        )?
+        .ok_or_else(|| anyhow::anyhow!("execution variable snapshot metadata missing"))?;
+        let values = crate::db::execution_variable_snapshots::load_values(
+            conn,
+            request.run_kind,
+            request.run_id,
+            &key,
+            Utc::now(),
+        )?
+        .ok_or_else(|| anyhow::anyhow!("execution variable snapshot unavailable or expired"))?;
+        return Ok(Ok(PreparedExecutionVariables {
+            resolved: ResolvedVariables {
+                values,
+                provenance: metadata.provenance,
+                resolved_at: metadata.resolved_at,
+            },
+            snapshot_id,
+        }));
+    }
     let mut environment: HashMap<String, Vec<(String, String)>> = HashMap::new();
     if let Some(project_id) = request.project_id {
         for config in crate::db::mcps::configs_for_project(conn, project_id)? {
-            let values = match crate::db::mcps::decrypt_env(&config.env_encrypted, request.encryption_secret) {
+            let values = match crate::db::mcps::decrypt_env(
+                &config.env_encrypted,
+                request.encryption_secret,
+            ) {
                 Ok(values) => values,
                 Err(_) => continue,
             };
             for (name, value) in values {
-                environment.entry(name.clone()).or_default().push((
-                    format!("mcp_config:{}:<env.{name}>", config.id),
-                    value,
-                ));
+                environment
+                    .entry(name.clone())
+                    .or_default()
+                    .push((format!("mcp_config:{}:<env.{name}>", config.id), value));
             }
         }
     }
@@ -142,8 +233,6 @@ pub fn prepare(
         Ok(resolved) => resolved,
         Err(failures) => return Ok(Err(failures)),
     };
-    let key = crate::core::crypto::parse_secret(request.encryption_secret)
-        .map_err(anyhow::Error::msg)?;
     let snapshot_id = crate::db::execution_variable_snapshots::insert(
         conn,
         crate::db::execution_variable_snapshots::NewSnapshot {
@@ -158,36 +247,158 @@ pub fn prepare(
         },
         &key,
     )?;
-    Ok(Ok(PreparedExecutionVariables { resolved, snapshot_id }))
+    Ok(Ok(PreparedExecutionVariables {
+        resolved,
+        snapshot_id,
+    }))
 }
 
 fn reference_name(reference: &str) -> Option<&str> {
-    reference.strip_prefix('<')?.strip_suffix('>')?.split_once('.').map(|(_, name)| name)
+    reference
+        .strip_prefix('<')?
+        .strip_suffix('>')?
+        .split_once('.')
+        .map(|(_, name)| name)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn env_var() -> PromptVariable { PromptVariable { name: "token".into(), label: "Token".into(), placeholder: "".into(), description: None, required: true, pattern: None, source: Some(PromptVariableSource::ProjectEnv), source_ref: Some("<env.TOKEN>".into()), allow_manual_override: false } }
+    fn env_var() -> PromptVariable {
+        PromptVariable {
+            name: "token".into(),
+            label: "Token".into(),
+            placeholder: "".into(),
+            description: None,
+            required: true,
+            pattern: None,
+            source: Some(PromptVariableSource::ProjectEnv),
+            source_ref: Some("<env.TOKEN>".into()),
+            allow_manual_override: false,
+        }
+    }
 
     #[test]
     fn resolves_current_value_and_rejects_ambiguous_sources() {
-        let supplied = HashMap::new(); let context = HashMap::new();
+        let supplied = HashMap::new();
+        let context = HashMap::new();
         let first = HashMap::from([("TOKEN".into(), vec![("mcp:a".into(), "one".into())])]);
-        assert_eq!(resolve(&[env_var()], &supplied, &context, &first, Some("p"), "project").unwrap().values["token"], "one");
+        assert_eq!(
+            resolve(
+                &[env_var()],
+                &supplied,
+                &context,
+                &first,
+                Some("p"),
+                "project"
+            )
+            .unwrap()
+            .values["token"],
+            "one"
+        );
         let second = HashMap::from([("TOKEN".into(), vec![("mcp:a".into(), "two".into())])]);
-        assert_eq!(resolve(&[env_var()], &supplied, &context, &second, Some("p"), "project").unwrap().values["token"], "two");
-        let ambiguous = HashMap::from([("TOKEN".into(), vec![("mcp:a".into(), "one".into()), ("mcp:b".into(), "two".into())])]);
-        assert_eq!(resolve(&[env_var()], &supplied, &context, &ambiguous, Some("p"), "project").unwrap_err()[0].cause, "ambiguous_source");
+        assert_eq!(
+            resolve(
+                &[env_var()],
+                &supplied,
+                &context,
+                &second,
+                Some("p"),
+                "project"
+            )
+            .unwrap()
+            .values["token"],
+            "two"
+        );
+        let ambiguous = HashMap::from([(
+            "TOKEN".into(),
+            vec![
+                ("mcp:a".into(), "one".into()),
+                ("mcp:b".into(), "two".into()),
+            ],
+        )]);
+        assert_eq!(
+            resolve(
+                &[env_var()],
+                &supplied,
+                &context,
+                &ambiguous,
+                Some("p"),
+                "project"
+            )
+            .unwrap_err()[0]
+                .cause,
+            "ambiguous_source"
+        );
     }
 
     #[test]
     fn override_is_explicit_and_zero_retention_has_no_expiry() {
-        let mut declaration = env_var(); declaration.allow_manual_override = true;
-        let resolved = resolve(&[declaration], &HashMap::from([("token".into(), "override".into())]), &HashMap::new(), &HashMap::new(), Some("p"), "project").unwrap();
+        let mut declaration = env_var();
+        declaration.allow_manual_override = true;
+        let resolved = resolve(
+            &[declaration],
+            &HashMap::from([("token".into(), "override".into())]),
+            &HashMap::new(),
+            &HashMap::new(),
+            Some("p"),
+            "project",
+        )
+        .unwrap();
         assert!(resolved.provenance[0].overridden);
         assert!(expiry(resolved.resolved_at, 0).is_none());
-        assert_eq!(expiry(resolved.resolved_at, 30).unwrap(), resolved.resolved_at + Duration::days(30));
+        assert_eq!(
+            expiry(resolved.resolved_at, 30).unwrap(),
+            resolved.resolved_at + Duration::days(30)
+        );
+    }
+
+    #[test]
+    fn prepare_reuses_the_immutable_snapshot_for_the_same_run() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        let secret = crate::core::crypto::generate_secret();
+        let mut declaration = env_var();
+        declaration.source = Some(PromptVariableSource::UserInput);
+        declaration.source_ref = None;
+        let declarations = vec![declaration];
+        let first = HashMap::from([("token".into(), "first".into())]);
+        let second = HashMap::from([("token".into(), "second".into())]);
+        let context = HashMap::new();
+        let initial = prepare(
+            &conn,
+            PrepareRequest {
+                declarations: &declarations,
+                supplied: &first,
+                context: &context,
+                project_id: None,
+                environment_ref: "project_mcp_configs",
+                run_kind: "workflow",
+                run_id: "stable-run",
+                encryption_secret: &secret,
+                retention_days: 30,
+            },
+        )
+        .unwrap()
+        .unwrap();
+        let resumed = prepare(
+            &conn,
+            PrepareRequest {
+                declarations: &declarations,
+                supplied: &second,
+                context: &context,
+                project_id: None,
+                environment_ref: "project_mcp_configs",
+                run_kind: "workflow",
+                run_id: "stable-run",
+                encryption_secret: &secret,
+                retention_days: 30,
+            },
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(initial.snapshot_id, resumed.snapshot_id);
+        assert_eq!(resumed.resolved.values["token"], "first");
     }
 }

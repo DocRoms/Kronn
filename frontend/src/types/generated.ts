@@ -1148,6 +1148,11 @@ tier?: ModelTier,
  */
 originating_qp_id?: string | null,
 /**
+ * Raw launch inputs for an originating Quick Prompt. The server resolves
+ * project/context sources and renders the canonical stored template.
+ */
+launch_variables?: { [key in string]: string },
+/**
  * F9 — create a "human-only" disc: the agent runner never spawns on
  * `send_message`. Used by the contact-click → 1:1 human↔human chat flow.
  */
@@ -4654,6 +4659,11 @@ failure_notify_url: string | null,
  * still referenced by a retained child are always preserved.
  */
 run_retention_days: number,
+/**
+ * Encrypted execution-variable snapshot retention. `0` keeps metadata
+ * but disables value retention. Product default: 30 days.
+ */
+execution_variable_retention_days: number,
 /**
  * KT-373 — refuse to provision a worktree below this much free disk, in
  * GiB. On 2026-08-21 the dev volume hit 100% with seven worktrees each

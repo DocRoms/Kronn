@@ -1367,7 +1367,6 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     launchingRef.current = true;
     setLaunching(true);
     try {
-      const rendered = renderTemplate(qp.prompt_template, launchVars);
       // Build dynamic title with first non-empty variable value
       const firstVal = qp.variables.map(v => launchVars[v.name]).find(v => v?.trim());
       const title = firstVal ? `${qp.name} — ${firstVal}` : qp.name;
@@ -1376,7 +1375,10 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
         title,
         agent: qp.agent,
         language: configLanguage || 'fr',
-        initial_prompt: rendered,
+        // The backend performs canonical rendering after JIT resolution so
+        // project-provided values never cross this launch payload.
+        initial_prompt: qp.prompt_template,
+        launch_variables: launchVars,
         initial_targets: qp.connection_id ? [{
           kind: 'agent',
           agent_type: qp.agent,
@@ -1529,14 +1531,14 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     launchingRef.current = true;
     setLaunching(true);
     try {
-      const rendered = renderTemplate(qp.prompt_template, launchVars);
       const firstVal = qp.variables.map(v => launchVars[v.name]).find(v => v?.trim());
       const stamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
       const batchName = firstVal
         ? `🤝 ${qp.name} — ${firstVal} — ${stamp}`
         : `🤝 ${qp.name} — ${stamp}`;
       const result = await quickPromptsApi.compareAgents(qp.id, {
-        prompt: rendered,
+        prompt: qp.prompt_template,
+        variables: launchVars,
         batch_name: batchName,
         targets,
         project_id: qp.project_id ?? undefined,
@@ -1627,8 +1629,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     try {
       const items = lines.map(line => {
         const vars: Record<string, string> = { [keyVar.name]: line };
-        const prompt = renderTemplate(qp.prompt_template, vars);
-        return { title: `${qp.name} — ${line}`, prompt };
+        return { title: `${qp.name} — ${line}`, prompt: qp.prompt_template, variables: vars };
       });
       const now = new Date();
       const batchName = `${qp.name} — ${now.toLocaleString(configLanguage || 'fr', {
