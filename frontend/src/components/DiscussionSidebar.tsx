@@ -3,6 +3,9 @@ import '../pages/DiscussionsPage.css';
 import { SwipeableDiscItem } from './SwipeableDiscItem';
 import { unseenBasis } from '../lib/discussionUiUtils';
 import { GlobalSearchPanel } from './GlobalSearchPanel';
+import { CollectionFavoritesHeader } from './CollectionFavoritesHeader';
+import { CopyIdPill } from './CopyIdPill';
+import { CollectionShell, CollectionSidebarCollapseButton } from './CollectionShell';
 import type { Discussion, Project, Contact, BatchRunSummary, ExecutionDiscussionLink, MessageSearchHit } from '../types/generated';
 import { projects as projectsApi } from '../lib/api';
 import { getProjectGroup, isHiddenPath } from '../lib/constants';
@@ -10,13 +13,15 @@ import { gravatarUrl } from '../lib/gravatar';
 import { formatRelativeTime } from '../lib/relativeTime';
 import type { ToastFn } from '../hooks/useToast';
 import {
-  Folder, ChevronLeft, ChevronRight, Plus, X, MessageSquare, Archive, Search,
-  SlidersHorizontal, Users2, Trash2, Star, CheckCheck, Columns3, ListChecks, LogIn,
+  Folder, ChevronRight, Plus, X, MessageSquare, Archive, Search,
+  Filter, Users2, Trash2, CheckCheck, Columns3, ListChecks, LogIn,
   Loader2, Upload, CircleDot, Clock3, MoreHorizontal, ChevronDown,
 } from 'lucide-react';
 
 export interface DiscussionSidebarProps {
   discussions: Discussion[];
+  /** Human-facing agent/provider label by discussion id. */
+  agentLabels?: Record<string, string>;
   projects: Project[];
   activeId: string | null;
   sendingMap: Record<string, boolean>;
@@ -74,8 +79,8 @@ export interface DiscussionSidebarProps {
    *  refetches discussions + batchSummaries so the group disappears live. */
   onDeleteBatch?: (runId: string, discCount: number) => void;
   /** Called when the user clicks "↻" (retry) on a batch group header.
-   *  Parent rebuilds the items from the existing children's title +
-   *  initial user prompt, then re-fires the QP batch endpoint. The old
+   *  The backend replays the durable agent+tier+connection matrix while
+   *  resolving the currently configured model for each tier. The old
    *  batch stays in place; a new batch is spawned alongside it.
    *  Only enabled when `quick_prompt_id` is known on the BatchRunSummary
    *  (top-level manual batches; nested workflow batches need a different
@@ -134,6 +139,7 @@ function formatBatchParent(summary: BatchRunSummary | undefined, t: (k: string, 
 
 export function DiscussionSidebar({
   discussions,
+  agentLabels = {},
   projects,
   activeId,
   sendingMap,
@@ -223,7 +229,6 @@ export function DiscussionSidebar({
   const [openBatchMenuRunId, setOpenBatchMenuRunId] = useState<string | null>(null);
   const batchMenuRef = useRef<HTMLDivElement>(null);
   const batchMenuTriggerRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
-  const searchInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (!headerMenuOpen) return;
@@ -264,29 +269,6 @@ export function DiscussionSidebar({
     };
   }, [openBatchMenuRunId]);
 
-  const handleSidebarKeyboard = (event: React.KeyboardEvent<HTMLDivElement>) => {
-    const target = event.target as HTMLElement;
-    const isTextControl = target.matches('input, textarea, select, [contenteditable="true"]');
-    if (event.key === '/' && !isTextControl && !globalSearchOpen) {
-      event.preventDefault();
-      searchInputRef.current?.focus();
-      return;
-    }
-    if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
-    if (isTextControl) return;
-    const rows = Array.from(
-      event.currentTarget.querySelectorAll<HTMLButtonElement>('.disc-item-open:not([disabled])'),
-    ).filter(row => row.offsetParent !== null);
-    if (rows.length === 0) return;
-    const current = rows.indexOf(document.activeElement as HTMLButtonElement);
-    const direction = event.key === 'ArrowDown' ? 1 : -1;
-    const next = current < 0
-      ? (direction > 0 ? 0 : rows.length - 1)
-      : (current + direction + rows.length) % rows.length;
-    event.preventDefault();
-    rows[next]?.focus();
-  };
-
   const toggleSelection = useCallback((discId: string) => {
     setSelectedIds(previous => {
       const next = new Set(previous);
@@ -294,12 +276,12 @@ export function DiscussionSidebar({
       else next.add(discId);
       return next;
     });
-  }, []);
+  }, [setSelectedIds]);
 
   const leaveSelectionMode = useCallback(() => {
     setSelectionMode(false);
     setSelectedIds(new Set());
-  }, []);
+  }, [setSelectedIds, setSelectionMode]);
 
   const runBulkAction = async (kind: 'archive' | 'delete') => {
     const action = kind === 'archive' ? onBulkArchive : onBulkDelete;
@@ -647,6 +629,7 @@ export function DiscussionSidebar({
     <SwipeableDiscItem
       key={`${keyPrefix}-${disc.id}`}
       disc={disc}
+      agentLabel={agentLabels[disc.id]}
       isActive={disc.id === activeId}
       lastSeenCount={lastSeenMsgCount[disc.id] ?? 0}
       isSending={isRunningDisc(disc)}
@@ -660,6 +643,7 @@ export function DiscussionSidebar({
       onStop={onStopDiscussion}
       onTogglePin={onTogglePin}
       t={t}
+      collectionRowClassName="collection-shell-row-button"
       contextLabel={disc.project_id ? projectNameById.get(disc.project_id) : t('disc.noProject')}
       sourceAgents={sourceBindings.get(disc.id)}
       importedBy={importProvenance.get(disc.id) ?? null}
@@ -687,6 +671,7 @@ export function DiscussionSidebar({
       <Fragment key={disc.id}>
         <SwipeableDiscItem
           disc={disc}
+          agentLabel={agentLabels[disc.id]}
           isActive={disc.id === activeId}
           lastSeenCount={lastSeenMsgCount[disc.id] ?? 0}
           isSending={isRunningDisc(disc)}
@@ -700,6 +685,7 @@ export function DiscussionSidebar({
           onStop={onStopDiscussion}
           onTogglePin={onTogglePin}
           t={t}
+          collectionRowClassName="collection-shell-row-button"
           sourceAgents={sourceBindings.get(disc.id)}
           importedBy={importProvenance.get(disc.id) ?? null}
         />
@@ -728,6 +714,7 @@ export function DiscussionSidebar({
                   </div>
                   <SwipeableDiscItem
                     disc={child}
+                    agentLabel={agentLabels[child.id]}
                     isActive={child.id === activeId}
                     lastSeenCount={lastSeenMsgCount[child.id] ?? 0}
                     isSending={isRunningDisc(child)}
@@ -741,6 +728,7 @@ export function DiscussionSidebar({
                     onStop={onStopDiscussion}
                     onTogglePin={onTogglePin}
                     t={t}
+                    collectionRowClassName="collection-shell-row-button"
                     sourceAgents={sourceBindings.get(child.id)}
                     importedBy={importProvenance.get(child.id) ?? null}
                   />
@@ -777,11 +765,41 @@ export function DiscussionSidebar({
   };
 
   return (
-    <div
-      className="disc-sidebar"
-      data-mobile={isMobile}
-      onKeyDown={handleSidebarKeyboard}
-    >
+    <CollectionShell<Discussion>
+      ariaLabel="Discussions"
+      items={discussions}
+      getId={disc => disc.id}
+      getLabel={disc => disc.title}
+      filterQuery={false}
+      persistence={{
+        query: discSearchFilter,
+        onQueryChange: setDiscSearchFilter,
+        favoritesOnly: false,
+        onFavoritesOnlyChange: () => {},
+      }}
+      selectedId={activeId}
+      onSelect={id => onSelect(id, 0)}
+      selectedIds={selectedIds}
+      onSelectedIdsChange={setSelectedIds}
+      sidebarOnly
+      sidebarClassName="disc-sidebar"
+      isMobile={isMobile}
+      globalSearchShortcut
+      shortcutsEnabled={!globalSearchOpen}
+      showControls={false}
+      onSearchSubmit={onOpenGlobalSearch}
+      labels={{
+        search: t('disc.globalSearch.placeholder'),
+        favorites: t('disc.favorites'),
+        clearFilters: t('disc.searchClear'),
+        moreActions: t('disc.sidebar.moreActions'),
+        openCollection: t('disc.openSidebar'),
+        closeCollection: t('disc.closeSidebar'),
+        selectItem: t('disc.select'),
+      }}
+      slots={{
+        renderDetail: () => null,
+        beforeSidebarHeader: <>
       <div className="disc-sidebar-header" data-selection-mode={selectionMode}>
         <span className="disc-sidebar-header-title">
           {selectionMode ? (
@@ -941,18 +959,25 @@ export function DiscussionSidebar({
                 )}
               </div>
               {isMobile && (
-                <button className="disc-icon-btn" onClick={onClose} aria-label="Close sidebar"><X size={16} /></button>
+                <CollectionSidebarCollapseButton
+                  isMobile
+                  label={t('disc.closeSidebar')}
+                  onCollapse={onClose}
+                />
               )}
               {!isMobile && onCollapse && (
-                <button className="disc-icon-btn" onClick={onCollapse} aria-label="Collapse sidebar" title="Collapse sidebar">
-                  <ChevronLeft size={16} />
-                </button>
+                <CollectionSidebarCollapseButton
+                  label={t('disc.closeSidebar')}
+                  onCollapse={onCollapse}
+                />
               )}
             </>
           )}
         </div>
       </div>
+        </>,
 
+        renderSearch: ({ value, inputId, onChange, onSubmit, clear }) => <>
       {globalSearchOpen && onCloseGlobalSearch && onOpenGlobalSearchResult && (
         <GlobalSearchPanel
           projects={projects}
@@ -978,25 +1003,25 @@ export function DiscussionSidebar({
           <div className="disc-search-box">
             <Search size={13} className="disc-search-icon" />
             <input
-              ref={searchInputRef}
+              id={inputId}
               type="text"
               className="disc-search-input"
-              value={discSearchFilter}
-              onChange={e => setDiscSearchFilter(e.target.value)}
+              value={value}
+              onChange={e => onChange(e.target.value)}
               placeholder={t('disc.globalSearch.placeholder')}
               aria-label={t('disc.globalSearch.placeholder')}
               aria-keyshortcuts="/"
               onKeyDown={event => {
-                if (event.key === 'Enter' && onOpenGlobalSearch) {
+                if (event.key === 'Enter' && onSubmit) {
                   event.preventDefault();
-                  onOpenGlobalSearch();
+                  onSubmit();
                 }
               }}
             />
             {discSearchFilter && (
               <button
                 type="button"
-                onClick={() => setDiscSearchFilter('')}
+                onClick={clear}
                 className="disc-search-clear"
                 aria-label={t('disc.searchClear')}
                 title={t('disc.searchClear')}
@@ -1014,10 +1039,9 @@ export function DiscussionSidebar({
               title={t('disc.globalSearch.open')}
               data-testid="disc-open-global-search"
               data-tour-id="global-search-open"
+              data-active={sourceFilter ? 'true' : undefined}
             >
-              <SlidersHorizontal size={12} />
-              <span>{t('disc.sidebar.filters')}</span>
-              {sourceFilter && <strong>1</strong>}
+              <Filter size={14} aria-hidden="true" />
             </button>
           )}
         </div>
@@ -1047,9 +1071,9 @@ export function DiscussionSidebar({
           </select>
         )}
       </div>
+        </>,
 
-      {/* Discussion list grouped by project */}
-      <div className="disc-sidebar-list" hidden={globalSearchOpen}>
+        renderList: () => <div className="disc-sidebar-list" hidden={globalSearchOpen}>
         {followUpDiscussions.length > 0 && (() => {
           const isCollapsed = collapsedGroups.has('__follow_up__');
           return (
@@ -1273,17 +1297,12 @@ export function DiscussionSidebar({
               className="disc-sidebar-section disc-sidebar-favorites"
               data-expanded={!isCollapsed}
             >
-              <button
-                className="disc-group-btn"
-                data-no-border="true"
-                onClick={() => onToggleGroup('__favorites__')}
-                aria-expanded={!isCollapsed}
-              >
-                <ChevronRight size={10} className="disc-chevron" data-expanded={!isCollapsed} />
-                <Star size={10} style={{ color: 'var(--kr-warning)' }} />
-                <span style={{ fontWeight: 600, fontSize: 'var(--kr-fs-sm)' }}>{t('disc.favorites')}</span>
-                <span className="disc-group-count">{pinned.length}</span>
-              </button>
+              <CollectionFavoritesHeader
+                label={t('disc.favorites')}
+                count={pinned.length}
+                expanded={!isCollapsed}
+                onToggle={() => onToggleGroup('__favorites__')}
+              />
               {!isCollapsed && renderSmartSectionRows(pinned.sort(byLiveThenRecent), 'pin')}
             </div>
           );
@@ -1594,13 +1613,16 @@ export function DiscussionSidebar({
                                         <Clock3 size={10} aria-hidden="true" />
                                         {batchWhen || t('disc.batchRun')}
                                       </span>
-                                      <span className="disc-batch-run-id" title={bg.runId}>
-                                        {t('disc.batchRunId', shortRunId)}
-                                      </span>
                                       <span className="disc-group-count" data-batch-status={statusKind}>
                                         {statusPill}
                                       </span>
                                     </button>
+                                    <CopyIdPill
+                                      id={bg.runId}
+                                      label={t('disc.batchRunId', shortRunId)}
+                                      title={t('disc.batchCopyRunId', bg.runId)}
+                                      className="disc-batch-run-id-copy"
+                                    />
                                     {hasBatchMenu && (
                                       <div
                                         className="disc-batch-menu"
@@ -1706,6 +1728,7 @@ export function DiscussionSidebar({
                                         <SwipeableDiscItem
                                           key={disc.id}
                                           disc={disc}
+                                          agentLabel={agentLabels[disc.id]}
                                           isActive={disc.id === activeId}
                                           lastSeenCount={lastSeenMsgCount[disc.id] ?? 0}
                                           isSending={!!sendingMap[disc.id]}
@@ -1719,6 +1742,7 @@ export function DiscussionSidebar({
                                           onStop={onStopDiscussion}
                                           onTogglePin={onTogglePin}
                                           t={t}
+                                          collectionRowClassName="collection-shell-row-button"
                                           sourceAgents={sourceBindings.get(disc.id)}
                                           importedBy={importProvenance.get(disc.id) ?? null}
                                         />
@@ -1878,6 +1902,7 @@ export function DiscussionSidebar({
                     <SwipeableDiscItem
                       key={disc.id}
                       disc={disc}
+                      agentLabel={agentLabels[disc.id]}
                       isActive={disc.id === activeId}
                       lastSeenCount={lastSeenMsgCount[disc.id] ?? 0}
                       isSending={!!sendingMap[disc.id]}
@@ -1891,6 +1916,7 @@ export function DiscussionSidebar({
                       onTogglePin={onTogglePin}
                       archiveLabel={t('disc.unarchive')}
                       t={t}
+                      collectionRowClassName="collection-shell-row-button"
                       sourceAgents={sourceBindings.get(disc.id)}
                       importedBy={importProvenance.get(disc.id) ?? null}
                     />
@@ -1909,15 +1935,16 @@ export function DiscussionSidebar({
             })()}
           </div>
         )}
-      </div>
-      <div className="disc-sidebar-footer" hidden={globalSearchOpen}>
-        <span>{t('disc.sidebar.compact')}</span>
-        <span>
-          <kbd>↑↓</kbd> {t('disc.sidebar.navigate')}
-          <span aria-hidden="true"> · </span>
-          <kbd>/</kbd> {t('disc.sidebar.searchShortcut')}
-        </span>
-      </div>
-    </div>
+      </div>,
+        sidebarFooter: !globalSearchOpen ? <div className="disc-sidebar-footer">
+          <span>{t('disc.sidebar.compact')}</span>
+          <span>
+            <kbd>↑↓</kbd> {t('disc.sidebar.navigate')}
+            <span aria-hidden="true"> · </span>
+            <kbd>/</kbd> {t('disc.sidebar.searchShortcut')}
+          </span>
+        </div> : null,
+      }}
+    />
   );
 }

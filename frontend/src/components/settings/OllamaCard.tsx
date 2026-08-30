@@ -6,11 +6,12 @@
 // 3. online, 0 models → Pull suggestions
 // 4. online + models → Model picker dropdown
 
-import { useState, useEffect, useCallback, type ReactNode } from 'react';
-import { ollama as ollamaApi, config as configApi } from '../../lib/api';
+import { useState, useEffect, useCallback, useRef, type ReactNode } from 'react';
+import { ollama as ollamaApi, config as configApi, type OllamaPullProgress } from '../../lib/api';
 import type { OllamaHealthResponse, OllamaModel, ModelTiersConfig } from '../../types/generated';
 import { RefreshCw, ExternalLink, Download, AlertTriangle, Loader2, Save, RotateCcw } from 'lucide-react';
 import { SUGGESTED_MODELS } from './ollamaModels';
+import { SearchableSelect } from '../SearchableSelect';
 import '../../pages/SettingsPage.css';
 
 interface OllamaCardProps {
@@ -24,11 +25,21 @@ interface ContextFeedback {
   error?: string;
 }
 
+interface PullState {
+  progress: OllamaPullProgress;
+  error?: string;
+}
+
 const CONTEXT_FLOOR = 2_048;
 const CONTEXT_OVERRIDE_MAX = 1_048_576;
 
 function formatContextTokens(value: number | null): string {
   return value == null ? '—' : value.toLocaleString();
+}
+
+function formatDownloadBytes(value: number | null): string {
+  if (value == null) return '—';
+  return `${(value / 1_000_000).toLocaleString(undefined, { maximumFractionDigits: 1 })} MB`;
 }
 
 // Hardware tier of a suggested model — drives a badge so users don't pull a
@@ -66,6 +77,9 @@ export function OllamaCard({ t, modelCostSuffix, headerAccessory }: OllamaCardPr
   const [contextDrafts, setContextDrafts] = useState<Record<string, string>>({});
   const [savingContext, setSavingContext] = useState<string | null>(null);
   const [contextFeedback, setContextFeedback] = useState<Record<string, ContextFeedback>>({});
+  const [pulls, setPulls] = useState<Record<string, PullState>>({});
+  const [activePulls, setActivePulls] = useState<Set<string>>(() => new Set());
+  const pullControllers = useRef(new Map<string, AbortController>());
 
   const syncModels = useCallback((nextModels: OllamaModel[]) => {
     setModels(nextModels);
@@ -209,6 +223,75 @@ export function OllamaCard({ t, modelCostSuffix, headerAccessory }: OllamaCardPr
     }
   }, [contextDrafts, syncModels, t]);
 
+  const startPull = useCallback(async (model: string) => {
+    if (pullControllers.current.has(model)) return;
+    const controller = new AbortController();
+    pullControllers.current.set(model, controller);
+    setActivePulls(prev => new Set(prev).add(model));
+    setPulls(prev => ({
+      ...prev,
+      [model]: { progress: { status: t('ollama.pullStarting'), digest: null, completed: null, total: null } },
+    }));
+    let succeeded = false;
+    try {
+      await ollamaApi.pull(model, {
+        onProgress: progress => setPulls(prev => ({ ...prev, [model]: { progress } })),
+        onSuccess: progress => {
+          succeeded = true;
+          setPulls(prev => ({ ...prev, [model]: { progress } }));
+        },
+        onError: error => setPulls(prev => ({
+          ...prev,
+          [model]: { progress: prev[model]?.progress ?? { status: '', digest: null, completed: null, total: null }, error },
+        })),
+      }, controller.signal);
+      if (succeeded) {
+        try {
+          const refreshed = await ollamaApi.models();
+          syncModels(refreshed.models);
+          setHealth(prev => prev ? { ...prev, models_count: refreshed.models.length } : prev);
+        } catch (error) {
+          setPulls(prev => ({
+            ...prev,
+            [model]: {
+              progress: prev[model]?.progress ?? { status: 'success', digest: null, completed: null, total: null },
+              error: `The model downloaded successfully, but Kronn could not refresh the installed-model list: ${error instanceof Error ? error.message : t('ollama.pullFailed')}`,
+            },
+          }));
+        }
+      }
+    } catch (error) {
+      if (!controller.signal.aborted) {
+        setPulls(prev => ({
+          ...prev,
+          [model]: { progress: prev[model]?.progress ?? { status: '', digest: null, completed: null, total: null }, error: error instanceof Error ? error.message : t('ollama.pullFailed') },
+        }));
+      }
+    } finally {
+      pullControllers.current.delete(model);
+      setActivePulls(prev => {
+        const next = new Set(prev);
+        next.delete(model);
+        return next;
+      });
+      if (controller.signal.aborted) {
+        setPulls(prev => {
+          const remaining = { ...prev };
+          delete remaining[model];
+          return remaining;
+        });
+      }
+    }
+  }, [syncModels, t]);
+
+  const cancelPull = useCallback((model: string) => {
+    pullControllers.current.get(model)?.abort();
+  }, []);
+
+  useEffect(() => () => {
+    pullControllers.current.forEach(controller => controller.abort());
+  }, []);
+
   const statusColor = health?.status === 'online'
     ? 'var(--kr-success)'
     : health?.status === 'offline' || health?.status === 'unreachable'
@@ -296,22 +379,51 @@ export function OllamaCard({ t, modelCostSuffix, headerAccessory }: OllamaCardPr
           )}
 
           {/* ── Online, no models ── */}
-          {health.status === 'online' && models.length === 0 && (
+          {health.status === 'online' && (
             <div className="set-ollama-wizard">
               <div className="set-ollama-wizard-title">
                 <Download size={14} /> {t('ollama.pullTitle')}
               </div>
-              <p className="set-ollama-wizard-desc">{t('ollama.pullDesc')}</p>
+              <p className="set-ollama-wizard-desc">{t(models.length === 0 ? 'ollama.pullDesc' : 'ollama.pullMoreDesc')}</p>
               <div className="set-ollama-suggestions">
                 {SUGGESTED_MODELS.map(m => (
                   <div key={m.name} className="set-ollama-suggestion">
                     <div className="set-ollama-suggestion-head">
-                      <code className="set-ollama-cmd">ollama pull {m.name}</code>
+                      <code className="set-ollama-cmd">{m.name}</code>
                       <span className={`set-ollama-tier set-ollama-tier-${m.tier}`}>
                         {t(`ollama.tier.${m.tier}`)}
                       </span>
+                      <button
+                        type="button"
+                        className="set-ollama-pull-button"
+                        disabled={activePulls.has(m.name) || models.some(model => model.name === m.name)}
+                        onClick={() => startPull(m.name)}
+                      >
+                        {activePulls.has(m.name) ? <Loader2 size={12} className="spin" /> : <Download size={12} />}
+                        {models.some(model => model.name === m.name) ? t('ollama.pullInstalled') : t('ollama.pullButton')}
+                      </button>
                     </div>
                     <span className="set-ollama-suggestion-desc">{t(m.descKey)} · {m.size}</span>
+                    {pulls[m.name] && (
+                      <div className="set-ollama-pull-progress" role="status">
+                        <div className="set-ollama-pull-progress-head">
+                          <span>{pulls[m.name].progress.status}</span>
+                          {activePulls.has(m.name) && (
+                            <button type="button" className="set-ollama-pull-cancel" onClick={() => cancelPull(m.name)}>
+                              {t('ollama.pullCancel')}
+                            </button>
+                          )}
+                        </div>
+                        {pulls[m.name].progress.total != null && (
+                          <progress value={pulls[m.name].progress.completed ?? 0} max={pulls[m.name].progress.total ?? undefined} />
+                        )}
+                        <span className="set-ollama-suggestion-desc">
+                          {formatDownloadBytes(pulls[m.name].progress.completed)} / {formatDownloadBytes(pulls[m.name].progress.total)}
+                          {pulls[m.name].progress.total != null && ` · ${Math.round(((pulls[m.name].progress.completed ?? 0) / (pulls[m.name].progress.total ?? 1)) * 100)}%`}
+                        </span>
+                        {pulls[m.name].error && <div className="set-ollama-context-error" role="alert">{pulls[m.name].error}</div>}
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>
@@ -330,7 +442,7 @@ export function OllamaCard({ t, modelCostSuffix, headerAccessory }: OllamaCardPr
               <div className="text-xs text-muted mb-2">{t('ollama.tierPickerTitle')}</div>
               <div className="set-ollama-tier-grid">
                 {(['economy', 'default', 'reasoning'] as const).map(tier => (
-                  <label key={tier} className="set-ollama-tier-row">
+                  <div key={tier} className="set-ollama-tier-row">
                     {/* Same tier emotes as every other agent (AgentsSection). */}
                     <span className="set-ollama-tier-label">
                       <span aria-hidden="true" style={{ marginRight: 4 }}>
@@ -338,23 +450,25 @@ export function OllamaCard({ t, modelCostSuffix, headerAccessory }: OllamaCardPr
                       </span>
                       {t(`disc.tier.${tier}`)}
                     </span>
-                    <select
-                      className="set-ollama-tier-select"
-                      data-model-tier-agent="Ollama"
-                      data-model-tier={tier}
+                    <SearchableSelect
+                      className="searchable-select--compact"
                       value={tiers?.ollama?.[tier] ?? ''}
+                      options={models.map(model => ({
+                        value: model.name,
+                        label: model.name,
+                        keywords: model.name.replaceAll('/', ' '),
+                        description: `${model.size}${modelCostSuffix?.(model.name) ?? ''}`,
+                      }))}
                       disabled={savingTier === tier}
-                      onChange={e => pickTierModel(tier, e.target.value || null)}
-                      aria-label={t(`disc.tier.${tier}`)}
-                    >
-                      <option value="">{t('ollama.tierAuto')}</option>
-                      {models.map(m => (
-                        <option key={m.name} value={m.name}>
-                          {m.name} · {m.size}{modelCostSuffix?.(m.name) ?? ''}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
+                      onChange={value => void pickTierModel(tier, value || null)}
+                      label={t(`disc.tier.${tier}`)}
+                      placeholder={t('config.searchModel')}
+                      emptyLabel={t('config.searchModelEmpty')}
+                      clearLabel={t('ollama.tierAuto')}
+                      dataModelTierAgent="Ollama"
+                      dataModelTier={tier}
+                    />
+                  </div>
                 ))}
               </div>
               {/* Bench-based guidance (2026-07) — which local model fits which

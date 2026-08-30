@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { LivePage, LivePageDetail, LivePagePublication } from '../../types/generated';
 
@@ -59,7 +59,13 @@ import { docs as docsApi, pages as pagesApi, workflows as workflowsApi } from '.
 import { requestRenderedPageHtml } from '../../lib/live-page-sandbox';
 import { PagesPage } from '../PagesPage';
 
+function getCanonicalPageRow(title: string): HTMLElement {
+  const section = screen.getByText('pages.filter.active').closest('.disc-sidebar-section') as HTMLElement;
+  return within(section).getByLabelText(new RegExp(`pages\\.(?:open|select):${title}`));
+}
+
 beforeEach(() => {
+  vi.stubGlobal('matchMedia', vi.fn().mockImplementation((query: string) => ({ matches: false, media: query, addEventListener: vi.fn(), removeEventListener: vi.fn() })));
   localStorage.removeItem('kronn:pageNavigation');
   localStorage.removeItem('kronn:pageCollapsedSections');
   linkRelay.connect.mockClear();
@@ -96,9 +102,139 @@ beforeEach(() => {
 afterEach(() => {
   localStorage.removeItem('kronn:pageNavigation');
   localStorage.removeItem('kronn:pageCollapsedSections');
+  vi.unstubAllGlobals();
 });
 
 describe('PagesPage', () => {
+  it('keeps the historical responsive sidebar classes on the shared shell', async () => {
+    render(<PagesPage />);
+    await screen.findByTestId('live-page-frame');
+    expect(screen.getByRole('complementary', { name: 'pages.title' }))
+      .toHaveClass('disc-sidebar', 'live-pages-list');
+    expect(document.querySelector('.live-pages-viewer-header'))
+      .toHaveClass('collection-detail-header');
+  });
+
+  it('uses the shared Discussions-style search with shortcut and inline clear', async () => {
+    render(<PagesPage />);
+    await screen.findByTestId('live-page-frame');
+
+    const search = screen.getByRole('textbox', { name: 'pages.search' });
+    expect(search).toHaveClass('collection-shell-search-input');
+    expect(search).toHaveAttribute('aria-keyshortcuts', '/');
+
+    fireEvent.keyDown(window, { key: '/' });
+    expect(search).toHaveFocus();
+
+    fireEvent.change(search, { target: { value: 'Adobe' } });
+    const clear = screen.getByRole('button', { name: 'pages.clearSearch' });
+    expect(clear).toHaveClass('collection-shell-search-clear');
+    fireEvent.click(clear);
+    expect(search).toHaveValue('');
+  });
+
+  it('collapses to the shared Discussions-style rail and reopens the sidebar', async () => {
+    render(<PagesPage />);
+    await screen.findByTestId('live-page-frame');
+    const collapse = screen.getByRole('button', { name: 'collection.closeCollection' });
+    expect(collapse).toHaveClass('collection-shell-collapse-button');
+    fireEvent.click(collapse);
+    expect(screen.queryByRole('complementary', { name: 'pages.title' })).toBeNull();
+    const rail = screen.getByRole('button', { name: 'collection.openCollection' });
+    expect(rail).toHaveClass('collection-shell-sidebar-rail');
+    fireEvent.click(rail);
+    expect(screen.getByRole('complementary', { name: 'pages.title' })).toBeInTheDocument();
+  });
+
+  it('uses refresh as the primary header action and reloads the Page list', async () => {
+    render(<PagesPage />);
+    await screen.findByTestId('live-page-frame');
+    vi.mocked(pagesApi.list).mockClear();
+
+    const refreshButton = screen.getByRole('button', { name: 'pages.refresh' });
+    expect(refreshButton).toHaveClass('disc-icon-btn', 'collection-shell-primary-action');
+    fireEvent.click(refreshButton);
+
+    await waitFor(() => expect(pagesApi.list).toHaveBeenCalledOnce());
+  });
+
+  it('uses checkbox semantics for transient Page bulk selection', async () => {
+    render(<PagesPage />);
+    await screen.findByTestId('live-page-frame');
+    fireEvent.click(screen.getByRole('button', { name: 'pages.bulk.start' }));
+    const row = screen.getByRole('checkbox', { name: 'pages.select:Adobe Signals' });
+    expect(row).toHaveAttribute('aria-checked', 'false');
+    fireEvent.click(row);
+    expect(row).toHaveAttribute('aria-checked', 'true');
+  });
+
+  it('covers the narrow rail, empty list, selection, and open menu on the real Pages page', async () => {
+    vi.stubGlobal('matchMedia', vi.fn().mockImplementation((query: string) => ({ matches: true, media: query, addEventListener: vi.fn(), removeEventListener: vi.fn() })));
+    vi.mocked(pagesApi.list).mockResolvedValueOnce([]);
+    const view = render(<PagesPage />);
+    await screen.findByText('pages.empty');
+
+    view.unmount();
+    const secondPage = { ...page, id: 'page-2', title: 'Audience', slug: 'audience' };
+    vi.mocked(pagesApi.list).mockResolvedValue([page, secondPage]);
+    vi.mocked(pagesApi.get).mockImplementation(async id => id === secondPage.id ? { ...detail, ...secondPage } : detail);
+    render(<PagesPage />);
+    await screen.findByTestId('live-page-frame');
+    fireEvent.click(screen.getByRole('button', { name: 'collection.closeCollection' }));
+    expect(screen.getByRole('button', { name: 'collection.openCollection' })).toHaveClass('collection-shell-sidebar-rail');
+    fireEvent.click(screen.getByRole('button', { name: 'collection.openCollection' }));
+    fireEvent.click(screen.getByRole('button', { name: 'pages.bulk.start' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: 'pages.select:Adobe Signals' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: 'pages.select:Audience' }));
+    expect(screen.getByRole('checkbox', { name: 'pages.select:Adobe Signals' })).toHaveAttribute('aria-checked', 'true');
+    fireEvent.click(screen.getByLabelText('pages.mosaic.open:2'));
+    expect(screen.getByLabelText('pages.mosaic.open:2').closest('details')).toHaveAttribute('open');
+  });
+
+  it('opens selected Pages in one external mosaic tab with count-specific presets', async () => {
+    const page2: LivePage = { ...page, id: 'page-2', title: 'Audience', slug: 'audience' };
+    const page3: LivePage = { ...page, id: 'page-3', title: 'Acquisition', slug: 'acquisition' };
+    vi.mocked(pagesApi.list).mockResolvedValue([page, page2, page3]);
+
+    render(<PagesPage />);
+    await screen.findByTestId('live-page-frame');
+    fireEvent.click(screen.getByRole('button', { name: 'pages.bulk.start' }));
+    fireEvent.click(getCanonicalPageRow('Adobe Signals'));
+    fireEvent.click(getCanonicalPageRow('Audience'));
+    fireEvent.click(getCanonicalPageRow('Acquisition'));
+
+    const mosaicMenu = screen.getByLabelText('pages.mosaic.open:3');
+    const mosaicDetails = mosaicMenu.closest('details') as HTMLDetailsElement;
+    const mosaicPopover = mosaicDetails.querySelector('.live-pages-mosaic-popover') as HTMLElement;
+    vi.stubGlobal('innerWidth', 360);
+    vi.stubGlobal('innerHeight', 180);
+    vi.spyOn(mosaicMenu, 'getBoundingClientRect').mockReturnValue({
+      x: 300, y: 140, top: 140, right: 328, bottom: 168, left: 300,
+      width: 28, height: 28, toJSON: () => ({}),
+    });
+    Object.defineProperty(mosaicPopover, 'scrollHeight', { configurable: true, value: 240 });
+    expect(mosaicMenu).toHaveAttribute('aria-disabled', 'false');
+    fireEvent.click(mosaicMenu);
+    await waitFor(() => expect(mosaicDetails).toHaveAttribute('data-placement', 'up'));
+    expect(mosaicDetails.style.getPropertyValue('--mosaic-popover-top')).toBe('8px');
+    expect(mosaicDetails.style.getPropertyValue('--mosaic-popover-left')).toBe('104px');
+    expect(mosaicDetails.style.getPropertyValue('--mosaic-popover-max-height')).toBe('126px');
+
+    const auto = screen.getByRole('link', { name: 'pages.mosaic.layout.auto' });
+    expect(auto).toHaveAttribute(
+      'href',
+      `${window.location.origin}${window.location.pathname}#pages/mosaic?page=page-1&page=page-2&page=page-3&layout=auto`,
+    );
+    expect(auto).toHaveAttribute('target', '_blank');
+    expect(auto).toHaveAttribute('rel', 'noopener noreferrer');
+    expect(screen.getByRole('link', { name: 'pages.mosaic.layout.threeTop' })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'pages.mosaic.layout.threeBottom' })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'pages.mosaic.layout.threeLeft' })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'pages.mosaic.layout.threeRight' })).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'pages.mosaic.layout.twoColumns' })).toBeNull();
+    vi.unstubAllGlobals();
+  });
+
   it('renders authored HTML in a script-only opaque sandbox', async () => {
     const onNavigateWorkflow = vi.fn();
     render(<PagesPage onNavigateWorkflow={onNavigateWorkflow} />);
@@ -178,7 +314,7 @@ describe('PagesPage', () => {
       title: 'Production health',
     }));
     expect(await screen.findByRole('heading', { name: 'Production health' })).toBeInTheDocument();
-    expect(screen.getByLabelText('pages.open:Production health')).toBeInTheDocument();
+    expect(getCanonicalPageRow('Production health')).toBeInTheDocument();
 
     view.unmount();
     const persisted = { ...detail, title: 'Production health' };
@@ -217,7 +353,7 @@ describe('PagesPage', () => {
 
     expect(await screen.findByRole('alert')).toHaveTextContent('Backend unavailable');
     expect(input).toHaveValue('Adobe Signals');
-    expect(screen.getByLabelText('pages.open:Adobe Signals')).toBeInTheDocument();
+    expect(getCanonicalPageRow('Adobe Signals')).toBeInTheDocument();
   });
 
   it('exports the data-materialized Page DOM as PDF from the header', async () => {
@@ -338,6 +474,47 @@ describe('PagesPage', () => {
     expect(screen.getByRole('alert')).toHaveTextContent('Network unavailable');
   });
 
+  it('orders recent shortcuts, excludes favorites, and keeps the complete canonical Page list', async () => {
+    const favorite = {
+      ...page,
+      id: 'favorite-page',
+      title: 'Favorite Page',
+      slug: 'favorite-page',
+      pinned: true,
+      updated_at: '2026-08-31T10:00:00Z',
+    };
+    const recentPages = Array.from({ length: 11 }, (_, index) => ({
+      ...page,
+      id: `recent-page-${index}`,
+      title: `Recent Page ${index}`,
+      slug: `recent-page-${index}`,
+      updated_at: `2026-08-${String(30 - index).padStart(2, '0')}T10:00:00Z`,
+    }));
+    vi.mocked(pagesApi.list).mockResolvedValue([favorite, ...recentPages]);
+
+    render(<PagesPage />);
+    await screen.findByTestId('live-page-frame');
+
+    const favoriteSection = screen.getByText('pages.filter.favorites').closest('.disc-sidebar-section') as HTMLElement;
+    expect(within(favoriteSection).getByRole('button', { name: 'pages.filter.favorites 1' })).toHaveClass('collection-favorites-header');
+    const recentSection = screen.getByText('disc.recent').closest('.disc-sidebar-section') as HTMLElement;
+    const canonicalSection = screen.getByText('pages.filter.active').closest('.disc-sidebar-section') as HTMLElement;
+    expect([...recentSection.querySelectorAll('.disc-item-title-text')].map(node => node.textContent))
+      .toEqual(recentPages.slice(0, 10).map(item => item.title));
+    expect(within(recentSection).queryByText(favorite.title)).toBeNull();
+    expect(within(favoriteSection).getByText(favorite.title)).toBeInTheDocument();
+    expect(within(canonicalSection).getByText(favorite.title)).toBeInTheDocument();
+    expect(canonicalSection.querySelectorAll('.live-page-row')).toHaveLength(12);
+
+    const recentToggle = within(recentSection).getByRole('button', { name: /disc\.recent/ });
+    fireEvent.click(recentToggle);
+    expect(recentToggle).toHaveAttribute('aria-expanded', 'false');
+    expect(within(recentSection).queryByText('Recent Page 0')).toBeNull();
+    await waitFor(() => expect(JSON.parse(
+      localStorage.getItem('kronn:pageCollapsedSections') ?? '[]',
+    )).toContain('recent'));
+  });
+
   it('searches, favorites and archives Pages with the library interactions', async () => {
     const other = { ...page, id: 'page-2', title: 'Jira Delivery', slug: 'jira-delivery' };
     vi.mocked(pagesApi.list).mockResolvedValue([page, other]);
@@ -345,7 +522,7 @@ describe('PagesPage', () => {
     await screen.findByTestId('live-page-frame');
 
     fireEvent.change(screen.getByLabelText('pages.search'), { target: { value: 'Jira' } });
-    expect(screen.getByText('Jira Delivery')).toBeInTheDocument();
+    expect(screen.getAllByText('Jira Delivery').length).toBeGreaterThan(0);
     expect(screen.queryByLabelText('pages.open:Adobe Signals')).not.toBeInTheDocument();
     fireEvent.change(screen.getByLabelText('pages.search'), { target: { value: '' } });
 
@@ -356,15 +533,55 @@ describe('PagesPage', () => {
       // The Page appears in both Favorites and the complete list, but each row
       // must render one star only: the stateful favorite action itself.
       const rows = Array.from(container.querySelectorAll('.live-page-row'));
-      expect(rows).toHaveLength(3);
+      expect(rows).toHaveLength(4);
       expect(rows.every(row => row.querySelectorAll('.lucide-star').length === 1)).toBe(true);
     });
 
     fireEvent.click(screen.getByLabelText('pages.bulk.start'));
-    fireEvent.click(screen.getByLabelText('pages.open:Adobe Signals'));
+    fireEvent.click(getCanonicalPageRow('Adobe Signals'));
     vi.stubGlobal('confirm', vi.fn(() => true));
     fireEvent.click(screen.getByTitle('pages.archive'));
     await waitFor(() => expect(pagesApi.update).toHaveBeenCalledWith(page.id, { archived: true }));
+  });
+
+  it('uses the shared row menu and complete keyboard footer', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
+    vi.stubGlobal('confirm', vi.fn(() => true));
+    const { container } = render(<PagesPage />);
+    await screen.findByTestId('live-page-frame');
+
+    const row = getCanonicalPageRow('Adobe Signals').closest('.disc-item') as HTMLElement;
+    fireEvent.click(within(row).getByRole('button', { name: 'collection.moreActions · Adobe Signals' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'disc.copyId' }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(page.id));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'pages.archive' }));
+    await waitFor(() => expect(pagesApi.update).toHaveBeenCalledWith(page.id, { archived: true }));
+
+    const footer = container.querySelector('.disc-sidebar-footer') as HTMLElement;
+    expect(footer).toHaveTextContent('pages.sidebar.hint');
+    expect(within(footer).getByText('↑↓')).toBeInTheDocument();
+    expect(within(footer).getByText('/')).toBeInTheDocument();
+  });
+
+  it('keeps keyboard navigation, active-row state, and empty state in the custom sidebar renderer', async () => {
+    const other = { ...page, id: 'page-2', title: 'Jira Delivery', slug: 'jira-delivery' };
+    vi.mocked(pagesApi.list).mockResolvedValue([page, other]);
+    vi.mocked(pagesApi.get).mockImplementation(async id => id === other.id ? { ...detail, ...other } : detail);
+    render(<PagesPage />);
+
+    await screen.findByTestId('live-page-frame');
+    const recentSection = screen.getByText('disc.recent').closest('.disc-sidebar-section') as HTMLElement;
+    const first = within(recentSection).getByLabelText('pages.open:Adobe Signals');
+    const second = within(recentSection).getByLabelText('pages.open:Jira Delivery');
+    expect(first).toHaveAttribute('aria-current', 'true');
+
+    first.focus();
+    fireEvent.keyDown(first, { key: 'ArrowDown' });
+    expect(second).toHaveFocus();
+
+    fireEvent.change(screen.getByLabelText('pages.search'), { target: { value: 'No match' } });
+    expect(screen.getByText('pages.noSearchResults')).toBeInTheDocument();
   });
 
   it('restores the selected Page and collapsed sidebar sections', async () => {
@@ -392,7 +609,7 @@ describe('PagesPage', () => {
     expect(activeSection).toHaveAttribute('aria-expanded', 'false');
     fireEvent.change(screen.getByLabelText('pages.search'), { target: { value: 'Adobe' } });
     expect(activeSection).toHaveAttribute('aria-expanded', 'true');
-    expect(screen.getByLabelText('pages.open:Adobe Signals')).toBeInTheDocument();
+    expect(getCanonicalPageRow('Adobe Signals')).toBeInTheDocument();
     expect(JSON.parse(localStorage.getItem('kronn:pageCollapsedSections') ?? '[]')).toEqual(['pages', 'archives']);
     fireEvent.change(screen.getByLabelText('pages.search'), { target: { value: '' } });
     expect(activeSection).toHaveAttribute('aria-expanded', 'false');

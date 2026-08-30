@@ -19,7 +19,7 @@
  * `purgeExpiredDrafts` once the caller supplies the current live ids.
  */
 
-import type { AgentType, ModelTier } from '../types/generated';
+import type { ModelTier } from '../types/generated';
 
 const DRAFT_KEY_PREFIX = 'kronn:draft:';
 const MAX_DRAFT_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
@@ -28,7 +28,10 @@ const DRAFT_SCHEMA_VERSION = 2;
 /** Stable pseudo-discussion used by the creation form before a disc has an id. */
 export const NEW_DISCUSSION_DRAFT_ID = '__new-discussion__';
 
-export type DraftRoutingTiers = Partial<Record<AgentType, ModelTier>>;
+/** Native agents use their AgentType as key. Dynamic HTTP connections use a
+ * connection-qualified key (`Custom:<uuid>`) so two providers never overwrite
+ * each other's selected tier in the same draft. */
+export type DraftRoutingTiers = Record<string, ModelTier>;
 
 export interface DraftRecord {
   text: string;
@@ -48,7 +51,7 @@ const VALID_TIERS = new Set<ModelTier>(['economy', 'default', 'reasoning']);
 function validRoutingTiers(value: unknown): DraftRoutingTiers {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
   return Object.fromEntries(
-    Object.entries(value).filter((entry): entry is [AgentType, ModelTier] => (
+    Object.entries(value).filter((entry): entry is [string, ModelTier] => (
       typeof entry[1] === 'string' && VALID_TIERS.has(entry[1] as ModelTier)
     )),
   );

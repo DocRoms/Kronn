@@ -44,6 +44,7 @@ import {
   type MessageBubbleProps,
 } from '../MessageBubble';
 import { parseModelErrorEvent } from '../../lib/modelErrorEvent';
+import { DELETED_MESSAGE_MARKER } from '../../lib/messageContent';
 import { config as configApi } from '../../lib/api';
 import type { DiscussionMessage, MessageRole } from '../../types/generated';
 
@@ -117,6 +118,52 @@ describe('MessageBubble — role-based bubble variant', () => {
   it('tags an Agent message bubble with data-role="agent"', () => {
     const { container } = renderBubble(makeMessage({ role: 'Agent' }));
     expect(container.querySelector('.disc-msg-bubble')?.getAttribute('data-role')).toBe('agent');
+  });
+
+  it('renders orchestrator turns as a collapsed automated orchestration variant', () => {
+    const { container } = renderBubble(makeMessage({
+      role: 'User',
+      agent_type: null,
+      author_pseudo: 'Orchestrateur',
+      content: '**Execution KT-42 completed**\n\nTechnical delivery details',
+    }));
+
+    expect(container.querySelector('.disc-msg-row')).toHaveAttribute('data-role', 'orchestrator');
+    const bubble = container.querySelector('.disc-msg-bubble');
+    expect(bubble).toHaveAttribute('data-role', 'orchestrator');
+    expect(bubble).toHaveAttribute('data-variant', 'orchestration');
+    expect(bubble).toHaveClass('disc-msg-bubble-full');
+    expect(screen.getByText('disc.orchestrator')).toBeInTheDocument();
+    expect(screen.getByText(/disc\.orchestratorKind/)).toBeInTheDocument();
+    expect(screen.queryByText(/· humain/)).toBeNull();
+    expect(screen.getByText('Execution KT-42 completed')).toBeInTheDocument();
+    expect(screen.queryByText('Technical delivery details')).toBeNull();
+
+    const toggle = screen.getByRole('button', { name: 'disc.orchestratorShowDetails' });
+    expect(toggle.closest('.disc-msg-header-row')).not.toBeNull();
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    fireEvent.click(toggle);
+    expect(screen.getByText('Technical delivery details')).toBeInTheDocument();
+    const expandedToggle = screen.getByRole('button', { name: 'disc.orchestratorHideDetails' });
+    expect(expandedToggle).toBe(toggle);
+    expect(expandedToggle).toHaveAttribute('aria-expanded', 'true');
+  });
+
+  it('renders deleted content as a compact tombstone without message actions', () => {
+    const onDelete = vi.fn();
+    const onReply = vi.fn();
+    const { container } = renderBubble(makeMessage({
+      role: 'User',
+      content: `${DELETED_MESSAGE_MARKER} hidden payload`,
+      author_pseudo: 'Peer',
+    }), { onDelete, onReply });
+
+    expect(container.querySelector('.disc-msg-row')).toHaveAttribute('data-role', 'deleted');
+    expect(container.querySelector('.disc-msg-row')).toHaveAttribute('data-former-role', 'user');
+    expect(screen.getByText('disc.deletedMessage')).toBeInTheDocument();
+    expect(screen.queryByText(/hidden payload/)).toBeNull();
+    expect(screen.queryByRole('button', { name: 'disc.deleteMessage' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'disc.reply' })).toBeNull();
   });
 
   it('exposes an accessible reply action on human and agent messages', () => {
@@ -316,9 +363,9 @@ describe('MessageBubble — author pseudo / avatar (User)', () => {
       author_pseudo: 'Orchestrateur',
     }));
     const author = container.querySelector('.disc-msg-author');
-    expect(author).toHaveTextContent('Orchestrateur');
+    expect(author).toHaveTextContent('disc.orchestrator');
     expect(author).not.toHaveTextContent('humain');
-    expect(container.querySelector('.disc-msg-author-kind')).toBeNull();
+    expect(container.querySelector('.disc-msg-author-kind')).toHaveTextContent('disc.orchestratorKind');
   });
 });
 
@@ -335,7 +382,9 @@ describe('MessageBubble — durable routing receipt', () => {
     );
 
     const receipt = screen.getByTestId('message-routing-receipt');
-    expect(receipt).toHaveTextContent('disc.routingRequested');
+    expect(receipt.closest('.disc-msg-author')).not.toBeNull();
+    expect(receipt).toHaveAccessibleName('disc.routingRequested');
+    expect(receipt).not.toHaveTextContent('disc.routingRequested');
     expect(receipt).toHaveTextContent('@claude · ⚡ disc.tier.economy');
     expect(receipt).toHaveTextContent('@codex · 🧠 disc.tier.reasoning');
   });
@@ -351,6 +400,24 @@ describe('MessageBubble — durable routing receipt', () => {
     expect(receipt).not.toHaveTextContent('⚡');
     expect(receipt).not.toHaveTextContent('🎯');
     expect(receipt).not.toHaveTextContent('🧠');
+  });
+
+  it('uses the configured alias for a dynamic connection target', () => {
+    renderBubble(
+      makeMessage({ role: 'User', content: '@openrouter traduis ceci' }),
+      {
+        targets: [{
+          kind: 'discussion_agent',
+          agent_type: 'Custom',
+          connection_id: 'conn-openrouter',
+          tier: 'default',
+        }],
+        targetConnectionAliases: { 'conn-openrouter': 'openrouter' },
+      },
+    );
+
+    expect(screen.getByTestId('message-routing-receipt'))
+      .toHaveTextContent('@openrouter · 🎯 disc.tier.default');
   });
 
   it('identifies an exact CLI route without assigning it a Kronn tier', () => {
@@ -505,6 +572,17 @@ describe('MessageBubble — @user carries the real human identity', () => {
 });
 
 describe('MessageBubble — agent label + copy buttons', () => {
+  it('uses the dynamic discussion alias instead of the Custom wire type', () => {
+    const { container } = renderBubble(
+      makeMessage({ role: 'Agent', agent_type: 'Custom' }),
+      { defaultAgent: 'Custom', defaultAgentAlias: '@openrouter' },
+    );
+    expect(container.querySelector('.disc-msg-agent-label')).toHaveTextContent(
+      '@openrouter · disc.targetDiscussionAgent',
+    );
+    expect(container.querySelector('.disc-msg-agent-label')).not.toHaveTextContent('Custom');
+  });
+
   it('renders a non-default native responder as a punctual agent', () => {
     const { container } = renderBubble(makeMessage({ role: 'Agent', agent_type: 'Codex' }));
     expect(container.querySelector('.disc-msg-agent-label')).toHaveTextContent(
@@ -722,6 +800,22 @@ describe('MessageBubble — footer chips', () => {
 });
 
 describe('MessageBubble — last-message affordances', () => {
+  it('offers deletion for a durable message and wires the selected message', () => {
+    const onDelete = vi.fn();
+    const message = makeMessage({ role: 'Agent', content: 'remove me' });
+    renderBubble(message, { onDelete });
+
+    fireEvent.click(screen.getByRole('button', { name: 'disc.deleteMessage' }));
+
+    expect(onDelete).toHaveBeenCalledWith(message);
+  });
+
+  it('keeps deletion visible but disabled while an agent is running', () => {
+    renderBubble(makeMessage({ role: 'User' }), { onDelete: vi.fn(), sending: true });
+
+    expect(screen.getByRole('button', { name: 'disc.deleteMessage' })).toBeDisabled();
+  });
+
   it('shows the edit pencil on the last user message', () => {
     const onEditStart = vi.fn();
     renderBubble(

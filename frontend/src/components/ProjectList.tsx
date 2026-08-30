@@ -1,20 +1,43 @@
 import '../pages/Dashboard.css';
-import { useState, useMemo, useDeferredValue, useEffect, useRef, useCallback } from 'react';
+import '../pages/DiscussionsPage.css';
+import { useState, useMemo, useDeferredValue, useEffect, useRef, useCallback, type ReactNode } from 'react';
 import { useT } from '../lib/I18nContext';
 import { getProjectGroup, isHiddenPath, isValidationDisc } from '../lib/constants';
 import { useIsMobile } from '../hooks/useMediaQuery';
 import { ProjectCard } from './ProjectCard';
+import { CollectionFavoritesHeader } from './CollectionFavoritesHeader';
+import { CollectionRowActions } from './CollectionRowActions';
+import { CollectionSidebarFooter } from './CollectionSidebarFooter';
 import { ListControls } from './ListControls';
-import type { Project, AgentDetection, AuditProgress, DriftCheckResponse, Discussion, Skill, McpConfigDisplay, WorkflowSummary } from '../types/generated';
+import { CollectionShell, type CollectionFilter } from './CollectionShell';
+import { projects as projectsApi } from '../lib/api';
+import { usePersistentIdSet } from '../hooks/usePersistentIdSet';
+import type { Project, AgentDetection, AuditProgress, DriftCheckResponse, Discussion, Skill, McpConfigDisplay, ModelTiersConfig, WorkflowSummary } from '../types/generated';
 import {
-  Folder, ChevronDown, ChevronRight, ChevronLeft, Search, X, AlertTriangle,
-  MessageSquare, Workflow, Puzzle, ShieldCheck, Loader2, FileCode, Clock,
+  Folder, ChevronRight, AlertTriangle,
+  MessageSquare, Workflow, Puzzle, ShieldCheck, Loader2, FileCode, Clock, Plus,
+  ArrowUpDown, CheckSquare2, Filter, Star, Trash2, Container,
 } from 'lucide-react';
 import { MatrixText } from './MatrixText';
 
 const isAiReady = (p: Project) => p.audit_status !== 'NoTemplate';
-type ProjectFilter = 'visible' | 'attention' | 'validated' | 'missing' | 'hidden' | 'all';
+type ProjectFilter = 'visible' | 'attention' | 'validated' | 'docker' | 'missing' | 'hidden' | 'all';
 type ProjectSort = 'name' | 'updated' | 'status' | 'techDebt';
+type ProjectSidebarSection = 'favorites' | 'recent' | 'all';
+
+const PROJECT_COLLAPSED_SECTIONS_KEY = 'kronn:project-sidebar-collapsed-sections';
+const PROJECT_SIDEBAR_SECTIONS = new Set<ProjectSidebarSection>(['favorites', 'recent', 'all']);
+
+function readCollapsedProjectSections(): Set<ProjectSidebarSection> {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(PROJECT_COLLAPSED_SECTIONS_KEY) ?? '[]');
+    return new Set(Array.isArray(parsed)
+      ? parsed.filter((value): value is ProjectSidebarSection => PROJECT_SIDEBAR_SECTIONS.has(value as ProjectSidebarSection))
+      : []);
+  } catch {
+    return new Set();
+  }
+}
 
 const PROJECT_STATUS_RANK: Record<Project['audit_status'], number> = {
   NoTemplate: 0,
@@ -26,6 +49,8 @@ const PROJECT_STATUS_RANK: Record<Project['audit_status'], number> = {
 
 export interface ProjectListProps {
   projects: Project[];
+  /** Keeps the master/detail shell mounted while the initial fleet request is pending. */
+  loading?: boolean;
   /** Fleet-wide live audits (Dashboard poll) — lets each card adopt an
    *  audit launched outside the UI (MCP bridge, CLI). */
   activeAudits?: AuditProgress[];
@@ -37,6 +62,7 @@ export interface ProjectListProps {
   mcpConfigs: McpConfigDisplay[];
   workflows: WorkflowSummary[];
   configLanguage: string | null;
+  modelTiers?: ModelTiersConfig | null;
   toast: (msg: string, type: 'success' | 'error' | 'warning' | 'info') => void;
   onNavigate: (page: string) => void;
   onSetDiscPrefill: (prefill: { projectId: string; title: string; prompt: string; locked?: boolean }) => void;
@@ -46,12 +72,17 @@ export interface ProjectListProps {
   onRefetchDiscussions: () => void;
   onRefetchSkills: () => void;
   onRefetchDrift: (projectId: string) => void;
+  onAddProject?: () => void;
+  /** False until the project list request has completed; protects restored
+   * favorites from an initial empty loading state. */
+  favoritesReady?: boolean;
   expandedId: string | null;
   onSetExpandedId: (id: string | null) => void;
 }
 
 export function ProjectList({
   projects,
+  loading = false,
   activeAudits = [],
   discussionsByProject,
   driftByProject,
@@ -60,6 +91,7 @@ export function ProjectList({
   mcpConfigs,
   workflows,
   configLanguage,
+  modelTiers,
   toast,
   onNavigate,
   onSetDiscPrefill,
@@ -69,6 +101,8 @@ export function ProjectList({
   onRefetchDiscussions,
   onRefetchSkills,
   onRefetchDrift,
+  onAddProject,
+  favoritesReady = true,
   expandedId,
   onSetExpandedId,
 }: ProjectListProps) {
@@ -79,16 +113,64 @@ export function ProjectList({
   const [projectFilter, setProjectFilter] = useState<ProjectFilter>('visible');
   const [projectSort, setProjectSort] = useState<ProjectSort>('name');
   const [projectSortReversed, setProjectSortReversed] = useState(false);
-  const [projectDisplayLimit, setProjectDisplayLimit] = useState(20);
-  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(() => new Set());
-  // Sentinel ref attached to the "Show more" button. An IntersectionObserver
-  // below auto-bumps the cap whenever the sentinel scrolls into view, so the
-  // list feels infinite even though we only ever mount ~20 cards more at a
-  // time (matches the "Show more" button bump). On 250+ project installs
-  // this avoids the artificial scroll-stop at each 20-step plateau.
-  const loadMoreRef = useRef<HTMLButtonElement | null>(null);
-  const listPaneRef = useRef<HTMLDivElement | null>(null);
-  const detailPaneRef = useRef<HTMLDivElement | null>(null);
+  const [filterOptionsOpen, setFilterOptionsOpen] = useState(false);
+  const [sortOptionsOpen, setSortOptionsOpen] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [favoritesOnly, setFavoritesOnly] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [collapsedSections, setCollapsedSections] = useState(readCollapsedProjectSections);
+  const projectIds = useMemo(() => projects.map(project => project.id), [projects]);
+  const { ids: favoriteIds, toggle: toggleFavorite } = usePersistentIdSet('kronn:collection-favorites:projects', projectIds, favoritesReady);
+  const shellRootRef = useRef<HTMLDivElement | null>(null);
+  const [dockerRunningIds, setDockerRunningIds] = useState<Set<string>>(new Set());
+
+  useEffect(() => {
+    if (projects.length === 0) {
+      return undefined;
+    }
+    let cancelled = false;
+    const refresh = async () => {
+      try {
+        const summary = await projectsApi.dockerRunning();
+        if (!cancelled) setDockerRunningIds(new Set(summary.project_ids));
+      } catch {
+        // Docker is optional. Keep the last known snapshot when its daemon is
+        // briefly unavailable instead of flashing every project to "down".
+      }
+    };
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), 15_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [projects.length]);
+
+  const handleDockerRunningChange = useCallback((projectId: string, running: boolean) => {
+    setDockerRunningIds(current => {
+      const next = new Set(current);
+      if (running) next.add(projectId);
+      else next.delete(projectId);
+      return next;
+    });
+  }, []);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(PROJECT_COLLAPSED_SECTIONS_KEY, JSON.stringify([...collapsedSections]));
+    } catch {
+      // Section collapsing remains usable in memory when storage is unavailable.
+    }
+  }, [collapsedSections]);
+
+  const toggleSection = useCallback((section: ProjectSidebarSection) => {
+    setCollapsedSections(current => {
+      const next = new Set(current);
+      if (next.has(section)) next.delete(section);
+      else next.add(section);
+      return next;
+    });
+  }, []);
 
   // Search input vs derived filter — useDeferredValue lets the keystroke
   // commit immediately on the input, while the heavy filter / sort /
@@ -109,45 +191,41 @@ export function ProjectList({
     [projects],
   );
 
+  // Shared collection-shell filters — a single source of truth handed both
+  // to CollectionShell (renders them as toggle buttons) and to the local
+  // `filteredProjects` computation below (auto-select + result count),
+  // since the shell doesn't expose its internally-filtered set.
+  const projectFilters = useMemo<CollectionFilter<Project>[]>(() => {
+    const all: CollectionFilter<Project>[] = [
+      { id: 'visible', label: t('projects.master.filter.visible'), matches: p => !isHiddenPath(p.path) },
+      {
+        id: 'attention', label: t('projects.master.filter.attention'), matches: p =>
+          !isHiddenPath(p.path) && (
+            p.path_exists === false
+            || p.audit_status !== 'Validated'
+            || (p.tech_debt_count ?? 0) > 0
+            || p.needs_docs_migration
+            || (driftByProject[p.id]?.stale_sections.length ?? 0) > 0
+          ),
+      },
+      { id: 'validated', label: t('projects.master.filter.validated'), matches: p => !isHiddenPath(p.path) && p.audit_status === 'Validated' },
+      { id: 'docker', label: t('projects.master.filter.dockerRunning'), matches: p => dockerRunningIds.has(p.id) },
+      { id: 'missing', label: t('projects.master.filter.missing'), matches: p => p.path_exists === false && !isHiddenPath(p.path) },
+      { id: 'hidden', label: t('projects.master.filter.hidden'), matches: p => isHiddenPath(p.path) },
+      { id: 'all', label: t('projects.master.filter.all'), matches: () => true },
+    ];
+    return all.filter(filter =>
+      (filter.id !== 'missing' || missingPathProjects.length > 0)
+      && (filter.id !== 'hidden' || hiddenProjects.length > 0)
+    );
+  }, [t, driftByProject, missingPathProjects.length, hiddenProjects.length, dockerRunningIds]);
+
   const filteredProjects = useMemo(() => {
-    let list = projects;
-    switch (projectFilter) {
-      case 'visible':
-        list = visibleProjects;
-        break;
-      case 'attention':
-        list = visibleProjects.filter(p =>
-          p.path_exists === false
-          || p.audit_status !== 'Validated'
-          || (p.tech_debt_count ?? 0) > 0
-          || p.needs_docs_migration
-          || (driftByProject[p.id]?.stale_sections.length ?? 0) > 0
-        );
-        break;
-      case 'validated':
-        list = visibleProjects.filter(p => p.audit_status === 'Validated');
-        break;
-      case 'missing':
-        list = missingPathProjects;
-        break;
-      case 'hidden':
-        list = hiddenProjects;
-        break;
-      case 'all':
-        break;
-    }
+    const activeFilter = projectFilters.find(filter => filter.id === projectFilter);
+    let list = activeFilter ? projects.filter(activeFilter.matches) : projects;
     if (deferredSearch) list = list.filter(p => p.name.toLowerCase().includes(searchLower) || p.path.toLowerCase().includes(searchLower));
     return list;
-  }, [
-    projects,
-    visibleProjects,
-    hiddenProjects,
-    missingPathProjects,
-    projectFilter,
-    deferredSearch,
-    searchLower,
-    driftByProject,
-  ]);
+  }, [projects, projectFilters, projectFilter, deferredSearch, searchLower]);
 
   const projGroup = useCallback(
     (p: Project) => getProjectGroup(p, t('projects.group.local'), t('projects.group.other')),
@@ -171,54 +249,10 @@ export function ProjectList({
     return projectSortReversed ? -result : result;
   }), [filteredProjects, projectSort, projectSortReversed, projGroup]);
 
-  const groupedProjects = useMemo(() => {
-    const groups: { group: string; projects: Project[] }[] = [];
-    for (const p of sortedProjects) {
-      const group = projGroup(p);
-      const last = groups[groups.length - 1];
-      if (last && last.group === group) { last.projects.push(p); }
-      else { groups.push({ group, projects: [p] }); }
-    }
-    return groups;
-  }, [sortedProjects, projGroup]);
-
-  // Infinite-scroll wiring — observe the "Show more" sentinel and bump the
-  // cap when it enters the viewport. `rootMargin: 200px` means we start
-  // loading the next batch a bit before the user actually reaches the
-  // bottom, so the scroll stays continuous instead of stuttering at the
-  // plateau. We only attach when there's still more to load (the button
-  // itself is conditional on `remainingCount > 0`).
-  useEffect(() => {
-    const el = loadMoreRef.current;
-    if (!el) return;
-    const observer = new IntersectionObserver(entries => {
-      for (const entry of entries) {
-        if (entry.isIntersecting) {
-          setProjectDisplayLimit(prev => prev + 20);
-        }
-      }
-    }, { root: listPaneRef.current, rootMargin: '200px' });
-    observer.observe(el);
-    return () => { observer.disconnect(); };
-    // We re-attach whenever the cap changes (button re-mounts) so the
-    // observer always tracks the *current* sentinel.
-  }, [projectDisplayLimit]);
-
-  // KEY UX-perf change: the cap stays in effect even when searching.
-  // Pre-fix `projectSearch ? sortedProjects : ...` mounted every match
-  // (200+ cards) on the first keystroke. Now we cap at the same limit
-  // and surface a "Show more" CTA — same as the no-search case. The
-  // typical user finds their project in the first 20 matches anyway.
-  const displayProjects = useMemo(
-    () => sortedProjects.slice(0, projectDisplayLimit),
-    [sortedProjects, projectDisplayLimit],
-  );
-  const remainingCount = sortedProjects.length - displayProjects.length;
   const aiCount = visibleProjects.filter(isAiReady).length;
-  const expandedProject = expandedId
-    ? filteredProjects.find(project => project.id === expandedId) ?? null
-    : null;
-  const selectedProject = expandedProject ?? (!isMobile ? displayProjects[0] ?? null : null);
+  const selectedProject = expandedId
+    ? filteredProjects.find(project => project.id === expandedId) ?? (!isMobile ? sortedProjects[0] ?? null : null)
+    : (!isMobile ? sortedProjects[0] ?? null : null);
 
   useEffect(() => {
     if (!isMobile && selectedProject && selectedProject.id !== expandedId) {
@@ -229,24 +263,25 @@ export function ProjectList({
   const selectProject = (projectId: string) => {
     onSetExpandedId(projectId);
     requestAnimationFrame(() => {
-      detailPaneRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
+      shellRootRef.current?.querySelector('.collection-shell-detail')?.scrollTo({ top: 0, behavior: 'smooth' });
     });
+  };
+
+  const deleteSelectedProjects = async (selected: Project[]) => {
+    if (selected.length === 0 || !confirm(t('collection.deleteConfirm', selected.length))) return;
+    try {
+      await Promise.all(selected.map(project => projectsApi.delete(project.id)));
+      if (expandedId && selected.some(project => project.id === expandedId)) onSetExpandedId(null);
+      onRefetch();
+      toast(t('collection.deleteSuccess', selected.length), 'success');
+    } catch (cause) {
+      toast(t('collection.deleteError', String(cause)), 'error');
+      throw cause;
+    }
   };
 
   return (
     <div className="project-page">
-      <div className="dash-page-header project-page-header">
-        <div>
-          <h1 className="dash-h1"><MatrixText text={t('projects.title')} /></h1>
-          <p className="dash-meta">
-            {aiCount}/{visibleProjects.length} {t('projects.aiReady')}
-            {hiddenProjects.length > 0 && (
-              <span className="text-faint"> + {hiddenProjects.length} {hiddenProjects.length > 1 ? t('projects.hiddenPlural') : t('projects.hidden')}</span>
-            )}
-          </p>
-        </div>
-      </div>
-
       {missingPathProjects.length > 0 && (
         <div className="dash-missing-banner" role="status" data-testid="missing-path-banner">
           <AlertTriangle size={15} className="dash-missing-banner-icon" />
@@ -265,236 +300,349 @@ export function ProjectList({
         </div>
       )}
 
-      <div className="project-list-toolbar">
-        <div className="dash-search-wrap project-search-wrap">
-          <Search size={14} className="dash-search-icon" />
-          <input
-            className="dash-search-input"
-            placeholder={t('projects.search')}
-            value={projectSearch}
-            onChange={(event) => setProjectSearch(event.target.value)}
-          />
-          {projectSearch && (
-            <button
-              className="dash-search-clear"
-              onClick={() => setProjectSearch('')}
-              aria-label={t('projects.master.clear')}
-            >
-              <X size={12} />
-            </button>
-          )}
-        </div>
-        <ListControls
-          filterLabel={t('projects.master.filter')}
-          filterValue={projectFilter}
-          filterOptions={[
-            { value: 'visible', label: t('projects.master.filter.visible') },
-            { value: 'attention', label: t('projects.master.filter.attention') },
-            { value: 'validated', label: t('projects.master.filter.validated') },
-            { value: 'missing', label: t('projects.master.filter.missing'), disabled: missingPathProjects.length === 0 },
-            { value: 'hidden', label: t('projects.master.filter.hidden'), disabled: hiddenProjects.length === 0 },
-            { value: 'all', label: t('projects.master.filter.all') },
-          ]}
-          onFilterChange={setProjectFilter}
-          sortLabel={t('projects.master.sort')}
-          sortValue={projectSort}
-          sortOptions={[
-            { value: 'name', label: t('projects.master.sort.name') },
-            { value: 'updated', label: t('projects.master.sort.updated') },
-            { value: 'status', label: t('projects.master.sort.status') },
-            { value: 'techDebt', label: t('projects.master.sort.techDebt') },
-          ]}
-          onSortChange={setProjectSort}
-          reversed={projectSortReversed}
-          onToggleDirection={() => setProjectSortReversed(value => !value)}
-          directionLabel={t('projects.master.sort.direction')}
-        />
-      </div>
-
-      <div className="project-workspace" data-mobile={isMobile}>
-        {!(isMobile && selectedProject) && (
-          <div ref={listPaneRef} className="project-list-pane" data-testid="project-list-pane">
-            <div className="project-list-result-count">
-              {t('projects.master.results', sortedProjects.length)}
-            </div>
-            {displayProjects.map((proj: Project, idx: number) => {
-              const isSelected = selectedProject?.id === proj.id;
-              const projHidden = isHiddenPath(proj.path);
-              const currentGroup = projGroup(proj);
-              const prevGroup = idx > 0 ? projGroup(displayProjects[idx - 1]) : null;
-              const showGroupHeader = projectSort === 'name'
-                && projectFilter === 'visible'
-                && !projectSearch
-                && groupedProjects.length > 1
-                && currentGroup !== prevGroup;
-              const groupColor = currentGroup === t('projects.group.local')
-                ? 'var(--kr-text-dim)'
-                : `hsl(${Math.abs([...currentGroup].reduce((h, c) => h * 31 + c.charCodeAt(0), 0)) % 360}, 70%, 38%)`;
-              const groupProjectCount = groupedProjects.find(group => group.group === currentGroup)?.projects.length ?? 0;
-              const projDiscussions = discussionsByProject[proj.id] ?? [];
-              const liveAudit = activeAudits.some(audit => audit.project_id === proj.id);
-              const validating = proj.audit_status === 'Audited'
-                && projDiscussions.some(discussion => isValidationDisc(discussion.title) && !discussion.archived);
-              const projectMcpCount = mcpConfigs.filter(config => config.is_global || config.project_ids.includes(proj.id)).length;
-              const projectWorkflowCount = workflows.filter(workflow => workflow.project_id === proj.id).length;
-              const staleCount = driftByProject[proj.id]?.stale_sections.length ?? 0;
-              const status = liveAudit
-                ? { label: t('projects.master.status.auditRunning'), tone: 'running', icon: <Loader2 size={10} className="spin" /> }
-                : validating
-                  ? { label: t('projects.status.validating'), tone: 'running', icon: <Loader2 size={10} className="spin" /> }
-                  : proj.audit_status === 'Validated'
-                    ? { label: t('projects.master.status.validated'), tone: 'success', icon: <ShieldCheck size={10} /> }
-                    : proj.audit_status === 'Audited'
-                      ? { label: t('projects.master.status.toValidate'), tone: 'warning', icon: <ShieldCheck size={10} /> }
-                      : proj.audit_status === 'Bootstrapped'
-                        ? { label: t('projects.status.bootstrapped'), tone: 'info', icon: <FileCode size={10} /> }
-                        : { label: t('projects.master.status.toPrepare'), tone: 'muted', icon: <FileCode size={10} /> };
-
-              return (
-                <div key={proj.id}>
-                  {showGroupHeader && (() => {
-                    const isCollapsed = collapsedGroups.has(currentGroup);
-                    return (
-                      <button
-                        className="dash-group-btn project-group-btn"
-                        data-first={idx === 0}
-                        onClick={() => setCollapsedGroups(previous => {
-                          const next = new Set(previous);
-                          if (next.has(currentGroup)) next.delete(currentGroup); else next.add(currentGroup);
-                          return next;
-                        })}
-                        aria-expanded={!isCollapsed}
-                      >
-                        <ChevronDown
-                          size={13}
-                          style={{
-                            color: groupColor,
-                            transform: isCollapsed ? 'rotate(-90deg)' : 'none',
-                            transition: 'transform 0.15s',
-                            flexShrink: 0,
-                          }}
-                        />
-                        <span className="dash-group-bar" style={{ background: groupColor }} />
-                        <span className="dash-group-label" style={{ color: groupColor }}>{currentGroup}</span>
-                        <span className="dash-group-count">({groupProjectCount})</span>
-                        <span className="dash-group-line" style={{ background: `${groupColor}20` }} />
-                      </button>
-                    );
-                  })()}
-                  {!collapsedGroups.has(currentGroup) && (
+      <div ref={shellRootRef} className="project-shell">
+        <CollectionShell<Project>
+          ariaLabel={t('projects.title')}
+          title={<MatrixText text={t('projects.title')} />}
+          titleCount={visibleProjects.length}
+          items={sortedProjects}
+          getId={project => project.id}
+          getLabel={project => `${project.name} ${project.path}`}
+          isFavorite={project => favoriteIds.has(project.id)}
+          onToggleFavorite={project => toggleFavorite(project.id)}
+          filters={projectFilters}
+          persistence={{
+            query: projectSearch,
+            onQueryChange: setProjectSearch,
+            activeFilterId: projectFilter,
+            onActiveFilterIdChange: id => setProjectFilter((id ?? 'all') as ProjectFilter),
+            favoritesOnly,
+            onFavoritesOnlyChange: setFavoritesOnly,
+          }}
+          selectedId={selectedProject?.id ?? null}
+          onSelect={selectProject}
+          selectedIds={selectedIds}
+          onSelectedIdsChange={setSelectedIds}
+          headerActions={onAddProject && <button
+            type="button"
+            className="collection-shell-icon collection-shell-primary-action"
+            data-tour-id="new-project-btn"
+            onClick={onAddProject}
+            aria-label={t('projects.bootstrap')}
+            title={t('projects.bootstrap')}
+          >
+            <Plus size={16} />
+          </button>}
+          actions={[{
+            id: 'delete',
+            label: t('collection.deleteSelected'),
+            icon: <Trash2 size={15} />,
+            danger: true,
+            disabled: selected => selected.length === 0,
+            onSelect: deleteSelectedProjects,
+          }]}
+          isMobile={isMobile}
+          sidebarOpen={sidebarOpen}
+          onSidebarOpenChange={setSidebarOpen}
+          globalSearchShortcut
+          showSearchClear
+          showControls={false}
+          labels={{
+            search: t('projects.search'),
+            favorites: t('collection.favorites'),
+            clearFilters: t('collection.clearFilters'),
+            moreActions: t('collection.moreActions'),
+            openCollection: t('collection.openCollection'),
+            closeCollection: t('collection.closeCollection'),
+            selectItem: t('collection.selectItem'),
+            selectMultiple: t('collection.selectMultiple'),
+            cancelSelection: t('collection.cancelSelection'),
+            selectedCount: count => t('collection.selectedCount', count),
+          }}
+          slots={{
+            sidebarHeaderEnd: <>
+              <button
+                type="button"
+                className="collection-shell-search-action collection-shell-search-action-icon"
+                data-active={filterOptionsOpen || favoritesOnly || projectFilter !== 'visible'}
+                onClick={() => {
+                  setFilterOptionsOpen(open => !open);
+                  setSortOptionsOpen(false);
+                }}
+                aria-expanded={filterOptionsOpen}
+                aria-controls={filterOptionsOpen ? 'project-filter-options' : undefined}
+                aria-label={t('projects.master.filter')}
+                title={t('projects.master.filter')}
+              >
+                <Filter size={14} aria-hidden="true" />
+              </button>
+              <button
+                type="button"
+                className="collection-shell-search-action collection-shell-search-action-icon"
+                data-active={sortOptionsOpen || projectSort !== 'name' || projectSortReversed}
+                onClick={() => {
+                  setSortOptionsOpen(open => !open);
+                  setFilterOptionsOpen(false);
+                }}
+                aria-expanded={sortOptionsOpen}
+                aria-controls={sortOptionsOpen ? 'project-sort-options' : undefined}
+                aria-label={t('projects.master.sort')}
+                title={t('projects.master.sort')}
+              >
+                <ArrowUpDown size={14} aria-hidden="true" />
+              </button>
+            </>,
+            afterSidebarHeader: <>
+              {filterOptionsOpen && <div id="project-filter-options" className="collection-shell-search-options collection-shell-controls">
+                <button type="button" className="collection-shell-filter" data-active={favoritesOnly} aria-pressed={favoritesOnly} onClick={() => setFavoritesOnly(value => !value)}><Star size={14} />{t('collection.favorites')}</button>
+                {projectFilters.map(filter => <button key={filter.id} type="button" className="collection-shell-filter" data-active={filter.id === projectFilter} aria-pressed={filter.id === projectFilter} onClick={() => setProjectFilter(filter.id === projectFilter ? 'all' : filter.id as ProjectFilter)}>{filter.label}</button>)}
+                {(favoritesOnly || projectFilter !== 'all') && <button type="button" className="collection-shell-clear" onClick={() => { setFavoritesOnly(false); setProjectFilter('all'); }}>{t('collection.clearFilters')}</button>}
+              </div>}
+              {sortOptionsOpen && <div id="project-sort-options" className="collection-shell-search-options">
+                <ListControls
+                  sortLabel={t('projects.master.sort')}
+                  sortValue={projectSort}
+                  sortOptions={[
+                    { value: 'name', label: t('projects.master.sort.name') },
+                    { value: 'updated', label: t('projects.master.sort.updated') },
+                    { value: 'status', label: t('projects.master.sort.status') },
+                    { value: 'techDebt', label: t('projects.master.sort.techDebt') },
+                  ]}
+                  onSortChange={setProjectSort}
+                  reversed={projectSortReversed}
+                  onToggleDirection={() => setProjectSortReversed(value => !value)}
+                  directionLabel={t('projects.master.sort.direction')}
+                />
+              </div>}
+              <div className="project-list-toolbar">
+                <span className="dash-meta">
+                  {aiCount}/{visibleProjects.length} {t('projects.aiReady')}
+                  {hiddenProjects.length > 0 && <> + {hiddenProjects.length} {hiddenProjects.length > 1 ? t('projects.hiddenPlural') : t('projects.hidden')}</>}
+                </span>
+              </div>
+            </>,
+            renderDetail: () => (
+              loading ? (
+                <div className="project-detail-loading" role="status">
+                  <Loader2 size={18} className="spin" />
+                  <span>{t('projects.loading')}</span>
+                </div>
+              ) : selectedProject ? (
+                <ProjectCard
+                  key={selectedProject.id}
+                  detailMode
+                  project={selectedProject}
+                  dockerRunning={dockerRunningIds.has(selectedProject.id)}
+                  onDockerRunningChange={handleDockerRunningChange}
+                  externalAuditLive={activeAudits.some(audit => audit.project_id === selectedProject.id)}
+                  isOpen
+                  onToggleOpen={() => {}}
+                  discussions={discussionsByProject[selectedProject.id] ?? []}
+                  driftStatus={driftByProject[selectedProject.id]}
+                  agents={agents}
+                  allSkills={allSkills}
+                  mcpConfigs={mcpConfigs}
+                  workflows={workflows}
+                  configLanguage={configLanguage}
+                  modelTiers={modelTiers}
+                  toast={toast}
+                  onNavigate={onNavigate}
+                  onSetDiscPrefill={onSetDiscPrefill}
+                  onAutoRunDiscussion={onAutoRunDiscussion}
+                  onOpenDiscussion={onOpenDiscussion}
+                  onRefetch={onRefetch}
+                  onRefetchDiscussions={onRefetchDiscussions}
+                  onRefetchSkills={onRefetchSkills}
+                  onRefetchDrift={onRefetchDrift}
+                />
+              ) : (
+                <div className="project-detail-empty">
+                  <Folder size={32} />
+                  <p>{t('projects.master.select')}</p>
+                </div>
+              )
+            ),
+            renderList: ({
+              visibleItems, getRowProps, isSelected, canMultiSelect,
+              isMultiSelected, toggleMultiSelection,
+            }) => {
+              if (loading) {
+                return <div className="project-sidebar-loading" aria-hidden="true">
+                  <Loader2 size={16} className="spin" />
+                </div>;
+              }
+              const favoriteProjects = canMultiSelect
+                ? []
+                : visibleItems.filter(project => favoriteIds.has(project.id));
+              const recentProjects = canMultiSelect
+                ? []
+                : visibleItems
+                  .filter(project => !favoriteIds.has(project.id))
+                  .sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime())
+                  .slice(0, 10);
+              const sectionCollapsed = (section: ProjectSidebarSection) => (
+                !projectSearch.trim() && !canMultiSelect && collapsedSections.has(section)
+              );
+              const row = (proj: Project, section: ProjectSidebarSection) => {
+                const rowProps = getRowProps(proj);
+                const active = isSelected(proj);
+                const multiSelected = isMultiSelected(proj);
+                const projHidden = isHiddenPath(proj.path);
+                const projDiscussions = discussionsByProject[proj.id] ?? [];
+                const liveAudit = activeAudits.some(audit => audit.project_id === proj.id);
+                const validating = proj.audit_status === 'Audited'
+                  && projDiscussions.some(discussion => isValidationDisc(discussion.title) && !discussion.archived);
+                const projectMcpCount = mcpConfigs.filter(config => config.is_global || config.project_ids.includes(proj.id)).length;
+                const projectWorkflowCount = workflows.filter(workflow => workflow.project_id === proj.id).length;
+                const staleCount = driftByProject[proj.id]?.stale_sections.length ?? 0;
+                const status = liveAudit
+                  ? { label: t('projects.master.status.auditRunning'), tone: 'running', icon: <Loader2 size={10} className="spin" /> }
+                  : validating
+                    ? { label: t('projects.status.validating'), tone: 'running', icon: <Loader2 size={10} className="spin" /> }
+                    : proj.audit_status === 'Validated'
+                      ? { label: t('projects.master.status.validated'), tone: 'success', icon: <ShieldCheck size={10} /> }
+                      : proj.audit_status === 'Audited'
+                        ? { label: t('projects.master.status.toValidate'), tone: 'warning', icon: <ShieldCheck size={10} /> }
+                        : proj.audit_status === 'Bootstrapped'
+                          ? { label: t('projects.status.bootstrapped'), tone: 'info', icon: <FileCode size={10} /> }
+                          : { label: t('projects.master.status.toPrepare'), tone: 'muted', icon: <FileCode size={10} /> };
+                return <div
+                  key={`${section}-${proj.id}`}
+                  id={section === 'all' ? `project-${proj.id}` : undefined}
+                  className="disc-swipe-wrap project-sidebar-row"
+                  data-testid={section === 'all' ? `project-list-item-${proj.id}` : `project-list-item-${section}-${proj.id}`}
+                >
+                  <div className="disc-item" data-active={active} data-selected={multiSelected} data-hidden={projHidden}>
                     <button
-                      id={`project-${proj.id}`}
                       type="button"
-                      className="project-list-card"
-                      data-active={isSelected}
-                      data-hidden={projHidden}
-                      data-testid={`project-list-item-${proj.id}`}
-                      onClick={() => selectProject(proj.id)}
-                      aria-pressed={isSelected}
+                      {...rowProps}
+                      className={`${rowProps.className} disc-item-open`}
+                      onClick={canMultiSelect ? () => toggleMultiSelection(proj.id) : rowProps.onClick}
+                      role={canMultiSelect ? 'checkbox' : undefined}
+                      aria-checked={canMultiSelect ? multiSelected : undefined}
+                      aria-label={canMultiSelect ? `${proj.name} ${t('collection.selectItem')}` : undefined}
                     >
-                      <span className="project-list-card-rail" data-tone={status.tone} />
-                      <span className="project-list-card-head">
-                        <span className="project-list-card-name">{proj.name}</span>
-                        <ChevronRight size={13} className="project-list-card-chevron" />
-                      </span>
-                      <span className="project-list-card-path" title={proj.path}>{proj.path}</span>
-                      <span className="project-list-card-status">
-                        <span className="project-status-chip" data-tone={status.tone}>
-                          {status.icon}
-                          {status.label}
+                      {canMultiSelect && <span className="disc-item-selection-box" data-selected={multiSelected} aria-hidden="true">
+                        {multiSelected && <CheckSquare2 size={12} />}
+                      </span>}
+                      <span className="disc-item-content">
+                        <span className="disc-item-title">
+                          <span className="disc-item-title-text">{proj.name}</span>
+                          <span className="disc-item-state-cluster">
+                            <span className="disc-item-state-icon project-sidebar-state-icon" data-tone={status.tone} title={status.label} aria-label={status.label}>
+                              {status.icon}
+                            </span>
+                            {dockerRunningIds.has(proj.id) && (
+                              <span
+                                className="project-sidebar-docker-up"
+                                title={t('projects.master.dockerUp')}
+                                aria-label={t('projects.master.dockerUp')}
+                              >
+                                <Container size={10} aria-hidden="true" /> UP
+                              </span>
+                            )}
+                            {proj.path_exists === false && <span className="disc-item-state-icon project-sidebar-state-icon" data-tone="error" title={t('projects.master.pathMissing')} aria-label={t('projects.master.pathMissing')}><AlertTriangle size={10} /></span>}
+                            {(proj.tech_debt_count ?? 0) > 0 && <span className="disc-item-state-icon project-sidebar-state-icon" data-tone="warning" title={`${proj.tech_debt_count} TD`} aria-label={`${proj.tech_debt_count} TD`}><AlertTriangle size={10} /></span>}
+                            {staleCount > 0 && <span className="disc-item-state-icon project-sidebar-state-icon" data-tone="warning" title={t('projects.master.stale', staleCount)} aria-label={t('projects.master.stale', staleCount)}><Clock size={10} /></span>}
+                          </span>
                         </span>
-                        {proj.path_exists === false && (
-                          <span className="project-alert-chip" data-tone="error">
-                            <AlertTriangle size={9} /> {t('projects.master.pathMissing')}
-                          </span>
-                        )}
-                        {(proj.tech_debt_count ?? 0) > 0 && (
-                          <span className="project-alert-chip" data-tone="warning">
-                            <AlertTriangle size={9} /> {proj.tech_debt_count} TD
-                          </span>
-                        )}
-                        {staleCount > 0 && (
-                          <span className="project-alert-chip" data-tone="warning">
-                            <Clock size={9} /> {t('projects.master.stale', staleCount)}
-                          </span>
-                        )}
-                      </span>
-                      <span className="project-list-card-meta">
-                        <span><MessageSquare size={11} /> {projDiscussions.length}</span>
-                        <span><Puzzle size={11} /> {projectMcpCount}</span>
-                        <span><Workflow size={11} /> {projectWorkflowCount}</span>
+                        <span className="disc-item-meta">
+                          <span className="disc-item-meta-summary" title={proj.path}>{proj.path}</span>
+                          <span className="project-sidebar-meta-count" title={t('nav.discussions')}><MessageSquare size={10} />{projDiscussions.length}</span>
+                          <span className="project-sidebar-meta-count" title={t('nav.mcps')}><Puzzle size={10} />{projectMcpCount}</span>
+                          <span className="project-sidebar-meta-count" title={t('nav.workflows')}><Workflow size={10} />{projectWorkflowCount}</span>
+                        </span>
                       </span>
                     </button>
-                  )}
+                    {!canMultiSelect && <CollectionRowActions
+                      itemName={proj.name}
+                      favorite={{
+                        active: favoriteIds.has(proj.id),
+                        onToggle: () => toggleFavorite(proj.id),
+                        activeLabel: t('wf.unpin'),
+                        inactiveLabel: t('wf.pin'),
+                      }}
+                      menuLabel={t('collection.moreActions')}
+                      copyId={proj.id}
+                      copyLabel={t('disc.copyId')}
+                      actions={[{
+                        id: 'delete',
+                        label: t('disc.delete'),
+                        icon: <Trash2 size={12} />,
+                        danger: true,
+                        onSelect: () => deleteSelectedProjects([proj]),
+                      }]}
+                    />}
+                  </div>
+                </div>;
+              };
+              const sectionHeader = (
+                section: ProjectSidebarSection,
+                icon: ReactNode,
+                label: string,
+                count: number,
+              ) => {
+                const collapsed = sectionCollapsed(section);
+                return <button
+                  type="button"
+                  className="disc-group-btn"
+                  data-no-border="true"
+                  onClick={() => toggleSection(section)}
+                  aria-expanded={!collapsed}
+                >
+                  <ChevronRight size={10} className="disc-chevron" data-expanded={!collapsed} />
+                  {icon}
+                  <span>{label}</span>
+                  <span className="disc-group-count">{count}</span>
+                </button>;
+              };
+              return <div className="disc-sidebar-list project-sidebar-list">
+                {favoriteProjects.length > 0 && <div
+                  className="disc-sidebar-section disc-sidebar-favorites"
+                  data-section="favorites"
+                  data-testid="project-section-favorites"
+                  data-expanded={!sectionCollapsed('favorites')}
+                >
+                  <CollectionFavoritesHeader
+                    label={t('disc.favorites')}
+                    count={favoriteProjects.length}
+                    expanded={!sectionCollapsed('favorites')}
+                    onToggle={() => toggleSection('favorites')}
+                  />
+                  {!sectionCollapsed('favorites') && favoriteProjects.map(project => row(project, 'favorites'))}
+                </div>}
+                {recentProjects.length > 0 && <div
+                  className="disc-sidebar-section disc-sidebar-recent"
+                  data-section="recent"
+                  data-testid="project-section-recent"
+                  data-expanded={!sectionCollapsed('recent')}
+                >
+                  {sectionHeader('recent', <Clock size={10} />, t('disc.recent'), recentProjects.length)}
+                  {!sectionCollapsed('recent') && recentProjects.map(project => row(project, 'recent'))}
+                </div>}
+                <div
+                  className="disc-sidebar-section disc-sidebar-projects"
+                  data-section="all"
+                  data-testid="project-section-all"
+                  data-expanded={!sectionCollapsed('all')}
+                >
+                  {sectionHeader('all', <Folder size={10} />, t('projects.master.filter.all'), visibleItems.length)}
+                  {!sectionCollapsed('all') && (visibleItems.length > 0
+                    ? visibleItems.map(project => row(project, 'all'))
+                    : <div className="project-list-empty">
+                      <Folder size={30} />
+                      <p className="dash-empty-text">{projectSearch ? t('projects.emptySearch') : t('projects.emptyHint')}</p>
+                    </div>)}
                 </div>
-              );
-            })}
-
-            {remainingCount > 0 && (
-              <button
-                ref={loadMoreRef}
-                className="dash-show-more-btn"
-                onClick={() => setProjectDisplayLimit(previous => previous + 20)}
-              >
-                {t('projects.showMore', remainingCount, remainingCount > 1 ? 's' : '', remainingCount > 1 ? 's' : '')}
-              </button>
-            )}
-            {!projectSearch && projectDisplayLimit > 20 && remainingCount === 0 && sortedProjects.length > 20 && (
-              <button className="dash-collapse-btn" onClick={() => setProjectDisplayLimit(20)}>
-                {t('projects.collapse')}
-              </button>
-            )}
-            {displayProjects.length === 0 && (
-              <div className="dash-empty project-list-empty">
-                <Folder size={30} />
-                <p className="dash-empty-text">
-                  {projectSearch ? t('projects.emptySearch') : t('projects.emptyHint')}
-                </p>
-              </div>
-            )}
-          </div>
-        )}
-
-        {(!isMobile || selectedProject) && (
-          <div ref={detailPaneRef} className="project-detail-pane" data-testid="project-detail-pane">
-            {isMobile && selectedProject && (
-              <button className="project-back-btn" onClick={() => onSetExpandedId(null)}>
-                <ChevronLeft size={14} /> {t('projects.master.back')}
-              </button>
-            )}
-            {selectedProject ? (
-              <ProjectCard
-                key={selectedProject.id}
-                detailMode
-                project={selectedProject}
-                externalAuditLive={activeAudits.some(audit => audit.project_id === selectedProject.id)}
-                isOpen
-                onToggleOpen={() => {}}
-                discussions={discussionsByProject[selectedProject.id] ?? []}
-                driftStatus={driftByProject[selectedProject.id]}
-                agents={agents}
-                allSkills={allSkills}
-                mcpConfigs={mcpConfigs}
-                workflows={workflows}
-                configLanguage={configLanguage}
-                toast={toast}
-                onNavigate={onNavigate}
-                onSetDiscPrefill={onSetDiscPrefill}
-                onAutoRunDiscussion={onAutoRunDiscussion}
-                onOpenDiscussion={onOpenDiscussion}
-                onRefetch={onRefetch}
-                onRefetchDiscussions={onRefetchDiscussions}
-                onRefetchSkills={onRefetchSkills}
-                onRefetchDrift={onRefetchDrift}
-              />
-            ) : (
-              <div className="project-detail-empty">
-                <Folder size={32} />
-                <p>{t('projects.master.select')}</p>
-              </div>
-            )}
-          </div>
-        )}
+              </div>;
+            },
+            sidebarFooter: <CollectionSidebarFooter
+              label={t('projects.sidebar.hint')}
+              navigateLabel={t('disc.sidebar.navigate')}
+              searchLabel={t('disc.sidebar.searchShortcut')}
+            />,
+          }}
+        />
       </div>
     </div>
   );

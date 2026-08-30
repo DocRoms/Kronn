@@ -5,6 +5,8 @@ interface UseApiState<T> {
   loading: boolean;
   /** True only on the very first fetch (data is null). False during refetches. */
   initialLoading: boolean;
+  /** True after at least one successful response, including an empty response. */
+  hasLoaded: boolean;
   error: string | null;
   refetch: () => void;
 }
@@ -67,6 +69,7 @@ export function useApi<T>(
     data,
     loading,
     initialLoading: loading && !hasLoaded,
+    hasLoaded,
     error,
     refetch: fetch,
   };

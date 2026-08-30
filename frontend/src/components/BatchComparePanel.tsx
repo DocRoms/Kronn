@@ -1,9 +1,11 @@
 import { ArrowLeft, ArrowRight, BarChart3, Clock3, ExternalLink, Hash, Loader2, RefreshCw, Scale, X } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { MarkdownContent } from './MessageBubble';
-import { AGENT_LABELS, MODEL_TIER_ICONS, agentColor, modelForAgentTier } from '../lib/constants';
+import { AGENT_LABELS, MODEL_TIER_ICONS, agentTextColor, modelForAgentTier } from '../lib/constants';
 import type { AgentType, Discussion, ModelTiersConfig } from '../types/generated';
 import { BatchCompareDetailsPanel } from './BatchCompareDetailsPanel';
+import type { ExternalApiConnectionView } from '../lib/api';
+import { externalConnectionForDiscussion } from '../lib/externalAgentIdentity';
 import './BatchComparePanel.css';
 
 interface BatchComparePanelProps {
@@ -14,6 +16,7 @@ interface BatchComparePanelProps {
   error: string | null;
   modelTiers?: ModelTiersConfig | null;
   availableAgents: AgentType[];
+  externalConnections?: ExternalApiConnectionView[];
   runningIds: ReadonlySet<string>;
   onRefresh: () => void;
   onOpenDiscussion: (discussionId: string) => void;
@@ -35,6 +38,29 @@ function lastSystemCause(discussion: Discussion) {
     if (message.role === 'System' && message.content.trim()) return message.content.trim();
   }
   return null;
+}
+
+function lastRecordedModel(discussion: Discussion) {
+  for (let index = discussion.messages.length - 1; index >= 0; index -= 1) {
+    const model = discussion.messages[index].model?.trim();
+    if (model) return model;
+  }
+  return null;
+}
+
+function compareAgentLabel(
+  discussion: Discussion,
+  externalConnections: ExternalApiConnectionView[],
+) {
+  if (discussion.agent !== 'Custom') return AGENT_LABELS[discussion.agent] ?? discussion.agent;
+  const connection = externalConnectionForDiscussion(discussion, externalConnections);
+  if (connection) return connection.display_name;
+  // Rolling compatibility for comparison children created before connection
+  // identity was persisted in message_targets.
+  // Compare child titles are generated as "QP · connection · tier". Reading
+  // from the right keeps QP names containing the same separator harmless.
+  const segments = discussion.title.split(' · ');
+  return segments.length >= 3 ? segments.at(-2) || discussion.agent : discussion.agent;
 }
 
 function formatDuration(durationMs?: number | null) {
@@ -64,6 +90,7 @@ export function BatchComparePanel({
   error,
   modelTiers,
   availableAgents,
+  externalConnections = [],
   runningIds,
   onRefresh,
   onOpenDiscussion,
@@ -137,12 +164,19 @@ export function BatchComparePanel({
         <div className="disc-compare-columns" data-layout={orderedDiscussions.length === 2 ? 'split' : 'scroll'}>
           {orderedDiscussions.map((discussion, index) => {
             const answer = lastAgentAnswer(discussion);
-            const running = runningIds.has(discussion.id) || discussion.awaiting_agent;
-            const failureCause = !answer && !running ? lastSystemCause(discussion) : null;
+            const terminalCause = !answer ? lastSystemCause(discussion) : null;
+            // A durable System failure wins over a stale optimistic spinner.
+            // Batch children do not own an SSE stream, so the local sending map
+            // can briefly lag behind the backend settlement event.
+            const running = !terminalCause
+              && (runningIds.has(discussion.id) || discussion.awaiting_agent);
+            const failureCause = !answer && !running ? terminalCause : null;
             const tier = discussion.tier ?? 'default';
             const model = answer?.model
+              || discussion.model
+              || lastRecordedModel(discussion)
               || modelForAgentTier(discussion.agent, tier, modelTiers, t('disc.defaultAgentModel'));
-            const agentLabel = AGENT_LABELS[discussion.agent] ?? discussion.agent;
+            const agentLabel = compareAgentLabel(discussion, externalConnections);
             const duration = formatDuration(answer?.duration_ms);
             const tokens = answer?.tokens_used != null && answer.tokens_used > 0
               ? answer.tokens_used.toLocaleString()
@@ -150,7 +184,7 @@ export function BatchComparePanel({
             return (
               <article key={discussion.id} className="disc-compare-column" data-running={running}>
                 <header className="disc-compare-column-head">
-                  <div className="disc-compare-target-name" style={{ color: agentColor(discussion.agent) }}>
+                  <div className="disc-compare-target-name" style={{ color: agentTextColor(discussion.agent) }}>
                     <span className="disc-compare-index">{index + 1}</span>
                     <strong>{agentLabel}</strong>
                     <span className="disc-compare-tier" title={tier}>{MODEL_TIER_ICONS[tier]}</span>
@@ -227,6 +261,7 @@ export function BatchComparePanel({
           runId={runId}
           discussions={discussions}
           availableAgents={availableAgents}
+          externalConnections={externalConnections}
           modelTiers={modelTiers}
           onOpenDiscussion={onOpenDiscussion}
           onClose={() => setShowDetails(false)}

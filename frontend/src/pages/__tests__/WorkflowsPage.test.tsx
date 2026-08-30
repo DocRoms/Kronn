@@ -3,6 +3,7 @@ import { render, screen, act, cleanup, fireEvent, waitFor, within } from '@testi
 import { I18nProvider } from '../../lib/I18nContext';
 import {
   discussions as discussionsApi,
+  mcps as mcpsApi,
   quickApis as quickApisApi,
   quickExecs as quickExecsApi,
   quickPrompts as quickPromptsApi,
@@ -154,6 +155,7 @@ const fullConfig: AgentsConfig = {
 
 afterEach(() => {
   cleanup();
+  vi.unstubAllGlobals();
   sessionStorage.removeItem('kronn:postQpImproved');
   localStorage.removeItem('kronn:automationNavigation');
   localStorage.removeItem('kronn:automationCollapsedSections');
@@ -168,7 +170,89 @@ const wrap = async (ui: React.ReactElement) => {
   return result!;
 };
 
+const openAutomationActions = () => {
+  fireEvent.click(screen.getByRole('button', { name: 'Créer ou importer' }));
+  return screen.getByRole('dialog', { name: 'Créer ou importer' });
+};
+
+const chooseAutomationAction = (name: string) => {
+  const dialog = openAutomationActions();
+  fireEvent.click(within(dialog).getByRole('button', { name }));
+};
+
 describe('WorkflowsPage', () => {
+  it('renders the automation empty state through the real page adapter', async () => {
+    await wrap(<WorkflowsPage projects={[]} />);
+    expect(screen.getByText('Aucun workflow configuré')).toBeInTheDocument();
+  });
+
+  it('covers the narrow rail, empty list, selection, and open menu on the real Automations page', async () => {
+    vi.stubGlobal('matchMedia', vi.fn().mockImplementation((query: string) => ({ matches: true, media: query, addEventListener: vi.fn(), removeEventListener: vi.fn() })));
+    await wrap(<WorkflowsPage projects={[]} />);
+    expect(screen.getByText('Aucun workflow configuré')).toBeInTheDocument();
+
+    const workflow = {
+      id: 'wf-narrow', name: 'Narrow report', project_id: null, project_name: null,
+      trigger_type: 'manual', step_count: 0, misconfigured_step_count: 0,
+      enabled: true, pinned: false, last_run: null, created_at: '2026-01-01T00:00:00Z',
+    } as WorkflowSummary;
+    cleanup();
+    mockWorkflowsApi.list.mockResolvedValueOnce([workflow]);
+    await wrap(<WorkflowsPage projects={[]} />);
+    const sidebar = screen.getByRole('complementary', { name: 'Automatisation' });
+    expect(within(sidebar).getByRole('button', { name: 'Ouvrir Narrow report' })).toBeInTheDocument();
+    fireEvent.click(within(sidebar).getByRole('button', { name: 'Ouvrir Narrow report' }));
+    expect(document.querySelector('.automation-page')).toHaveAttribute('data-has-selection', 'true');
+    expect(openAutomationActions()).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Fermer la liste' }));
+    expect(screen.getByRole('button', { name: 'Ouvrir la liste' })).toHaveClass('collection-shell-sidebar-rail');
+  });
+
+  it('collapses to the shared Discussions-style rail and reopens the sidebar', async () => {
+    await wrap(<WorkflowsPage projects={[]} />);
+    const collapse = screen.getByRole('button', { name: 'Fermer la liste' });
+    expect(collapse).toHaveClass('collection-shell-collapse-button');
+    fireEvent.click(collapse);
+    expect(screen.queryByRole('complementary', { name: 'Automatisation' })).toBeNull();
+    const rail = screen.getByRole('button', { name: 'Ouvrir la liste' });
+    expect(rail).toHaveClass('collection-shell-sidebar-rail');
+    fireEvent.click(rail);
+    expect(screen.getByRole('complementary', { name: 'Automatisation' })).toBeInTheDocument();
+  });
+
+  it('groups creation and import paths behind one green sidebar action', async () => {
+    vi.mocked(mcpsApi.overview).mockResolvedValueOnce({
+      servers: [{ id: 'api-server', name: 'Configured API', api_spec: {} }],
+      configs: [{ id: 'api-config', server_id: 'api-server' }],
+      customized_contexts: [],
+      incompatibilities: [],
+    } as never);
+
+    await wrap(<WorkflowsPage projects={[]} onNavigateDiscussion={vi.fn()} />);
+
+    const primaryAction = screen.getByRole('button', { name: 'Créer ou importer' });
+    expect(primaryAction).toHaveClass('collection-shell-primary-action', 'disc-sidebar-new-btn');
+    expect(screen.queryByRole('button', { name: 'Importer' })).toBeNull();
+
+    const dialog = openAutomationActions();
+    expect(await within(dialog).findByRole('button', { name: 'Nouveau Quick API' })).toBeInTheDocument();
+    expect(within(dialog).getByRole('button', { name: "Créer avec l'IA" })).toBeInTheDocument();
+    expect(within(dialog).getByRole('button', { name: 'Nouveau workflow' })).toBeInTheDocument();
+    expect(within(dialog).getByRole('button', { name: 'Nouveau prompt' })).toBeInTheDocument();
+    expect(within(dialog).getByRole('button', { name: 'Nouveau Quick Exec' })).toBeInTheDocument();
+    expect(within(dialog).getByRole('button', { name: 'Importer' })).toBeInTheDocument();
+
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(screen.queryByRole('dialog', { name: 'Créer ou importer' })).toBeNull();
+
+    openAutomationActions();
+    fireEvent.click(document.querySelector('.wf-import-modal-backdrop') as HTMLElement);
+    expect(screen.queryByRole('dialog', { name: 'Créer ou importer' })).toBeNull();
+
+    chooseAutomationAction('Nouveau prompt');
+    expect(screen.getByRole('heading', { name: 'Nouveau prompt' })).toBeInTheDocument();
+  });
+
   it('uses one searchable sidebar ordered Workflow → API → Prompt → Exec', async () => {
     const alpha = {
       id: 'wf-alpha', name: 'Alpha report', project_id: 'p-alpha', project_name: 'Alpha',
@@ -205,11 +289,66 @@ describe('WorkflowsPage', () => {
     expect(within(sidebar).getByRole('button', { name: 'Ouvrir Alpha report' })).toBeInTheDocument();
     expect(within(sidebar).queryByRole('button', { name: 'Ouvrir Beta report' })).toBeNull();
 
+    fireEvent.keyDown(window, { key: '/' });
+    expect(within(sidebar).getByRole('textbox', { name: 'Rechercher une automatisation…' })).toHaveFocus();
+
+    const projectFilterButton = within(sidebar).getByRole('button', { name: 'Filtrer les automatisations par projet' });
+    expect(projectFilterButton).toHaveClass('collection-shell-search-action-icon');
+    expect(projectFilterButton.querySelector('span')).toBeNull();
+    expect(projectFilterButton).toHaveAttribute('aria-expanded', 'false');
+    expect(projectFilterButton).not.toHaveAttribute('aria-controls');
+    expect(within(sidebar).queryByRole('combobox', { name: 'Filtrer les automatisations par projet' })).toBeNull();
+
+    fireEvent.click(projectFilterButton);
+    expect(projectFilterButton).toHaveAttribute('aria-expanded', 'true');
+    expect(projectFilterButton).toHaveAttribute('aria-controls', 'automation-project-filter-options');
+    const projectFilter = within(sidebar).getByRole('combobox', { name: 'Filtrer les automatisations par projet' });
+    expect(projectFilter.closest('.collection-shell-search-options')).toHaveAttribute(
+      'id',
+      'automation-project-filter-options',
+    );
+    fireEvent.change(projectFilter, {
+      target: { value: 'p-alpha' },
+    });
+    expect(projectFilterButton).toHaveAttribute('data-active', 'true');
+    expect(projectFilterButton.querySelector('strong')).toBeNull();
+
+    fireEvent.keyDown(projectFilter, { key: 'Escape' });
+    expect(projectFilterButton).toHaveAttribute('aria-expanded', 'false');
+    expect(projectFilterButton).toHaveFocus();
+    expect(within(sidebar).queryByRole('combobox', { name: 'Filtrer les automatisations par projet' })).toBeNull();
+
+    fireEvent.click(within(sidebar).getByRole('button', { name: 'Effacer la recherche' }));
+    expect(within(sidebar).getByRole('button', { name: 'Ouvrir Alpha report' })).toBeInTheDocument();
+    expect(within(sidebar).queryByRole('button', { name: 'Ouvrir Beta report' })).toBeNull();
+
     await act(async () => {
       fireEvent.click(within(sidebar).getByRole('button', { name: 'Ouvrir Alpha report' }));
     });
     await waitFor(() => expect(mockWorkflowsApi.get).toHaveBeenCalledWith('wf-alpha'));
-    expect(screen.getByTestId('workflow-detail-pane')).toBeInTheDocument();
+    const detailPane = screen.getByTestId('workflow-detail-pane');
+    expect(detailPane).toBeInTheDocument();
+    expect(detailPane.querySelector('.wf-detail-header')).toHaveClass('collection-detail-header');
+    expect(document.querySelector('.automation-page-header')).toBeNull();
+  });
+
+  it('keeps arrow-key navigation on grouped Automation rows rendered by CollectionShell', async () => {
+    const alpha = {
+      id: 'wf-alpha', name: 'Alpha report', project_id: null, project_name: null,
+      trigger_type: 'manual', step_count: 1, misconfigured_step_count: 0,
+      enabled: true, pinned: false, last_run: null, created_at: '2026-01-01T00:00:00Z',
+    } as WorkflowSummary;
+    const beta = { ...alpha, id: 'wf-beta', name: 'Beta report' };
+    mockWorkflowsApi.list.mockResolvedValueOnce([alpha, beta]);
+
+    await wrap(<WorkflowsPage projects={[]} />);
+
+    const sidebar = screen.getByRole('complementary', { name: 'Automatisation' });
+    const alphaButton = within(sidebar).getByRole('button', { name: 'Ouvrir Alpha report' });
+    const betaButton = within(sidebar).getByRole('button', { name: 'Ouvrir Beta report' });
+    alphaButton.focus();
+    fireEvent.keyDown(alphaButton, { key: 'ArrowDown' });
+    expect(betaButton).toHaveFocus();
   });
 
   it('opens a Quick Exec from the shared sidebar in the common detail area', async () => {
@@ -373,7 +512,7 @@ describe('WorkflowsPage', () => {
     // Without agentAccess
     const { unmount: u1 } = await wrap(<WorkflowsPage projects={[]} />);
     expect(screen.getByText('Automatisation')).toBeDefined();
-    expect(screen.getByText('Nouveau workflow')).toBeDefined();
+    expect(screen.getByRole('button', { name: 'Créer ou importer' })).toBeDefined();
     u1();
 
     // With restricted agentAccess
@@ -385,7 +524,7 @@ describe('WorkflowsPage', () => {
       />
     );
     expect(screen.getByText('Automatisation')).toBeDefined();
-    expect(screen.getByText('Nouveau workflow')).toBeDefined();
+    expect(screen.getByRole('button', { name: 'Créer ou importer' })).toBeDefined();
     u2();
 
     // With full access agentAccess
@@ -397,7 +536,7 @@ describe('WorkflowsPage', () => {
       />
     );
     expect(screen.getByText('Automatisation')).toBeDefined();
-    expect(screen.getByText('Nouveau workflow')).toBeDefined();
+    expect(screen.getByRole('button', { name: 'Créer ou importer' })).toBeDefined();
   });
 
   // ─── Mobile responsive ─────────────────────────────────────────────────
@@ -419,7 +558,7 @@ describe('WorkflowsPage', () => {
 
     // Page title and create button should still render on mobile
     expect(screen.getByText('Automatisation')).toBeDefined();
-    expect(screen.getByText('Nouveau workflow')).toBeDefined();
+    expect(screen.getByRole('button', { name: 'Créer ou importer' })).toBeDefined();
 
     // The layout should use column direction on mobile (flex-direction: column)
     // Just verify no crash and content is accessible
@@ -553,7 +692,7 @@ describe('WorkflowsPage', () => {
     await wrap(<WorkflowsPage projects={[]} />);
 
     const sidebar = screen.getByRole('complementary', { name: 'Automatisation' });
-    expect(within(sidebar).getByRole('button', { name: /Favoris \(1\)/ })).toBeInTheDocument();
+    expect(within(sidebar).getByRole('button', { name: 'Favoris 1' })).toHaveClass('collection-favorites-header');
     expect(within(sidebar).getAllByRole('button', { name: 'Ouvrir Pinned detail' })).toHaveLength(2);
     expect(screen.getByTestId('workflow-detail-pane')).toBeInTheDocument();
   });
@@ -585,8 +724,8 @@ describe('WorkflowsPage', () => {
     await wrap(<WorkflowsPage projects={[]} installedAgentTypes={['Codex']} agentAccess={fullConfig} />);
 
     const sidebar = screen.getByRole('complementary', { name: 'Automatisation' });
-    const favorites = sidebar.querySelector('.automation-favorites-section') as HTMLElement;
-    expect(within(favorites).getByRole('button', { name: /Favoris \(3\)/ })).toBeInTheDocument();
+    const favorites = sidebar.querySelector('.disc-sidebar-favorites') as HTMLElement;
+    expect(within(favorites).getByRole('button', { name: 'Favoris 3' })).toHaveClass('collection-favorites-header');
     expect(within(favorites).getByRole('button', { name: 'Ouvrir API favorite' })).toBeInTheDocument();
     expect(within(favorites).getByRole('button', { name: 'Ouvrir Prompt favori' })).toBeInTheDocument();
     expect(within(favorites).getByRole('button', { name: 'Ouvrir Exec favori' })).toBeInTheDocument();
@@ -613,6 +752,27 @@ describe('WorkflowsPage', () => {
       fireEvent.click(screen.getByLabelText('Ajouter aux favoris'));
     });
     expect(mockWorkflowsApi.update).toHaveBeenCalledWith('wf-reg', { pinned: true });
+  });
+
+  it('uses the shared row menu and complete keyboard footer', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
+    mockWorkflowsApi.list.mockResolvedValue([{
+      id: 'wf-reg', name: 'Regular WF', project_id: null, project_name: null,
+      trigger_type: 'manual', step_count: 1, misconfigured_step_count: 0,
+      enabled: true, pinned: false, last_run: null, created_at: '2026-01-01T00:00:00Z',
+    }]);
+
+    await wrap(<WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig} />);
+    const sidebar = screen.getByRole('complementary', { name: 'Automatisation' });
+    fireEvent.click(within(sidebar).getByRole('button', { name: 'Plus d’actions · Regular WF' }));
+    fireEvent.click(within(sidebar).getByRole('menuitem', { name: 'Copier l’ID' }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('wf-reg'));
+
+    const footer = sidebar.querySelector('.disc-sidebar-footer') as HTMLElement;
+    expect(footer).toHaveTextContent('Sélectionne une ressource pour l’ouvrir');
+    expect(within(footer).getByText('↑↓')).toBeInTheDocument();
+    expect(within(footer).getByText('/')).toBeInTheDocument();
   });
 
   it('shows a "needs config" badge on the card when misconfigured_step_count > 0', async () => {
@@ -671,8 +831,7 @@ describe('WorkflowsPage', () => {
     );
 
     // Click "Nouveau workflow" to open wizard
-    const newBtn = screen.getByText(/Nouveau workflow/);
-    await act(async () => { fireEvent.click(newBtn); });
+    chooseAutomationAction('Nouveau workflow');
 
     // Wizard starts in simple mode (3 steps: infos → task → summary)
     // Fill workflow name on step 0
@@ -697,8 +856,7 @@ describe('WorkflowsPage', () => {
     );
 
     // Click "Nouveau workflow" to open wizard
-    const newBtn = screen.getByText(/Nouveau workflow/);
-    await act(async () => { fireEvent.click(newBtn); });
+    chooseAutomationAction('Nouveau workflow');
 
     // The "Suivant" button should be disabled since name is empty
     const nextBtns = screen.getAllByText(/Suivant/);
@@ -712,8 +870,7 @@ describe('WorkflowsPage', () => {
     );
 
     // Click "Nouveau workflow" to open wizard
-    const newBtn = screen.getByText(/Nouveau workflow/);
-    await act(async () => { fireEvent.click(newBtn); });
+    chooseAutomationAction('Nouveau workflow');
 
     // Switch to advanced mode (wizard starts in simple mode)
     const advBtn = screen.getByText(/Avancé/);
@@ -763,8 +920,7 @@ describe('WorkflowsPage', () => {
     );
 
     // Click "Nouveau workflow" to open wizard
-    const newBtn = screen.getByText(/Nouveau workflow/);
-    await act(async () => { fireEvent.click(newBtn); });
+    chooseAutomationAction('Nouveau workflow');
 
     // Wizard starts in simple mode — should show "Simple" and "Avancé" toggles
     expect(screen.getByText(/Simple/)).toBeDefined();
@@ -1425,12 +1581,13 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
       fireEvent.click(screen.getByRole('button', { name: /Quick APIs \(0\)/ }));
     });
 
-    expect(screen.getByRole('button', { name: 'Importer' })).toHaveAttribute(
+    const actionDialog = openAutomationActions();
+    expect(within(actionDialog).getByRole('button', { name: 'Importer' })).toHaveAttribute(
       'title',
       expect.stringContaining('Le type est détecté automatiquement'),
     );
     await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: /Créer avec l'IA/ }));
+      fireEvent.click(within(actionDialog).getByRole('button', { name: /Créer avec l'IA/ }));
     });
 
     await waitFor(() => expect(discussionsApi.create).toHaveBeenCalledWith(
@@ -1443,7 +1600,7 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
     ));
     expect(onNavigateDiscussion).toHaveBeenCalledWith('disc-qa-architect');
 
-    fireEvent.click(screen.getByRole('button', { name: 'Importer' }));
+    chooseAutomationAction('Importer');
     const globalModalTitle = screen.getByRole('heading', { name: 'Importer dans Automation' });
     const modal = globalModalTitle.closest('.wf-import-modal');
     expect(modal).not.toBeNull();
@@ -1491,7 +1648,8 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
     fireEvent.click(screen.getByRole('button', { name: /Quick Prompts \(1\)/ }));
     fireEvent.click(screen.getByRole('button', { name: 'Ouvrir Selected prompt' }));
 
-    expect(screen.getByRole('button', { name: 'Importer' })).toBeInTheDocument();
+    const actionDialog = openAutomationActions();
+    expect(within(actionDialog).getByRole('button', { name: 'Importer' })).toBeInTheDocument();
   });
 
   it('routes Quick Prompt and Quick Exec files through their existing import APIs', async () => {
@@ -1502,7 +1660,7 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
     );
 
     const importFile = async (content: string, filename: string, expectedTitle: string) => {
-      fireEvent.click(screen.getByRole('button', { name: 'Importer' }));
+      chooseAutomationAction('Importer');
       const file = new File([content], filename, { type: 'application/json' });
       Object.defineProperty(file, 'text', { value: vi.fn().mockResolvedValue(content) });
       await act(async () => {
@@ -1539,7 +1697,7 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
     const { container } = await wrap(
       <WorkflowsPage projects={[]} installedAgentTypes={[]} agentAccess={fullConfig} />,
     );
-    fireEvent.click(screen.getByRole('button', { name: 'Importer' }));
+    chooseAutomationAction('Importer');
     const input = container.querySelector<HTMLInputElement>('input[type="file"]')!;
 
     const invalidContent = JSON.stringify({ kind: 'kronn.unknown', item: {} });
@@ -1576,7 +1734,7 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
     const { container } = await wrap(
       <WorkflowsPage projects={[]} installedAgentTypes={[]} agentAccess={fullConfig} />,
     );
-    fireEvent.click(screen.getByRole('button', { name: 'Importer' }));
+    chooseAutomationAction('Importer');
     const content = JSON.stringify({
       kind: 'kronn.workflow',
       version: 3,

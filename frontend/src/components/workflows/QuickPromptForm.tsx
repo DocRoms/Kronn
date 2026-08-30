@@ -1,8 +1,10 @@
 import { useState, useRef, useEffect } from 'react';
 import { useT } from '../../lib/I18nContext';
 import { MarkdownEditor } from '../MarkdownComposerTools';
-import { AGENT_LABELS } from '../../lib/constants';
 import { config as configApi, ollama as ollamaApi } from '../../lib/api';
+import { AgentSwitchPicker } from '../AgentSwitchPicker';
+import type { AgentSwitchTarget } from '../AgentSwitchPicker';
+import { SearchableSelect } from '../SearchableSelect';
 import type {
   QuickPrompt,
   PromptVariable,
@@ -13,10 +15,9 @@ import type {
   AgentProfile,
   Directive,
   ModelTier,
+  ModelTiersConfig,
 } from '../../types/generated';
 import { Plus, Save, X, Check, Zap, UserCircle, FileText, ChevronRight } from 'lucide-react';
-
-const ALL_AGENTS: AgentType[] = ['ClaudeCode', 'Codex', 'GeminiCli', 'Kiro', 'Vibe', 'CopilotCli'];
 
 /** Extract {{variable}} names from a template string (includes {{var}} and {{#var}}) */
 function extractVars(template: string): string[] {
@@ -35,6 +36,8 @@ interface Props {
   profiles?: AgentProfile[];
   /** 0.8.5 — full directives catalog. Empty array hides the section. */
   directives?: Directive[];
+  agentChoices?: AgentSwitchTarget[];
+  modelTiers?: ModelTiersConfig | null;
   onSave: (req: CreateQuickPromptRequest) => Promise<void>;
   onCancel: () => void;
 }
@@ -45,6 +48,8 @@ export function QuickPromptForm({
   skills = [],
   profiles = [],
   directives = [],
+  agentChoices = [],
+  modelTiers,
   onSave,
   onCancel,
 }: Props) {
@@ -55,6 +60,7 @@ export function QuickPromptForm({
   const [template, setTemplate] = useState(editPrompt?.prompt_template ?? '');
   const [variables, setVariables] = useState<PromptVariable[]>(editPrompt?.variables ?? []);
   const [agent, setAgent] = useState<AgentType>(editPrompt?.agent ?? 'ClaudeCode');
+  const [connectionId, setConnectionId] = useState(editPrompt?.connection_id ?? '');
   const [projectId, setProjectId] = useState(editPrompt?.project_id ?? '');
   // 0.8.6 phase 4 — tier carried through across edits. New QPs start
   // with 'default' then the effect below replaces it with the user's
@@ -137,6 +143,7 @@ export function QuickPromptForm({
         prompt_template: template,
         variables,
         agent,
+        connection_id: connectionId || null,
         project_id: projectId || null,
         skill_ids: skillIds,
         profile_ids: profileIds,
@@ -154,6 +161,12 @@ export function QuickPromptForm({
   };
 
   const bindingCount = skillIds.length + profileIds.length + directiveIds.length;
+  const effectiveAgentChoices: AgentSwitchTarget[] = agentChoices.length > 0
+    ? agentChoices
+    : [{ agent, connectionId: connectionId || undefined }];
+  const selectedAgentChoice = effectiveAgentChoices.find(choice =>
+    choice.agent === agent && (choice.connectionId ?? '') === connectionId
+  );
 
   return (
     <div className="qp-form">
@@ -180,13 +193,50 @@ export function QuickPromptForm({
       </div>
 
       <div className="flex-row gap-4 mb-4">
-        <select className="wf-select" value={agent} onChange={e => setAgent(e.target.value as AgentType)}>
-          {ALL_AGENTS.map(a => <option key={a} value={a}>{AGENT_LABELS[a] ?? a}</option>)}
-        </select>
-        <select className="wf-select" value={projectId} onChange={e => setProjectId(e.target.value)}>
-          <option value="">{t('wiz.noProject')}</option>
-          {projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
-        </select>
+        <div className="flex-1">
+          <label className="wf-label">{t('disc.agent')}</label>
+          <AgentSwitchPicker
+            currentAgent={agent}
+            availableAgents={effectiveAgentChoices.map(choice => choice.agent)}
+            currentConnectionId={connectionId || undefined}
+            currentTargetLabel={selectedAgentChoice?.label}
+            availableTargets={effectiveAgentChoices}
+            currentTier={tier}
+            onTargetSelectionChange={async (choice, nextTier) => {
+              setAgent(choice.agent);
+              setConnectionId(choice.connectionId ?? '');
+              setTier(nextTier);
+              setModel('');
+            }}
+            tierLabels={{
+              economy: t('disc.tier.economy'),
+              default: t('disc.tier.default'),
+              reasoning: t('disc.tier.reasoning'),
+            }}
+            modelTiers={modelTiers}
+            defaultModelLabel={t('config.defaultModel')}
+            title={t('disc.switchAgentAndTier')}
+            ariaLabel={t('disc.switchAgentAndTier')}
+          />
+        </div>
+        <div className="flex-1">
+          <label className="wf-label">{t('disc.project')}</label>
+          <SearchableSelect
+            value={projectId}
+            options={projects.map(project => ({
+              value: project.id,
+              label: project.name,
+              keywords: project.path,
+              description: project.path,
+            }))}
+            onChange={setProjectId}
+            label={t('disc.project')}
+            placeholder={t('disc.searchProjects')}
+            emptyLabel={t('disc.noMatchingProjects')}
+            clearLabel={t('disc.noProject')}
+            testId="qp-project-picker"
+          />
+        </div>
       </div>
 
       {/* 0.8.10 — optional explicit model, wins over the tier at run time.

@@ -5,12 +5,13 @@ import type { SetupStatus } from './types/generated';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { UpdateBanner } from './components/UpdateBanner';
 import { BackendStatus } from './components/BackendStatus';
-import { standaloneLivePageId } from './lib/live-page-navigation';
+import { standaloneLivePageId, standaloneLivePageMosaic } from './lib/live-page-navigation';
 import './App.css';
 
 const SetupWizard = lazy(() => import('./pages/SetupWizard').then(m => ({ default: m.SetupWizard })));
 const Dashboard = lazy(() => import('./pages/Dashboard').then(m => ({ default: m.Dashboard })));
 const StandaloneLivePage = lazy(() => import('./pages/StandaloneLivePage').then(m => ({ default: m.StandaloneLivePage })));
+const StandaloneLivePageMosaic = lazy(() => import('./pages/StandaloneLivePageMosaic').then(m => ({ default: m.StandaloneLivePageMosaic })));
 
 export function App() {
   const [setupStatus, setSetupStatus] = useState<SetupStatus | null>(null);
@@ -125,6 +126,20 @@ export function App() {
               // Re-fetch status to get fresh state with is_first_run=false
               setupApi.getStatus().then(setSetupStatus).catch(e => console.warn('Setup status refresh failed:', e));
             }}
+          />
+        </Suspense>
+      </ErrorBoundary>
+    );
+  }
+
+  const standaloneMosaic = standaloneLivePageMosaic(window.location.hash);
+  if (standaloneMosaic) {
+    return (
+      <ErrorBoundary>
+        <Suspense fallback={<LoadingScreen />}>
+          <StandaloneLivePageMosaic
+            pageIds={standaloneMosaic.pageIds}
+            layout={standaloneMosaic.layout}
           />
         </Suspense>
       </ErrorBoundary>

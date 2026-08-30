@@ -384,6 +384,7 @@ describe('api.discussions (rest)', () => {
     await expect(discussions.uploadContextFile('d-1', new File([''], 'big.har'))).rejects.toThrow(/413/);
   });
   it('deleteLastAgentMessages', async () => { await exec(discussions.deleteLastAgentMessages('d-1'), 'DELETE', '/discussions/d-1/messages/last'); });
+  it('deleteMessage', async () => { await exec(discussions.deleteMessage('d/1', 'm/1'), 'DELETE', '/discussions/d%2F1/messages/m%2F1'); });
   it('editLastUserMessage', async () => {
     const b = await exec(discussions.editLastUserMessage('d-1', 'new text'), 'PATCH', '/discussions/d-1/messages/last');
     expect(b).toEqual({ content: 'new text' });
@@ -474,6 +475,7 @@ describe('api.workflows (rest)', () => {
     );
   });
   it('deleteBatchRun', async () => { await exec(workflows.deleteBatchRun('r-1'), 'DELETE', '/workflow-runs/r-1'); });
+  it('retryBatchRun', async () => { await exec(workflows.retryBatchRun('r-1'), 'POST', '/workflow-runs/r-1/retry'); });
 });
 
 // ════════════════════════════════════════════════════════════════════════════

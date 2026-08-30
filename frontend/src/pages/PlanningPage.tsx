@@ -1,27 +1,32 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Archive,
   Check,
-  ChevronDown,
   ChevronRight,
   Circle,
+  Clock3,
   Filter,
+  Folder,
   GitBranch,
-  GripVertical,
   History,
   Link2,
   Loader2,
   Plus,
-  Search,
   Target,
   X,
 } from 'lucide-react';
 import { planning } from '../lib/api';
 import { queueDiscussionWorkspaceTarget } from '../lib/discussion-navigation';
 import { useT } from '../lib/I18nContext';
+import { useIsMobile } from '../hooks/useMediaQuery';
 import { userError } from '../lib/userError';
 import { CopyIdPill } from '../components/CopyIdPill';
 import { ContextHelp } from '../components/ContextHelp';
+import { CollectionShell } from '../components/CollectionShell';
+import { CollectionFavoritesHeader } from '../components/CollectionFavoritesHeader';
+import { CollectionRowActions } from '../components/CollectionRowActions';
+import { CollectionSidebarFooter } from '../components/CollectionSidebarFooter';
+import { usePersistentIdSet } from '../hooks/usePersistentIdSet';
 import type { ToastFn } from '../hooks/useToast';
 import type {
   Discussion,
@@ -31,6 +36,7 @@ import type {
   PlanningTaskSummary,
   Project,
 } from '../types/generated';
+import './DiscussionsPage.css';
 import './PlanningPage.css';
 
 interface Props {
@@ -43,6 +49,25 @@ interface Props {
 
 const PRIORITIES: PlanningTaskPriority[] = ['critical', 'high', 'normal', 'low'];
 const ACTIVE_STATUSES: PlanningTaskStatus[] = ['idea', 'todo', 'in_progress', 'blocked'];
+const PLANNING_COLLAPSED_STORAGE_KEY = 'kronn:planningCollapsedSections';
+
+function readCollapsedPlanningSections(): Set<string> {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(PLANNING_COLLAPSED_STORAGE_KEY) ?? '[]') as unknown;
+    return Array.isArray(parsed)
+      ? new Set(parsed.filter((section): section is string => typeof section === 'string'))
+      : new Set();
+  } catch {
+    return new Set();
+  }
+}
+
+function byMostRecentlyUpdated(
+  left: Pick<PlanningTaskSummary, 'updated_at'>,
+  right: Pick<PlanningTaskSummary, 'updated_at'>,
+): number {
+  return Date.parse(right.updated_at) - Date.parse(left.updated_at);
+}
 
 function titleTokens(value: string): Set<string> {
   return new Set(
@@ -62,31 +87,68 @@ export function PlanningPage({
   onNavigateDiscussion,
 }: Props) {
   const { t } = useT();
+  const isMobile = useIsMobile();
+  const [sidebarOpen, setSidebarOpen] = useState(true);
   const [tasks, setTasks] = useState<PlanningTaskSummary[]>([]);
-  const [nextCursor, setNextCursor] = useState<number | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [loadingMore, setLoadingMore] = useState(false);
   const [search, setSearch] = useState('');
   const [status, setStatus] = useState<PlanningTaskStatus | ''>('');
   const [priorityFilter, setPriorityFilter] = useState<PlanningTaskPriority | ''>('');
   const [projectId, setProjectId] = useState('');
   const [withDiscussion, setWithDiscussion] = useState<'' | 'yes' | 'no'>('');
   const [tag, setTag] = useState('');
-  const [showCompleted, setShowCompleted] = useState(false);
   const [quickTitle, setQuickTitle] = useState('');
   const [quickPriority, setQuickPriority] = useState<PlanningTaskPriority>('normal');
+  const [createModalOpen, setCreateModalOpen] = useState(false);
   const [creating, setCreating] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(initialSelectedTaskId ?? null);
   const [detail, setDetail] = useState<PlanningTaskDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(Boolean(initialSelectedTaskId));
   const [saving, setSaving] = useState(false);
-  const [draggedId, setDraggedId] = useState<string | null>(null);
   const [filtersOpen, setFiltersOpen] = useState(false);
+  const [tasksLoaded, setTasksLoaded] = useState(false);
+  const [collapsedSections, setCollapsedSections] = useState<Set<string>>(readCollapsedPlanningSections);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const createTriggerRef = useRef<HTMLButtonElement>(null);
+  const createTitleRef = useRef<HTMLInputElement>(null);
+  const createModalRef = useRef<HTMLElement>(null);
+  const createWasOpenRef = useRef(false);
+  const creatingRef = useRef(false);
+  const taskIds = useMemo(() => tasks.map(task => task.id), [tasks]);
+  // The Planning endpoint returns one filtered, paginated page. Its IDs are
+  // useful for rendering but cannot prove that an omitted favorite is stale.
+  const { ids: favoriteIds, toggle: toggleFavorite } = usePersistentIdSet(
+    'kronn:collection-favorites:planning',
+    taskIds,
+    tasksLoaded,
+    false,
+  );
+  const activeFilterCount = [status, priorityFilter, projectId, withDiscussion, tag]
+    .filter(Boolean).length;
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(PLANNING_COLLAPSED_STORAGE_KEY, JSON.stringify([...collapsedSections]));
+    } catch {
+      // localStorage may be unavailable in private/restricted browser modes.
+    }
+  }, [collapsedSections]);
+
+  const isSectionCollapsed = useCallback(
+    (section: string) => !search.trim() && collapsedSections.has(section),
+    [collapsedSections, search],
+  );
+
+  const toggleSection = useCallback((section: string) => {
+    setCollapsedSections(previous => {
+      const next = new Set(previous);
+      if (next.has(section)) next.delete(section);
+      else next.add(section);
+      return next;
+    });
+  }, []);
 
   const fetchTasks = useCallback(async (cursor?: number) => {
     const append = cursor !== undefined;
-    if (append) setLoadingMore(true);
-    else setLoading(true);
     try {
       const result = await planning.list({
         search: search.trim() || undefined,
@@ -99,12 +161,9 @@ export function PlanningPage({
         limit: 100,
       });
       setTasks(previous => append ? [...previous, ...result.items] : result.items);
-      setNextCursor(result.next_cursor);
+      if (!append) setTasksLoaded(true);
     } catch (cause) {
       toast(userError(cause), 'error');
-    } finally {
-      setLoading(false);
-      setLoadingMore(false);
     }
   }, [priorityFilter, projectId, search, status, tag, toast, withDiscussion]);
 
@@ -120,12 +179,30 @@ export function PlanningPage({
       .then(item => {
         if (!cancelled) setDetail(item);
       })
-      .catch(cause => toast(userError(cause), 'error'))
+      .catch(cause => {
+        if (cancelled) return;
+        setSelectedId(null);
+        setDetail(null);
+        setDetailLoading(false);
+        toast(userError(cause), 'error');
+      })
       .finally(() => {
         if (!cancelled) setDetailLoading(false);
       });
     return () => { cancelled = true; };
   }, [selectedId, toast]);
+
+  useEffect(() => {
+    if (createModalOpen) {
+      createWasOpenRef.current = true;
+      createTitleRef.current?.focus();
+      return;
+    }
+    if (createWasOpenRef.current) {
+      createWasOpenRef.current = false;
+      createTriggerRef.current?.focus();
+    }
+  }, [createModalOpen]);
 
   const tags = useMemo(
     () => [...new Set(tasks.flatMap(task => task.tags))].sort((a, b) => a.localeCompare(b)),
@@ -157,17 +234,46 @@ export function PlanningPage({
 
   const createQuickTask = async () => {
     const title = quickTitle.trim();
-    if (!title || creating) return;
+    if (!title || creatingRef.current) return;
+    creatingRef.current = true;
     setCreating(true);
     try {
       const created = await planning.create({ title, priority: quickPriority, status: 'idea' });
       setTasks(previous => [...previous, created]);
       setQuickTitle('');
+      setCreateModalOpen(false);
       toast(t('planning.created'), 'success');
     } catch (cause) {
       toast(userError(cause), 'error');
     } finally {
+      creatingRef.current = false;
       setCreating(false);
+    }
+  };
+
+  const closeCreateModal = () => {
+    if (!creatingRef.current) setCreateModalOpen(false);
+  };
+
+  const handleCreateModalKeyDown = (event: React.KeyboardEvent<HTMLElement>) => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      closeCreateModal();
+      return;
+    }
+    if (event.key !== 'Tab') return;
+    const focusable = [...(createModalRef.current?.querySelectorAll<HTMLElement>(
+      'button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])',
+    ) ?? [])];
+    if (focusable.length === 0) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
     }
   };
 
@@ -181,101 +287,41 @@ export function PlanningPage({
     return updated;
   };
 
-  const moveTask = async (
-    taskId: string,
-    priority: PlanningTaskPriority,
-    beforeTaskId?: string,
-  ) => {
-    const band = tasks
-      .filter(task => task.priority === priority && task.id !== taskId)
-      .sort((a, b) => a.rank - b.rank);
-    const beforeIndex = beforeTaskId ? band.findIndex(task => task.id === beforeTaskId) : band.length;
-    const previous = beforeIndex > 0 ? band[beforeIndex - 1] : undefined;
-    const next = beforeIndex >= 0 && beforeIndex < band.length ? band[beforeIndex] : undefined;
-    let rank = 1024;
-    if (previous && next) rank = Math.floor((previous.rank + next.rank) / 2);
-    else if (previous) rank = previous.rank + 1024;
-    else if (next) rank = next.rank - 1024;
+  const archiveSelectedTasks = async (selected: PlanningTaskSummary[]) => {
+    if (selected.length === 0 || !confirm(t('collection.archiveConfirm', selected.length))) return;
     try {
-      await updateTask(taskId, { priority, rank });
-      // The backend atomically rebalances the whole priority band so ranks
-      // never collapse after repeated midpoint inserts. Reload the compact
-      // list to keep every sibling's local rank aligned with that rebalance.
-      await fetchTasks();
+      const archived = await Promise.all(selected.map(task => planning.update(task.id, { status: 'archived' })));
+      const archivedIds = new Set(archived.map(task => task.id));
+      setTasks(previous => previous.map(task => archived.find(item => item.id === task.id) ?? task));
+      if (selectedId && archivedIds.has(selectedId)) {
+        setSelectedId(null);
+        setDetail(null);
+      }
+      toast(t('collection.archiveSuccess', selected.length), 'success');
     } catch (cause) {
-      toast(userError(cause), 'error');
-      await fetchTasks();
+      toast(t('collection.deleteError', userError(cause)), 'error');
+      throw cause;
     }
   };
 
-  const renderCard = (task: PlanningTaskSummary) => (
-    <article
-      key={task.id}
-      className="planning-card"
-      data-selected={selectedId === task.id}
-      data-status={task.status}
-      draggable
-      onDragStart={() => setDraggedId(task.id)}
-      onDragEnd={() => setDraggedId(null)}
-      onDragOver={event => event.preventDefault()}
-      onDrop={event => {
-        event.preventDefault();
-        if (draggedId && draggedId !== task.id) {
-          void moveTask(draggedId, task.priority, task.id);
-        }
-      }}
-      onClick={() => selectTask(task.id)}
-    >
-      <GripVertical size={13} className="planning-grip" />
-      <button
-        type="button"
-        className="planning-check"
-        onClick={event => {
-          event.stopPropagation();
-          void updateTask(task.id, { status: task.status === 'done' ? 'todo' : 'done' });
-        }}
-        aria-label={task.status === 'done' ? t('planning.markTodo') : t('planning.markDone')}
-      >
-        {task.status === 'done' ? <Check size={13} /> : <Circle size={13} />}
-      </button>
-      <div className="planning-card-main">
-        {task.parent_reference && (
-          <div className="planning-card-parent">
-            {task.parent_reference} · {task.parent_title}
-          </div>
-        )}
-        <div className="planning-card-title">{task.title}</div>
-        <div className="planning-card-meta">
-          <CopyIdPill
-            id={task.id}
-            label={task.reference}
-            title={t('planning.copyTaskId', task.reference)}
-          />
-          <span className="planning-status" data-status={task.status}>
-            {t(`planning.status.${task.status}`)}
-          </span>
-          {task.total_subtasks > 0 && (
-            <span>{task.completed_subtasks}/{task.total_subtasks}</span>
-          )}
-          {task.project_ids.map(id => (
-            <span key={id}>{projects.find(project => project.id === id)?.name ?? id.slice(0, 8)}</span>
-          ))}
-          {task.discussion_ids.length > 0 && (
-            <span><Link2 size={10} /> {task.discussion_ids.length}</span>
-          )}
-          {task.tags.map(value => <span className="planning-tag" key={value}>{value}</span>)}
-        </div>
-      </div>
-      <ChevronRight size={14} className="planning-card-chevron" />
-    </article>
-  );
-
   return (
     <div className="planning-page">
-      <header className="planning-header">
-        <div>
-          <div className="kr-context-help-title-row">
-            <h1><Target size={20} /> {t('planning.title')}</h1>
+      <div className="planning-shell">
+        <CollectionShell<PlanningTaskSummary>
+          ariaLabel={t('planning.title')}
+          title={<><Target size={17} /> {t('planning.title')}</>}
+          titleCount={tasks.length}
+          headerActions={<>
+            <button
+              ref={createTriggerRef}
+              type="button"
+              className="collection-shell-icon collection-shell-primary-action"
+              onClick={() => setCreateModalOpen(true)}
+              aria-label={t('planning.quickCreate')}
+              title={t('planning.quickCreate')}
+            >
+              <Plus size={16} />
+            </button>
             <ContextHelp title={t('contextHelp.planning.title')}>
               <p>{t('contextHelp.planning.intro')}</p>
               <ul>
@@ -286,269 +332,411 @@ export function PlanningPage({
               </ul>
               <p className="kr-context-help-agent-note">{t('contextHelp.planning.mcp')}</p>
             </ContextHelp>
-          </div>
-          <p>{t('planning.subtitle')}</p>
-        </div>
-        <div className="planning-summary">
-          <span><strong>{activeTasks.length}</strong>{t('planning.activeCount')}</span>
-          <span><strong>{completedTasks.length}</strong>{t('planning.doneCount')}</span>
-        </div>
-      </header>
-
-      <div className="planning-toolbar">
-        <label className="planning-search">
-          <Search size={14} />
-          <input
-            value={search}
-            onChange={event => setSearch(event.target.value)}
-            placeholder={t('planning.search')}
-          />
-        </label>
-        <button
-          type="button"
-          className="btn btn-sm"
-          data-active={filtersOpen}
-          onClick={() => setFiltersOpen(value => !value)}
-        >
-          <Filter size={14} /> {t('planning.filters')}
-        </button>
-        <div className="planning-create">
-          <input
-            value={quickTitle}
-            onChange={event => setQuickTitle(event.target.value)}
-            onKeyDown={event => {
-              if (event.key === 'Enter') void createQuickTask();
-            }}
-            placeholder={t('planning.newIdea')}
-            maxLength={240}
-          />
-          <select
-            value={quickPriority}
-            onChange={event => setQuickPriority(event.target.value as PlanningTaskPriority)}
-          >
-            {PRIORITIES.map(value => (
-              <option key={value} value={value}>{t(`planning.priority.${value}`)}</option>
-            ))}
-          </select>
-          <button type="button" onClick={() => void createQuickTask()} disabled={!quickTitle.trim() || creating}>
-            {creating ? <Loader2 size={14} className="spin" /> : <Plus size={14} />}
-          </button>
-        </div>
-      </div>
-      {quickTitle.trim() && duplicateCandidates.length > 0 && (
-        <div className="planning-duplicates">
-          <span>{t('planning.possibleDuplicates')}</span>
-          {duplicateCandidates.map(task => (
-            <button type="button" key={task.id} onClick={() => selectTask(task.id)}>
-              {task.reference} · {task.title}
-            </button>
-          ))}
-        </div>
-      )}
-
-      {filtersOpen && (
-        <div className="planning-filters">
-          <select value={status} onChange={event => setStatus(event.target.value as PlanningTaskStatus | '')}>
-            <option value="">{t('planning.allStatuses')}</option>
-            {(['idea', 'todo', 'in_progress', 'blocked', 'done', 'archived'] as PlanningTaskStatus[])
-              .map(value => <option key={value} value={value}>{t(`planning.status.${value}`)}</option>)}
-          </select>
-          <select value={projectId} onChange={event => setProjectId(event.target.value)}>
-            <option value="">{t('planning.allProjects')}</option>
-            {projects.map(project => <option key={project.id} value={project.id}>{project.name}</option>)}
-          </select>
-          <select
-            value={priorityFilter}
-            onChange={event => setPriorityFilter(event.target.value as PlanningTaskPriority | '')}
-          >
-            <option value="">{t('planning.allPriorities')}</option>
-            {PRIORITIES.map(value => (
-              <option key={value} value={value}>{t(`planning.priority.${value}`)}</option>
-            ))}
-          </select>
-          <select value={withDiscussion} onChange={event => setWithDiscussion(event.target.value as typeof withDiscussion)}>
-            <option value="">{t('planning.allLinks')}</option>
-            <option value="yes">{t('planning.withDiscussion')}</option>
-            <option value="no">{t('planning.withoutDiscussion')}</option>
-          </select>
-          {tags.length > 0 && (
-            <select value={tag} onChange={event => setTag(event.target.value)}>
-              <option value="">{t('planning.allTags')}</option>
-              {tags.map(value => <option key={value} value={value}>{value}</option>)}
-            </select>
-          )}
-        </div>
-      )}
-
-      <div className="planning-workspace">
-        <main className="planning-backlog">
-          {loading && <div className="planning-state"><Loader2 size={17} className="spin" /> {t('common.loading')}</div>}
-          {!loading && activeTasks.length === 0 && (
-            <div className="planning-state"><Target size={24} /> {t('planning.emptyBacklog')}</div>
-          )}
-          {!loading && PRIORITIES.map(priority => {
-            const items = activeTasks
-              .filter(task => task.priority === priority)
-              .sort((a, b) => a.rank - b.rank);
-            return (
-              <section
-                className="planning-band"
-                data-priority={priority}
-                key={priority}
-                onDragOver={event => event.preventDefault()}
-                onDrop={event => {
-                  event.preventDefault();
-                  if (draggedId) void moveTask(draggedId, priority);
-                }}
-              >
-                <header>
-                  <span className="planning-priority-mark" />
-                  <h2>{t(`planning.priority.${priority}`)}</h2>
-                  <span>{items.length}</span>
-                </header>
-                <div className="planning-band-list">
-                  {items.map(renderCard)}
-                  {items.length === 0 && <div className="planning-band-empty">{t('planning.dropHere')}</div>}
-                </div>
-              </section>
-            );
-          })}
-
-          {completedTasks.length > 0 && (
-            <section className="planning-completed">
-              <button type="button" onClick={() => setShowCompleted(value => !value)}>
-                {showCompleted ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                <Check size={14} />
-                {t('planning.completed')} · {completedTasks.length}
-              </button>
-              {showCompleted && <div>{completedTasks.map(renderCard)}</div>}
-            </section>
-          )}
-          {nextCursor !== null && (
-            <button
+          </>}
+          items={tasks}
+          getId={task => task.id}
+          getLabel={task => `${task.title} ${task.reference} ${task.tags.join(' ')}`}
+          persistence={{
+            query: search,
+            onQueryChange: setSearch,
+            favoritesOnly: false,
+            onFavoritesOnlyChange: () => {},
+          }}
+          selectedId={selectedId}
+          onSelect={id => selectTask(id)}
+          selectedIds={selectedIds}
+          onSelectedIdsChange={setSelectedIds}
+          actions={[{
+            id: 'archive',
+            label: t('collection.archiveSelected'),
+            icon: <Archive size={15} />,
+            danger: true,
+            disabled: selected => selected.length === 0,
+            onSelect: archiveSelectedTasks,
+          }]}
+          isMobile={isMobile}
+          sidebarOpen={sidebarOpen}
+          onSidebarOpenChange={setSidebarOpen}
+          globalSearchShortcut
+          showSearchClear
+          labels={{
+            search: t('planning.search'),
+            favorites: t('collection.favorites'),
+            clearFilters: t('collection.clearFilters'),
+            moreActions: t('collection.moreActions'),
+            openCollection: t('collection.openCollection'),
+            closeCollection: t('collection.closeCollection'),
+            selectItem: t('collection.selectItem'),
+            selectMultiple: t('collection.selectMultiple'),
+            cancelSelection: t('collection.cancelSelection'),
+            selectedCount: count => t('collection.selectedCount', count),
+          }}
+          slots={{
+            sidebarHeaderEnd: <button
               type="button"
-              className="btn planning-load-more"
-              onClick={() => void fetchTasks(nextCursor)}
-              disabled={loadingMore}
+              className="collection-shell-search-action collection-shell-search-action-icon"
+              data-active={filtersOpen || activeFilterCount > 0}
+              onClick={() => setFiltersOpen(value => !value)}
+              aria-expanded={filtersOpen}
+              aria-controls={filtersOpen ? 'planning-search-options' : undefined}
+              aria-label={t('planning.filters')}
+              title={t('planning.filters')}
             >
-              {loadingMore ? <Loader2 size={14} className="spin" /> : t('planning.loadMore')}
-            </button>
-          )}
-        </main>
+              <Filter size={14} aria-hidden="true" />
+            </button>,
+            afterSidebarHeader: <>
+              {filtersOpen && <div id="planning-search-options" className="collection-shell-search-options planning-filters">
+                <select value={status} onChange={event => setStatus(event.target.value as PlanningTaskStatus | '')} aria-label={t('planning.allStatuses')}>
+                  <option value="">{t('planning.allStatuses')}</option>
+                  {(['idea', 'todo', 'in_progress', 'blocked', 'done', 'archived'] as PlanningTaskStatus[]).map(value => <option key={value} value={value}>{t(`planning.status.${value}`)}</option>)}
+                </select>
+                <select value={projectId} onChange={event => setProjectId(event.target.value)} aria-label={t('planning.allProjects')}>
+                  <option value="">{t('planning.allProjects')}</option>
+                  {projects.map(project => <option key={project.id} value={project.id}>{project.name}</option>)}
+                </select>
+                <select value={priorityFilter} onChange={event => setPriorityFilter(event.target.value as PlanningTaskPriority | '')} aria-label={t('planning.allPriorities')}>
+                  <option value="">{t('planning.allPriorities')}</option>
+                  {PRIORITIES.map(value => <option key={value} value={value}>{t(`planning.priority.${value}`)}</option>)}
+                </select>
+                <select value={withDiscussion} onChange={event => setWithDiscussion(event.target.value as typeof withDiscussion)} aria-label={t('planning.allLinks')}>
+                  <option value="">{t('planning.allLinks')}</option><option value="yes">{t('planning.withDiscussion')}</option><option value="no">{t('planning.withoutDiscussion')}</option>
+                </select>
+                {tags.length > 0 && <select value={tag} onChange={event => setTag(event.target.value)} aria-label={t('planning.allTags')}>
+                  <option value="">{t('planning.allTags')}</option>{tags.map(value => <option key={value} value={value}>{value}</option>)}
+                </select>}
+              </div>}
+              <div className="planning-sidebar-summary">
+                <span><strong>{activeTasks.length}</strong>{t('planning.activeCount')}</span>
+                <span><strong>{completedTasks.length}</strong>{t('planning.doneCount')}</span>
+              </div>
+            </>,
+            renderList: ({
+              visibleItems,
+              canMultiSelect,
+              isMultiSelected,
+              toggleMultiSelection,
+              getRowProps,
+            }) => {
+              const favorites = canMultiSelect
+                ? []
+                : visibleItems.filter(task => favoriteIds.has(task.id));
+              const recent = canMultiSelect
+                ? []
+                : visibleItems
+                  .filter(task => !favoriteIds.has(task.id))
+                  .sort(byMostRecentlyUpdated)
+                  .slice(0, 10);
+              const projectNames = new Map(projects.map(project => [project.id, project.name]));
+              const projectIds = new Set(visibleItems.flatMap(task => task.project_ids));
+              const projectGroups = [...projectIds]
+                .map(id => ({
+                  id,
+                  label: projectNames.get(id) ?? id.slice(0, 8),
+                  tasks: visibleItems.filter(task => task.project_ids.includes(id)),
+                }))
+                .sort((left, right) => left.label.localeCompare(right.label));
+              const generalTasks = visibleItems.filter(task => task.project_ids.length === 0);
+              const collapsedInCurrentMode = (section: string) => (
+                !canMultiSelect && isSectionCollapsed(section)
+              );
 
-        {(selectedId || detailLoading) && (
-          <aside className="planning-detail" aria-label={t('planning.taskActions')}>
-            <header>
-              {detail && (
-                <CopyIdPill
-                  id={detail.id}
-                  label={detail.reference}
-                  title={t('planning.copyTaskId', detail.reference)}
-                />
-              )}
-              <button type="button" className="planning-detail-close" onClick={() => {
-                setSelectedId(null);
-                setDetail(null);
-                setDetailLoading(false);
-              }} aria-label={t('common.close')}><X size={16} /></button>
-            </header>
-            {detailLoading && <div className="planning-state"><Loader2 size={16} className="spin" /></div>}
-            {detail && (
-              <PlanningDetailForm
-                key={detail.id}
-                task={detail}
-                projects={projects}
-                discussions={discussions}
-                saving={saving}
-                onNavigateDiscussion={onNavigateDiscussion}
-                onOpenTask={selectTask}
-                onToggleDod={async (dodId, completed) => {
-                  try {
-                    const refreshed = await planning.updateDod(detail.id, dodId, { completed });
-                    setDetail(refreshed);
-                    setTasks(previous => previous.map(item => item.id === refreshed.id ? refreshed : item));
-                  } catch (cause) {
-                    toast(userError(cause), 'error');
-                    throw cause;
-                  }
-                }}
-                onAddBlocker={async blockerTaskId => {
-                  try {
-                    const refreshed = await planning.addBlocker(detail.id, {
-                      blocker_task_id: blockerTaskId,
-                    });
-                    setDetail(refreshed);
-                    setTasks(previous => previous.map(item => item.id === refreshed.id ? refreshed : item));
-                    toast(t('planning.blockerAdded'), 'success');
-                  } catch (cause) {
-                    toast(userError(cause), 'error');
-                    throw cause;
-                  }
-                }}
-                onRemoveBlocker={async blockerTaskId => {
-                  try {
-                    const refreshed = await planning.removeBlocker(detail.id, blockerTaskId);
-                    setDetail(refreshed);
-                    setTasks(previous => previous.map(item => item.id === refreshed.id ? refreshed : item));
-                    toast(t('planning.blockerRemoved'), 'success');
-                  } catch (cause) {
-                    toast(userError(cause), 'error');
-                    throw cause;
-                  }
-                }}
-                onLinkDiscussion={async discussionId => {
-                  try {
-                    await planning.linkDiscussion(detail.id, {
-                      discussion_id: discussionId,
-                      placement: 'active',
-                      is_primary: false,
-                    });
-                    const refreshed = await planning.get(detail.id);
-                    setDetail(refreshed);
-                    setTasks(previous => previous.map(item => item.id === refreshed.id ? refreshed : item));
-                    toast(t('planning.discussionLinked'), 'success');
-                  } catch (cause) {
-                    toast(userError(cause), 'error');
-                    throw cause;
-                  }
-                }}
-                onCreateSubtask={async title => {
-                  try {
-                    const created = await planning.create({
-                      title,
-                      status: 'todo',
-                      priority: detail.priority,
-                      parent_id: detail.id,
-                      project_ids: detail.project_ids,
-                    });
-                    const refreshed = await planning.get(detail.id);
-                    setDetail(refreshed);
-                    setTasks(previous => [
-                      ...previous.map(item => item.id === refreshed.id ? refreshed : item),
-                      created,
-                    ]);
-                    toast(t('planning.subtaskCreated'), 'success');
-                  } catch (cause) {
-                    toast(userError(cause), 'error');
-                    throw cause;
-                  }
-                }}
-                onSave={async patch => {
-                  setSaving(true);
-                  try {
-                    await updateTask(detail.id, patch);
-                    toast(t('planning.saved'), 'success');
-                  } catch (cause) {
-                    toast(userError(cause), 'error');
-                  } finally {
-                    setSaving(false);
-                  }
-                }}
-              />
-            )}
-          </aside>
-        )}
+              const row = (task: PlanningTaskSummary, keyPrefix: string) => {
+                const rowProps = getRowProps(task);
+                const multiSelected = isMultiSelected(task);
+                return <div className="disc-swipe-wrap planning-sidebar-row" key={`${keyPrefix}-${task.id}`}>
+                  <div className="disc-item" data-active={task.id === selectedId} data-selected={multiSelected} data-status={task.status}>
+                    {canMultiSelect && <input
+                      type="checkbox"
+                      aria-label={`${task.title} ${t('collection.selectItem')}`}
+                      checked={multiSelected}
+                      onChange={() => toggleMultiSelection(task.id)}
+                    />}
+                    <button type="button" {...rowProps} className={`${rowProps.className} disc-item-open`}>
+                      <span className="disc-item-content">
+                        {task.parent_reference && <span className="planning-sidebar-parent">{task.parent_reference} · {task.parent_title}</span>}
+                        <span className="disc-item-title"><span className="disc-item-title-text">{task.title}</span></span>
+                        <span className="disc-item-meta">
+                          <span className="planning-ref">{task.reference}</span>
+                          <span className="planning-status" data-status={task.status}>{t(`planning.status.${task.status}`)}</span>
+                          {task.total_subtasks > 0 && <span>{task.completed_subtasks}/{task.total_subtasks}</span>}
+                        </span>
+                      </span>
+                    </button>
+                    {!canMultiSelect && <CollectionRowActions
+                      itemName={task.title}
+                      favorite={{
+                        active: favoriteIds.has(task.id),
+                        onToggle: () => toggleFavorite(task.id),
+                        activeLabel: t('wf.unpin'),
+                        inactiveLabel: t('wf.pin'),
+                      }}
+                      menuLabel={t('collection.moreActions')}
+                      copyId={task.id}
+                      copyLabel={t('disc.copyId')}
+                      actions={task.status === 'archived' ? [] : [{
+                        id: 'archive',
+                        label: t('disc.archive'),
+                        icon: <Archive size={12} />,
+                        onSelect: () => archiveSelectedTasks([task]),
+                      }]}
+                    />}
+                  </div>
+                </div>;
+              };
+
+              const group = (key: string, label: string, groupTasks: PlanningTaskSummary[]) => {
+                if (groupTasks.length === 0) return null;
+                const collapsed = collapsedInCurrentMode(key);
+                return <div key={key} data-planning-group={key}>
+                  <button
+                    type="button"
+                    className="disc-group-btn"
+                    data-no-border="true"
+                    onClick={() => toggleSection(key)}
+                    aria-expanded={!collapsed}
+                  >
+                    <ChevronRight size={10} className="disc-chevron" data-expanded={!collapsed} />
+                    <Target size={10} />
+                    <span>{label}</span><span className="disc-group-count">{groupTasks.length}</span>
+                  </button>
+                  {!collapsed && groupTasks.map(task => row(task, key))}
+                </div>;
+              };
+
+              return <div className="disc-sidebar-list planning-sidebar-list">
+                {favorites.length > 0 && <div className="disc-sidebar-section disc-sidebar-favorites" data-expanded={!isSectionCollapsed('favorites')}>
+                  <CollectionFavoritesHeader
+                    label={t('disc.favorites')}
+                    count={favorites.length}
+                    expanded={!isSectionCollapsed('favorites')}
+                    onToggle={() => toggleSection('favorites')}
+                  />
+                  {!isSectionCollapsed('favorites') && favorites.map(task => row(task, 'favorite'))}
+                </div>}
+
+                {recent.length > 0 && <div className="disc-sidebar-section disc-sidebar-recent" data-expanded={!isSectionCollapsed('recent')}>
+                  <button type="button" className="disc-group-btn" data-no-border="true" onClick={() => toggleSection('recent')} aria-expanded={!isSectionCollapsed('recent')}>
+                    <ChevronRight size={10} className="disc-chevron" data-expanded={!isSectionCollapsed('recent')} />
+                    <Clock3 size={10} />
+                    <span>{t('disc.recent')}</span><span className="disc-group-count">{recent.length}</span>
+                  </button>
+                  {!isSectionCollapsed('recent') && recent.map(task => row(task, 'recent'))}
+                </div>}
+
+                {visibleItems.length > 0 && <div className="disc-sidebar-section disc-sidebar-projects" data-expanded={!collapsedInCurrentMode('projects')}>
+                  <button type="button" className="disc-group-btn" data-no-border="true" onClick={() => toggleSection('projects')} aria-expanded={!collapsedInCurrentMode('projects')}>
+                    <ChevronRight size={10} className="disc-chevron" data-expanded={!collapsedInCurrentMode('projects')} />
+                    <Folder size={10} />
+                    <span>{t('projects.title')}</span><span className="disc-group-count">{visibleItems.length}</span>
+                  </button>
+                  {!collapsedInCurrentMode('projects') && <div className="disc-project-tree">
+                    {group('general', t('disc.general'), generalTasks)}
+                    {projectGroups.map(project => group(`project:${project.id}`, project.label, project.tasks))}
+                  </div>}
+                </div>}
+
+                {visibleItems.length === 0 && <div className="disc-empty"><Target size={24} /> {t('planning.emptyBacklog')}</div>}
+              </div>;
+            },
+            sidebarFooter: <CollectionSidebarFooter
+              label={t('planning.sidebar.hint')}
+              navigateLabel={t('disc.sidebar.navigate')}
+              searchLabel={t('disc.sidebar.searchShortcut')}
+            />,
+            renderDetail: () => {
+              if (!selectedId && !detailLoading) {
+                return <div className="collection-shell-detail-empty-hint">{t('planning.selectHint')}</div>;
+              }
+              return (
+                <aside className="planning-detail" aria-label={t('planning.taskActions')}>
+                  <header className="collection-detail-header">
+                    {detail && (
+                      <CopyIdPill
+                        id={detail.id}
+                        label={detail.reference}
+                        title={t('planning.copyTaskId', detail.reference)}
+                      />
+                    )}
+                    <button type="button" className="planning-detail-close" onClick={() => {
+                      setSelectedId(null);
+                      setDetail(null);
+                      setDetailLoading(false);
+                    }} aria-label={t('common.close')}><X size={16} /></button>
+                  </header>
+                  {detailLoading && <div className="planning-state"><Loader2 size={16} className="spin" /></div>}
+                  {detail && (
+                    <PlanningDetailForm
+                      key={detail.id}
+                      task={detail}
+                      projects={projects}
+                      discussions={discussions}
+                      saving={saving}
+                      onNavigateDiscussion={onNavigateDiscussion}
+                      onOpenTask={selectTask}
+                      onToggleDod={async (dodId, completed) => {
+                        try {
+                          const refreshed = await planning.updateDod(detail.id, dodId, { completed });
+                          setDetail(refreshed);
+                          setTasks(previous => previous.map(item => item.id === refreshed.id ? refreshed : item));
+                        } catch (cause) {
+                          toast(userError(cause), 'error');
+                          throw cause;
+                        }
+                      }}
+                      onAddBlocker={async blockerTaskId => {
+                        try {
+                          const refreshed = await planning.addBlocker(detail.id, {
+                            blocker_task_id: blockerTaskId,
+                          });
+                          setDetail(refreshed);
+                          setTasks(previous => previous.map(item => item.id === refreshed.id ? refreshed : item));
+                          toast(t('planning.blockerAdded'), 'success');
+                        } catch (cause) {
+                          toast(userError(cause), 'error');
+                          throw cause;
+                        }
+                      }}
+                      onRemoveBlocker={async blockerTaskId => {
+                        try {
+                          const refreshed = await planning.removeBlocker(detail.id, blockerTaskId);
+                          setDetail(refreshed);
+                          setTasks(previous => previous.map(item => item.id === refreshed.id ? refreshed : item));
+                          toast(t('planning.blockerRemoved'), 'success');
+                        } catch (cause) {
+                          toast(userError(cause), 'error');
+                          throw cause;
+                        }
+                      }}
+                      onLinkDiscussion={async discussionId => {
+                        try {
+                          await planning.linkDiscussion(detail.id, {
+                            discussion_id: discussionId,
+                            placement: 'active',
+                            is_primary: false,
+                          });
+                          const refreshed = await planning.get(detail.id);
+                          setDetail(refreshed);
+                          setTasks(previous => previous.map(item => item.id === refreshed.id ? refreshed : item));
+                          toast(t('planning.discussionLinked'), 'success');
+                        } catch (cause) {
+                          toast(userError(cause), 'error');
+                          throw cause;
+                        }
+                      }}
+                      onCreateSubtask={async title => {
+                        try {
+                          const created = await planning.create({
+                            title,
+                            status: 'todo',
+                            priority: detail.priority,
+                            parent_id: detail.id,
+                            project_ids: detail.project_ids,
+                          });
+                          const refreshed = await planning.get(detail.id);
+                          setDetail(refreshed);
+                          setTasks(previous => [
+                            ...previous.map(item => item.id === refreshed.id ? refreshed : item),
+                            created,
+                          ]);
+                          toast(t('planning.subtaskCreated'), 'success');
+                        } catch (cause) {
+                          toast(userError(cause), 'error');
+                          throw cause;
+                        }
+                      }}
+                      onSave={async patch => {
+                        setSaving(true);
+                        try {
+                          await updateTask(detail.id, patch);
+                          toast(t('planning.saved'), 'success');
+                        } catch (cause) {
+                          toast(userError(cause), 'error');
+                        } finally {
+                          setSaving(false);
+                        }
+                      }}
+                    />
+                  )}
+                </aside>
+              );
+            },
+          }}
+        />
       </div>
+      {createModalOpen && (
+        <div
+          className="planning-create-modal-backdrop"
+          role="presentation"
+          onMouseDown={event => {
+            if (event.target === event.currentTarget) closeCreateModal();
+          }}
+        >
+          <section
+            ref={createModalRef}
+            className="planning-create-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="planning-create-modal-title"
+            aria-describedby="planning-create-modal-hint"
+            onKeyDown={handleCreateModalKeyDown}
+          >
+            <header className="planning-create-modal-header">
+              <div className="planning-create-modal-heading">
+                <span className="planning-create-modal-icon" aria-hidden="true"><Target size={16} /></span>
+                <span>
+                  <strong id="planning-create-modal-title">{t('planning.createTitle')}</strong>
+                  <small id="planning-create-modal-hint">{t('planning.createHint')}</small>
+                </span>
+              </div>
+              <button
+                type="button"
+                className="planning-create-modal-close"
+                onClick={closeCreateModal}
+                disabled={creating}
+                aria-label={t('common.close')}
+              >
+                <X size={16} />
+              </button>
+            </header>
+            <form onSubmit={event => { event.preventDefault(); void createQuickTask(); }}>
+              <div className="planning-create-modal-body">
+                <label htmlFor="planning-create-title">{t('planning.taskTitle')}</label>
+                <input
+                  ref={createTitleRef}
+                  id="planning-create-title"
+                  value={quickTitle}
+                  onChange={event => setQuickTitle(event.target.value)}
+                  placeholder={t('planning.newIdea')}
+                  maxLength={240}
+                  required
+                />
+                <label htmlFor="planning-create-priority">{t('planning.priorityField')}</label>
+                <select
+                  id="planning-create-priority"
+                  value={quickPriority}
+                  onChange={event => setQuickPriority(event.target.value as PlanningTaskPriority)}
+                >
+                  {PRIORITIES.map(value => <option key={value} value={value}>{t(`planning.priority.${value}`)}</option>)}
+                </select>
+                {quickTitle.trim() && duplicateCandidates.length > 0 && <div className="planning-duplicates">
+                  <span>{t('planning.possibleDuplicates')}</span>
+                  {duplicateCandidates.map(task => <button type="button" key={task.id} onClick={() => {
+                    selectTask(task.id);
+                    setCreateModalOpen(false);
+                  }}>{task.reference} · {task.title}</button>)}
+                </div>}
+              </div>
+              <footer className="planning-create-modal-footer">
+                <button type="button" className="btn btn-ghost" onClick={closeCreateModal} disabled={creating}>{t('common.cancel')}</button>
+                <button type="submit" className="planning-create-modal-submit" disabled={!quickTitle.trim() || creating}>
+                  {creating ? <Loader2 size={15} className="spin" /> : <Plus size={15} />}
+                  {t('planning.createAction')}
+                </button>
+              </footer>
+            </form>
+          </section>
+        </div>
+      )}
     </div>
   );
 }

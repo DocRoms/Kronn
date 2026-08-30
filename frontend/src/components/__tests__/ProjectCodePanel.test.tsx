@@ -12,12 +12,13 @@ vi.mock('../../lib/I18nContext', () => ({
 // The stub exposes the KT-75 callback so the panel's tab can be driven without
 // mounting the real blame gutter.
 vi.mock('../SourceCodeViewer', () => ({
-  SourceCodeViewer: ({ projectId, onOpenCommit }: {
+  SourceCodeViewer: ({ projectId, initialPath, onOpenCommit }: {
     projectId: string;
+    initialPath?: string | null;
     onOpenCommit?: (sha: string) => void;
   }) => (
     <div data-testid="source-viewer">
-      {projectId}
+      {projectId}:{initialPath ?? 'root'}
       <button type="button" data-testid="stub-open-a" onClick={() => onOpenCommit?.('aaaaaaa1')}>a</button>
       <button type="button" data-testid="stub-open-b" onClick={() => onOpenCommit?.('bbbbbbb2')}>b</button>
     </div>
@@ -80,6 +81,12 @@ describe('ProjectCodePanel', () => {
       expect(projects.gitDiff).toHaveBeenCalledWith('project-1', 'src/current.ts', false);
     });
     expect(await screen.findByText('src/committed.ts')).toBeInTheDocument();
+  });
+
+  it('passes a requested source path to the source explorer', () => {
+    render(<ProjectCodePanel projectId="project-1" initialPath="compose.yaml" />);
+
+    expect(screen.getByTestId('source-viewer')).toHaveTextContent('project-1:compose.yaml');
   });
 
   it('loads the cumulative branch diff when a committed file is selected', async () => {
@@ -255,7 +262,9 @@ describe('ProjectCodePanel', () => {
       const css = readFileSync('src/components/ProjectCodePanel.css', 'utf8');
       const layoutRule = css.match(/\.project-code-commit-layout\s*\{([^}]*)\}/)?.[1];
       const filesRule = css.match(/\.project-code-commit-files\s*\{([^}]*)\}/)?.[1];
-      expect(layoutRule).toContain('height: min(620px, calc(100dvh - 340px));');
+      expect(layoutRule).toContain('height: auto;');
+      expect(layoutRule).toContain('min-height: 0;');
+      expect(layoutRule).toContain('flex: 1;');
       expect(layoutRule).toContain('grid-template-rows: minmax(0, 1fr);');
       expect(layoutRule).toContain('overflow: hidden;');
       expect(filesRule).toContain('overflow-y: auto;');

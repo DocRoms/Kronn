@@ -40,6 +40,26 @@ function themeBlock(name: string): string {
   return match?.[1] ?? '';
 }
 
+function tokenHex(block: string, token: string): string {
+  const match = block.match(new RegExp(`${token}\\s*:\\s*(#[0-9a-f]{6})`, 'i'));
+  expect(match, `Missing hexadecimal ${token}`).not.toBeNull();
+  return match?.[1] ?? '#000000';
+}
+
+function relativeLuminance(hex: string): number {
+  const channels = hex.slice(1).match(/../g)?.map(value => parseInt(value, 16) / 255) ?? [];
+  const linear = channels.map(value => (
+    value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4
+  ));
+  return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2];
+}
+
+function contrastRatio(foreground: string, background: string): number {
+  const lighter = Math.max(relativeLuminance(foreground), relativeLuminance(background));
+  const darker = Math.min(relativeLuminance(foreground), relativeLuminance(background));
+  return (lighter + 0.05) / (darker + 0.05);
+}
+
 /** Every `var(--kr-…)` usage WITHOUT a fallback, with its file. */
 function usagesWithoutFallback(): { name: string; file: string }[] {
   const out: { name: string; file: string }[] = [];
@@ -68,6 +88,25 @@ describe('CSS design tokens', () => {
     for (const token of ['--kr-text-rgb', '--kr-text-faint-rgb', '--kr-text-ghost-rgb']) {
       expect(euronews, `${token} must not inherit the dark theme RGB triple`)
         .toMatch(new RegExp(`${token}\\s*:`));
+    }
+  });
+
+  it('keeps NVIDIA text at WCAG AA contrast in every theme', () => {
+    const tokens = readFileSync(join(SRC, 'styles', 'tokens.css'), 'utf8');
+    const defaultBlock = tokens.match(/:root\s*\{([\s\S]*?)\n\}/)?.[1] ?? '';
+    const blocks = [
+      ['default', defaultBlock],
+      ...['light', 'matrix', 'gotham', 'sakura', 'euronews']
+        .map(name => [name, themeBlock(name)]),
+    ];
+
+    for (const [name, block] of blocks) {
+      const foreground = tokenHex(block, '--kr-agent-nvidia-text');
+      const background = tokenHex(block, '--kr-bg-surface');
+      expect(
+        contrastRatio(foreground, background),
+        `${name} NVIDIA text must reach WCAG AA on its card surface`,
+      ).toBeGreaterThanOrEqual(4.5);
     }
   });
 });

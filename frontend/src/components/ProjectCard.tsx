@@ -15,7 +15,7 @@ import {
   saveAuditCheckpoint, loadAuditCheckpoint, clearAuditCheckpoint,
   type AuditCheckpointKind,
 } from '../lib/audit-resume';
-import type { Project, AgentDetection, AgentType, DriftCheckResponse, Discussion, Skill, McpConfigDisplay, WorkflowSummary, GitStatusResponse, DependencyUpdateSummary, AuditEvidenceResponse, ContextAuditResponse } from '../types/generated';
+import type { Project, AgentDetection, AgentType, ModelTier, ModelTiersConfig, DriftCheckResponse, Discussion, Skill, McpConfigDisplay, WorkflowSummary, GitStatusResponse, DependencyUpdateSummary, AuditEvidenceResponse, ContextAuditResponse } from '../types/generated';
 import {
   ChevronRight, ChevronDown, Cpu, Workflow,
   Plus, Trash2, Zap,
@@ -24,6 +24,9 @@ import {
   Play, FileCode, ShieldCheck, StopCircle, BookOpen, Rocket, Check, RefreshCw, Puzzle,
   FolderInput, Plug, X, FileText, DownloadCloud,
   Code2, ExternalLink, GitBranch, GitPullRequest, Tag, Package, ListTodo,
+  CircleHelp,
+  Container,
+  Copy,
 } from 'lucide-react';
 import { BriefingForm } from './BriefingForm';
 import { CopyIdPill } from './CopyIdPill';
@@ -31,16 +34,18 @@ import { ProjectCodePanel } from './ProjectCodePanel';
 import { ProjectGitPanel } from './ProjectGitPanel';
 import { ProjectTasksPanel } from './ProjectTasksPanel';
 import { ContextHelp } from './ContextHelp';
+import { AgentSwitchPicker } from './AgentSwitchPicker';
+import { ProjectDockerPanel } from './ProjectDockerPanel';
 
 const STATUS_COLORS: Record<string, string> = {
   Pending: 'var(--kr-warning)', Running: 'var(--kr-cyan)', Success: 'var(--kr-success)',
   Failed: 'var(--kr-error)', Cancelled: 'var(--kr-cancelled)', WaitingApproval: 'var(--kr-accent-ink)',
 };
 
-type ProjectDetailView = 'overview' | 'discussions' | 'tasks' | 'docs' | 'code' | 'git' | 'resources';
+type ProjectDetailView = 'overview' | 'discussions' | 'tasks' | 'audit' | 'docs' | 'code' | 'docker' | 'git' | 'resources';
 
 const PROJECT_DETAIL_VIEWS: ProjectDetailView[] = [
-  'overview', 'discussions', 'tasks', 'docs', 'code', 'git', 'resources',
+  'overview', 'discussions', 'tasks', 'audit', 'docs', 'code', 'docker', 'git', 'resources',
 ];
 const PROJECT_DETAIL_VIEW_STORAGE_KEY = 'kronn:projectDetailView';
 
@@ -84,6 +89,8 @@ function formatElapsedShort(ms: number): string {
 
 export interface ProjectCardProps {
   project: Project;
+  dockerRunning?: boolean;
+  onDockerRunningChange?: (projectId: string, running: boolean) => void;
   detailMode?: boolean;
   isOpen: boolean;
   onToggleOpen: () => void;
@@ -97,6 +104,7 @@ export interface ProjectCardProps {
   mcpConfigs: McpConfigDisplay[];
   workflows: WorkflowSummary[];
   configLanguage: string | null;
+  modelTiers?: ModelTiersConfig | null;
   toast: (msg: string, type: 'success' | 'error' | 'warning' | 'info') => void;
   onNavigate: (page: string) => void;
   onSetDiscPrefill: (prefill: { projectId: string; title: string; prompt: string; locked?: boolean }) => void;
@@ -112,6 +120,8 @@ export function ProjectCard({
   externalAuditLive = false,
   detailMode = false,
   project: proj,
+  dockerRunning = false,
+  onDockerRunningChange,
   isOpen,
   onToggleOpen,
   discussions: projDiscussions,
@@ -120,6 +130,7 @@ export function ProjectCard({
   allSkills,
   mcpConfigs,
   workflows,
+  modelTiers,
   toast,
   onNavigate,
   onSetDiscPrefill,
@@ -133,6 +144,8 @@ export function ProjectCard({
   const { t, locale } = useT();
   const isMobile = useIsMobile();
   const [detailView, setDetailView] = useState<ProjectDetailView>(readProjectDetailView);
+  const [codeInitialPath, setCodeInitialPath] = useState<string | null>(null);
+  const [expandedTab, setExpandedTab] = useState<string | undefined>(undefined);
   const selectDetailView = useCallback((view: ProjectDetailView) => {
     setDetailView(view);
     try {
@@ -141,6 +154,10 @@ export function ProjectCard({
       // localStorage may be unavailable in private/restricted browser modes.
     }
   }, []);
+  const reportDockerRunning = useCallback(
+    (running: boolean) => onDockerRunningChange?.(proj.id, running),
+    [onDockerRunningChange, proj.id],
+  );
   const [gitRevision, setGitRevision] = useState(0);
   const [projectTaskCount, setProjectTaskCount] = useState<number | null>(null);
   const [visibleDiscussionCount, setVisibleDiscussionCount] = useState(10);
@@ -158,6 +175,8 @@ export function ProjectCard({
   const [contextAudit, setContextAudit] = useState<ContextAuditResponse | null>(null);
   const [contextAuditLoading, setContextAuditLoading] = useState(false);
   const [contextAuditError, setContextAuditError] = useState(false);
+  const [contextAuditDetailsOpen, setContextAuditDetailsOpen] = useState(false);
+  const [contextAuditWhyOpen, setContextAuditWhyOpen] = useState(false);
   const [attestingDocumentation, setAttestingDocumentation] = useState(false);
   const [acceptingContextBaseline, setAcceptingContextBaseline] = useState(false);
   const attestationGuardRef = useRef(false);
@@ -339,7 +358,7 @@ export function ProjectCard({
 
   // ── Collapsible sections ──
   // 0.8.4 (#323 / F3) — on `Validated` and `Audited`, `aiContext` is
-  // the action zone (relaunch audit, launch sub-audit, validate). The
+  // the action zone (relaunch the complete audit, validate). The
   // pre-fix default sent the user to `discussions` which forced 2
   // clicks to reach the launcher (and was discovered confusing in
   // the Marc persona Playwright pass). Bootstrapped keeps
@@ -348,7 +367,6 @@ export function ProjectCard({
   // since that's where the briefing form CTA lives.
   const defaultSection = (auditStatus: string) =>
     auditStatus === 'Bootstrapped' ? 'discussions' : 'aiContext';
-  const [expandedTab, setExpandedTab] = useState<string | undefined>(undefined);
   const isSectionOpen = (section: string) => {
     if (expandedTab === undefined) return section === defaultSection(proj.audit_status);
     return expandedTab === section;
@@ -411,16 +429,40 @@ export function ProjectCard({
   // we always remove the key so a manual reload doesn't re-trigger.
   useEffect(() => {
     if (!isOpen) return;
+    let cancelled = false;
     let target: string | null = null;
     try {
       target = sessionStorage.getItem(`kronn:postValidation:${proj.id}`);
       if (target) sessionStorage.removeItem(`kronn:postValidation:${proj.id}`);
     } catch { /* private mode / quota — no deep-link */ }
     if (target) {
-      selectDetailView('docs');
-      setExpandedTab('docAi');
-      setDocDeepLink(target);
+      queueMicrotask(() => {
+        if (cancelled) return;
+        selectDetailView('docs');
+        setExpandedTab('docAi');
+        setDocDeepLink(target);
+      });
     }
+    return () => { cancelled = true; };
+  }, [isOpen, proj.id, selectDetailView]);
+
+  // Generic one-shot project-tab deep-link. The validation discussion uses
+  // this after "Mark audit as validated" so the user lands on the Audit tab
+  // and sees the new validated state instead of staying on Discussions.
+  useEffect(() => {
+    if (!isOpen) return;
+    let cancelled = false;
+    let target: string | null = null;
+    try {
+      target = sessionStorage.getItem(`kronn:projectView:${proj.id}`);
+      if (target) sessionStorage.removeItem(`kronn:projectView:${proj.id}`);
+    } catch { /* private mode / quota — no deep-link */ }
+    if (target && PROJECT_DETAIL_VIEWS.includes(target as ProjectDetailView)) {
+      queueMicrotask(() => {
+        if (!cancelled) selectDetailView(target as ProjectDetailView);
+      });
+    }
+    return () => { cancelled = true; };
   }, [isOpen, proj.id, selectDetailView]);
 
   // ── Audit state ──
@@ -436,7 +478,7 @@ export function ProjectCard({
   // drive a per-second re-render via `auditTick` so the displayed value
   // updates without re-polling the network. Cleared when the audit ends.
   const [auditStartedAt, setAuditStartedAt] = useState<number | null>(null);
-  const [, setAuditTick] = useState(0);
+  const [auditNow, setAuditNow] = useState(() => Date.now());
   // 0.8.3 TD #274 — per-step + cumulative token counters surfaced live.
   // Backend's enriched `step_done` SSE event carries:
   //   - tokens: max(input+output) for the step just finished (Claude
@@ -459,12 +501,7 @@ export function ProjectCard({
   const [auditToolCallCount, setAuditToolCallCount] = useState<number | null>(null);
   const [auditAbortController, setAuditAbortController] = useState<AbortController | null>(null);
   const [auditAgentChoice, setAuditAgentChoice] = useState<AgentType | undefined>(undefined);
-  // 0.8.4 (#287) — selected audit kind for the next launch. Defaults
-  // to Full. Sub-audit options in the dropdown are disabled until the
-  // project reaches Audited/Validated (running a Security/RGAA audit
-  // before the baseline doc audit makes no sense — the agent has no
-  // `inconsistencies-*.md` to refine against).
-  const [auditKindChoice, setAuditKindChoice] = useState<AuditKind>('Full');
+  const [auditTierChoice, setAuditTierChoice] = useState<ModelTier>('reasoning');
   /// Briefing-start in flight — re-used by the post-form AI review
   /// trigger. Pre-fix it guarded the now-removed second "Briefing IA"
   /// button against double-clicks; with the form-only flow the inner
@@ -529,6 +566,30 @@ export function ProjectCard({
     return () => { cancelled = true; };
   }, [proj.id, proj.audit_status, auditActive]);
 
+  // Keep the latest terminal result visible on an opened project card. The
+  // live tracker owns the in-progress state; history owns the durable result
+  // once the tracker clears (including Failed and Interrupted runs).
+  const [latestAuditOutcome, setLatestAuditOutcome] = useState<{ id: string; status: string } | null>(null);
+  const [selectedAuditRunId, setSelectedAuditRunId] = useState<string | null>(null);
+  useEffect(() => {
+    if (!detailMode && !isOpen) return;
+    // Some narrow consumers (including older test doubles) expose only the
+    // audit APIs they need. Treat an absent history reader as no recap rather
+    // than throwing from this effect and taking the whole dashboard down.
+    if (typeof projectsApi.auditHistory !== 'function') return;
+    let cancelled = false;
+    projectsApi.auditHistory(proj.id).then(rows => {
+      if (cancelled) return;
+      const latestTerminal = (rows ?? []).find(row => row.status !== 'Running');
+      setLatestAuditOutcome(latestTerminal
+        ? { id: latestTerminal.id, status: latestTerminal.status }
+        : null);
+    }).catch(() => {
+      if (!cancelled) setLatestAuditOutcome(null);
+    });
+    return () => { cancelled = true; };
+  }, [proj.id, isOpen, detailMode, auditCompletedTick]);
+
   // Briefing agent: an explicit audit pick stays valid (audit-capable ⊂
   // briefing-capable), otherwise fall back to any BRIEFING-capable agent —
   // never the audit list, which is empty when only Ollama is installed
@@ -536,6 +597,10 @@ export function ProjectCard({
   const briefingAgentPick = (auditAgentChoice && agents.some(a => a.agent_type === auditAgentChoice && canRunBriefing(a)))
     ? auditAgentChoice
     : (agents.filter(canRunBriefing)[0]?.agent_type ?? 'ClaudeCode');
+  const auditAgents = useMemo(() => agents.filter(canRunAudit), [agents]);
+  const selectedAuditAgent = auditAgentChoice && auditAgents.some(a => a.agent_type === auditAgentChoice)
+    ? auditAgentChoice
+    : (auditAgents[0]?.agent_type ?? 'ClaudeCode');
 
   // ── Computed ──
   const validationDisc = projDiscussions.find(d => isValidationDisc(d.title) && !d.archived);
@@ -570,6 +635,28 @@ export function ProjectCard({
   const pullRequestsUrl = overviewGit?.pull_requests_url ?? overviewGit?.pr_url ?? null;
   const languageStats = overviewGit?.languages ?? [];
   const languageTotalBytes = languageStats.reduce((total, item) => total + item.bytes, 0);
+  const contextDrift = contextAudit?.drift;
+  const contextGrowthCount = contextDrift?.paid_agent_growth.length ?? 0;
+  const contextBrokenRouteCount = contextDrift?.newly_broken_routes.length ?? 0;
+  const contextUnusedFileCount = contextDrift?.unused_files.length ?? 0;
+  const hasContextDriftSignals = contextGrowthCount > 0
+    || contextBrokenRouteCount > 0
+    || contextUnusedFileCount > 0;
+  const contextSignalSummaries = [
+    contextGrowthCount > 0 ? t('projects.contextAudit.growthSummary', contextGrowthCount) : null,
+    contextBrokenRouteCount > 0 ? t('projects.contextAudit.brokenSummary', contextBrokenRouteCount) : null,
+    contextUnusedFileCount > 0 ? t('projects.contextAudit.orphanSummary', contextUnusedFileCount) : null,
+  ].filter((summary): summary is string => summary !== null);
+  const contextAuditDetailsId = `project-context-audit-details-${proj.id}`;
+  const contextAuditWhyId = `project-context-audit-why-${proj.id}`;
+  const projectReadOnly = proj.write_access?.status === 'ReadOnly';
+  const primaryWritableRoot = proj.write_access?.writable_roots?.[0] ?? '';
+  const projectParent = proj.path.replace(/[\\/][^\\/]+[\\/]?$/, '');
+  const mcpSyncTone = proj.mcp_sync_report?.status === 'Written' || proj.mcp_sync_report?.status === 'Unchanged'
+    ? 'success'
+    : proj.mcp_sync_report?.status === 'ReadOnly' || proj.mcp_sync_report?.status === 'MissingSecrets'
+      ? 'warning'
+      : 'error';
   const languageCheckedTime = overviewGit?.languages_checked_at
     ? new Date(overviewGit.languages_checked_at).toLocaleTimeString(locale, {
       hour: '2-digit',
@@ -678,13 +765,11 @@ export function ProjectCard({
     try { localStorage.setItem(trackerHintDismissKey, '1'); } catch { /* swallow quota / private-mode */ }
     setTrackerHintDismissed(true);
   };
-  // Show the hint when:
-  //   - audit hasn't run yet (NoTemplate / TemplateInstalled / Bootstrapped), OR
-  //   - audit already ran (Audited / Validated) — pre-AutoPilot suggestion
-  //   AND no tracker MCP is wired AND user hasn't dismissed.
+  // Show this preparation step before the briefing whenever no tracker is
+  // wired. It remains optional and dismissible for projects without an issue
+  // queue, but a fresh project must not hide it behind the template install.
   const shouldShowTrackerHint = !trackerHintDismissed
-    && trackerMcps.length === 0
-    && proj.audit_status !== 'NoTemplate'; // hide on truly fresh project — the empty-MCP pulse already nudges
+    && trackerMcps.length === 0;
 
   const handleDeleteProject = async (id: string, hard: boolean) => {
     await projectsApi.delete(id, hard);
@@ -796,11 +881,12 @@ export function ProjectCard({
     setAuditAbortController(null);
     stopAuditPolling();
     clearAuditCheckpoint(proj.id);
+    setAuditCompletedTick((tick) => tick + 1);
     onRefetch();
     onRefetchDiscussions();
   }, [auditAbortController, proj.id, toast, t, onRefetch, onRefetchDiscussions, stopAuditPolling]);
 
-  const handleFullAudit = useCallback(async (kindOverride?: AuditKind) => {
+  const handleFullAudit = useCallback(async () => {
     // Guard against double-click — `setAuditActive(true)` flips the UI to
     // the progress panel synchronously, but a fast double-click can call
     // this handler twice before React re-renders, spawning two concurrent
@@ -813,22 +899,20 @@ export function ProjectCard({
     auditActiveRef.current = true;
     // Resume support. When a resumable interrupted run exists we resume it
     // by id — the server derives the kind AND the checkpoint from that row,
-    // so a stale selector value can never graft onto the wrong pipeline
-    // (Codex #3). A fresh launch uses the selector's kind.
+    // so client state can never graft onto the wrong pipeline (Codex #3).
     const resumeRunId = resumableAudit?.id ?? null;
-    // Progress-bar total: a resumed run uses its OWN kind, a fresh launch the
-    // selector's. Full/foundation → the backend sends the authoritative total
-    // on `start`; a standalone sub-audit is a single step.
-    const effectiveKind = resumeRunId ? resumableAudit?.kind : kindOverride;
+    // Progress-bar total: the UI now exposes the complete chained audit only;
+    // a resumed legacy targeted run still keeps the kind stored by the server.
+    const effectiveKind = resumeRunId ? resumableAudit?.kind : 'Full';
     const controller = new AbortController();
     setAuditAbortController(controller);
     setAuditActive(true);
     setAuditStep(0);
-    // 0.8.4 (#287) — sub-audits run a single targeted step (not 10).
-    // Without this the progress bar shows 1/10 forever — visually
+    // Legacy targeted audits run a single step. Without this fallback the
+    // progress bar would show 1/16 forever — visually
     // freezing as if the audit hung.
     const isSubAudit = effectiveKind !== undefined && effectiveKind !== 'Full';
-    setAuditTotalSteps(isSubAudit ? 1 : 10);
+    setAuditTotalSteps(isSubAudit ? 1 : 16);
     setAuditCurrentFile(t('audit.templateStep'));
     // 0.8.3 TD #274 — fallback wallclock seed so the elapsed chip
     // ticks during Phase 1 (template install + legacy migration)
@@ -844,17 +928,15 @@ export function ProjectCard({
     const startedAt = new Date().toISOString();
     saveAuditCheckpoint({
       projectId: proj.id, kind: 'full_audit', startedAt,
-      stepIndex: 0, totalSteps: 10, currentFile: null,
+      stepIndex: 0, totalSteps: 16, currentFile: null,
     });
     try {
-      const auditAgent = auditAgentChoice ?? agents.filter(canRunAudit)[0]?.agent_type ?? 'ClaudeCode';
       await projectsApi.fullAuditStream(proj.id, {
-        agent: auditAgent,
-        // Fresh launch: pass the selector kind so the backend routes to
-        // SECURITY_STEPS / RGAA_STEPS / etc. Resume: send ONLY the run id
-        // and null the kind — the server is authoritative for both kind and
-        // checkpoint, so a stale selector can't hijack the resumed pipeline.
-        kind: resumeRunId ? null : (kindOverride ?? null),
+        agent: selectedAuditAgent,
+        tier: auditTierChoice,
+        // A fresh launch always runs the complete 16-step chain. Resume sends
+        // only the run id so the server remains authoritative for legacy runs.
+        kind: resumeRunId ? null : 'Full',
         resume_run_id: resumeRunId,
       }, {
         onTemplateInstalled: () => {},
@@ -970,6 +1052,7 @@ export function ProjectCard({
           setAuditAbortController(null);
           clearAuditCheckpoint(proj.id);
           toast(t('audit.streamError', error || 'unknown error'), 'error');
+          setAuditCompletedTick((t) => t + 1);
           onRefetch();
         },
       }, controller.signal);
@@ -979,10 +1062,11 @@ export function ProjectCard({
       auditActiveRef.current = false;
       setAuditActive(false);
       clearAuditCheckpoint(proj.id);
+      setAuditCompletedTick((t) => t + 1);
     } finally {
       setAuditAbortController(null);
     }
-  }, [auditAgentChoice, agents, proj.id, t, toast, onRefetch, onRefetchDiscussions, onAutoRunDiscussion, onNavigate, resumableAudit]);
+  }, [selectedAuditAgent, auditTierChoice, proj.id, t, toast, onRefetch, onRefetchDiscussions, onAutoRunDiscussion, onNavigate, resumableAudit]);
 
   const startPartialAudit = useCallback(async (drift: DriftCheckResponse) => {
     if (auditActiveRef.current) return;
@@ -990,7 +1074,6 @@ export function ProjectCard({
     const steps = drift.stale_sections.map(s => s.audit_step);
     const controller = new AbortController();
     setAuditAbortController(controller);
-    const auditAgent = auditAgentChoice ?? agents.filter(canRunAudit)[0]?.agent_type ?? 'ClaudeCode';
     setAuditActive(true);
     setAuditStep(0);
     setAuditTotalSteps(steps.length);
@@ -1001,7 +1084,7 @@ export function ProjectCard({
       stepIndex: 0, totalSteps: steps.length, currentFile: null,
     });
     try {
-      await projectsApi.partialAuditStream(proj.id, { agent: auditAgent, steps }, {
+      await projectsApi.partialAuditStream(proj.id, { agent: selectedAuditAgent, tier: auditTierChoice, steps }, {
         onStepStart: (step, total, file) => {
           setAuditStep(step);
           setAuditTotalSteps(total);
@@ -1029,6 +1112,7 @@ export function ProjectCard({
           setAuditActive(false);
           setAuditAbortController(null);
           clearAuditCheckpoint(proj.id);
+          setAuditCompletedTick((t) => t + 1);
           onRefetch();
           onRefetchDrift(proj.id);
           // A5 — a fully-successful partial created a SCOPED validation
@@ -1063,6 +1147,7 @@ export function ProjectCard({
           setAuditAbortController(null);
           clearAuditCheckpoint(proj.id);
           toast(t('audit.partialStreamError', error || 'unknown error'), 'error');
+          setAuditCompletedTick((t) => t + 1);
           onRefetch();
         },
       }, controller.signal);
@@ -1072,10 +1157,11 @@ export function ProjectCard({
       auditActiveRef.current = false;
       setAuditActive(false);
       clearAuditCheckpoint(proj.id);
+      setAuditCompletedTick((t) => t + 1);
     } finally {
       setAuditAbortController(null);
     }
-  }, [auditAgentChoice, agents, proj.id, t, toast, onRefetch, onRefetchDrift, onRefetchDiscussions, onOpenDiscussion, onNavigate]);
+  }, [selectedAuditAgent, auditTierChoice, proj.id, t, toast, onRefetch, onRefetchDrift, onRefetchDiscussions, onOpenDiscussion, onNavigate]);
 
   // ─── Audit resume on mount ───────────────────────────────────────────────
   // When a local checkpoint indicates an audit was in-flight (tab switch, page
@@ -1178,6 +1264,7 @@ export function ProjectCard({
           setAuditTotalTokens(null);
           setAuditCurrentTool(null);
           setAuditToolCallCount(null);
+          if (wasActive) setAuditCompletedTick((t) => t + 1);
           if (auditPollRef.current) {
             clearInterval(auditPollRef.current);
             auditPollRef.current = null;
@@ -1198,10 +1285,13 @@ export function ProjectCard({
     // says — which is the authoritative source.
     if (cp) {
       auditActiveRef.current = true;
-      setAuditActive(true);
-      setAuditStep(cp.stepIndex);
-      setAuditTotalSteps(cp.totalSteps);
-      setAuditCurrentFile(cp.currentFile ?? '');
+      queueMicrotask(() => {
+        if (cancelled) return;
+        setAuditActive(true);
+        setAuditStep(cp.stepIndex);
+        setAuditTotalSteps(cp.totalSteps);
+        setAuditCurrentFile(cp.currentFile ?? '');
+      });
     }
 
     // Fire one immediate poll. Whatever the local checkpoint says,
@@ -1241,9 +1331,76 @@ export function ProjectCard({
   // (no skew if the tick misses by a few ms).
   useEffect(() => {
     if (!auditActive || auditStartedAt === null) return;
-    const id = setInterval(() => setAuditTick(t => t + 1), 1000);
+    const id = setInterval(() => setAuditNow(Date.now()), 1000);
     return () => clearInterval(id);
   }, [auditActive, auditStartedAt]);
+
+  const auditAgentPicker = auditAgents.length > 0 ? (
+    <div className="dash-audit-agent-picker" data-testid="project-audit-agent-picker">
+      <span className="text-xs text-dim">{t('disc.agentAndMode')}</span>
+      <AgentSwitchPicker
+        currentAgent={selectedAuditAgent}
+        currentTier={auditTierChoice}
+        availableAgents={auditAgents.map(agent => agent.agent_type)}
+        modelTiers={modelTiers}
+        defaultModelLabel={t('disc.defaultAgentModel')}
+        tierLabels={{
+          economy: t('disc.tier.economy'),
+          default: t('disc.tier.default'),
+          reasoning: t('disc.tier.reasoning'),
+        }}
+        onSelectionChange={async (agent, tier) => {
+          setAuditAgentChoice(agent);
+          setAuditTierChoice(tier);
+        }}
+        title={t('disc.agentAndMode')}
+        ariaLabel={t('disc.agentAndMode')}
+      />
+    </div>
+  ) : (
+    <span className="text-xs text-dim">{t('disc.noAgent')}</span>
+  );
+
+  const auditLaunchButton = (
+    <button
+      className="dash-icon-btn dash-btn-accent-border"
+      onClick={() => void handleFullAudit()}
+      disabled={auditAgents.length === 0}
+    >
+      <Play size={12} /> {resumableAudit
+        ? t('audit.resumeFromStep', resumableAudit.last_completed_step + 1)
+        : t('audit.startFullAudit')}
+    </button>
+  );
+
+  const auditLaunchControls = (
+    <div className="dash-audit-launch-controls" data-testid="project-audit-launch-controls">
+      {auditAgentPicker}
+      {auditLaunchButton}
+    </div>
+  );
+
+  const auditOutcomeLabel = latestAuditOutcome?.status === 'Completed'
+    ? t('projects.docAi.auditRecap.status.completed')
+    : latestAuditOutcome?.status === 'Interrupted'
+      ? t('projects.docAi.auditRecap.status.interrupted')
+      : latestAuditOutcome?.status === 'Failed'
+        ? t('projects.docAi.auditRecap.status.failed')
+        : latestAuditOutcome?.status === 'Cancelled'
+          ? t('projects.docAi.auditRecap.status.cancelled')
+          : latestAuditOutcome?.status ?? '';
+  const auditOutcomeFailed = latestAuditOutcome !== null
+    && latestAuditOutcome.status !== 'Completed';
+  const openAuditOutcome = () => {
+    if (!latestAuditOutcome) return;
+    setSelectedAuditRunId(latestAuditOutcome.id);
+    if (detailMode) {
+      selectDetailView('audit');
+      return;
+    }
+    if (!isOpen) onToggleOpen();
+    setExpandedTab('aiContext');
+  };
 
   return (
     <div
@@ -1253,7 +1410,7 @@ export function ProjectCard({
     >
       {detailMode && (
         <>
-          <header className="project-detail-header">
+          <header className="project-detail-header collection-detail-header">
             <div className="project-detail-heading">
               <div className="project-detail-icon"><FileCode size={18} /></div>
               <div className="project-detail-title-block">
@@ -1277,6 +1434,25 @@ export function ProjectCard({
               </div>
             </div>
             <div className="project-detail-actions">
+              {dockerRunning && (
+                <span className="project-status-chip" data-tone="success" title={t('projects.master.dockerUp')}>
+                  <Container size={10} /> {t('projects.master.dockerUp')}
+                </span>
+              )}
+              {projectReadOnly && (
+                <span className="project-status-chip" data-tone="warning">
+                  <AlertTriangle size={10} /> {t('projects.writeAccess.readOnlyShort')}
+                </span>
+              )}
+              {proj.mcp_sync_report && (
+                <span
+                  className="project-status-chip"
+                  data-tone={mcpSyncTone}
+                  title={proj.mcp_sync_report.detail ?? undefined}
+                >
+                  <Plug size={10} /> {t(`projects.mcpSync.${proj.mcp_sync_report.status}`)}
+                </span>
+              )}
               <span
                 className="project-status-chip"
                 data-testid={auditActive ? 'project-audit-progress' : undefined}
@@ -1298,6 +1474,18 @@ export function ProjectCard({
                         ? <><ShieldCheck size={10} /> {t('projects.master.status.toValidate')}</>
                       : <><FileCode size={10} /> {t('projects.master.status.toPrepare')}</>}
               </span>
+              {!auditActive && latestAuditOutcome && (
+                <button
+                  type="button"
+                  className="project-alert-chip"
+                  data-tone={auditOutcomeFailed ? 'error' : 'success'}
+                  data-testid="project-audit-outcome"
+                  onClick={openAuditOutcome}
+                >
+                  {auditOutcomeFailed ? <AlertTriangle size={10} /> : <ShieldCheck size={10} />}
+                  {auditOutcomeLabel}
+                </button>
+              )}
               {!auditActive && driftStatus && driftStatus.stale_sections.length > 0 && (
                 <>
                   <span
@@ -1337,8 +1525,10 @@ export function ProjectCard({
               ['overview', t('projects.master.tab.overview'), FileCode, undefined],
               ['discussions', t('projects.master.tab.discussions'), MessageSquare, projDiscussions.length],
               ['tasks', t('projects.master.tab.tasks'), ListTodo, projectTaskCount],
+              ['audit', t('projects.master.tab.audit'), Cpu, undefined],
               ['docs', t('projects.master.tab.docs'), BookOpen, undefined],
               ['code', t('projects.master.tab.code'), Code2, undefined],
+              ['docker', t('projects.master.tab.docker'), Container, undefined],
               ['git', t('projects.master.tab.git'), GitBranch, undefined],
               ['resources', t('projects.master.tab.resources'), Puzzle, undefined],
             ] as const).map(([view, label, Icon, count]) => (
@@ -1401,6 +1591,16 @@ export function ProjectCard({
             ) : (
               <span className="dash-badge-green"><FileCode size={9} /> Project docs</span>
             )}
+            {dockerRunning && (
+              <span className="dash-badge-green" title={t('projects.master.dockerUp')}>
+                <Container size={9} /> {t('projects.master.dockerUp')}
+              </span>
+            )}
+            {projectReadOnly && (
+              <span className="dash-badge-orange" title={t('projects.writeAccess.readOnlyDesc', proj.path)}>
+                <AlertTriangle size={9} /> {t('projects.writeAccess.readOnlyShort')}
+              </span>
+            )}
             {/* AI audit badge */}
             {auditActive ? (
               <span className="dash-badge-orange">
@@ -1417,7 +1617,7 @@ export function ProjectCard({
                When `auditActive=true`, the previous "Validated" / TD
                count / audit-date badges describe a stale state and
                confuse the user ("Validated but in progress?"). The
-               "AI audit X/10" orange badge above is the only truth
+               "AI audit X/16" orange badge above is the only truth
                while a run is in flight. */}
             {!auditActive && proj.audit_status === 'Validated' ? (
               <span className="dash-badge-green"><ShieldCheck size={9} /> Validated</span>
@@ -1428,6 +1628,17 @@ export function ProjectCard({
             ) : !auditActive && (proj.audit_status === 'Audited' || proj.audit_status === 'TemplateInstalled') ? (
               <span className="dash-badge-gray"><ShieldCheck size={9} /> Validated</span>
             ) : null}
+            {!auditActive && latestAuditOutcome && (
+              <button
+                type="button"
+                className={auditOutcomeFailed ? 'dash-badge-orange' : 'dash-badge-green'}
+                data-testid="project-audit-outcome"
+                onClick={(e) => { e.stopPropagation(); openAuditOutcome(); }}
+              >
+                {auditOutcomeFailed ? <AlertTriangle size={9} /> : <ShieldCheck size={9} />}
+                {auditOutcomeLabel}
+              </button>
+            )}
             {/* Tech-debt count badge. 0.8.1: surfaced so users can spot
                 projects with known issues at a glance. Counts both
                 detail files under `docs/tech-debt/` and table rows
@@ -1475,6 +1686,7 @@ export function ProjectCard({
                   // tech-debt folder so the user lands one click away from
                   // the items. The viewer auto-selects the first file
                   // under `docs/tech-debt/` on mount.
+                  selectDetailView('docs');
                   setExpandedTab('docAi');
                   setDocDeepLink('docs/tech-debt');
                 }}
@@ -1591,6 +1803,41 @@ export function ProjectCard({
         </div>
       )}
 
+      {proj.path_exists !== false && projectReadOnly && (
+        <div
+          className="dash-write-access-banner"
+          data-testid={`write-access-banner-${proj.id}`}
+          onClick={(event) => event.stopPropagation()}
+        >
+          <div className="dash-remap-icon" aria-hidden="true"><AlertTriangle size={16} /></div>
+          <div className="dash-remap-content">
+            <div className="dash-remap-title">{t('projects.writeAccess.readOnlyTitle')}</div>
+            <div className="dash-remap-desc">{t('projects.writeAccess.readOnlyDesc', proj.path)}</div>
+            <div className="dash-write-access-actions">
+              {primaryWritableRoot && (
+                <button
+                  type="button"
+                  className="dash-remap-btn"
+                  onClick={() => navigator.clipboard.writeText(`mv "${proj.path}" "${primaryWritableRoot}/"`).catch(() => {})}
+                  title={t('projects.writeAccess.moveHint', primaryWritableRoot)}
+                >
+                  <FolderInput size={12} /> {t('projects.writeAccess.copyMove')}
+                </button>
+              )}
+              <button
+                type="button"
+                className="dash-remap-clone-btn"
+                onClick={() => navigator.clipboard.writeText(`KRONN_EXTRA_REPOS=${projectParent}`).catch(() => {})}
+                title={t('projects.writeAccess.extraHint')}
+              >
+                <Copy size={12} /> {t('projects.writeAccess.copyExtra')}
+              </button>
+            </div>
+            <div className="dash-write-access-restart">{t('projects.writeAccess.restart')}</div>
+          </div>
+        </div>
+      )}
+
       {isOpen && (
         <div
           className="dash-card-body"
@@ -1629,12 +1876,13 @@ export function ProjectCard({
                   </div>
                   <button
                     type="button"
+                    className="project-context-audit-refresh"
                     onClick={() => void refreshContextAudit()}
                     disabled={contextAuditLoading}
                     aria-label={t('projects.contextAudit.refresh')}
+                    title={t('projects.contextAudit.refresh')}
                   >
-                    <RefreshCw size={12} className={contextAuditLoading ? 'spin' : undefined} />
-                    {t('projects.contextAudit.refresh')}
+                    <RefreshCw size={14} className={contextAuditLoading ? 'spin' : undefined} />
                   </button>
                 </header>
                 {contextAuditError ? (
@@ -1658,84 +1906,143 @@ export function ProjectCard({
                       {auditEvidence.kind === 'missing_evidence' && (
                         <button
                           type="button"
+                          className="project-context-audit-attest"
                           onClick={() => void attestExistingDocumentation()}
                           disabled={attestingDocumentation}
                         >
-                          {attestingDocumentation && <Loader2 size={12} className="spin" />}
+                          {attestingDocumentation
+                            ? <Loader2 size={12} className="spin" />
+                            : <Check size={12} aria-hidden="true" />}
                           {t('projects.contextAudit.attest')}
                         </button>
                       )}
                     </div>
-                    <p className="project-context-audit-paths">
-                      {t('projects.contextAudit.paths', auditEvidence.state_file, auditEvidence.runtime_workspace)}
-                    </p>
-                    {auditEvidence.audit_runs > 0 && (
-                      <div className="project-context-audit-reliability">
-                        <span>{t('projects.contextAudit.runs', auditEvidence.audit_runs)}</span>
-                        <span data-warning={auditEvidence.interrupted_runs > 0}>
-                          {t(
-                            'projects.contextAudit.interruptions',
-                            auditEvidence.interrupted_runs,
-                            auditEvidence.interruption_rate_percent.toFixed(1),
-                          )}
-                        </span>
-                        {auditEvidence.resumable_after_step !== null && (
-                          <span data-tone="success">
-                            {t('projects.contextAudit.resume', auditEvidence.resumable_after_step + 1)}
-                          </span>
-                        )}
-                      </div>
-                    )}
-                    {contextAudit.drift === null ? (
-                      <p className="project-context-audit-baseline">
-                        <Check size={13} /> {t('projects.contextAudit.baselineCreated')}
-                      </p>
-                    ) : (
-                      <div className="project-context-audit-signals">
-                        {contextAudit.drift.paid_agent_growth.map(growth => (
-                          <div key={growth.agent} data-tone="warning">
-                            <AlertTriangle size={13} />
-                            <span>
-                              {t(
-                                'projects.contextAudit.paidGrowth',
-                                growth.agent,
-                                growth.delta_bytes,
-                                growth.current_bytes,
+                    <div
+                      className="project-context-audit-summary"
+                      data-tone={hasContextDriftSignals ? 'warning' : 'success'}
+                    >
+                      {hasContextDriftSignals
+                        ? <AlertTriangle size={15} />
+                        : <Check size={15} />}
+                      <p>
+                        {contextAudit.drift === null ? (
+                          <>
+                            <strong>{t('projects.contextAudit.baselineCreatedTitle')}</strong>
+                            <span>{t('projects.contextAudit.baselineCreated')}</span>
+                          </>
+                        ) : hasContextDriftSignals ? (
+                          <>
+                            <span className="project-context-audit-summary-title">
+                              <strong>{contextSignalSummaries[0]}</strong>
+                              {contextGrowthCount > 0 && (
+                                <button
+                                  type="button"
+                                  className="project-context-audit-why-toggle"
+                                  aria-label={t('projects.contextAudit.whyTitle')}
+                                  title={t('projects.contextAudit.whyTitle')}
+                                  aria-expanded={contextAuditWhyOpen}
+                                  aria-controls={contextAuditWhyId}
+                                  onClick={() => setContextAuditWhyOpen(open => !open)}
+                                >
+                                  <CircleHelp size={13} aria-hidden="true" />
+                                </button>
                               )}
                             </span>
+                            {contextGrowthCount > 0 && contextAuditWhyOpen && (
+                              <span id={contextAuditWhyId} className="project-context-audit-why">
+                                {t('projects.contextAudit.whyHelp')}
+                              </span>
+                            )}
+                            {contextGrowthCount > 0 && (
+                              <span>{t('projects.contextAudit.growthHelp')}</span>
+                            )}
+                            {contextSignalSummaries.slice(1).map(summary => (
+                              <span key={summary}>{summary}</span>
+                            ))}
+                          </>
+                        ) : (
+                          <>
+                            <strong>{t('projects.contextAudit.stableTitle')}</strong>
+                            <span>{t('projects.contextAudit.stable')}</span>
+                          </>
+                        )}
+                      </p>
+                      <button
+                        type="button"
+                        className="project-context-audit-details-toggle"
+                        aria-expanded={contextAuditDetailsOpen}
+                        aria-controls={contextAuditDetailsId}
+                        onClick={() => setContextAuditDetailsOpen(open => !open)}
+                      >
+                        {t(contextAuditDetailsOpen
+                          ? 'projects.contextAudit.hideDetails'
+                          : 'projects.contextAudit.showDetails')}
+                        <ChevronDown size={13} aria-hidden="true" />
+                      </button>
+                    </div>
+                    {contextAuditDetailsOpen && (
+                      <div id={contextAuditDetailsId} className="project-context-audit-details">
+                        <p className="project-context-audit-paths">
+                          {t('projects.contextAudit.paths', auditEvidence.state_file, auditEvidence.runtime_workspace)}
+                        </p>
+                        {auditEvidence.audit_runs > 0 && (
+                          <div className="project-context-audit-reliability">
+                            <span>{t('projects.contextAudit.runs', auditEvidence.audit_runs)}</span>
+                            <span data-warning={auditEvidence.interrupted_runs > 0}>
+                              {t(
+                                'projects.contextAudit.interruptions',
+                                auditEvidence.interrupted_runs,
+                                auditEvidence.interruption_rate_percent.toFixed(1),
+                              )}
+                            </span>
+                            {auditEvidence.resumable_after_step !== null && (
+                              <span data-tone="success">
+                                {t('projects.contextAudit.resume', auditEvidence.resumable_after_step + 1)}
+                              </span>
+                            )}
                           </div>
-                        ))}
-                        {contextAudit.drift.newly_broken_routes.map(route => (
-                          <div key={`broken-${route}`} data-tone="error">
-                            <AlertTriangle size={13} />
-                            <span>{t('projects.contextAudit.brokenRoute', route)}</span>
-                          </div>
-                        ))}
-                        {contextAudit.drift.unused_files.map(path => (
-                          <div key={`unused-${path}`} data-tone="warning">
-                            <FileText size={13} />
-                            <span>{t('projects.contextAudit.orphanFile', path)}</span>
-                          </div>
-                        ))}
-                        {contextAudit.drift.paid_agent_growth.length === 0
-                          && contextAudit.drift.newly_broken_routes.length === 0
-                          && contextAudit.drift.unused_files.length === 0 && (
-                            <p className="project-context-audit-baseline">
-                              <Check size={13} /> {t('projects.contextAudit.stable')}
-                            </p>
-                          )}
-                        {(contextAudit.drift.paid_agent_growth.length > 0
-                          || contextAudit.drift.newly_broken_routes.length > 0
-                          || contextAudit.drift.unused_files.length > 0) && (
+                        )}
+                        {contextAudit.drift && hasContextDriftSignals && (
+                          <div className="project-context-audit-signals">
+                            {contextAudit.drift.paid_agent_growth.map(growth => (
+                              <div key={growth.agent} data-tone="warning">
+                                <AlertTriangle size={13} />
+                                <span>
+                                  {t(
+                                    'projects.contextAudit.paidGrowth',
+                                    growth.agent,
+                                    growth.delta_bytes,
+                                    growth.current_bytes,
+                                  )}
+                                </span>
+                              </div>
+                            ))}
+                            {contextAudit.drift.newly_broken_routes.map(route => (
+                              <div key={`broken-${route}`} data-tone="error">
+                                <AlertTriangle size={13} />
+                                <span>{t('projects.contextAudit.brokenRoute', route)}</span>
+                              </div>
+                            ))}
+                            {contextAudit.drift.unused_files.map(path => (
+                              <div key={`unused-${path}`} data-tone="warning">
+                                <FileText size={13} />
+                                <span>{t('projects.contextAudit.orphanFile', path)}</span>
+                              </div>
+                            ))}
                             <button
                               type="button"
+                              className="project-context-audit-accept"
                               onClick={() => void acceptCurrentContextBaseline()}
                               disabled={acceptingContextBaseline}
+                              title={t('projects.contextAudit.acceptBaselineHelp')}
                             >
-                              {acceptingContextBaseline && <Loader2 size={12} className="spin" />}
+                              {acceptingContextBaseline
+                                ? <Loader2 size={12} className="spin" />
+                                : <Check size={12} aria-hidden="true" />}
                               {t('projects.contextAudit.acceptBaseline')}
                             </button>
-                          )}
+                          </div>
+                        )}
                       </div>
                     )}
                   </>
@@ -2031,8 +2338,8 @@ export function ProjectCard({
                   <strong>{t('projects.master.overview.browse')}</strong>
                   <span>{t('projects.master.tab.tasks')}</span>
                 </button>
-                <button type="button" onClick={() => selectDetailView('docs')}>
-                  <BookOpen size={16} />
+                <button type="button" onClick={() => selectDetailView('audit')}>
+                  <Cpu size={16} />
                   <strong>
                     {proj.audit_status === 'Validated'
                       ? t('projects.status.valid')
@@ -2044,6 +2351,11 @@ export function ProjectCard({
                             ? t('projects.status.template')
                             : t('projects.status.none')}
                   </strong>
+                  <span>{t('projects.master.tab.audit')}</span>
+                </button>
+                <button type="button" onClick={() => selectDetailView('docs')}>
+                  <BookOpen size={16} />
+                  <strong>{t('projects.master.overview.browse')}</strong>
                   <span>{t('projects.master.tab.docs')}</span>
                 </button>
                 <button type="button" onClick={() => selectDetailView('code')}>
@@ -2088,7 +2400,7 @@ export function ProjectCard({
                   <strong>{proj.tech_debt_count ?? 0}</strong>
                   <span>{t('projects.master.sort.techDebt')}</span>
                 </button>
-                <button type="button" onClick={() => selectDetailView('docs')}>
+                <button type="button" onClick={() => selectDetailView('audit')}>
                   <RefreshCw size={16} />
                   <strong>{driftStatus?.stale_sections.length ?? 0}</strong>
                   <span>{t('projects.master.overview.stale')}</span>
@@ -2103,7 +2415,24 @@ export function ProjectCard({
           )}
           {detailMode && detailView === 'code' && (
             <section className="project-detail-section project-detail-source" data-project-view="code">
-              <ProjectCodePanel key={`${proj.id}:${gitRevision}`} projectId={proj.id} />
+              <ProjectCodePanel
+                key={`${proj.id}:${gitRevision}`}
+                projectId={proj.id}
+                initialPath={codeInitialPath}
+              />
+            </section>
+          )}
+          {detailMode && detailView === 'docker' && (
+            <section className="project-detail-section project-detail-docker" data-project-view="docker">
+              <ProjectDockerPanel
+                projectId={proj.id}
+                toast={toast}
+                onRunningChange={reportDockerRunning}
+                onOpenConfig={(path) => {
+                  setCodeInitialPath(path);
+                  selectDetailView('code');
+                }}
+              />
             </section>
           )}
           {detailMode && detailView === 'git' && (
@@ -2314,11 +2643,13 @@ export function ProjectCard({
             }
             return (
               <div className="dash-section project-detail-section" data-project-view="docs">
-                <button className="dash-collapsible-header" onClick={() => toggleSection('docAi')} aria-expanded={isSectionOpen('docAi')}>
-                  {isSectionOpen('docAi') ? <ChevronDown size={12} className="flex-shrink-0" /> : <ChevronRight size={12} className="flex-shrink-0" />}
-                  <BookOpen size={14} /> <span className="dash-section-title">{t('projects.docAi')}</span>
-                </button>
-                {isSectionOpen('docAi') && (
+                {!detailMode && (
+                  <button className="dash-collapsible-header" onClick={() => toggleSection('docAi')} aria-expanded={isSectionOpen('docAi')}>
+                    {isSectionOpen('docAi') ? <ChevronDown size={12} className="flex-shrink-0" /> : <ChevronRight size={12} className="flex-shrink-0" />}
+                    <BookOpen size={14} /> <span className="dash-section-title">{t('projects.docAi')}</span>
+                  </button>
+                )}
+                {(detailMode ? detailView === 'docs' : isSectionOpen('docAi')) && (
                   <>
                   <AiDocViewer
                     projectId={proj.id}
@@ -2489,16 +2820,18 @@ export function ProjectCard({
             )}
           </div>
 
-          {/* -- 6. AI Context / Audit -- */}
-          <div className="dash-section project-detail-section" data-project-view="docs">
-            <button className="dash-collapsible-header" onClick={() => toggleSection('aiContext')} aria-expanded={isSectionOpen('aiContext')}>
-              {isSectionOpen('aiContext') ? <ChevronDown size={12} className="flex-shrink-0" /> : <ChevronRight size={12} className="flex-shrink-0" />}
-              <FileCode size={14} /> <span className="dash-section-title">AI Context</span>
-              <span className="dash-count">
-                {proj.audit_status === 'Validated' ? t('projects.status.valid') : validationInProgress ? t('projects.status.validating') : proj.audit_status === 'Audited' ? t('projects.status.auditOk') : proj.audit_status === 'Bootstrapped' ? t('projects.status.bootstrapped') : bootstrapInProgress ? t('projects.status.bootstrapping') : proj.audit_status === 'TemplateInstalled' ? t('projects.status.template') : t('projects.status.none')}
-              </span>
-            </button>
-            {isSectionOpen('aiContext') && (
+          {/* -- 6. Audit -- */}
+          <div className="dash-section project-detail-section" data-project-view="audit">
+            {!detailMode && (
+              <button className="dash-collapsible-header" onClick={() => toggleSection('aiContext')} aria-expanded={isSectionOpen('aiContext')}>
+                {isSectionOpen('aiContext') ? <ChevronDown size={12} className="flex-shrink-0" /> : <ChevronRight size={12} className="flex-shrink-0" />}
+                <FileCode size={14} /> <span className="dash-section-title">AI Context</span>
+                <span className="dash-count">
+                  {proj.audit_status === 'Validated' ? t('projects.status.valid') : validationInProgress ? t('projects.status.validating') : proj.audit_status === 'Audited' ? t('projects.status.auditOk') : proj.audit_status === 'Bootstrapped' ? t('projects.status.bootstrapped') : bootstrapInProgress ? t('projects.status.bootstrapping') : proj.audit_status === 'TemplateInstalled' ? t('projects.status.template') : t('projects.status.none')}
+                </span>
+              </button>
+            )}
+            {(detailMode ? detailView === 'audit' : isSectionOpen('aiContext')) && (
               <>
                 {/* 0.8.4 — audit history panel (chips + per-step table).
                    Mounted here at the top of AI Context so it's directly
@@ -2510,16 +2843,38 @@ export function ProjectCard({
                 <AuditRecapPanel
                   projectId={proj.id}
                   refreshTrigger={auditCompletedTick}
+                  selectedRunId={selectedAuditRunId}
                 />
                 {(proj.audit_status === 'NoTemplate' || (proj.audit_status === 'TemplateInstalled' && !bootstrapInProgress)) && !auditActive && (
                   <div className="dash-audit-pad">
                     <p className="dash-audit-warning">
                       <AlertTriangle size={11} /> {proj.audit_status === 'NoTemplate' ? t('audit.noTemplate') : t('audit.description')}
                     </p>
+                    {shouldShowTrackerHint && (
+                      <div className="dash-tracker-hint" data-testid="audit-tracker-prerequisite">
+                        <span className="dash-tracker-hint-text">
+                          💡 {t('audit.trackerHint')}
+                        </span>
+                        <div className="dash-tracker-hint-actions">
+                          <button className="dash-icon-btn" onClick={() => onNavigate('mcps')}>
+                            <Plug size={12} /> {t('audit.trackerHintConfigure')}
+                          </button>
+                          <button
+                            className="dash-icon-btn dash-tracker-hint-dismiss"
+                            onClick={dismissTrackerHint}
+                            title={t('audit.trackerHintDismiss')}
+                          >
+                            <X size={12} />
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                    {auditAgentPicker}
                     {briefingFormOpen && (
                       <BriefingForm
                         projectId={proj.id}
                         agent={briefingAgentPick}
+                        tier={auditTierChoice}
                         onClose={() => setBriefingFormOpen(false)}
                         onSaved={(discId) => {
                           // 0.8.4 UX fix — single briefing flow. The form
@@ -2579,73 +2934,8 @@ export function ProjectCard({
                     <p className="dash-audit-desc">
                       {t('audit.fullAuditDesc')}
                     </p>
-                    {shouldShowTrackerHint && (
-                      <div className="dash-tracker-hint">
-                        <span className="dash-tracker-hint-text">
-                          💡 {t('audit.trackerHint')}
-                        </span>
-                        <div className="dash-tracker-hint-actions">
-                          <button className="dash-icon-btn" onClick={() => onNavigate('mcps')}>
-                            <Plug size={12} /> {t('audit.trackerHintConfigure')}
-                          </button>
-                          <button
-                            className="dash-icon-btn dash-tracker-hint-dismiss"
-                            onClick={dismissTrackerHint}
-                            title={t('audit.trackerHintDismiss')}
-                          >
-                            <X size={12} />
-                          </button>
-                        </div>
-                      </div>
-                    )}
-                    <div className="flex-row gap-4">
-                      <select
-                        className="dash-audit-select"
-                        value={auditAgentChoice ?? agents.filter(canRunAudit)[0]?.agent_type ?? 'ClaudeCode'}
-                        onChange={e => setAuditAgentChoice(e.target.value as AgentType)}
-                      >
-                        {agents.filter(canRunAudit).map(a => (
-                          <option key={a.agent_type} value={a.agent_type}>{a.name}</option>
-                        ))}
-                        {agents.filter(canRunAudit).length === 0 && (
-                          <option value="" disabled>{t('disc.noAgent')}</option>
-                        )}
-                      </select>
-                      {/* 0.8.4 (#287) — audit kind dropdown. Sub-audits stay
-                         disabled until the project has a Full audit baseline
-                         (Audited or Validated). Otherwise the targeted
-                         agent would have no `inconsistencies-*.md` to
-                         refine against, producing a half-baked re-discovery
-                         instead of a focused re-scan. */}
-                      <select
-                        className="dash-audit-select"
-                        data-testid="audit-kind-select"
-                        value={auditKindChoice}
-                        onChange={e => setAuditKindChoice(e.target.value as AuditKind)}
-                        title={t('audit.kindSelector.tooltip')}
-                        // Resume is bound to the interrupted run's kind (server-derived);
-                        // lock the selector so the UI can't imply the kind is still a choice.
-                        disabled={!!resumableAudit}
-                      >
-                        <option value="Full">{t('audit.kind.Full')}</option>
-                        <option value="Security" disabled>{t('audit.kind.Security')} {t('audit.kind.afterFull')}</option>
-                        <option value="Docker" disabled>{t('audit.kind.Docker')} {t('audit.kind.afterFull')}</option>
-                        <option value="Performance" disabled>{t('audit.kind.Performance')} {t('audit.kind.afterFull')}</option>
-                        <option value="Accessibility" disabled>{t('audit.kind.Accessibility')} {t('audit.kind.afterFull')}</option>
-                        <option value="Rgaa" disabled>{t('audit.kind.Rgaa')} {t('audit.kind.afterFull')}</option>
-                        <option value="Database" disabled>{t('audit.kind.Database')} {t('audit.kind.afterFull')}</option>
-                        <option value="ApiDesign" disabled>{t('audit.kind.ApiDesign')} {t('audit.kind.afterFull')}</option>
-                        <option value="CodeQuality" disabled>{t('audit.kind.CodeQuality')} {t('audit.kind.afterFull')}</option>
-                      </select>
-                      <button
-                        className="dash-icon-btn dash-btn-accent-border"
-                        onClick={() => handleFullAudit(auditKindChoice)}
-                        disabled={agents.filter(canRunAudit).length === 0}
-                      >
-                        <Play size={12} /> {resumableAudit
-                          ? t('audit.resumeFromStep', resumableAudit.last_completed_step + 1)
-                          : t('audit.kindSelector.launchLabel', t(`audit.kind.${auditKindChoice}`))}
-                      </button>
+                    <div className="flex-row gap-4" data-testid="project-audit-launch-controls">
+                      {auditLaunchButton}
                     </div>
                   </div>
                 )}
@@ -2659,7 +2949,7 @@ export function ProjectCard({
                       </span>
                       {auditStartedAt !== null && (
                         <span className="text-2xs text-ghost" title={t('audit.elapsedTooltip')}>
-                          {t('audit.elapsed', formatElapsedShort(Date.now() - auditStartedAt))}
+                          {t('audit.elapsed', formatElapsedShort(Math.max(0, auditNow - auditStartedAt)))}
                         </span>
                       )}
                       {/* 0.8.3 (#274) — last step + cumulative token
@@ -2729,47 +3019,7 @@ export function ProjectCard({
                     <p className="dash-audit-hint-accent">
                       <Rocket size={11} /> {t('audit.bootstrapDone')}
                     </p>
-                    <div className="flex-row gap-4">
-                      <select
-                        className="dash-audit-select"
-                        value={auditAgentChoice ?? agents.filter(canRunAudit)[0]?.agent_type ?? 'ClaudeCode'}
-                        onChange={e => setAuditAgentChoice(e.target.value as AgentType)}
-                      >
-                        {agents.filter(canRunAudit).map(a => (
-                          <option key={a.agent_type} value={a.agent_type}>{a.name}</option>
-                        ))}
-                        {agents.filter(canRunAudit).length === 0 && (
-                          <option value="" disabled>{t('disc.noAgent')}</option>
-                        )}
-                      </select>
-                      <select
-                        className="dash-audit-select"
-                        data-testid="audit-kind-select-bootstrapped"
-                        value={auditKindChoice}
-                        onChange={e => setAuditKindChoice(e.target.value as AuditKind)}
-                        title={t('audit.kindSelector.tooltip')}
-                        disabled={!!resumableAudit}
-                      >
-                        <option value="Full">{t('audit.kind.Full')}</option>
-                        <option value="Security" disabled>{t('audit.kind.Security')} {t('audit.kind.afterFull')}</option>
-                        <option value="Docker" disabled>{t('audit.kind.Docker')} {t('audit.kind.afterFull')}</option>
-                        <option value="Performance" disabled>{t('audit.kind.Performance')} {t('audit.kind.afterFull')}</option>
-                        <option value="Accessibility" disabled>{t('audit.kind.Accessibility')} {t('audit.kind.afterFull')}</option>
-                        <option value="Rgaa" disabled>{t('audit.kind.Rgaa')} {t('audit.kind.afterFull')}</option>
-                        <option value="Database" disabled>{t('audit.kind.Database')} {t('audit.kind.afterFull')}</option>
-                        <option value="ApiDesign" disabled>{t('audit.kind.ApiDesign')} {t('audit.kind.afterFull')}</option>
-                        <option value="CodeQuality" disabled>{t('audit.kind.CodeQuality')} {t('audit.kind.afterFull')}</option>
-                      </select>
-                      <button
-                        className="dash-icon-btn dash-btn-accent-border"
-                        onClick={() => handleFullAudit(auditKindChoice)}
-                        disabled={agents.filter(canRunAudit).length === 0}
-                      >
-                        <Play size={12} /> {resumableAudit
-                          ? t('audit.resumeFromStep', resumableAudit.last_completed_step + 1)
-                          : t('audit.kindSelector.launchLabel', t(`audit.kind.${auditKindChoice}`))}
-                      </button>
-                    </div>
+                    {auditLaunchControls}
                   </div>
                 )}
 
@@ -2811,49 +3061,10 @@ export function ProjectCard({
                         </button>
                       </>
                     )}
-                    {/* 0.8.4 (#318 / B2) — post-Full launcher BEFORE validation.
-                       Lets the user chain Full → Security/RGAA without
-                       having to finish the validation discussion first.
-                       The Full baseline (docs/ + index files) exists at
-                       this point so sub-audits have something to refine. */}
+                    {/* Keep a complete re-audit available before validation. */}
                     {!validationInProgress && (
-                      <div className="flex-row gap-4" style={{ marginTop: 8 }}>
-                        <select
-                          className="dash-audit-select"
-                          value={auditAgentChoice ?? agents.filter(canRunAudit)[0]?.agent_type ?? 'ClaudeCode'}
-                          onChange={e => setAuditAgentChoice(e.target.value as AgentType)}
-                        >
-                          {agents.filter(canRunAudit).map(a => (
-                            <option key={a.agent_type} value={a.agent_type}>{a.name}</option>
-                          ))}
-                          {agents.filter(canRunAudit).length === 0 && (
-                            <option value="" disabled>{t('disc.noAgent')}</option>
-                          )}
-                        </select>
-                        <select
-                          className="dash-audit-select"
-                          data-testid="audit-kind-select-audited"
-                          value={auditKindChoice}
-                          onChange={e => setAuditKindChoice(e.target.value as AuditKind)}
-                          title={t('audit.kindSelector.tooltip')}
-                        >
-                          <option value="Full">{t('audit.kind.Full')}</option>
-                          <option value="Security">{t('audit.kind.Security')}</option>
-                          <option value="Docker">{t('audit.kind.Docker')}</option>
-                          <option value="Performance">{t('audit.kind.Performance')}</option>
-                          <option value="Accessibility">{t('audit.kind.Accessibility')}</option>
-                          <option value="Rgaa">{t('audit.kind.Rgaa')}</option>
-                          <option value="Database">{t('audit.kind.Database')}</option>
-                          <option value="ApiDesign">{t('audit.kind.ApiDesign')}</option>
-                          <option value="CodeQuality">{t('audit.kind.CodeQuality')}</option>
-                        </select>
-                        <button
-                          className="dash-icon-btn dash-btn-accent-border"
-                          onClick={() => handleFullAudit(auditKindChoice)}
-                          disabled={agents.filter(canRunAudit).length === 0}
-                        >
-                          <Play size={12} /> {t('audit.kindSelector.launchLabel', t(`audit.kind.${auditKindChoice}`))}
-                        </button>
+                      <div style={{ marginTop: 8 }}>
+                        {auditLaunchControls}
                       </div>
                     )}
                   </div>
@@ -2871,6 +3082,7 @@ export function ProjectCard({
                         onClick={(e) => {
                           e.stopPropagation();
                           if (!isOpen) onToggleOpen();
+                          selectDetailView('docs');
                           setExpandedTab('docAi');
                           setDocDeepLink('docs/tech-debt');
                         }}
@@ -2879,50 +3091,9 @@ export function ProjectCard({
                       </button>
                     )}
                   </div>
-                  {/* 0.8.4 (#287) — post-baseline re-audit row. SAME shape as
-                     the TemplateInstalled/Bootstrapped launch row (agent +
-                     kind + button). Sub-audits are ENABLED here because the
-                     Full audit baseline exists. */}
                   <div className="dash-audit-pad">
-                    <p className="dash-audit-desc">{t('audit.kindSelector.reAuditHint')}</p>
-                    <div className="flex-row gap-4">
-                      <select
-                        className="dash-audit-select"
-                        value={auditAgentChoice ?? agents.filter(canRunAudit)[0]?.agent_type ?? 'ClaudeCode'}
-                        onChange={e => setAuditAgentChoice(e.target.value as AgentType)}
-                      >
-                        {agents.filter(canRunAudit).map(a => (
-                          <option key={a.agent_type} value={a.agent_type}>{a.name}</option>
-                        ))}
-                        {agents.filter(canRunAudit).length === 0 && (
-                          <option value="" disabled>{t('disc.noAgent')}</option>
-                        )}
-                      </select>
-                      <select
-                        className="dash-audit-select"
-                        data-testid="audit-kind-select-validated"
-                        value={auditKindChoice}
-                        onChange={e => setAuditKindChoice(e.target.value as AuditKind)}
-                        title={t('audit.kindSelector.tooltip')}
-                      >
-                        <option value="Full">{t('audit.kind.Full')}</option>
-                        <option value="Security">{t('audit.kind.Security')}</option>
-                        <option value="Docker">{t('audit.kind.Docker')}</option>
-                        <option value="Performance">{t('audit.kind.Performance')}</option>
-                        <option value="Accessibility">{t('audit.kind.Accessibility')}</option>
-                        <option value="Rgaa">{t('audit.kind.Rgaa')}</option>
-                        <option value="Database">{t('audit.kind.Database')}</option>
-                        <option value="ApiDesign">{t('audit.kind.ApiDesign')}</option>
-                          <option value="CodeQuality">{t('audit.kind.CodeQuality')}</option>
-                      </select>
-                      <button
-                        className="dash-icon-btn dash-btn-accent-border"
-                        onClick={() => handleFullAudit(auditKindChoice)}
-                        disabled={agents.filter(canRunAudit).length === 0}
-                      >
-                        <Play size={12} /> {t('audit.kindSelector.launchLabel', auditKindChoice === 'Full' ? t('audit.kind.Full') : t(`audit.kind.${auditKindChoice}`))}
-                      </button>
-                    </div>
+                    <p className="dash-audit-desc">{t('audit.reAuditHint')}</p>
+                    {auditLaunchControls}
                   </div>
                   </>
                 )}

@@ -225,20 +225,21 @@ describe('WorkflowWizard — name + project fields', () => {
     expect(screen.queryByText('wiz.nameRequired')).not.toBeInTheDocument();
   });
 
-  it('renders every project as a select option', () => {
+  it('selects a project from the searchable picker', () => {
     renderWizard({ projects: [mkProject(), mkProject({ id: 'proj-2', name: 'ProjectBeta' })] });
-    const select = screen.getByLabelText('wiz.project') as HTMLSelectElement;
-    fireEvent.change(select, { target: { value: 'proj-2' } });
-    expect(select.value).toBe('proj-2');
-    expect(screen.getByText('ProjectBeta')).toBeInTheDocument();
+    const picker = screen.getByRole('combobox', { name: 'wiz.project' });
+    fireEvent.focus(picker);
+    fireEvent.click(screen.getByRole('option', { name: 'ProjectBeta' }));
+    expect(picker).toHaveValue('ProjectBeta');
   });
 
   it('selecting a project seeds default skill ids onto steps without their own skills', () => {
     // No throw + the project is selected; the skill-seeding branch runs.
     renderWizard({ projects: [mkProject({ default_skill_ids: ['skill-1'] })] });
-    const select = screen.getByLabelText('wiz.project') as HTMLSelectElement;
-    fireEvent.change(select, { target: { value: 'proj-1' } });
-    expect(select.value).toBe('proj-1');
+    const picker = screen.getByRole('combobox', { name: 'wiz.project' });
+    fireEvent.focus(picker);
+    fireEvent.click(screen.getByRole('option', { name: 'ProjectAlpha' }));
+    expect(picker).toHaveValue('ProjectAlpha');
   });
 });
 

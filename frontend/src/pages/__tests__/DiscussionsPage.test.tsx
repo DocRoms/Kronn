@@ -3,6 +3,7 @@ import { render, screen, act, cleanup, fireEvent, waitFor } from '@testing-libra
 import { I18nProvider } from '../../lib/I18nContext';
 import { loadDraft } from '../../lib/chat-drafts';
 import { clearReplyDraft, loadReplyDraft } from '../../lib/chat-reply-drafts';
+import type { DiscussionMessage } from '../../types/generated';
 
 // Mock SpeechSynthesis API
 const mockCancel = vi.fn();
@@ -40,6 +41,7 @@ vi.mock('../../lib/api', () => ({
     get: vi.fn().mockResolvedValue(null),
     create: vi.fn(),
     delete: vi.fn(),
+    deleteMessage: vi.fn().mockResolvedValue(undefined),
     update: vi.fn(),
     nativeAgentMode: vi.fn().mockResolvedValue({ disabled: false }),
     meta: vi.fn().mockResolvedValue({ poll_policy: { max_delay_seconds: 120 } }),
@@ -74,6 +76,7 @@ vi.mock('../../lib/api', () => ({
     // whether to show the audit-running banner. Default = null (no
     // audit). Tests that need the running state override per-test.
     auditStatus: vi.fn().mockResolvedValue(null),
+    validateAudit: vi.fn().mockResolvedValue('Validated'),
     // 0.8.4 (#294) — sidebar fetches this once per mount to decorate
     // disc rows with the "bound to X" badge. Empty = no bindings,
     // badge stays hidden.
@@ -103,6 +106,9 @@ vi.mock('../../lib/api', () => ({
     create: vi.fn(),
     update: vi.fn(),
     delete: vi.fn(),
+  },
+  externalApi: {
+    list: vi.fn().mockResolvedValue([]),
   },
   contacts: {
     list: vi.fn().mockResolvedValue([]),
@@ -175,6 +181,11 @@ beforeEach(() => {
   vi.mocked(discussionsApi.searchMessages).mockResolvedValue([]);
   vi.mocked(discussionsApi.listContextFiles).mockReset();
   vi.mocked(discussionsApi.listContextFiles).mockResolvedValue([]);
+  vi.mocked(discussionsApi.deleteMessage).mockReset();
+  vi.mocked(discussionsApi.deleteMessage).mockResolvedValue(undefined);
+  vi.mocked(projectsApi.validateAudit).mockReset();
+  vi.mocked(projectsApi.validateAudit).mockResolvedValue('Validated');
+  sessionStorage.clear();
   vi.mocked(planningApi.proposals).mockReset();
   vi.mocked(planningApi.proposals).mockResolvedValue({
     proposals: [],
@@ -183,7 +194,10 @@ beforeEach(() => {
   });
 });
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
 
 const wrap = async (ui: React.ReactElement) => {
   let result: ReturnType<typeof render>;
@@ -230,6 +244,47 @@ const makeListDiscussion = (id: string, msgCount: number): Discussion => ({
 });
 
 describe('DiscussionsPage', () => {
+  it('confirms and tombstones the selected message before refreshing the discussion', async () => {
+    const message: DiscussionMessage = {
+      id: 'message-delete-me',
+      role: 'User',
+      channel: 'main',
+      content: 'Message to remove',
+      agent_type: null,
+      timestamp: '2026-01-01T00:00:00Z',
+      tokens_used: 0,
+      auth_mode: null,
+    };
+    const discussion = { ...makeListDiscussion('d-delete-message', 1), messages: [message] };
+    vi.mocked(discussionsApi.get).mockResolvedValue(discussion);
+    const confirmDelete = vi.fn(() => true);
+    vi.stubGlobal('confirm', confirmDelete);
+    const refetchDiscussions = vi.fn();
+
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[discussion]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={refetchDiscussions}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        initialActiveDiscussionId={discussion.id}
+        {...liftedProps()}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Supprimer le message' }));
+
+    await waitFor(() => expect(discussionsApi.deleteMessage)
+      .toHaveBeenCalledWith(discussion.id, message.id));
+    expect(confirmDelete).toHaveBeenCalledTimes(1);
+    expect(refetchDiscussions).toHaveBeenCalled();
+  });
+
   it('finds a rendered occurrence even when Markdown splits it across text nodes', () => {
     const root = document.createElement('div');
     root.append('foo ');
@@ -422,7 +477,9 @@ describe('DiscussionsPage', () => {
     );
 
     const receipt = await screen.findByTestId('message-routing-receipt');
-    expect(receipt).toHaveTextContent('Routage demandé');
+    expect(receipt.closest('.disc-msg-author')).not.toBeNull();
+    expect(receipt).toHaveAccessibleName('Routage demandé');
+    expect(receipt).not.toHaveTextContent('Routage demandé');
     expect(receipt).toHaveTextContent('@claude · ⚡ Éco');
   });
 
@@ -3332,6 +3389,8 @@ describe('DiscussionsPage', () => {
     ai_config: { detected: false, configs: [] },
     audit_status,
     ai_todo_count: 0, tech_debt_count: 0, needs_docs_migration: false, path_exists: true,
+    write_access: { status: 'Writable' },
+    mcp_sync_report: null,
     default_skill_ids: [],
     briefing_notes: briefing ?? null,
     linked_repos: [],
@@ -3462,6 +3521,46 @@ describe('DiscussionsPage', () => {
     expect(btn).toBeTruthy();
     fireEvent.click(btn!);
     expect(onNav).toHaveBeenCalledWith('projects', { projectId: 'p8' });
+  });
+
+  it('validation CTA validates, records the Audit deep-link, refreshes, and opens the project', async () => {
+    const proj = makeProject('p-validation', 'Audited', 'context');
+    const disc: Discussion = {
+      ...makeProjectDisc('d-validation', proj.id, 'Validation audit AI'),
+      messages: [
+        { id: 'm-user', role: 'User', channel: 'main', content: 'Validate', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
+        { id: 'm-agent', role: 'Agent', channel: 'main', content: 'KRONN:VALIDATION_COMPLETE', agent_type: 'ClaudeCode', timestamp: '2026-01-01T00:01:00Z', tokens_used: 10, auth_mode: null },
+      ],
+      message_count: 2,
+      non_system_message_count: 2,
+    };
+    vi.mocked(discussionsApi.get).mockResolvedValue(disc);
+    const onNavigate = vi.fn();
+    const refetchProjects = vi.fn();
+    const refetchDiscussions = vi.fn();
+
+    await wrap(
+      <DiscussionsPage
+        projects={[proj]}
+        agents={[]}
+        allDiscussions={[disc]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={refetchDiscussions}
+        refetchProjects={refetchProjects}
+        onNavigate={onNavigate}
+        toast={toastFn}
+        initialActiveDiscussionId={disc.id}
+        {...liftedProps()}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole('button', { name: /Marquer l'audit comme valide/i }));
+    await waitFor(() => expect(projectsApi.validateAudit).toHaveBeenCalledWith(proj.id));
+    expect(sessionStorage.getItem(`kronn:projectView:${proj.id}`)).toBe('audit');
+    expect(refetchProjects).toHaveBeenCalled();
+    expect(refetchDiscussions).toHaveBeenCalled();
+    expect(onNavigate).toHaveBeenCalledWith('projects', { projectId: proj.id });
   });
 
   // ─── Audit-running MCP filter banner (0.8.3 #280) ────────────────────

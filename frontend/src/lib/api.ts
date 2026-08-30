@@ -6,6 +6,10 @@ import type {
   ApiKeyDisplay,
   ApiKeysResponse,
   Project,
+  ProjectDockerAction,
+  ProjectDockerLogs,
+  ProjectDockerRunningSummary,
+  ProjectDockerStatus,
   LinkedRepo,
   DetectedRepo,
   McpDefinition,
@@ -198,6 +202,7 @@ import type {
   TaskExecutionDetail,
   TaskExecutionObservability,
   ValidationSpec,
+  ExternalApiConnectionPreset,
 } from '../types/generated';
 import type { DiscoverKeysResponse, TestModeEnterResult, TestModeExitResponse } from '../types/extensions';
 
@@ -271,6 +276,7 @@ async function parseSSEStream(
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
+  let eventType = '';
 
   try {
     while (true) {
@@ -281,7 +287,6 @@ async function parseSSEStream(
       const lines = buffer.split('\n');
       buffer = lines.pop() ?? '';
 
-      let eventType = '';
       for (const line of lines) {
         if (line.startsWith('event:')) {
           eventType = line.slice(6).trim();
@@ -291,13 +296,14 @@ async function parseSSEStream(
             const parsed = JSON.parse(data);
             handlers.onEvent(eventType, parsed);
           } catch { /* ignore non-JSON */ }
+        } else if (line.trim() === '') {
+          eventType = '';
         }
       }
     }
     // Process any remaining data in buffer
     if (buffer.trim()) {
       const lines = buffer.split('\n');
-      let eventType = '';
       for (const line of lines) {
         if (line.startsWith('event:')) {
           eventType = line.slice(6).trim();
@@ -307,6 +313,8 @@ async function parseSSEStream(
             const parsed = JSON.parse(data);
             handlers.onEvent(eventType, parsed);
           } catch { /* ignore non-JSON */ }
+        } else if (line.trim() === '') {
+          eventType = '';
         }
       }
     }
@@ -736,6 +744,12 @@ export interface MigrateDocsResponse {
 export const projects = {
   list: () => api<Project[]>('GET', '/projects'),
   get: (id: string) => api<Project>('GET', `/projects/${id}`),
+  dockerStatus: (id: string) => api<ProjectDockerStatus>('GET', `/projects/${id}/docker`),
+  dockerRunning: () => api<ProjectDockerRunningSummary>('GET', '/projects/docker-running'),
+  dockerAction: (id: string, action: ProjectDockerAction, service?: string) =>
+    api<ProjectDockerStatus>('POST', `/projects/${id}/docker`, { action, service: service ?? null }),
+  dockerLogs: (id: string, service: string, tail = 200) =>
+    api<ProjectDockerLogs>('GET', `/projects/${id}/docker/logs?service=${encodeURIComponent(service)}&tail=${tail}`),
   scan: () => api<DetectedRepo[]>('POST', '/projects/scan'),
   create: (repo: DetectedRepo) => api<Project>('POST', '/projects', repo),
   addFolder: (req: { path: string; name?: string }) => api<Project>('POST', '/projects/add-folder', req),
@@ -912,7 +926,8 @@ export const projects = {
   checkDrift: (id: string) => api<DriftCheckResponse>('GET', `/projects/${id}/drift`),
   getBriefing: (id: string) => api<string | null>('GET', `/projects/${id}/briefing`),
   setBriefing: (id: string, notes: string | null) => api<void>('PUT', `/projects/${id}/briefing`, { notes }),
-  startBriefing: (id: string, agent: string) => api<{ discussion_id: string }>('POST', `/projects/${id}/start-briefing`, { agent }),
+  startBriefing: (id: string, agent: AgentType, tier?: ModelTier) =>
+    api<{ discussion_id: string }>('POST', `/projects/${id}/start-briefing`, { agent, tier }),
   /**
    * 0.8.4 (#285) — désagentified briefing. POST the 6 answers and
    * the server writes `docs/briefing.md` + persists DB notes without
@@ -997,7 +1012,7 @@ export const projects = {
   /** Stream a partial re-audit for stale sections via SSE */
   partialAuditStream: async (
     id: string,
-    req: { agent: AgentType; steps: number[] },
+    req: { agent: AgentType; tier?: ModelTier; steps: number[] },
     handlers: {
       onStepStart: (step: number, total: number, file: string) => void;
       onChunk: (text: string, step: number) => void;
@@ -1673,6 +1688,12 @@ export const discussions = {
   /** Delete trailing agent/system messages (for retry/edit). */
   deleteLastAgentMessages: (id: string) => api<void>('DELETE', `/discussions/${id}/messages/last`),
 
+  /** Remove one message payload while preserving its timeline tombstone. */
+  deleteMessage: (id: string, messageId: string) => api<void>(
+    'DELETE',
+    `/discussions/${encodeURIComponent(id)}/messages/${encodeURIComponent(messageId)}`,
+  ),
+
   /** Edit the last user message content. */
   editLastUserMessage: (id: string, content: string) => api<void>('PATCH', `/discussions/${id}/messages/last`, { content } as SendMessageRequest),
 
@@ -2132,6 +2153,9 @@ export const workflows = {
    *  Returns the count of discussions actually deleted. */
   deleteBatchRun: (runId: string) =>
     api<{ run_id: string; discussions_deleted: number }>('DELETE', `/workflow-runs/${runId}`),
+  /** Re-run the durable agent+tier+connection matrix with today's model mapping. */
+  retryBatchRun: (runId: string) =>
+    api<BatchRunResponse>('POST', `/workflow-runs/${runId}/retry`),
   /** Rankings + independent human/AI quality evaluations for a Compare run. */
   getBatchCompareDetails: (runId: string) =>
     api<BatchCompareDetails>('GET', `/workflow-runs/${runId}/compare-details`),
@@ -2277,7 +2301,7 @@ export const quickPrompts = {
     req: {
       prompt: string;
       batch_name: string;
-      targets: Array<{ agent: AgentType; tier: ModelTier }>;
+      targets: Array<{ agent: AgentType; tier: ModelTier; connection_id?: string }>;
       project_id?: string;
     },
   ) => api<BatchRunResponse>('POST', `/quick-prompts/${qpId}/compare-agents`, req),
@@ -2465,12 +2489,67 @@ export const usage = {
 export const ollama = {
   health: () => api<OllamaHealthResponse>('GET', '/ollama/health'),
   models: () => api<OllamaModelsResponse>('GET', '/ollama/models'),
+  pull: (
+    model: string,
+    handlers: {
+      onProgress: (progress: OllamaPullProgress) => void;
+      onSuccess: (progress: OllamaPullProgress) => void;
+      onError: (message: string) => void;
+    },
+    signal: AbortSignal,
+  ) => {
+    let terminal = false;
+    return fetchAndParseSSE(`${_apiBase}/api/ollama/pull`, {
+      method: 'POST',
+      headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model }),
+      signal,
+    }, {
+      onEvent: (type, data) => {
+        if (!data || typeof data !== 'object') {
+          terminal = true;
+          handlers.onError('Ollama returned an invalid download update. Please try again.');
+          return;
+        }
+        const event = data as Partial<OllamaPullProgress> & { message?: unknown; error?: unknown };
+        if (type === 'progress' && typeof event.status === 'string') {
+          handlers.onProgress(event as OllamaPullProgress);
+        } else if (type === 'success' && typeof event.status === 'string') {
+          terminal = true;
+          handlers.onSuccess(event as OllamaPullProgress);
+        } else if (type === 'error' && (typeof event.message === 'string' || typeof event.error === 'string')) {
+          terminal = true;
+          handlers.onError(typeof event.message === 'string' ? event.message : event.error as string);
+        } else {
+          terminal = true;
+          handlers.onError('Ollama returned an invalid download update. Please try again.');
+        }
+      },
+      onDone: () => {
+        if (!terminal && !signal.aborted) {
+          terminal = true;
+          handlers.onError('The Ollama download connection closed before completion. Please try again.');
+        }
+      },
+      onError: message => {
+        terminal = true;
+        handlers.onError(message);
+      },
+    });
+  },
   setContextOverride: (model: string, numCtx: number | null) =>
     api<SetOllamaContextOverrideResponse>('POST', '/ollama/context-override', {
       model,
       num_ctx: numCtx,
     }),
 };
+
+export interface OllamaPullProgress {
+  status: string;
+  digest: string | null;
+  completed: number | null;
+  total: number | null;
+}
 
 // ─── LiteLLM (OpenAI-compatible proxy) ─────────────────────────────────────
 
@@ -2494,6 +2573,61 @@ export const liteLlm = {
   /// `api_key: null` keeps the stored credential; `''` clears it.
   test: (body: { base_url: string; api_key: string | null }) =>
     api<LiteLlmTestResponse>('POST', '/lite-llm/test', body),
+};
+
+// ─── External API connections (unified LiteLLM/NVIDIA/Other zone) ──────────
+// KT-339 — one CRUD surface for every OpenAI-compatible connection. Adding a
+// third compatible service (e.g. Groq) is an `other` preset with a custom
+// endpoint: no enum variant, no dedicated card, no new i18n key. Reuse the
+// backend-generated enum so the JSON wire value cannot silently drift.
+export type ExternalApiPreset = ExternalApiConnectionPreset;
+
+export interface ExternalApiConnectionView {
+  id: string;
+  display_name: string;
+  mention_alias: string;
+  endpoint: string | null;
+  credential_slug: string;
+  origin_preset: ExternalApiPreset;
+  economy_model: string | null;
+  default_model: string | null;
+  reasoning_model: string | null;
+  created_at: string;
+  updated_at: string;
+  /** Whether a credential is currently stored; the value never crosses the wire. */
+  has_credential: boolean;
+}
+
+export interface UpsertExternalApiConnection {
+  display_name: string;
+  mention_alias: string;
+  endpoint: string | null;
+  origin_preset: ExternalApiPreset;
+  economy_model: string | null;
+  default_model: string | null;
+  reasoning_model: string | null;
+  /** Tri-state: omitted/null keeps the stored key, '' clears it, a value replaces it. */
+  api_key?: string | null;
+}
+
+export interface ExternalApiConnectionTestResult {
+  ok: boolean;
+  status: 'success' | 'invalid_url' | 'credential_required' | 'auth_error' | 'http_error' | 'timeout' | 'transport_error' | 'invalid_catalogue';
+  models: string[];
+  hint: string | null;
+}
+
+export const externalApi = {
+  list: () => api<ExternalApiConnectionView[]>('GET', '/external-api/connections'),
+  create: (body: UpsertExternalApiConnection) =>
+    api<ExternalApiConnectionView>('POST', '/external-api/connections', body),
+  update: (id: string, body: UpsertExternalApiConnection) =>
+    api<ExternalApiConnectionView>('PUT', `/external-api/connections/${id}`, body),
+  reveal: (id: string) =>
+    api<string>('POST', `/external-api/connections/${id}/reveal`),
+  remove: (id: string) => api<null>('DELETE', `/external-api/connections/${id}`),
+  test: (body: { endpoint: string | null; api_key: string | null; connection_id?: string; origin_preset?: ExternalApiPreset; models?: string[] }) =>
+    api<ExternalApiConnectionTestResult>('POST', '/external-api/connections/test', body),
 };
 
 // 0.8.6 (#24) — Unified API call logs.

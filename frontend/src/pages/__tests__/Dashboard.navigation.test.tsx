@@ -29,6 +29,7 @@ vi.mock('../../lib/api', () => ({
   projects: {
     list: vi.fn().mockResolvedValue([]),
     auditStatusAll: vi.fn().mockResolvedValue([]),
+    auditHistory: vi.fn().mockResolvedValue([]),
   },
   mcps: {
     registry: vi.fn().mockResolvedValue([]),

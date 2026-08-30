@@ -1,8 +1,10 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useMemo, useCallback, type ReactNode } from 'react';
 import { mcps as mcpsApi, apiCallLogs, type EndpointDrift } from '../lib/api';
 import { useT } from '../lib/I18nContext';
+import { useIsMobile } from '../hooks/useMediaQuery';
 import { useToast } from '../hooks/useToast';
 import { useAsyncGuard } from '../hooks/useAsyncGuard';
+import { usePersistentIdSet } from '../hooks/usePersistentIdSet';
 import { userError } from '../lib/userError';
 import { isHiddenPath } from '../lib/constants';
 import type { AgentType, ApiAuthKind, ApiEndpoint, Project, McpConfigDisplay, McpDefinition, McpOverview, McpProbeResponse, HostSyncMode, CustomApiPayload, McpServer, PluginInterface } from '../types/generated';
@@ -19,12 +21,17 @@ import { Dropdown } from '../components/Dropdown';
 import { SecretField } from '../components/SecretField';
 import {
   Puzzle, Plus, Trash2, Eye, Check, RefreshCw, Square, CheckSquare, Minus,
-  X, Key, Pencil, FileText, ExternalLink, Save, Search,
+  X, Key, Pencil, FileText, ExternalLink, Save,
   Plug, Globe, Info, Sparkles, Upload, Download, ChevronRight, Terminal, AlertTriangle,
+  ArrowUpDown, Filter, Folder,
 } from 'lucide-react';
 import { HostSyncChip } from '../components/HostSyncChip';
 import { HostSyncPreview } from '../components/HostSyncPreview';
 import { ListControls } from '../components/ListControls';
+import { CollectionShell } from '../components/CollectionShell';
+import { CollectionFavoritesHeader } from '../components/CollectionFavoritesHeader';
+import { CollectionRowActions } from '../components/CollectionRowActions';
+import { CollectionSidebarFooter } from '../components/CollectionSidebarFooter';
 import { PluginPortabilityModal } from '../components/PluginPortabilityModal';
 import { ContextHelp } from '../components/ContextHelp';
 
@@ -56,9 +63,25 @@ function PluginKindBadge({ kind }: { kind: PluginKind }) {
   );
 }
 import { MatrixText } from '../components/MatrixText';
+import './DiscussionsPage.css';
 import './McpPage.css';
 
 const slugify = (label: string) => label.toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+const MCP_COLLAPSED_GROUPS_STORAGE_KEY = 'kronn:mcpCollapsedGroups';
+const MCP_STATIC_GROUPS = new Set(['favorites', 'projects', 'global', 'general', 'unassigned']);
+
+function readCollapsedMcpGroups(): Set<string> {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(MCP_COLLAPSED_GROUPS_STORAGE_KEY) ?? '[]') as unknown;
+    if (!Array.isArray(parsed)) return new Set();
+    return new Set(parsed.filter((group): group is string => (
+      typeof group === 'string'
+      && (MCP_STATIC_GROUPS.has(group) || group.startsWith('project:'))
+    )));
+  } catch {
+    return new Set();
+  }
+}
 
 const hasAgentScope = (
   isGlobal: boolean,
@@ -143,6 +166,9 @@ interface McpPageProps {
   mcpOverview: McpOverview;
   mcpRegistry: McpDefinition[];
   refetchMcps: () => void;
+  /** False until the overview request has completed; protects restored
+   * favorites from its initial empty fallback. */
+  favoritesReady?: boolean;
   initialSelectedConfigId?: string | null;
   /** Installed agent types — threaded through to the Custom API AI
    *  helper bubble so the user can pick which local agent runs the
@@ -155,8 +181,9 @@ interface McpPageProps {
   configLanguage?: string;
 }
 
-export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initialSelectedConfigId, installedAgentTypes, configLanguage }: McpPageProps) {
+export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, favoritesReady = true, initialSelectedConfigId, installedAgentTypes, configLanguage }: McpPageProps) {
   const { t } = useT();
+  const isMobile = useIsMobile();
   const { toast, ToastContainer } = useToast();
   const [editingLabelId, setEditingLabelId] = useState<string | null>(null);
   const [editingLabelText, setEditingLabelText] = useState('');
@@ -174,8 +201,11 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
   const [addMcpLabel, setAddMcpLabel] = useState('');
   const [addMcpEnv, setAddMcpEnv] = useState<Record<string, string>>({});
   const [addMcpGlobal, setAddMcpGlobal] = useState(false);
+  const [addMcpHostSync, setAddMcpHostSync] = useState(false);
   const [addVisibleFields, setAddVisibleFields] = useState<Set<string>>(new Set());
   const addMcpRef = useRef<HTMLDivElement>(null);
+  const addMcpTriggerRef = useRef<HTMLButtonElement>(null);
+  const addMcpWasOpenRef = useRef(false);
   // Custom API form state. Only meaningful when addMcpSelected === 'api-custom'.
   // The shape mirrors `CustomApiPayload` in generated.ts so submit can
   // forward it as-is via `custom_spec`.
@@ -266,12 +296,55 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
     } catch { return false; }
   });
   const [mcpKindFilter, setMcpKindFilter] = useState<'all' | 'mcp' | 'api' | 'cli'>('all');
+  const [mcpSearchPanel, setMcpSearchPanel] = useState<'filters' | 'sort' | null>(null);
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [collapsedMcpGroups, setCollapsedMcpGroups] = useState<Set<string>>(readCollapsedMcpGroups);
+  const [selectedConfigIds, setSelectedConfigIds] = useState<Set<string>>(new Set());
+  const availableConfigIds = useMemo(() => mcpOverview.configs.map(config => config.id), [mcpOverview.configs]);
+  const { ids: favoriteConfigIds, toggle: toggleConfigFavorite } = usePersistentIdSet('kronn:collection-favorites:plugins', availableConfigIds, favoritesReady);
   useEffect(() => {
     try {
       localStorage.setItem('kronn:mcpSort', mcpSortReversed ? 'za' : 'az');
     } catch { /* localStorage disabled (incognito / quota) — sort defaults to A→Z on next load */ }
   }, [mcpSortReversed]);
+  useEffect(() => {
+    try {
+      localStorage.setItem(MCP_COLLAPSED_GROUPS_STORAGE_KEY, JSON.stringify([...collapsedMcpGroups]));
+    } catch { /* localStorage may be unavailable in private/restricted browser modes. */ }
+  }, [collapsedMcpGroups]);
   const [selectedConfigId, setSelectedConfigId] = useState<string | null>(initialSelectedConfigId ?? null);
+  const resetAddMcp = useCallback(() => {
+    setShowAddMcp(false);
+    setAddMcpSelected(null);
+    setAddMcpLabel('');
+    setAddMcpEnv({});
+    setAddMcpGlobal(false);
+    setAddMcpHostSync(false);
+    setAddMcpSearch('');
+    setCustomName('');
+    setCustomBaseUrl('');
+    setCustomDescription('');
+    setCustomDocsUrl('');
+    setCustomFields([{ label: '', value: '' }]);
+    setCustomEndpoints([]);
+    setEditingCustomServerId(null);
+    setEditingCustomConfigId(null);
+    setCustomAuth('None');
+    setReplacingFields(new Set());
+    setImportJsonText('');
+    setImportJsonError(null);
+    setImportJsonLoading(false);
+  }, []);
+  useEffect(() => {
+    if (showAddMcp) {
+      addMcpWasOpenRef.current = true;
+      return;
+    }
+    if (addMcpWasOpenRef.current) {
+      addMcpWasOpenRef.current = false;
+      addMcpTriggerRef.current?.focus();
+    }
+  }, [showAddMcp]);
   // Endpoints that keep failing, grouped by plugin. A spec is written once and
   // never re-checked against the API, so when it drifts nothing says so — this
   // reads the call log Kronn already keeps. Failure to load is not worth an
@@ -293,40 +366,9 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
   }, []);
   const [probeByConfig, setProbeByConfig] = useState<Record<string, McpProbeResponse>>({});
   const [probingConfigId, setProbingConfigId] = useState<string | null>(null);
-  // The detail panel is viewport-fixed, so it must start below whatever chrome
-  // sits above it: the sticky top nav and the list boundary below the search /
-  // filter / sort controls. This mirrors Planning: page chrome stays full-width,
-  // then one horizontal rule starts both the list and its detail drawer.
-  // Measured, not hardcoded: the nav can wrap and the toolbar is responsive.
-  // Recomputed on scroll because the list boundary scrolls while the nav doesn't.
-  const [panelTop, setPanelTop] = useState(0);
-  useEffect(() => {
-    const nav = document.querySelector('.dash-nav');
-    const boundary = document.querySelector('.mcp-list-boundary');
-    const sync = () => {
-      const navBottom = nav?.getBoundingClientRect().bottom ?? 0;
-      const boundaryBottom = boundary?.getBoundingClientRect().bottom ?? 0;
-      setPanelTop(Math.max(navBottom, Math.min(boundaryBottom, window.innerHeight)));
-    };
-    sync();
-    const observer = new ResizeObserver(sync);
-    if (nav) observer.observe(nav);
-    if (boundary) observer.observe(boundary);
-    window.addEventListener('scroll', sync, { passive: true, capture: true });
-    window.addEventListener('resize', sync);
-    return () => {
-      observer.disconnect();
-      window.removeEventListener('scroll', sync, { capture: true });
-      window.removeEventListener('resize', sync);
-    };
-  }, []);
-
-  // Open a specific config when navigated from another page (e.g. ProjectCard)
-  useEffect(() => {
-    if (initialSelectedConfigId) {
-      setSelectedConfigId(initialSelectedConfigId);
-    }
-  }, [initialSelectedConfigId]);
+  // Dashboard only supplies a deep-linked config while mounting this page;
+  // leaving Plugins unmounts it and clears the route state. The state
+  // initializer above therefore owns the hand-off without a second render.
 
   // The plugin detail/edit is a non-blocking side panel. Esc is staged:
   // while editing, first Esc cancels the edit (back to the view body);
@@ -344,7 +386,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
     // (0.8.11 — the old `eslint-disable react-hooks/exhaustive-deps` here was
     // dead: with the React-19 ruleset the rule no longer reports on this hook,
     // so the directive itself warned as unused. Removed rather than restored.)
-  }, [selectedConfigId, editingCustomServerId]);
+  }, [selectedConfigId, editingCustomServerId, resetAddMcp]);
   // "Show more" for project toggles per config
   const [expandedProjectLists, setExpandedProjectLists] = useState<Set<string>>(new Set());
   const PROJECT_TOGGLE_LIMIT = 10;
@@ -375,26 +417,26 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
     }
   });
 
-  const resetAddMcp = () => {
-    setShowAddMcp(false);
-    setAddMcpSelected(null);
-    setAddMcpLabel('');
-    setAddMcpEnv({});
-    setAddMcpGlobal(false);
-    setAddMcpSearch('');
-    setCustomName('');
-    setCustomBaseUrl('');
-    setCustomDescription('');
-    setCustomDocsUrl('');
-    setCustomFields([{ label: '', value: '' }]);
-    setCustomEndpoints([]);
-    setEditingCustomServerId(null);
-    setEditingCustomConfigId(null);
-    setCustomAuth('None');
-    setReplacingFields(new Set());
-    setImportJsonText('');
-    setImportJsonError(null);
-    setImportJsonLoading(false);
+  const handleAddMcpModalKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      resetAddMcp();
+      return;
+    }
+    if (event.key !== 'Tab') return;
+    const focusable = [...(addMcpRef.current?.querySelectorAll<HTMLElement>(
+      'button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), a[href], [tabindex]:not([tabindex="-1"])',
+    ) ?? [])];
+    if (focusable.length === 0) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
   };
 
   /** 0.8.6 — Discriminated-union helpers for the auth picker. The
@@ -694,6 +736,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
         args_override: null,
         is_global: false,
         project_ids: [],
+        host_sync: 'None',
         custom_spec: {
           name: res.spec.name,
           base_url: res.spec.base_url,
@@ -837,6 +880,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
           args_override: null,
           is_global: addMcpGlobal,
           project_ids: [],
+          host_sync: 'None',
           custom_spec: {
             name: customName.trim(),
             base_url: customBaseUrl.trim(),
@@ -876,6 +920,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
         args_override: null,
         is_global: addMcpGlobal,
         project_ids: [],
+        host_sync: addMcpHostSync ? 'GlobalOnly' : 'None',
       });
       resetAddMcp();
       refetchMcps();
@@ -902,6 +947,19 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
     } catch (e) {
       console.warn('Failed to delete MCP config:', e);
       toast(t('mcp.deleteConfigError', userError(e)), 'error');
+    }
+  };
+
+  const handleDeleteSelectedMcpConfigs = async (selected: McpConfigDisplay[]) => {
+    if (selected.length === 0 || !confirm(t('collection.deleteConfirm', selected.length))) return;
+    try {
+      await Promise.all(selected.map(config => mcpsApi.deleteConfig(config.id)));
+      if (selectedConfigId && selected.some(config => config.id === selectedConfigId)) setSelectedConfigId(null);
+      refetchMcps();
+      toast(t('collection.deleteSuccess', selected.length), 'success');
+    } catch (cause) {
+      toast(t('collection.deleteError', userError(cause)), 'error');
+      throw cause;
     }
   };
 
@@ -1094,12 +1152,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
         || (mcpKindFilter === 'mcp' && (kind === 'mcp' || kind === 'hybrid'))
         || (mcpKindFilter === 'api' && (kind === 'api' || kind === 'hybrid'))
         || (mcpKindFilter === 'cli' && kind === 'cli');
-      if (!matchesKind) return false;
-      if (!mcpSearch) return true;
-      const search = mcpSearch.toLowerCase();
-      return cfg.label.toLowerCase().includes(search)
-        || cfg.server_name.toLowerCase().includes(search)
-        || cfg.project_names.some(name => name.toLowerCase().includes(search));
+      return matchesKind;
     })
     .sort((a, b) => {
       const aKind = kindForServer(a.server_id);
@@ -1126,6 +1179,15 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
       }
       return mcpSortReversed ? -result : result;
     });
+
+  useEffect(() => {
+    const query = mcpSearch.trim().toLocaleLowerCase();
+    const selectedConfig = visibleConfigs.find(config => config.id === selectedConfigId);
+    const selectedMatchesQuery = selectedConfig && (!query || `${selectedConfig.label} ${selectedConfig.server_name} ${selectedConfig.project_names.join(' ')}`.toLocaleLowerCase().includes(query));
+    if (selectedConfigId && !selectedMatchesQuery) {
+      setSelectedConfigId(null);
+    }
+  }, [mcpSearch, selectedConfigId, visibleConfigs]);
 
   const configsByServer = new Map<string, { serverId: string; serverName: string; configs: McpConfigDisplay[] }>();
   for (const c of configs) {
@@ -1597,9 +1659,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
   );
 
   return (
-    // While the detail panel is open the page reserves its width so cards
-    // reflow beside it instead of sitting hidden underneath.
-    <div className={selectedConfigId ? 'mcp-page-with-panel' : undefined}>
+    <div className="mcp-page">
       <ToastContainer />
       {/* 0.8.6 (#33 fix 2026-05-21) — Custom plugin export modal.
           Renders unconditionally at the top so it survives navigation
@@ -1692,50 +1752,6 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
         />
       )}
 
-      <div className="mcp-page-header">
-        <div>
-          <div className="kr-context-help-title-row">
-            <h1 className="mcp-h1"><MatrixText text={t('mcp.title')} /> <span className="mcp-subtitle"><MatrixText text={t('mcp.subtitle')} /></span></h1>
-            <ContextHelp title={t('contextHelp.plugins.title')}>
-              <p>{t('contextHelp.plugins.intro')}</p>
-              <ul>
-                <li>{t('contextHelp.plugins.mcp')}</li>
-                <li>{t('contextHelp.plugins.api')}</li>
-                <li>{t('contextHelp.plugins.cli')}</li>
-              </ul>
-              <p className="kr-context-help-agent-note">{t('contextHelp.plugins.agents')}</p>
-            </ContextHelp>
-          </div>
-          <p className="mcp-meta">
-            {totalConfigs} {totalConfigs > 1 ? t('mcp.configPlural') : t('mcp.config')} · {servers.length} {servers.length > 1 ? t('mcp.serverPlural') : t('mcp.server')} · {globalConfigs.length} {globalConfigs.length > 1 ? t('mcp.globalPlural') : t('mcp.global')}
-          </p>
-        </div>
-        <div className="flex-row gap-4 mcp-header-actions">
-          {totalConfigs > 0 && (
-            <button
-              className="mcp-btn-action"
-              onClick={() => setPortabilityMode('export')}
-              title={t('mcp.portability.exportTitle')}
-            >
-              <Download size={14} /> {t('mcp.portability.export')}
-            </button>
-          )}
-          <button
-            className="mcp-btn-action"
-            onClick={() => setPortabilityMode('import')}
-            title={t('mcp.portability.importTitle')}
-          >
-            <Upload size={14} /> {t('mcp.portability.import')}
-          </button>
-          <button className="mcp-btn-action mcp-btn-action-primary" data-tour-id="add-plugin-btn" onClick={() => { setShowAddMcp(true); setAddMcpSelected(null); setAddMcpSearch(''); }} title={t('mcp.addTitle')}>
-            <Plus size={14} /> {t('mcp.add')}
-          </button>
-          <button className="mcp-btn-action" disabled={syncing} onClick={async () => { setSyncing(true); try { await mcpsApi.refresh(); refetchMcps(); } catch (e) { console.warn('Failed to sync MCPs:', e); } finally { setSyncing(false); } }} title={t('mcp.detect')}>
-            <RefreshCw size={14} className={syncing ? 'spin' : ''} /> {syncing ? t('mcp.syncing') : t('mcp.detect')}
-          </button>
-        </div>
-      </div>
-
       {/* Incomplete-config warning banner. Lists the MCPs whose env_keys
           are declared but values are missing/empty — those would fail
           handshake at agent boot and slow down every Kronn-spawned run.
@@ -1775,12 +1791,27 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
 
       {/* ── Add MCP from registry ── */}
       {showAddMcp && (
-        <div ref={addMcpRef} className="mcp-card mcp-add-panel">
+        <div
+          className="mcp-add-modal-backdrop"
+          data-testid="mcp-add-modal-backdrop"
+          role="presentation"
+          onMouseDown={event => {
+            if (event.target === event.currentTarget) resetAddMcp();
+          }}
+        >
+          <div
+            ref={addMcpRef}
+            className="mcp-card mcp-add-panel mcp-add-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="mcp-add-modal-title"
+            onKeyDown={handleAddMcpModalKeyDown}
+          >
           <div className="mcp-add-header">
-            <h3 className="mcp-add-title">
+            <h3 id="mcp-add-modal-title" className="mcp-add-title">
               {addMcpSelected ? t('mcp.configure', selectedDef?.name ?? addMcpLabel) : t('mcp.addTitle')}
             </h3>
-            <button className="mcp-icon-btn" onClick={() => { setShowAddMcp(false); setAddMcpSelected(null); }} aria-label="Close">
+            <button type="button" className="mcp-icon-btn" onClick={resetAddMcp} aria-label={t('common.close')}>
               <X size={14} />
             </button>
           </div>
@@ -2204,6 +2235,16 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                   {addMcpGlobal ? <CheckSquare size={11} className="text-accent" /> : <Square size={11} />}
                   {t('mcp.globalAll')}
                 </button>
+                {selectedDef && pluginKind(selectedDef) !== 'api' && (
+                  <button
+                    className={`mcp-project-toggle ${addMcpHostSync ? 'mcp-project-toggle-on' : 'mcp-project-toggle-off'}`}
+                    onClick={() => setAddMcpHostSync(!addMcpHostSync)}
+                    title={t('mcp.createHostScopeHint')}
+                  >
+                    {addMcpHostSync ? <CheckSquare size={11} className="text-accent" /> : <Square size={11} />}
+                    <Globe size={11} /> {t('mcp.createHostScope')}
+                  </button>
+                )}
               </div>
               {/* Actions */}
               <div className="flex-row gap-4">
@@ -2219,76 +2260,14 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
               </div>
             </>
           )}
+          </div>
         </div>
       )}
-
-      {/* ── Shared search / filter / sort toolbar ── */}
-      {totalConfigs > 1 && (
-        <div className="mcp-list-toolbar">
-          {totalConfigs > 3 && (
-            <div className="mcp-search-wrap">
-              <Search size={14} className="mcp-search-icon" />
-              <input
-                className="input mcp-search-input"
-                placeholder={t('mcp.search')}
-                value={mcpSearch}
-                onChange={(e) => setMcpSearch(e.target.value)}
-              />
-              {mcpSearch && (
-                <button
-                  className="mcp-search-clear"
-                  onClick={() => setMcpSearch('')}
-                  aria-label={t('mcp.clearSearch')}
-                >
-                  <X size={12} />
-                </button>
-              )}
-            </div>
-          )}
-          <ListControls
-            filterLabel={t('automation.filter.label')}
-            filterAriaLabel={t('mcp.filterKind')}
-            filterValue={mcpKindFilter}
-            filterOptions={[
-              { value: 'all', label: t('mcp.kindFilter.all') },
-              { value: 'mcp', label: t('mcp.kindFilter.mcp') },
-              { value: 'api', label: t('mcp.kindFilter.api') },
-              { value: 'cli', label: t('mcp.kindFilter.cli') },
-            ]}
-            onFilterChange={setMcpKindFilter}
-            sortLabel={t('automation.sort.label')}
-            sortAriaLabel={t('mcp.sortLabel')}
-            sortValue={mcpSort}
-            sortOptions={[
-              { value: 'name', label: t('automation.sort.name') },
-              { value: 'kind', label: t('mcp.sortKind') },
-              { value: 'scope', label: t('mcp.sortScope') },
-            ]}
-            onSortChange={setMcpSort}
-            reversed={mcpSortReversed}
-            onToggleDirection={() => setMcpSortReversed(value => !value)}
-            directionLabel={t(mcpSortReversed
-              ? 'automation.sort.restoreDirection'
-              : 'automation.sort.reverseDirection')}
-          />
-        </div>
-      )}
-      <div
-        className="mcp-list-boundary"
-        data-testid="mcp-list-boundary"
-        aria-hidden="true"
-      />
-
-      {/* ── Empty-state banner: no MCP exposed in CLI hors Kronn (UX#7) ── */}
-      <CliExposureHint configs={configs} onJumpToConfig={(id) => setSelectedConfigId(id)} />
 
       {/* ── Installed plugins grid (detail expands inline) ── */}
-      {totalConfigs > 0 || showBuiltinFallback ? (
-        <div className="mcp-installed-grid">
-          {visibleConfigs.length === 0 && (
-            !showBuiltinFallback && <div className="mcp-filter-empty">{t('automation.filter.empty')}</div>
-          )}
-          {visibleConfigs.flatMap(cfg => {
+      <div className="mcp-plugin-shell">
+          {(() => {
+            const renderPlugin = (cfg: McpConfigDisplay, renderDetail: boolean): ReactNode => {
               const linkedProjects = cfg.is_global ? projects.filter(p => !isHiddenPath(p.path)).length : cfg.project_ids.length;
               const isSelected = selectedConfigId === cfg.id;
               const isBuiltin = isBuiltinConfig(cfg);
@@ -2306,15 +2285,13 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
               );
 
               const card = (
-                <button
-                  type="button"
+                <div
                   key={cfg.id}
                   className={`mcp-installed-card${isSelected ? ' mcp-installed-card-selected' : ''}`}
                   data-kind={cfgKind}
                   data-config-id={cfg.id}
                   data-testid={isBuiltin ? 'mcp-kronn-internal-card' : undefined}
-                  onClick={() => setSelectedConfigId(isSelected ? null : cfg.id)}
-                  aria-label={`${cfg.label} — ${t('mcp.openDetails')}`}
+                  aria-hidden="true"
                 >
                   <div className="mcp-plugin-card-header">
                     <span className="mcp-plugin-card-icon"><Puzzle size={16} /></span>
@@ -2393,10 +2370,10 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                     {supportsHostSync && <HostSyncChip mode={cfg.host_sync} />}
                     <span className="mcp-plugin-card-open">{t('mcp.openDetails')}</span>
                   </div>
-                </button>
+                </div>
               );
 
-              if (!isSelected) return [card];
+              if (!renderDetail) return card;
 
               /* ── Inline detail: spans full grid width, right after this card ── */
               const def = mcpRegistry.find(m => m.id === cfg.server_id);
@@ -2470,16 +2447,13 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                 && cfgServer?.api_spec
                 && (cfgServer.api_spec.endpoints?.length ?? 0) === 0;
               const detail = (
-                // Non-blocking side panel (no backdrop): the list behind stays
-                // clickable, so another card swaps this content directly.
                 <aside
                   key={`detail-${cfg.id}`}
-                  className="mcp-detail-inline mcp-plugin-panel"
-                  style={{ top: panelTop }}
+                  className="mcp-detail-inline"
                   aria-label={cfg.label}
-                  data-testid="mcp-plugin-panel"
+                  data-testid="mcp-plugin-detail"
                 >
-                  <div className="mcp-detail-header">
+                  <div className="mcp-detail-header collection-detail-header">
                     <div className="mcp-registry-card-icon" style={{ width: 40, height: 40 }}><Puzzle size={20} /></div>
                     <div className="flex-1">
                       {isEditingLabel ? (
@@ -2919,8 +2893,339 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                   </div>
                 </aside>
               );
-              return [card, detail];
-            })}
+              return detail;
+            };
+            return (
+              <CollectionShell<McpConfigDisplay>
+                ariaLabel={t('mcp.title')}
+                title={<><Puzzle size={17} /> <MatrixText text={t('mcp.title')} /></>}
+                titleCount={totalConfigs}
+                headerActions={<>
+                  <ContextHelp title={t('contextHelp.plugins.title')}>
+                    <p>{t('contextHelp.plugins.intro')}</p>
+                    <ul><li>{t('contextHelp.plugins.mcp')}</li><li>{t('contextHelp.plugins.api')}</li><li>{t('contextHelp.plugins.cli')}</li></ul>
+                    <p className="kr-context-help-agent-note">{t('contextHelp.plugins.agents')}</p>
+                  </ContextHelp>
+                  <button ref={addMcpTriggerRef} type="button" className="collection-shell-icon collection-shell-primary-action" data-tour-id="add-plugin-btn" onClick={() => { setShowAddMcp(true); setAddMcpSelected(null); setAddMcpSearch(''); }} aria-label={t('mcp.add')} title={t('mcp.addTitle')}><Plus size={16} /></button>
+                </>}
+                items={visibleConfigs}
+                getId={config => config.id}
+                getLabel={config => `${config.label} ${config.server_name} ${config.project_names.join(' ')}`}
+                isFavorite={config => favoriteConfigIds.has(config.id)}
+                onToggleFavorite={config => toggleConfigFavorite(config.id)}
+                persistence={{
+                  query: mcpSearch,
+                  onQueryChange: setMcpSearch,
+                  favoritesOnly: false,
+                  onFavoritesOnlyChange: () => {},
+                }}
+                selectedId={selectedConfigId}
+                onSelect={setSelectedConfigId}
+                selectedIds={selectedConfigIds}
+                onSelectedIdsChange={setSelectedConfigIds}
+                actions={[
+                  {
+                    id: 'delete',
+                    label: t('collection.deleteSelected'),
+                    icon: <Trash2 size={15} />,
+                    danger: true,
+                    disabled: selected => selected.length === 0,
+                    onSelect: handleDeleteSelectedMcpConfigs,
+                  },
+                ]}
+                isMobile={isMobile}
+                sidebarOpen={sidebarOpen}
+                onSidebarOpenChange={setSidebarOpen}
+                globalSearchShortcut
+                showSearchClear
+                showControls={false}
+                labels={{
+                  search: t('mcp.search'),
+                  favorites: t('collection.favorites'),
+                  clearFilters: t('collection.clearFilters'),
+                  moreActions: t('collection.moreActions'),
+                  openCollection: t('collection.openCollection'),
+                  closeCollection: t('collection.closeCollection'),
+                  selectItem: t('collection.selectItem'),
+                  selectMultiple: t('collection.selectMultiple'),
+                  cancelSelection: t('collection.cancelSelection'),
+                  selectedCount: count => t('collection.selectedCount', count),
+                }}
+                slots={{
+                  afterSidebarHeader: <>
+                    {totalConfigs > 1 && mcpSearchPanel === 'filters' && (
+                      <div id="mcp-filter-options" className="collection-shell-search-options">
+                        <div className="list-controls">
+                          <label className="list-control">
+                            <Filter size={12} aria-hidden="true" />
+                            <span>{t('automation.filter.label')}</span>
+                            <select
+                              value={mcpKindFilter}
+                              onChange={event => setMcpKindFilter(event.target.value as typeof mcpKindFilter)}
+                              aria-label={t('mcp.filterKind')}
+                            >
+                              <option value="all">{t('mcp.kindFilter.all')}</option>
+                              <option value="mcp">{t('mcp.kindFilter.mcp')}</option>
+                              <option value="api">{t('mcp.kindFilter.api')}</option>
+                              <option value="cli">{t('mcp.kindFilter.cli')}</option>
+                            </select>
+                          </label>
+                        </div>
+                      </div>
+                    )}
+                    {totalConfigs > 1 && mcpSearchPanel === 'sort' && (
+                      <div id="mcp-sort-options" className="collection-shell-search-options">
+                        <ListControls
+                          sortLabel={t('automation.sort.label')}
+                          sortAriaLabel={t('mcp.sortLabel')}
+                          sortValue={mcpSort}
+                          sortOptions={[
+                            { value: 'name', label: t('automation.sort.name') },
+                            { value: 'kind', label: t('mcp.sortKind') },
+                            { value: 'scope', label: t('mcp.sortScope') },
+                          ]}
+                          onSortChange={setMcpSort}
+                          reversed={mcpSortReversed}
+                          onToggleDirection={() => setMcpSortReversed(value => !value)}
+                          directionLabel={t(mcpSortReversed
+                            ? 'automation.sort.restoreDirection'
+                            : 'automation.sort.reverseDirection')}
+                        />
+                      </div>
+                    )}
+                    <div className="mcp-collection-toolbar">
+                      <span className="mcp-meta">{servers.length} {servers.length > 1 ? t('mcp.serverPlural') : t('mcp.server')} · {globalConfigs.length} {globalConfigs.length > 1 ? t('mcp.globalPlural') : t('mcp.global')}</span>
+                      <div className="mcp-collection-toolbar-actions">
+                        {totalConfigs > 0 && <button type="button" className="collection-shell-icon" onClick={() => setPortabilityMode('export')} aria-label={t('mcp.portability.export')} title={t('mcp.portability.exportTitle')}><Download size={14} /></button>}
+                        <button type="button" className="collection-shell-icon" onClick={() => setPortabilityMode('import')} aria-label={t('mcp.portability.import')} title={t('mcp.portability.importTitle')}><Upload size={14} /></button>
+                        <button type="button" className="collection-shell-icon" disabled={syncing} onClick={async () => { setSyncing(true); try { await mcpsApi.refresh(); refetchMcps(); } catch (e) { console.warn('Failed to sync MCPs:', e); } finally { setSyncing(false); } }} aria-label={t('mcp.detect')} title={t('mcp.detect')}><RefreshCw size={14} className={syncing ? 'spin' : ''} /></button>
+                      </div>
+                    </div>
+                  </>,
+                  sidebarHeaderEnd: totalConfigs > 1 ? <>
+                    <button
+                      type="button"
+                      className="collection-shell-search-action collection-shell-search-action-icon"
+                      data-active={mcpSearchPanel === 'filters' || mcpKindFilter !== 'all'}
+                      onClick={() => setMcpSearchPanel(panel => panel === 'filters' ? null : 'filters')}
+                      aria-label={t('mcp.filterKind')}
+                      aria-expanded={mcpSearchPanel === 'filters'}
+                      aria-controls={mcpSearchPanel === 'filters' ? 'mcp-filter-options' : undefined}
+                      title={t('mcp.filterKind')}
+                    >
+                      <Filter size={14} aria-hidden="true" />
+                    </button>
+                    <button
+                      type="button"
+                      className="collection-shell-search-action collection-shell-search-action-icon"
+                      data-active={mcpSearchPanel === 'sort' || mcpSort !== 'name' || mcpSortReversed}
+                      onClick={() => setMcpSearchPanel(panel => panel === 'sort' ? null : 'sort')}
+                      aria-label={t('mcp.sortLabel')}
+                      aria-expanded={mcpSearchPanel === 'sort'}
+                      aria-controls={mcpSearchPanel === 'sort' ? 'mcp-sort-options' : undefined}
+                      title={t('mcp.sortLabel')}
+                    >
+                      <ArrowUpDown size={14} aria-hidden="true" />
+                    </button>
+                  </> : undefined,
+                  renderList: ({ visibleItems, getRowProps, canMultiSelect, isMultiSelected, toggleMultiSelection }) => {
+                    const isGroupCollapsed = (group: string) => (
+                      !canMultiSelect && !mcpSearch.trim() && collapsedMcpGroups.has(group)
+                    );
+                    const toggleGroup = (group: string) => {
+                      setCollapsedMcpGroups(current => {
+                        const next = new Set(current);
+                        if (next.has(group)) next.delete(group);
+                        else next.add(group);
+                        return next;
+                      });
+                    };
+                    const row = (config: McpConfigDisplay, keyPrefix: string) => {
+                      const rowProps = getRowProps(config);
+                      const kind = kindForServer(config.server_id);
+                      const isBuiltin = isBuiltinConfig(config);
+                      const selected = isMultiSelected(config);
+                      const scopeLabels = [
+                        config.is_global ? t('mcp.globalAll') : null,
+                        config.include_general ? t('disc.general') : null,
+                        config.project_ids.length > 0
+                          ? `${config.project_ids.length} ${config.project_ids.length > 1 ? t('mcp.projectPlural') : t('mcp.project')}`
+                          : null,
+                      ].filter((label): label is string => Boolean(label));
+                      const drifting = driftBySlug[config.server_id] ?? [];
+                      const worstDrift = drifting[0];
+                      return <div className="disc-swipe-wrap" key={`${keyPrefix}-${config.id}`}>
+                        <div
+                          className="disc-item mcp-sidebar-plugin-row"
+                          data-active={config.id === selectedConfigId}
+                          data-selected={selected}
+                          data-kind={kind}
+                          data-config-id={config.id}
+                          data-testid={isBuiltin ? 'mcp-kronn-internal-card' : undefined}
+                        >
+                          <button
+                            type="button"
+                            {...rowProps}
+                            className={`${rowProps.className} disc-item-open`}
+                            onClick={canMultiSelect
+                              ? () => toggleMultiSelection(config.id)
+                              : rowProps.onClick}
+                            aria-label={canMultiSelect
+                              ? `${config.label} · ${t('collection.selectItem')}`
+                              : `${config.label} — ${t('mcp.openDetails')}`}
+                            role={canMultiSelect ? 'checkbox' : undefined}
+                            aria-checked={canMultiSelect ? selected : undefined}
+                          >
+                            {canMultiSelect && <span className="disc-item-selection-box" data-selected={selected} aria-hidden="true">{selected && <CheckSquare size={12} />}</span>}
+                            <span className="mcp-sidebar-plugin-icon" data-kind={kind} aria-hidden="true"><Puzzle size={14} /></span>
+                            <span className="disc-item-content">
+                              <span className="disc-item-title">
+                                <span className="disc-item-title-text">{config.label}</span>
+                                {isBuiltin && <span className="mcp-origin-badge mcp-origin-official">{t('mcp.builtin.tileBadge')}</span>}
+                              </span>
+                              <span className="disc-item-meta">
+                                <span className="disc-item-meta-summary">
+                                  {config.server_name !== config.label ? `${config.server_name} · ` : ''}
+                                  {scopeLabels.length > 0 ? scopeLabels.join(' · ') : t('mcp.scopeOrphanShort')}
+                                </span>
+                                <PluginKindBadge kind={kind} />
+                                {kind !== 'api' && <HostSyncChip mode={config.host_sync} />}
+                                {config.env_keys.length > 0 && <span className="mcp-installed-keys"><Key size={9} /> {config.env_keys.length}</span>}
+                                {config.secrets_broken && <span className="mcp-scope-badge mcp-scope-broken" title={t('mcp.secretsBroken')}>⚠ {t('mcp.secretsBrokenShort')}</span>}
+                                {config.registry_drift && <span className="mcp-scope-badge mcp-scope-drift" title={t('mcp.registryDrift')}>⚠ {t(config.registry_drift.orphaned ? 'mcp.registryOrphanShort' : 'mcp.registryDriftShort')}</span>}
+                                {worstDrift && <span
+                                  className="mcp-scope-badge mcp-scope-drift"
+                                  data-testid={`mcp-endpoint-drift-${config.server_id}`}
+                                  title={t(
+                                    worstDrift.successes > 0 ? 'mcp.drift.sometimes' : 'mcp.drift.never',
+                                    worstDrift.failures,
+                                    worstDrift.endpoint_path,
+                                    `HTTP ${worstDrift.http_status}`,
+                                  )}
+                                >⚠ {t('mcp.drift.short')}</span>}
+                              </span>
+                            </span>
+                          </button>
+                          {!canMultiSelect && <CollectionRowActions
+                            itemName={config.label}
+                            favorite={{
+                              active: favoriteConfigIds.has(config.id),
+                              onToggle: () => toggleConfigFavorite(config.id),
+                              activeLabel: t('disc.unpin'),
+                              inactiveLabel: t('disc.pin'),
+                            }}
+                            menuLabel={t('collection.moreActions')}
+                            copyId={config.id}
+                            copyLabel={t('disc.copyId')}
+                            actions={[{
+                              id: 'delete',
+                              label: t('mcp.deleteConfig'),
+                              icon: <Trash2 size={12} />,
+                              danger: true,
+                              onSelect: () => handleDeleteMcpConfig(config.id),
+                            }]}
+                          />}
+                        </div>
+                      </div>;
+                    };
+
+                    const globalConfigs = visibleItems.filter(config => config.is_global);
+                    const generalConfigs = visibleItems.filter(config => config.include_general);
+                    const unassignedConfigs = visibleItems.filter(config => !hasAgentScope(
+                      config.is_global,
+                      config.include_general,
+                      config.project_ids,
+                    ));
+                    const projectGroups = new Map<string, { name: string; configs: McpConfigDisplay[] }>();
+                    const projectById = new Map(projects.map(project => [project.id, project]));
+                    for (const config of visibleItems) {
+                      config.project_ids.forEach((projectId, index) => {
+                        const knownProject = projectById.get(projectId);
+                        const group = projectGroups.get(projectId) ?? {
+                          name: knownProject?.name ?? config.project_names[index] ?? projectId,
+                          configs: [],
+                        };
+                        group.configs.push(config);
+                        projectGroups.set(projectId, group);
+                      });
+                    }
+                    const sortedProjectGroups = [...projectGroups.entries()].sort(([, left], [, right]) => (
+                      left.name.localeCompare(right.name, undefined, { sensitivity: 'base', numeric: true })
+                    ));
+                    const favorites = canMultiSelect
+                      ? []
+                      : visibleItems.filter(config => favoriteConfigIds.has(config.id));
+                    const renderGroup = (
+                      key: string,
+                      label: string,
+                      icon: ReactNode,
+                      groupConfigs: McpConfigDisplay[],
+                    ) => {
+                      if (groupConfigs.length === 0) return null;
+                      const collapsed = isGroupCollapsed(key);
+                      return <div key={key} data-mcp-group={key}>
+                        <button
+                          type="button"
+                          className="disc-group-btn"
+                          onClick={() => toggleGroup(key)}
+                          aria-expanded={!collapsed}
+                        >
+                          <ChevronRight size={10} className="disc-chevron" data-expanded={!collapsed} />
+                          {icon}<span>{label}</span><span className="disc-group-count">{groupConfigs.length}</span>
+                        </button>
+                        {!collapsed && groupConfigs.map(config => row(config, key))}
+                      </div>;
+                    };
+                    const projectsCollapsed = isGroupCollapsed('projects');
+                    const favoritesCollapsed = isGroupCollapsed('favorites');
+                    return <div className="disc-sidebar-list mcp-sidebar-items">
+                      {favorites.length > 0 && <div className="disc-sidebar-section disc-sidebar-favorites" data-expanded={!favoritesCollapsed}>
+                        <CollectionFavoritesHeader
+                          label={t('disc.favorites')}
+                          count={favorites.length}
+                          expanded={!favoritesCollapsed}
+                          onToggle={() => toggleGroup('favorites')}
+                        />
+                        {!favoritesCollapsed && favorites.map(config => row(config, 'favorite'))}
+                      </div>}
+
+                      {visibleItems.length > 0 && <div className="disc-sidebar-section disc-sidebar-projects" data-expanded={!projectsCollapsed}>
+                        <button type="button" className="disc-group-btn" data-no-border="true" onClick={() => toggleGroup('projects')} aria-expanded={!projectsCollapsed}>
+                          <ChevronRight size={10} className="disc-chevron" data-expanded={!projectsCollapsed} />
+                          <Folder size={10} /><span>{t('projects.title')}</span><span className="disc-group-count">{visibleItems.length}</span>
+                        </button>
+                        {!projectsCollapsed && <div className="disc-project-tree">
+                          {renderGroup('global', t('mcp.globalAll'), <Globe size={10} />, globalConfigs)}
+                          {renderGroup('general', t('disc.general'), <Plug size={10} />, generalConfigs)}
+                          {sortedProjectGroups.map(([projectId, group]) => renderGroup(
+                            `project:${projectId}`,
+                            group.name,
+                            <Folder size={10} />,
+                            group.configs,
+                          ))}
+                          {renderGroup('unassigned', t('mcp.scopeOrphanShort'), <AlertTriangle size={10} />, unassignedConfigs)}
+                        </div>}
+                      </div>}
+
+                      {visibleItems.length === 0 && <div className="disc-empty">{t('automation.filter.empty')}</div>}
+                    </div>;
+                  },
+                  sidebarFooter: <CollectionSidebarFooter
+                    label={t('mcp.sidebar.hint')}
+                    navigateLabel={t('disc.sidebar.navigate')}
+                    searchLabel={t('disc.sidebar.searchShortcut')}
+                  />,
+                  renderDetail: config => <>
+                    <CliExposureHint configs={configs} onJumpToConfig={(id) => setSelectedConfigId(id)} />
+                    {config
+                      ? renderPlugin(config, true)
+                      : <div className="collection-shell-detail-empty-hint">{t('mcp.selectHint')}</div>}
+                  </>,
+                  renderEmpty: () => <div className="mcp-filter-empty">{t('automation.filter.empty')}</div>,
+                }}
+              />
+            );
+          })()}
           {showBuiltinFallback && (
             <article
               className="mcp-installed-card mcp-installed-card-static"
@@ -2944,15 +3249,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
               </div>
             </article>
           )}
-        </div>
-      ) : !showAddMcp ? (
-        <div className="mcp-card mcp-empty">
-          <Puzzle size={32} className="text-ghost mb-6" />
-          <p className="mcp-empty-text">
-            {t('mcp.empty')}
-          </p>
-        </div>
-      ) : null}
+      </div>
 
       {/* ── MCP Context Editor Modal ── */}
       {contextEditor && (

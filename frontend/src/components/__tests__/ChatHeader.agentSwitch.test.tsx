@@ -11,6 +11,7 @@ import { discussions as discussionsApi } from '../../lib/api';
 import { ChatHeader } from '../ChatHeader';
 import type { AgentDetection, AgentType, Discussion, ModelTiersConfig } from '../../types/generated';
 import type { ToastFn } from '../../hooks/useToast';
+import type { ExternalApiConnectionView } from '../../lib/api';
 
 const noop = () => {};
 const t = (key: string) => key;
@@ -65,6 +66,8 @@ function renderHeader(options: {
   onDiscussionUpdated?: () => void;
   toast?: ToastFn;
   modelTiers?: ModelTiersConfig;
+  discussion?: Discussion;
+  externalConnections?: ExternalApiConnectionView[];
 } = {}) {
   const sending = options.sending ?? false;
   const onAgentSwitch = options.onAgentSwitch ?? vi.fn<(agent: AgentType) => void>();
@@ -72,7 +75,7 @@ function renderHeader(options: {
   const toast = options.toast ?? vi.fn<ToastFn>();
   render(
     <ChatHeader
-      discussion={makeDiscussion()}
+      discussion={options.discussion ?? makeDiscussion()}
       projects={[]}
       agents={[
         makeAgent('ClaudeCode'),
@@ -80,6 +83,7 @@ function renderHeader(options: {
         makeAgent('GeminiCli', false),
       ]}
       modelTiers={options.modelTiers}
+      externalConnections={options.externalConnections}
       showGitPanel={false}
       isMobile={false}
       sending={sending}
@@ -112,6 +116,7 @@ describe('ChatHeader — shared agent switcher', () => {
   it('keeps the title edit action immediately beside the visible title', () => {
     renderHeader();
 
+    expect(document.querySelector('.disc-chat-header')).toHaveClass('collection-detail-header');
     const title = document.querySelector('.disc-chat-header-title-text');
     const edit = screen.getByRole('button', { name: 'disc.editTitle' });
     const id = screen.getByRole('button', { name: 'disc.idPillTooltip' });
@@ -120,6 +125,58 @@ describe('ChatHeader — shared agent switcher', () => {
     expect(edit.nextElementSibling).toBe(id);
     expect(edit.closest('.disc-chat-header-title')).not.toBeNull();
     expect(edit.closest('.disc-chat-header-presence')).toBeNull();
+  });
+
+  it('renders the durable OpenRouter alias instead of the Custom wire type', async () => {
+    const discussion = makeDiscussion() as Discussion & {
+      message_targets: Record<string, Array<{
+        kind: 'discussion_agent';
+        agent_type: 'Custom';
+        connection_id: string;
+        tier: 'default';
+      }>>;
+    };
+    discussion.agent = 'Custom';
+    discussion.messages = [{
+      id: 'initial-message',
+      role: 'User',
+      channel: 'main',
+      content: '@openrouter translate this',
+      agent_type: null,
+      timestamp: '2026-08-30T12:00:00Z',
+      tokens_used: 0,
+      auth_mode: null,
+    }];
+    discussion.message_targets = {
+      'initial-message': [{
+        kind: 'discussion_agent',
+        agent_type: 'Custom',
+        connection_id: 'conn-openrouter',
+        tier: 'default',
+      }],
+    };
+    renderHeader({
+      discussion,
+      externalConnections: [{
+        id: 'conn-openrouter',
+        display_name: 'OpenRouter',
+        mention_alias: 'openrouter',
+        endpoint: 'https://openrouter.ai/api/v1',
+        credential_slug: 'openrouter',
+        origin_preset: 'open_router',
+        economy_model: 'qwen/qwen3.8-flash',
+        default_model: 'z-ai/glm-5.3',
+        reasoning_model: 'z-ai/glm-5.3',
+        created_at: '2026-08-30T12:00:00Z',
+        updated_at: '2026-08-30T12:00:00Z',
+        has_credential: true,
+      }],
+    });
+
+    const trigger = screen.getByRole('button', { name: 'disc.switchAgentAndTier' });
+    await waitFor(() => expect(trigger).toBeEnabled());
+    expect(trigger).toHaveTextContent('@openrouter');
+    expect(trigger).not.toHaveTextContent('Custom');
   });
 
   it('persists an agent and AI mode together from the quick picker', async () => {

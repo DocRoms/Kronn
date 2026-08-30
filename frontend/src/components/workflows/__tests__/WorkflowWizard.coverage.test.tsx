@@ -375,7 +375,9 @@ describe('WorkflowWizard — QuickStart apply paths', () => {
     renderWizard();
     fireEvent.change(screen.getByLabelText('wiz.name'), { target: { value: 'PickSuggestion' } });
     // Select the project so suggestions are fetched.
-    fireEvent.change(screen.getByLabelText('wiz.project'), { target: { value: 'proj-1' } });
+    const projectPicker = screen.getByRole('combobox', { name: 'wiz.project' });
+    fireEvent.focus(projectPicker);
+    fireEvent.click(screen.getByRole('option', { name: 'ProjectAlpha' }));
     // Expand the picker, then apply the suggestion row.
     fireEvent.click(screen.getByText(/wiz\.quickstart\.toggle/).closest('button')!);
     const sug = await screen.findByText('SuggestedWF');

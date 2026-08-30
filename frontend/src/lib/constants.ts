@@ -186,6 +186,24 @@ export const agentColor = (
   return isRgbHex(override) ? override : AGENT_COLORS[agentType ?? ''] ?? '#8b5cf6';
 };
 
+/** Text-safe companion to the agent brand palette.
+ *
+ * NVIDIA's official green is kept by `agentColor()` for dots, borders and
+ * tinted surfaces. At small text sizes it only reaches ~3:1 on white, so
+ * labels use a theme-aware AA token instead. A deliberate user override is
+ * left untouched: it is their configured mention colour, not our default.
+ */
+export const agentTextColor = (
+  agentType: string | null | undefined,
+  overrides?: AgentMentionColors,
+): string => {
+  const override = agentType ? overrides?.[agentType as AgentType] : undefined;
+  if (isRgbHex(override)) return override;
+  return agentType === 'Nvidia'
+    ? 'var(--kr-agent-nvidia-text)'
+    : AGENT_COLORS[agentType ?? ''] ?? '#8b5cf6';
+};
+
 /**
  * Check if an agent has full_access disabled (restricted mode).
  *

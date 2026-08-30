@@ -25,6 +25,13 @@ vi.mock('../../lib/api', () => ({
       : (row.attributed - row.attributed_without_counters) / row.sessions,
 }));
 
+vi.mock('../../lib/I18nContext', () => ({
+  useT: () => ({
+    t: (key: string, ...args: Array<string | number>) =>
+      args.length ? `${key} ${args.join(' ')}` : key,
+  }),
+}));
+
 import { telemetry } from '../../lib/api';
 import { TelemetryCoveragePanel } from '../TelemetryCoveragePanel';
 import type { TelemetryCoverage } from '../../types/generated';
@@ -50,7 +57,7 @@ describe('TelemetryCoveragePanel', () => {
     await waitFor(() => expect(screen.getByText('100 %')).toBeTruthy());
     // No unknown BADGE (the footer note always mentions the word, so the
     // assertion has to match the counted form).
-    expect(screen.queryByText(/\d+ inconnue/)).toBeNull();
+    expect(screen.queryByText(/telemetryCoverage\.unknown(?:One|Many)/)).toBeNull();
   });
 
   it('names unmeasured sessions as unknown rather than hiding them', async () => {
@@ -60,7 +67,7 @@ describe('TelemetryCoveragePanel', () => {
     mockCoverage.mockResolvedValue([row({ sessions: 4, attributed: 2 })]);
     render(<TelemetryCoveragePanel />);
     await waitFor(() => expect(screen.getByText('50 %')).toBeTruthy());
-    expect(screen.getByText(/2 inconnues/)).toBeTruthy();
+    expect(screen.getByText(/telemetryCoverage\.unknownMany 2/)).toBeTruthy();
   });
 
   it('does not credit a vendor whose rows carry no counters', async () => {
@@ -71,15 +78,17 @@ describe('TelemetryCoveragePanel', () => {
     ]);
     render(<TelemetryCoveragePanel />);
     await waitFor(() => expect(screen.getByText('0 %')).toBeTruthy());
-    expect(screen.getByText(/3 inconnues/)).toBeTruthy();
+    expect(screen.getByText(/telemetryCoverage\.unknownMany 3/)).toBeTruthy();
   });
 
   it('renders a failed query as unknown, never as zero coverage', async () => {
     // Turning a network error into 0% would invent a measurement.
     mockCoverage.mockRejectedValue(new Error('backend down'));
     render(<TelemetryCoveragePanel />);
-    await waitFor(() => expect(screen.getByText(/backend down/)).toBeTruthy());
-    expect(screen.getByText(/couverture inconnue/)).toBeTruthy();
+    await waitFor(() =>
+      expect(screen.getByText(/telemetryCoverage\.readError backend down/)).toBeTruthy(),
+    );
+    expect(screen.getByText('telemetryCoverage.errorNote')).toBeTruthy();
     expect(screen.queryByText('0 %')).toBeNull();
   });
 
@@ -90,12 +99,12 @@ describe('TelemetryCoveragePanel', () => {
       row({ agent_type: 'Kiro', sessions: 0, attributed: 0 }),
     ]);
     render(<TelemetryCoveragePanel />);
-    await waitFor(() => expect(screen.getByText('ClaudeCode')).toBeTruthy());
+    await waitFor(() => expect(screen.getByText('Claude Code')).toBeTruthy());
     expect(screen.queryByText('Kiro')).toBeNull();
   });
 
   it('degrades to unknown when the API surface throws synchronously', async () => {
-    // The panel is mounted inside a shared zone of the Dashboard. A telemetry
+    // The panel is mounted inside the shared Settings usage card. A telemetry
     // failure must never take the page down with it — the same rule the bridge
     // follows. This regression was real: a missing mock crashed the project
     // list into its ErrorBoundary.
@@ -106,14 +115,14 @@ describe('TelemetryCoveragePanel', () => {
     await waitFor(() =>
       expect(screen.getByText(/coverage is not a function/)).toBeTruthy(),
     );
-    expect(screen.getByText(/couverture inconnue/)).toBeTruthy();
+    expect(screen.getByText('telemetryCoverage.errorNote')).toBeTruthy();
   });
 
   it('states plainly that an unmeasured session is not a free one', async () => {
     mockCoverage.mockResolvedValue([row()]);
     render(<TelemetryCoveragePanel />);
     await waitFor(() =>
-      expect(screen.getByText(/pas gratuite/)).toBeTruthy(),
+      expect(screen.getByText('telemetryCoverage.note')).toBeTruthy(),
     );
   });
 });

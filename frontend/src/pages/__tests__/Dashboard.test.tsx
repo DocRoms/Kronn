@@ -10,8 +10,8 @@ vi.mock('../../hooks/useWebSocket', () => ({
 
 // Mock ALL API modules used by Dashboard and its children
 vi.mock('../../lib/api', () => ({
-  // KT-190 — the Dashboard mounts TelemetryCoveragePanel. Empty coverage is
-  // the honest neutral: no sessions measured, nothing claimed.
+  // Settings > Usage mounts TelemetryCoveragePanel when the lazy route opens.
+  // Empty coverage is the honest neutral: no sessions, nothing claimed.
   telemetry: { coverage: vi.fn().mockResolvedValue([]) },
   measuredRatio: vi.fn(() => null),
   projects: {
@@ -26,6 +26,7 @@ vi.mock('../../lib/api', () => ({
     auditStatus: vi.fn().mockResolvedValue(null),
     auditResumable: vi.fn().mockResolvedValue(null),
     auditStatusAll: vi.fn().mockResolvedValue([]),
+    auditHistory: vi.fn().mockResolvedValue([]),
     auditEvidence: vi.fn().mockResolvedValue({
       project_id: '', status: 'NoTemplate', kind: 'no_documentation',
       state_file: 'docs/.kronn.json', runtime_workspace: '.kronn/',
@@ -96,6 +97,15 @@ import type { Discussion, Project } from '../../types/generated';
 
 beforeEach(() => {
   vi.useFakeTimers({ shouldAdvanceTime: true });
+  Object.defineProperty(window, 'matchMedia', {
+    writable: true,
+    value: vi.fn().mockImplementation((query: string) => ({
+      matches: false,
+      media: query,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    })),
+  });
 });
 
 afterEach(() => {
@@ -145,6 +155,28 @@ const makeProject = (id: string, name: string, org?: string): Project => ({
 });
 
 describe('Dashboard — unseen badge & document.title', () => {
+  it('does not render project loading content above the project master/detail layout', async () => {
+    let resolveProjects!: (projects: Project[]) => void;
+    vi.mocked(projectsApi.list).mockReturnValueOnce(new Promise(resolve => {
+      resolveProjects = resolve;
+    }));
+
+    act(() => {
+      render(<I18nProvider><Dashboard onReset={vi.fn()} /></I18nProvider>);
+    });
+
+    const main = document.querySelector('.dash-main');
+    const projectPage = main?.querySelector('.project-page');
+    expect(projectPage).not.toBeNull();
+    expect(main?.querySelector(':scope > .dash-loading-bar')).toBeNull();
+    expect(projectPage?.querySelector('.project-detail-loading')).toHaveTextContent('Chargement des projets');
+
+    await act(async () => {
+      resolveProjects([]);
+      await Promise.resolve();
+    });
+  });
+
   it('shows unseen badge on discussions tab when on another page', async () => {
     const disc = makeDiscussion('d1', 3);
     vi.mocked(discussionsApi.list).mockResolvedValue([disc]);
@@ -247,15 +279,16 @@ describe('Dashboard — project list', () => {
     expect(document.body.textContent!).not.toContain('go-service');
   });
 
-  it('renders "New project" button in nav bar', async () => {
+  it('renders the new-project action in the project aside instead of the global nav', async () => {
     vi.mocked(projectsApi.list).mockResolvedValue([]);
     vi.mocked(discussionsApi.list).mockResolvedValue([]);
 
     await wrap(<Dashboard onReset={vi.fn()} />);
 
-    // The nav bar shows the project-creation button (French: "Ajouter un projet")
-    const body = document.body.textContent!;
-    expect(body).toContain('Ajouter un projet');
+    const newProjectButton = document.querySelector('[data-tour-id="new-project-btn"]');
+    expect(newProjectButton).toBeTruthy();
+    expect(newProjectButton?.closest('.collection-shell-titlebar')).toBeTruthy();
+    expect(newProjectButton?.closest('nav')).toBeNull();
   });
 });
 
@@ -264,7 +297,7 @@ describe('Dashboard — mobile responsive', () => {
     Object.defineProperty(window, 'matchMedia', {
       writable: true,
       value: vi.fn().mockImplementation((query: string) => ({
-        matches: query.includes('767'),
+        matches: query.includes('1099'),
         media: query,
         addEventListener: vi.fn(),
         removeEventListener: vi.fn(),
@@ -316,9 +349,7 @@ describe('Dashboard — Ctrl+Enter keyboard shortcuts', () => {
 
     await wrap(<Dashboard onReset={vi.fn()} />);
 
-    // Find and click the new project button (contains "Nouveau projet" in FR)
-    const allButtons = Array.from(document.body.querySelectorAll('button'));
-    const newProjectBtn = allButtons.find(b => b.textContent?.includes('Ajouter un projet'));
+    const newProjectBtn = document.querySelector('[data-tour-id="new-project-btn"]') as HTMLButtonElement | null;
     expect(newProjectBtn).toBeTruthy();
 
     await act(async () => { newProjectBtn!.click(); });
@@ -346,8 +377,8 @@ describe('Dashboard — Ctrl+Enter keyboard shortcuts', () => {
     await wrap(<Dashboard onReset={vi.fn()} />);
 
     // Open modal
-    const newProjectBtn = Array.from(document.body.querySelectorAll('button')).find(b => b.textContent?.includes('Ajouter un projet'));
-    await act(async () => { newProjectBtn!.click(); });
+    const newProjectBtn = document.querySelector('[data-tour-id="new-project-btn"]') as HTMLButtonElement;
+    await act(async () => { newProjectBtn.click(); });
 
     // Switch to clone tab
     const cloneTab = Array.from(document.body.querySelectorAll('button')).find(b => b.textContent?.includes('Cloner'));

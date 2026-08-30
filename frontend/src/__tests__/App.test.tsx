@@ -26,6 +26,12 @@ vi.mock('../pages/StandaloneLivePage', () => ({
   ),
 }));
 
+vi.mock('../pages/StandaloneLivePageMosaic', () => ({
+  StandaloneLivePageMosaic: ({ pageIds, layout }: { pageIds: string[]; layout: string }) => (
+    <div data-testid="standalone-page-mosaic">{layout}:{pageIds.join(',')}</div>
+  ),
+}));
+
 // Mock the API
 vi.mock('../lib/api', () => ({
   setup: {
@@ -117,6 +123,23 @@ describe('App', () => {
 
     render(<App />);
     await waitFor(() => expect(screen.getByTestId('standalone-page')).toHaveTextContent('page-1'));
+    expect(screen.queryByTestId('dashboard')).toBeNull();
+  });
+
+  it('opens a direct Page mosaic URL without mounting the dashboard chrome', async () => {
+    window.location.hash = '#pages/mosaic?page=page-1&page=page-2&layout=two-columns';
+    (setupApi.getStatus as ReturnType<typeof vi.fn>).mockResolvedValue({
+      is_first_run: false,
+      current_step: 'Complete',
+      agents_detected: [],
+      scan_paths_set: true,
+      repos_detected: [],
+      default_scan_path: '/home',
+    });
+
+    render(<App />);
+    await waitFor(() => expect(screen.getByTestId('standalone-page-mosaic'))
+      .toHaveTextContent('two-columns:page-1,page-2'));
     expect(screen.queryByTestId('dashboard')).toBeNull();
   });
 

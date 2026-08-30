@@ -24,18 +24,19 @@ import remarkEmoji from 'remark-emoji';
 import '../pages/DiscussionsPage.css';
 import type { DiscussionMessage, AgentType, QuickPrompt, ContextFile, MessageTarget } from '../types/generated';
 import { MessageAttachments } from './MessageAttachments';
-import { AGENT_LABELS, AGENT_MENTIONS, MODEL_TIER_ICONS, USER_MENTION_TRIGGER, agentColor } from '../lib/constants';
+import { AGENT_LABELS, AGENT_MENTIONS, MODEL_TIER_ICONS, USER_MENTION_TRIGGER, agentColor, agentTextColor } from '../lib/constants';
 import { gravatarUrl } from '../lib/gravatar';
 import {
   splitInjectedContext,
   splitMessageSeed,
   stripAgentHandoff,
+  isDeletedMessage,
 } from '../lib/messageContent';
 import { parseModelErrorEvent } from '../lib/modelErrorEvent';
 import {
   Cpu, AlertTriangle, Zap, Loader2, Pause, Play,
   Key, Settings, Send, Pencil, RotateCcw, Check, Copy, Clock, ShieldCheck,
-  ChevronRight, ListTodo, User, Users,
+  ChevronRight, ListTodo, User, Users, Trash2, Workflow,
   Reply,
 } from 'lucide-react';
 
@@ -207,6 +208,11 @@ export interface MessageBubbleProps {
   isExpandedSummary: boolean;
   prevUserTs: string | null;
   defaultAgent: AgentType;
+  /** Provider alias for a Custom discussion agent (for example
+   * `@openrouter`). The message row otherwise only knows AgentType::Custom. */
+  defaultAgentAlias?: string;
+  /** Dynamic aliases keyed by MessageTarget.connection_id. */
+  targetConnectionAliases?: Record<string, string>;
   summaryCache: string | null;
   language: string;
   sending: boolean;
@@ -256,13 +262,15 @@ export interface MessageBubbleProps {
   replies?: DiscussionMessage[];
   onReply?: (message: DiscussionMessage) => void;
   onReplyNavigate?: (messageId: string) => void;
+  onDelete?: (message: DiscussionMessage) => void;
+  isDeleting?: boolean;
   t: (key: string, ...args: (string | number)[]) => string;
 }
 
 export const MessageBubble = memo(function MessageBubble(props: MessageBubbleProps) {
   const { msg, isLastUser, isLastAgent, isEditing, isCopied, isTtsActive, ttsState: tts, isExpandedSummary,
-    prevUserTs, defaultAgent, summaryCache, language, sending, editingText, hasFullAccess,
-    onCopy, onTts, onEditStart, onEditCancel, onEditSubmit, onEditTextChange, onRetry, onRetryAgentDispatch, onExpandSummary, onNavigate, discussionId, projectId, chainableQPs, onLaunchQp, attachments, pendingAttachment, isSearchMatch, isSearchCurrent, replyTarget, replies = [], onReply, onReplyNavigate, targets = [], t } = props;
+    prevUserTs, defaultAgent, defaultAgentAlias, targetConnectionAliases = {}, summaryCache, language, sending, editingText, hasFullAccess,
+    onCopy, onTts, onEditStart, onEditCancel, onEditSubmit, onEditTextChange, onRetry, onRetryAgentDispatch, onExpandSummary, onNavigate, discussionId, projectId, chainableQPs, onLaunchQp, attachments, pendingAttachment, isSearchMatch, isSearchCurrent, replyTarget, replies = [], onReply, onReplyNavigate, onDelete, isDeleting = false, targets = [], t } = props;
   const editTextareaRef = useRef<HTMLTextAreaElement>(null);
   useLayoutEffect(() => {
     if (isEditing && editTextareaRef.current) {
@@ -270,6 +278,8 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
     }
   }, [editingText, isEditing]);
   const isUser = msg.role === 'User';
+  const isOrchestrator = isUser && msg.author_pseudo === 'Orchestrateur';
+  const isDeleted = isDeletedMessage(msg.content);
   const modelError = useMemo(() => {
     if (msg.role !== 'System') return null;
     const structured = parseModelErrorEvent(msg.content);
@@ -304,6 +314,8 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
     && msg.source_msg_id === 'kronn-guided-tour-demo-preview';
   const agentTrigger = isTourDemo
     ? t('disc.tourDemoAuthor')
+    : agentType === defaultAgent && defaultAgentAlias
+      ? defaultAgentAlias
     : AGENT_MENTIONS.find(mention => mention.type === agentType)?.trigger
       ?? AGENT_LABELS[agentType]
       ?? agentType;
@@ -335,6 +347,21 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
   // retry never repeated, so it stays one click away.
   const isFragment = msg.recovered_partial === true;
   const [fragmentOpen, setFragmentOpen] = useState(false);
+  const [orchestratorDetailsOpen, setOrchestratorDetailsOpen] = useState(false);
+
+  const orchestratorPreview = useMemo(() => {
+    if (!isOrchestrator) return '';
+    const firstLine = visibleContent
+      .split('\n')
+      .map(line => line.trim())
+      .find(Boolean)
+      ?.replace(/^#{1,6}\s+/, '')
+      .replace(/^\*\*(.*?)\*\*.*$/, '$1')
+      .replace(/[`*_~]/g, '')
+      .trim() ?? '';
+    const compact = firstLine || t('disc.orchestratorUpdate');
+    return compact.length > 140 ? `${compact.slice(0, 137).trimEnd()}…` : compact;
+  }, [isOrchestrator, t, visibleContent]);
 
   useEffect(() => () => {
     if (messageIdResetTimer.current) clearTimeout(messageIdResetTimer.current);
@@ -455,23 +482,64 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
     ? /^\[kronn-internal: ([a-z_]+)(?:\(([^)]*)\))?(?: → (.*))?\]$/s.exec(msg.content.trim())
     : null;
 
+  if (isDeleted) {
+    const deletedAuthor = isOrchestrator
+      ? t('disc.orchestrator')
+      : msg.role === 'Agent'
+        ? agentTrigger
+        : msg.author_pseudo || t('disc.humanAuthor');
+    return (
+      <div
+        className="disc-msg-row"
+        data-role="deleted"
+        data-former-role={isUser ? 'user' : msg.role === 'System' ? 'system' : 'agent'}
+        data-message-id={msg.id}
+      >
+        <div className="disc-msg-bubble disc-msg-deleted" data-role="deleted">
+          <Trash2 size={12} aria-hidden="true" />
+          <span>{t('disc.deletedMessage')}</span>
+          <span className="disc-msg-deleted-meta">· {deletedAuthor} · {formattedTime}</span>
+          <button
+            type="button"
+            className="disc-id-pill disc-message-id-pill"
+            data-copied={isMessageIdCopied}
+            onClick={copyMessageId}
+            title={t('disc.idPillTooltip', msg.id)}
+            aria-label={t('disc.idPillTooltip', msg.id)}
+          >
+            {isMessageIdCopied ? <Check size={8} /> : null}
+            {messageShortLabel(msg.id)}
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  const visualRole = isOrchestrator
+    ? 'orchestrator'
+    : isUser
+      ? 'user'
+      : msg.role === 'System'
+        ? 'system'
+        : 'agent';
+
   return (
     // KT-58 — `data-target-agent` carries the message's durable dispatch
     // target, so CSS can single out the mention actually awaiting a reply
     // instead of giving every mention the same weight.
     <div
       className="disc-msg-row"
-      data-role={isUser ? 'user' : msg.role === 'System' ? 'system' : 'agent'}
+      data-role={visualRole}
       data-target-agent={msg.target_agent ?? undefined}
       data-message-id={msg.id}
       data-search-match={isSearchMatch || undefined}
       data-search-current={isSearchCurrent || undefined}
     >
       <div
-        className="disc-msg-bubble"
-        data-role={isUser ? 'user' : msg.role === 'System' ? 'system' : 'agent'}
+        className={`disc-msg-bubble${isOrchestrator ? ' disc-msg-bubble-full' : ''}`}
+        data-role={visualRole}
         data-editing={isEditing || undefined}
-        data-variant={msg.role === 'System' ? (
+        data-variant={isOrchestrator ? 'orchestration' : msg.role === 'System' ? (
           isKronnTool ? 'kronn-tool'
           : isKronnPlanning ? 'kronn-planning'
           : msg.content.startsWith('summary cached') ? 'summary'
@@ -490,15 +558,25 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
               // in Kronn, not an agent reply (F11: cross-instance, both used to read
               // as a bare "Anonymous" with no human/agent distinction).
               <div className="disc-msg-author">
-                {msg.author_avatar_email ? (
+                {isOrchestrator ? (
+                  <span className="disc-msg-author-initials" data-kind="orchestrator">
+                    <Workflow size={10} aria-hidden="true" />
+                  </span>
+                ) : msg.author_avatar_email ? (
                   <img src={gravatarUrl(msg.author_avatar_email, 20)} alt="" className="disc-msg-author-avatar" />
                 ) : (
                   <span className="disc-msg-author-initials">
                     {(msg.author_pseudo || 'anonyme').slice(0, 2).toUpperCase()}
                   </span>
                 )}
-                <span className="disc-msg-author-name">{msg.author_pseudo || 'anonyme'}</span>
-                {msg.author_pseudo !== 'Orchestrateur' && (
+                <span className="disc-msg-author-name">
+                  {isOrchestrator ? t('disc.orchestrator') : msg.author_pseudo || 'anonyme'}
+                </span>
+                {isOrchestrator ? (
+                  <span className="disc-msg-author-kind" title={t('disc.orchestratorKind')}>
+                    · {t('disc.orchestratorKind')}
+                  </span>
+                ) : (
                   <span
                     className="disc-msg-author-kind"
                     style={{ fontSize: 'var(--kr-fs-xs)', fontWeight: 400, opacity: 0.55 }}
@@ -507,10 +585,55 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
                     · humain
                   </span>
                 )}
+                {targets.length > 0 && (
+                  <span
+                    className="disc-msg-routing-receipt"
+                    role="group"
+                    aria-label={t('disc.routingRequested')}
+                    title={t('disc.routingRequested')}
+                    data-testid="message-routing-receipt"
+                  >
+                    <span className="disc-msg-routing-label" aria-hidden="true">→</span>
+                    <span className="disc-msg-routing-targets">
+                      {targets.map((target, index) => {
+                        const dynamicAlias = target.connection_id
+                          ? targetConnectionAliases[target.connection_id]
+                          : null;
+                        const trigger = dynamicAlias
+                          ? `@${dynamicAlias}`
+                          : AGENT_MENTIONS.find(mention => mention.type === target.agent_type)?.trigger
+                          ?? `@${AGENT_LABELS[target.agent_type] ?? target.agent_type}`;
+                        const alias = target.kind === 'cli' ? `${trigger}-cli` : trigger;
+                        const tierLabel = target.tier ? t(`disc.tier.${target.tier}`) : null;
+                        return (
+                          <span
+                            key={`${target.kind}-${target.agent_type}-${target.cli_session_id ?? index}`}
+                            className="disc-msg-routing-target"
+                            data-kind={target.kind}
+                            title={target.kind === 'cli'
+                              ? `${alias} · ${t('disc.targetCli')}`
+                              : tierLabel
+                                ? `${alias} · ${tierLabel}`
+                                : alias}
+                          >
+                            <span>{alias}{' '}</span>
+                            {target.kind === 'cli' ? (
+                              <span className="disc-msg-routing-tier">· {t('disc.targetCli')}</span>
+                            ) : target.tier && tierLabel ? (
+                              <span className="disc-msg-routing-tier">
+                                · <span aria-hidden="true">{MODEL_TIER_ICONS[target.tier]}</span> {tierLabel}
+                              </span>
+                            ) : null}
+                          </span>
+                        );
+                      })}
+                    </span>
+                  </span>
+                )}
               </div>
             )}
             {msg.role === 'Agent' && (
-              <div className="disc-msg-agent-label" style={{ color: agentColor(agentType, mentionColors), justifyContent: 'space-between' }}>
+              <div className="disc-msg-agent-label" style={{ color: agentTextColor(agentType, mentionColors), justifyContent: 'space-between' }}>
                 <span className="flex-row gap-2">
                   {/* "<agent>[ · <model>][ · <owner>]" — answers WHO + WHAT at a
                    *  glance. model_tier is present on local agent messages; a
@@ -628,57 +751,33 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
               </div>
             )}
           </div>
-          <button
-            type="button"
-            className="disc-id-pill disc-message-id-pill"
-            data-tour-id="message-id-pill"
-            data-copied={isMessageIdCopied}
-            onClick={copyMessageId}
-            title={t('disc.idPillTooltip', msg.id)}
-            aria-label={t('disc.idPillTooltip', msg.id)}
-          >
-            {isMessageIdCopied ? <Check size={8} /> : null}
-            {messageShortLabel(msg.id)}
-          </button>
-        </div>
-        {isUser && targets.length > 0 && (
-          <div
-            className="disc-msg-routing-receipt"
-            aria-label={t('disc.routingRequested')}
-            data-testid="message-routing-receipt"
-          >
-            <span className="disc-msg-routing-label">{t('disc.routingRequested')}</span>
-            <span className="disc-msg-routing-targets">
-              {targets.map((target, index) => {
-                const trigger = AGENT_MENTIONS.find(mention => mention.type === target.agent_type)?.trigger
-                  ?? `@${AGENT_LABELS[target.agent_type] ?? target.agent_type}`;
-                const alias = target.kind === 'cli' ? `${trigger}-cli` : trigger;
-                const tierLabel = target.tier ? t(`disc.tier.${target.tier}`) : null;
-                return (
-                  <span
-                    key={`${target.kind}-${target.agent_type}-${target.cli_session_id ?? index}`}
-                    className="disc-msg-routing-target"
-                    data-kind={target.kind}
-                    title={target.kind === 'cli'
-                      ? `${alias} · ${t('disc.targetCli')}`
-                      : tierLabel
-                        ? `${alias} · ${tierLabel}`
-                        : alias}
-                  >
-                    <span>{alias}{' '}</span>
-                    {target.kind === 'cli' ? (
-                      <span className="disc-msg-routing-tier">· {t('disc.targetCli')}</span>
-                    ) : target.tier && tierLabel ? (
-                      <span className="disc-msg-routing-tier">
-                        · <span aria-hidden="true">{MODEL_TIER_ICONS[target.tier]}</span> {tierLabel}
-                      </span>
-                    ) : null}
-                  </span>
-                );
-              })}
-            </span>
+          <div className="disc-msg-header-actions">
+            {isOrchestrator && (
+              <button
+                type="button"
+                className="disc-msg-orchestrator-toggle"
+                aria-expanded={orchestratorDetailsOpen}
+                onClick={() => setOrchestratorDetailsOpen(open => !open)}
+              >
+                {orchestratorDetailsOpen
+                  ? t('disc.orchestratorHideDetails')
+                  : t('disc.orchestratorShowDetails')}
+              </button>
+            )}
+            <button
+              type="button"
+              className="disc-id-pill disc-message-id-pill"
+              data-tour-id="message-id-pill"
+              data-copied={isMessageIdCopied}
+              onClick={copyMessageId}
+              title={t('disc.idPillTooltip', msg.id)}
+              aria-label={t('disc.idPillTooltip', msg.id)}
+            >
+              {isMessageIdCopied ? <Check size={8} /> : null}
+              {messageShortLabel(msg.id)}
+            </button>
           </div>
-        )}
+        </div>
         {msg.role !== 'System' && msg.reply_to_message_id && (
           <button
             type="button"
@@ -765,6 +864,23 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
             // only renders the visible prefix.
             const { visible, seed } = splitMessageSeed(visibleContent);
             const cleaned = visible.replace(/KRONN:(BRIEFING_COMPLETE|VALIDATION_COMPLETE|BOOTSTRAP_COMPLETE|WORKFLOW_READY|REPO_READY|ARCHITECTURE_READY|PLAN_READY|STRUCTURE_READY|ISSUES_READY|ISSUES_CREATED|QP_IMPROVED|BUNDLE_READY|CHAIN_QP:[0-9a-fA-F-]+)/gi, '').trim();
+            if (isOrchestrator) {
+              return (
+                <div className="disc-msg-orchestrator-content">
+                  {!orchestratorDetailsOpen && (
+                    <p className="disc-msg-orchestrator-preview">{orchestratorPreview}</p>
+                  )}
+                  {orchestratorDetailsOpen && (
+                    <MentionDiscussionAgentContext.Provider value={defaultAgent}>
+                      <MentionAwareMessageBody
+                        content={cleaned}
+                        discussionId={discussionId}
+                      />
+                    </MentionDiscussionAgentContext.Provider>
+                  )}
+                </div>
+              );
+            }
             // KT-251 — a salvaged fragment is folded behind a toggle. Two
             // half-answers next to a real one read as several agents replying,
             // which is what a user reported. Folded and NOT hidden: the fragment
@@ -1038,6 +1154,18 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
                 <span>{t('disc.reply')}</span>
               </button>
             )}
+            {!isEditing && onDelete && (
+              <button
+                type="button"
+                className="disc-icon-btn disc-delete-message-action"
+                onClick={() => onDelete(msg)}
+                disabled={isDeleting || sending}
+                title={t('disc.deleteMessage')}
+                aria-label={t('disc.deleteMessage')}
+              >
+                {isDeleting ? <Loader2 size={10} className="spin" /> : <Trash2 size={10} />}
+              </button>
+            )}
             {msg.role === 'Agent' && copyBtn(9, true)}
             {msg.role === 'Agent' && hasFullAccess && (
               <span className="disc-full-access-badge">
@@ -1055,7 +1183,7 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
             )}
             {!sending && !isEditing && (isLastUser || isLastAgent) && (
               <div className="flex-row gap-2">
-                {isLastUser && (
+                {isLastUser && !isOrchestrator && (
                   <button className="disc-icon-btn" style={{ padding: '2px 6px', fontSize: 10, color: 'var(--kr-text-dim)' }} onClick={() => onEditStart(msg.id, visibleContent)} title={t('disc.editResend')} aria-label={t('disc.editResend')}>
                     <Pencil size={10} />
                   </button>
@@ -1250,6 +1378,7 @@ function MarkdownLink({ href, children }: MdProps) {
     : null;
   if (mention) {
     const color = agentColor(mention.type, mentionColors);
+    const textColor = agentTextColor(mention.type, mentionColors);
     const isCli = encodedAgent?.endsWith('-cli') ?? false;
     const identityKind = !isCli && discussionAgent
       ? t(mention.type === discussionAgent
@@ -1260,7 +1389,7 @@ function MarkdownLink({ href, children }: MdProps) {
       <span
         className="disc-agent-mention-chip"
         data-agent={mention.type}
-        style={{ color, borderColor: color, backgroundColor: `${color}18` }}
+        style={{ color: textColor, borderColor: color, backgroundColor: `${color}18` }}
       >
         <Cpu size={10} aria-hidden="true" />
         {children}

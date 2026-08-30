@@ -23,7 +23,8 @@
 //      always-on poll musn't spam the projects list endpoint).
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, act } from '@testing-library/react';
+import { render, act, fireEvent, screen } from '@testing-library/react';
+import { readFileSync } from 'node:fs';
 import { buildApiMock } from '../../test/apiMock';
 
 vi.mock('../../lib/api', () => buildApiMock());
@@ -69,10 +70,11 @@ const AGENT: AgentDetection = {
   runtime_available: false, rtk_available: false, rtk_hook_configured: false,
 };
 
-function renderCard(onRefetch = noop) {
+function renderCard(onRefetch = noop, detailMode = false) {
   return render(
     <ProjectCard
       project={PROJECT}
+      detailMode={detailMode}
       isOpen={true}
       onToggleOpen={noop}
       discussions={[]}
@@ -121,7 +123,7 @@ describe('ProjectCard — audit resume after refresh (0.8.3 #280-fix)', () => {
       project_id: 'p-resume',
       phase: 'auditing',
       step_index: 3,
-      total_steps: 10,
+      total_steps: 16,
       current_file: 'docs/AGENTS.md',
       started_at: '2026-05-14T17:44:14Z',
       kind: 'full_audit',
@@ -159,7 +161,7 @@ describe('ProjectCard — audit resume after refresh (0.8.3 #280-fix)', () => {
       kind: 'full_audit',
       startedAt: new Date().toISOString(),
       stepIndex: 2,
-      totalSteps: 10,
+      totalSteps: 16,
       currentFile: 'docs/glossary.md',
     };
     localStorage.setItem('kronn:audit-checkpoint:p-resume', JSON.stringify(cp));
@@ -167,7 +169,7 @@ describe('ProjectCard — audit resume after refresh (0.8.3 #280-fix)', () => {
       project_id: 'p-resume',
       phase: 'auditing',
       step_index: 2,
-      total_steps: 10,
+      total_steps: 16,
       current_file: 'docs/glossary.md',
       started_at: cp.startedAt,
       kind: 'full_audit',
@@ -190,8 +192,8 @@ describe('ProjectCard — audit resume after refresh (0.8.3 #280-fix)', () => {
       if (firstCall) {
         firstCall = false;
         return {
-          project_id: 'p-resume', phase: 'auditing', step_index: 9,
-          total_steps: 10, current_file: 'docs/x.md',
+          project_id: 'p-resume', phase: 'auditing', step_index: 15,
+          total_steps: 16, current_file: 'docs/x.md',
           started_at: '2026-05-14T17:44:14Z', kind: 'full_audit',
         };
       }
@@ -211,5 +213,61 @@ describe('ProjectCard — audit resume after refresh (0.8.3 #280-fix)', () => {
     });
     expect(isAuditBarMounted(container)).toBe(false);
     expect(onRefetch).toHaveBeenCalled();
+  });
+
+  it.each([
+    ['Failed', 'projects.docAi.auditRecap.status.failed'],
+    ['Completed', 'projects.docAi.auditRecap.status.completed'],
+  ])('shows a %s terminal result on the project card and opens its exact Audit run', async (status, label) => {
+    const terminalRunId = `run-${status.toLowerCase()}`;
+    vi.mocked(projectsApi.auditHistory).mockResolvedValue([{
+      id: 'run-still-running', project_id: PROJECT.id, kind: 'Full', agent_type: 'ClaudeCode',
+      started_at: '2026-05-14T17:46:14Z', ended_at: null,
+      duration_ms: null, status: 'Running', td_total: 0,
+    }, {
+      id: terminalRunId, project_id: PROJECT.id, kind: 'Full', agent_type: 'ClaudeCode',
+      started_at: '2026-05-14T17:44:14Z', ended_at: '2026-05-14T17:45:14Z',
+      duration_ms: 60_000, status, td_total: 0,
+    }]);
+
+    const { container } = renderCard(noop, true);
+    // The suite uses fake timers for the audit poll. Flush the effect's
+    // resolved promise directly instead of using findBy*, which polls using
+    // those frozen timers and can therefore time out.
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    const outcome = screen.getByTestId('project-audit-outcome');
+    expect(outcome.textContent).toContain(label);
+
+    await act(async () => { fireEvent.click(outcome); await Promise.resolve(); });
+    expect(container.querySelector('.dash-card-body')).toHaveAttribute('data-detail-view', 'audit');
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(projectsApi.auditRunSteps).toHaveBeenCalledWith(terminalRunId);
+  });
+
+  it('refreshes the terminal outcome after cancelling an active audit', async () => {
+    vi.mocked(projectsApi.auditStatus).mockResolvedValue({
+      project_id: PROJECT.id, phase: 'auditing', step_index: 3, total_steps: 16,
+      current_file: 'docs/AGENTS.md', started_at: '2026-05-14T17:44:14Z', kind: 'full_audit',
+    });
+    vi.mocked(projectsApi.auditHistory).mockResolvedValue([{
+      id: 'run-cancelled', project_id: PROJECT.id, kind: 'Full', agent_type: 'ClaudeCode',
+      started_at: '2026-05-14T17:44:14Z', ended_at: '2026-05-14T17:45:14Z',
+      duration_ms: 60_000, status: 'Cancelled', td_total: 0,
+    }]);
+
+    renderCard();
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    const historyCallsBeforeCancel = vi.mocked(projectsApi.auditHistory).mock.calls.length;
+    await act(async () => { fireEvent.click(screen.getByText('audit.cancelAudit')); await Promise.resolve(); });
+
+    expect(projectsApi.cancelAudit).toHaveBeenCalledWith(PROJECT.id);
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(vi.mocked(projectsApi.auditHistory).mock.calls.length).toBeGreaterThan(historyCallsBeforeCancel);
+    expect(screen.getByTestId('project-audit-outcome')).toHaveTextContent('projects.docAi.auditRecap.status.cancelled');
+  });
+
+  it('defines the green success treatment for terminal audit outcome chips', () => {
+    const css = readFileSync('src/pages/Dashboard.css', 'utf8');
+    expect(css).toMatch(/\.project-alert-chip\[data-tone='success'\]\s*\{\s*color:\s*var\(--kr-success\);/);
   });
 });

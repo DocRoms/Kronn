@@ -77,6 +77,9 @@
   --kr-purple-soft-rgb: 200, 160, 255;
   --kr-pink: #ff5bbc;
   --kr-pink-rgb: 255, 91, 188;
+  /* NVIDIA #76B900 stays the brand/accent colour. This lighter companion is
+     reserved for small text on dark surfaces (11:1 on --kr-bg-surface). */
+  --kr-agent-nvidia-text: #a8df55;
   --kr-warning-amber-rgb: 245, 158, 11;
   --kr-cancelled: rgba(255, 255, 255, 0.45);
   --kr-text-on-accent: #111;
@@ -243,6 +246,8 @@
   --kr-bg-code: #1a1d23;                    /* code blocks stay dark on purpose — readability + convention */
   --kr-bg-code-panel: #0d1017;              /* git diff / terminal panel stays dark (IDE convention) */
   --kr-bg-scrim: rgba(10, 14, 30, 0.08);
+  /* Darkened NVIDIA green: 5.86:1 on white, WCAG AA for normal text. */
+  --kr-agent-nvidia-text: #477000;
 
   /* ── Accent — neon teal in light theme ──
      Teal is the chromatic cousin of the dark-theme lime on the
@@ -408,6 +413,7 @@
   --kr-bg-code: rgba(0, 0, 0, 0.5);
   --kr-bg-code-panel: #050805;
   --kr-bg-scrim: rgba(0, 0, 0, 0.4);
+  --kr-agent-nvidia-text: #a8df55;
 
   --kr-accent: #00ff41;
   --kr-accent-rgb: 0, 255, 65;
@@ -505,6 +511,7 @@
   --kr-bg-code: rgba(0, 0, 0, 0.35);
   --kr-bg-code-panel: #05070c;
   --kr-bg-scrim: rgba(0, 0, 0, 0.3);
+  --kr-agent-nvidia-text: #a8df55;
 
   --kr-accent: #ffd400;
   --kr-accent-rgb: 255, 212, 0;
@@ -601,6 +608,7 @@
   --kr-bg-code: #2a0f2a;
   --kr-bg-code-panel: #1f0820;
   --kr-bg-scrim: rgba(236, 72, 153, 0.08);
+  --kr-agent-nvidia-text: #477000;
 
   --kr-accent: #be185d;
   --kr-accent-rgb: 190, 24, 93;
@@ -692,6 +700,7 @@
   --kr-bg-code: #0a1420;
   --kr-bg-code-panel: #060d16;
   --kr-bg-scrim: rgba(1, 114, 240, 0.08);
+  --kr-agent-nvidia-text: #477000;
 
   --kr-accent: #0172f0;
   --kr-accent-rgb: 1, 114, 240;

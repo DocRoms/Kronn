@@ -12,16 +12,19 @@ import './SourceCodeViewer.css';
 
 interface SourceCodeViewerProps {
   projectId: string;
+  /** Optional file selected when another project view deep-links into Code. */
+  initialPath?: string | null;
   /** KT-75 — open the full patch of a commit in the panel's temporary tab.
    *  Absent when the host has no tab to open it in. */
   onOpenCommit?: (sha: string) => void;
 }
 
-export function SourceCodeViewer({ projectId, onOpenCommit }: SourceCodeViewerProps) {
+export function SourceCodeViewer({ projectId, initialPath, onOpenCommit }: SourceCodeViewerProps) {
   return (
     <SourceCodeViewerProject
-      key={projectId}
+      key={`${projectId}:${initialPath ?? ''}`}
       projectId={projectId}
+      initialPath={initialPath}
       onOpenCommit={onOpenCommit}
     />
   );
@@ -56,7 +59,7 @@ interface SearchResult {
 
 const EMPTY_SEARCH_RESULTS = new Map<string, number>();
 
-function SourceCodeViewerProject({ projectId, onOpenCommit }: SourceCodeViewerProps) {
+function SourceCodeViewerProject({ projectId, initialPath, onOpenCommit }: SourceCodeViewerProps) {
   const { t } = useT();
   const [tree, setTree] = useState<SourceFileNode[]>([]);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
@@ -103,23 +106,24 @@ function SourceCodeViewerProject({ projectId, onOpenCommit }: SourceCodeViewerPr
     if (treeLoadRef.current !== generation) return Promise.resolve();
     setTree(rootFiles);
     setExclusions(savedExclusions);
-    setSelectedPath(previous => (
-      previous
-        ? previous
-        : findPreferredSourceFile(rootFiles)?.path ?? null
-    ));
+    setSelectedPath(previous => {
+      if (previous) return previous;
+      if (initialPath && hasSourcePath(rootFiles, initialPath)) return initialPath;
+      return findPreferredSourceFile(rootFiles)?.path ?? null;
+    });
     setTreeLoading(false);
     setTreeHydrating(true);
 
     return projectsApi.listSourceFiles(projectId)
       .then(files => {
         if (treeLoadRef.current !== generation) return;
-        setTree(files);
-        setSelectedPath(previous => (
-          previous && hasSourcePath(files, previous)
-            ? previous
-            : findPreferredSourceFile(files)?.path ?? null
-        ));
+        const hydratedTree = mergeHydratedSourceTree(rootFiles, files);
+        setTree(hydratedTree);
+        setSelectedPath(previous => {
+          if (previous && hasSourcePath(hydratedTree, previous)) return previous;
+          if (initialPath && hasSourcePath(hydratedTree, initialPath)) return initialPath;
+          return findPreferredSourceFile(hydratedTree)?.path ?? null;
+        });
       })
       .catch(() => {
         // The root-level tree is already usable; a failed enrichment must not
@@ -128,7 +132,7 @@ function SourceCodeViewerProject({ projectId, onOpenCommit }: SourceCodeViewerPr
       .finally(() => {
         if (treeLoadRef.current === generation) setTreeHydrating(false);
       });
-  }, [projectId]);
+  }, [initialPath, projectId]);
 
   const fetchTree = useCallback(() => {
     const generation = treeLoadRef.current + 1;
@@ -638,6 +642,17 @@ function SourceCodeViewerProject({ projectId, onOpenCommit }: SourceCodeViewerPr
       </section>
     </div>
   );
+}
+
+function mergeHydratedSourceTree(
+  rootFiles: SourceFileNode[],
+  hydratedFiles: SourceFileNode[],
+): SourceFileNode[] {
+  const hydratedByPath = new Map(hydratedFiles.map(node => [node.path, node]));
+  const merged = rootFiles.map(node => hydratedByPath.get(node.path) ?? node);
+  const rootPaths = new Set(rootFiles.map(node => node.path));
+  merged.push(...hydratedFiles.filter(node => !rootPaths.has(node.path)));
+  return merged;
 }
 
 function SourceTreeNode({

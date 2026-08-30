@@ -11,12 +11,16 @@ import { gravatarUrl } from '../lib/gravatar';
 import { useT } from '../lib/I18nContext';
 import { MatrixText } from './MatrixText';
 import { FavoriteToggle } from './FavoriteToggle';
+import type { CollectionRowProps } from './CollectionShell';
 import '../pages/DiscussionsPage.css';
 
 const SWIPE_THRESHOLD = 80;
 
 export interface SwipeableDiscItemProps {
   disc: Discussion;
+  /** Human-facing provider identity. Dynamic HTTP discussions keep `Custom`
+   * as their wire AgentType, so the parent resolves the named connection. */
+  agentLabel?: string;
   isActive: boolean;
   lastSeenCount: number;
   isSending: boolean;
@@ -39,6 +43,10 @@ export interface SwipeableDiscItemProps {
   contextLabel?: string;
   t: (key: string, ...args: (string | number)[]) => string;
   archiveLabel?: string;
+  /** The shared collection shell contributes only its roving-focus class.
+   * SwipeableDiscItem retains its own click, pointer, checkbox and current
+   * semantics so selection mode and swipe gestures cannot be overwritten. */
+  collectionRowClassName?: CollectionRowProps['className'];
   /**
    * 0.8.4 (#294) — cross-agent source binding: this disc is BOUND to a live
    * external CLI session, which is not the same thing as having been imported
@@ -59,9 +67,9 @@ export interface SwipeableDiscItemProps {
 }
 
 export const SwipeableDiscItem = memo(function SwipeableDiscItem({
-  disc, isActive, lastSeenCount, isSending, isQueued = false, onSelect, onArchive, onDelete, onStop, t, archiveLabel,
+  disc, agentLabel, isActive, lastSeenCount, isSending, isQueued = false, onSelect, onArchive, onDelete, onStop, t, archiveLabel,
   sourceAgents, importedBy, selectionMode = false, isSelected = false, onToggleSelection, onTogglePin,
-  contextLabel,
+  contextLabel, collectionRowClassName,
 }: SwipeableDiscItemProps) {
   const [offsetX, setOffsetX] = useState(0);
   const [swiping, setSwiping] = useState(false);
@@ -78,6 +86,7 @@ export const SwipeableDiscItem = memo(function SwipeableDiscItem({
   // locale is unchanged.
   const { locale } = useT();
   const relativeWhen = formatRelativeTime(disc.updated_at, locale);
+  const visibleAgent = agentLabel ?? disc.agent;
 
   const handlePointerDown = (e: React.PointerEvent) => {
     if (selectionMode) return;
@@ -185,11 +194,11 @@ export const SwipeableDiscItem = memo(function SwipeableDiscItem({
       >
         <button
           type="button"
-          className="disc-item-open"
+          className={`disc-item-open ${collectionRowClassName ?? ''}`.trim()}
           role={selectionMode ? 'checkbox' : undefined}
           aria-current={!selectionMode && isActive ? 'true' : undefined}
           aria-checked={selectionMode ? isSelected : undefined}
-          aria-label={`${disc.title} — ${msgCount} messages, ${disc.agent}`}
+          aria-label={`${disc.title} — ${msgCount} messages, ${visibleAgent}`}
           onClick={handleOpenClick}
           onPointerDown={handlePointerDown}
           onPointerMove={handlePointerMove}
@@ -287,7 +296,7 @@ export const SwipeableDiscItem = memo(function SwipeableDiscItem({
                   {' · '}
                 </>
               )}
-              {msgCount} msg · {disc.agent}
+              {msgCount} msg · {visibleAgent}
               {relativeWhen && (
                 <>
                   {' · '}

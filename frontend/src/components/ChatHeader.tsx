@@ -34,12 +34,15 @@ import { DiscussionSessionBinding } from './DiscussionSessionBinding';
 import { DiscussionTokenCost } from './DiscussionTokenCost';
 import { triggerDownload } from '../lib/downloadBlob';
 import { ContextHelp } from './ContextHelp';
+import type { ExternalApiConnectionView } from '../lib/api';
+import { discussionConnectionId, externalConnectionForDiscussion } from '../lib/externalAgentIdentity';
 
 export interface ChatHeaderProps {
   discussion: Discussion;
   projects: Project[];
   agents: AgentDetection[];
   modelTiers?: ModelTiersConfig | null;
+  externalConnections?: ExternalApiConnectionView[];
   showGitPanel: boolean;
   showTerminalPanel?: boolean;
   terminalEnabled?: boolean;
@@ -81,6 +84,7 @@ export function ChatHeader({
   projects,
   agents,
   modelTiers = null,
+  externalConnections = [],
   showGitPanel,
   showTerminalPanel = false,
   terminalEnabled = false,
@@ -111,6 +115,8 @@ export function ChatHeader({
   toast,
   t,
 }: ChatHeaderProps) {
+  const externalConnection = externalConnectionForDiscussion(discussion, externalConnections);
+  const externalConnectionId = discussionConnectionId(discussion);
   // Header-only state
   const [editingTitleId, setEditingTitleId] = useState<string | null>(null);
   const [editingTitleText, setEditingTitleText] = useState('');
@@ -228,7 +234,7 @@ export function ChatHeader({
   };
 
   return (
-    <div className="disc-chat-header" data-tour-id="disc-header-controls">
+    <div className="disc-chat-header collection-detail-header" data-tour-id="disc-header-controls">
       {isMobile && (
         <button
           className="disc-mobile-sidebar-btn"
@@ -391,6 +397,8 @@ export function ChatHeader({
               <>
                 <AgentSwitchPicker
                   currentAgent={discussion.agent}
+                  currentConnectionId={externalConnectionId}
+                  currentTargetLabel={externalConnection?.display_name}
                   availableAgents={installedAgentsList.map(agent => agent.agent_type)}
                   disabled={sending || nativeAgentDisabled === null || nativeAgentModeSaving}
                   title={t('disc.switchAgentAndTier')}
@@ -405,7 +413,9 @@ export function ChatHeader({
                   modelTiers={modelTiers}
                   defaultModelLabel={t('config.defaultModel')}
                   displayName={
-                    AGENT_MENTIONS.find(mention => mention.type === discussion.agent)?.trigger
+                    externalConnection
+                      ? `@${externalConnection.mention_alias}`
+                      : AGENT_MENTIONS.find(mention => mention.type === discussion.agent)?.trigger
                     ?? discussion.agent
                   }
                   onSelectionChange={async (agent, tier) => {

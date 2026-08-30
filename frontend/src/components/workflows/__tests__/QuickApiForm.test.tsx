@@ -195,13 +195,13 @@ describe('QuickApiForm — field edits', () => {
     expect(ta.value).toBe('Does a thing');
   });
 
-  it('changes the project via the Dropdown picker', () => {
+  it('changes the project via the searchable picker', () => {
     renderForm();
     const trigger = screen.getByTestId('qa-project-picker');
-    fireEvent.click(trigger);
-    fireEvent.click(screen.getByText('ProjectBeta'));
+    fireEvent.focus(trigger);
+    fireEvent.click(screen.getByRole('option', { name: 'ProjectBeta' }));
     // The selected label surfaces on the trigger.
-    expect(screen.getByTestId('qa-project-picker').textContent).toMatch(/ProjectBeta/);
+    expect(screen.getByTestId('qa-project-picker')).toHaveValue('ProjectBeta');
   });
 });
 

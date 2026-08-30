@@ -8,10 +8,11 @@ import { buildV07Presets, type ChildWorkflowPreset } from '../../lib/workflow-te
 import { WorkflowQuickStartPicker } from './WorkflowQuickStartPicker';
 import { CopyIdPill } from '../CopyIdPill';
 import { AgentSwitchPicker } from '../AgentSwitchPicker';
+import { SearchableSelect } from '../SearchableSelect';
 import { MarkdownEditor } from '../MarkdownComposerTools';
 import { buildQuickStartCatalogue, type UnifiedQuickStart } from '../../lib/workflow-quick-start';
 import { parseRepoUrl, buildOldestIssueRequest, inferTrackerSlugFromRepoUrl } from '../../lib/constants';
-import { AGENT_COLORS, AGENT_LABELS, ALL_AGENT_TYPES, isAgentRestricted } from '../../lib/constants';
+import { AGENT_LABELS, ALL_AGENT_TYPES, agentTextColor, isAgentRestricted } from '../../lib/constants';
 import type {
   Project, Workflow, WorkflowTrigger,
   WorkflowStep, AgentType, WorkflowSafety,
@@ -1370,19 +1371,27 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
           )}
 
           <label className="wf-label mt-6">{isEdit ? t('wiz.project') : t('wiz.projectOptional')}</label>
-          <select className="wf-select" value={projectId} aria-label={t('wiz.project')} onChange={e => {
-            const pid = e.target.value;
+          <SearchableSelect
+            value={projectId}
+            options={projects.map(project => ({
+              value: project.id,
+              label: project.name,
+              keywords: project.path,
+              description: project.path,
+            }))}
+            onChange={pid => {
             setProjectId(pid);
             const proj = projects.find(p => p.id === pid);
             if (proj?.default_skill_ids?.length) {
               setSteps(prev => prev.map(s => ({ ...s, skill_ids: s.skill_ids?.length ? s.skill_ids : proj.default_skill_ids })));
             }
-          }}>
-            <option value="">{t('wiz.noProject')}</option>
-            {projects.map(p => (
-              <option key={p.id} value={p.id}>{p.name}</option>
-            ))}
-          </select>
+            }}
+            label={t('wiz.project')}
+            placeholder={t('disc.searchProjects')}
+            emptyLabel={t('disc.noMatchingProjects')}
+            clearLabel={t('disc.noProject')}
+            testId="workflow-project-picker"
+          />
 
           {/* 0.8.5 — unified QuickStart picker. Replaces three formerly
               separate UI sections (STARTER_TEMPLATES buttons, project
@@ -4947,7 +4956,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
               : null;
             const nameColor = isBatch || isApi || isNotify || isGate || isExec || isBatchApi || isJsonData || isCollectData || isTransformData || isPublishPage
               ? 'var(--kr-text-faint)'
-              : (AGENT_COLORS[s.agent] ?? 'var(--kr-text-faint)');
+              : agentTextColor(s.agent);
             const execSubtitle = isExec && s.exec_command
               ? [s.exec_command, ...(s.exec_args ?? [])].join(' ')
               : null;

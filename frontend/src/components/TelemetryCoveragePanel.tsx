@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 import { telemetry, measuredRatio } from '../lib/api';
-import type { TelemetryCoverage } from '../types/generated';
+import { AGENT_LABELS } from '../lib/constants';
+import { useT } from '../lib/I18nContext';
+import type { AgentType, TelemetryCoverage } from '../types/generated';
 
 /**
  * KT-190 — how much of the CLI token spend Kronn can actually account for.
@@ -15,6 +17,7 @@ import type { TelemetryCoverage } from '../types/generated';
  * what is not.
  */
 export function TelemetryCoveragePanel() {
+  const { t } = useT();
   const [rows, setRows] = useState<TelemetryCoverage[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -46,11 +49,11 @@ export function TelemetryCoveragePanel() {
 
   if (error) {
     return (
-      <div className="telemetry-coverage telemetry-coverage--error">
-        <h3>Couverture télémétrie</h3>
-        <p>Impossible de lire la couverture : {error}</p>
+      <div className="telemetry-coverage telemetry-coverage--error" data-testid="telemetry-coverage-panel">
+        <h3>{t('telemetryCoverage.title')}</h3>
+        <p>{t('telemetryCoverage.readError', error)}</p>
         <p className="telemetry-coverage__note">
-          Ce n’est pas une couverture nulle — c’est une couverture inconnue.
+          {t('telemetryCoverage.errorNote')}
         </p>
       </div>
     );
@@ -58,9 +61,9 @@ export function TelemetryCoveragePanel() {
 
   if (rows === null) {
     return (
-      <div className="telemetry-coverage">
-        <h3>Couverture télémétrie</h3>
-        <p>Lecture…</p>
+      <div className="telemetry-coverage" data-testid="telemetry-coverage-panel">
+        <h3>{t('telemetryCoverage.title')}</h3>
+        <p>{t('telemetryCoverage.loading')}</p>
       </div>
     );
   }
@@ -68,56 +71,59 @@ export function TelemetryCoveragePanel() {
   const cliRows = rows.filter((row) => row.sessions > 0);
 
   return (
-    <div className="telemetry-coverage">
-      <h3>Couverture télémétrie</h3>
+    <div className="telemetry-coverage" data-testid="telemetry-coverage-panel">
+      <h3>{t('telemetryCoverage.title')}</h3>
+      <p className="telemetry-coverage__intro">{t('telemetryCoverage.intro')}</p>
       {cliRows.length === 0 ? (
-        <p>Aucune session CLI enregistrée.</p>
+        <p>{t('telemetryCoverage.empty')}</p>
       ) : (
-        <table className="telemetry-coverage__table">
-          <thead>
-            <tr>
-              <th>Agent</th>
-              <th>Sessions</th>
-              <th>Mesurées</th>
-              <th>Couverture</th>
-            </tr>
-          </thead>
-          <tbody>
-            {cliRows.map((row) => {
-              const ratio = measuredRatio(row);
-              const measured = row.attributed - row.attributed_without_counters;
-              const unknown = row.sessions - measured;
-              return (
-                <tr key={row.agent_type}>
-                  <td>{row.agent_type}</td>
-                  <td>{row.sessions}</td>
-                  <td>{measured}</td>
-                  <td>
-                    {/* `null` only happens with zero sessions, filtered above —
-                        but a nullish check beats a NaN reaching the DOM. */}
-                    {ratio === null ? '—' : `${Math.round(ratio * 100)} %`}
-                    {unknown > 0 && (
-                      <span
-                        className="telemetry-coverage__unknown"
-                        title={
-                          `${unknown} session(s) sans compteur natif lisible. ` +
-                          `Leur coût est INCONNU, pas nul : Kronn ne les a pas lancées, ` +
-                          `donc il n’a aucun compteur propre pour ce qu’elles publient.`
-                        }
-                      >
-                        {' '}· {unknown} inconnue{unknown > 1 ? 's' : ''}
-                      </span>
-                    )}
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
+        <div className="telemetry-coverage__table-wrap">
+          <table className="telemetry-coverage__table">
+            <thead>
+              <tr>
+                <th>{t('telemetryCoverage.agent')}</th>
+                <th>{t('telemetryCoverage.sessions')}</th>
+                <th>{t('telemetryCoverage.measured')}</th>
+                <th>{t('telemetryCoverage.coverage')}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {cliRows.map((row) => {
+                const ratio = measuredRatio(row);
+                const measured = row.attributed - row.attributed_without_counters;
+                const unknown = row.sessions - measured;
+                return (
+                  <tr key={row.agent_type}>
+                    <td>{AGENT_LABELS[row.agent_type as AgentType] ?? row.agent_type}</td>
+                    <td>{row.sessions}</td>
+                    <td>{measured}</td>
+                    <td>
+                      {/* `null` only happens with zero sessions, filtered above —
+                          but a nullish check beats a NaN reaching the DOM. */}
+                      {ratio === null ? '—' : `${Math.round(ratio * 100)} %`}
+                      {unknown > 0 && (
+                        <span
+                          className="telemetry-coverage__unknown"
+                          title={t('telemetryCoverage.unknownHint', unknown)}
+                        >
+                          {' '}· {t(
+                            unknown === 1
+                              ? 'telemetryCoverage.unknownOne'
+                              : 'telemetryCoverage.unknownMany',
+                            unknown,
+                          )}
+                        </span>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
       )}
       <p className="telemetry-coverage__note">
-        Une session sans compteur natif est <strong>inconnue</strong>, pas gratuite.
-        Codex et Copilot n’ont pas encore de collecteur.
+        {t('telemetryCoverage.note')}
       </p>
     </div>
   );

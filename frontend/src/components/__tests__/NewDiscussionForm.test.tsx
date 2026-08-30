@@ -3,6 +3,7 @@ import { render, screen, fireEvent, act, waitFor } from '@testing-library/react'
 import { NewDiscussionForm } from '../NewDiscussionForm';
 import type { Project, AgentDetection } from '../../types/generated';
 import { loadDraft, NEW_DISCUSSION_DRAFT_ID } from '../../lib/chat-drafts';
+import type { ExternalApiConnectionView } from '../../lib/api';
 
 vi.mock('../../lib/api', () => ({
   skills: { list: vi.fn().mockResolvedValue([]) },
@@ -64,6 +65,21 @@ const CODEX_AGENT: AgentDetection = {
   path: '/usr/bin/codex',
 };
 
+const OPENROUTER_CONNECTION: ExternalApiConnectionView = {
+  id: 'conn-openrouter',
+  display_name: 'OpenRouter',
+  mention_alias: 'openrouter',
+  endpoint: 'https://openrouter.ai/api/v1',
+  credential_slug: 'openrouter',
+  origin_preset: 'open_router',
+  economy_model: 'qwen/qwen3.8-flash',
+  default_model: 'z-ai/glm-5.3',
+  reasoning_model: 'z-ai/glm-5.3',
+  created_at: '2026-08-30T12:00:00Z',
+  updated_at: '2026-08-30T12:00:00Z',
+  has_credential: true,
+};
+
 const mount = (projects: Project[]) => {
   const onSubmit = vi.fn();
   return render(
@@ -85,6 +101,52 @@ beforeEach(() => {
 });
 
 describe('NewDiscussionForm — creation flow layout', () => {
+  it('offers @openrouter with its configured models and submits the durable connection target', async () => {
+    const onSubmit = vi.fn();
+    render(
+      <NewDiscussionForm
+        projects={[]}
+        agents={[AGENT]}
+        configLanguage="fr"
+        agentAccess={null}
+        externalConnections={[OPENROUTER_CONNECTION]}
+        onSubmit={onSubmit}
+        onClose={vi.fn()}
+        onNavigate={vi.fn()}
+        t={(key: string, ...args) => `${key}${args.length ? ` ${args.join(' ')}` : ''}`}
+      />,
+    );
+
+    const prompt = screen.getByRole('textbox', { name: 'disc.prompt' });
+    fireEvent.change(prompt, { target: { value: '@open', selectionStart: 5 } });
+
+    expect(await screen.findByText('@openrouter')).toBeInTheDocument();
+    expect(screen.getByText('OpenRouter')).toBeInTheDocument();
+    expect(screen.getAllByTitle(/z-ai\/glm-5\.3/)).not.toHaveLength(0);
+
+    const reasoningChoice = screen.getByRole('button', {
+      name: /@openrouter · disc\.routingInvokeTier disc\.tier\.reasoning z-ai\/glm-5\.3/,
+    });
+    fireEvent.mouseDown(reasoningChoice);
+    expect(prompt).toHaveValue('@openrouter ');
+
+    await act(async () => {
+      fireEvent.click(document.querySelector('.disc-create-btn') as HTMLButtonElement);
+    });
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
+      agent: 'Custom',
+      tier: 'reasoning',
+      targetAgents: ['Custom'],
+      initialTargets: [{
+        kind: 'discussion_agent',
+        agent_type: 'Custom',
+        connection_id: 'conn-openrouter',
+        tier: 'reasoning',
+      }],
+    }));
+  });
+
   it('restores an unsent starting brief after the form remounts', () => {
     const first = mount([PROJECT_WITH_REPO]);
     fireEvent.change(screen.getByRole('textbox', { name: 'disc.prompt' }), {
@@ -122,7 +184,7 @@ describe('NewDiscussionForm — creation flow layout', () => {
     expect(loadDraft(NEW_DISCUSSION_DRAFT_ID)).toBeNull();
   });
 
-  it('searches a large project list without replacing the native picker contract', () => {
+  it('filters projects by name and path, then supports keyboard and mouse selection', () => {
     const manyProjects = Array.from({ length: 250 }, (_, index) => ({
       ...PROJECT_WITH_REPO,
       id: `project-${index}`,
@@ -131,27 +193,39 @@ describe('NewDiscussionForm — creation flow layout', () => {
     }));
     mount(manyProjects);
 
-    fireEvent.change(screen.getByRole('searchbox', { name: 'disc.searchProjects' }), {
-      target: { value: 'Project 249' },
+    const picker = screen.getByRole('combobox', { name: 'disc.project' });
+    fireEvent.focus(picker);
+    fireEvent.change(picker, {
+      target: { value: 'PROJECT 249' },
     });
 
     expect(screen.getByRole('option', { name: 'Project 249' })).toBeInTheDocument();
     expect(screen.queryByRole('option', { name: 'Project 17' })).toBeNull();
-    expect(screen.getByRole('combobox', { name: 'disc.project' })).toHaveAttribute('data-locked');
+    fireEvent.keyDown(picker, { key: 'Enter' });
+    expect(picker).toHaveValue('Project 249');
+
+    fireEvent.focus(picker);
+    fireEvent.change(picker, { target: { value: '/REPOS/PROJECT-248' } });
+    expect(screen.getByRole('option', { name: 'Project 248' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('option', { name: 'Project 248' }));
+    expect(picker).toHaveValue('Project 248');
+
+    fireEvent.focus(picker);
+    fireEvent.change(picker, { target: { value: 'not-a-project' } });
+    expect(screen.getByRole('status')).toHaveTextContent('disc.noMatchingProjects');
   });
 
   it('persists an explicitly selected default project across form mounts', async () => {
     const first = mount([PROJECT_WITH_REPO, PROJECT_WITHOUT_REPO]);
-    fireEvent.change(screen.getByRole('combobox', { name: 'disc.project' }), {
-      target: { value: PROJECT_WITHOUT_REPO.id },
-    });
+    fireEvent.focus(screen.getByRole('combobox', { name: 'disc.project' }));
+    fireEvent.click(screen.getByRole('option', { name: PROJECT_WITHOUT_REPO.name }));
     fireEvent.click(screen.getByRole('checkbox', { name: 'disc.defaultProject' }));
     first.unmount();
 
     mount([PROJECT_WITH_REPO, PROJECT_WITHOUT_REPO]);
     await waitFor(() => {
       expect(screen.getByRole('combobox', { name: 'disc.project' })).toHaveValue(
-        PROJECT_WITHOUT_REPO.id,
+        PROJECT_WITHOUT_REPO.name,
       );
       expect(screen.getByRole('checkbox', { name: 'disc.defaultProject' })).toBeChecked();
     });
@@ -427,11 +501,46 @@ describe('NewDiscussionForm — creation flow layout', () => {
 
     const prompt = screen.getByRole('textbox', { name: 'disc.prompt' }) as HTMLTextAreaElement;
     fireEvent.change(prompt, { target: { value: 'Avis de @co' } });
+    const popover = await screen.findByRole('listbox', { name: 'disc.mentionAgents' });
+    expect(popover).toHaveAttribute('data-placement');
+    expect(popover.style.maxHeight).not.toBe('');
     const option = await screen.findByRole('option', { name: /@codex Codex/ });
     fireEvent.mouseDown(option);
 
     expect(prompt.value).toBe('Avis de @codex ');
     expect(screen.getByTestId('prompt-agent-summary')).toHaveTextContent('@codex');
+  });
+
+  it('selects an agent tier with Left/Right before validating the @alias', async () => {
+    render(
+      <NewDiscussionForm
+        projects={[]}
+        agents={[AGENT, CODEX_AGENT]}
+        configLanguage="fr"
+        agentAccess={null}
+        onSubmit={vi.fn()}
+        onClose={vi.fn()}
+        onNavigate={vi.fn()}
+        t={(key: string) => key}
+      />,
+    );
+
+    const prompt = screen.getByRole('textbox', { name: 'disc.prompt' }) as HTMLTextAreaElement;
+    fireEvent.change(prompt, { target: { value: 'Avis de @co' } });
+    await screen.findByRole('option', { name: /@codex Codex/ });
+
+    fireEvent.keyDown(prompt, { key: 'ArrowRight' });
+    fireEvent.keyUp(prompt, { key: 'ArrowRight' });
+    const reasoningChoice = screen
+      .getByRole('option', { name: /@codex Codex/ })
+      .querySelector('[data-tier="reasoning"]') as HTMLButtonElement;
+    expect(reasoningChoice).toHaveAttribute('data-keyboard-selected', 'true');
+
+    fireEvent.keyDown(prompt, { key: 'Enter' });
+    expect(prompt.value).toBe('Avis de @codex ');
+    expect(screen.getByTestId('prompt-agent-summary')).toHaveTextContent(
+      'disc.tier.reasoning',
+    );
   });
 
   it('uses the same :emoji: autocomplete and exposes Markdown support', async () => {
@@ -444,6 +553,31 @@ describe('NewDiscussionForm — creation flow layout', () => {
 
     expect(prompt.value).toBe('Bravo 🎉 ');
     expect(screen.getByRole('button', { name: 'disc.composerHelpTitle' })).toBeInTheDocument();
+  });
+
+  it('keeps multiline pastes inside a blockquote without double-quoting', async () => {
+    mount([]);
+    const prompt = screen.getByRole('textbox', { name: 'disc.prompt' }) as HTMLTextAreaElement;
+    fireEvent.change(prompt, { target: { value: '> ' } });
+    prompt.setSelectionRange(2, 2);
+
+    const dispatched = fireEvent.paste(prompt, {
+      clipboardData: { getData: () => 'first\r\n\r\n>\r\n> already quoted' },
+    });
+
+    expect(dispatched).toBe(false);
+    await waitFor(() => expect(prompt).toHaveValue('> first\n> \n>\n> already quoted'));
+  });
+
+  it('leaves single-line pastes to the browser', () => {
+    mount([]);
+    const prompt = screen.getByRole('textbox', { name: 'disc.prompt' }) as HTMLTextAreaElement;
+    fireEvent.change(prompt, { target: { value: '> ' } });
+    prompt.setSelectionRange(2, 2);
+
+    expect(fireEvent.paste(prompt, {
+      clipboardData: { getData: () => 'one line' },
+    })).toBe(true);
   });
 });
 
@@ -487,10 +621,9 @@ describe('NewDiscussionForm — workspace toggle', () => {
     mount([PROJECT_WITH_REPO]);
 
     // Project dropdown shows our repo-backed project — select it
-    const projectSelect = screen.getAllByRole('combobox')[0];
-    await act(async () => {
-      fireEvent.change(projectSelect, { target: { value: PROJECT_WITH_REPO.id } });
-    });
+    const projectSelect = screen.getByRole('combobox', { name: 'disc.project' });
+    fireEvent.focus(projectSelect);
+    fireEvent.click(screen.getByRole('option', { name: PROJECT_WITH_REPO.name }));
 
     // The workspace-toggle container renders with both buttons (data-mode)
     await waitFor(() => {
@@ -506,10 +639,9 @@ describe('NewDiscussionForm — workspace toggle', () => {
     // tooltip explaining why. Hiding it silently was the bug that made
     // Marie think the feature vanished.
     mount([PROJECT_WITHOUT_REPO]);
-    const projectSelect = screen.getAllByRole('combobox')[0];
-    await act(async () => {
-      fireEvent.change(projectSelect, { target: { value: PROJECT_WITHOUT_REPO.id } });
-    });
+    const projectSelect = screen.getByRole('combobox', { name: 'disc.project' });
+    fireEvent.focus(projectSelect);
+    fireEvent.click(screen.getByRole('option', { name: PROJECT_WITHOUT_REPO.name }));
     expect(document.querySelector('.disc-workspace-toggle')).not.toBeNull();
     const isolatedBtn = document.querySelector('.disc-workspace-btn[data-mode="isolated"]') as HTMLButtonElement;
     expect(isolatedBtn).not.toBeNull();
@@ -518,10 +650,9 @@ describe('NewDiscussionForm — workspace toggle', () => {
 
   it('reveals the branch-name / base-branch inputs when the user picks Isolated', async () => {
     mount([PROJECT_WITH_REPO]);
-    const projectSelect = screen.getAllByRole('combobox')[0];
-    await act(async () => {
-      fireEvent.change(projectSelect, { target: { value: PROJECT_WITH_REPO.id } });
-    });
+    const projectSelect = screen.getByRole('combobox', { name: 'disc.project' });
+    fireEvent.focus(projectSelect);
+    fireEvent.click(screen.getByRole('option', { name: PROJECT_WITH_REPO.name }));
     await waitFor(() => {
       expect(document.querySelector('.disc-workspace-btn[data-mode="isolated"]')).not.toBeNull();
     });

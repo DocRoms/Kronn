@@ -78,8 +78,19 @@ vi.mock('../../lib/I18nContext', () => ({
 }));
 vi.mock('../../hooks/useMediaQuery', () => ({ useIsMobile: () => false }));
 vi.mock('../ProjectCodePanel', () => ({
-  ProjectCodePanel: ({ projectId }: { projectId: string }) => (
-    <div data-testid="project-code-panel">{projectId}</div>
+  ProjectCodePanel: ({ projectId, initialPath }: { projectId: string; initialPath?: string | null }) => (
+    <div data-testid="project-code-panel">{projectId}:{initialPath ?? 'root'}</div>
+  ),
+}));
+vi.mock('../ProjectDockerPanel', () => ({
+  ProjectDockerPanel: ({ projectId, onOpenConfig }: {
+    projectId: string;
+    onOpenConfig: (path: string) => void;
+  }) => (
+    <div data-testid="project-docker-panel">
+      {projectId}
+      <button type="button" onClick={() => onOpenConfig('compose.yaml')}>open compose</button>
+    </div>
   ),
 }));
 
@@ -101,6 +112,8 @@ const PROJECT: Project = {
   tech_debt_count: 0,
   needs_docs_migration: false,
   path_exists: true,
+  write_access: { status: 'Writable' },
+  mcp_sync_report: null,
   created_at: '2026-01-01T00:00:00Z',
   updated_at: '2026-01-01T00:00:00Z',
 };
@@ -109,12 +122,14 @@ describe('ProjectCard — repository overview', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     localStorage.removeItem('kronn:projectDetailView');
+    sessionStorage.clear();
   });
 
-  it('keeps the active detail tab when switching projects and rejects stale values', () => {
+  it('separates audit and docs, keeps the active tab, and consumes an audit deep-link', async () => {
     const renderCard = (project: Project) => render(
       <ProjectCard
         project={project}
+        dockerRunning
         detailMode
         isOpen
         onToggleOpen={noop}
@@ -138,9 +153,40 @@ describe('ProjectCard — repository overview', () => {
     );
 
     const first = renderCard(PROJECT);
+    expect(document.querySelector('.project-detail-header')).toHaveClass('collection-detail-header');
+    expect(screen.getByText('projects.master.dockerUp')).toBeInTheDocument();
+    const auditTab = screen.getByRole('button', { name: 'projects.master.tab.audit' });
+    const docsTab = screen.getByRole('button', { name: 'projects.master.tab.docs' });
+    const detailBody = document.querySelector('.dash-card-body');
+
+    fireEvent.click(auditTab);
+    expect(auditTab).toHaveAttribute('data-active', 'true');
+    expect(detailBody).toHaveAttribute('data-detail-view', 'audit');
+    const auditSection = document.querySelector('[data-project-view="audit"]');
+    expect(auditSection).toBeInTheDocument();
+    expect(auditSection?.querySelector('.dash-collapsible-header')).not.toBeInTheDocument();
+    expect(auditSection?.querySelector('.dash-audit-pad')).toBeInTheDocument();
+
+    fireEvent.click(docsTab);
+    expect(docsTab).toHaveAttribute('data-active', 'true');
+    expect(detailBody).toHaveAttribute('data-detail-view', 'docs');
+    const docsSection = document.querySelector('[data-project-view="docs"]');
+    expect(docsSection).toBeInTheDocument();
+    expect(docsSection?.querySelector('.dash-collapsible-header')).not.toBeInTheDocument();
+    expect(docsSection?.querySelector('.aidoc-loading, .aidoc-root, .aidoc-empty'))
+      .toBeInTheDocument();
+
     fireEvent.click(screen.getByRole('button', { name: 'projects.master.tab.code' }));
     expect(screen.getByRole('button', { name: 'projects.master.tab.code' }))
       .toHaveAttribute('data-active', 'true');
+
+    fireEvent.click(screen.getByRole('button', { name: 'projects.master.tab.docker' }));
+    expect(detailBody).toHaveAttribute('data-detail-view', 'docker');
+    expect(screen.getByTestId('project-docker-panel')).toHaveTextContent(PROJECT.id);
+
+    fireEvent.click(screen.getByRole('button', { name: 'open compose' }));
+    expect(detailBody).toHaveAttribute('data-detail-view', 'code');
+    expect(screen.getByTestId('project-code-panel')).toHaveTextContent('compose.yaml');
     first.unmount();
 
     const second = renderCard({ ...PROJECT, id: 'p-second', name: 'Second project' });
@@ -149,12 +195,57 @@ describe('ProjectCard — repository overview', () => {
     second.unmount();
 
     localStorage.setItem('kronn:projectDetailView', 'removed-tab');
-    renderCard({ ...PROJECT, id: 'p-third', name: 'Third project' });
+    const third = renderCard({ ...PROJECT, id: 'p-third', name: 'Third project' });
     expect(screen.getByRole('button', { name: 'projects.master.tab.overview' }))
       .toHaveAttribute('data-active', 'true');
+    third.unmount();
+
+    sessionStorage.setItem('kronn:projectView:p-deep', 'audit');
+    renderCard({ ...PROJECT, id: 'p-deep', name: 'Deep-linked project' });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'projects.master.tab.audit' }))
+      .toHaveAttribute('data-active', 'true'));
+    expect(sessionStorage.getItem('kronn:projectView:p-deep')).toBeNull();
   });
 
-  it('explains audit provenance, paid drift and records an explicit human attestation', async () => {
+  it('makes a project outside the write perimeter explicit', () => {
+    render(
+      <ProjectCard
+        project={{
+          ...PROJECT,
+          write_access: {
+            status: 'ReadOnly',
+            reason: 'outside_rw_perimeter',
+            writable_roots: ['/repos'],
+          },
+        }}
+        detailMode
+        isOpen
+        onToggleOpen={noop}
+        discussions={[]}
+        driftStatus={undefined}
+        agents={[]}
+        allSkills={[]}
+        mcpConfigs={[]}
+        workflows={[]}
+        configLanguage="fr"
+        toast={vi.fn()}
+        onNavigate={noop}
+        onSetDiscPrefill={noop}
+        onAutoRunDiscussion={noop}
+        onOpenDiscussion={noop}
+        onRefetch={noop}
+        onRefetchDiscussions={noop}
+        onRefetchSkills={noop}
+        onRefetchDrift={noop}
+      />,
+    );
+    expect(screen.getByTestId(`write-access-banner-${PROJECT.id}`)).toBeInTheDocument();
+    expect(screen.getByText('projects.writeAccess.readOnlyTitle')).toBeInTheDocument();
+    expect(screen.getByText('projects.writeAccess.copyMove')).toBeInTheDocument();
+    expect(screen.getByText('projects.writeAccess.copyExtra')).toBeInTheDocument();
+  });
+
+  it('summarizes context drift and reveals technical audit details on demand', async () => {
     vi.mocked(projectsApi.auditEvidence).mockResolvedValueOnce({
       project_id: PROJECT.id,
       status: 'TemplateInstalled',
@@ -231,12 +322,32 @@ describe('ProjectCard — repository overview', () => {
 
     expect(await screen.findByText('projects.contextAudit.evidence.missing_evidence'))
       .toBeInTheDocument();
+    expect(screen.getByText('projects.contextAudit.growthSummary')).toBeInTheDocument();
+    expect(screen.getByText('projects.contextAudit.growthHelp')).toBeInTheDocument();
+    expect(screen.queryByText('projects.contextAudit.whyHelp')).not.toBeInTheDocument();
+    const contextHelp = screen.getByRole('button', { name: 'projects.contextAudit.whyTitle' });
+    expect(contextHelp).toHaveAttribute('aria-expanded', 'false');
+    fireEvent.click(contextHelp);
+    expect(contextHelp).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByText('projects.contextAudit.whyHelp')).toBeInTheDocument();
+    expect(screen.getByText('projects.contextAudit.brokenSummary')).toBeInTheDocument();
+    expect(screen.getByText('projects.contextAudit.orphanSummary')).toBeInTheDocument();
+    expect(screen.queryByText('projects.contextAudit.paidGrowth')).not.toBeInTheDocument();
+
+    const details = screen.getByRole('button', { name: 'projects.contextAudit.showDetails' });
+    expect(details).toHaveAttribute('aria-expanded', 'false');
+    fireEvent.click(details);
+    expect(screen.getByRole('button', { name: 'projects.contextAudit.hideDetails' }))
+      .toHaveAttribute('aria-expanded', 'true');
     expect(screen.getByText('projects.contextAudit.paidGrowth')).toBeInTheDocument();
     expect(screen.getByText('projects.contextAudit.brokenRoute')).toBeInTheDocument();
     expect(screen.getByText('projects.contextAudit.orphanFile')).toBeInTheDocument();
     expect(screen.getByText('projects.contextAudit.resume')).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: 'projects.contextAudit.acceptBaseline' }));
+    const acceptBaseline = screen.getByRole('button', { name: 'projects.contextAudit.acceptBaseline' });
+    expect(acceptBaseline).toHaveClass('project-context-audit-accept');
+    expect(acceptBaseline).toHaveAttribute('title', 'projects.contextAudit.acceptBaselineHelp');
+    fireEvent.click(acceptBaseline);
     await waitFor(() => expect(projectsApi.acceptContextBaseline).toHaveBeenCalledWith(PROJECT.id));
     expect(await screen.findByText('projects.contextAudit.stable')).toBeInTheDocument();
     expect(toast).toHaveBeenCalledWith('projects.contextAudit.baselineAccepted', 'success');

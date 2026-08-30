@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { AGENT_COLORS, AGENT_LABELS, AGENT_MENTIONS, ALL_AGENT_TYPES, MODEL_TIER_ICONS, agentColor, agentMentionColors, mentionedAgents, getProjectGroup, isHiddenPath, isUsable, isValidationDisc, isBriefingDisc, isBootstrapDisc, agentSupportsIntrospection, isTrackerMcp, TRACKER_MCP_NEEDLES, parseRepoUrl, buildOldestIssueRequest, inferTrackerSlugFromRepoUrl, RTK_APPLICABLE, isRtkActive, modelForAgentTier, isAgentRestricted, hasAgentFullAccess } from '../constants';
+import { AGENT_COLORS, AGENT_LABELS, AGENT_MENTIONS, ALL_AGENT_TYPES, MODEL_TIER_ICONS, agentColor, agentTextColor, agentMentionColors, mentionedAgents, getProjectGroup, isHiddenPath, isUsable, isValidationDisc, isBriefingDisc, isBootstrapDisc, agentSupportsIntrospection, isTrackerMcp, TRACKER_MCP_NEEDLES, parseRepoUrl, buildOldestIssueRequest, inferTrackerSlugFromRepoUrl, RTK_APPLICABLE, isRtkActive, modelForAgentTier, isAgentRestricted, hasAgentFullAccess } from '../constants';
 
 describe('constants', () => {
   describe('agent registry completeness', () => {
@@ -187,6 +187,18 @@ describe('constants', () => {
     it('uses a valid configured mention color ahead of the built-in palette', () => {
       expect(agentColor('Codex', { Codex: '#123abc' })).toBe('#123abc');
       expect(agentColor('Codex', { Codex: 'red' })).toBe('#10a37f');
+    });
+  });
+
+  describe('agentTextColor()', () => {
+    it('keeps NVIDIA branding while using the accessible theme text token', () => {
+      expect(agentColor('Nvidia')).toBe('#76B900');
+      expect(agentTextColor('Nvidia')).toBe('var(--kr-agent-nvidia-text)');
+    });
+
+    it('preserves explicit mention colour overrides', () => {
+      expect(agentTextColor('Nvidia', { Nvidia: '#123abc' })).toBe('#123abc');
+      expect(agentTextColor('Codex')).toBe('#10a37f');
     });
   });
 

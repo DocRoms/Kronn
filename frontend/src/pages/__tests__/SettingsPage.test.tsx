@@ -79,6 +79,14 @@ vi.mock('../../lib/api', () => ({
     models: vi.fn().mockResolvedValue({ models: [], endpoint: 'https://integrate.api.nvidia.com', has_key: false }),
     probe: vi.fn().mockResolvedValue({ model: '', verdict: 'Usable', detail: '' }),
   },
+  // KT-339 — the unified External API zone lists its connections on mount, so
+  // this hand-written mock needs the namespace or the mount would throw.
+  externalApi: {
+    list: vi.fn().mockResolvedValue([]),
+    create: vi.fn().mockResolvedValue({}),
+    update: vi.fn().mockResolvedValue({}),
+    remove: vi.fn().mockResolvedValue(null),
+  },
   agents: {
     detect: vi.fn(),
     install: vi.fn(),
@@ -150,6 +158,10 @@ vi.mock('../../lib/api', () => ({
       agents_detected: [],
     }),
   },
+  telemetry: {
+    coverage: vi.fn().mockResolvedValue([]),
+  },
+  measuredRatio: vi.fn(() => null),
   debugApi: {
     getLogs: vi.fn().mockResolvedValue({
       lines: [],

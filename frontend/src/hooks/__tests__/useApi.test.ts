@@ -69,6 +69,21 @@ describe('useApi', () => {
     expect(result.current.initialLoading).toBe(false);
   });
 
+  it('does not report a completed load after an error, then becomes ready after a retry succeeds', async () => {
+    const fetcher = vi.fn()
+      .mockRejectedValueOnce(new Error('offline'))
+      .mockResolvedValueOnce('recovered');
+    const { result } = renderHook(() => useApi(fetcher, []));
+
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.hasLoaded).toBe(false);
+    expect(result.current.data).toBeNull();
+
+    act(() => { result.current.refetch(); });
+    await waitFor(() => expect(result.current.data).toBe('recovered'));
+    expect(result.current.hasLoaded).toBe(true);
+  });
+
   it('keeps stale data during refetch (stale-while-revalidate)', async () => {
     let callCount = 0;
     const fetcher = vi.fn().mockImplementation(() => {

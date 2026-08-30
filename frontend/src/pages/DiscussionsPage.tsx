@@ -8,7 +8,8 @@ import { MessageDateSeparator } from '../components/MessageDateSeparator';
 import { groupMessagesWithToolFold } from '../lib/discussionMessageGrouping';
 import { localCalendarDayKey } from '../lib/discussionDates';
 import { ChatInput } from '../components/ChatInput';
-import { discussions as discussionsApi, projects as projectsApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi, contacts as contactsApi, workflows as workflowsApi, quickPrompts as quickPromptsApi, planning as planningApi, orchestration as orchestrationApi } from '../lib/api';
+import { discussions as discussionsApi, projects as projectsApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi, contacts as contactsApi, workflows as workflowsApi, quickPrompts as quickPromptsApi, planning as planningApi, orchestration as orchestrationApi, externalApi as externalApiConnections } from '../lib/api';
+import type { ExternalApiConnectionView } from '../lib/api';
 import { GitPanel } from '../components/GitPanel';
 import { TerminalPanel } from '../components/TerminalPanel';
 import { DiscussionPlanPanel } from '../components/DiscussionPlanPanel';
@@ -20,6 +21,7 @@ import { TestModeModal } from '../components/TestModeModal';
 import type { TestModeBlocker } from '../types/extensions';
 import { ChatHeader } from '../components/ChatHeader';
 import { DiscussionSidebar } from '../components/DiscussionSidebar';
+import { CollectionSidebarRail } from '../components/CollectionShell';
 import { NewDiscussionForm } from '../components/NewDiscussionForm';
 import type { NewDiscConfig } from '../components/NewDiscussionForm';
 import { AgentQuestionForm } from '../components/AgentQuestionForm';
@@ -41,7 +43,7 @@ import { findRenderedTextRanges } from '../lib/discussionMessageSearch';
 import { consumeDiscussionWorkspaceTarget } from '../lib/discussion-navigation';
 import { buildBatchTriageRows, buildContinuationDraft, type BatchTriageRow } from '../lib/batchTriage';
 import { useT } from '../lib/I18nContext';
-import { AGENT_LABELS, agentColor, isAgentRestricted as isAgentRestrictedUtil, hasAgentFullAccess, getProjectGroup, isUsable, isBriefingDisc, isBootstrapDisc, isValidationDisc } from '../lib/constants';
+import { AGENT_LABELS, agentColor, agentTextColor, isAgentRestricted as isAgentRestrictedUtil, hasAgentFullAccess, getProjectGroup, isUsable, isBriefingDisc, isBootstrapDisc, isValidationDisc } from '../lib/constants';
 import type { ToastFn } from '../hooks/useToast';
 import {
   ChevronRight, Cpu, Loader2,
@@ -56,6 +58,7 @@ import {
   pendingAgentReplies,
   targetsFromComposerText,
 } from '../lib/messageTargets';
+import { externalConnectionForDiscussion } from '../lib/externalAgentIdentity';
 
 type LoadedDiscussion = Discussion
   & Partial<Pick<DiscussionDetail, 'active_agent_dispatches' | 'message_targets'>>;
@@ -101,7 +104,7 @@ function PendingAgentReplyBubble({
       aria-live="polite"
     >
       <div className="disc-msg-bubble" data-role="agent">
-        <div className="disc-msg-agent-label" style={{ color: agentColor(agent) }}>
+        <div className="disc-msg-agent-label" style={{ color: agentTextColor(agent) }}>
           <Cpu size={10} /> {AGENT_LABELS[agent] ?? agent}
           <Loader2 size={10} style={{ animation: 'spin 1s linear infinite', marginLeft: 4 }} />
         </div>
@@ -160,7 +163,7 @@ function StreamingAgentReplyBubble({
       aria-live="polite"
     >
       <div className="disc-msg-bubble" data-role="agent">
-        <div className="disc-msg-agent-label" style={{ color: agentColor(agent), justifyContent: 'space-between' }}>
+        <div className="disc-msg-agent-label" style={{ color: agentTextColor(agent), justifyContent: 'space-between' }}>
           <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
             <Cpu size={10} /> {AGENT_LABELS[agent] ?? agent}
             <Loader2 size={10} style={{ animation: 'spin 1s linear infinite', marginLeft: 4 }} />
@@ -390,6 +393,7 @@ export function DiscussionsPage({
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
     try { return localStorage.getItem('kronn:sidebarCollapsed') === 'true'; } catch { return false; }
   });
+  const [focusCollapsedSidebarRail, setFocusCollapsedSidebarRail] = useState(false);
   const [activeDiscussionId, setActiveDiscussionId] = useState<string | null>(initialActiveDiscussionId ?? null);
   const [showNewDiscussion, setShowNewDiscussion] = useState(false);
   const [showGitPanel, setShowGitPanel] = useState(false);
@@ -514,6 +518,8 @@ export function DiscussionsPage({
   const [testModeBlocker, setTestModeBlocker] = useState<TestModeBlocker | null>(null);
   const [testModePendingDiscId, setTestModePendingDiscId] = useState<string | null>(null);
   const [editingMsgId, setEditingMsgId] = useState<string | null>(null);
+  const deletingMessageIdsRef = useRef(new Set<string>());
+  const [deletingMessageIds, setDeletingMessageIds] = useState<Set<string>>(() => new Set());
   // Race-free guard for handleEditMessage. A fast double Ctrl+Enter on
   // the message-edit textarea (the only re-submit path) was reading
   // `sending` from a stale closure → both invocations called
@@ -571,6 +577,7 @@ export function DiscussionsPage({
   const [availableSkills, setAvailableSkills] = useState<Skill[]>([]);
   const [availableProfiles, setAvailableProfiles] = useState<AgentProfile[]>([]);
   const [availableDirectives, setAvailableDirectives] = useState<Directive[]>([]);
+  const [externalConnections, setExternalConnections] = useState<ExternalApiConnectionView[]>([]);
   const [expandedSummaryMsgId, setExpandedSummaryMsgId] = useState<string | null>(null);
   const [worktreeError, setWorktreeError] = useState<string | null>(null);
   // A send refused because the previous run is still being recovered. Held as
@@ -806,6 +813,50 @@ export function DiscussionsPage({
   const activeDiscussion: LoadedDiscussion | null = (activeDiscussionId && loadedDiscussions[activeDiscussionId])
     ? loadedDiscussions[activeDiscussionId]
     : allDiscussions.find(d => d.id === activeDiscussionId) ?? null;
+  const externalConnectionAliases = useMemo(
+    () => Object.fromEntries(
+      externalConnections.map(connection => [connection.id, connection.mention_alias]),
+    ),
+    [externalConnections],
+  );
+  const activeExternalConnection = activeDiscussion
+    ? externalConnectionForDiscussion(activeDiscussion, externalConnections)
+    : null;
+  const sidebarAgentLabels = useMemo(() => {
+    const detailedById = new Map<string, LoadedDiscussion>();
+    Object.values(loadedDiscussions).forEach(discussion => detailedById.set(discussion.id, discussion));
+    batchCompareDiscs.forEach(discussion => detailedById.set(discussion.id, discussion));
+    batchReviewDiscs.forEach(discussion => detailedById.set(discussion.id, discussion));
+    const customConnections = externalConnections.filter(connection => (
+      connection.origin_preset === 'open_router' || connection.origin_preset === 'other'
+    ));
+
+    return Object.fromEntries(allDiscussions.map(discussion => {
+      if (discussion.agent !== 'Custom') return [discussion.id, discussion.agent];
+      const detailed = detailedById.get(discussion.id);
+      const durable = detailed
+        ? externalConnectionForDiscussion(detailed, customConnections)
+        : null;
+      if (durable) return [discussion.id, durable.display_name];
+
+      // List rows intentionally omit messages for performance. Until the row
+      // is hydrated, generated compare titles and the concrete model provide a
+      // bounded rolling fallback; neither can override durable routing data.
+      const titleSegments = discussion.title.split(' · ');
+      const fromTitle = customConnections.find(connection => (
+        titleSegments.includes(connection.display_name)
+      ));
+      if (fromTitle) return [discussion.id, fromTitle.display_name];
+      const modelMatches = customConnections.filter(connection => (
+        Boolean(discussion.model)
+        && [connection.economy_model, connection.default_model, connection.reasoning_model]
+          .includes(discussion.model ?? null)
+      ));
+      if (modelMatches.length === 1) return [discussion.id, modelMatches[0].display_name];
+      if (customConnections.length === 1) return [discussion.id, customConnections[0].display_name];
+      return [discussion.id, discussion.agent];
+    }));
+  }, [allDiscussions, batchCompareDiscs, batchReviewDiscs, externalConnections, loadedDiscussions]);
   const replyTarget = useMemo(
     () => activeDiscussion?.messages.find(message => message.id === replyToMessageId) ?? null,
     [activeDiscussion, replyToMessageId],
@@ -1112,7 +1163,9 @@ export function DiscussionsPage({
   // to disappear. Controllers are cleaned up by cleanupStream (on SSE done)
   // or by the explicit Stop button (handleStop).
 
-  // Fetch available skills, profiles, directives & contacts.
+  // Fetch available skills, profiles, directives, contacts and dynamic HTTP
+  // agents. The connection catalogue is safe metadata: credentials never
+  // cross this API boundary.
   // Re-fetch profiles on secret-code unlock so Batman shows up in
   // ChatHeader without a page reload.
   useEffect(() => {
@@ -1121,6 +1174,7 @@ export function DiscussionsPage({
     refetchProfiles();
     directivesApi.list().then(setAvailableDirectives).catch(() => {});
     contactsApi.list().then(setContactsList).catch(() => {});
+    externalApiConnections.list().then(setExternalConnections).catch(() => {});
     refetchBatchSummaries();
     window.addEventListener('kronn:profiles-changed', refetchProfiles);
     return () => window.removeEventListener('kronn:profiles-changed', refetchProfiles);
@@ -1200,6 +1254,11 @@ export function DiscussionsPage({
       // every queued follow-up would re-enqueue instead of firing (stuck queue).
       delete abortControllers.current[msg.discussion_id];
       reloadDiscussion(msg.discussion_id);
+      void discussionsApi.get(msg.discussion_id).then(updated => {
+        setBatchCompareDiscs(previous => previous.map(discussion =>
+          discussion.id === updated.id ? updated : discussion
+        ));
+      }).catch(() => {});
       const name = msg.batch_name ?? 'Batch';
       if (msg.batch_failed === 0) {
         toast(t('qp.batch.toast.ok', name, msg.batch_completed), 'success');
@@ -1232,14 +1291,17 @@ export function DiscussionsPage({
     }
     // Batch progress tick — refresh the list so the pill ticks live.
     //
-    // It does NOT clear the spinner. A progress tick says "the batch advanced",
-    // not "this discussion finished": on a batch the tick fires while other
-    // items are still running, and clearing `sending` there unmounted the
-    // streaming bubble mid-run — taking the tool logs and the elapsed counter
-    // with it — and flipped the sidebar card back to the queued hourglass while
-    // the job was still `Running` in the database. `batch_run_child_finished`
-    // above is the event that actually means finished, and it already clears.
+    // The event carries the exact child that just settled. Clear only that
+    // child's optimistic state; other running/queued siblings remain intact.
     if (msg.type === 'batch_run_progress') {
+      setSendingMap(prev => ({ ...prev, [msg.discussion_id]: false }));
+      setQueuedMap(prev => ({ ...prev, [msg.discussion_id]: false }));
+      delete abortControllers.current[msg.discussion_id];
+      void discussionsApi.get(msg.discussion_id).then(updated => {
+        setBatchCompareDiscs(previous => previous.map(discussion =>
+          discussion.id === updated.id ? updated : discussion
+        ));
+      }).catch(() => {});
       refetchDiscussions();
     }
     // Backend boot recovered in-flight agent partials — refresh the affected
@@ -1837,7 +1899,7 @@ export function DiscussionsPage({
         agent: config.agent,
         language: configLanguage ?? 'fr',
         initial_prompt: config.prompt,
-        initial_targets: config.targetAgents.map(agent => ({
+        initial_targets: config.initialTargets ?? config.targetAgents.map(agent => ({
           kind: agent === config.agent ? 'discussion_agent' : 'agent',
           agent_type: agent,
           tier: config.targetTiers[agent] ?? config.tier,
@@ -2606,6 +2668,28 @@ export function DiscussionsPage({
     if (activeDiscussionId) saveReplyDraft(activeDiscussionId, message.id);
     setReplyToMessageId(message.id);
   }, [activeDiscussionId]);
+  const handleMsgDelete = useCallback(async (message: DiscussionMessage) => {
+    if (!activeDiscussionId || deletingMessageIdsRef.current.has(message.id)) return;
+    if (!confirm(t('disc.deleteMessageConfirm'))) return;
+    deletingMessageIdsRef.current.add(message.id);
+    setDeletingMessageIds(previous => new Set(previous).add(message.id));
+    try {
+      await discussionsApi.deleteMessage(activeDiscussionId, message.id);
+      if (editingMsgId === message.id) handleMsgEditCancel();
+      reloadDiscussion(activeDiscussionId);
+      refetchDiscussions();
+      toast(t('disc.deleteMessageDone'), 'success');
+    } catch (error) {
+      toast(t('disc.deleteMessageError', userError(error)), 'error');
+    } finally {
+      deletingMessageIdsRef.current.delete(message.id);
+      setDeletingMessageIds(previous => {
+        const next = new Set(previous);
+        next.delete(message.id);
+        return next;
+      });
+    }
+  }, [activeDiscussionId, editingMsgId, handleMsgEditCancel, refetchDiscussions, reloadDiscussion, t, toast]);
   const handleReplyNavigate = useCallback((messageId: string) => {
     if (!activeDiscussionId) return;
     const target = { discussionId: activeDiscussionId, messageId };
@@ -2998,12 +3082,19 @@ export function DiscussionsPage({
     <div className="disc-root">
       {/* Sidebar — collapsed mode shows a thin rail with expand button */}
       {!isMobile && (sidebarCollapsed || gitPanelExpanded) ? (
-        <div className="disc-sidebar-rail" onClick={() => setSidebarCollapsed(false)} title="Expand sidebar">
-          <ChevronRight size={16} />
-        </div>
+        <CollectionSidebarRail
+          className="disc-sidebar-rail"
+          label={t('disc.openSidebar')}
+          focusOnMount={focusCollapsedSidebarRail}
+          onOpen={() => {
+            setFocusCollapsedSidebarRail(false);
+            setSidebarCollapsed(false);
+          }}
+        />
       ) : (!isMobile || sidebarOpen) ? (
         <DiscussionSidebar
           discussions={allDiscussions}
+          agentLabels={sidebarAgentLabels}
           projects={projects}
           activeId={activeDiscussionId}
           sendingMap={sendingMap}
@@ -3116,37 +3207,34 @@ export function DiscussionsPage({
             }
           }}
           onRetryBatch={async (oldRunId, qpId, discIds) => {
-            // Rebuild the batch payload from the existing children's
-            // title + initial user prompt, then fire a fresh batch via
-            // the QP endpoint. The OLD batch is left alone (with its
-            // history) — the user can delete it manually if they want.
-            // Tya's audit on 2026-05-09 flagged the missing retry surface.
+            // The backend owns replay semantics: it reads every durable child
+            // target (agent+tier+connection), resolves today's model for that
+            // tier, then creates a sibling run. Rebuilding only title+prompt in
+            // the browser used the QP's one default agent for every child.
             try {
-              const items: { title: string; prompt: string }[] = [];
-              for (const did of discIds) {
-                const disc = allDiscussions.find(d => d.id === did);
-                if (!disc) continue;
-                // Need the full disc to read messages[0]. Fetch on demand.
-                const full = await discussionsApi.get(did).catch(() => null);
-                const firstUser = full?.messages.find(m => m.role === 'User');
-                if (firstUser) {
-                  items.push({ title: disc.title, prompt: firstUser.content });
-                }
-              }
-              if (items.length === 0) {
+              if (discIds.length === 0) {
                 toast(t('disc.batchRetryEmpty'), 'error');
                 return;
               }
-              const batchName = `Retry · ${items.length} items`;
-              await quickPromptsApi.batchRun(qpId, {
-                batch_name: batchName,
-                items,
-                workspace_mode: 'Direct',
+              const retried = await workflowsApi.retryBatchRun(oldRunId);
+              const optimistic = Object.fromEntries(
+                retried.discussion_ids.map(id => [id, true] as const),
+              );
+              setSendingMap(previous => ({ ...previous, ...optimistic }));
+              retried.discussion_ids.forEach(discussionId => {
+                const controller = new AbortController();
+                fetch(`/api/discussions/${discussionId}/run`, {
+                  method: 'POST',
+                  signal: controller.signal,
+                  keepalive: true,
+                }).catch(() => {});
+                setTimeout(() => controller.abort(), 500);
               });
-              toast(t('disc.batchRetryToast', items.length), 'success');
+              setOpenBatchRuns(previous => new Set(previous).add(retried.run_id));
+              toast(t('disc.batchRetryToast', retried.batch_total), 'success');
               refetchDiscussions();
               refetchBatchSummaries();
-              void oldRunId; // logged + reserved for future "side-by-side" UI
+              void qpId; // retained in the sidebar callback for compatibility.
             } catch (e) {
               toast(t('disc.batchRetryError', userError(e)), 'error');
             }
@@ -3161,7 +3249,10 @@ export function DiscussionsPage({
             if (next.has(runId)) next.delete(runId); else next.add(runId);
             return next;
           })}
-          onCollapse={() => setSidebarCollapsed(true)}
+          onCollapse={() => {
+            setFocusCollapsedSidebarRail(true);
+            setSidebarCollapsed(true);
+          }}
         />
       ) : null}
 
@@ -3206,6 +3297,7 @@ export function DiscussionsPage({
             agents={agents}
             configLanguage={configLanguage}
             agentAccess={agentAccess}
+            externalConnections={externalConnections}
             prefill={prefill}
             onSubmit={handleCreateDiscussion}
             onClose={() => setShowNewDiscussion(false)}
@@ -3302,6 +3394,7 @@ export function DiscussionsPage({
             error={batchCompareError}
             modelTiers={agentAccess?.model_tiers}
             availableAgents={agents.filter(isUsable).map(agent => agent.agent_type)}
+            externalConnections={externalConnections}
             runningIds={new Set([
               ...Object.entries(sendingMap).filter(([, running]) => running).map(([id]) => id),
               ...Object.entries(queuedMap).filter(([, queued]) => queued).map(([id]) => id),
@@ -3322,6 +3415,7 @@ export function DiscussionsPage({
               projects={projects}
               agents={agents}
               modelTiers={agentAccess?.model_tiers}
+              externalConnections={externalConnections}
               showGitPanel={showGitPanel}
               showTerminalPanel={showTerminalPanel}
               terminalEnabled={agentAccess != null && [
@@ -3774,6 +3868,10 @@ export function DiscussionsPage({
                         isExpandedSummary={expandedSummaryMsgId === msg.id}
                         prevUserTs={prevUserTs[idx]}
                         defaultAgent={activeDiscussion.agent}
+                        defaultAgentAlias={activeExternalConnection
+                          ? `@${activeExternalConnection.mention_alias}`
+                          : undefined}
+                        targetConnectionAliases={externalConnectionAliases}
                         summaryCache={activeDiscussion.summary_cache ?? null}
                         language={activeDiscussion.language || 'fr'}
                         sending={sending}
@@ -3804,6 +3902,8 @@ export function DiscussionsPage({
                         replies={repliesByTarget.get(msg.id) ?? EMPTY_MESSAGES}
                         onReply={handleMsgReply}
                         onReplyNavigate={handleReplyNavigate}
+                        onDelete={handleMsgDelete}
+                        isDeleting={deletingMessageIds.has(msg.id)}
                         t={t}
                       />
                       {pending}
@@ -3858,7 +3958,7 @@ export function DiscussionsPage({
                           className="disc-msg-bubble" data-role="agent"
                           style={{ borderLeft: `3px solid ${agentColor(as_.agentType || as_.agent)}` }}
                         >
-                          <div className="disc-orch-stream-agent" style={{ color: agentColor(as_.agentType || as_.agent) }}>
+                          <div className="disc-orch-stream-agent" style={{ color: agentTextColor(as_.agentType || as_.agent) }}>
                             <Cpu size={10} /> {as_.agent}
                             <span className="disc-orch-round">
                               {as_.round === 'synthesis' ? t('disc.synthesis') : `Round ${as_.round}`}
@@ -3956,7 +4056,32 @@ export function DiscussionsPage({
                     <p className="disc-cta-text" data-variant="accent">
                       <ShieldCheck size={14} /> {t('audit.validationComplete')}
                     </p>
-                    <button className="disc-cta-btn" data-variant="accent" onClick={async () => { await projectsApi.validateAudit(proj.id); refetchProjects(); refetchDiscussions(); }}>
+                    <button
+                      className="disc-cta-btn"
+                      data-variant="accent"
+                      onClick={async () => {
+                        try {
+                          await projectsApi.validateAudit(proj.id);
+                          // One-shot deep-link consumed by ProjectCard once the
+                          // Projects page has opened the matching card. Keep it
+                          // separate from the post-validation docs deep-link:
+                          // this CTA confirms the audit, so its natural landing
+                          // place is the Audit tab where the validated state is
+                          // immediately visible.
+                          try {
+                            sessionStorage.setItem(`kronn:projectView:${proj.id}`, 'audit');
+                          } catch { /* restricted storage — navigation still works */ }
+                          await Promise.all([
+                            Promise.resolve(refetchProjects()),
+                            Promise.resolve(refetchDiscussions()),
+                          ]);
+                          toast(t('audit.done'), 'success');
+                          onNavigate('projects', { projectId: proj.id });
+                        } catch (error) {
+                          toast(userError(error), 'error');
+                        }
+                      }}
+                    >
                       <Check size={12} /> {t('audit.markValid')}
                     </button>
                   </div>

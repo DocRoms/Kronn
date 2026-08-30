@@ -18,7 +18,7 @@ import type {
 import {
   AGENT_MENTIONS as ALL_AGENT_MENTIONS,
   MODEL_TIER_ICONS,
-  agentColor,
+  agentTextColor,
   isUsable,
   modelForAgentTier,
 } from '../lib/constants';
@@ -1343,11 +1343,11 @@ export function ChatInput({
                       }}
                     >
                       {m.type
-                        ? <Cpu size={12} style={{ color: agentColor(m.type) }} />
+                        ? <Cpu size={12} style={{ color: agentTextColor(m.type) }} />
                         : <Users size={12} className="text-accent" />}
                       <span
                         className="font-semibold"
-                        style={m.type ? { color: agentColor(m.type) } : undefined}
+                        style={m.type ? { color: agentTextColor(m.type) } : undefined}
                       >
                         {m.displayTrigger}
                       </span>
@@ -1408,7 +1408,7 @@ export function ChatInput({
                     >
                       <Cpu
                         size={12}
-                        style={{ color: mention.type ? agentColor(mention.type) : undefined }}
+                        style={{ color: mention.type ? agentTextColor(mention.type) : undefined }}
                       />
                       <span className="font-semibold">
                         {mention.displayTrigger}
@@ -1595,7 +1595,7 @@ export function ChatInput({
                   className="disc-composer-routing-chip"
                   title={title}
                 >
-                  <span style={{ color: agentColor(agentType) }}>{trigger}</span>
+                  <span style={{ color: agentTextColor(agentType) }}>{trigger}</span>
                   <span>{MODEL_TIER_ICONS[tier]} {t(`disc.tier.${tier}`)}</span>
                   <button
                     type="button"

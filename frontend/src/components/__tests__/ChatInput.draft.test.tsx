@@ -115,6 +115,12 @@ describe('ChatInput draft persistence', () => {
             runtime_available: false,
             enabled: true,
           } as AgentDetection,
+          {
+            agent_type: 'Nvidia',
+            installed: false,
+            runtime_available: true,
+            enabled: true,
+          } as AgentDetection,
         ]}
         sending={false}
         disabled={false}
@@ -140,6 +146,8 @@ describe('ChatInput draft persistence', () => {
     fireEvent.change(screen.getByRole('textbox'), { target: { value: '@' } });
     const trigger = screen.getByText('@codex');
     expect(trigger.style.color).toBe('#10a37f');
+    const nvidiaTrigger = screen.getByText('@nvidia');
+    expect(nvidiaTrigger.style.color).toBe('var(--kr-agent-nvidia-text)');
   });
 
   it('autocompletes and routes an agent mention in the middle of a message', () => {

@@ -49,6 +49,68 @@ function sse(event: string, data: unknown): string {
 beforeEach(() => { vi.resetModules(); });
 afterEach(() => { vi.restoreAllMocks(); });
 
+describe('ollama.pull', () => {
+  it('preserves the SSE event name when event and data arrive in separate network chunks', async () => {
+    mockStreamingFetch([
+      'event: success\n',
+      'data: {"status":"success","digest":null,"completed":null,"total":null}\n\n',
+    ]);
+    const { ollama } = await import('../api');
+    const onSuccess = vi.fn();
+    const onError = vi.fn();
+    await ollama.pull('llama3.2:1b', { onProgress: vi.fn(), onSuccess, onError }, new AbortController().signal);
+    expect(onSuccess).toHaveBeenCalledTimes(1);
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it('turns a clean EOF without a terminal event into an actionable error', async () => {
+    mockStreamingFetch([sse('progress', { status: 'pulling manifest', digest: null, completed: null, total: null })]);
+    const { ollama } = await import('../api');
+    const onError = vi.fn();
+    await ollama.pull('llama3.2:1b', { onProgress: vi.fn(), onSuccess: vi.fn(), onError }, new AbortController().signal);
+    expect(onError).toHaveBeenCalledWith(expect.stringContaining('closed before completion'));
+  });
+
+  it('surfaces the shared SSE limiter error payload', async () => {
+    mockStreamingFetch([sse('error', { error: 'sse stream idle for 600s, server closed' })]);
+    const { ollama } = await import('../api');
+    const onError = vi.fn();
+    await ollama.pull('llama3.2:1b', { onProgress: vi.fn(), onSuccess: vi.fn(), onError }, new AbortController().signal);
+    expect(onError).toHaveBeenCalledWith('sse stream idle for 600s, server closed');
+  });
+
+  it('aborting an active pull cancels the fetch body reader without reporting an error', async () => {
+    const encoder = new TextEncoder();
+    let upstreamCancelled = false;
+    let streamController!: ReadableStreamDefaultController<Uint8Array>;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        streamController = controller;
+        controller.enqueue(encoder.encode(sse('progress', {
+          status: 'downloading', digest: 'sha256:abc', completed: 1, total: 10,
+        })));
+      },
+    });
+    vi.stubGlobal('fetch', vi.fn((_url: string, options: RequestInit) => {
+      options.signal?.addEventListener('abort', () => {
+        upstreamCancelled = true;
+        streamController.error(new DOMException('aborted', 'AbortError'));
+      }, { once: true });
+      return Promise.resolve({ ok: true, status: 200, body, headers: { get: () => null } });
+    }));
+    const { ollama } = await import('../api');
+    const controller = new AbortController();
+    const onProgress = vi.fn();
+    const onError = vi.fn();
+    const pulling = ollama.pull('llama3.2:1b', { onProgress, onSuccess: vi.fn(), onError }, controller.signal);
+    await vi.waitFor(() => expect(onProgress).toHaveBeenCalledTimes(1));
+    controller.abort();
+    await pulling;
+    expect(upstreamCancelled).toBe(true);
+    expect(onError).not.toHaveBeenCalled();
+  });
+});
+
 // ════════════════════════════════════════════════════════════════════════════
 // projects.partialAuditStream — carries the generic SSE dispatch coverage
 // (HTTP error, double-done, abort-as-done) since the legacy auditStream /

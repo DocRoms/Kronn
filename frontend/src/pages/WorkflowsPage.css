@@ -3,12 +3,12 @@
 /* ── Unified Automation library shell ────────────────── */
 .automation-page {
   display: flex;
-  width: 100%;
-  height: calc(100dvh - 128px);
-  min-height: 520px;
+  height: calc(100vh - 56px);
+  min-height: 0;
+  margin:
+    calc(-1 * var(--dash-main-padding-block))
+    calc(-1 * var(--dash-main-padding-inline));
   overflow: hidden;
-  border: 1px solid var(--kr-border-light);
-  border-radius: var(--kr-r-xl);
   background: var(--kr-bg-base);
 }
 
@@ -25,11 +25,6 @@
   overscroll-behavior: contain;
   padding: var(--kr-sp-6);
   scrollbar-gutter: stable;
-}
-
-.automation-sidebar-search {
-  display: grid;
-  gap: 7px;
 }
 
 .automation-project-filter {
@@ -92,16 +87,6 @@
 
 .automation-resource-row .disc-item-open {
   min-width: 0;
-}
-
-/* KT-464 — visual identity (size/color/focus) lives in the shared
-   FavoriteToggle component; only page-specific spacing stays here. */
-.automation-resource-pin {
-  margin-right: 6px;
-}
-
-.automation-favorites-section > .automation-kind-button {
-  color: var(--kr-accent);
 }
 
 @media (max-width: 760px) {
@@ -236,6 +221,109 @@
 }
 .wf-create-ai-btn:hover { opacity: 0.85; }
 
+.automation-action-modal {
+  width: min(620px, 100%);
+  max-height: 90vh;
+  overflow-y: auto;
+  padding: var(--kr-sp-6);
+  border: 1px solid var(--kr-border-medium);
+  border-radius: var(--kr-r-lg);
+  background: var(--kr-bg-base);
+  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.45);
+}
+
+.automation-action-modal-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--kr-sp-4);
+  margin-bottom: var(--kr-sp-5);
+}
+
+.automation-action-modal-header h2 {
+  margin: 0;
+  color: var(--kr-text-primary);
+  font-size: var(--kr-fs-lg);
+}
+
+.automation-action-modal-header p {
+  margin: var(--kr-sp-2) 0 0;
+  color: var(--kr-text-muted);
+  font-size: var(--kr-fs-sm);
+  line-height: 1.45;
+}
+
+.automation-action-modal-header .disc-icon-btn {
+  flex: 0 0 34px;
+  width: 34px;
+  height: 34px;
+  justify-content: center;
+  padding: 0;
+}
+
+.automation-action-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--kr-sp-3);
+}
+
+.automation-action-option {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr);
+  align-items: start;
+  gap: var(--kr-sp-3);
+  min-height: 78px;
+  padding: var(--kr-sp-4);
+  border: 1px solid var(--kr-border-light);
+  border-radius: var(--kr-r-md);
+  background: var(--kr-bg-elevated);
+  color: var(--kr-text-secondary);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.automation-action-option > svg {
+  box-sizing: content-box;
+  padding: 7px;
+  border-radius: var(--kr-r-sm);
+  background: var(--kr-accent-bg);
+  color: var(--kr-accent-ink);
+}
+
+.automation-action-option > span {
+  display: grid;
+  gap: var(--kr-sp-1);
+  min-width: 0;
+}
+
+.automation-action-option strong {
+  color: var(--kr-text-primary);
+  font-size: var(--kr-fs-sm);
+}
+
+.automation-action-option small {
+  color: var(--kr-text-muted);
+  font-size: var(--kr-fs-xs);
+  line-height: 1.35;
+}
+
+.automation-action-option:hover,
+.automation-action-option:focus-visible {
+  border-color: var(--kr-accent-border);
+  background: var(--kr-bg-hover);
+  outline: none;
+}
+
+.automation-action-option:focus-visible {
+  box-shadow: 0 0 0 2px var(--kr-accent);
+}
+
+.automation-action-option-ai {
+  border-color: var(--kr-accent-border);
+  background: var(--kr-accent-bg);
+}
+
 @media (max-width: 700px) {
   .automation-page-header {
     align-items: stretch;
@@ -249,6 +337,10 @@
 
   .automation-header-actions > button {
     justify-content: center;
+  }
+
+  .automation-action-grid {
+    grid-template-columns: 1fr;
   }
 }
 
@@ -546,7 +638,9 @@
   display: flex;
   align-items: flex-start;
   gap: var(--kr-sp-6);
-  margin-bottom: var(--kr-sp-8);
+  margin: calc(-1 * var(--kr-sp-8)) calc(-1 * var(--kr-sp-9)) var(--kr-sp-8);
+  padding: 18px 20px;
+  border-radius: var(--kr-r-xl) var(--kr-r-xl) 0 0;
 }
 
 .wf-detail-heading {
@@ -6695,8 +6789,8 @@
   gap: var(--kr-sp-3) var(--kr-sp-5);
   padding: var(--kr-sp-3) var(--kr-sp-4);
   border-color: var(--kr-border-strong);
+  border-bottom-color: var(--kr-border-light);
   border-radius: var(--kr-r-lg);
-  background: color-mix(in srgb, var(--kr-bg-elevated) 94%, transparent);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.09);
   backdrop-filter: blur(14px);
 }
@@ -6827,6 +6921,7 @@
 
 .qp-card-name {
   min-width: 0;
+  margin: 0;
   overflow: hidden;
   color: var(--kr-text-primary);
   font-size: var(--kr-fs-md);
