@@ -78,6 +78,34 @@ secrets_configured() {
 
 # ─── MCP sync ────────────────────────────────────────────────────────────────
 
+load_mcp_secret_env() {
+    export ATLASSIAN_URL JIRA_USERNAME JIRA_API_TOKEN
+    export CONFLUENCE_USERNAME CONFLUENCE_API_TOKEN
+    export GITHUB_PERSONAL_ACCESS_TOKEN AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_REGION
+    ATLASSIAN_URL=$(secret_get "atlassian" "url" || true)
+    JIRA_USERNAME=$(secret_get "atlassian" "username" || true)
+    JIRA_API_TOKEN=$(secret_get "atlassian" "api_token" || true)
+    CONFLUENCE_USERNAME=$(secret_get "atlassian" "username" || true)
+    CONFLUENCE_API_TOKEN=$(secret_get "atlassian" "api_token" || true)
+    GITHUB_PERSONAL_ACCESS_TOKEN=$(secret_get "github" "personal_access_token" || true)
+    AWS_ACCESS_KEY_ID=$(secret_get "aws" "access_key_id" || true)
+    AWS_SECRET_ACCESS_KEY=$(secret_get "aws" "secret_access_key" || true)
+    AWS_REGION=$(secret_get "aws" "region" || true)
+}
+
+# Print the names of referenced-but-empty variables, one per line.
+# Shared by sync and `kronn doctor` so both enforce the exact same contract.
+mcp_missing_secrets_for_template() {
+    local template="$1" _v
+    local _kronn_vars="ATLASSIAN_URL JIRA_USERNAME JIRA_API_TOKEN CONFLUENCE_USERNAME CONFLUENCE_API_TOKEN GITHUB_PERSONAL_ACCESS_TOKEN AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_REGION"
+    load_mcp_secret_env
+    for _v in $_kronn_vars; do
+        if grep -q "\$[{]\?${_v}" "$template" && [[ -z "${!_v}" ]]; then
+            printf '%s\n' "$_v"
+        fi
+    done
+}
+
 # Generate .mcp.json for a repo from its .mcp.json.example + central secrets.
 sync_mcp_for_repo() {
     local repo_dir="$1"
@@ -88,38 +116,21 @@ sync_mcp_for_repo() {
         return 1
     fi
 
+    if [[ ! -w "$repo_dir" ]]; then
+        warn "$(basename "$repo_dir"): skipped: read-only — move it under KRONN_REPOS_DIR or add its parent to KRONN_EXTRA_REPOS, then restart Kronn"
+        return 1
+    fi
+
     # Export secrets as env vars for envsubst
-    export ATLASSIAN_URL
-    ATLASSIAN_URL=$(secret_get "atlassian" "url")
-    export JIRA_USERNAME
-    JIRA_USERNAME=$(secret_get "atlassian" "username")
-    export JIRA_API_TOKEN
-    JIRA_API_TOKEN=$(secret_get "atlassian" "api_token")
-    export CONFLUENCE_USERNAME
-    CONFLUENCE_USERNAME=$(secret_get "atlassian" "username")
-    export CONFLUENCE_API_TOKEN
-    CONFLUENCE_API_TOKEN=$(secret_get "atlassian" "api_token")
-    export GITHUB_PERSONAL_ACCESS_TOKEN
-    GITHUB_PERSONAL_ACCESS_TOKEN=$(secret_get "github" "personal_access_token")
-    export AWS_ACCESS_KEY_ID
-    AWS_ACCESS_KEY_ID=$(secret_get "aws" "access_key_id")
-    export AWS_SECRET_ACCESS_KEY
-    AWS_SECRET_ACCESS_KEY=$(secret_get "aws" "secret_access_key")
-    export AWS_REGION
-    AWS_REGION=$(secret_get "aws" "region")
+    load_mcp_secret_env
 
     # Refuse to write a broken file: a secret referenced by the template but
     # empty would land as "" (opaque 401s at runtime), and `> output` used to
     # truncate the existing GOOD file before envsubst even ran.
-    local _kronn_vars="ATLASSIAN_URL JIRA_USERNAME JIRA_API_TOKEN CONFLUENCE_USERNAME CONFLUENCE_API_TOKEN GITHUB_PERSONAL_ACCESS_TOKEN AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_REGION"
-    local _missing="" _v
-    for _v in $_kronn_vars; do
-        if grep -q "\$[{]\?${_v}" "$template" && [[ -z "${!_v}" ]]; then
-            _missing="$_missing $_v"
-        fi
-    done
+    local _missing=""
+    _missing=$(mcp_missing_secrets_for_template "$template" | tr '\n' ' ')
     if [[ -n "$_missing" ]]; then
-        fail ".mcp.json NOT generated for $(basename "$repo_dir") — missing secret(s):$_missing (existing file left untouched)"
+        fail "$(basename "$repo_dir"): refused: missing secrets ${_missing% } (existing file left untouched)"
         return 1
     fi
 
@@ -129,13 +140,18 @@ sync_mcp_for_repo() {
         local _tmp_out
         _tmp_out=$(mktemp "${output}.XXXXXX") || return 1
         if envsubst '$ATLASSIAN_URL $JIRA_USERNAME $JIRA_API_TOKEN $CONFLUENCE_USERNAME $CONFLUENCE_API_TOKEN $GITHUB_PERSONAL_ACCESS_TOKEN $AWS_ACCESS_KEY_ID $AWS_SECRET_ACCESS_KEY $AWS_REGION' < "$template" > "$_tmp_out"; then
+            if [[ -f "$output" ]] && cmp -s "$_tmp_out" "$output"; then
+                rm -f "$_tmp_out"
+                info "$(basename "$repo_dir"): unchanged"
+                return 0
+            fi
             mv "$_tmp_out" "$output"
         else
             rm -f "$_tmp_out"
             fail "envsubst failed for $(basename "$repo_dir") — existing file left untouched"
             return 1
         fi
-        success ".mcp.json generated for $(basename "$repo_dir")"
+        success "$(basename "$repo_dir"): written"
     else
         fail "envsubst not found — install gettext"
         printf "  ${DIM}sudo apt install gettext (Linux) / brew install gettext (macOS)${RESET}\n"
@@ -150,14 +166,19 @@ sync_mcp_all() {
     if ! secrets_configured; then
         warn "No secret configured."
         init_secrets
-        return 1
+        info "Each repository below will report the exact referenced values it still needs."
     fi
 
-    local synced=0
+    local synced=0 failed=0
     for dir in "${REPO_PATHS[@]}"; do
         if [[ -f "$dir/.mcp.json.example" ]]; then
-            sync_mcp_for_repo "$dir"
-            ((synced++))
+            if sync_mcp_for_repo "$dir"; then
+                synced=$((synced + 1))
+            else
+                failed=$((failed + 1))
+            fi
+        else
+            info "$(basename "$dir"): skipped: no .mcp.json.example"
         fi
     done
 
@@ -165,8 +186,10 @@ sync_mcp_all() {
         info "No repository with .mcp.json.example found."
     else
         echo
-        success "$synced repository(ies) synchronized."
+        success "$synced repository(ies) synchronized, $failed failure(s)."
     fi
+
+    (( failed == 0 ))
 }
 
 # ─── MCP prerequisites check ────────────────────────────────────────────────

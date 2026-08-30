@@ -63,6 +63,10 @@ services:
       - ${KRONN_EXTRA_BIN:-./.docker/empty}:/host-bin/extra:ro        # Escape hatch — anything else (asdf shims, pyenv, custom paths)
       - /usr/libexec/docker/cli-plugins:/usr/libexec/docker/cli-plugins:ro  # Docker compose plugin
       - /var/run/docker.sock:/var/run/docker.sock  # Docker socket for docker compose
+      # Read the machine's hostname mappings when project Docker endpoints are
+      # inspected. `make start` snapshots the real host file because Docker
+      # Desktop / OrbStack resolve a direct `/etc/hosts` bind inside their VM.
+      - ${KRONN_HOSTS_SNAPSHOT:-./.docker/host-hosts-unavailable}:/host-etc/hosts:ro
       - ${HOME}/.local/share:/host-home/.local/share:ro  # Symlink targets (claude, vibe)
       # Self-mount so absolute-path symlinks created by host installers
       # (e.g. `~/.local/bin/claude` → `/home/<user>/.local/share/claude/versions/<v>/claude`)
@@ -122,6 +126,11 @@ services:
       - KRONN_DATA_DIR=/data
       - KRONN_IN_DOCKER=1
       - KRONN_HOST_HOME=${HOME}
+      # Expose the security boundary to diagnostics. These values do not add
+      # mounts; they mirror the primary + generated override mounts above.
+      - KRONN_REPOS_DIR=${KRONN_REPOS_DIR:-${HOME}/Repositories}
+      - KRONN_EXTRA_REPOS=${KRONN_EXTRA_REPOS:-}
+      - KRONN_HOSTS_FILE=/host-etc/hosts
       # Path written into project-level `.mcp.json` / `.kiro/settings/…`
       # / `.gemini/settings.json` / `~/.codex/config.toml` for the
       # `kronn-internal` MCP entry. Must resolve identically inside the

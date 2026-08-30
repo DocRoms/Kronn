@@ -57,24 +57,47 @@ RESET  := \033[0m
 	@echo "KRONN_HOST_GID=$$(id -g)" >> .env
 	@echo "UID=$$(id -u)" >> .env
 	@echo "GID=$$(id -g)" >> .env
-	@# Auto-detect repos dir = parent of Kronn install dir.
+	@# Confirm repos dir on first run; inference remains the default answer.
 	@# Edge case (TD-20260507-makefile-repos-rel-home-edge): when Kronn lives
 	@# directly under $$HOME, the parent IS $$HOME, which collides with the
 	@# read-only `${HOME}:/host-home:ro` mount in docker-compose.yml. Refuse
 	@# rather than silently produce a broken mount layout — the operator
 	@# either moves Kronn under a sub-dir OR sets KRONN_REPOS_DIR explicitly.
-	@repos_dir=$$(cd "$(CURDIR)/.." && pwd); \
-	if [ -z "$$KRONN_REPOS_DIR" ] && [ "$$repos_dir" = "$$HOME" ]; then \
+	@home_dir=$$(cd "$$HOME" && pwd -P); \
+	repos_dir=$$(cd "$(CURDIR)/.." && pwd -P); \
+	if [ -n "$$KRONN_REPOS_DIR" ]; then repos_dir="$$KRONN_REPOS_DIR"; \
+	elif [ -t 0 ]; then \
+		echo "$(CYAN)Kronn must know where it may write project files (.mcp.json, agent instructions, worktrees).$(RESET)"; \
+		printf "$(CYAN)Primary repositories directory [$$repos_dir]: $(RESET)"; \
+		read -r confirmed_repos; \
+		if [ -n "$$confirmed_repos" ]; then repos_dir="$$confirmed_repos"; fi; \
+	fi; \
+	if [ -d "$$repos_dir" ]; then repos_dir=$$(cd "$$repos_dir" && pwd -P); fi; \
+	if [ -z "$$KRONN_REPOS_DIR" ] && [ "$$repos_dir" = "$$home_dir" ]; then \
 		echo "$(RED)KRONN_REPOS_DIR auto-detect picked $$HOME, which collides with the read-only /host-home mount.$(RESET)"; \
-		echo "$(YELLOW)Move Kronn into a sub-directory (e.g. $$HOME/Kronn-host/Kronn)$(RESET)"; \
-		echo "$(YELLOW)OR set KRONN_REPOS_DIR=path/to/your/repos before running 'make start'.$(RESET)"; \
+		echo "$(YELLOW)The parent of Kronn becomes the rw repositories directory: move Kronn into the directory that already contains your repos.$(RESET)"; \
+		echo "$(YELLOW)Or set KRONN_REPOS_DIR for the primary directory; use KRONN_EXTRA_REPOS for additional directories.$(RESET)"; \
 		exit 1; \
 	fi; \
-	if [ -n "$$KRONN_REPOS_DIR" ]; then repos_dir="$$KRONN_REPOS_DIR"; fi; \
-	repos_rel=$${repos_dir#$$HOME/}; \
+	case "$$repos_dir" in \
+		"$$home_dir"/*) repos_rel=$${repos_dir#$$home_dir/} ;; \
+		*) repos_rel=.kronn-external-repos ;; \
+	esac; \
 	echo "KRONN_REPOS_DIR=$$repos_dir" >> .env; \
 	echo "KRONN_REPOS_REL=$$repos_rel" >> .env; \
-	echo "$(CYAN)  Repos dir: $$repos_dir (rw mount)$(RESET)"
+	echo "$(CYAN)  Repos dir confirmed: $$repos_dir (rw mount)$(RESET)"; \
+	case "$$repos_dir" in /mnt/[a-zA-Z]/*) \
+		echo "$(YELLOW)  WSL warning: /mnt/c-style repositories are much slower for Docker/agents. Prefer the Linux filesystem under $$HOME.$(RESET)" ;; \
+	esac; \
+	extra_repos="$${KRONN_EXTRA_REPOS:-}"; \
+	if [ -z "$$extra_repos" ] && [ -t 0 ]; then \
+		printf "$(CYAN)Additional repositories directories (colon-separated, optional): $(RESET)"; \
+		read -r extra_repos; \
+	fi; \
+	if [ -n "$$extra_repos" ]; then \
+		echo "KRONN_EXTRA_REPOS=$$extra_repos" >> .env; \
+		echo "$(CYAN)  Additional repos: $$extra_repos (rw mounts)$(RESET)"; \
+	fi
 	@# Docker socket GID (for docker compose access from container)
 	@if [ -S /var/run/docker.sock ]; then \
 		docker_gid=$$(stat -c '%g' /var/run/docker.sock 2>/dev/null || stat -f '%g' /var/run/docker.sock 2>/dev/null || echo ""); \
@@ -136,8 +159,11 @@ _gen-override:
 		echo "  backend:" >> docker-compose.override.yml; \
 		echo "    volumes:" >> docker-compose.override.yml; \
 		IFS=':'; for dir in $$extra_repos; do \
-			rel=$${dir#$$HOME/}; \
-			echo "      - $$dir:/host-home/$$rel:rw" >> docker-compose.override.yml; \
+			case "$$dir" in \
+				"$$HOME"/*) rel=$${dir#$$HOME/}; target="/host-home/$$rel" ;; \
+				*) target="$$dir" ;; \
+			esac; \
+			echo "      - $$dir:$$target:rw" >> docker-compose.override.yml; \
 			echo "$(CYAN)  Extra rw mount: $$dir$(RESET)"; \
 		done; \
 	elif [ -f docker-compose.override.yml ]; then \
@@ -156,6 +182,26 @@ _apply-debug-flag:
 		echo "$(CYAN)  Debug mode: verbose logs enabled (DEBUG=1)$(RESET)"; \
 	fi
 
+## Snapshot the machine hosts file for the backend container. A direct bind of
+## `/etc/hosts` is unreliable on Docker Desktop and OrbStack: it resolves to the
+## Linux VM's file instead of the macOS host file.
+.PHONY: _snapshot-host-hosts
+_snapshot-host-hosts: .env
+	@mkdir -p .docker/runtime
+	@hosts_source="$${KRONN_HOSTS_FILE:-/etc/hosts}"; \
+	 snapshot_tmp=".docker/runtime/hosts.tmp"; \
+	 env_tmp=".env.hosts.tmp"; \
+	 snapshot="./.docker/host-hosts-unavailable"; \
+	 if [ -f "$$hosts_source" ] && cp "$$hosts_source" "$$snapshot_tmp"; then \
+		mv "$$snapshot_tmp" .docker/runtime/hosts; \
+		snapshot="./.docker/runtime/hosts"; \
+	 else \
+		echo "$(YELLOW)  Host mappings unavailable: $$hosts_source$(RESET)"; \
+	 fi; \
+	 grep -v '^KRONN_HOSTS_SNAPSHOT=' .env > "$$env_tmp" || true; \
+	 echo "KRONN_HOSTS_SNAPSHOT=$$snapshot" >> "$$env_tmp"; \
+	 mv "$$env_tmp" .env
+
 ## Start everything (Docker, fast build — no LTO, ~4x faster than prod)
 ## Pass DEBUG=1 to force verbose logs (kronn=debug,tower_http=debug) for this run.
 ## Without DEBUG=1, the backend picks the level from config.server.debug_mode.
@@ -168,7 +214,7 @@ install:
 	@echo "$(CYAN)Launching the guided Kronn setup (./kronn start)...$(RESET)"
 	@./kronn start
 
-start: .env _gen-override _apply-debug-flag
+start: .env _snapshot-host-hosts _gen-override _apply-debug-flag
 	@if [ "$$(uname -s)" = "Darwin" ]; then \
 		echo "$(YELLOW)  macOS note: Docker can't run your host agents (Claude, Codex, …) or read the Keychain.$(RESET)"; \
 		echo "$(YELLOW)  For native agent execution prefer: ./kronn start-dev$(RESET)"; \
@@ -188,7 +234,7 @@ start: .env _gen-override _apply-debug-flag
 	@echo ""
 
 ## Production build (Docker, release with LTO — slow but optimized binary)
-start-prod: .env _gen-override
+start-prod: .env _snapshot-host-hosts _gen-override
 	@echo "$(GREEN)▸ Building $(APP_NAME) (production release)...$(RESET)"
 	@$(DOCKER_COMP) up -d --build
 
@@ -292,6 +338,17 @@ test-python:
 ## Run frontend unit tests (vitest)
 test-frontend:
 	@echo "$(CYAN)▸ Running frontend unit tests (vitest)...$(RESET)"
+	cd frontend && pnpm test
+
+## Orchestration validation compatibility: keep these stable target names for
+## persisted TaskExecution gates, even though the frontend now uses pnpm.
+typecheck:
+	@echo "$(CYAN)▸ Running frontend TypeScript parity checks...$(RESET)"
+	cd frontend && pnpm typecheck:native
+	cd frontend && pnpm typecheck:legacy
+
+yarn-test-changed:
+	@echo "$(CYAN)▸ Running frontend unit tests for persisted validation gates...$(RESET)"
 	cd frontend && pnpm test
 
 ## Run frontend E2E tests (Playwright). Pre-req: `make dev` running (Vite + backend).

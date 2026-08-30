@@ -52,6 +52,7 @@ kronn.toml
 .env
 docker-compose.override.yml
 .docker/data/
+.docker/runtime/
 
 #ai
 .mcp.json

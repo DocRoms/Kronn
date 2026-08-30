@@ -1,0 +1,3 @@
+# KRONN_HOSTS_UNAVAILABLE
+# Safe read-only fallback for direct `docker compose` usage. `make start`
+# replaces the bind source with a snapshot of the machine's real hosts file.

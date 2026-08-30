@@ -764,10 +764,54 @@ cmd_logs() {
     (cd "$KRONN_DIR" && make logs)
 }
 
+_kronn_env_value() {
+    local key="$1"
+    [[ -f "$KRONN_DIR/.env" ]] || return 1
+    sed -n "s/^${key}=//p" "$KRONN_DIR/.env" | tail -n 1
+}
+
+_path_under_root() {
+    local path="${1%/}" root="${2%/}"
+    [[ "$path" == "$root" || "$path" == "$root"/* ]]
+}
+
+_doctor_project_paths() {
+    local json root dir
+    if kronn_api_available && json=$(kronn_api_data GET /projects 2>/dev/null); then
+        if command -v jq >/dev/null 2>&1; then
+            printf '%s' "$json" | jq -r '.[].path'
+        elif command -v python3 >/dev/null 2>&1; then
+            printf '%s' "$json" | python3 -c 'import json,sys; [print(p["path"]) for p in json.load(sys.stdin)]'
+        fi
+        return
+    fi
+
+    # Offline fallback: inspect immediate git children of every configured rw
+    # root. The running backend path above is authoritative for registered
+    # projects and catches visible read-only siblings too.
+    for root in "$@"; do
+        [[ -d "$root" ]] || continue
+        for dir in "$root"/*/; do
+            [[ -d "$dir/.git" ]] && printf '%s\n' "${dir%/}"
+        done
+    done
+}
+
+_doctor_host_sync_labels() {
+    local json
+    kronn_api_available || return 1
+    json=$(kronn_api_data GET /mcps/overview 2>/dev/null) || return 1
+    if command -v jq >/dev/null 2>&1; then
+        printf '%s' "$json" | jq -r '.configs[] | select(.host_sync != "None") | .label'
+    elif command -v python3 >/dev/null 2>&1; then
+        printf '%s' "$json" | python3 -c 'import json,sys; [print(c["label"]) for c in json.load(sys.stdin).get("configs",[]) if c.get("host_sync") != "None"]'
+    fi
+}
+
 cmd_doctor() {
     # Diagnostic command — surfaces the kind of host-state corruption
     # that silently breaks Kronn-mounted bind dirs (TD-20260429).
-    # Today checks:
+    # Checks:
     #   1. Root-owned files under host caches the container shares
     #      (~/.cache/uv, ~/.local/share/rtk, etc.) — leftovers from
     #      pre-APP_UID upgrades that break host `uvx` / `rtk gain`.
@@ -775,12 +819,128 @@ cmd_doctor() {
     #      required by Kronn-managed MCP servers when invoked from
     #      the host CLI.
     #   3. Docker presence + version — Kronn won't run without it.
-    #   4. Vibe workspace trust — a revoked `.vibe` makes Vibe ignore the
+    #   4. Repository rw perimeter + project MCP synchronization invariants.
+    #   5. Host-CLI sync promises.
+    #   6. Vibe workspace trust — a revoked `.vibe` makes Vibe ignore the
     #      MCP config Kronn writes, with no error on either side.
     banner
     local total_issues=0
 
-    # ─── 1. Host cache permissions (uid-0 detection) ─────────────────
+    # ─── 1. Repository write perimeter ──────────────────────────────
+    step "Repository write perimeter"
+    load_config
+    local primary_repos extra_repos
+    primary_repos="${KRONN_REPOS_DIR:-$(_kronn_env_value KRONN_REPOS_DIR 2>/dev/null || true)}"
+    [[ -z "$primary_repos" ]] && primary_repos="$SCAN_PATH"
+    extra_repos="${KRONN_EXTRA_REPOS:-$(_kronn_env_value KRONN_EXTRA_REPOS 2>/dev/null || true)}"
+    local rw_roots=("$primary_repos")
+    if [[ -n "$extra_repos" ]]; then
+        local old_ifs="$IFS" extra
+        IFS=':'
+        for extra in $extra_repos; do [[ -n "$extra" ]] && rw_roots+=("$extra"); done
+        IFS="$old_ifs"
+    fi
+
+    if [[ ! -d "$primary_repos" ]]; then
+        warn "Primary repositories directory does not exist: $primary_repos"
+        printf "    ${DIM}Set KRONN_REPOS_DIR to an existing parent directory, then restart Kronn.${RESET}\n"
+        total_issues=$((total_issues + 1))
+    elif [[ "${primary_repos%/}" == "${HOME%/}" ]]; then
+        warn "Primary repositories directory is HOME — it collides with Kronn's read-only home mount"
+        printf "    ${DIM}Use a dedicated directory containing your repos (for example: $HOME/Repositories).${RESET}\n"
+        total_issues=$((total_issues + 1))
+    else
+        success "Primary rw directory: $primary_repos"
+    fi
+    for extra in "${rw_roots[@]:1}"; do
+        if [[ -d "$extra" ]]; then
+            success "Additional rw directory: $extra"
+        else
+            warn "Additional repositories directory does not exist: $extra"
+            total_issues=$((total_issues + 1))
+        fi
+    done
+
+    local project_paths=() project_path inside root
+    while IFS= read -r project_path; do
+        [[ -n "$project_path" ]] && project_paths+=("$project_path")
+    done < <(_doctor_project_paths "${rw_roots[@]}")
+    for project_path in "${project_paths[@]}"; do
+        inside=0
+        for root in "${rw_roots[@]}"; do
+            if _path_under_root "$project_path" "$root"; then inside=1; break; fi
+        done
+        if [[ $inside -eq 1 ]]; then
+            success "$(basename "$project_path"): inside rw perimeter"
+        else
+            warn "$(basename "$project_path"): visible but read-only ($project_path)"
+            printf "    ${DIM}Move it under $primary_repos, or add its parent to KRONN_EXTRA_REPOS and restart Kronn.${RESET}\n"
+            total_issues=$((total_issues + 1))
+        fi
+    done
+
+    if grep -qiE "microsoft|wsl" /proc/version 2>/dev/null; then
+        for root in "${rw_roots[@]}"; do
+            if [[ "$root" == /mnt/[a-zA-Z]/* ]]; then
+                warn "WSL performance: $root is on the Windows filesystem; prefer a path under $HOME"
+            fi
+        done
+    fi
+
+    # ─── 2. Project MCP files + referenced secrets ──────────────────
+    step "Project MCP synchronization"
+    local secrets_file="$KRONN_CONFIG_DIR/secrets.toml" mcp_issues=0 missing
+    if [[ -f "$secrets_file" ]]; then
+        success "Secrets store exists: $secrets_file"
+    else
+        warn "Secrets store missing: $secrets_file"
+        printf "    ${DIM}Run 'kronn mcp sync' to create it, then fill the referenced values.${RESET}\n"
+        mcp_issues=$((mcp_issues + 1))
+    fi
+    for project_path in "${project_paths[@]}"; do
+        if [[ -f "$project_path/.mcp.json.example" ]]; then
+            missing=$(mcp_missing_secrets_for_template "$project_path/.mcp.json.example" | tr '\n' ' ')
+            if [[ -n "$missing" ]]; then
+                warn "$(basename "$project_path"): missing referenced secrets ${missing% }"
+                mcp_issues=$((mcp_issues + 1))
+            else
+                success "$(basename "$project_path"): referenced secrets configured"
+            fi
+        fi
+        if [[ -f "$project_path/.mcp.json" ]] && grep -q '"kronn-internal"' "$project_path/.mcp.json"; then
+            success "$(basename "$project_path"): .mcp.json contains kronn-internal"
+        else
+            warn "$(basename "$project_path"): .mcp.json missing kronn-internal"
+            printf "    ${DIM}Open the project in Kronn or run a plugin sync after fixing its rw perimeter.${RESET}\n"
+            mcp_issues=$((mcp_issues + 1))
+        fi
+    done
+    total_issues=$((total_issues + mcp_issues))
+
+    # ─── 3. Host CLI sync promises ──────────────────────────────────
+    step "Host CLI plugin sync"
+    local host_labels=() label found host_file host_issues=0
+    while IFS= read -r label; do [[ -n "$label" ]] && host_labels+=("$label"); done < <(_doctor_host_sync_labels || true)
+    if [[ ${#host_labels[@]} -eq 0 ]]; then
+        info "No plugin currently promises local CLI synchronization (or backend is offline)"
+    else
+        for label in "${host_labels[@]}"; do
+            found=0
+            for host_file in "$HOME/.claude.json" "$HOME/.gemini/settings.json" "$HOME/.codex/config.toml" "$HOME/.copilot/mcp-config.json"; do
+                if [[ -f "$host_file" ]] && grep -Fq "$label" "$host_file"; then found=1; break; fi
+            done
+            if [[ $found -eq 1 ]]; then
+                success "$label: present in a local CLI config"
+            else
+                warn "$label: marked for local CLI sync but absent from known host config files"
+                printf "    ${DIM}Re-save the plugin's 'CLI local' setting, then run doctor again.${RESET}\n"
+                host_issues=$((host_issues + 1))
+            fi
+        done
+    fi
+    total_issues=$((total_issues + host_issues))
+
+    # ─── 4. Host cache permissions (uid-0 detection) ─────────────────
     step "Host cache permissions"
     # Search up to depth 4 — enough to catch the typical
     # `~/.cache/uv/CACHEDIR.TAG` and `~/.local/share/rtk/<dir>/<file>`
@@ -811,9 +971,16 @@ cmd_doctor() {
         total_issues=$((total_issues + cache_issues))
     fi
 
-    # ─── 2. Host runtime tooling ─────────────────────────────────────
+    # ─── 5. Host runtime tooling ─────────────────────────────────────
     step "Host runtime prerequisites"
     local tooling_issues=0
+    if command -v envsubst >/dev/null 2>&1; then
+        success "envsubst — found"
+    else
+        warn "envsubst — not found (template-based .mcp.json sync cannot run)"
+        printf "    ${DIM}Install gettext: brew install gettext (macOS) / apt install gettext (Linux)${RESET}\n"
+        tooling_issues=$((tooling_issues + 1))
+    fi
     # uvx — Python MCP servers (atlassian, cloudwatch, docker, git, …)
     if command -v uvx >/dev/null 2>&1; then
         success "uvx — $(uvx --version 2>/dev/null | head -1)"
@@ -854,7 +1021,7 @@ cmd_doctor() {
     fi
     total_issues=$((total_issues + tooling_issues))
 
-    # ─── 3. Docker ──────────────────────────────────────────────────
+    # ─── 6. Docker ──────────────────────────────────────────────────
     step "Docker"
     if command -v docker >/dev/null 2>&1; then
         local docker_v
@@ -872,7 +1039,7 @@ cmd_doctor() {
         total_issues=$((total_issues + 1))
     fi
 
-    # ─── 4. Vibe workspace trust ─────────────────────────────────────
+    # ─── 7. Vibe workspace trust ─────────────────────────────────────
     # Vibe drops its whole project config layer when the `.vibe` directory
     # is untrusted, so a Kronn-written config silently yields zero MCPs.
     step "Vibe workspace trust"
@@ -1100,4 +1267,6 @@ main() {
     esac
 }
 
-main "$@"
+if [[ "${KRONN_SOURCE_ONLY:-0}" != "1" ]]; then
+    main "$@"
+fi

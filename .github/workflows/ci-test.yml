@@ -246,9 +246,10 @@ jobs:
           python3 scripts/ci/agent_task_matrix.py
 
       # ── Coverage threshold floor ────────────────────────────────
-      # Pinned just below the 2026-05-29 measured baseline
-      # (Regions 79.02 / Functions 81.49 / Lines 77.48) so a single
-      # test removal doesn't fail the job. Drift below = job fails.
+      # Pinned to the integer floor demonstrated by the 0.12.0 candidate
+      # (Regions 83.95 / Functions 83.66 / Lines 83.48). This keeps a
+      # sub-point margin for harmless instrumentation drift while making
+      # every full percentage point of coverage a durable quality gain.
       # When a future push raises the real coverage, bump these in
       # lockstep — DON'T lower them, that defeats the purpose.
       - name: Install cargo-llvm-cov
@@ -257,9 +258,9 @@ jobs:
       - name: cargo llvm-cov — enforce coverage floor
         run: |
           cargo llvm-cov --lib --tests --summary-only \
-            --fail-under-lines 78 \
-            --fail-under-functions 82 \
-            --fail-under-regions 80
+            --fail-under-lines 83 \
+            --fail-under-functions 83 \
+            --fail-under-regions 83
 
       # Scoped, stricter floor on the encryption-key / config-persistence modules
       # (2026-06-30 secret-loss hardening). Reuses the instrumented build from the
@@ -281,11 +282,11 @@ jobs:
 
   # ── Code-duplication ceiling (jscpd, all 3 languages) ──────────────────
   # Copy-paste detector across Rust + TS/TSX + Python. Baseline 2026-05-29 =
-  # 3.75% duplicated lines (270 clones, rust-dominated). The threshold (4%)
+  # The 0.12.0 candidate measures 2.62% duplicated lines. The threshold (3%)
   # lives in `.jscpd.json` — jscpd exits 1 when exceeded, failing this job.
   # Same ratchet philosophy as the coverage floors: pinned just above the
-  # current state so accumulating copy-paste fails the build, RATCHET DOWN
-  # as the AgentIo refactor removes the rust loop duplication. This is the
+  # current state so accumulating copy-paste fails the build, then lowered
+  # again whenever the measured baseline improves. This is the
   # mechanical guard that stops agents (and humans) from merging dup'd code.
   duplication-check:
     if: contains(github.event.pull_request.labels.*.name, 'ci-test')
