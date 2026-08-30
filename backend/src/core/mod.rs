@@ -8,6 +8,7 @@ pub mod config;
 pub mod context_audit;
 pub mod context_files;
 pub mod crypto;
+pub mod execution_variables;
 pub mod dependency_updates;
 pub mod directives;
 pub mod docs_migration;
