@@ -11,7 +11,7 @@ export class PluginsPage {
   }
 
   get panel(): Locator {
-    return this.page.locator('[data-testid="mcp-plugin-panel"]');
+    return this.page.getByTestId('mcp-plugin-detail');
   }
 
   get probeButton(): Locator {

@@ -29,16 +29,19 @@ test.describe('Kronn smoke', () => {
     await expect(workflows.tabQuickApis).toBeVisible();
   });
 
-  test('Quick APIs tab shows its own create button (regression: 0.6.0)', async ({ page }) => {
-    // Regression guard: in 0.6.0 the Quick APIs tab showed the Quick Prompts
-    // header buttons (ternary leak). Fixed by switching the header to a
-    // 3-way conditional.
+  test('Quick APIs tab opens the unified creation chooser', async ({ page }) => {
+    // Creation is intentionally global since the sidebar UX unification:
+    // the green + opens one accessible chooser instead of rendering a
+    // tab-specific action row in the page header.
     const dashboard = new DashboardPage(page);
     const workflows = new WorkflowsPage(page);
     await dashboard.goto();
     await dashboard.clickWorkflows();
     await workflows.clickQuickApisTab();
-    await expect(workflows.header).not.toContainText(/Nouveau prompt/i);
-    await expect(workflows.header).not.toContainText(/Créer prompt/i);
+    await workflows.openCreationDialog();
+    await expect(workflows.creationDialog).toBeVisible();
+    await expect(workflows.newWorkflowButton).toBeVisible();
+    await expect(workflows.newPromptButton).toBeVisible();
+    await expect(workflows.importButton).toBeVisible();
   });
 });

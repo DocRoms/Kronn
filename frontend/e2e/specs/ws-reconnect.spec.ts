@@ -28,15 +28,12 @@
  * Zero $. No agent runs. Offline health checks retry after 2s; healthy checks
  * stay sparse so the happy path remains cheap.
  */
-import { test, expect } from '@playwright/test';
+import { test, expect } from '../fixtures/kronn-fixture';
 
 test.describe.configure({ timeout: 120_000, retries: 0 });
 
 test.describe('Backend status pill — surfaces health failures + auto-recovers', () => {
   test('pill is hidden in steady state', async ({ page }) => {
-    await page.addInitScript(() => {
-      try { window.localStorage.setItem('kronn:tour-completed', 'true'); } catch { /* noop */ }
-    });
     await page.goto('/');
     // Give the first health check a beat to fire and resolve OK.
     await page.waitForTimeout(2_000);
@@ -45,10 +42,6 @@ test.describe('Backend status pill — surfaces health failures + auto-recovers'
   });
 
   test('pill appears when /api/health starts failing and disappears on recovery', async ({ page }) => {
-    await page.addInitScript(() => {
-      try { window.localStorage.setItem('kronn:tour-completed', 'true'); } catch { /* noop */ }
-    });
-
     let mockedRequests = 0;
     // Start failing /api/health BEFORE navigation so the very first
     // poll fails. We fulfill with 503 rather than abort because fetch's

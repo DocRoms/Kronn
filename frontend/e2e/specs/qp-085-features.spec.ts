@@ -101,8 +101,8 @@ test.describe('0.8.5 — QP AI Improver + bindings (frontend wiring)', () => {
     const eyeBtns = page.locator('button[title="Edit"]');
     const hasQp = await eyeBtns.count();
     if (hasQp === 0) {
-      // No QPs: open the new-prompt form via the header button.
-      await workflows.newPromptButton.click();
+      // No QPs: use the shared sidebar + chooser to open the form.
+      await workflows.openNewQuickPromptForm();
     } else {
       await eyeBtns.first().click();
     }

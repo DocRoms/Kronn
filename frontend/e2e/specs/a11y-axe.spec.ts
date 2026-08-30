@@ -1,8 +1,8 @@
 /**
  * a11y axe-core scan — WCAG 2.1 AA on the main pages.
  *
- * Walks the major routes (Projects / Discussions / Plugins /
- * Workflows / Settings) and runs `@axe-core/playwright` against each.
+ * Walks the major routes (Projects / Discussions / Planning / Plugins /
+ * Workflows / Pages / Settings) and runs `@axe-core/playwright` against each.
  * Fails on `serious` or `critical` violations; logs `moderate` and
  * `minor` ones so we have visibility without blocking CI.
  *
@@ -23,7 +23,7 @@
  *
  * # Cost
  *
- * Zero $. Six page navigations, no agent runs. ~30s wall.
+ * Zero $. Seven page navigations, no agent runs. ~30s wall.
  */
 import { test, expect, type Page } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
@@ -45,14 +45,21 @@ interface PageRoute {
    * marker we already use for the guided tour, so we re-use it here.
    */
   navTourId: string;
+  /** A rendered page boundary; collection routes use the shared sidebar class. */
+  readySelector?: string;
+  /** Embedded live-page documents are user-authored, not app chrome. */
+  excludeSelectors?: string[];
+  enablePages?: boolean;
 }
 
 const ROUTES: PageRoute[] = [
-  { name: 'Projects',    navTourId: 'nav-projects' },
-  { name: 'Discussions', navTourId: 'nav-discussions' },
-  { name: 'Plugins',     navTourId: 'nav-mcps' },
-  { name: 'Workflows',   navTourId: 'nav-workflows' },
-  { name: 'Settings',    navTourId: 'nav-settings' },
+  { name: 'Projects',    navTourId: 'nav-projects', readySelector: 'aside.collection-shell-sidebar' },
+  { name: 'Discussions', navTourId: 'nav-discussions', readySelector: 'aside.collection-shell-sidebar' },
+  { name: 'Planning',    navTourId: 'nav-planning', readySelector: 'aside.collection-shell-sidebar' },
+  { name: 'Plugins',     navTourId: 'nav-mcps', readySelector: 'aside.collection-shell-sidebar' },
+  { name: 'Workflows',   navTourId: 'nav-workflows', readySelector: 'aside.collection-shell-sidebar' },
+  { name: 'Pages',       navTourId: 'nav-pages', readySelector: 'aside.collection-shell-sidebar', enablePages: true, excludeSelectors: ['iframe'] },
+  { name: 'Settings',    navTourId: 'nav-settings', readySelector: '.settings-page' },
 ];
 
 /**
@@ -70,10 +77,11 @@ const DISABLED_RULES = [
   'aria-allowed-attr',
 ];
 
-async function scanPage(page: Page): Promise<{ violations: Array<{ id: string; impact: string | null | undefined; nodes: number; targets: string[] }> }> {
+async function scanPage(page: Page, excludeSelectors: string[] = []): Promise<{ violations: Array<{ id: string; impact: string | null | undefined; nodes: number; targets: string[] }> }> {
   const builder = new AxeBuilder({ page })
     .withTags(['wcag2a', 'wcag2aa', 'wcag21aa'])
     .disableRules(DISABLED_RULES);
+  excludeSelectors.forEach(selector => builder.exclude(selector));
   const results = await builder.analyze();
   return {
     violations: results.violations.map(v => ({
@@ -93,13 +101,23 @@ test.describe('a11y — axe-core scans main pages, fails on serious/critical', (
       await page.addInitScript(() => {
         try { window.localStorage.setItem('kronn:tour-completed', 'true'); } catch { /* noop */ }
       });
+      if (route.enablePages) {
+        await page.route('**/api/pages/capability', async request => {
+          await request.fulfill({ json: { success: true, data: { activated: true, activated_at: '2026-08-29T00:00:00Z' }, error: null } });
+        });
+      }
       await page.goto('/');
-      await page.locator(`[data-tour-id="${route.navTourId}"]`).click();
-      // Let the page settle — async data fetches, lazy-loaded sub-trees.
-      await page.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => { /* may stay busy on long polls */ });
-      await page.waitForTimeout(500);
+      const nav = page.locator(`[data-tour-id="${route.navTourId}"]`);
+      await nav.click();
+      await expect(nav).toHaveAttribute('aria-current', 'page');
+      const readySelector = route.readySelector;
+      if (!readySelector) throw new Error(`Missing readiness selector for ${route.name}`);
+      await expect(page.locator(readySelector)).toBeVisible();
+      // The shell selector proves that the lazy route mounted. The bounded
+      // network-idle wait is fail-closed so axe never scans partial data.
+      await page.waitForLoadState('networkidle', { timeout: 10_000 });
 
-      const { violations } = await scanPage(page);
+      const { violations } = await scanPage(page, route.excludeSelectors);
       const seriousOrCritical = violations.filter(v => v.impact === 'serious' || v.impact === 'critical');
       const moderate = violations.filter(v => v.impact === 'moderate');
       const minor = violations.filter(v => v.impact === 'minor');

@@ -218,7 +218,7 @@ async fn orchestration_cli_tool_routes_require_server_verifiable_identity() {
             serde_json::json!({
                 "source_agent": "",
                 "source_session_id": "",
-                "worker": {"target": {"kind": "agent", "agent_type": "Ollama"}},
+                "worker": {"kind": "agent", "agent_type": "Ollama"},
                 "reason": "test"
             }),
         ),
@@ -650,6 +650,7 @@ async fn workflow_export_import_bundles_quick_prompt_quick_api_and_page() {
                 prompt_template: "Analyse the collected data".into(),
                 variables: vec![],
                 agent: kronn::models::AgentType::ClaudeCode,
+                connection_id: None,
                 project_id: None,
                 skill_ids: vec![],
                 profile_ids: vec![],
@@ -1460,7 +1461,12 @@ async fn get_json(app: Router, uri: &str) -> (StatusCode, Value) {
     let resp = app.oneshot(req).await.unwrap();
     let status = resp.status();
     let body = resp.into_body().collect().await.unwrap().to_bytes();
-    let json: Value = serde_json::from_slice(&body).unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap_or_else(|error| {
+        panic!(
+            "GET {uri} returned {status} with a non-JSON body {:?}: {error}",
+            String::from_utf8_lossy(&body)
+        )
+    });
     (status, json)
 }
 
@@ -1482,7 +1488,12 @@ async fn post_json(app: Router, uri: &str, body: Value) -> (StatusCode, Value) {
     let resp = app.oneshot(req).await.unwrap();
     let status = resp.status();
     let body = resp.into_body().collect().await.unwrap().to_bytes();
-    let json: Value = serde_json::from_slice(&body).unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap_or_else(|error| {
+        panic!(
+            "POST {uri} returned {status} with a non-JSON body {:?}: {error}",
+            String::from_utf8_lossy(&body)
+        )
+    });
     (status, json)
 }
 
@@ -3702,6 +3713,54 @@ async fn discussions_create_and_list() {
 }
 
 #[tokio::test]
+async fn discussions_delete_message_keeps_an_explicit_timeline_marker() {
+    let state = test_state();
+    let app = build_router_with_auth(state, false);
+    let (status, created) = post_json(
+        app.clone(),
+        "/api/discussions",
+        serde_json::json!({
+            "title": "Delete one message",
+            "agent": "ClaudeCode",
+            "language": "en",
+            "initial_prompt": "Sensitive message payload",
+            "no_agent": true,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let discussion_id = created["data"]["id"].as_str().unwrap();
+    let message_id = created["data"]["messages"][0]["id"].as_str().unwrap();
+
+    let (status, deleted) = delete_json(
+        app.clone(),
+        &format!("/api/discussions/{discussion_id}/messages/{message_id}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(deleted["success"], true);
+
+    let (status, detail) =
+        get_json(app.clone(), &format!("/api/discussions/{discussion_id}")).await;
+    assert_eq!(status, StatusCode::OK);
+    let messages = detail["data"]["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 1, "deletion must not create a silent gap");
+    assert_eq!(messages[0]["id"], message_id);
+    assert_eq!(
+        messages[0]["content"],
+        kronn::db::discussions::DELETED_MESSAGE_CONTENT,
+    );
+
+    let (status, missing) = delete_json(
+        app,
+        &format!("/api/discussions/{discussion_id}/messages/missing"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(missing["error_code"], "not_found");
+}
+
+#[tokio::test]
 async fn discussion_agent_switch_waits_for_next_user_message() {
     let state = test_state();
     state
@@ -4080,6 +4139,41 @@ async fn projects_add_folder_rejects_duplicate_path() {
     .await;
     assert_eq!(json2["success"], false);
     assert!(json2["error"].as_str().unwrap().contains("already exists"));
+}
+
+#[tokio::test]
+async fn project_docker_routes_return_a_safe_empty_state_without_compose() {
+    let state = test_state();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().to_string_lossy().to_string();
+    let (_, created) = post_json(
+        build_router_with_auth(state.clone(), false),
+        "/api/projects/add-folder",
+        serde_json::json!({ "path": path, "name": "No Compose" }),
+    )
+    .await;
+    assert_eq!(created["success"], true, "{created}");
+    let project_id = created["data"]["id"].as_str().unwrap();
+
+    let route = format!("/api/projects/{project_id}/docker");
+    let (status, snapshot) = get_json(build_router_with_auth(state.clone(), false), &route).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(snapshot["success"], true, "{snapshot}");
+    assert_eq!(snapshot["data"]["compose_present"], false);
+    assert_eq!(snapshot["data"]["compose_file"], Value::Null);
+    assert_eq!(snapshot["data"]["services"], serde_json::json!([]));
+
+    let (status, action) = post_json(
+        build_router_with_auth(state, false),
+        &route,
+        serde_json::json!({ "action": "start", "service": null }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(action["success"], false, "{action}");
+    assert!(action["error"]
+        .as_str()
+        .is_some_and(|error| error.contains("Compose")));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -4905,6 +4999,8 @@ async fn bootstrap_find_common_parent_logic() {
             tech_debt_count: 0,
             needs_docs_migration: false,
             path_exists: true,
+            write_access: None,
+            mcp_sync_report: None,
             default_skill_ids: vec![],
             default_profile_id: None,
             briefing_notes: None,
@@ -5599,6 +5695,8 @@ async fn exec_returns_expected_fields() {
         tech_debt_count: 0,
         needs_docs_migration: false,
         path_exists: true,
+        write_access: None,
+        mcp_sync_report: None,
         default_skill_ids: vec![],
         default_profile_id: None,
         briefing_notes: None,
@@ -5657,6 +5755,585 @@ async fn start_test_server(state: AppState) -> std::net::SocketAddr {
         axum::serve(listener, app).await.unwrap();
     });
     addr
+}
+
+async fn external_api_test_state(endpoint: String) -> AppState {
+    let state = test_state();
+    let connection = kronn::models::ExternalApiConnection {
+        id: "saved-connection".into(),
+        display_name: "Saved connection".into(),
+        mention_alias: "saved".into(),
+        endpoint: Some(endpoint),
+        credential_slug: "conn-saved".into(),
+        origin_preset: kronn::models::ExternalApiConnectionPreset::Other,
+        economy_model: None,
+        default_model: None,
+        reasoning_model: None,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    };
+    let insert = connection.clone();
+    state
+        .db
+        .with_conn(move |conn| kronn::db::external_api_connections::insert(conn, &insert))
+        .await
+        .unwrap();
+    state
+        .config
+        .write()
+        .await
+        .tokens
+        .keys
+        .push(kronn::models::ApiKey {
+            id: "test-key".into(),
+            name: "saved test credential".into(),
+            provider: connection.credential_slug,
+            value: "stored-secret-must-not-leak".into(),
+            active: true,
+        });
+    state
+}
+
+#[tokio::test]
+async fn external_api_reveal_route_returns_the_stored_key_only_on_explicit_request() {
+    let state = external_api_test_state("https://saved.example.test".into()).await;
+    let app = build_router_with_auth(state, false);
+
+    let (status, response) = post_json(
+        app,
+        "/api/external-api/connections/saved-connection/reveal",
+        serde_json::json!({}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(response["success"], true, "{response}");
+    assert_eq!(response["data"], "stored-secret-must-not-leak");
+}
+
+#[tokio::test]
+async fn external_api_nvidia_update_refreshes_the_models_used_by_global_selectors_and_runtime() {
+    let state = test_state();
+    let connection = kronn::models::ExternalApiConnection {
+        id: "external-api-nvidia".into(),
+        display_name: "NVIDIA".into(),
+        mention_alias: "nvidia".into(),
+        endpoint: Some("https://integrate.api.nvidia.com".into()),
+        credential_slug: "nvidia".into(),
+        origin_preset: kronn::models::ExternalApiConnectionPreset::Nvidia,
+        economy_model: Some("nvidia/old-low".into()),
+        default_model: Some("nvidia/old-standard".into()),
+        reasoning_model: Some("nvidia/old-reasoning".into()),
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    };
+    state
+        .db
+        .with_conn(move |conn| kronn::db::external_api_connections::insert(conn, &connection))
+        .await
+        .unwrap();
+
+    let (status, response) = put_json_root(
+        build_router_with_auth(state.clone(), false),
+        "/api/external-api/connections/external-api-nvidia",
+        serde_json::json!({
+            "display_name": "NVIDIA",
+            "mention_alias": "nvidia",
+            "endpoint": "https://integrate.api.nvidia.com",
+            "origin_preset": "nvidia",
+            "economy_model": "nvidia/new-low",
+            "default_model": "nvidia/new-standard",
+            "reasoning_model": "nvidia/new-reasoning"
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(response["success"], true, "{response}");
+    let config = state.config.read().await;
+    assert_eq!(
+        config.agents.model_tiers.nvidia.economy.as_deref(),
+        Some("nvidia/new-low")
+    );
+    assert_eq!(
+        config.agents.model_tiers.nvidia.default.as_deref(),
+        Some("nvidia/new-standard")
+    );
+    assert_eq!(
+        config.agents.model_tiers.nvidia.reasoning.as_deref(),
+        Some("nvidia/new-reasoning")
+    );
+}
+
+#[tokio::test]
+async fn external_api_openrouter_validates_the_key_before_unlocking_the_catalogue() {
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let upstream = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/key"))
+        .and(header("authorization", "Bearer sk-or-v1-valid"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": {"label": "Kronn test key"}
+        })))
+        .expect(1)
+        .mount(&upstream)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .and(header("authorization", "Bearer sk-or-v1-valid"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [{"id": "z-ai/glm-5.3"}]
+        })))
+        .expect(1)
+        .mount(&upstream)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&upstream)
+        .await;
+
+    let (_, response) = post_json(
+        test_app(),
+        "/api/external-api/connections/test",
+        serde_json::json!({
+            "endpoint": upstream.uri(),
+            "api_key": "sk-or-v1-valid",
+            "origin_preset": "open_router"
+        }),
+    )
+    .await;
+
+    assert_eq!(response["data"]["status"], "success", "{response}");
+    assert_eq!(
+        response["data"]["models"],
+        serde_json::json!(["z-ai/glm-5.3"])
+    );
+}
+
+#[tokio::test]
+async fn external_api_openrouter_explains_a_key_saved_without_its_prefix() {
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let upstream = MockServer::start().await;
+    let incomplete_key = "a".repeat(64);
+    Mock::given(method("GET"))
+        .and(path("/v1/key"))
+        .and(header(
+            "authorization",
+            format!("Bearer {incomplete_key}").as_str(),
+        ))
+        .respond_with(ResponseTemplate::new(401).set_body_string("private upstream detail"))
+        .expect(1)
+        .mount(&upstream)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&upstream)
+        .await;
+
+    let (_, response) = post_json(
+        test_app(),
+        "/api/external-api/connections/test",
+        serde_json::json!({
+            "endpoint": upstream.uri(),
+            "api_key": incomplete_key,
+            "origin_preset": "open_router"
+        }),
+    )
+    .await;
+
+    assert_eq!(response["data"]["status"], "auth_error", "{response}");
+    assert!(response["data"]["hint"]
+        .as_str()
+        .is_some_and(|hint| hint.contains("sk-or-v1-")));
+    assert!(!response.to_string().contains("private upstream detail"));
+}
+
+#[tokio::test]
+async fn external_api_nvidia_catalogue_does_not_probe_an_arbitrary_first_model() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let upstream = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [{"id": "nvidia/public-but-unavailable"}]
+        })))
+        .expect(1)
+        .mount(&upstream)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(404))
+        .expect(0)
+        .mount(&upstream)
+        .await;
+
+    let (_, response) = post_json(
+        test_app(),
+        "/api/external-api/connections/test",
+        serde_json::json!({
+            "endpoint": upstream.uri(),
+            "api_key": "nvapi-test",
+            "origin_preset": "nvidia"
+        }),
+    )
+    .await;
+
+    assert_eq!(response["data"]["status"], "success", "{response}");
+    assert_eq!(
+        response["data"]["models"],
+        serde_json::json!(["nvidia/public-but-unavailable"])
+    );
+    assert!(response["data"]["hint"]
+        .as_str()
+        .is_some_and(|hint| hint.contains("Select the tier models")));
+}
+
+#[tokio::test]
+async fn external_api_nvidia_probes_the_explicit_model_and_preserves_the_catalogue_on_404() {
+    use wiremock::matchers::{body_json, header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let upstream = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [
+                {"id": "nvidia/arbitrary-first"},
+                {"id": "nvidia/chosen-model"}
+            ]
+        })))
+        .expect(1)
+        .mount(&upstream)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(header("authorization", "Bearer nvapi-test"))
+        .and(body_json(serde_json::json!({
+            "model": "nvidia/chosen-model",
+            "messages": [{"role": "user", "content": "ping"}],
+            "max_tokens": 1,
+            "temperature": 0,
+            "stream": false
+        })))
+        .respond_with(ResponseTemplate::new(404))
+        .expect(1)
+        .mount(&upstream)
+        .await;
+
+    let (_, response) = post_json(
+        test_app(),
+        "/api/external-api/connections/test",
+        serde_json::json!({
+            "endpoint": upstream.uri(),
+            "api_key": "nvapi-test",
+            "origin_preset": "nvidia",
+            "models": ["nvidia/chosen-model"]
+        }),
+    )
+    .await;
+
+    assert_eq!(response["data"]["status"], "http_error", "{response}");
+    assert_eq!(
+        response["data"]["models"],
+        serde_json::json!(["nvidia/arbitrary-first", "nvidia/chosen-model"])
+    );
+    assert!(response["data"]["hint"].as_str().is_some_and(|hint| hint
+        .contains("nvidia/chosen-model")
+        && hint.contains("not accessible")));
+}
+
+#[tokio::test]
+async fn external_api_test_route_returns_catalogue_without_returning_the_credential() {
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let upstream = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .and(header(
+            "authorization",
+            "Bearer stored-secret-must-not-leak",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [{"id": "catalogue-model"}]
+        })))
+        .expect(1)
+        .mount(&upstream)
+        .await;
+    // A valid key: the authenticated probe accepts the credential and the
+    // catalogue stands.
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(header(
+            "authorization",
+            "Bearer stored-secret-must-not-leak",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "choices": [{"message": {"role": "assistant", "content": ""}}]
+        })))
+        .expect(1)
+        .mount(&upstream)
+        .await;
+    let app = build_router_with_auth(external_api_test_state(upstream.uri()).await, false);
+
+    let (status, response) = post_json(
+        app,
+        "/api/external-api/connections/test",
+        serde_json::json!({
+            "endpoint": upstream.uri(),
+            "api_key": null,
+            "connection_id": "saved-connection",
+            "origin_preset": "other"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(response["success"], true, "{response}");
+    assert_eq!(response["data"]["status"], "success");
+    assert_eq!(
+        response["data"]["models"],
+        serde_json::json!(["catalogue-model"])
+    );
+    assert!(!response.to_string().contains("stored-secret-must-not-leak"));
+}
+
+#[tokio::test]
+async fn external_api_test_route_public_catalogue_rejects_an_invalid_key() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    // Provider whose `/v1/models` is public (200 to anyone) but whose chat
+    // endpoint enforces auth. The catalogue read alone would let an invalid key
+    // through; the authenticated probe must fail it.
+    let upstream = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [{"id": "catalogue-model"}]
+        })))
+        .mount(&upstream)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(401).set_body_string("secret upstream diagnostic"))
+        .mount(&upstream)
+        .await;
+    let app = test_app();
+
+    let (status, response) = post_json(
+        app,
+        "/api/external-api/connections/test",
+        serde_json::json!({
+            "endpoint": upstream.uri(),
+            "api_key": "wrong-secret"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(response["data"]["status"], "auth_error", "{response}");
+    assert!(response["data"]["models"]
+        .as_array()
+        .is_some_and(Vec::is_empty));
+    assert!(!response.to_string().contains("wrong-secret"));
+    assert!(!response.to_string().contains("secret upstream diagnostic"));
+}
+
+#[tokio::test]
+async fn external_api_test_route_public_catalogue_rejects_non_successful_chat_statuses() {
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    for upstream_status in [404_u16, 429, 500] {
+        let upstream = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{"id": "catalogue-model"}]
+            })))
+            .expect(1)
+            .mount(&upstream)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(header("authorization", "Bearer wrong-secret"))
+            .respond_with(
+                ResponseTemplate::new(upstream_status)
+                    .set_body_string("secret upstream diagnostic"),
+            )
+            .expect(1)
+            .mount(&upstream)
+            .await;
+
+        let (status, response) = post_json(
+            test_app(),
+            "/api/external-api/connections/test",
+            serde_json::json!({
+                "endpoint": upstream.uri(),
+                "api_key": "wrong-secret"
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["data"]["status"], "http_error", "{response}");
+        assert!(response["data"]["models"]
+            .as_array()
+            .is_some_and(Vec::is_empty));
+        assert!(response["data"]["hint"]
+            .as_str()
+            .is_some_and(|hint| hint.contains(&upstream_status.to_string())));
+        assert!(!response.to_string().contains("wrong-secret"));
+        assert!(!response.to_string().contains("secret upstream diagnostic"));
+    }
+}
+
+#[tokio::test]
+async fn external_api_test_route_maps_auth_empty_and_transport_failures_without_upstream_bodies() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let auth_upstream = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(401).set_body_string("secret upstream diagnostic"))
+        .mount(&auth_upstream)
+        .await;
+    let app = test_app();
+    let (_, auth) = post_json(
+        app.clone(),
+        "/api/external-api/connections/test",
+        serde_json::json!({ "endpoint": auth_upstream.uri(), "api_key": "submitted-secret" }),
+    )
+    .await;
+    assert_eq!(auth["data"]["status"], "auth_error");
+    assert!(!auth.to_string().contains("submitted-secret"));
+    assert!(!auth.to_string().contains("secret upstream diagnostic"));
+
+    let empty_upstream = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": []})))
+        .mount(&empty_upstream)
+        .await;
+    let (_, empty) = post_json(
+        app.clone(),
+        "/api/external-api/connections/test",
+        serde_json::json!({ "endpoint": empty_upstream.uri(), "api_key": null }),
+    )
+    .await;
+    assert_eq!(empty["data"]["status"], "success");
+    assert_eq!(empty["data"]["models"], serde_json::json!([]));
+
+    let malformed_upstream = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("not-json"))
+        .mount(&malformed_upstream)
+        .await;
+    let (_, malformed) = post_json(
+        app.clone(),
+        "/api/external-api/connections/test",
+        serde_json::json!({ "endpoint": malformed_upstream.uri(), "api_key": "submitted-secret" }),
+    )
+    .await;
+    assert_eq!(malformed["data"]["status"], "invalid_catalogue");
+    assert_eq!(malformed["data"]["models"], serde_json::json!([]));
+    assert!(!malformed.to_string().contains("submitted-secret"));
+
+    let incompatible_catalogue_upstream = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "models": [{"name": "not-openai-compatible"}]
+        })))
+        .mount(&incompatible_catalogue_upstream)
+        .await;
+    let (_, incompatible_catalogue) = post_json(
+        app.clone(),
+        "/api/external-api/connections/test",
+        serde_json::json!({ "endpoint": incompatible_catalogue_upstream.uri(), "api_key": null }),
+    )
+    .await;
+    assert_eq!(
+        incompatible_catalogue["data"]["status"],
+        "invalid_catalogue"
+    );
+    assert_eq!(
+        incompatible_catalogue["data"]["models"],
+        serde_json::json!([])
+    );
+
+    let (_, transport) = post_json(
+        app.clone(),
+        "/api/external-api/connections/test",
+        serde_json::json!({ "endpoint": "http://127.0.0.1:1", "api_key": null }),
+    )
+    .await;
+    assert_eq!(transport["data"]["status"], "transport_error");
+
+    let timeout_upstream = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(std::time::Duration::from_secs(7))
+                .set_body_json(serde_json::json!({"data": []})),
+        )
+        .mount(&timeout_upstream)
+        .await;
+    let (_, timeout) = post_json(
+        app,
+        "/api/external-api/connections/test",
+        serde_json::json!({ "endpoint": timeout_upstream.uri(), "api_key": null }),
+    )
+    .await;
+    assert_eq!(timeout["data"]["status"], "timeout");
+}
+
+#[tokio::test]
+async fn external_api_test_route_does_not_send_a_saved_credential_to_a_changed_endpoint() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let canonical_upstream = MockServer::start().await;
+    let changed_upstream = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&changed_upstream)
+        .await;
+    let app = build_router_with_auth(
+        external_api_test_state(canonical_upstream.uri()).await,
+        false,
+    );
+
+    let (_, response) = post_json(
+        app,
+        "/api/external-api/connections/test",
+        serde_json::json!({
+            "endpoint": changed_upstream.uri(),
+            "api_key": null,
+            "connection_id": "saved-connection",
+            "origin_preset": "other"
+        }),
+    )
+    .await;
+    assert_eq!(response["data"]["status"], "credential_required");
+    assert!(response["data"]["models"]
+        .as_array()
+        .is_some_and(Vec::is_empty));
+    assert!(!response.to_string().contains("stored-secret-must-not-leak"));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -5779,6 +6456,8 @@ async fn source_browser_lists_reads_and_searches_project_code() {
         tech_debt_count: 0,
         needs_docs_migration: false,
         path_exists: true,
+        write_access: None,
+        mcp_sync_report: None,
         default_skill_ids: vec![],
         default_profile_id: None,
         briefing_notes: None,
@@ -5918,6 +6597,175 @@ async fn ollama_models_returns_valid_response() {
     assert_eq!(json["success"], true);
     // Models array: empty if Ollama offline, populated if online
     assert!(json["data"]["models"].is_array());
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn ollama_pull_route_proxies_fragmented_ndjson_bounds_failures_and_cancels_upstream() {
+    use axum::{body::Bytes, response::Response, routing::post, Json};
+    use futures::stream;
+    use std::{convert::Infallible, sync::Mutex};
+    use tokio::sync::oneshot;
+
+    #[derive(Clone, Default)]
+    struct PullMockState {
+        cancelled: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+    }
+
+    struct CancelNotice(Option<oneshot::Sender<()>>);
+    impl Drop for CancelNotice {
+        fn drop(&mut self) {
+            if let Some(sender) = self.0.take() {
+                let _ = sender.send(());
+            }
+        }
+    }
+
+    async fn mock_pull(
+        axum::extract::State(state): axum::extract::State<PullMockState>,
+        Json(body): Json<Value>,
+    ) -> Response<Body> {
+        let model = body["model"].as_str().expect("Kronn forwards a model name");
+        assert_eq!(
+            body["stream"], true,
+            "Kronn requests Ollama NDJSON streaming"
+        );
+        let chunks: Vec<Result<Bytes, Infallible>> = match model {
+            "fragmented" => vec![
+                Ok(Bytes::from_static(
+                    b"{\"status\":\"pulling manifest\"}\n{\"status\":\"down",
+                )),
+                Ok(Bytes::from_static(
+                    b"loading\",\"digest\":\"sha256:abc\",\"completed\":5,",
+                )),
+                Ok(Bytes::from_static(
+                    b"\"total\":10}\n{\"status\":\"success\"}\n",
+                )),
+            ],
+            "unknown-total" => vec![
+                Ok(Bytes::from_static(
+                    b"{\"status\":\"downloading\",\"completed\":5}\n",
+                )),
+                Ok(Bytes::from_static(b"{\"status\":\"success\"}\n")),
+            ],
+            "upstream-error" => vec![Ok(Bytes::from_static(
+                b"{\"error\":\"manifest unknown\"}\n",
+            ))],
+            "early-eof" => vec![Ok(Bytes::from_static(
+                b"{\"status\":\"downloading\",\"completed\":5,\"total\":10}\n",
+            ))],
+            "oversized" => vec![Ok(Bytes::from(vec![b'x'; 1024 * 1024 + 1]))],
+            "cancel" => {
+                let sender = state.cancelled.lock().expect("cancel lock").take();
+                let output = async_stream::stream! {
+                    let _notice = CancelNotice(sender);
+                    yield Ok::<Bytes, Infallible>(Bytes::from_static(b"{\"status\":\"downloading\",\"completed\":1,\"total\":10}\n"));
+                    futures::future::pending::<()>().await;
+                };
+                return Response::new(Body::from_stream(output));
+            }
+            other => panic!("unexpected mock model {other}"),
+        };
+        Response::new(Body::from_stream(stream::iter(chunks)))
+    }
+
+    async fn spawn(router: Router) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        (format!("http://{address}"), task)
+    }
+
+    let (cancelled_tx, cancelled_rx) = oneshot::channel();
+    let mock_state = PullMockState {
+        cancelled: Arc::new(Mutex::new(Some(cancelled_tx))),
+    };
+    let upstream = Router::new()
+        .route("/api/pull", post(mock_pull))
+        .with_state(mock_state);
+    let (upstream_url, upstream_task) = spawn(upstream).await;
+
+    let previous_host = std::env::var("OLLAMA_HOST").ok();
+    struct RestoreEnv(Option<String>);
+    impl Drop for RestoreEnv {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => std::env::set_var("OLLAMA_HOST", value),
+                None => std::env::remove_var("OLLAMA_HOST"),
+            }
+        }
+    }
+    let _restore_host = RestoreEnv(previous_host);
+    std::env::set_var("OLLAMA_HOST", &upstream_url);
+    let (kronn_url, kronn_task) = spawn(build_router_with_auth(test_state(), false)).await;
+    let client = reqwest::Client::new();
+
+    async fn pull_text(client: &reqwest::Client, base: &str, model: &str) -> String {
+        client
+            .post(format!("{base}/api/ollama/pull"))
+            .json(&serde_json::json!({ "model": model }))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap()
+    }
+
+    let fragmented = pull_text(&client, &kronn_url, "fragmented").await;
+    assert!(fragmented.contains("event: progress"), "{fragmented}");
+    assert!(fragmented.contains("\"completed\":5"), "{fragmented}");
+    assert!(fragmented.contains("\"total\":10"), "{fragmented}");
+    assert!(fragmented.contains("event: success"), "{fragmented}");
+
+    let unknown_total = pull_text(&client, &kronn_url, "unknown-total").await;
+    assert!(unknown_total.contains("\"completed\":5"), "{unknown_total}");
+    assert!(unknown_total.contains("\"total\":null"), "{unknown_total}");
+    assert!(unknown_total.contains("event: success"), "{unknown_total}");
+
+    let upstream_error = pull_text(&client, &kronn_url, "upstream-error").await;
+    assert!(upstream_error.contains("event: error"), "{upstream_error}");
+    assert!(
+        upstream_error.contains("could not find this model"),
+        "{upstream_error}"
+    );
+
+    let early_eof = pull_text(&client, &kronn_url, "early-eof").await;
+    assert!(early_eof.contains("event: error"), "{early_eof}");
+    assert!(
+        early_eof.contains("without confirming success"),
+        "{early_eof}"
+    );
+
+    let oversized = pull_text(&client, &kronn_url, "oversized").await;
+    assert!(oversized.contains("event: error"), "{oversized}");
+    assert!(
+        oversized.contains("oversized download update"),
+        "{oversized}"
+    );
+
+    let mut cancelling = client
+        .post(format!("{kronn_url}/api/ollama/pull"))
+        .json(&serde_json::json!({ "model": "cancel" }))
+        .send()
+        .await
+        .unwrap()
+        .bytes_stream();
+    let mut received = String::new();
+    while !received.contains("event: progress") {
+        let chunk = cancelling.next().await.expect("first SSE event").unwrap();
+        received.push_str(&String::from_utf8_lossy(&chunk));
+    }
+    drop(cancelling);
+    tokio::time::timeout(std::time::Duration::from_secs(2), cancelled_rx)
+        .await
+        .expect("client disconnect closes Ollama response body")
+        .expect("mock upstream reports cancellation");
+
+    kronn_task.abort();
+    upstream_task.abort();
 }
 
 #[tokio::test]
@@ -9596,6 +10444,8 @@ async fn audit_runs_cleanup_flips_running_to_interrupted() {
         tech_debt_count: 0,
         needs_docs_migration: false,
         path_exists: true,
+        write_access: None,
+        mcp_sync_report: None,
         default_skill_ids: vec![],
         default_profile_id: None,
         briefing_notes: None,
@@ -11195,6 +12045,8 @@ mod cold_api_handlers_tests {
             tech_debt_count: 0,
             needs_docs_migration: false,
             path_exists: true,
+            write_access: None,
+            mcp_sync_report: None,
             default_skill_ids: vec![],
             default_profile_id: None,
             briefing_notes: None,
@@ -11420,6 +12272,8 @@ mod cold_api_handlers_tests {
             tech_debt_count: 0,
             needs_docs_migration: false,
             path_exists: true,
+            write_access: None,
+            mcp_sync_report: None,
             default_skill_ids: vec![],
             default_profile_id: None,
             briefing_notes: None,
@@ -12770,7 +13624,106 @@ mod cold_api_handlers_tests {
         )
         .await;
         assert_eq!(st, StatusCode::OK);
-        assert!(json.get("success").is_some());
+        assert_eq!(json["success"], true);
+        assert_eq!(json["data"]["created"], serde_json::json!(["AGENTS.md"]));
+        assert!(repo.join("AGENTS.md").is_file());
+        for absent in [
+            "CLAUDE.md",
+            "GEMINI.md",
+            ".cursorrules",
+            ".windsurfrules",
+            ".clinerules",
+            ".github/copilot-instructions.md",
+            ".kiro/steering/instructions.md",
+        ] {
+            assert!(
+                !repo.join(absent).exists(),
+                "created absent adapter {absent}"
+            );
+        }
+        let body = std::fs::read_to_string(repo.join("AGENTS.md")).unwrap();
+        assert!(!body.contains("{{"), "{body}");
+        assert!(!body.contains("ai/index.md"), "{body}");
+        assert!(!body.contains("[ex:"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn redirectors_sync_installs_only_detected_subset() {
+        let (_dir, repo) = seed_repo("redirectors-subset");
+        std::fs::write(repo.join("CLAUDE.md"), "# Existing Claude rules\n").unwrap();
+        std::fs::create_dir_all(repo.join(".cursor/rules")).unwrap();
+        std::fs::write(repo.join(".cursor/rules/custom.mdc"), "existing\n").unwrap();
+        let state = test_state();
+        let pid = seed_project_with_repo(&state, &repo).await;
+        let app = build_router_with_auth(state, false);
+
+        let (st, json) = post_json(
+            app,
+            &format!("/api/projects/{}/redirectors/sync", pid),
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(json["success"], true);
+        assert_eq!(
+            json["data"]["created"],
+            serde_json::json!([
+                "AGENTS.md",
+                ".cursorrules",
+                ".cursor/rules/repo-instructions.mdc"
+            ])
+        );
+        assert!(json["data"]["already_present"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("CLAUDE.md")));
+        assert_eq!(
+            std::fs::read_to_string(repo.join("CLAUDE.md")).unwrap(),
+            "# Existing Claude rules\n"
+        );
+        assert!(!repo.join("GEMINI.md").exists());
+        assert!(!repo.join(".windsurfrules").exists());
+    }
+
+    #[tokio::test]
+    async fn redirectors_sync_repairs_recognized_template_without_touching_user_content() {
+        let (_dir, repo) = seed_repo("redirectors-upgrade");
+        let old_template = include_str!("../../templates/CLAUDE.md")
+            .replace(
+                "Test: {{TEST_CMD}}",
+                "Test: {{TEST_CMD}} [ex: \"cargo test && npm test\"]",
+            )
+            .replace(
+                "Lint: {{LINT_CMD}}",
+                "Lint: {{LINT_CMD}} [ex: \"cargo clippy && npx tsc --noEmit\"]",
+            );
+        let prefix = "<!-- user prefix stays -->\n";
+        let suffix = "\n## User rules\nKeep {{USER_TOKEN}} byte-identical.\n";
+        std::fs::write(
+            repo.join("CLAUDE.md"),
+            format!("{prefix}{old_template}{suffix}"),
+        )
+        .unwrap();
+        let state = test_state();
+        let pid = seed_project_with_repo(&state, &repo).await;
+        let app = build_router_with_auth(state, false);
+
+        let (st, json) = post_json(
+            app,
+            &format!("/api/projects/{}/redirectors/sync", pid),
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(json["success"], true);
+        assert_eq!(json["data"]["updated"], serde_json::json!(["CLAUDE.md"]));
+        let body = std::fs::read_to_string(repo.join("CLAUDE.md")).unwrap();
+        assert!(body.starts_with(prefix), "{body}");
+        assert!(body.ends_with(suffix), "{body}");
+        assert!(!body.contains("{{TEST_CMD}}"), "{body}");
+        assert!(!body.contains("{{DO_NOT_1}}"), "{body}");
+        assert!(!body.contains("[ex:"), "{body}");
+        assert!(body.contains("{{USER_TOKEN}}"), "{body}");
     }
 
     // ── workflows.rs cold edge endpoints ─────────────────────────────
@@ -13116,6 +14069,7 @@ mod cold_api_handlers_tests {
                 pattern: None,
             }],
             agent: kronn::models::AgentType::ClaudeCode,
+            connection_id: None,
             project_id: Some(project_id.clone()),
             skill_ids: vec![],
             profile_ids: vec![],
@@ -13320,6 +14274,8 @@ mod cold_api_handlers_tests {
             tech_debt_count: 0,
             needs_docs_migration: false,
             path_exists: true,
+            write_access: None,
+            mcp_sync_report: None,
             default_skill_ids: vec![],
             default_profile_id: None,
             briefing_notes: None,
