@@ -51,6 +51,9 @@ pub async fn create(
     if req.api_endpoint_path.is_empty() {
         return Json(ApiResponse::err("api_endpoint_path is required"));
     }
+    if let Err(error) = validate_prompt_variables(&req.variables) {
+        return Json(ApiResponse::err(error));
+    }
 
     let now = Utc::now();
     let qa = QuickApi {
@@ -106,6 +109,9 @@ pub async fn update(
         Ok(None) => return Json(ApiResponse::err("Quick API not found")),
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
+    if let Err(error) = validate_prompt_variables(&req.variables) {
+        return Json(ApiResponse::err(error));
+    }
 
     let updated = QuickApi {
         id: existing.id,
@@ -346,6 +352,12 @@ pub async fn run_qa(
 
     // Validate required variables.
     for v in &qa.variables {
+        if let Err(error) = v.validate_source() {
+            return Json(ApiResponse::err(error));
+        }
+        if !v.requires_user_input() {
+            continue;
+        }
         if v.required {
             let val = req.variables.get(&v.name).map(|s| s.trim()).unwrap_or("");
             if val.is_empty() {

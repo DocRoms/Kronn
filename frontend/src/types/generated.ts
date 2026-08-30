@@ -3908,7 +3908,29 @@ required: boolean,
  * regex is treated as "no constraint" (never blocks a launch on a
  * malformed pattern; logged).
  */
-pattern?: string | null, };
+pattern?: string | null,
+/**
+ * Resolution strategy. Omitted legacy definitions remain manual inputs.
+ */
+source: PromptVariableSource | null,
+/**
+ * Declarative source reference (`<env.NAME>` for `ProjectEnv`).
+ * This field must never carry a resolved value.
+ */
+source_ref?: string | null,
+/**
+ * Project environment variables are read-only unless the template author
+ * explicitly allows an audited launch-time override.
+ */
+allow_manual_override: boolean, };
+
+/**
+ * Where a declared template variable obtains its value at execution time.
+ *
+ * The declaration is deliberately a reference only. In particular a
+ * `ProjectEnv` declaration stores `<env.NAME>`, never the secret value.
+ */
+export type PromptVariableSource = "user_input" | "kronn_context" | "project_env";
 
 /**
  * Aggregate over a proposal's item states.

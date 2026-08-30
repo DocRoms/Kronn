@@ -3842,7 +3842,13 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
               ><X size={12} /></button>
             </div>
             <p className="text-xs text-muted mb-4">{t('wf.launchModalHint')}</p>
-            {(launchingWorkflow.workflow.variables ?? []).map((v, idx) => {
+            {(() => {
+              const declared = launchingWorkflow.workflow.variables ?? [];
+              const manual = declared.filter(v => (v.source ?? 'user_input') === 'user_input' || v.allow_manual_override);
+              const provided = declared.filter(v => (v.source ?? 'user_input') !== 'user_input' && !v.allow_manual_override);
+              return <>
+              {manual.length > 0 && <h3 className="text-xs font-medium mb-2">{t('wf.launchInputsTitle')}</h3>}
+              {manual.map((v, idx) => {
               const required = v.required ?? true;
               return (
                 <div key={v.name} className="qp-launch-field mb-3">
@@ -3874,7 +3880,18 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                   )}
                 </div>
               );
-            })}
+              })}
+              {provided.length > 0 && <>
+                <h3 className="text-xs font-medium mt-4 mb-2">{t('wf.launchProvidedTitle')}</h3>
+                {provided.map(v => (
+                  <div key={v.name} className="qp-launch-field mb-3">
+                    <label className="qp-launch-label">{v.label || v.name}</label>
+                    <input className="wf-input flex-1" value={v.source_ref ?? ''} readOnly aria-label={`${v.label || v.name} source`} />
+                  </div>
+                ))}
+              </>}
+              </>;
+            })()}
             {launchingWorkflow.error && (
               <div className="text-xs text-error mb-3">{launchingWorkflow.error}</div>
             )}

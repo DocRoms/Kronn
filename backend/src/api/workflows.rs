@@ -256,7 +256,11 @@ pub(crate) fn validate_launch_variables(
     declared: &[crate::models::PromptVariable],
     provided: &std::collections::HashMap<String, String>,
 ) -> Result<(), String> {
+    crate::models::validate_prompt_variables(declared)?;
     for d in declared {
+        if !d.requires_user_input() {
+            continue;
+        }
         let label = if d.label.is_empty() {
             &d.name
         } else {
@@ -1130,6 +1134,9 @@ pub async fn create(
     if req.name.len() > 200 {
         return Json(ApiResponse::err("Workflow name too long (max 200 chars)"));
     }
+    if let Err(e) = crate::models::validate_prompt_variables(&req.variables) {
+        return Json(ApiResponse::err(e));
+    }
     if let Err(errors) = crate::workflows::template::validate_step_references(&req.steps) {
         return Json(ApiResponse::err(format!(
             "Références d'étapes invalides :\n- {}",
@@ -1392,6 +1399,11 @@ pub async fn update(
     if let Some(ref name) = req.name {
         if name.len() > 200 {
             return Json(ApiResponse::err("Workflow name too long (max 200 chars)"));
+        }
+    }
+    if let Some(ref variables) = req.variables {
+        if let Err(e) = crate::models::validate_prompt_variables(variables) {
+            return Json(ApiResponse::err(e));
         }
     }
 
@@ -4797,6 +4809,9 @@ mod tests {
             description: None,
             required,
             pattern: pattern.map(str::to_string),
+            source: Default::default(),
+            source_ref: None,
+            allow_manual_override: false,
         }
     }
 
@@ -5697,6 +5712,7 @@ mod tests {
                 description: None,
                 required: true,
                 pattern: None,
+                source: Default::default(), source_ref: None, allow_manual_override: false,
             }],
             agent: AgentType::ClaudeCode,
             connection_id: None,

@@ -360,12 +360,7 @@ fn validate_request(request: &CreateQuickExecRequest) -> Result<(), String> {
     if matches!(request.timeout_secs, Some(0 | 1801..)) {
         return Err("Quick Exec timeout must be between 1 and 1800 seconds".to_string());
     }
-    let mut names = std::collections::HashSet::new();
-    for variable in &request.variables {
-        if variable.name.trim().is_empty() || !names.insert(variable.name.trim()) {
-            return Err("Quick Exec variable names must be non-empty and unique".to_string());
-        }
-    }
+    crate::models::validate_prompt_variables(&request.variables)?;
     Ok(())
 }
 
@@ -374,6 +369,10 @@ pub(crate) fn validate_variables(
     values: &std::collections::HashMap<String, String>,
 ) -> Result<(), String> {
     for variable in declarations {
+        variable.validate_source()?;
+        if !variable.requires_user_input() {
+            continue;
+        }
         let value = values.get(&variable.name).map(String::as_str).unwrap_or("");
         if variable.required && value.trim().is_empty() {
             return Err(format!("Missing required variable `{}`", variable.name));

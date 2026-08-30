@@ -1725,6 +1725,7 @@ mod tests {
                 description: Some("Ticket ID".into()),
                 required: true,
                 pattern: None,
+                source: Default::default(), source_ref: None, allow_manual_override: false,
             }],
             agent: AgentType::ClaudeCode,
             connection_id: None,
