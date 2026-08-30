@@ -78,10 +78,12 @@ impl PromptVariable {
                 .as_deref()
                 .filter(|reference| is_reference(reference, "context"))
                 .map(|_| ())
-                .ok_or_else(|| format!(
-                    "Context variable `{}` must reference <context.NAME>",
-                    self.name
-                )),
+                .ok_or_else(|| {
+                    format!(
+                        "Context variable `{}` must reference <context.NAME>",
+                        self.name
+                    )
+                }),
             PromptVariableSource::ProjectEnv => {
                 let reference = self.source_ref.as_deref().unwrap_or_default();
                 if is_reference(reference, "env") {
@@ -592,9 +594,11 @@ mod tests {
         let declaration = variable(PromptVariableSource::ProjectEnv, Some("<env.API_TOKEN>"));
         assert!(declaration.validate_source().is_ok());
         assert!(!declaration.requires_user_input());
-        assert!(variable(PromptVariableSource::ProjectEnv, Some("secret-value"))
-            .validate_source()
-            .is_err());
+        assert!(
+            variable(PromptVariableSource::ProjectEnv, Some("secret-value"))
+                .validate_source()
+                .is_err()
+        );
     }
 
     #[test]

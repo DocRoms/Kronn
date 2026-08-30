@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useMemo, Fragment } from 'react';
 import { useT } from '../../lib/I18nContext';
-import { workflows as workflowsApi, quickPrompts as quickPromptsApi } from '../../lib/api';
-import type { BatchPreview } from '../../lib/api';
+import { workflows as workflowsApi, quickPrompts as quickPromptsApi, executionVariables as executionVariablesApi } from '../../lib/api';
+import type { BatchPreview, ExecutionVariableMetadata } from '../../lib/api';
 import { AGENT_LABELS, isAgentRestricted } from '../../lib/constants';
 import { extractLikelyOutput } from '../../lib/extractLikelyOutput';
 import type { Workflow, WorkflowRun, StepResult, AgentsConfig, WorkflowStep, QuickPrompt, BatchRunSummary, AgentType, ModelTier, Project } from '../../types/generated';
@@ -24,6 +24,55 @@ import { WorkflowWizard } from './WorkflowWizard';
 import '../../pages/WorkflowsPage.css';
 
 const checkAgentRestricted = isAgentRestricted;
+
+function ExecutionVariablesInspector({ runId }: { runId: string }) {
+  const [metadata, setMetadata] = useState<ExecutionVariableMetadata | null>(null);
+  const [open, setOpen] = useState(false);
+  const [revealed, setRevealed] = useState<Record<string, string>>({});
+  const remaskTimers = useRef<Record<string, number>>({});
+
+  useEffect(() => () => Object.values(remaskTimers.current).forEach(window.clearTimeout), []);
+
+  const inspect = async () => {
+    if (!metadata) {
+      try {
+        setMetadata(await executionVariablesApi.metadata('workflow', runId));
+      } catch {
+        return;
+      }
+    }
+    setOpen(current => !current);
+  };
+  const toggleReveal = async (name: string) => {
+    if (revealed[name] !== undefined) {
+      window.clearTimeout(remaskTimers.current[name]);
+      setRevealed(current => { const next = { ...current }; delete next[name]; return next; });
+      return;
+    }
+    const value = await executionVariablesApi.reveal('workflow', runId, name);
+    setRevealed(current => ({ ...current, [name]: value }));
+    remaskTimers.current[name] = window.setTimeout(() => {
+      setRevealed(current => { const next = { ...current }; delete next[name]; return next; });
+    }, 15_000);
+  };
+
+  return <div className="wf-execution-variables">
+    <button type="button" className="wf-small-btn" onClick={() => void inspect()} aria-expanded={open}>
+      <Eye size={12} /> Inspect variables
+    </button>
+    {open && metadata && <div className="wf-run-group-body" role="region" aria-label="Execution variables">
+      <p className="text-2xs text-ghost">Resolved {new Date(metadata.resolved_at).toLocaleString()} · snapshot {metadata.id}</p>
+      {metadata.provenance.map(item => <div className="qp-launch-field" key={item.name}>
+        <label className="qp-launch-label">{item.name}</label>
+        <input className="wf-input flex-1" readOnly value={revealed[item.name] ?? '••••••'} aria-label={`${item.name} ${revealed[item.name] === undefined ? 'masked' : 'temporarily revealed'}`} />
+        <button type="button" className="wf-icon-btn" disabled={metadata.purged} onClick={() => void toggleReveal(item.name)} aria-label={`${revealed[item.name] === undefined ? 'Reveal' : 'Remask'} ${item.name}`}>
+          <Eye size={12} />
+        </button>
+        <p className="text-2xs text-ghost">{item.effective_source_ref}{item.overridden ? ' · manual override' : ''}</p>
+      </div>)}
+    </div>}
+  </div>;
+}
 
 /** 0.8.8 — which "step in progress" placeholder to show in the live-run view.
  *  Only `Agent` steps stream chunks into `currentStepText`; every other type
@@ -2408,6 +2457,7 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, onChangeSt
                 onGateDecided?.();
               }}
             />
+            <ExecutionVariablesInspector runId={run.id} />
             {childBatch && onNavigateToBatch && (
               <button
                 type="button"

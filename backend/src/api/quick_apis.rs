@@ -350,25 +350,54 @@ pub async fn run_qa(
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
 
-    let secret = match state.config.read().await.encryption_secret.clone() {
-        Some(secret) => secret,
-        None => return Json(ApiResponse::err("Variable preflight unavailable: encryption key missing")),
+    let (secret, retention_days) = {
+        let config = state.config.read().await;
+        let Some(secret) = config.encryption_secret.clone() else {
+            return Json(ApiResponse::err(
+                "Variable preflight unavailable: encryption key missing",
+            ));
+        };
+        (secret, config.server.execution_variable_retention_days)
     };
     let declarations = qa.variables.clone();
     let supplied = req.variables.clone();
     let project_id = qa.project_id.clone();
-    let execution_id = req.workflow_run_id.clone().unwrap_or_else(|| Uuid::new_v4().to_string());
-    let prepared = state.db.with_conn(move |conn| crate::core::execution_variables::prepare(conn,
-        crate::core::execution_variables::PrepareRequest {
-            declarations: &declarations, supplied: &supplied, context: &std::collections::HashMap::new(),
-            project_id: project_id.as_deref(), environment_ref: "project_mcp_configs",
-            run_kind: "quick_api", run_id: &execution_id, encryption_secret: &secret,
-            retention_days: crate::core::execution_variables::DEFAULT_RETENTION_DAYS,
-        })).await;
+    let execution_id = req
+        .workflow_run_id
+        .clone()
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    let prepared = state
+        .db
+        .with_conn(move |conn| {
+            crate::core::execution_variables::prepare(
+                conn,
+                crate::core::execution_variables::PrepareRequest {
+                    declarations: &declarations,
+                    supplied: &supplied,
+                    context: &std::collections::HashMap::new(),
+                    project_id: project_id.as_deref(),
+                    environment_ref: "project_mcp_configs",
+                    run_kind: "quick_api",
+                    run_id: &execution_id,
+                    encryption_secret: &secret,
+                    retention_days,
+                },
+            )
+        })
+        .await;
     let resolved = match prepared {
         Ok(Ok(prepared)) => prepared.resolved,
-        Ok(Err(failures)) => return Json(ApiResponse::err(format!("preflight_failed:{}", serde_json::to_string(&failures).unwrap_or_default()))),
-        Err(error) => return Json(ApiResponse::err(format!("Variable preflight failed: {error}"))),
+        Ok(Err(failures)) => {
+            return Json(ApiResponse::err(format!(
+                "preflight_failed:{}",
+                serde_json::to_string(&failures).unwrap_or_default()
+            )))
+        }
+        Err(error) => {
+            return Json(ApiResponse::err(format!(
+                "Variable preflight failed: {error}"
+            )))
+        }
     };
 
     // Build template context from variables.
@@ -554,6 +583,66 @@ pub async fn batch_run_qa(
     let normalized_items: Vec<serde_json::Value> =
         normalize_batch_items(items_arr, first_var_name.as_deref());
 
+    // Resolve every declared source before the BatchApiCall executor can
+    // issue its first HTTP request. Item object fields provide user inputs;
+    // project-provided values are resolved once for this batch execution.
+    let supplied: std::collections::HashMap<String, String> = normalized_items
+        .first()
+        .and_then(serde_json::Value::as_object)
+        .into_iter()
+        .flat_map(|object| object.iter())
+        .filter_map(|(name, value)| {
+            value
+                .as_str()
+                .map(|value| (name.clone(), value.to_string()))
+        })
+        .collect();
+    let (secret, retention_days) = {
+        let config = state.config.read().await;
+        let Some(secret) = config.encryption_secret.clone() else {
+            return Json(ApiResponse::err(
+                "Variable preflight unavailable: encryption key missing",
+            ));
+        };
+        (secret, config.server.execution_variable_retention_days)
+    };
+    let declarations = qa.variables.clone();
+    let project_id = qa.project_id.clone();
+    let execution_id = Uuid::new_v4().to_string();
+    let prepared = state
+        .db
+        .with_conn(move |conn| {
+            crate::core::execution_variables::prepare(
+                conn,
+                crate::core::execution_variables::PrepareRequest {
+                    declarations: &declarations,
+                    supplied: &supplied,
+                    context: &std::collections::HashMap::new(),
+                    project_id: project_id.as_deref(),
+                    environment_ref: "project_mcp_configs",
+                    run_kind: "quick_api_batch",
+                    run_id: &execution_id,
+                    encryption_secret: &secret,
+                    retention_days,
+                },
+            )
+        })
+        .await;
+    let resolved = match prepared {
+        Ok(Ok(prepared)) => prepared.resolved,
+        Ok(Err(failures)) => {
+            return Json(ApiResponse::err(format!(
+                "preflight_failed:{}",
+                serde_json::to_string(&failures).unwrap_or_default()
+            )))
+        }
+        Err(error) => {
+            return Json(ApiResponse::err(format!(
+                "Variable preflight failed: {error}"
+            )))
+        }
+    };
+
     // Serialize the items array as a JSON literal — the executor's
     // template engine renders the literal as-is when items_from doesn't
     // contain `{{` placeholders. No template variables in standalone runs.
@@ -633,7 +722,10 @@ pub async fn batch_run_qa(
         multi_agent_review: None,
     };
 
-    let ctx = crate::workflows::template::TemplateContext::new();
+    let mut ctx = crate::workflows::template::TemplateContext::new();
+    for (name, value) in resolved.values {
+        ctx.set(name, value);
+    }
     // 0.8.6 (#59) — standalone batch-QA run is user-initiated, classify
     // as manual_test (same as the single Quick API run path).
     let outcome = crate::workflows::batch_apicall_step::execute_batch_apicall_step(

@@ -143,8 +143,72 @@ pub async fn agent_handoff_mode(
 /// POST /api/discussions
 pub async fn create(
     State(state): State<AppState>,
-    Json(req): Json<CreateDiscussionRequest>,
+    Json(mut req): Json<CreateDiscussionRequest>,
 ) -> Json<ApiResponse<Discussion>> {
+    let discussion_id = Uuid::new_v4().to_string();
+    if let Some(qp_id) = req.originating_qp_id.clone() {
+        let lookup = qp_id.clone();
+        let qp = match state
+            .db
+            .with_conn(move |conn| crate::db::quick_prompts::get_quick_prompt(conn, &lookup))
+            .await
+        {
+            Ok(Some(qp)) => qp,
+            Ok(None) => return Json(ApiResponse::err("Quick prompt not found")),
+            Err(error) => return Json(ApiResponse::err(format!("DB error: {error}"))),
+        };
+        let (secret, retention_days) = {
+            let config = state.config.read().await;
+            let Some(secret) = config.encryption_secret.clone() else {
+                return Json(ApiResponse::err(
+                    "Variable preflight unavailable: encryption key missing",
+                ));
+            };
+            (secret, config.server.execution_variable_retention_days)
+        };
+        let declarations = qp.variables.clone();
+        let supplied = req.launch_variables.clone();
+        let project_id = req.project_id.clone().or(qp.project_id.clone());
+        let run_id = discussion_id.clone();
+        let prepared = state
+            .db
+            .with_conn(move |conn| {
+                crate::core::execution_variables::prepare(
+                    conn,
+                    crate::core::execution_variables::PrepareRequest {
+                        declarations: &declarations,
+                        supplied: &supplied,
+                        context: &std::collections::HashMap::new(),
+                        project_id: project_id.as_deref(),
+                        environment_ref: "project_mcp_configs",
+                        run_kind: "quick_prompt",
+                        run_id: &run_id,
+                        encryption_secret: &secret,
+                        retention_days,
+                    },
+                )
+            })
+            .await;
+        match prepared {
+            Ok(Ok(_)) => {}
+            Ok(Err(failures)) => {
+                return Json(ApiResponse::err(format!(
+                    "preflight_failed:{}",
+                    serde_json::to_string(&failures).unwrap_or_default()
+                )))
+            }
+            Err(error) => {
+                return Json(ApiResponse::err(format!(
+                    "Variable preflight failed: {error}"
+                )))
+            }
+        }
+        // Persist only the canonical template. The encrypted snapshot is
+        // hydrated into a temporary discussion copy immediately before agent
+        // dispatch; API responses and message storage never receive values.
+        req.initial_prompt = qp.prompt_template;
+        req.project_id = req.project_id.or(qp.project_id);
+    }
     // Input validation
     if req.title.len() > MAX_TITLE_LEN {
         return Json(ApiResponse::err(format!(
@@ -223,7 +287,7 @@ pub async fn create(
         author_cli_ordinal: None,
         model: None,
         lint_report: None,
-        id: Uuid::new_v4().to_string(),
+        id: discussion_id,
         role: MessageRole::User,
         channel: MessageChannel::Main,
         content: req.initial_prompt,

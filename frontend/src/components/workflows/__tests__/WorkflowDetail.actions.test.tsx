@@ -316,6 +316,11 @@ describe('WorkflowDetail — runs list', () => {
     expect(props.onDeleteAllRuns).toHaveBeenCalledTimes(1);
   });
 
+  it('offers the secured variable inspector on an expanded run', () => {
+    renderDetail({ runs: [mkRun({ id: 'r-secret', status: 'Success' })] });
+    expect(screen.getByRole('button', { name: 'Inspect variables' })).toBeInTheDocument();
+  });
+
   it('collapses the runs list when the chevron toggle is clicked', () => {
     renderDetail({ runs: [mkRun({ id: 'r1', status: 'Success' })] });
     expect(screen.getByText('Success')).toBeInTheDocument();

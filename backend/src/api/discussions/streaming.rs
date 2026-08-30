@@ -2028,7 +2028,54 @@ async fn make_agent_stream_inner(
         global_mcp_context.as_deref(),
         &agent_type,
     ) + context_files_prompt.len();
-    let prompt_disc = discussion_at_dispatch_trigger(&disc, dispatch_trigger_message_id.as_deref());
+    let mut prompt_disc =
+        discussion_at_dispatch_trigger(&disc, dispatch_trigger_message_id.as_deref());
+    // QP values are never persisted in messages. Hydrate only this temporary
+    // dispatch copy from the immutable encrypted snapshot.
+    if let Some(first_message) = prompt_disc.messages.first_mut() {
+        let secret = state.config.read().await.encryption_secret.clone();
+        if let Some(secret) = secret {
+            if let Ok(key) = crate::core::crypto::parse_secret(&secret) {
+                let disc_id = disc.id.clone();
+                let workflow_run_id = disc.workflow_run_id.clone();
+                let values = state
+                    .db
+                    .with_conn(move |conn| {
+                        for (kind, id) in [
+                            ("quick_prompt", Some(disc_id.as_str())),
+                            ("quick_prompt_batch_item", Some(disc_id.as_str())),
+                            ("quick_prompt_compare", workflow_run_id.as_deref()),
+                        ] {
+                            if let Some(id) = id {
+                                if let Some(values) =
+                                    crate::db::execution_variable_snapshots::load_values(
+                                        conn,
+                                        kind,
+                                        id,
+                                        &key,
+                                        chrono::Utc::now(),
+                                    )?
+                                {
+                                    return Ok(Some(values));
+                                }
+                            }
+                        }
+                        Ok::<_, anyhow::Error>(None)
+                    })
+                    .await
+                    .ok()
+                    .flatten();
+                if let Some(values) = values {
+                    first_message.content = values.iter().fold(
+                        first_message.content.clone(),
+                        |rendered, (name, value)| {
+                            rendered.replace(&format!("{{{{{name}}}}}"), value)
+                        },
+                    );
+                }
+            }
+        }
+    }
     let prompt = build_agent_prompt(&prompt_disc, &agent_type, extra_context_len);
 
     let auth_mode_str = auth_mode_for(&agent_type, &tokens);

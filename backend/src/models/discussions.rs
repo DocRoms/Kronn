@@ -378,6 +378,10 @@ pub struct CreateDiscussionRequest {
     /// `None` = not a QP launch (briefing / manual / etc.).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub originating_qp_id: Option<String>,
+    /// Raw launch inputs for an originating Quick Prompt. The server resolves
+    /// project/context sources and renders the canonical stored template.
+    #[serde(default)]
+    pub launch_variables: std::collections::HashMap<String, String>,
     /// F9 — create a "human-only" disc: the agent runner never spawns on
     /// `send_message`. Used by the contact-click → 1:1 human↔human chat flow.
     #[serde(default)]

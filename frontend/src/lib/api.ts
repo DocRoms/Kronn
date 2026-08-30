@@ -2206,6 +2206,27 @@ export const workflows = {
   },
 };
 
+export interface ExecutionVariableMetadata {
+  id: string;
+  resolved_at: string;
+  expires_at: string | null;
+  purged: boolean;
+  provenance: Array<{
+    name: string;
+    source: 'user_input' | 'kronn_context' | 'project_env';
+    source_ref: string | null;
+    effective_source_ref: string;
+    overridden: boolean;
+  }>;
+}
+
+export const executionVariables = {
+  metadata: (runKind: string, runId: string) =>
+    api<ExecutionVariableMetadata>('GET', `/execution-variables/${encodeURIComponent(runKind)}/${encodeURIComponent(runId)}`),
+  reveal: (runKind: string, runId: string, variable: string) =>
+    api<string>('POST', `/execution-variables/${encodeURIComponent(runKind)}/${encodeURIComponent(runId)}/reveal`, { variable }),
+};
+
 // ─── Pages vivantes (0.10.0) ──────────────────────────────────────────────
 
 export const pages = {
@@ -2235,6 +2256,7 @@ export const pages = {
 export interface BatchItem {
   title: string;
   prompt: string;
+  variables?: Record<string, string>;
 }
 
 export interface BatchPreview {
@@ -2300,6 +2322,7 @@ export const quickPrompts = {
     qpId: string,
     req: {
       prompt: string;
+      variables?: Record<string, string>;
       batch_name: string;
       targets: Array<{ agent: AgentType; tier: ModelTier; connection_id?: string }>;
       project_id?: string;
