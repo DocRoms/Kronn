@@ -1960,6 +1960,7 @@ pub struct TaskWorkerBridgeContext {
     pub execution_id: String,
     pub discussion_id: String,
     pub agent_type: String,
+    pub dispatch_job_id: String,
     pub source_message_id: String,
 }
 
@@ -1993,7 +1994,7 @@ fn codex_kronn_internal_env_override() -> String {
 /// `--ignore-user-config` deliberately removes every user MCP and policy, so
 /// overriding only `...env_vars` leaves a partial server with no command. Codex
 /// rejects that shape as `invalid transport` before the model starts. A worker
-/// gets one self-contained server instead: the exact commit + delivery bridge
+/// gets one self-contained server instead: the exact status, commit and delivery bridge
 /// it needs, and nothing inherited from the user's global config.
 fn codex_task_worker_mcp_override() -> Option<String> {
     let script = disc_introspection_mcp_path()?;
@@ -2004,7 +2005,7 @@ fn render_codex_task_worker_mcp_override(script: Option<&str>) -> Option<String>
     let script = serde_json::to_string(script?).ok()?;
     let env_vars = serde_json::to_string(KRONN_INTERNAL_CODEX_ENV_VARS).ok()?;
     Some(format!(
-        "mcp_servers={{\"kronn-internal\"={{command=\"python3\",args=[{script}],env_vars={env_vars},startup_timeout_sec=30,required=true,enabled_tools=[\"task_exec_commit\",\"task_exec_deliver\"],default_tools_approval_mode=\"prompt\",tools={{task_exec_commit={{approval_mode=\"approve\"}},task_exec_deliver={{approval_mode=\"approve\"}}}}}}}}"
+        "mcp_servers={{\"kronn-internal\"={{command=\"python3\",args=[{script}],env_vars={env_vars},startup_timeout_sec=30,required=true,enabled_tools=[\"task_exec_status\",\"task_exec_commit\",\"task_exec_deliver\"],default_tools_approval_mode=\"prompt\",tools={{task_exec_status={{approval_mode=\"approve\"}},task_exec_commit={{approval_mode=\"approve\"}},task_exec_deliver={{approval_mode=\"approve\"}}}}}}}}"
     ))
 }
 
@@ -2039,6 +2040,10 @@ pub struct AgentStartConfig<'a> {
     /// (KT-337). `None` falls back to each provider's own default, and the
     /// matching key is read from `tokens` under that provider's slug.
     pub http_endpoints: Option<&'a crate::models::setup::HttpEndpoints>,
+    /// Exact named OpenAI-compatible connection for `AgentType::Custom`.
+    /// The secret is borrowed only for the provider call and is never added to
+    /// the prompt, command line or durable dispatch row.
+    pub external_http: Option<&'a ExternalHttpRuntime>,
     /// Pre-built context files prompt (uploaded file contents for this discussion).
     pub context_files_prompt: &'a str,
     /// Discussion id this run targets, when known. Forwarded to the
@@ -2123,6 +2128,7 @@ impl<'a> AgentStartConfig<'a> {
             model_tiers: None,
             tools: None,
             http_endpoints: None,
+            external_http: None,
             context_files_prompt: "",
             discussion_id: None,
             task_worker_context: None,
@@ -2133,6 +2139,14 @@ impl<'a> AgentStartConfig<'a> {
             cancel_token: None,
         }
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct ExternalHttpRuntime {
+    pub display_name: String,
+    pub mention_alias: String,
+    pub endpoint: String,
+    pub api_key: Option<String>,
 }
 
 /// What an HTTP agent is told about its own capabilities.
@@ -2202,7 +2216,10 @@ fn prelocalized_http_worker_notice() -> &'static str {
 /// bearer auth, same `/v1/chat/completions` shape. Only the endpoint and the
 /// credential slot differ (LiteLLM proxy vs NVIDIA hosted) — KT-337.
 pub(crate) fn is_openai_wire_agent(agent_type: &AgentType) -> bool {
-    matches!(agent_type, AgentType::LiteLlm | AgentType::Nvidia)
+    matches!(
+        agent_type,
+        AgentType::LiteLlm | AgentType::Nvidia | AgentType::Custom
+    )
 }
 
 /// How many runs of one agent may be in flight at once, as the JSON map the
@@ -2285,7 +2302,7 @@ pub(crate) fn agent_concurrency_limits(
 pub(crate) fn is_http_chat_agent(agent_type: &AgentType) -> bool {
     matches!(
         agent_type,
-        AgentType::Ollama | AgentType::LiteLlm | AgentType::Nvidia
+        AgentType::Ollama | AgentType::LiteLlm | AgentType::Nvidia | AgentType::Custom
     )
 }
 
@@ -2479,6 +2496,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
             | AgentType::Vibe
             | AgentType::Ollama
             | AgentType::LiteLlm
+            | AgentType::Custom
     );
 
     // Ensure this run's skills/profiles exist as native files in the
@@ -2730,6 +2748,12 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
     // doesn't confuse MCP context with the user's question, (2) token
     // counts in the response, (3) works without the ollama binary (Docker).
     if is_http_chat_agent(config.agent_type) {
+        if *config.agent_type == AgentType::Custom && config.external_http.is_none() {
+            return Err(
+                "The selected external API connection is unavailable. Select the connection again or recreate it in Settings → Agents."
+                    .into(),
+            );
+        }
         let model_flag = effective_model_flag(
             config.model_override,
             config.agent_type,
@@ -2758,26 +2782,55 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                         .into(),
                 )
             }
+            (AgentType::Custom, _) => {
+                return Err(
+                    "No model configured for this external API connection. Pick a model for the selected tier in Settings → Agents."
+                        .into(),
+                )
+            }
             _ => "qwen3:8b",
         };
         // Both OpenAI-compatible providers read their endpoint and key from their
         // own slot: LiteLLM's proxy is operator-hosted (config or env), NVIDIA's
         // is the hosted service (env override, else the public endpoint).
         let http_base_url = config
-            .http_endpoints
-            .and_then(|endpoints| endpoints.for_agent(config.agent_type));
+            .external_http
+            .map(|runtime| runtime.endpoint.as_str())
+            .or_else(|| {
+                config
+                    .http_endpoints
+                    .and_then(|endpoints| endpoints.for_agent(config.agent_type))
+            });
         let provider_slug = match config.agent_type {
             AgentType::Nvidia => crate::api::nvidia::PROVIDER,
             _ => "litellm",
         };
+        let http_api_key = config
+            .external_http
+            .and_then(|runtime| runtime.api_key.as_deref())
+            .or_else(|| config.tokens.active_key_for(provider_slug));
+        let http_system_context = config.external_http.map_or_else(
+            || extra_context.clone(),
+            |runtime| {
+                let identity = format!(
+                    "=== RUNTIME IDENTITY ===\nYou are the model `{model}`, served through the named external API connection `{}`. Messages addressed to `@{}` target you. The connection is the transport, not your model name. Never copy another participant's self-identification from the conversation history.",
+                    runtime.display_name, runtime.mention_alias
+                );
+                if extra_context.is_empty() {
+                    identity
+                } else {
+                    format!("{identity}\n\n{extra_context}")
+                }
+            },
+        );
         return start_ollama_http(
             config.agent_type,
             config.prompt,
-            &extra_context,
+            &http_system_context,
             model,
             config.ollama_format,
             http_base_url,
-            config.tokens.active_key_for(provider_slug),
+            http_api_key,
             config.tools.clone(),
             config.ollama_context_overrides,
             config.http_request_timeout,
@@ -2804,16 +2857,6 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                 .to_string(),
         );
     }
-    let (binary, npx_pkg, mut args, env_key, stderr_mode, output_mode) =
-        agent_command_with_task_worker_policy(
-            config.agent_type,
-            config.prompt,
-            config.full_access,
-            &extra_context,
-            model_flag.as_deref(),
-            task_worker,
-        );
-
     // Use work_dir (or project_path) for the agent's CWD
     let effective_work_dir = config.work_dir.unwrap_or(config.project_path);
     let work_dir = if effective_work_dir.is_empty() {
@@ -2831,6 +2874,16 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
             p
         }
     };
+    let (binary, npx_pkg, mut args, env_key, stderr_mode, output_mode) =
+        agent_command_with_task_worker_policy(
+            config.agent_type,
+            config.prompt,
+            config.full_access,
+            &extra_context,
+            model_flag.as_deref(),
+            task_worker,
+            task_worker.then_some(work_dir.as_path()),
+        );
 
     // Claude Code in --print mode does NOT auto-load .mcp.json from CWD.
     // Explicitly pass it via --mcp-config so MCP tools are available.
@@ -2876,31 +2929,27 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         // Pop the last arg — by construction of agent_command it is the
         // prompt (see the Claude branch there).
         let popped = args.pop();
-        // Cap the --append-system-prompt value (penultimate arg) to avoid
-        // hitting ARG_MAX via skills + MCP bundles. Truncation is graceful:
-        // we append a marker so a reader can tell the context was trimmed.
-        if let Some(idx) = args.iter().position(|a| a == "--append-system-prompt") {
-            if let Some(val) = args.get_mut(idx + 1) {
-                if val.len() > MAX_SINGLE_ARG_BYTES {
-                    tracing::warn!(
-                        "Truncating --append-system-prompt from {} bytes to {} to avoid ARG_MAX (E2BIG). \
-                        Consider trimming skills / MCP context.",
-                        val.len(), MAX_SINGLE_ARG_BYTES
-                    );
-                    // Find a safe UTF-8 boundary at or below the cap.
-                    let mut cut = MAX_SINGLE_ARG_BYTES;
-                    while cut > 0 && !val.is_char_boundary(cut) {
-                        cut -= 1;
-                    }
-                    val.truncate(cut);
-                    val.push_str("\n\n[... system prompt truncated by Kronn to fit ARG_MAX ...]");
-                }
-            }
+        if let Some((original_bytes, truncated_bytes)) =
+            truncate_claude_system_prompt_argument(&mut args)
+        {
+            tracing::warn!(
+                "Truncating --append-system-prompt from {} bytes to {} to avoid ARG_MAX (E2BIG). \
+                Consider trimming skills / MCP context.",
+                original_bytes,
+                truncated_bytes
+            );
         }
         popped
     } else {
         None
     };
+
+    if task_worker && *config.agent_type == AgentType::ClaudeCode {
+        probe_claude_task_worker_auth(binary, npx_pkg, &work_dir).await?;
+    }
+    if task_worker && *config.agent_type == AgentType::CopilotCli {
+        probe_copilot_task_worker_auth(binary, npx_pkg, &work_dir).await?;
+    }
 
     // Try direct binary first, then npx fallback
     let mut child = match try_spawn(
@@ -4587,10 +4636,14 @@ async fn start_ollama_http(
     let mut ctx_notice: Option<String> = None;
     let (base, body, ctx_cap, model_trained_context, model_storage_format, ctx_cap_origin) =
         if is_openai_wire_agent(agent_type) {
-            let base = if *agent_type == AgentType::Nvidia {
-                crate::api::nvidia::resolve_base_url_pub(http_base_url)
-            } else {
-                crate::api::lite_llm::resolve_base_url_pub(http_base_url)
+            let base = match agent_type {
+                AgentType::Nvidia => crate::api::nvidia::resolve_base_url_pub(http_base_url),
+                AgentType::Custom => http_base_url
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+                    .ok_or_else(|| "External API endpoint is missing".to_string())?,
+                _ => crate::api::lite_llm::resolve_base_url_pub(http_base_url),
             };
             // No `num_ctx` equivalent: the window belongs to whatever upstream the
             // proxy fronts, so there is nothing here to cap or to warn about.
@@ -4610,7 +4663,7 @@ async fn start_ollama_http(
             );
             (base, body, 0, None, None, None)
         } else {
-            let base = crate::api::ollama::ollama_base_url_pub();
+            let base = crate::api::ollama::resolve_base_url_pub(http_base_url);
             // 0.11.0 — ctx cap auto-derived from THE MODEL (its trained context via
             // /api/show, cached), clamped to a RAM-safe ceiling. Zero configuration:
             // a user who pulled qwen3:32b gets its real window instead of a silent 8K
@@ -4731,6 +4784,7 @@ async fn start_ollama_http(
     let backend = match agent_type {
         AgentType::LiteLlm => "LiteLLM",
         AgentType::Nvidia => "NVIDIA",
+        AgentType::Custom => "External API",
         _ => "Ollama",
     };
     // Ollama takes no credential; a LiteLLM proxy usually sits behind a
@@ -7001,16 +7055,405 @@ async fn start_ollama_http(
 /// MCP context is injected via --append-system-prompt for Claude Code,
 /// or prepended to the prompt for other agents.
 /// Returns: (binary, npx_package, args, env_key, stderr_mode, output_mode)
-const CLAUDE_TASK_WORKER_SETTINGS: &str = r#"{
-  "sandbox": {
-    "enabled": true,
-    "failIfUnavailable": true,
-    "autoAllowBashIfSandboxed": true,
-    "allowUnsandboxedCommands": false,
-    "excludedCommands": [],
-    "filesystem": { "allowWrite": [] }
-  }
-}"#;
+/// Build the complete Claude sandbox policy for one task worktree.
+///
+/// Keep this invocation-local and bounded regardless of how many unrelated
+/// worktrees exist on the host. The current task worktree is the only explicit
+/// write root; sandbox availability and unsandboxed fallback remain fail-closed.
+fn claude_task_worker_settings(work_dir: &Path) -> Result<String, String> {
+    let work_dir = work_dir.canonicalize().map_err(|error| {
+        format!(
+            "Claude task worker cannot start: unable to canonicalize managed worktree {}: {error}",
+            work_dir.display()
+        )
+    })?;
+    serde_json::to_string(&serde_json::json!({
+        "sandbox": {
+            "enabled": true,
+            "failIfUnavailable": true,
+            "autoAllowBashIfSandboxed": true,
+            "allowUnsandboxedCommands": false,
+            "excludedCommands": [],
+            "filesystem": { "allowWrite": [work_dir] }
+        }
+    }))
+    .map_err(|error| format!("Unable to encode the Claude task-worker sandbox policy: {error}"))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClaudeTaskWorkerAuthStatus {
+    LoggedIn,
+    LoggedOut,
+    Malformed,
+}
+
+fn parse_claude_task_worker_auth_status(
+    stdout: &[u8],
+    exit_success: bool,
+) -> ClaudeTaskWorkerAuthStatus {
+    let logged_in = serde_json::from_slice::<serde_json::Value>(stdout)
+        .ok()
+        .and_then(|status| status.get("loggedIn").and_then(serde_json::Value::as_bool));
+    match (logged_in, exit_success) {
+        (Some(true), true) => ClaudeTaskWorkerAuthStatus::LoggedIn,
+        (Some(false), _) => ClaudeTaskWorkerAuthStatus::LoggedOut,
+        _ => ClaudeTaskWorkerAuthStatus::Malformed,
+    }
+}
+
+fn claude_task_worker_auth_result(stdout: &[u8], exit_success: bool) -> Result<(), String> {
+    match parse_claude_task_worker_auth_status(stdout, exit_success) {
+        ClaudeTaskWorkerAuthStatus::LoggedIn => Ok(()),
+        ClaudeTaskWorkerAuthStatus::LoggedOut => Err(
+            "Claude task worker cannot start: `claude auth status` reports `loggedIn=false`. \
+             Run `claude auth login`, or use `task_exec_reassign` to move this execution to \
+             another available worker."
+                .into(),
+        ),
+        ClaudeTaskWorkerAuthStatus::Malformed => Err(
+            "Claude task worker cannot start: `claude auth status` returned an unrecognized \
+             response. Verify the local Claude CLI with `claude auth status`; if it remains \
+             unavailable, use `task_exec_reassign` to move this execution to another \
+             available worker."
+                .into(),
+        ),
+    }
+}
+
+const MAX_CLAUDE_SANDBOX_WORKTREES: usize = 64;
+const MAX_CLAUDE_SANDBOX_WORKTREE_BYTES: usize = 32 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ClaudeSandboxCatalogueReceipt {
+    pub common_dir_count: usize,
+    pub worktree_count: usize,
+    pub worktree_bytes: usize,
+}
+
+impl ClaudeSandboxCatalogueReceipt {
+    fn validate(self) -> Result<(), String> {
+        if self.worktree_count <= MAX_CLAUDE_SANDBOX_WORKTREES
+            && self.worktree_bytes <= MAX_CLAUDE_SANDBOX_WORKTREE_BYTES
+        {
+            return Ok(());
+        }
+        Err(format!(
+            "Claude task worker refused before provisioning: reason_code=claude_sandbox_catalogue_unsafe; \
+             git_common_dir_count={}, git_worktree_count={}, git_worktree_bytes={}, \
+             max_git_worktrees={}, max_git_worktree_bytes={}. No repository or worktree path was \
+             logged. Use `task_exec_reassign` to \
+             move this execution to another available worker.",
+            self.common_dir_count,
+            self.worktree_count,
+            self.worktree_bytes,
+            MAX_CLAUDE_SANDBOX_WORKTREES,
+            MAX_CLAUDE_SANDBOX_WORKTREE_BYTES,
+        ))
+    }
+}
+
+fn claude_sandbox_catalogue_receipt(
+    repo_roots: &[PathBuf],
+) -> Result<ClaudeSandboxCatalogueReceipt, String> {
+    let mut common_dirs = std::collections::BTreeSet::new();
+    let mut worktrees = std::collections::BTreeSet::new();
+    for repo_root in repo_roots {
+        let common_output = sync_cmd("git")
+            .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+            .current_dir(repo_root)
+            .output()
+            .map_err(|_| claude_sandbox_catalogue_unreadable())?;
+        if !common_output.status.success() {
+            return Err(claude_sandbox_catalogue_unreadable());
+        }
+        let common_dir = PathBuf::from(String::from_utf8_lossy(&common_output.stdout).trim())
+            .canonicalize()
+            .map_err(|_| claude_sandbox_catalogue_unreadable())?;
+        if !common_dirs.insert(common_dir) {
+            continue;
+        }
+        let output = sync_cmd("git")
+            .args(["worktree", "list", "--porcelain"])
+            .current_dir(repo_root)
+            .output()
+            .map_err(|_| claude_sandbox_catalogue_unreadable())?;
+        if !output.status.success() {
+            return Err(claude_sandbox_catalogue_unreadable());
+        }
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            if let Some(path) = line.strip_prefix("worktree ") {
+                worktrees.insert(path.to_string());
+            }
+        }
+    }
+    Ok(ClaudeSandboxCatalogueReceipt {
+        common_dir_count: common_dirs.len(),
+        worktree_count: worktrees.len(),
+        worktree_bytes: worktrees.iter().map(String::len).sum(),
+    })
+}
+
+fn claude_sandbox_catalogue_unreadable() -> String {
+    "Claude task worker refused before provisioning: reason_code=claude_sandbox_catalogue_unreadable; \
+     the registered Git worktree catalogue could not be measured. No repository or worktree path \
+     was logged. Use `task_exec_reassign` to move this execution to another available worker."
+        .to_string()
+}
+
+pub(crate) fn claude_task_worker_catalogue_preflight(
+    project: &crate::models::Project,
+) -> Result<(), String> {
+    if !super::host_is_macos() {
+        return Ok(());
+    }
+    let mut repo_roots = vec![crate::core::scanner::resolve_host_path(&project.path)];
+    repo_roots.extend(project.linked_repos.iter().filter_map(|repo| {
+        let location = repo.location.trim();
+        (!location.is_empty()
+            && !location.starts_with("http://")
+            && !location.starts_with("https://")
+            && !location.starts_with("git@"))
+        .then(|| crate::core::scanner::resolve_host_path(location))
+    }));
+    claude_sandbox_catalogue_receipt(&repo_roots)?.validate()
+}
+
+async fn run_claude_task_worker_auth_probe(
+    resolved: (String, Vec<String>, bool),
+    work_dir: &Path,
+) -> std::io::Result<std::process::Output> {
+    let (command, args, via_wsl) = resolved;
+    let (command, args, effective_work_dir) =
+        platform_agent_invocation(command, args, via_wsl, work_dir);
+    async_cmd(command)
+        .args(args)
+        .current_dir(effective_work_dir)
+        .stdin(Stdio::null())
+        .output()
+        .await
+}
+
+async fn probe_claude_task_worker_auth(
+    binary: &str,
+    npx_package: Option<&str>,
+    work_dir: &Path,
+) -> Result<(), String> {
+    let auth_args = vec!["auth".to_string(), "status".to_string()];
+    let direct = resolve_agent_invocation(binary, None, &auth_args);
+    let output = match direct {
+        Ok(resolved) => match run_claude_task_worker_auth_probe(resolved, work_dir).await {
+            Ok(output) => output,
+            Err(direct_error) => {
+                let Some(package) = npx_package else {
+                    return Err(claude_task_worker_probe_spawn_diagnostic(
+                        "authentication",
+                        &direct_error,
+                    ));
+                };
+                let fallback = resolve_agent_invocation(binary, Some(package), &auth_args)
+                    .map_err(|_| {
+                        claude_task_worker_probe_spawn_diagnostic("authentication", &direct_error)
+                    })?;
+                run_claude_task_worker_auth_probe(fallback, work_dir)
+                    .await
+                    .map_err(|error| {
+                        claude_task_worker_probe_spawn_diagnostic("authentication", &error)
+                    })?
+            }
+        },
+        Err(direct_error) => {
+            let Some(package) = npx_package else {
+                return Err(format!(
+                    "{direct_error}. Use `task_exec_reassign` to move this execution to another \
+                     available worker."
+                ));
+            };
+            let fallback =
+                resolve_agent_invocation(binary, Some(package), &auth_args).map_err(|error| {
+                    format!(
+                        "{error}. Use `task_exec_reassign` to move this execution to another \
+                         available worker."
+                    )
+                })?;
+            run_claude_task_worker_auth_probe(fallback, work_dir)
+                .await
+                .map_err(|error| {
+                    claude_task_worker_probe_spawn_diagnostic("authentication", &error)
+                })?
+        }
+    };
+
+    claude_task_worker_auth_result(&output.stdout, output.status.success())
+}
+
+fn claude_task_worker_probe_spawn_diagnostic(probe: &str, error: &std::io::Error) -> String {
+    format!(
+        "Claude task worker cannot start: the Claude {probe} preflight could not run \
+         ({error}). Use `task_exec_reassign` to move this execution to another available worker."
+    )
+}
+
+/// The bounded, read-only Copilot probe used both before a task-worker spawn
+/// and by the worker catalogue. `/user show` exercises the CLI's effective
+/// authentication source without asking a model to answer a user prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CopilotTaskWorkerPreflight {
+    Usable,
+    AuthInvalid,
+    Malformed,
+    SpawnFailed,
+    TimedOut,
+}
+
+impl CopilotTaskWorkerPreflight {
+    pub(crate) fn reason_code(self) -> Option<&'static str> {
+        match self {
+            Self::Usable => None,
+            Self::AuthInvalid => Some("copilot_auth_invalid"),
+            Self::Malformed => Some("copilot_preflight_malformed"),
+            Self::SpawnFailed => Some("copilot_preflight_spawn_failed"),
+            Self::TimedOut => Some("copilot_preflight_timed_out"),
+        }
+    }
+}
+
+fn parse_copilot_task_worker_preflight(
+    stdout: &[u8],
+    exit_success: bool,
+) -> CopilotTaskWorkerPreflight {
+    if !exit_success {
+        return CopilotTaskWorkerPreflight::AuthInvalid;
+    }
+    // A successful slash command must emit a response. Do not propagate that
+    // response (which may identify an account) outside this process.
+    let output = String::from_utf8_lossy(stdout);
+    if output.trim().is_empty() {
+        CopilotTaskWorkerPreflight::Malformed
+    } else {
+        CopilotTaskWorkerPreflight::Usable
+    }
+}
+
+fn copilot_task_worker_preflight_error(status: CopilotTaskWorkerPreflight) -> String {
+    let failure_kind = status
+        .reason_code()
+        .expect("unusable Copilot preflight has a stable reason code");
+    let detail = match status {
+        CopilotTaskWorkerPreflight::AuthInvalid => {
+            "the bounded `copilot -p /user show` preflight rejected the effective authentication"
+        }
+        CopilotTaskWorkerPreflight::Malformed => {
+            "the bounded `copilot -p /user show` preflight returned no account response"
+        }
+        CopilotTaskWorkerPreflight::SpawnFailed => {
+            "the bounded `copilot -p /user show` preflight could not be invoked"
+        }
+        CopilotTaskWorkerPreflight::TimedOut => {
+            "the bounded `copilot -p /user show` preflight did not finish before its deadline"
+        }
+        CopilotTaskWorkerPreflight::Usable => unreachable!("usable Copilot preflight has no error"),
+    };
+    format!(
+        "Copilot task worker cannot start: phase=preflight; failure_kind={failure_kind}; {detail}. Run `copilot login` or use \
+         `task_exec_reassign` to move this execution to another available worker."
+    )
+}
+
+const COPILOT_TASK_WORKER_PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(4);
+
+async fn run_copilot_task_worker_preflight(
+    resolved: (String, Vec<String>, bool),
+    work_dir: &Path,
+) -> Result<std::process::Output, CopilotTaskWorkerPreflight> {
+    run_copilot_task_worker_preflight_with_timeout(
+        resolved,
+        work_dir,
+        COPILOT_TASK_WORKER_PREFLIGHT_TIMEOUT,
+    )
+    .await
+}
+
+async fn run_copilot_task_worker_preflight_with_timeout(
+    resolved: (String, Vec<String>, bool),
+    work_dir: &Path,
+    timeout: Duration,
+) -> Result<std::process::Output, CopilotTaskWorkerPreflight> {
+    let (command, args, via_wsl) = resolved;
+    let (command, args, effective_work_dir) =
+        platform_agent_invocation(command, args, via_wsl, work_dir);
+    let mut command = async_cmd(command);
+    command
+        .args(args)
+        .current_dir(effective_work_dir)
+        .stdin(Stdio::null())
+        // `timeout` drops the output future. Ensure that cancellation also
+        // terminates the preflight child instead of leaving a CLI process alive.
+        .kill_on_drop(true);
+    match tokio::time::timeout(timeout, command.output()).await {
+        Ok(Ok(output)) => Ok(output),
+        Ok(Err(_)) => Err(CopilotTaskWorkerPreflight::SpawnFailed),
+        Err(_) => Err(CopilotTaskWorkerPreflight::TimedOut),
+    }
+}
+
+pub(crate) async fn probe_copilot_task_worker_preflight(
+    binary: &str,
+    npx_package: Option<&str>,
+    work_dir: &Path,
+) -> CopilotTaskWorkerPreflight {
+    let args = vec![
+        "-p".to_string(),
+        "/user show".to_string(),
+        "--no-ask-user".to_string(),
+        "--no-custom-instructions".to_string(),
+        "--no-auto-update".to_string(),
+        "--no-color".to_string(),
+    ];
+    let direct = resolve_agent_invocation(binary, None, &args);
+    let output = match direct {
+        Ok(resolved) => match run_copilot_task_worker_preflight(resolved, work_dir).await {
+            Ok(output) => output,
+            Err(CopilotTaskWorkerPreflight::SpawnFailed) => {
+                let Some(package) = npx_package else {
+                    return CopilotTaskWorkerPreflight::SpawnFailed;
+                };
+                let Ok(resolved) = resolve_agent_invocation(binary, Some(package), &args) else {
+                    return CopilotTaskWorkerPreflight::SpawnFailed;
+                };
+                match run_copilot_task_worker_preflight(resolved, work_dir).await {
+                    Ok(output) => output,
+                    Err(status) => return status,
+                }
+            }
+            Err(status) => return status,
+        },
+        Err(_) => {
+            let Some(package) = npx_package else {
+                return CopilotTaskWorkerPreflight::SpawnFailed;
+            };
+            let Ok(resolved) = resolve_agent_invocation(binary, Some(package), &args) else {
+                return CopilotTaskWorkerPreflight::SpawnFailed;
+            };
+            match run_copilot_task_worker_preflight(resolved, work_dir).await {
+                Ok(output) => output,
+                Err(status) => return status,
+            }
+        }
+    };
+    parse_copilot_task_worker_preflight(&output.stdout, output.status.success())
+}
+
+async fn probe_copilot_task_worker_auth(
+    binary: &str,
+    npx_package: Option<&str>,
+    work_dir: &Path,
+) -> Result<(), String> {
+    let status = probe_copilot_task_worker_preflight(binary, npx_package, work_dir).await;
+    match status {
+        CopilotTaskWorkerPreflight::Usable => Ok(()),
+        other => Err(copilot_task_worker_preflight_error(other)),
+    }
+}
 
 fn claude_task_worker_mcp_config(project_root: &Path) -> Result<String, String> {
     let source = project_root.join(".mcp.json");
@@ -7104,6 +7547,7 @@ fn agent_command(
         mcp_context,
         model_flag,
         false,
+        None,
     )
 }
 
@@ -7117,6 +7561,7 @@ fn agent_command_with_task_worker_policy(
     mcp_context: &str,
     model_flag: Option<&str>,
     task_worker: bool,
+    task_work_dir: Option<&Path>,
 ) -> (
     &'static str,
     Option<&'static str>,
@@ -7148,12 +7593,21 @@ fn agent_command_with_task_worker_policy(
                 args.push("--setting-sources".into());
                 args.push(String::new());
                 args.push("--settings".into());
-                args.push(CLAUDE_TASK_WORKER_SETTINGS.into());
+                let settings = task_work_dir
+                    .and_then(|path| claude_task_worker_settings(path).ok())
+                    .unwrap_or_else(|| {
+                        // Production task-worker launches always provide the
+                        // managed worktree. This invalid path keeps direct
+                        // builder calls fail-closed and deterministic.
+                        r#"{"sandbox":{"enabled":true,"failIfUnavailable":true,"autoAllowBashIfSandboxed":true,"allowUnsandboxedCommands":false,"excludedCommands":[],"filesystem":{"allowWrite":[]}}}"#.into()
+                    });
+                args.push(settings);
                 // Task workers need repository I/O, not nested agents,
                 // browsers, worktree creation or arbitrary MCP capabilities.
                 args.push("--tools".into());
                 args.push("Bash,Edit,Read,Write,Glob,Grep".into());
                 args.push("--allowedTools".into());
+                args.push("mcp__kronn-internal__task_exec_status".into());
                 args.push("mcp__kronn-internal__task_exec_commit".into());
                 args.push("mcp__kronn-internal__task_exec_deliver".into());
                 args.push("--permission-mode".into());
@@ -7413,6 +7867,219 @@ fn agent_command_with_task_worker_policy(
 /// Seen in the wild (EW-7189 analysis): large MCP + skills + prompt combined
 /// pushed past the limit, spawn_failed with `os error 7`.
 pub(crate) const MAX_SINGLE_ARG_BYTES: usize = 100 * 1024;
+const CLAUDE_SYSTEM_PROMPT_TRUNCATION_MARKER: &str =
+    "\n\n[... system prompt truncated by Kronn to fit ARG_MAX ...]";
+
+fn truncate_claude_system_prompt_argument(args: &mut [String]) -> Option<(usize, usize)> {
+    let index = args
+        .iter()
+        .position(|argument| argument == "--append-system-prompt")?;
+    let value = args.get_mut(index + 1)?;
+    let original_bytes = value.len();
+    if original_bytes <= MAX_SINGLE_ARG_BYTES {
+        return None;
+    }
+
+    let mut cut = MAX_SINGLE_ARG_BYTES.saturating_sub(CLAUDE_SYSTEM_PROMPT_TRUNCATION_MARKER.len());
+    while cut > 0 && !value.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    value.truncate(cut);
+    value.push_str(CLAUDE_SYSTEM_PROMPT_TRUNCATION_MARKER);
+    Some((original_bytes, value.len()))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct InvocationSizeReceipt {
+    argv_payload_bytes: usize,
+    environment_payload_bytes: usize,
+    argument_count: usize,
+    max_argument_bytes: usize,
+    environment_entry_count: usize,
+    max_environment_entry_bytes: usize,
+    settings_bytes: usize,
+    mcp_config_bytes: usize,
+    system_prompt_bytes: usize,
+    stdin_bytes: usize,
+}
+
+impl InvocationSizeReceipt {
+    fn compact(self) -> String {
+        format!(
+            "argv_payload_bytes={}, environment_payload_bytes={}, argument_count={}, \
+             max_argument_bytes={}, environment_entry_count={}, \
+             max_environment_entry_bytes={}, settings_bytes={}, mcp_config_bytes={}, \
+             system_prompt_bytes={}, stdin_bytes={}",
+            self.argv_payload_bytes,
+            self.environment_payload_bytes,
+            self.argument_count,
+            self.max_argument_bytes,
+            self.environment_entry_count,
+            self.max_environment_entry_bytes,
+            self.settings_bytes,
+            self.mcp_config_bytes,
+            self.system_prompt_bytes,
+            self.stdin_bytes,
+        )
+    }
+
+    fn validate_single_argument_limit(self) -> Result<(), String> {
+        if self.max_argument_bytes <= MAX_SINGLE_ARG_BYTES {
+            return Ok(());
+        }
+
+        let oversized_components: Vec<&str> = [
+            ("settings_bytes", self.settings_bytes),
+            ("mcp_config_bytes", self.mcp_config_bytes),
+            ("system_prompt_bytes", self.system_prompt_bytes),
+        ]
+        .into_iter()
+        .filter_map(|(name, bytes)| (bytes > MAX_SINGLE_ARG_BYTES).then_some(name))
+        .collect();
+        let oversized_components = if oversized_components.is_empty() {
+            "other_argument_bytes".to_string()
+        } else {
+            oversized_components.join(",")
+        };
+
+        Err(format!(
+            "Claude task worker invocation refused before spawn: max_argument_bytes={} exceeds \
+             max_single_arg_bytes={MAX_SINGLE_ARG_BYTES}; oversized_components={oversized_components}; \
+             settings_bytes={}, mcp_config_bytes={}, system_prompt_bytes={}. No argument content \
+             was logged. Use `task_exec_reassign` to move this execution to another available worker.",
+            self.max_argument_bytes,
+            self.settings_bytes,
+            self.mcp_config_bytes,
+            self.system_prompt_bytes,
+        ))
+    }
+}
+
+#[cfg(unix)]
+fn os_str_bytes(value: &std::ffi::OsStr) -> usize {
+    use std::os::unix::ffi::OsStrExt;
+    value.as_bytes().len()
+}
+
+#[cfg(windows)]
+fn os_str_bytes(value: &std::ffi::OsStr) -> usize {
+    use std::os::windows::ffi::OsStrExt;
+    value.encode_wide().count() * std::mem::size_of::<u16>()
+}
+
+fn invocation_size_receipt(
+    program: &std::ffi::OsStr,
+    args: &[&std::ffi::OsStr],
+    environment: &[(&std::ffi::OsStr, &std::ffi::OsStr)],
+    stdin_bytes: usize,
+) -> InvocationSizeReceipt {
+    let program_bytes = os_str_bytes(program);
+    let argument_lengths: Vec<usize> = std::iter::once(program_bytes)
+        .chain(args.iter().map(|arg| os_str_bytes(arg)))
+        .collect();
+    let environment_lengths: Vec<usize> = environment
+        .iter()
+        .map(|(key, value)| os_str_bytes(key) + 1 + os_str_bytes(value))
+        .collect();
+    let value_after = |flag: &str| {
+        args.windows(2)
+            .find(|pair| pair[0] == std::ffi::OsStr::new(flag))
+            .map_or(0, |pair| os_str_bytes(pair[1]))
+    };
+
+    InvocationSizeReceipt {
+        argv_payload_bytes: argument_lengths.iter().map(|bytes| bytes + 1).sum(),
+        environment_payload_bytes: environment_lengths.iter().map(|bytes| bytes + 1).sum(),
+        argument_count: argument_lengths.len(),
+        max_argument_bytes: argument_lengths.into_iter().max().unwrap_or(0),
+        environment_entry_count: environment_lengths.len(),
+        max_environment_entry_bytes: environment_lengths.into_iter().max().unwrap_or(0),
+        settings_bytes: value_after("--settings"),
+        mcp_config_bytes: value_after("--mcp-config"),
+        system_prompt_bytes: value_after("--append-system-prompt"),
+        stdin_bytes,
+    }
+}
+
+fn command_invocation_size_receipt(
+    command: &tokio::process::Command,
+    stdin_payload: Option<&str>,
+) -> InvocationSizeReceipt {
+    let command = command.as_std();
+    let mut environment: std::collections::BTreeMap<std::ffi::OsString, std::ffi::OsString> =
+        std::env::vars_os().collect();
+    for (key, value) in command.get_envs() {
+        if let Some(value) = value {
+            environment.insert(key.to_os_string(), value.to_os_string());
+        } else {
+            environment.remove(key);
+        }
+    }
+    let args: Vec<&std::ffi::OsStr> = command.get_args().collect();
+    let environment: Vec<(&std::ffi::OsStr, &std::ffi::OsStr)> = environment
+        .iter()
+        .map(|(key, value)| (key.as_os_str(), value.as_os_str()))
+        .collect();
+    invocation_size_receipt(
+        command.get_program(),
+        &args,
+        &environment,
+        stdin_payload.map_or(0, str::len),
+    )
+}
+
+fn resolve_agent_invocation(
+    binary: &str,
+    npx_package: Option<&str>,
+    args: &[String],
+) -> Result<(String, Vec<String>, bool), String> {
+    if let Some(package) = npx_package {
+        let mut npx_args = vec!["--yes".to_string(), package.to_string()];
+        npx_args.extend_from_slice(args);
+        let via_wsl = super::find_binary("npx")
+            .map(|location| location.via_wsl)
+            .unwrap_or(false);
+        Ok(("npx".to_string(), npx_args, via_wsl))
+    } else {
+        let location =
+            super::find_binary(binary).ok_or_else(|| format!("Binary '{binary}' not found"))?;
+        Ok((location.path, args.to_vec(), location.via_wsl))
+    }
+}
+
+fn platform_agent_invocation(
+    command: String,
+    args: Vec<String>,
+    resolved_via_wsl: bool,
+    work_dir: &Path,
+) -> (String, Vec<String>, PathBuf) {
+    #[cfg(target_os = "windows")]
+    let use_wsl = !is_wsl() && (resolved_via_wsl || command.starts_with('/'));
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = resolved_via_wsl;
+    }
+    #[cfg(not(target_os = "windows"))]
+    let use_wsl = false;
+
+    if use_wsl {
+        #[cfg(target_os = "windows")]
+        let wsl_work_dir = windows_to_wsl_path(work_dir);
+        #[cfg(not(target_os = "windows"))]
+        let wsl_work_dir = work_dir.to_path_buf();
+
+        let mut wsl_args = vec![
+            "--cd".to_string(),
+            wsl_work_dir.display().to_string(),
+            "-e".to_string(),
+            command,
+        ];
+        wsl_args.extend(args);
+        ("wsl.exe".to_string(), wsl_args, work_dir.to_path_buf())
+    } else {
+        (command, args, work_dir.to_path_buf())
+    }
+}
 
 /// True iff the agent's `HOME` should NOT be overridden to
 /// `KRONN_HOST_HOME` before spawn. Pure decision so we can test the
@@ -7471,21 +8138,8 @@ fn try_spawn(
     // Resolve the final command. We also remember whether the resolved binary
     // lives inside WSL (`via_wsl`) so we can pick the right exec strategy
     // below — sending a Linux path to a Windows-native spawn would just fail.
-    let (cmd_name, mut cmd_args, resolved_via_wsl) = if let Some(pkg) = npx_package {
-        let mut npx_args = vec!["--yes".to_string(), pkg.to_string()];
-        npx_args.extend_from_slice(args);
-        // For the npx fallback we don't know up-front where npx itself lives;
-        // probe it so we wrap with wsl.exe only when npx is a WSL binary.
-        let via_wsl = super::find_binary("npx")
-            .map(|loc| loc.via_wsl)
-            .unwrap_or(false);
-        ("npx".to_string(), npx_args, via_wsl)
-    } else {
-        let bin_loc =
-            super::find_binary(binary).ok_or_else(|| format!("Binary '{}' not found", binary))?;
-        let via_wsl = bin_loc.via_wsl;
-        (bin_loc.path, args.to_vec(), via_wsl)
-    };
+    let (cmd_name, mut cmd_args, resolved_via_wsl) =
+        resolve_agent_invocation(binary, npx_package, args)?;
 
     // Force current workspace as trusted for Codex sessions inside Docker.
     // This avoids path-style mismatch issues (/Users/... vs /host-home/...).
@@ -7527,44 +8181,12 @@ fn try_spawn(
         }
     );
 
-    // Decide whether to wrap the command with `wsl.exe -e`. On Windows native
-    // (Tauri desktop) most agents live inside WSL, but a user may also have
-    // installed them as Windows-native binaries (npm-global, scoop, winget).
-    // We trust `find_binary` to flag WSL-resolved binaries via `via_wsl` so
-    // native Windows binaries (paths like `C:\Users\...\claude.cmd`) are
-    // executed directly without the WSL detour.
-    //
-    // Linux paths (starting with `/`) on Windows are an unambiguous WSL
-    // signal — fall back to wrapping in case `via_wsl` was not set, e.g. for
-    // a binary picked up via `which::which` inside the host PATH.
-    #[cfg(target_os = "windows")]
-    let use_wsl = !is_wsl() && (resolved_via_wsl || cmd_name.starts_with('/'));
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = resolved_via_wsl; // suppress unused on non-Windows
-    }
-    #[cfg(not(target_os = "windows"))]
-    let use_wsl = false;
-
-    let (final_cmd, final_args, effective_work_dir) = if use_wsl {
-        // Convert Windows path to WSL path for --cd
-        #[cfg(target_os = "windows")]
-        let wsl_work_dir = windows_to_wsl_path(work_dir);
-        #[cfg(not(target_os = "windows"))]
-        let wsl_work_dir = work_dir.to_path_buf();
-
-        let mut wsl_args = vec![
-            "--cd".to_string(),
-            wsl_work_dir.display().to_string(),
-            "-e".to_string(),
-            cmd_name.clone(),
-        ];
-        wsl_args.extend(cmd_args.iter().cloned());
-        // wsl.exe runs from the Windows current dir, but --cd sets WSL's cwd
-        ("wsl.exe".to_string(), wsl_args, work_dir.to_path_buf())
-    } else {
-        (cmd_name.clone(), cmd_args.clone(), work_dir.to_path_buf())
-    };
+    let (final_cmd, final_args, effective_work_dir) = platform_agent_invocation(
+        cmd_name.clone(),
+        cmd_args.clone(),
+        resolved_via_wsl,
+        work_dir,
+    );
 
     let mut cmd = async_cmd(&final_cmd);
     cmd.args(&final_args)
@@ -7744,9 +8366,29 @@ fn try_spawn(
         }
     }
 
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("Spawn failed for {}: {}", cmd_name, e))?;
+    let invocation_receipt = (task_worker_context.is_some()
+        && (binary == "claude" || npx_package == Some("@anthropic-ai/claude-code")))
+    .then(|| command_invocation_size_receipt(&cmd, stdin_payload));
+    if let Some(receipt) = invocation_receipt {
+        tracing::info!(
+            target: "kronn::agent::claude_task_worker",
+            "Claude task-worker invocation receipt: {}",
+            receipt.compact()
+        );
+        receipt.validate_single_argument_limit()?;
+    }
+
+    let mut child = cmd.spawn().map_err(|error| {
+        if let Some(receipt) = invocation_receipt {
+            format!(
+                "Spawn failed for {cmd_name}: {error}; Claude task-worker invocation receipt: {}. \
+                 Use `task_exec_reassign` to move this execution to another available worker.",
+                receipt.compact()
+            )
+        } else {
+            format!("Spawn failed for {cmd_name}: {error}")
+        }
+    })?;
 
     // Feed the prompt over stdin when requested. The caller uses this path
     // for Claude Code to keep large prompts off the argv size cap (~128 KiB
@@ -8072,7 +8714,7 @@ pub fn parse_token_usage(
             }
             (response.to_string(), 0)
         }
-        AgentType::Ollama | AgentType::LiteLlm | AgentType::Nvidia => {
+        AgentType::Ollama | AgentType::LiteLlm | AgentType::Nvidia | AgentType::Custom => {
             // Both HTTP backends put "ollama_tokens:prompt:eval" in stderr_capture
             // (written by `forward_chat_line` on the terminal chunk); the marker
             // keeps its original name because it is an internal wire detail. One

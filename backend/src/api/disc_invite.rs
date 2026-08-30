@@ -510,6 +510,12 @@ fn join_next_steps(
          unchanged tasks merely to report progress. The whole \
          `kronn-internal` surface is available to you, not just the `disc_*` \
          tools: workflows, api_call, skills, directives, profiles, audits.\n\
+         When a user request is clear, actionable, and has no matching planned \
+         task, check `plan_get` and `task_list` for an equivalent task first, \
+         then create exactly one task with `task_create`. Do not create a \
+         duplicate when the work is already planned or in flight. If the \
+         request, ownership, or scope is ambiguous, do not create or delegate \
+         it: submit a human-gated `kronn-plan-action` proposal instead.\n\
          Room messages support Markdown plus visual fences: `mermaid` renders \
          a diagram, `kronn-doc-preview` renders sandboxed HTML with PDF/DOCX \
          actions, and `kronn-doc-data` exposes CSV/XLSX/PPTX export. A plain \
@@ -525,8 +531,23 @@ fn join_next_steps(
          external action, call `disc_append` with a concise \
          \"task / scope / next action\" update. Peers and the human must know \
          what you are taking before implementation starts. Pure context reads \
-         do not need a noisy announcement. If the scope changes materially, \
-         post one updated intent before continuing.\n\n\
+         do not need a noisy announcement. For clear, independent tasks, use \
+         PARALLEL LANES when suitable workers are available: tasks that have \
+         no overlapping files, dependencies, or unresolved decisions CAN and \
+         MUST be launched simultaneously. Before any launch, make one readable \
+         `disc_append` allocation listing every lane's task, worker, scope, and \
+         why the lanes do not overlap. Refuse parallelism when files, \
+         dependencies, or decisions overlap; keep that work in one lane or \
+         resolve the overlap first. For every lane separately, call \
+         `agent_list`, then use `task_exec_prepare` followed by \
+         `task_exec_launch` only when its selected worker is available and its \
+         preflight is launchable. Respect the available worker capacity, and do \
+         not wait for one ready lane to finish before launching another ready \
+         lane. For example, two independent ready tasks use two separate \
+         prepare/launch pairs, then each keeps its own `task_exec_status` and \
+         `task_exec_review`. Never invent a child room or launch a duplicate \
+         execution. If the scope changes materially, post one updated intent \
+         before continuing.\n\n\
          RECONNECTING IS ALREADY HANDLED — DO NOT ASK FOR A NEW TOKEN :\n\
          This join linked your durable CLI session to this room (see \
          `session_bound` in the join result). After an MCP reload, call \
@@ -1267,13 +1288,14 @@ pub async fn wait_for_peer(
                                     SELECT GROUP_CONCAT(
                                         ordered.target_kind || '|' ||
                                         ordered.agent_type || '|' ||
+                                        COALESCE(ordered.connection_id, '') || '|' ||
                                         COALESCE(ordered.cli_session_id, '') || '|' ||
                                         COALESCE(ordered.model_tier, ''),
                                         ','
                                     )
                                     FROM (
-                                        SELECT mt.target_kind, mt.agent_type, mt.cli_session_id,
-                                               mt.model_tier
+                                        SELECT mt.target_kind, mt.agent_type, mt.connection_id,
+                                               mt.cli_session_id, mt.model_tier
                                         FROM message_targets mt
                                         WHERE mt.message_id = messages.id
                                         ORDER BY mt.position ASC
@@ -1307,13 +1329,14 @@ pub async fn wait_for_peer(
                                     SELECT GROUP_CONCAT(
                                         ordered.target_kind || '|' ||
                                         ordered.agent_type || '|' ||
+                                        COALESCE(ordered.connection_id, '') || '|' ||
                                         COALESCE(ordered.cli_session_id, '') || '|' ||
                                         COALESCE(ordered.model_tier, ''),
                                         ','
                                     )
                                     FROM (
-                                        SELECT mt.target_kind, mt.agent_type, mt.cli_session_id,
-                                               mt.model_tier
+                                        SELECT mt.target_kind, mt.agent_type, mt.connection_id,
+                                               mt.cli_session_id, mt.model_tier
                                         FROM message_targets mt
                                         WHERE mt.message_id = message_revision_events.target_message_id
                                         ORDER BY mt.position ASC
@@ -1344,7 +1367,7 @@ pub async fn wait_for_peer(
                                 serialized
                                     .split(',')
                                     .filter_map(|target| {
-                                        let mut fields = target.splitn(4, '|');
+                                        let mut fields = target.splitn(5, '|');
                                         let kind = match fields.next()? {
                                             "discussion_agent" => MessageTargetKind::DiscussionAgent,
                                             "cli" => MessageTargetKind::Cli,
@@ -1353,6 +1376,10 @@ pub async fn wait_for_peer(
                                         let agent_type = crate::db::discussions::parse_agent_type(
                                             fields.next()?,
                                         );
+                                        let connection_id = fields
+                                            .next()
+                                            .filter(|value| !value.is_empty())
+                                            .map(str::to_owned);
                                         let cli_session_id =
                                             fields.next().and_then(|value| value.parse().ok());
                                         let tier = match fields.next() {
@@ -1362,6 +1389,7 @@ pub async fn wait_for_peer(
                                             _ => None,
                                         };
                                         Some(MessageTarget {
+                                            connection_id,
                                             kind,
                                             agent_type,
                                             cli_session_id,
@@ -1739,13 +1767,14 @@ fn load_awareness_batch(
                         SELECT GROUP_CONCAT(
                             ordered.target_kind || '|' ||
                             ordered.agent_type || '|' ||
+                            COALESCE(ordered.connection_id, '') || '|' ||
                             COALESCE(ordered.cli_session_id, '') || '|' ||
                             COALESCE(ordered.model_tier, ''),
                             ','
                         )
                         FROM (
-                            SELECT mt.target_kind, mt.agent_type, mt.cli_session_id,
-                                   mt.model_tier
+                            SELECT mt.target_kind, mt.agent_type, mt.connection_id,
+                                   mt.cli_session_id, mt.model_tier
                             FROM message_targets mt
                             WHERE mt.message_id = messages.id
                             ORDER BY mt.position ASC
@@ -1784,13 +1813,14 @@ fn load_awareness_batch(
                         SELECT GROUP_CONCAT(
                             ordered.target_kind || '|' ||
                             ordered.agent_type || '|' ||
+                            COALESCE(ordered.connection_id, '') || '|' ||
                             COALESCE(ordered.cli_session_id, '') || '|' ||
                             COALESCE(ordered.model_tier, ''),
                             ','
                         )
                         FROM (
-                            SELECT mt.target_kind, mt.agent_type, mt.cli_session_id,
-                                   mt.model_tier
+                            SELECT mt.target_kind, mt.agent_type, mt.connection_id,
+                                   mt.cli_session_id, mt.model_tier
                             FROM message_targets mt
                             WHERE mt.message_id = message_revision_events.target_message_id
                             ORDER BY mt.position ASC
@@ -1821,7 +1851,7 @@ fn load_awareness_batch(
                     serialized
                         .split(',')
                         .filter_map(|target| {
-                            let mut fields = target.splitn(4, '|');
+                            let mut fields = target.splitn(5, '|');
                             let kind = match fields.next()? {
                                 "discussion_agent" => MessageTargetKind::DiscussionAgent,
                                 "cli" => MessageTargetKind::Cli,
@@ -1829,6 +1859,10 @@ fn load_awareness_batch(
                             };
                             let agent_type =
                                 crate::db::discussions::parse_agent_type(fields.next()?);
+                            let connection_id = fields
+                                .next()
+                                .filter(|value| !value.is_empty())
+                                .map(str::to_owned);
                             let cli_session_id = fields.next().and_then(|value| value.parse().ok());
                             let tier = match fields.next() {
                                 Some("economy") => Some(crate::models::ModelTier::Economy),
@@ -1837,6 +1871,7 @@ fn load_awareness_batch(
                                 _ => None,
                             };
                             Some(MessageTarget {
+                                connection_id,
                                 kind,
                                 agent_type,
                                 cli_session_id,
@@ -2004,9 +2039,17 @@ fn invite_handoff(token: &str) -> String {
          ne demande pas qu'on te réexplique l'état, charge-le.\n\
          Tu peux créer, modifier, prioriser et cocher ces tâches \
          (`task_create`, `task_update`, `task_update_dod`, `task_add_blocker`, `task_remove_blocker`), \
-         en utilisant les outils `kronn-internal` autorisés.\n\
+         en utilisant les outils `kronn-internal` autorisés. Pour une demande \
+         utilisateur claire non planifiée, vérifie d'abord les doublons avec \
+         `plan_get` et `task_list`, puis crée une seule tâche ; si elle est \
+         ambiguë, propose un `kronn-plan-action` human-gated au lieu de créer \
+         ou déléguer. \
          Avant ta première action substantielle, annonce via `disc_append` la \
-         tâche, le périmètre et la prochaine action dans la room.\n\
+         tâche, le périmètre et la prochaine action dans la room. \
+         Pour un lot clair et indépendant, annonce son périmètre de délégation, \
+         choisis un worker via `agent_list`, puis enchaîne `task_exec_prepare` \
+         et `task_exec_launch` seulement si le preflight est launchable ; ne \
+         lance jamais un doublon et suis l'exécution avec `task_exec_status`.\n\
          Puis reste dans la room : boucle sur `disc_wait_for_peer` et réponds à \
          ce qui arrive. Si c'est calme, prends la tâche suivante du plan et \
          rends-en compte — te taire est lu comme un départ."
@@ -2521,6 +2564,16 @@ mod tests {
             assert!(handoff.contains(tool), "must state that {tool} is allowed");
         }
         assert!(handoff.contains("kronn-internal"));
+        assert!(handoff.contains("doublons"));
+        assert!(handoff.contains("kronn-plan-action"));
+        for tool in [
+            "agent_list",
+            "task_exec_prepare",
+            "task_exec_launch",
+            "task_exec_status",
+        ] {
+            assert!(handoff.contains(tool), "must state the dogfood path {tool}");
+        }
         assert!(
             handoff.contains("Avant ta première action substantielle")
                 && handoff.contains("périmètre")
@@ -6426,6 +6479,44 @@ mod tests {
             "plan maintenance must be event-driven, never a noisy no-op rewrite",
         );
         assert!(
+            steps.contains("clear, actionable")
+                && steps.contains("no matching planned task")
+                && steps.contains("equivalent task")
+                && steps.contains("task_create"),
+            "clear unplanned user requests must be duplicate-checked before task creation",
+        );
+        assert!(
+            steps.contains("kronn-plan-action")
+                && steps.contains("ambiguous")
+                && steps.contains("do not create or delegate"),
+            "ambiguous requests must remain human-gated",
+        );
+        for contract in [
+            "PARALLEL LANES",
+            "CAN and MUST be launched simultaneously",
+            "one readable `disc_append` allocation",
+            "every lane's task, worker, scope",
+            "files, dependencies, or unresolved decisions",
+            "Refuse parallelism",
+            "Respect the available worker capacity",
+            "do not wait for one ready lane to finish before launching another ready lane",
+            "two independent ready tasks use two separate prepare/launch pairs",
+            "agent_list",
+            "task_exec_prepare",
+            "task_exec_launch",
+            "selected worker is available",
+            "preflight is launchable",
+            "task_exec_review",
+            "Never invent a child room",
+            "duplicate execution",
+            "task_exec_status",
+        ] {
+            assert!(
+                steps.contains(contract),
+                "join protocol must state the delegated dogfood contract {contract}",
+            );
+        }
+        assert!(
             steps.contains("plan_snapshot") && steps.contains("reconnect the Kronn MCP"),
             "a stale MCP tool catalogue needs an explicit read-only fallback",
         );
@@ -6455,6 +6546,28 @@ mod tests {
         assert!(
             steps.contains("indistinguishable from having left"),
             "must state why silence is not acceptable",
+        );
+    }
+
+    #[test]
+    fn join_protocol_requires_two_independent_lanes_to_launch_in_parallel() {
+        let steps = join_next_steps("d-1", "Room", 2, None);
+
+        assert!(
+            steps.contains("no overlapping files, dependencies, or unresolved decisions")
+                && steps.contains("MUST be launched simultaneously"),
+            "only independent lanes may launch in parallel",
+        );
+        assert!(
+            steps.contains("two independent ready tasks use two separate prepare/launch pairs")
+                && steps.contains(
+                    "do not wait for one ready lane to finish before launching another ready lane"
+                ),
+            "two ready lanes must launch independently rather than sequentially",
+        );
+        assert!(
+            steps.contains("each keeps its own `task_exec_status` and `task_exec_review`"),
+            "each parallel lane must retain its own durable execution lifecycle",
         );
     }
 

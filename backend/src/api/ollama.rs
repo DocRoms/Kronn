@@ -9,12 +9,23 @@
 
 use crate::models::*;
 use crate::AppState;
-use axum::{extract::State, Json};
-use futures::StreamExt;
+use axum::{
+    extract::State,
+    response::sse::{Event, Sse},
+    Json,
+};
+use futures::{Stream, StreamExt};
+use std::{convert::Infallible, pin::Pin, time::Duration};
 
-/// Public accessor for the runner's HTTP execution path.
-pub fn ollama_base_url_pub() -> String {
-    ollama_base_url()
+type OllamaSseStream = Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>>;
+
+/// Resolve the endpoint supplied by the runner, falling back to Ollama's
+/// process-level configuration when no invocation-local endpoint was given.
+///
+/// Production currently supplies `None`; the explicit branch exists so an
+/// isolated invocation (notably a test mock) never has to mutate `OLLAMA_HOST`.
+pub fn resolve_base_url_pub(explicit: Option<&str>) -> String {
+    explicit.map(str::to_owned).unwrap_or_else(ollama_base_url)
 }
 
 /// Resolve the Ollama API base URL.
@@ -293,6 +304,187 @@ fn override_warnings(
 /// echoed back verbatim, never executed — this exists only against an
 /// accidental paste of something enormous, not a security boundary.
 const MAX_MODEL_NAME_LEN: usize = 256;
+const PULL_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const PULL_HEADER_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_PULL_LINE_BYTES: usize = 1024 * 1024;
+const MAX_PULL_ERROR_BYTES: usize = 64 * 1024;
+
+/// A deliberately narrow representation of Ollama's NDJSON pull records.
+/// Keeping the upstream shape private means the browser only has to handle
+/// the progress contract documented by `OllamaPullProgress`.
+#[derive(Debug, serde::Deserialize)]
+struct OllamaPullRecord {
+    status: Option<String>,
+    digest: Option<String>,
+    completed: Option<u64>,
+    total: Option<u64>,
+    error: Option<String>,
+}
+
+fn normalize_pull_record(record: OllamaPullRecord) -> Result<OllamaPullProgress, String> {
+    if let Some(error) = record.error.filter(|error| !error.trim().is_empty()) {
+        return Err(classify_pull_error(&error));
+    }
+    let status = record
+        .status
+        .filter(|status| !status.trim().is_empty())
+        .ok_or_else(|| {
+            "Ollama returned an invalid pull progress record. Try again or update Ollama."
+                .to_string()
+        })?;
+    Ok(OllamaPullProgress {
+        status,
+        digest: record.digest,
+        completed: record.completed,
+        total: record.total,
+    })
+}
+
+fn classify_pull_error(error: &str) -> String {
+    let lower = error.to_ascii_lowercase();
+    if lower.contains("no space left") || lower.contains("disk full") {
+        "Ollama could not finish because the disk is full. Free disk space, then try again.".into()
+    } else if lower.contains("not found") || lower.contains("manifest unknown") {
+        "Ollama could not find this model. Check its name and tag, then try again.".into()
+    } else if lower.contains("connection") || lower.contains("network") || lower.contains("timeout")
+    {
+        "Ollama lost network access while downloading. Check your connection, then try again."
+            .into()
+    } else {
+        format!("Ollama could not download the model: {error}")
+    }
+}
+
+fn pull_sse_error(message: impl Into<String>) -> Sse<OllamaSseStream> {
+    let message = message.into();
+    let stream: OllamaSseStream = Box::pin(futures::stream::once(async move {
+        Ok(Event::default()
+            .event("error")
+            .data(serde_json::json!({ "message": message }).to_string()))
+    }));
+    Sse::new(crate::core::sse_limits::bounded(stream))
+}
+
+async fn bounded_response_text(response: reqwest::Response) -> String {
+    let mut body = response.bytes_stream();
+    let mut bytes = Vec::new();
+    while let Some(chunk) = body.next().await {
+        let Ok(chunk) = chunk else { break };
+        let remaining = MAX_PULL_ERROR_BYTES.saturating_sub(bytes.len());
+        bytes.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+        if bytes.len() == MAX_PULL_ERROR_BYTES {
+            break;
+        }
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// POST /api/ollama/pull
+///
+/// Proxies Ollama's NDJSON `POST /api/pull` response as SSE. The request body
+/// owns the upstream response, so when the browser aborts the SSE request the
+/// response body is dropped and the in-flight Ollama request is cancelled too.
+pub async fn pull(Json(request): Json<PullOllamaModelRequest>) -> Sse<OllamaSseStream> {
+    let model = request.model.trim().to_string();
+    if model.is_empty() {
+        return pull_sse_error("Choose a model before starting the download.");
+    }
+    if model.chars().count() > MAX_MODEL_NAME_LEN {
+        return pull_sse_error(format!(
+            "The model name is longer than {MAX_MODEL_NAME_LEN} characters. Check the model name and try again."
+        ));
+    }
+
+    let client = match reqwest::Client::builder()
+        .connect_timeout(PULL_CONNECT_TIMEOUT)
+        .build()
+    {
+        Ok(client) => client,
+        Err(error) => {
+            return pull_sse_error(format!("Could not start the Ollama download: {error}"))
+        }
+    };
+    let upstream = client
+        .post(format!("{}/api/pull", ollama_base_url()))
+        .json(&serde_json::json!({ "model": model, "stream": true }))
+        .send();
+    let response = match tokio::time::timeout(PULL_HEADER_TIMEOUT, upstream).await {
+        Err(_) => return pull_sse_error("Ollama did not start the download within 30 seconds. Check that it is responsive, then try again."),
+        Ok(result) => match result {
+        Ok(response) if response.status().is_success() => response,
+        Ok(response) => {
+            let detail = tokio::time::timeout(PULL_HEADER_TIMEOUT, bounded_response_text(response))
+                .await
+                .unwrap_or_else(|_| "timeout reading Ollama's error response".to_string());
+            return pull_sse_error(classify_pull_error(&detail));
+        }
+        Err(error) => {
+            return pull_sse_error(format!(
+                "Could not reach Ollama to start the download. Check that it is running and reachable, then try again. ({error})"
+            ));
+        }
+        },
+    };
+
+    let stream: OllamaSseStream = Box::pin(async_stream::stream! {
+        let mut lines = response.bytes_stream();
+        let mut pending = String::new();
+        while let Some(chunk) = lines.next().await {
+            let chunk = match chunk {
+                Ok(chunk) => chunk,
+                Err(error) => {
+                    yield Ok(Event::default().event("error").data(
+                        serde_json::json!({ "message": format!("The Ollama download stream stopped unexpectedly. Check your network, then try again. ({error})") }).to_string(),
+                    ));
+                    return;
+                }
+            };
+            if pending.len().saturating_add(chunk.len()) > MAX_PULL_LINE_BYTES {
+                yield Ok(Event::default().event("error").data(
+                    serde_json::json!({ "message": "Ollama sent an oversized download update. Update Ollama, then try again." }).to_string(),
+                ));
+                return;
+            }
+            pending.push_str(&String::from_utf8_lossy(&chunk));
+            while let Some(newline) = pending.find('\n') {
+                let line = pending[..newline].trim().to_string();
+                pending.drain(..=newline);
+                if line.is_empty() { continue; }
+                match serde_json::from_str::<OllamaPullRecord>(&line)
+                    .map_err(|_| "Ollama returned an invalid pull progress record. Try again or update Ollama.".to_string())
+                    .and_then(normalize_pull_record)
+                {
+                    Ok(progress) => {
+                        let finished = progress.status == "success";
+                        yield Ok(Event::default().event(if finished { "success" } else { "progress" }).data(
+                            serde_json::to_string(&progress).unwrap_or_else(|_| "{}".to_string()),
+                        ));
+                        if finished { return; }
+                    }
+                    Err(error) => {
+                        yield Ok(Event::default().event("error").data(
+                            serde_json::json!({ "message": error }).to_string(),
+                        ));
+                        return;
+                    }
+                }
+            }
+        }
+        if !pending.trim().is_empty() {
+            match serde_json::from_str::<OllamaPullRecord>(pending.trim())
+                .map_err(|_| "Ollama returned an invalid pull progress record. Try again or update Ollama.".to_string())
+                .and_then(normalize_pull_record)
+            {
+                Ok(progress) if progress.status == "success" => yield Ok(Event::default().event("success").data(serde_json::to_string(&progress).unwrap_or_else(|_| "{}".to_string()))),
+                Ok(_) => yield Ok(Event::default().event("error").data(serde_json::json!({ "message": "Ollama ended the download without confirming success. You can safely try again." }).to_string())),
+                Err(error) => yield Ok(Event::default().event("error").data(serde_json::json!({ "message": error }).to_string())),
+            }
+        } else {
+            yield Ok(Event::default().event("error").data(serde_json::json!({ "message": "Ollama ended the download without confirming success. You can safely try again." }).to_string()));
+        }
+    });
+    Sse::new(crate::core::sse_limits::bounded(stream))
+}
 
 pub async fn set_context_override(
     State(state): State<AppState>,
@@ -368,6 +560,12 @@ pub async fn set_context_override(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_runner_endpoint_is_used_verbatim() {
+        let mock_endpoint = "http://127.0.0.1:43123";
+        assert_eq!(resolve_base_url_pub(Some(mock_endpoint)), mock_endpoint);
+    }
 
     /// KT-405 — an operator's request is never refused for being LARGER than
     /// what Kronn's own figures suggest; it is warned. The floor rejection
@@ -495,5 +693,103 @@ mod tests {
             context_origin_label(&CtxCapOrigin::PortableFallback),
             "portable_fallback"
         );
+    }
+
+    #[test]
+    fn pull_progress_preserves_bytes_and_unknown_totals() {
+        let progress = normalize_pull_record(OllamaPullRecord {
+            status: Some("downloading".into()),
+            digest: Some("sha256:abc".into()),
+            completed: Some(1_048_576),
+            total: None,
+            error: None,
+        })
+        .expect("valid partial progress");
+        assert_eq!(progress.completed, Some(1_048_576));
+        assert_eq!(progress.total, None);
+        assert_eq!(progress.digest.as_deref(), Some("sha256:abc"));
+    }
+
+    #[test]
+    fn pull_success_is_a_normalized_terminal_record() {
+        let progress = normalize_pull_record(OllamaPullRecord {
+            status: Some("success".into()),
+            digest: None,
+            completed: None,
+            total: None,
+            error: None,
+        })
+        .expect("success is a valid record");
+        assert_eq!(progress.status, "success");
+    }
+
+    #[test]
+    fn pull_errors_are_actionable_and_invalid_records_are_refused() {
+        let disk_error = normalize_pull_record(OllamaPullRecord {
+            status: None,
+            digest: None,
+            completed: None,
+            total: None,
+            error: Some("write: no space left on device".into()),
+        })
+        .expect_err("disk-full upstream error must stop the pull");
+        assert!(disk_error.contains("disk is full"), "{disk_error}");
+
+        let invalid = normalize_pull_record(OllamaPullRecord {
+            status: None,
+            digest: None,
+            completed: None,
+            total: None,
+            error: None,
+        })
+        .expect_err("a record without status or error is invalid");
+        assert!(invalid.contains("invalid pull progress"), "{invalid}");
+    }
+
+    #[test]
+    fn pull_error_classifier_distinguishes_network_and_unknown_models() {
+        assert!(classify_pull_error("manifest unknown").contains("could not find this model"));
+        assert!(classify_pull_error("network timeout").contains("network access"));
+    }
+
+    #[test]
+    fn pull_bounds_allow_long_downloads_but_reject_unbounded_records() {
+        assert!(PULL_CONNECT_TIMEOUT < PULL_HEADER_TIMEOUT);
+        const {
+            assert!(MAX_PULL_LINE_BYTES >= 1024 * 1024);
+            assert!(MAX_PULL_ERROR_BYTES < MAX_PULL_LINE_BYTES);
+        }
+    }
+
+    #[tokio::test]
+    async fn dropping_a_pull_sse_closes_its_upstream_request() {
+        use axum::response::IntoResponse;
+        use http_body_util::BodyExt;
+        use tokio::sync::oneshot;
+
+        let (closed_tx, closed_rx) = oneshot::channel();
+        struct DropNotify(Option<oneshot::Sender<()>>);
+        impl Drop for DropNotify {
+            fn drop(&mut self) {
+                if let Some(sender) = self.0.take() {
+                    let _ = sender.send(());
+                }
+            }
+        }
+        let stream: OllamaSseStream = Box::pin(async_stream::stream! {
+            let _upstream_response = DropNotify(Some(closed_tx));
+            futures::future::pending::<()>().await;
+            yield Ok(Event::default());
+        });
+        let mut body = Sse::new(stream).into_response().into_body();
+        let reader = tokio::spawn(async move { body.frame().await });
+        tokio::task::yield_now().await;
+        reader.abort();
+        let _ = reader.await;
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), closed_rx)
+            .await
+            .expect("cancelling the SSE response drops its upstream owner")
+            .expect("upstream owner reports cancellation");
     }
 }

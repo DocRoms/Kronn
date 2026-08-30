@@ -157,6 +157,7 @@ mod tests {
                 pattern: None,
             }],
             agent: AgentType::ClaudeCode,
+            connection_id: None,
             project_id: None,
             skill_ids: vec!["skill-a".to_string(), "skill-b".to_string()],
             profile_ids: vec!["coder".to_string()],

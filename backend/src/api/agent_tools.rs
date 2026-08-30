@@ -511,7 +511,7 @@ fn orchestration_tool_catalogue() -> Vec<Value> {
             "Reassign a blocked/interrupted execution as its parent-room principal while preserving durable child/worktree/checkpoints.",
             json!({
                 "task_execution_id": {"type": "string"},
-                "worker": {"type": "object", "description": "CampaignWorkerSelection with typed target and optional model/profile."},
+                "worker": {"type": "object", "description": "Typed MessageTarget: kind, agent_type, optional exact cli_session_id and tier — the same object agent_list hands back and task_exec_prepare/task_exec_launch accept as worker."},
                 "reason": {"type": "string"}
             }),
             json!(["task_execution_id", "worker", "reason"]),
@@ -667,7 +667,6 @@ fn worker_room_catalogue(catalogue: Vec<Value>) -> Vec<Value> {
         "agent_list",
         "task_exec_prepare",
         "task_exec_launch",
-        "task_exec_status",
         "task_exec_cancel",
         "task_exec_reassign",
         "task_exec_review",
@@ -1218,7 +1217,7 @@ impl KronnToolExecutor {
 
         match call.name.as_str() {
             "agent_list" => {
-                match crate::api::orchestration::task_worker_catalogue_for_discussion(
+                match crate::api::orchestration::target_aware_task_worker_catalogue_for_discussion(
                     &self.state,
                     &discussion_id,
                 )
@@ -1343,16 +1342,10 @@ impl KronnToolExecutor {
                                 return fail(call, format!("invalid validations: {error}"))
                             }
                         };
-                        if let Some(bad) = parsed.iter().find(|spec| {
-                            spec.command.trim().is_empty() || spec.timeout_secs == Some(0)
-                        }) {
-                            return fail(
-                                call,
-                                format!(
-                                    "invalid validations: command must be non-empty and timeout_secs must be at least 1 (got {})",
-                                    serde_json::to_string(bad).unwrap_or_default()
-                                ),
-                            );
+                        if let Err(reason) =
+                            crate::api::orchestration::validate_new_validation_specs(&parsed)
+                        {
+                            return fail(call, format!("invalid validations: {reason}"));
                         }
                         parsed
                     }
@@ -1450,6 +1443,9 @@ impl KronnToolExecutor {
                     Err(error) => return fail(call, format!("manifest is not JSON: {error}")),
                 };
                 let actor_session_id = self.actor_session_id();
+                let Some(source_dispatch_job_id) = self.source_dispatch_job_id.as_deref() else {
+                    return fail(call, "execution not found or caller is not a party");
+                };
                 match crate::api::orchestration::deliver_native_worker_manifest(
                     &self.state.db,
                     &execution_id,
@@ -1460,6 +1456,7 @@ impl KronnToolExecutor {
                         alias: &self.actor_id,
                         actor_session_id: actor_session_id.as_deref(),
                     },
+                    source_dispatch_job_id,
                     &manifest_json,
                 )
                 .await
@@ -1583,11 +1580,25 @@ impl KronnToolExecutor {
                 let Some(reason) = required_string(call, "reason") else {
                     return fail(call, "missing required field `reason`");
                 };
-                let worker = match serde_json::from_value::<crate::models::CampaignWorkerSelection>(
+                let target = match serde_json::from_value::<crate::models::MessageTarget>(
                     call.arguments["worker"].clone(),
                 ) {
-                    Ok(worker) => worker,
-                    Err(error) => return fail(call, format!("invalid worker selection: {error}")),
+                    Ok(target) => target,
+                    Err(error) => {
+                        return fail(
+                            call,
+                            format!(
+                                "worker must be the typed MessageTarget object copied verbatim \
+                                 from agent_list (kind/agent_type/...), not the internal \
+                                 CampaignWorkerSelection envelope: {error}"
+                            ),
+                        )
+                    }
+                };
+                let worker = crate::models::CampaignWorkerSelection {
+                    target,
+                    model: None,
+                    profile_id: None,
                 };
                 let authorized = {
                     let execution_id = execution_id.clone();
@@ -2936,10 +2947,10 @@ mod tests {
             projected["properties"]["dod_status"]["items"]["additionalProperties"],
             json!(false)
         );
-        assert!(worker.iter().all(|tool| {
+        assert!(worker.iter().any(|tool| {
             tool["function"]["name"]
                 .as_str()
-                .is_none_or(|name| name != "task_exec_status")
+                .is_some_and(|name| name == "task_exec_status")
         }));
     }
 

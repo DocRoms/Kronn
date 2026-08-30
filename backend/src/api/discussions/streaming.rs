@@ -104,7 +104,23 @@ async fn cli_task_worker_context(
     if runner::is_http_chat_agent(agent_type) {
         return Ok(None);
     }
+    let discussion_id_owned = discussion_id.to_string();
+    let is_task_worker_room = state
+        .db
+        .with_read_conn(move |conn| {
+            Ok(conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM task_executions \
+                 WHERE sub_discussion_id = ?1 AND worker_target_kind = 'agent')",
+                rusqlite::params![discussion_id_owned],
+                |row| row.get::<_, bool>(0),
+            )?)
+        })
+        .await?;
     let Some(dispatch_job_id) = dispatch_job_id else {
+        anyhow::ensure!(
+            !is_task_worker_room,
+            "task-worker launch is missing its immutable dispatch id"
+        );
         return Ok(None);
     };
     let lineage = state
@@ -120,12 +136,20 @@ async fn cli_task_worker_context(
         })
         .await?;
     let Some((execution, dispatch)) = lineage else {
+        anyhow::ensure!(
+            !is_task_worker_room,
+            "task-worker launch has no matching execution dispatch lineage"
+        );
         return Ok(None);
     };
 
     anyhow::ensure!(
         execution.worker_target_kind == Some(MessageTargetKind::Agent),
         "task dispatch is not owned by a launched discussion agent"
+    );
+    anyhow::ensure!(
+        execution.dispatch_job_id.as_deref() == Some(dispatch_job_id),
+        "task dispatch is no longer the execution's current worker dispatch"
     );
     anyhow::ensure!(
         execution.sub_discussion_id.as_deref() == Some(discussion_id),
@@ -153,6 +177,7 @@ async fn cli_task_worker_context(
         execution_id: execution.id,
         discussion_id: discussion_id.to_string(),
         agent_type: crate::db::orchestration::agent_type_to_db(agent_type),
+        dispatch_job_id: dispatch_job_id.to_string(),
         source_message_id: dispatch.trigger_message_id,
     }))
 }
@@ -364,6 +389,7 @@ mod native_http_tools_scope_tests {
         assert_eq!(context.execution_id, execution_id);
         assert_eq!(context.discussion_id, "d-worker");
         assert_eq!(context.agent_type, "Codex");
+        assert_eq!(context.dispatch_job_id, "dispatch-a");
         assert_eq!(context.source_message_id, "trigger-a");
 
         assert!(cli_task_worker_context(
@@ -398,8 +424,12 @@ mod native_http_tools_scope_tests {
             Some("unknown-dispatch"),
         )
         .await
-        .expect("ordinary dispatch is not a worker capability")
-        .is_none());
+        .is_err());
+        assert!(
+            cli_task_worker_context(&state, "d-worker", &AgentType::Codex, None)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -649,18 +679,27 @@ pub(crate) async fn make_agent_stream(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum AgentExecutionOutcome {
     Finished { success: bool },
-    PreflightFailed,
+    PreflightFailed { diagnostic: String },
     RuntimeUnavailable { reason: String },
 }
 
 fn agent_start_failure_outcome(agent_type: &AgentType, error: &str) -> AgentExecutionOutcome {
     let non_retryable_http_status = agent_http_status(error)
         .is_some_and(|status| (400..500).contains(&status) && !matches!(status, 408 | 425 | 429));
-    if matches!(agent_type, AgentType::LiteLlm | AgentType::Ollama)
-        || error.starts_with("Project path not found:")
+    if matches!(
+        agent_type,
+        AgentType::LiteLlm | AgentType::Nvidia | AgentType::Ollama | AgentType::Custom
+    ) || error.starts_with("Project path not found:")
+        || error.starts_with("Copilot task worker cannot start:")
         || non_retryable_http_status
     {
-        AgentExecutionOutcome::PreflightFailed
+        AgentExecutionOutcome::PreflightFailed {
+            diagnostic: if error.starts_with("Copilot task worker cannot start:") {
+                error.to_string()
+            } else {
+                "agent execution preflight failed".into()
+            },
+        }
     } else {
         AgentExecutionOutcome::RuntimeUnavailable {
             reason: error.to_string(),
@@ -764,7 +803,9 @@ fn finish_tracked_preflight(
     completion_tx: &mut Option<tokio::sync::oneshot::Sender<AgentExecutionOutcome>>,
 ) {
     if let Some(sender) = completion_tx.take() {
-        let _ = sender.send(AgentExecutionOutcome::PreflightFailed);
+        let _ = sender.send(AgentExecutionOutcome::PreflightFailed {
+            diagnostic: "agent execution preflight failed".into(),
+        });
     }
 }
 
@@ -1082,7 +1123,7 @@ async fn make_agent_stream_inner(
             .await
             .ok()
             .flatten()
-            .map(|job| (job.trigger_message_id, job.group_id))
+            .map(|job| (job.trigger_message_id, job.group_id, job.connection_id))
     } else {
         let did = discussion_id.clone();
         state
@@ -1093,12 +1134,15 @@ async fn make_agent_stream_inner(
             .await
             .ok()
             .flatten()
-            .map(|trigger| (trigger, None))
+            .map(|trigger| (trigger, None, None))
     };
     let dispatch_trigger_message_id = dispatch_metadata
         .as_ref()
-        .map(|(trigger, _)| trigger.clone());
-    let dispatch_group_id = dispatch_metadata.and_then(|(_, group)| group);
+        .map(|(trigger, _, _)| trigger.clone());
+    let dispatch_group_id = dispatch_metadata
+        .as_ref()
+        .and_then(|(_, group, _)| group.clone());
+    let dispatch_connection_id = dispatch_metadata.and_then(|(_, _, connection)| connection);
     // 0.8.5 — capture the agent-run start wallclock. The delta between
     // this and the moment we commit the Agent message gives us the
     // real reply duration in milliseconds (excludes user typing time).
@@ -1143,6 +1187,48 @@ async fn make_agent_stream_inner(
         }
     };
     let agent_type = agent_override.unwrap_or_else(|| disc.agent.clone());
+    let external_connection = if let Some(connection_id) = dispatch_connection_id.as_ref() {
+        let lookup_id = connection_id.clone();
+        match state
+            .db
+            .with_read_conn(move |conn| crate::db::external_api_connections::get(conn, &lookup_id))
+            .await
+        {
+            Ok(Some(connection))
+                if crate::db::external_api_connections::target_for_connection(&connection)
+                    .agent_type
+                    == agent_type =>
+            {
+                Some(connection)
+            }
+            Ok(Some(_)) => {
+                finish_tracked_preflight(&mut completion_tx);
+                let stream: SseStream = Box::pin(futures::stream::once(async move {
+                    Ok::<_, Infallible>(Event::default().event("error").data(
+                        serde_json::json!({
+                            "error": "The selected external API connection no longer matches this agent target. Select it again."
+                        })
+                        .to_string(),
+                    ))
+                }));
+                return Sse::new(prepend_initial_event(stream, initial_event.take()));
+            }
+            _ => {
+                finish_tracked_preflight(&mut completion_tx);
+                let stream: SseStream = Box::pin(futures::stream::once(async move {
+                    Ok::<_, Infallible>(Event::default().event("error").data(
+                        serde_json::json!({
+                            "error": "The selected external API connection no longer exists. Recreate or select it again in Settings → Agents."
+                        })
+                        .to_string(),
+                    ))
+                }));
+                return Sse::new(prepend_initial_event(stream, initial_event.take()));
+            }
+        }
+    } else {
+        None
+    };
     let mut attached_handoff_agents = vec![disc.agent.clone()];
     for participant in &disc.participants {
         if !attached_handoff_agents.contains(participant) {
@@ -1188,6 +1274,18 @@ async fn make_agent_stream_inner(
     } else {
         disc.model.clone()
     };
+    let disc_model = disc_model.or_else(|| {
+        external_connection.as_ref().and_then(|connection| {
+            let selected = match disc_tier {
+                crate::models::ModelTier::Economy => &connection.economy_model,
+                crate::models::ModelTier::Default => &connection.default_model,
+                crate::models::ModelTier::Reasoning => &connection.reasoning_model,
+            };
+            selected
+                .clone()
+                .or_else(|| connection.default_model.clone())
+        })
+    });
     let skill_ids = disc.skill_ids.clone();
     let directive_ids = disc.directive_ids.clone();
     let profile_ids = disc.profile_ids.clone();
@@ -1565,9 +1663,7 @@ async fn make_agent_stream_inner(
                     let _ = state
                         .db
                         .with_conn(move |conn| {
-                            let _ = crate::core::mcp_scanner::sync_project_mcps_to_disk(
-                                conn, &pid, &secret,
-                            );
+                            crate::core::mcp_scanner::sync_project_with_report(conn, &pid, &secret);
                             Ok::<_, anyhow::Error>(())
                         })
                         .await;
@@ -1750,6 +1846,20 @@ async fn make_agent_stream_inner(
             config.server.agent_handoff_blocked_agents.clone(),
         )
     };
+    let external_http_runtime = external_connection.as_ref().and_then(|connection| {
+        connection
+            .endpoint
+            .as_ref()
+            .map(|endpoint| runner::ExternalHttpRuntime {
+                display_name: connection.display_name.clone(),
+                mention_alias: connection.mention_alias.clone(),
+                endpoint: endpoint.clone(),
+                api_key: tokens
+                    .active_key_for(&connection.credential_slug)
+                    .filter(|key| !key.trim().is_empty())
+                    .map(str::to_string),
+            })
+    });
 
     // Build the context preamble: user bio (first exchange) + global context (always)
     let context_files_prompt = {
@@ -2067,6 +2177,25 @@ async fn make_agent_stream_inner(
                 ),
             )
         };
+        if let Some(job_id) = dispatch_job_id.as_ref() {
+            let progress_id = job_id.clone();
+            if let Err(error) = state
+                .db
+                .with_conn(move |conn| {
+                    crate::db::agent_dispatch::mark_progress(
+                        conn,
+                        &progress_id,
+                        "upstream_wait",
+                        None,
+                    )?;
+                    Ok(())
+                })
+                .await
+            {
+                tracing::warn!(dispatch_job_id = %job_id, "Unable to persist provider-call boundary: {error}");
+            }
+        }
+
         match runner::start_agent_with_config(runner::AgentStartConfig {
             work_dir: workspace_path.as_deref(),
             full_access,
@@ -2077,6 +2206,7 @@ async fn make_agent_stream_inner(
             tier: disc_tier,
             model_tiers: Some(&model_tiers_config),
             http_endpoints: Some(&http_endpoints),
+            external_http: external_http_runtime.as_ref(),
             ollama_context_overrides: Some(&ollama_context_overrides),
             http_request_timeout: Some(http_request_timeout),
             cancel_token: Some(cancel_token.clone()),
@@ -2095,6 +2225,9 @@ async fn make_agent_stream_inner(
         .await
         {
             Ok(mut process) => {
+                let _runtime_guard = dispatch_job_id.as_ref().map(|job_id| {
+                    crate::AgentRuntimeGuard::insert(&state.agent_runtime_registry, job_id.clone())
+                });
                 let mut full_response = String::new();
                 let mut stream_json_tokens: u64 = 0;
                 let mut stream_json_cost: Option<f64> = None;
@@ -2352,6 +2485,25 @@ async fn make_agent_stream_inner(
                                 stream_json_failure = Some(failure);
                             }
                             runner::StreamJsonEvent::ToolStart(name) => {
+                                if let Some(job_id) = dispatch_job_id.as_ref() {
+                                    let progress_id = job_id.clone();
+                                    let progress_tool = name.clone();
+                                    if let Err(error) = state
+                                        .db
+                                        .with_conn(move |conn| {
+                                            crate::db::agent_dispatch::mark_progress(
+                                                conn,
+                                                &progress_id,
+                                                "tool_activity",
+                                                Some(&progress_tool),
+                                            )?;
+                                            Ok(())
+                                        })
+                                        .await
+                                    {
+                                        tracing::warn!(dispatch_job_id = %job_id, "Unable to persist tool progress: {error}");
+                                    }
+                                }
                                 current_tool = Some(name);
                                 current_tool_input.clear();
                             }
@@ -2385,6 +2537,24 @@ async fn make_agent_stream_inner(
                                 }
                                 current_tool = None;
                                 current_tool_input.clear();
+                                if let Some(job_id) = dispatch_job_id.as_ref() {
+                                    let progress_id = job_id.clone();
+                                    if let Err(error) = state
+                                        .db
+                                        .with_conn(move |conn| {
+                                            crate::db::agent_dispatch::mark_progress(
+                                                conn,
+                                                &progress_id,
+                                                "upstream_wait",
+                                                Some("tool_completed"),
+                                            )?;
+                                            Ok(())
+                                        })
+                                        .await
+                                    {
+                                        tracing::warn!(dispatch_job_id = %job_id, "Unable to persist post-tool progress: {error}");
+                                    }
+                                }
                             }
                             runner::StreamJsonEvent::Skip => {}
                         }
@@ -4122,16 +4292,30 @@ mod agent_lifecycle_tests {
     fn http_agents_surface_runtime_outages_but_cli_runtime_absence_stays_deferred() {
         assert_eq!(
             agent_start_failure_outcome(&AgentType::LiteLlm, "LiteLLM unreachable at http://proxy"),
-            AgentExecutionOutcome::PreflightFailed
+            AgentExecutionOutcome::PreflightFailed {
+                diagnostic: "agent execution preflight failed".into()
+            }
         );
         assert_eq!(
             agent_start_failure_outcome(&AgentType::Ollama, "Ollama unreachable at localhost"),
-            AgentExecutionOutcome::PreflightFailed
+            AgentExecutionOutcome::PreflightFailed {
+                diagnostic: "agent execution preflight failed".into()
+            }
         );
         assert_eq!(
             agent_start_failure_outcome(&AgentType::Codex, "Binary 'codex' not found"),
             AgentExecutionOutcome::RuntimeUnavailable {
                 reason: "Binary 'codex' not found".into()
+            }
+        );
+        assert_eq!(
+            agent_start_failure_outcome(
+                &AgentType::CopilotCli,
+                "Copilot task worker cannot start: phase=auth; failure_kind=invalid_auth"
+            ),
+            AgentExecutionOutcome::PreflightFailed {
+                diagnostic:
+                    "Copilot task worker cannot start: phase=auth; failure_kind=invalid_auth".into()
             }
         );
     }

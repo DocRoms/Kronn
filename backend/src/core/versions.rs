@@ -26,7 +26,7 @@ use crate::models::AgentType;
 /// Latest known *stable* version of `rtk` (https://github.com/rtk-ai/rtk).
 /// Bump on each Kronn release after verifying with `rtk --version` against
 /// the GitHub releases page.
-pub const LATEST_RTK_VERSION: &str = "0.37.2";
+pub const LATEST_RTK_VERSION: &str = "0.46.0";
 
 /// Shell command that re-installs RTK over an existing install. The RTK
 /// upstream install.sh is idempotent — running it again upgrades in place.
@@ -37,26 +37,26 @@ pub const RTK_UPDATE_CMD: &str =
 /// each vendor's release page / npm registry. Pairs (agent → version).
 ///
 /// Bumped per Kronn release; see `docs/AGENTS.md` for the bump checklist.
-/// Captured 2026-08-19.
+/// Captured 2026-08-30.
 pub fn latest_known_agent_version(agent_type: &AgentType) -> Option<&'static str> {
     match agent_type {
         // @anthropic-ai/claude-code on npm
-        AgentType::ClaudeCode => Some("2.1.235"),
+        AgentType::ClaudeCode => Some("2.1.251"),
         // @openai/codex on npm
-        AgentType::Codex => Some("0.148.0"),
+        AgentType::Codex => Some("0.151.0"),
         // mistral-vibe on PyPI
-        AgentType::Vibe => Some("2.24.2"),
+        AgentType::Vibe => Some("2.24.5"),
         // @google/gemini-cli on npm
-        AgentType::GeminiCli => Some("0.55.1"),
+        AgentType::GeminiCli => Some("0.57.0"),
         // ollama (binary release on ollama.com)
-        AgentType::Ollama => Some("0.32.14"),
+        AgentType::Ollama => Some("0.33.2"),
         // @github/copilot on npm
-        AgentType::CopilotCli => Some("1.0.80"),
+        AgentType::CopilotCli => Some("1.0.82"),
         // Kiro (preview, AWS distributes via cli.kiro.dev — no stable version
         // promise yet; we don't surface a freshness pill).
         AgentType::Kiro => None,
         // litellm on PyPI
-        AgentType::LiteLlm => Some("1.97.0"),
+        AgentType::LiteLlm => Some("1.98.0"),
         // Remote endpoint: no local package, so no freshness pill to surface.
         AgentType::Nvidia => None,
         AgentType::Custom => None,

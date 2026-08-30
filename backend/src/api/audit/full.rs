@@ -270,6 +270,7 @@ pub async fn full_audit(
                 None
             }
         };
+    let audit_tier = req.tier.unwrap_or(crate::models::ModelTier::Reasoning);
     let agent_type = req.agent;
     if !super::agent_can_audit(&agent_type) {
         return sse_error(format!(
@@ -505,6 +506,8 @@ pub async fn full_audit(
         let is_full = matches!(kind, crate::models::AuditKind::Full);
         let status = scanner::detect_audit_status(&project_path_str);
         let template_installed = is_full && matches!(status, AiAuditStatus::NoTemplate);
+        let configured_adapter =
+            crate::core::root_agent_files::adapter_for_agent_type(&agent_type);
 
         if template_installed {
             let pp = project_path_str.clone();
@@ -512,6 +515,12 @@ pub async fn full_audit(
                 let project_path = scanner::resolve_host_path(&pp);
                 if !project_path.exists() {
                     return Err(format!("Project path not found: {}", project_path.display()));
+                }
+
+                let mut detected_adapters =
+                    crate::core::root_agent_files::detect_agent_adapters(&project_path);
+                if let Some(adapter) = configured_adapter {
+                    detected_adapters.insert(adapter);
                 }
 
                 // 0.7.1 — bootstrap to docs/ (or respect legacy ai/ when
@@ -561,8 +570,22 @@ pub async fn full_audit(
                     );
                 }
 
+                // Install only the shared entry plus adapters present in the
+                // target repository or explicitly selected for this audit.
+                // Every emitted template is rendered before publication, so a
+                // crashed audit cannot leave raw placeholders.
+                let adapter_report =
+                    crate::core::root_agent_files::install_detected_agent_files(
+                        &project_path,
+                        &template_dir,
+                        &detected_adapters,
+                    );
+                for failure in adapter_report.failed {
+                    tracing::warn!("Agent instruction install failed: {failure}");
+                }
+
                 // 0.8.3 (#278) — inject the Kronn-managed block into
-                // every root agent file. Replaces the pre-0.8.3
+                // every detected root agent file. Replaces the pre-0.8.3
                 // `copy if !exists` loop that silently skipped user-
                 // curated files → the agent never learned that Kronn
                 // had put `docs/AGENTS.md` in place. The new helper:
@@ -576,7 +599,13 @@ pub async fn full_audit(
                 // Failures on one file don't abort the audit — we log
                 // and move on so a single locked / permission-denied
                 // file doesn't break the whole install path.
-                for filename in crate::core::root_agent_files::KRONN_ROOT_AGENT_FILES {
+                for filename in crate::core::root_agent_files::desired_agent_template_paths(
+                    &detected_adapters,
+                )
+                .into_iter()
+                .filter(|path| {
+                    crate::core::root_agent_files::KRONN_ROOT_AGENT_FILES.contains(path)
+                }) {
                     let src = template_dir.join(filename);
                     let dst = project_path.join(filename);
                     let template_body = std::fs::read_to_string(&src).ok();
@@ -1026,7 +1055,7 @@ pub async fn full_audit(
 
             match runner::start_agent_with_config(runner::AgentStartConfig {
                 full_access: true,
-                tier: crate::models::ModelTier::Reasoning,
+                tier: audit_tier,
                 // Audit admission currently accepts CLI providers only. The
                 // auditor already has its bounded source/citation prompt; keep
                 // native HTTP tools explicitly absent so a future provider
@@ -1685,6 +1714,50 @@ pub async fn full_audit(
             }
         }
 
+        // ── Phase 2.6: Documentary optimization ──
+        // Deterministic and token-free. It runs after generation/reconciliation
+        // and before validation so an oversized or broken mandatory context can
+        // never earn a completed audit or spawn a validation discussion.
+        if run_is_complete && should_optimize_documents(kind) {
+            let pp = project_path.clone();
+            let optimization = tokio::task::spawn_blocking(move || {
+                crate::core::document_optimization::analyze_and_write(&pp)
+            }).await;
+            match optimization {
+                Ok(Ok(report)) => {
+                    let blocking: Vec<_> = report.blocking_diagnostics().cloned().collect();
+                    yield Event::default().event("documentary_optimization").data(
+                        serde_json::json!({
+                            "phase": report.phase,
+                            "agents": report.agents,
+                            "diagnostics": report.diagnostics,
+                            "blocking_count": blocking.len(),
+                        }).to_string()
+                    );
+                    if !blocking.is_empty() {
+                        any_step_warning = true;
+                        tracing::warn!(
+                            target: "kronn::invariant",
+                            diagnostics = blocking.len(),
+                            "documentary optimization blocked audit validation"
+                        );
+                    }
+                }
+                Ok(Err(e)) => {
+                    any_step_warning = true;
+                    yield Event::default().event("documentary_optimization").data(
+                        serde_json::json!({"phase": "documentary_optimization", "error": e, "blocking_count": 1}).to_string()
+                    );
+                }
+                Err(e) => {
+                    any_step_warning = true;
+                    yield Event::default().event("documentary_optimization").data(
+                        serde_json::json!({"phase": "documentary_optimization", "error": format!("task panicked: {e}"), "blocking_count": 1}).to_string()
+                    );
+                }
+            }
+        }
+
         // ── Phase 3: Create validation discussion ──
         // 0.8.2 — Specialized kinds (non-Full) skip the validation
         // discussion: they emit findings into their own index file and
@@ -1882,7 +1955,7 @@ pub async fn full_audit(
                 "devils-advocate".into(),
             ],
             directive_ids: vec![],
-            tier: crate::models::ModelTier::Default,
+            tier: audit_tier,
             model: None,
             pin_first_message: true,
             archived: false,
@@ -2116,6 +2189,10 @@ pub(crate) fn resolve_resume_row(
 /// checksums, which would mark stale foundation docs "fresh" without ever
 /// re-auditing them against current source.
 pub(crate) fn should_write_full_baseline(kind: crate::models::AuditKind) -> bool {
+    matches!(kind, crate::models::AuditKind::Full)
+}
+
+pub(crate) fn should_optimize_documents(kind: crate::models::AuditKind) -> bool {
     matches!(kind, crate::models::AuditKind::Full)
 }
 
@@ -2863,7 +2940,7 @@ mod drop_guard_tests {
 
 #[cfg(test)]
 mod finalization_decision_tests {
-    use super::should_write_full_baseline;
+    use super::{should_optimize_documents, should_write_full_baseline};
     use crate::models::AuditKind;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2970,6 +3047,25 @@ mod finalization_decision_tests {
                 !should_write_full_baseline(k),
                 "{k:?} must not touch the Full baseline"
             );
+        }
+    }
+
+    #[test]
+    fn only_full_runs_documentary_optimization() {
+        assert!(should_optimize_documents(AuditKind::Full));
+        for kind in [
+            AuditKind::Security,
+            AuditKind::Docker,
+            AuditKind::Performance,
+            AuditKind::Accessibility,
+            AuditKind::Rgaa,
+            AuditKind::Database,
+            AuditKind::ApiDesign,
+            AuditKind::CodeQuality,
+            AuditKind::Drift,
+            AuditKind::Custom,
+        ] {
+            assert!(!should_optimize_documents(kind), "{kind:?}");
         }
     }
 }

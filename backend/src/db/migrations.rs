@@ -543,6 +543,46 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "143_quick_items_pinned",
         include_str!("sql/143_quick_items_pinned.sql"),
     ),
+    (
+        "144_external_api_connections",
+        include_str!("sql/144_external_api_connections.sql"),
+    ),
+    (
+        "145_task_execution_worker_connection",
+        include_str!("sql/145_task_execution_worker_connection.sql"),
+    ),
+    (
+        "146_message_target_connection",
+        include_str!("sql/146_message_target_connection.sql"),
+    ),
+    (
+        "147_task_execution_commit_leases",
+        include_str!("sql/147_task_execution_commit_leases.sql"),
+    ),
+    (
+        "148_task_execution_commit_lease_liveness",
+        include_str!("sql/148_task_execution_commit_lease_liveness.sql"),
+    ),
+    (
+        "149_task_execution_progress",
+        include_str!("sql/149_task_execution_progress.sql"),
+    ),
+    (
+        "150_project_mcp_sync_report",
+        include_str!("sql/150_project_mcp_sync_report.sql"),
+    ),
+    (
+        "151_agent_dispatch_connection",
+        include_str!("sql/151_agent_dispatch_connection.sql"),
+    ),
+    (
+        "152_external_api_openrouter_preset",
+        include_str!("sql/152_external_api_openrouter_preset.sql"),
+    ),
+    (
+        "153_quick_prompt_external_connection",
+        include_str!("sql/153_quick_prompt_external_connection.sql"),
+    ),
 ];
 
 /// Apply one migration inside the caller-owned transaction.
@@ -558,6 +598,59 @@ fn apply_migration(tx: &rusqlite::Transaction<'_>, name: &str, sql: &str) -> Res
     tx.execute_batch(sql)?;
     if name == "139_task_execution_actor_session_repair" {
         ensure_actor_session_columns(tx)?;
+    }
+    if name == "152_external_api_openrouter_preset" {
+        ensure_openrouter_preset(tx)?;
+    }
+    Ok(())
+}
+
+fn ensure_openrouter_preset(tx: &rusqlite::Transaction<'_>) -> Result<()> {
+    const OLD_CHECK: &str = "origin_preset IN ('litellm', 'nvidia', 'other')";
+    const NEW_CHECK: &str = "origin_preset IN ('litellm', 'nvidia', 'open_router', 'other')";
+
+    let create_sql: String = tx.query_row(
+        "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'external_api_connections'",
+        [],
+        |row| row.get(0),
+    )?;
+    if create_sql.contains(NEW_CHECK) {
+        return Ok(());
+    }
+    if !create_sql.contains(OLD_CHECK) {
+        return Err(anyhow::anyhow!(
+            "external_api_connections has an unknown origin_preset constraint"
+        ));
+    }
+
+    // SQLite cannot ALTER a CHECK constraint. Rebuilding this parent table is
+    // unsafe once message/dispatch rows reference it: DROP TABLE performs an
+    // implicit delete and the migration fails at commit. Updating only the
+    // stored CREATE statement preserves the table root page, rows, indexes and
+    // foreign-key identity. The exact old fragment above is required before we
+    // enable writable_schema, so an unexpected schema is never rewritten.
+    let updated_sql = create_sql.replacen(OLD_CHECK, NEW_CHECK, 1);
+    let schema_version: i64 = tx.pragma_query_value(None, "schema_version", |row| row.get(0))?;
+    tx.execute_batch("PRAGMA writable_schema = ON;")?;
+    let update_result = tx.execute(
+        "UPDATE sqlite_schema SET sql = ?1 WHERE type = 'table' AND name = 'external_api_connections'",
+        [&updated_sql],
+    );
+    let reset_result = tx.execute_batch("PRAGMA writable_schema = OFF;");
+    let changed = update_result?;
+    reset_result?;
+    if changed != 1 {
+        return Err(anyhow::anyhow!(
+            "external_api_connections schema repair updated {changed} rows"
+        ));
+    }
+    tx.pragma_update(None, "schema_version", schema_version + 1)?;
+
+    let integrity: String = tx.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+    if integrity != "ok" {
+        return Err(anyhow::anyhow!(
+            "database integrity check failed after OpenRouter schema repair: {integrity}"
+        ));
     }
     Ok(())
 }
@@ -1782,6 +1875,214 @@ mod tests {
             !orchestration_applied,
             "backup must remain at the 0.10 schema boundary"
         );
+    }
+
+    /// Release gate for 0.12.0: upgrade the last 0.11 schema boundary through
+    /// migrations 144-153 using the production backup path, while retaining a
+    /// representative project -> discussion -> plan -> execution lineage and a
+    /// Quick Prompt created before named external connections existed.
+    #[test]
+    fn persistent_0_11_database_upgrades_through_153_and_preserves_core_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("kronn.db");
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            run_through(&conn, "143_quick_items_pinned").unwrap();
+            conn.execute_batch(
+                "INSERT INTO projects (id, name, path, created_at, updated_at)
+                 VALUES ('release-project', 'Release project', '/release-project',
+                         '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z');
+                 INSERT INTO discussions (id, project_id, title, created_at, updated_at)
+                 VALUES ('release-discussion', 'release-project', 'Release discussion',
+                         '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z');
+                 INSERT INTO planning_tasks
+                     (id, task_number, title, description, status, priority, created_at, updated_at)
+                 VALUES ('release-task', 1200, 'Release task', 'Preserve 0.11 data',
+                         'in_progress', 'high',
+                         '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z');
+                 INSERT INTO orchestration_runs
+                     (id, discussion_id, project_id, target_branch, created_at, updated_at)
+                 VALUES ('release-run', 'release-discussion', 'release-project', 'feat/0.12.0',
+                         '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z');
+                 INSERT INTO task_executions
+                     (id, orchestration_run_id, task_id, parent_discussion_id, status,
+                      child_branch, created_at, updated_at)
+                 VALUES ('release-execution', 'release-run', 'release-task',
+                         'release-discussion', 'Working', 'kronn/release-task',
+                         '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z');
+                 INSERT INTO quick_prompts
+                     (id, name, prompt_template, created_at, updated_at)
+                 VALUES ('release-qp', 'Release prompt', 'Translate {{text}}',
+                         '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z');",
+            )
+            .unwrap();
+        }
+
+        let conn = Connection::open(&db_path).unwrap();
+        run_with_backup(&conn, Some(&db_path)).unwrap();
+
+        let preserved: (String, String, String, String) = conn
+            .query_row(
+                "SELECT p.name, d.title, t.description, e.child_branch
+                   FROM projects p
+                   JOIN discussions d ON d.project_id = p.id
+                   JOIN planning_tasks t ON t.id = 'release-task'
+                   JOIN task_executions e ON e.task_id = t.id
+                  WHERE p.id = 'release-project'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            preserved,
+            (
+                "Release project".into(),
+                "Release discussion".into(),
+                "Preserve 0.11 data".into(),
+                "kronn/release-task".into(),
+            )
+        );
+
+        let preserved_qp: (String, String, Option<String>) = conn
+            .query_row(
+                "SELECT name, prompt_template, connection_id
+                   FROM quick_prompts
+                  WHERE id = 'release-qp'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            preserved_qp,
+            ("Release prompt".into(), "Translate {{text}}".into(), None)
+        );
+
+        for migration in [
+            "144_external_api_connections",
+            "145_task_execution_worker_connection",
+            "146_message_target_connection",
+            "147_task_execution_commit_leases",
+            "148_task_execution_commit_lease_liveness",
+            "149_task_execution_progress",
+            "150_project_mcp_sync_report",
+            "151_agent_dispatch_connection",
+            "152_external_api_openrouter_preset",
+            "153_quick_prompt_external_connection",
+        ] {
+            let applied: bool = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM _migrations WHERE name = ?1)",
+                    [migration],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(applied, "missing 0.12 migration receipt: {migration}");
+        }
+
+        let backup = Connection::open(db_path.with_extension("db.backup")).unwrap();
+        let migration_144_applied: bool = backup
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM _migrations
+                  WHERE name = '144_external_api_connections')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            !migration_144_applied,
+            "backup must remain at the 0.11 schema boundary"
+        );
+    }
+
+    #[test]
+    fn migration_152_repairs_receipted_databases_and_accepts_openrouter() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        run_through(&conn, "151_agent_dispatch_connection").unwrap();
+        // Reproduce a development database that receipted migration 144 before
+        // OpenRouter existed. Editing 144 cannot repair that database because
+        // the migration runner correctly refuses to replay receipts.
+        conn.execute_batch(
+            "PRAGMA foreign_keys = OFF;
+             CREATE TABLE external_api_connections_historical (
+                 id TEXT PRIMARY KEY,
+                 display_name TEXT NOT NULL,
+                 mention_alias TEXT NOT NULL UNIQUE,
+                 endpoint TEXT,
+                 credential_slug TEXT NOT NULL UNIQUE,
+                 origin_preset TEXT NOT NULL CHECK (origin_preset IN ('litellm', 'nvidia', 'other')),
+                 economy_model TEXT,
+                 default_model TEXT,
+                 reasoning_model TEXT,
+                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                 updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+             );
+             DROP TABLE external_api_connections;
+             ALTER TABLE external_api_connections_historical RENAME TO external_api_connections;
+             CREATE INDEX idx_external_api_connections_origin_preset
+                 ON external_api_connections(origin_preset);
+             PRAGMA foreign_keys = ON;",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO external_api_connections
+                (id, display_name, mention_alias, endpoint, credential_slug, origin_preset)
+             VALUES ('lite', 'LiteLLM', 'litellm', 'http://localhost:4000', 'litellm', 'litellm')",
+            [],
+        )
+        .unwrap();
+        conn.execute_batch(
+            "INSERT INTO discussions (id, title, created_at, updated_at)
+             VALUES ('d-router', 'Router', '2026-08-30T00:00:00Z', '2026-08-30T00:00:00Z');
+             INSERT INTO messages (
+                 id, discussion_id, role, content, timestamp, sort_order
+             ) VALUES (
+                 'm-router', 'd-router', 'User', 'hello', '2026-08-30T00:00:00Z', 0
+             );
+             INSERT INTO message_targets (
+                 message_id, target_kind, agent_type, connection_id, position
+             ) VALUES ('m-router', 'agent', 'Custom', 'lite', 0);",
+        )
+        .unwrap();
+
+        let rejected_before_repair = conn.execute(
+            "INSERT INTO external_api_connections
+                (id, display_name, mention_alias, endpoint, credential_slug, origin_preset)
+             VALUES ('before', 'Before', 'before', 'https://openrouter.ai/api', 'before', 'open_router')",
+            [],
+        );
+        assert!(rejected_before_repair.is_err());
+
+        run_with_backup(&conn, None).unwrap();
+        let preserved: String = conn
+            .query_row(
+                "SELECT display_name FROM external_api_connections WHERE id = 'lite'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(preserved, "LiteLLM");
+        let preserved_target: String = conn
+            .query_row(
+                "SELECT connection_id FROM message_targets WHERE message_id = 'm-router'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(preserved_target, "lite");
+        conn.execute(
+            "INSERT INTO external_api_connections
+                (id, display_name, mention_alias, endpoint, credential_slug, origin_preset)
+             VALUES ('router', 'OpenRouter', 'openrouter', 'https://openrouter.ai/api', 'router', 'open_router')",
+            [],
+        )
+        .unwrap();
+        let foreign_key_errors: i64 = conn
+            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(foreign_key_errors, 0);
     }
 
     #[test]

@@ -12,6 +12,7 @@ pub mod bootstrap;
 pub mod clone;
 pub mod crud;
 pub mod dependencies;
+pub mod docker;
 pub mod git;
 pub mod migrate;
 pub mod template;
@@ -21,6 +22,7 @@ pub use bootstrap::*;
 pub use clone::*;
 pub use crud::*;
 pub use dependencies::*;
+pub use docker::*;
 pub use git::*;
 pub use migrate::*;
 pub use template::*;
@@ -306,6 +308,7 @@ pub(crate) fn enrich_audit_status(project: &mut Project) {
     // below: they're pointless on a missing dir, and the self-heal writes could
     // land somewhere unintended. The UI surfaces the flag as a banner + badge.
     project.path_exists = resolved.exists();
+    project.write_access = Some(scanner::diagnose_project_write_access(&project.path));
     if !project.path_exists {
         project.audit_status = crate::models::AiAuditStatus::default();
         project.ai_todo_count = 0;
@@ -400,12 +403,10 @@ pub(crate) async fn resync_project_assets(state: &AppState, project_id: &str) {
         .db
         .with_conn(move |conn| {
             // Plugins (MCP configs) → per-agent config files in the project root.
-            // `sync_project_mcps_to_disk` reads the project's path from the DB,
+            // The sync reads the project's path from the DB,
             // so it picks up the path we just updated.
             if let Some(ref s) = secret {
-                if let Err(e) = crate::core::mcp_scanner::sync_project_mcps_to_disk(conn, &pid, s) {
-                    tracing::warn!("Plugin (MCP) re-sync failed for project {pid} after path change: {e}");
-                }
+                crate::core::mcp_scanner::sync_project_with_report(conn, &pid, s);
             } else {
                 tracing::debug!("Skipping MCP re-sync for project {pid}: no encryption secret configured");
             }
@@ -519,6 +520,8 @@ mod tests {
             tech_debt_count: 0,
             needs_docs_migration: false,
             path_exists: true,
+            write_access: None,
+            mcp_sync_report: None,
             default_skill_ids: vec![],
             default_profile_id: None,
             briefing_notes: None,

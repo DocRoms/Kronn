@@ -11,6 +11,7 @@ pub mod disc_source;
 pub mod discussion_sessions;
 pub mod discussion_workspaces;
 pub mod discussions;
+pub mod external_api_connections;
 pub mod id_resolver;
 pub mod learnings;
 pub mod lite_llm_model_failures;
@@ -84,7 +85,7 @@ impl Database {
         let dir = config::config_dir()?;
         std::fs::create_dir_all(&dir)?;
         let path = dir.join("kronn.db");
-        Self::open_path(&path)
+        Self::open_path_for_backend_boot(&path)
     }
 
     /// Open an in-memory database (useful for testing).
@@ -102,6 +103,17 @@ impl Database {
 
     /// Open a database at a specific path (useful for testing).
     pub fn open_path(path: &PathBuf) -> Result<Self> {
+        Self::open_path_internal(path, false)
+    }
+
+    /// Open the one production database after the caller has acquired the
+    /// process-wide data-directory lock. Only this mode may discard commit
+    /// leases: no Git worker from an earlier backend can still be live.
+    pub(crate) fn open_path_for_backend_boot(path: &PathBuf) -> Result<Self> {
+        Self::open_path_internal(path, true)
+    }
+
+    fn open_path_internal(path: &PathBuf, recover_commit_leases: bool) -> Result<Self> {
         let conn = Connection::open(path)
             .with_context(|| format!("Failed to open database at {}", path.display()))?;
 
@@ -148,6 +160,17 @@ impl Database {
         // Run migrations before wrapping in Mutex (avoids blocking_lock inside async runtime).
         // Pass db path so a backup is created before pending migrations.
         migrations::run_with_backup(&conn, Some(path))?;
+
+        if recover_commit_leases {
+            let recovered_commit_leases =
+                orchestration::recover_spawned_commit_leases_after_restart(&conn)
+                    .context("Failed to reconcile spawned commit leases after restart")?;
+            if recovered_commit_leases > 0 {
+                tracing::info!(
+                    "Reconciled {recovered_commit_leases} spawned commit lease(s) left by the previous backend"
+                );
+            }
+        }
 
         // 0.8.4 (#317 / B1) — reconcile stale `Running` audit_runs at
         // boot. A backend crash, container restart, or kill -9 during

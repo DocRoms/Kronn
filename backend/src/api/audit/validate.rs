@@ -86,7 +86,7 @@ pub async fn validate_audit(
             Ok((latest, disc))
         })
         .await;
-    match gate {
+    let optimize_documents = match gate {
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
         Ok((latest, linked_disc)) => {
             let Some(run) = latest else {
@@ -127,8 +127,9 @@ pub async fn validate_audit(
                     "The validation discussion has not finished — the agent must end on KRONN:VALIDATION_COMPLETE before the project can be marked validated.",
                 ));
             }
+            run.kind == "Full"
         }
-    }
+    };
 
     // Run filesystem I/O on blocking thread pool
     let validate_result = tokio::task::spawn_blocking(move || -> Result<(), String> {
@@ -137,6 +138,20 @@ pub async fn validate_audit(
 
         if !index_file.exists() {
             return Err("docs/AGENTS.md not found — run the audit first".into());
+        }
+
+        if optimize_documents {
+            let report = crate::core::document_optimization::analyze_and_write(&project_path)?;
+            let blocking: Vec<String> = report
+                .blocking_diagnostics()
+                .map(|d| format!("{}: {} ({})", d.code, d.message, d.path))
+                .collect();
+            if !blocking.is_empty() {
+                return Err(format!(
+                    "Documentary validation failed; KRONN:VALIDATION_COMPLETE is blocked: {}",
+                    blocking.join("; ")
+                ));
+            }
         }
 
         kronn_state::mark_validated(&project_path)
@@ -282,6 +297,43 @@ mod validate_gate_tests {
             !state.audit_tracker.lock().unwrap().leased.contains("p1"),
             "the lease must be released after validation"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn specialized_validation_does_not_apply_full_document_gate() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state = test_state();
+        seed(
+            &state,
+            tmp.path(),
+            "Completed",
+            Some("d1"),
+            Some("KRONN:VALIDATION_COMPLETE"),
+        )
+        .await;
+        std::fs::write(tmp.path().join("docs/AGENTS.md"), "# {{BROKEN_TEMPLATE}}\n").unwrap();
+        state
+            .db
+            .with_conn(|conn| {
+                conn.execute(
+                    "UPDATE audit_runs SET kind = 'Security' WHERE id = 'r1'",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let response = call(&state).await;
+        assert!(
+            response.success,
+            "specialized validation: {:?}",
+            response.error
+        );
+        assert!(!tmp
+            .path()
+            .join(crate::core::document_optimization::REPORT_FILE)
+            .exists());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

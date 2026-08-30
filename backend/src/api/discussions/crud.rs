@@ -6,6 +6,8 @@
 
 use axum::{
     extract::{Path, Query, State},
+    http::StatusCode,
+    response::{IntoResponse, Response},
     Json,
 };
 use chrono::Utc;
@@ -707,6 +709,70 @@ pub async fn delete_last_agent_messages(
             Json(ApiResponse::ok(()))
         }
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
+    }
+}
+
+/// DELETE /api/discussions/:id/messages/:message_id
+pub async fn delete_message(
+    State(state): State<AppState>,
+    Path((discussion_id, message_id)): Path<(String, String)>,
+) -> Response {
+    let result = state
+        .db
+        .with_conn(move |connection| {
+            Ok(crate::db::discussions::tombstone_message(
+                connection,
+                &discussion_id,
+                &message_id,
+            ))
+        })
+        .await;
+
+    match result {
+        Ok(Ok(disk_paths)) => {
+            for path in disk_paths {
+                crate::core::context_files::delete_image_from_disk(&path);
+            }
+            (StatusCode::OK, Json(ApiResponse::ok(()))).into_response()
+        }
+        Ok(Err(crate::db::discussions::TombstoneMessageError::NotFound)) => (
+            StatusCode::NOT_FOUND,
+            Json(ApiResponse::<()>::err_coded(
+                ApiErrorCode::NotFound,
+                "Message not found",
+            )),
+        )
+            .into_response(),
+        Ok(Err(crate::db::discussions::TombstoneMessageError::DispatchInProgress)) => (
+            StatusCode::CONFLICT,
+            Json(ApiResponse::<()>::err_coded(
+                ApiErrorCode::Conflict,
+                "The message is still being processed by an agent",
+            )),
+        )
+            .into_response(),
+        Ok(Err(error)) => {
+            tracing::error!("Failed to tombstone discussion message: {error}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::<()>::err_coded(
+                    ApiErrorCode::Internal,
+                    "Failed to delete message",
+                )),
+            )
+                .into_response()
+        }
+        Err(error) => {
+            tracing::error!("Failed to run discussion message deletion: {error}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::<()>::err_coded(
+                    ApiErrorCode::Internal,
+                    "Failed to delete message",
+                )),
+            )
+                .into_response()
+        }
     }
 }
 

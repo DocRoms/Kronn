@@ -1,0 +1,4 @@
+-- Migration 144 originally constrained presets to LiteLLM, NVIDIA and Other.
+-- The schema-aware implementation lives in `ensure_openrouter_preset` because
+-- rebuilding this parent table would violate existing task/message foreign
+-- keys. The migration remains a named, receipted forward repair.

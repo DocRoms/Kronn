@@ -727,6 +727,8 @@ pub struct TaskExecution {
     pub worker_target_kind: Option<MessageTargetKind>,
     #[serde(default)]
     pub worker_cli_session_id: Option<i64>,
+    #[serde(default)]
+    pub worker_connection_id: Option<String>,
     pub worker_agent_type: Option<String>,
     pub worker_model: Option<String>,
     pub worker_model_tier: Option<String>,
@@ -887,7 +889,15 @@ impl Default for OrchestrationResiliencePolicy {
             activity_timeout_secs: None,
             review_timeout_secs: None,
             human_wait_timeout_secs: None,
-            cancellation_cleanup_policy: CancellationCleanupPolicy::Preserve,
+            // KT-514 — a task keeps at most one live execution, so every prior
+            // attempt of a relaunched task is already terminal. Preserving each
+            // cancelled checkout by default is what let 18 worktrees pile up on a
+            // single task until the sandbox guard blocked every worker. The
+            // default now reclaims the clean checkout (the branch and its commits
+            // survive — `git worktree remove` never touches the ref); an operator
+            // who wants the working tree kept for inspection still opts into
+            // `Preserve` explicitly.
+            cancellation_cleanup_policy: CancellationCleanupPolicy::RemoveIfClean,
         }
     }
 }
@@ -1049,6 +1059,7 @@ pub struct LaunchSingleTaskInput {
     /// exact typed identity. For a `Cli` kind, `worker_cli_session_id` is required.
     pub worker_target_kind: Option<MessageTargetKind>,
     pub worker_cli_session_id: Option<i64>,
+    pub worker_connection_id: Option<String>,
     pub worker_agent_type: Option<String>,
     pub worker_model: Option<String>,
     pub worker_model_tier: Option<String>,
@@ -1075,6 +1086,7 @@ impl LaunchSingleTaskInput {
             child_branch: None,
             worker_target_kind: None,
             worker_cli_session_id: None,
+            worker_connection_id: None,
             worker_agent_type: None,
             worker_model: None,
             worker_model_tier: None,
@@ -1354,6 +1366,41 @@ pub struct TaskExecutionDetail {
     pub validation_runs: Vec<TaskExecutionValidationRun>,
     pub recovery: Option<TaskExecutionRecovery>,
     pub usage: TaskExecutionUsage,
+    pub progress: TaskExecutionProgress,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum TaskExecutionProgressPhase {
+    Queued,
+    Launching,
+    UpstreamWait,
+    ToolActivity,
+    Delivering,
+    Completed,
+    Failed,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum TaskExecutionTelemetryMode {
+    BoundaryOnly,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TaskExecutionProgress {
+    pub phase: TaskExecutionProgressPhase,
+    pub reason: Option<String>,
+    pub queue_position: Option<u32>,
+    pub queued_since: Option<DateTime<Utc>>,
+    pub process_alive: Option<bool>,
+    pub last_reliable_signal_at: Option<DateTime<Utc>>,
+    pub telemetry_mode: TaskExecutionTelemetryMode,
 }
 
 /// Compact sidebar edge. The canonical relation already lives on
@@ -1684,6 +1731,17 @@ pub fn review_decision_v1_schema() -> serde_json::Value {
 mod tests {
     use super::TaskExecutionStatus::{self, *};
     use super::TaskWorkerScope;
+
+    /// KT-514 — a cancellation with no explicit policy must reclaim the clean
+    /// checkout (branch preserved) rather than hoard it. This default is what
+    /// stops a relaunched task from stacking one worktree per attempt.
+    #[test]
+    fn default_cancellation_policy_reclaims_the_clean_checkout() {
+        assert_eq!(
+            super::OrchestrationResiliencePolicy::default().cancellation_cleanup_policy,
+            super::CancellationCleanupPolicy::RemoveIfClean,
+        );
+    }
 
     #[test]
     fn prelocalized_worker_scope_is_small_relative_and_inclusive() {

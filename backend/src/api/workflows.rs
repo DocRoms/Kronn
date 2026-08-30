@@ -3341,6 +3341,45 @@ pub struct DeletedBatchResponse {
     pub discussions_deleted: u32,
 }
 
+#[derive(Debug, serde::Serialize)]
+pub struct RetriedBatchResponse {
+    pub run_id: String,
+    pub discussion_ids: Vec<String>,
+    pub batch_total: u32,
+}
+
+/// POST /api/workflow-runs/:run_id/retry
+///
+/// Replays the previous run's durable target matrix. Concrete HTTP models are
+/// resolved from the current tier mapping, so an updated model is picked up
+/// while agent/tier/connection intent remains identical.
+pub async fn retry_batch_run(
+    State(state): State<AppState>,
+    Path(run_id): Path<String>,
+) -> Json<ApiResponse<RetriedBatchResponse>> {
+    let (author_pseudo, author_avatar_email) = {
+        let config = state.config.read().await;
+        (
+            config.server.pseudo.clone(),
+            config.server.avatar_email.clone(),
+        )
+    };
+    match state
+        .db
+        .with_conn(move |conn| {
+            crate::db::workflows::retry_batch_run(conn, &run_id, author_pseudo, author_avatar_email)
+        })
+        .await
+    {
+        Ok(outcome) => Json(ApiResponse::ok(RetriedBatchResponse {
+            run_id: outcome.run_id,
+            discussion_ids: outcome.discussion_ids,
+            batch_total: outcome.batch_total,
+        })),
+        Err(error) => Json(ApiResponse::err(format!("Failed to retry batch: {error}"))),
+    }
+}
+
 /// DELETE /api/workflow-runs/:run_id
 ///
 /// Delete a batch workflow run AND all its child discussions in one
@@ -5660,6 +5699,7 @@ mod tests {
                 pattern: None,
             }],
             agent: AgentType::ClaudeCode,
+            connection_id: None,
             project_id: Some("src-project".into()),
             skill_ids: vec![],
             profile_ids: vec![],

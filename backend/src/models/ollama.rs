@@ -56,6 +56,27 @@ pub struct OllamaModelsResponse {
     pub models: Vec<OllamaModel>,
 }
 
+/// The sole accepted input for a local Ollama pull.  The endpoint never
+/// accepts arbitrary upstream URLs: it always uses Kronn's configured Ollama
+/// base URL.
+#[derive(Debug, Clone, Deserialize, TS)]
+#[ts(export)]
+pub struct PullOllamaModelRequest {
+    pub model: String,
+}
+
+/// Normalized status sent as an SSE `progress` event while Ollama pulls a
+/// model. `completed` and `total` remain optional because several Ollama
+/// stages have no byte counter.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
+#[ts(export)]
+pub struct OllamaPullProgress {
+    pub status: String,
+    pub digest: Option<String>,
+    pub completed: Option<u64>,
+    pub total: Option<u64>,
+}
+
 #[derive(Debug, Clone, Deserialize, TS)]
 #[ts(export)]
 pub struct SetOllamaContextOverrideRequest {

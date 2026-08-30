@@ -52,6 +52,10 @@ pub struct QuickPrompt {
     pub prompt_template: String,
     pub variables: Vec<PromptVariable>,
     pub agent: AgentType,
+    /// Named external API connection used when `agent` is `Custom` (or when
+    /// selecting a specific named HTTP provider instance).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_id: Option<String>,
     pub project_id: Option<String>,
     #[serde(default)]
     pub skill_ids: Vec<String>,
@@ -95,6 +99,8 @@ pub struct CreateQuickPromptRequest {
     #[serde(default)]
     pub variables: Vec<PromptVariable>,
     pub agent: Option<AgentType>,
+    #[serde(default)]
+    pub connection_id: Option<String>,
     pub project_id: Option<String>,
     #[serde(default)]
     pub skill_ids: Vec<String>,
@@ -330,6 +336,8 @@ pub struct QuickPromptVersion {
     pub prompt_template: String,
     pub variables: Vec<PromptVariable>,
     pub agent: AgentType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_id: Option<String>,
     pub project_id: Option<String>,
     pub skill_ids: Vec<String>,
     pub profile_ids: Vec<String>,

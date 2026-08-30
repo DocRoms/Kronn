@@ -978,6 +978,70 @@ fn reassignment_repairs_an_unadvanced_request_changes_attempt() {
 }
 
 #[test]
+fn reassignment_repairs_an_unadvanced_approved_attempt_after_validation_sendback() {
+    let conn = setup();
+    seed_task(&conn, "t-reassign-approved-rework", 1104);
+    let execution = launch_single_task(
+        &conn,
+        &LaunchSingleTaskInput::new("t-reassign-approved-rework", DISC),
+        &backend_actor(),
+    )
+    .unwrap()
+    .execution;
+    for status in [
+        TaskExecutionStatus::Provisioning,
+        TaskExecutionStatus::Working,
+    ] {
+        transition_execution(
+            &conn,
+            &execution.id,
+            status,
+            &backend_actor(),
+            serde_json::json!({}),
+        )
+        .unwrap();
+    }
+    crate::db::worker_reviews::upsert_review(
+        &conn,
+        &execution.id,
+        0,
+        "approve",
+        r#"{"version":"1","decision":"approve"}"#,
+    )
+    .unwrap();
+
+    let reassigned = reassign_execution_worker(
+        &conn,
+        &execution.id,
+        &CampaignWorkerSelection {
+            target: MessageTarget::discussion_agent(AgentType::Ollama),
+            model: None,
+            profile_id: None,
+        },
+        "recover validation sendback",
+        &backend_actor(),
+    )
+    .unwrap();
+    assert_eq!(reassigned.attempt_no, 1);
+    assert!(
+        crate::db::worker_reviews::get_review(&conn, &execution.id, 1)
+            .unwrap()
+            .is_none()
+    );
+    let events = list_execution_events(&conn, &execution.id).unwrap();
+    let repair = events
+        .iter()
+        .find(|event| event.action == "rework_attempt_repaired")
+        .expect("the approve-path repair is auditable");
+    assert_eq!(repair.changes["from_attempt"], 0);
+    assert_eq!(repair.changes["to_attempt"], 1);
+    assert_eq!(
+        repair.changes["reason"],
+        "reviewed_attempt_was_not_advanced"
+    );
+}
+
+#[test]
 fn timeout_scan_reports_activity_total_review_and_human_wait_distinctly() {
     let conn = setup();
     let past = "2020-01-01T00:00:00Z";
@@ -1245,6 +1309,129 @@ fn hard_quota_creates_an_immediate_human_wait_checkpoint() {
     assert_eq!(recovery.recovery_reason, "quota_exhausted:Codex");
     assert!(recovery.human_wait_started_at.is_some());
     assert!(!recovery.pending);
+}
+
+// ── KT-515 — `provider_has_open_quota_exhaustion`: the honest availability
+// signal behind `agent_list`, launch preflight and reassignment. ──
+
+/// Launches a task pinned to `provider` and drives it to `Working`, mirroring
+/// the shape `commit_provisioning_checkpoint` leaves behind — without the full
+/// dispatch/discussion apparatus `hard_quota_creates_an_immediate_human_wait_checkpoint`
+/// needs to exercise `escalate_execution_for_dispatch_quota` itself.
+fn launch_working_execution_for(
+    conn: &Connection,
+    task_id: &str,
+    number: i64,
+    provider: &str,
+) -> String {
+    seed_task(conn, task_id, number);
+    let mut input = LaunchSingleTaskInput::new(task_id, DISC);
+    input.worker_agent_type = Some(provider.to_string());
+    let execution = launch_single_task(conn, &input, &backend_actor())
+        .unwrap()
+        .execution;
+    transition_execution(
+        conn,
+        &execution.id,
+        TaskExecutionStatus::Provisioning,
+        &backend_actor(),
+        serde_json::json!({}),
+    )
+    .unwrap();
+    transition_execution(
+        conn,
+        &execution.id,
+        TaskExecutionStatus::Working,
+        &backend_actor(),
+        serde_json::json!({}),
+    )
+    .unwrap();
+    execution.id
+}
+
+/// Moves `exec_id` to `Escalated` and stamps `reason` on its recovery row,
+/// exactly as `escalate_execution_for_dispatch_quota` does but without
+/// requiring a real dispatch job — lets each scenario below name its own
+/// `recovery_reason` directly.
+fn escalate_with_reason(conn: &Connection, exec_id: &str, reason: &str) {
+    transition_execution(
+        conn,
+        exec_id,
+        TaskExecutionStatus::Escalated,
+        &backend_actor(),
+        serde_json::json!({}),
+    )
+    .unwrap();
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO task_execution_recovery (
+             task_execution_id, recovery_action, recovery_reason, last_activity_at,
+             assignment_generation, watchdog_redispatches, human_wait_started_at,
+             pending, updated_at
+         ) VALUES (?1, 'await_human', ?2, ?3, 0, 0, ?3, 0, ?3)
+         ON CONFLICT(task_execution_id) DO UPDATE SET
+             recovery_action = 'await_human', recovery_reason = excluded.recovery_reason,
+             activity_deadline_at = NULL, review_deadline_at = NULL,
+             total_deadline_at = NULL, human_wait_started_at = ?3,
+             pending = 0, updated_at = ?3",
+        params![exec_id, reason, now],
+    )
+    .unwrap();
+}
+
+#[test]
+fn quota_signal_is_absent_without_any_escalation() {
+    let conn = setup();
+    launch_working_execution_for(&conn, "t-quota-none", 1220, "Codex");
+    assert!(!provider_has_open_quota_exhaustion(&conn, "Codex", None).unwrap());
+}
+
+#[test]
+fn quota_signal_is_true_after_a_hard_quota_escalation_and_excludable_by_execution() {
+    let conn = setup();
+    let exec_id = launch_working_execution_for(&conn, "t-quota-hit", 1221, "Codex");
+    escalate_with_reason(&conn, &exec_id, "quota_exhausted:Codex");
+
+    assert!(provider_has_open_quota_exhaustion(&conn, "Codex", None).unwrap());
+    // A different provider is unaffected.
+    assert!(!provider_has_open_quota_exhaustion(&conn, "ClaudeCode", None).unwrap());
+    // Reassigning the exact escalated execution back to Codex must not see
+    // its own still-open row as a refusal (KT-515 self-exclusion).
+    assert!(!provider_has_open_quota_exhaustion(&conn, "Codex", Some(&exec_id)).unwrap());
+}
+
+#[test]
+fn quota_signal_ignores_a_non_quota_escalation_reason() {
+    let conn = setup();
+    let exec_id = launch_working_execution_for(&conn, "t-quota-timeout", 1222, "Codex");
+    // Same terminal shape (Escalated) as a real quota rejection, but the
+    // upstream failure here is a bounded activity timeout — never quota.
+    escalate_with_reason(&conn, &exec_id, "activity_timeout");
+    assert!(!provider_has_open_quota_exhaustion(&conn, "Codex", None).unwrap());
+}
+
+#[test]
+fn quota_signal_clears_once_the_escalated_execution_is_reassigned_away() {
+    let conn = setup();
+    let exec_id = launch_working_execution_for(&conn, "t-quota-recovers", 1223, "Codex");
+    escalate_with_reason(&conn, &exec_id, "quota_exhausted:Codex");
+    assert!(provider_has_open_quota_exhaustion(&conn, "Codex", None).unwrap());
+
+    // Mirrors `reassign_native_execution`: Escalated -> Working plus clearing
+    // the recovery row's pending flag. `recovery_reason` deliberately keeps
+    // its old value (like production does) — only the execution status is
+    // what this signal actually keys on.
+    transition_execution(
+        &conn,
+        &exec_id,
+        TaskExecutionStatus::Working,
+        &backend_actor(),
+        serde_json::json!({ "recovery": "worker_reassigned" }),
+    )
+    .unwrap();
+    clear_execution_recovery(&conn, &exec_id, "worker_reassigned").unwrap();
+
+    assert!(!provider_has_open_quota_exhaustion(&conn, "Codex", None).unwrap());
 }
 
 #[test]
@@ -2747,6 +2934,107 @@ fn worker_identity_round_trips_all_kinds_and_two_clis_stay_distinct() {
     assert_eq!(reread.worker_target_kind, Some(Cli));
     assert_eq!(reread.worker_cli_session_id, Some(11));
     assert_eq!(reread.worker_agent_type.as_deref(), Some("Codex"));
+}
+
+#[test]
+fn external_worker_connection_round_trips_and_unknown_id_is_rejected_on_reload() {
+    use MessageTargetKind::Agent;
+    let conn = setup();
+    conn.execute(
+        "INSERT INTO external_api_connections \
+         (id, display_name, mention_alias, credential_slug, origin_preset) \
+         VALUES ('conn-known', 'Known', 'known', 'known', 'litellm')",
+        [],
+    )
+    .unwrap();
+
+    seed_task(&conn, "t-connection", 1);
+    let mut input = LaunchSingleTaskInput::new("t-connection", DISC);
+    input.worker_target_kind = Some(Agent);
+    input.worker_agent_type = Some(agent_type_to_db(&AgentType::LiteLlm));
+    input.worker_connection_id = Some("conn-known".into());
+    let launched = launch_single_task(&conn, &input, &backend_actor())
+        .unwrap()
+        .execution;
+    let reread = get_task_execution(&conn, &launched.id).unwrap().unwrap();
+    assert_eq!(reread.worker_target_kind, Some(Agent));
+    assert_eq!(reread.worker_agent_type.as_deref(), Some("LiteLlm"));
+    assert_eq!(reread.worker_connection_id.as_deref(), Some("conn-known"));
+
+    conn.execute(
+        "INSERT INTO discussions (id, title, created_at, updated_at) \
+         VALUES ('d-connection-worker', 'Connection worker', '2026-01-01T00:00:00Z', \
+                 '2026-01-01T00:00:00Z')",
+        [],
+    )
+    .unwrap();
+    set_execution_sub_discussion(&conn, &launched.id, "d-connection-worker").unwrap();
+
+    conn.pragma_update(None, "foreign_keys", false).unwrap();
+    conn.execute(
+        "UPDATE task_executions SET worker_connection_id = 'conn-missing' WHERE id = ?1",
+        [&launched.id],
+    )
+    .unwrap();
+    let error = get_task_execution(&conn, &launched.id).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("unknown worker connection identifier: conn-missing"),
+        "unknown connection must be an explicit reload error: {error:#}"
+    );
+
+    for (path, result) in [
+        (
+            "worker room",
+            get_execution_for_sub_discussion(&conn, "d-connection-worker"),
+        ),
+        (
+            "active task reconnect",
+            get_active_execution_for_task(&conn, "t-connection"),
+        ),
+        (
+            "latest task reconnect",
+            get_latest_execution_for_task(&conn, "t-connection"),
+        ),
+    ] {
+        let error = result.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("unknown worker connection identifier: conn-missing"),
+            "{path} must reject the unknown connection: {error:#}"
+        );
+    }
+
+    let error = get_execution_lineage(&conn, &launched.id).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("unknown worker connection identifier: conn-missing"),
+        "lineage reload must reject the unknown connection: {error:#}"
+    );
+}
+
+#[test]
+fn connectionless_custom_worker_is_rejected_before_persistence() {
+    use MessageTargetKind::Agent;
+    let conn = setup();
+    seed_task(&conn, "t-custom-connection", 1);
+    let mut input = LaunchSingleTaskInput::new("t-custom-connection", DISC);
+    input.worker_target_kind = Some(Agent);
+    input.worker_agent_type = Some(agent_type_to_db(&AgentType::Custom));
+    let error = launch_single_task(&conn, &input, &backend_actor()).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("worker connection identifier is required for Custom providers"),
+        "Custom must retain its connection pin before persistence: {error:#}"
+    );
+    let executions: i64 = conn
+        .query_row("SELECT COUNT(*) FROM task_executions", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(executions, 0, "the refused Custom launch must roll back");
 }
 
 #[test]

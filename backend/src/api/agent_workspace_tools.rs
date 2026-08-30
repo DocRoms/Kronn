@@ -137,6 +137,40 @@ fn invalid_sha256_receipt_message() -> String {
     )
 }
 
+/// Owns one successfully locked edit descriptor and releases it explicitly.
+/// The edit paths have many intentional early refusals; the next call must not
+/// mistake a completed refusal for a concurrently running worker.
+struct ExclusiveEditFile(std::fs::File);
+
+impl std::ops::Deref for ExclusiveEditFile {
+    type Target = std::fs::File;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for ExclusiveEditFile {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl Drop for ExclusiveEditFile {
+    fn drop(&mut self) {
+        let _ = fs2::FileExt::unlock(&self.0);
+    }
+}
+
+fn try_lock_for_edit(file: std::fs::File, requested: &str) -> Result<ExclusiveEditFile, String> {
+    fs2::FileExt::try_lock_exclusive(&file).map_err(|_| {
+        format!(
+            "`{requested}` is already being edited by another worker. Re-read it after that edit finishes."
+        )
+    })?;
+    Ok(ExclusiveEditFile(file))
+}
+
 /// Directories that are never worth walking into: they are enormous, generated,
 /// and contain nothing the model reasons about. Skipping them is what makes a
 /// bounded walk useful rather than exhausted on build artefacts.
@@ -530,6 +564,15 @@ pub fn git_log_payload(
 /// Every path is validated before the first `git add`, so a refused final entry
 /// cannot leave earlier entries staged.
 pub fn git_commit_payload(root: &Path, files: &[String], message: &str) -> Result<Value, String> {
+    git_commit_payload_with_data_dir_lock(root, files, message, None)
+}
+
+pub fn git_commit_payload_with_data_dir_lock(
+    root: &Path,
+    files: &[String],
+    message: &str,
+    data_dir_lock: Option<&std::fs::File>,
+) -> Result<Value, String> {
     let message = message.trim();
     if message.is_empty() {
         return Err("refused: commit message cannot be empty".into());
@@ -564,8 +607,14 @@ pub fn git_commit_payload(root: &Path, files: &[String], message: &str) -> Resul
         normalized.insert(relative.to_string_lossy().to_string());
     }
     let normalized: Vec<String> = normalized.into_iter().collect();
-    let committed =
-        crate::api::git_ops::run_git_commit(&canonical_root, &normalized, message, false, false)?;
+    let committed = crate::api::git_ops::run_git_commit_with_child_lock(
+        &canonical_root,
+        &normalized,
+        message,
+        false,
+        false,
+        data_dir_lock,
+    )?;
     Ok(json!({
         "hash": committed.hash,
         "message": committed.message,
@@ -1148,7 +1197,7 @@ fn write_file_payload_inner(
         if !sha256_receipt_is_well_formed(expected_sha256) {
             return Err(invalid_sha256_receipt_message());
         }
-        let mut file = std::fs::OpenOptions::new()
+        let file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
             .open(&path)
@@ -1158,11 +1207,7 @@ fn write_file_payload_inner(
                      Retry without `expected_sha256` to create it."
                 )
             })?;
-        fs2::FileExt::try_lock_exclusive(&file).map_err(|_| {
-            format!(
-                "`{requested}` is already being edited by another worker. Re-read it after that edit finishes."
-            )
-        })?;
+        let mut file = try_lock_for_edit(file, requested)?;
         let metadata = file
             .metadata()
             .map_err(|error| format!("could not inspect `{requested}`: {error}"))?;
@@ -1271,7 +1316,7 @@ pub fn edit_file_payload(
     if !sha256_receipt_is_well_formed(expected_sha256) {
         return Err(invalid_sha256_receipt_message());
     }
-    let mut file = std::fs::OpenOptions::new()
+    let file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .open(&path)
@@ -1279,11 +1324,7 @@ pub fn edit_file_payload(
     // Avoid two Kronn HTTP workers editing the same inode concurrently. The
     // hash below is still the authoritative CAS guard; the lock only closes
     // the check/write gap between cooperating tool calls.
-    fs2::FileExt::try_lock_exclusive(&file).map_err(|_| {
-        format!(
-            "`{requested}` is already being edited by another worker. Re-read it after that edit finishes."
-        )
-    })?;
+    let mut file = try_lock_for_edit(file, requested)?;
     let metadata = file
         .metadata()
         .map_err(|error| format!("could not inspect `{requested}`: {error}"))?;
@@ -1399,16 +1440,12 @@ pub fn edit_lines_payload(
         return Err(invalid_sha256_receipt_message());
     }
     let path = resolve_in_workspace(root, requested).map_err(|refusal| refusal.message())?;
-    let mut file = std::fs::OpenOptions::new()
+    let file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .open(&path)
         .map_err(|_| format!("`{requested}` does not exist. `edit_lines` never creates a file; use `write_file` for a new one."))?;
-    fs2::FileExt::try_lock_exclusive(&file).map_err(|_| {
-        format!(
-            "`{requested}` is already being edited by another worker. Re-read it after that edit finishes."
-        )
-    })?;
+    let mut file = try_lock_for_edit(file, requested)?;
     let metadata = file
         .metadata()
         .map_err(|error| format!("could not inspect `{requested}`: {error}"))?;
@@ -1513,18 +1550,14 @@ pub fn insert_after_line_payload(
         return Err(invalid_sha256_receipt_message());
     }
     let path = resolve_in_workspace(root, requested).map_err(|refusal| refusal.message())?;
-    let mut file = std::fs::OpenOptions::new()
+    let file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .open(&path)
         .map_err(|_| {
             format!("`{requested}` does not exist. `insert_after_line` never creates a file.")
         })?;
-    fs2::FileExt::try_lock_exclusive(&file).map_err(|_| {
-        format!(
-            "`{requested}` is already being edited by another worker. Re-read it after that edit finishes."
-        )
-    })?;
+    let mut file = try_lock_for_edit(file, requested)?;
     let metadata = file
         .metadata()
         .map_err(|error| format!("could not inspect `{requested}`: {error}"))?;
@@ -2509,6 +2542,17 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         write_file_payload(root.path(), "a.txt", "let x = 1;\nlet x = 1;\n").unwrap();
 
+        let assert_edit_lock_released = || {
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(root.path().join("a.txt"))
+                .unwrap();
+            fs2::FileExt::try_lock_exclusive(&file)
+                .expect("a completed refusal must release its per-file edit lock");
+            fs2::FileExt::unlock(&file).unwrap();
+        };
+
         let missing = edit_file_payload(
             root.path(),
             "a.txt",
@@ -2523,6 +2567,7 @@ mod tests {
             missing.contains("read_file"),
             "the remedy for a miss is re-reading: {missing}"
         );
+        assert_edit_lock_released();
 
         let ambiguous = edit_file_payload(
             root.path(),
@@ -2538,6 +2583,7 @@ mod tests {
             ambiguous.contains("replace_all"),
             "the remedy for ambiguity is widening or replace_all: {ambiguous}"
         );
+        assert_edit_lock_released();
 
         let all = edit_file_payload(
             root.path(),
@@ -2549,6 +2595,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(all["replacements"], json!(2));
+        assert_edit_lock_released();
     }
 
     /// A small model often reconstructs indentation instead of copying it. That

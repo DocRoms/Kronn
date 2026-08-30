@@ -41,10 +41,13 @@ type TerminalWorkerContext = (
     Option<String>,
 );
 
+type SpawnedCommitLeaseContext = (String, Option<String>, Option<String>, Option<String>);
+
 // Columns 0..=26 are the KT-317 shape; 27..=29 append attempt_no + the typed worker
 // identity (KT-318); 30 appends blocked_reason_code (KT-328); 31 appends the
 // exact worker profile (KT-321); 32 appends the principal-authored worker scope;
-// 33 appends the launch-time ordered DoD id snapshot.
+// 33 appends the launch-time ordered DoD id snapshot; 34 appends the stable
+// external API connection identity used by configured HTTP runtimes.
 // New columns are appended so no existing index shifts.
 const EXEC_COLS: &str = "id, orchestration_run_id, task_id, parent_discussion_id, \
     sub_discussion_id, workspace_id, dispatch_job_id, base_sha, child_branch, \
@@ -53,7 +56,7 @@ const EXEC_COLS: &str = "id, orchestration_run_id, task_id, parent_discussion_id
     backup_ref, blocked_reason, outcome_reason, idempotency_key, created_at, \
     updated_at, finished_at, blocked_from_status, interrupted_from_status, \
     attempt_no, worker_target_kind, worker_cli_session_id, blocked_reason_code, \
-    worker_profile_id, worker_scope_json, worker_dod_ids_json";
+    worker_profile_id, worker_scope_json, worker_dod_ids_json, worker_connection_id";
 
 const RUN_COLS: &str = "id, kind, discussion_id, project_id, target_workspace_id, \
     target_branch, max_review_rounds, max_concurrent_executions, token_budget, \
@@ -275,6 +278,7 @@ fn row_to_execution(row: &Row) -> rusqlite::Result<TaskExecution> {
         child_branch: row.get(8)?,
         worker_target_kind: parse_target_kind(28, row.get(28)?)?,
         worker_cli_session_id: row.get(29)?,
+        worker_connection_id: row.get::<_, Option<String>>(34)?,
         worker_agent_type: row.get(9)?,
         worker_model: row.get(10)?,
         worker_model_tier: row.get(11)?,
@@ -549,13 +553,17 @@ pub fn get_execution_for_sub_discussion(
     conn: &Connection,
     discussion_id: &str,
 ) -> Result<Option<TaskExecution>> {
-    conn.query_row(
-        &format!("SELECT {EXEC_COLS} FROM task_executions WHERE sub_discussion_id = ?1 LIMIT 1"),
-        params![discussion_id],
-        row_to_execution,
-    )
-    .optional()
-    .map_err(Into::into)
+    let execution = conn
+        .query_row(
+            &format!(
+                "SELECT {EXEC_COLS} FROM task_executions WHERE sub_discussion_id = ?1 LIMIT 1"
+            ),
+            params![discussion_id],
+            row_to_execution,
+        )
+        .optional()
+        .map_err(anyhow::Error::from)?;
+    validate_loaded_execution(conn, execution)
 }
 
 /// Resolve the active execution that durably owns a native worker's worktree.
@@ -876,6 +884,7 @@ pub fn resolve_campaign_worker(
         MessageTargetKind::DiscussionAgent | MessageTargetKind::Agent => {}
     }
     ensure_task_worker_transport_compatible(&selection.target)?;
+    validate_task_worker_connection(conn, &selection.target)?;
     Ok((selection, explanation))
 }
 
@@ -1137,13 +1146,90 @@ pub fn principal_attention(conn: &Connection, run_id: &str) -> Result<PrincipalA
 // ─── TaskExecution ───────────────────────────────────────────────────────────
 
 pub fn get_task_execution(conn: &Connection, id: &str) -> Result<Option<TaskExecution>> {
-    conn.query_row(
-        &format!("SELECT {EXEC_COLS} FROM task_executions WHERE id = ?1"),
-        params![id],
-        row_to_execution,
+    let execution = conn
+        .query_row(
+            &format!("SELECT {EXEC_COLS} FROM task_executions WHERE id = ?1"),
+            params![id],
+            row_to_execution,
+        )
+        .optional()
+        .map_err(anyhow::Error::from)?;
+    validate_loaded_execution(conn, execution)
+}
+
+fn validate_loaded_execution(
+    conn: &Connection,
+    execution: Option<TaskExecution>,
+) -> Result<Option<TaskExecution>> {
+    if let Some(execution) = execution.as_ref() {
+        validate_worker_connection(conn, execution)?;
+    }
+    Ok(execution)
+}
+
+fn validate_worker_connection(conn: &Connection, execution: &TaskExecution) -> Result<()> {
+    let persisted_agent = execution
+        .worker_agent_type
+        .as_deref()
+        .map(agent_type_from_db)
+        .transpose()?;
+    validate_worker_connection_fields(
+        conn,
+        persisted_agent.as_ref(),
+        execution.worker_connection_id.as_deref(),
     )
-    .optional()
-    .map_err(Into::into)
+}
+
+/// Native HTTP worker configuration is resolved by provider type. A dynamic
+/// `Custom` target, in contrast, must retain its external connection pin.
+pub fn validate_task_worker_connection(conn: &Connection, target: &MessageTarget) -> Result<()> {
+    validate_worker_connection_fields(
+        conn,
+        Some(&target.agent_type),
+        target.connection_id.as_deref(),
+    )
+}
+
+fn validate_worker_connection_fields(
+    conn: &Connection,
+    persisted_agent: Option<&AgentType>,
+    raw_connection_id: Option<&str>,
+) -> Result<()> {
+    let Some(raw_connection_id) = raw_connection_id else {
+        if persisted_agent == Some(&AgentType::Custom) {
+            bail!("worker connection identifier is required for Custom providers");
+        }
+        // The public task-worker target returned by `agent_list` identifies an
+        // HTTP provider by its typed provider + transport. It intentionally has
+        // no internal external-api connection id; the runtime is resolved
+        // server-side. A persisted id remains an optional legacy pin and is
+        // validated below when one is present.
+        return Ok(());
+    };
+    let connection_id = raw_connection_id.trim();
+    if connection_id.is_empty() {
+        bail!("worker connection identifier is empty");
+    }
+    let preset: Option<String> = conn
+        .query_row(
+            "SELECT origin_preset FROM external_api_connections WHERE id = ?1",
+            [connection_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let expected = match preset.as_deref() {
+        Some("litellm") => AgentType::LiteLlm,
+        Some("nvidia") => AgentType::Nvidia,
+        Some("other") => AgentType::Custom,
+        Some(other) => bail!("unknown external connection preset: {other}"),
+        None => bail!("unknown worker connection identifier: {connection_id}"),
+    };
+    let persisted = persisted_agent
+        .ok_or_else(|| anyhow::anyhow!("execution connection has no worker_agent_type"))?;
+    if *persisted != expected {
+        bail!("worker connection does not match persisted provider");
+    }
+    Ok(())
 }
 
 /// The single active (non-terminal) execution for a task, if any. The partial
@@ -1152,16 +1238,18 @@ pub fn get_active_execution_for_task(
     conn: &Connection,
     task_id: &str,
 ) -> Result<Option<TaskExecution>> {
-    conn.query_row(
-        &format!(
-            "SELECT {EXEC_COLS} FROM task_executions \
+    let execution = conn
+        .query_row(
+            &format!(
+                "SELECT {EXEC_COLS} FROM task_executions \
              WHERE task_id = ?1 AND status NOT IN ('Done', 'Failed', 'Cancelled') LIMIT 1"
-        ),
-        params![task_id],
-        row_to_execution,
-    )
-    .optional()
-    .map_err(Into::into)
+            ),
+            params![task_id],
+            row_to_execution,
+        )
+        .optional()
+        .map_err(anyhow::Error::from)?;
+    validate_loaded_execution(conn, execution)
 }
 
 /// Latest execution for a task, including terminal history. Used by reconnecting
@@ -1170,16 +1258,18 @@ pub fn get_latest_execution_for_task(
     conn: &Connection,
     task_id: &str,
 ) -> Result<Option<TaskExecution>> {
-    conn.query_row(
-        &format!(
-            "SELECT {EXEC_COLS} FROM task_executions \
+    let execution = conn
+        .query_row(
+            &format!(
+                "SELECT {EXEC_COLS} FROM task_executions \
              WHERE task_id = ?1 ORDER BY created_at DESC, id DESC LIMIT 1"
-        ),
-        params![task_id],
-        row_to_execution,
-    )
-    .optional()
-    .map_err(Into::into)
+            ),
+            params![task_id],
+            row_to_execution,
+        )
+        .optional()
+        .map_err(anyhow::Error::from)?;
+    validate_loaded_execution(conn, execution)
 }
 
 /// Launch a single task: create the implicit `single_task` OrchestrationRun and
@@ -1239,7 +1329,7 @@ pub fn launch_single_task(
                 "INSERT INTO task_executions ({EXEC_COLS}) VALUES \
                  (?1, ?2, ?3, ?4, NULL, NULL, NULL, ?5, ?6, ?7, ?8, ?9, ?10, 0, ?11, \
                   NULL, NULL, NULL, NULL, NULL, NULL, ?12, ?13, ?13, NULL, NULL, NULL, \
-                  0, ?14, ?15, NULL, ?16, ?17, ?18)"
+                  0, ?14, ?15, NULL, ?16, ?17, ?18, ?19)"
             ),
             params![
                 id,
@@ -1268,6 +1358,7 @@ pub fn launch_single_task(
                     .as_ref()
                     .map(serde_json::to_string)
                     .transpose()?,
+                input.worker_connection_id,
             ],
         )?;
 
@@ -1363,7 +1454,7 @@ pub fn launch_task_in_run(
                 "INSERT INTO task_executions ({EXEC_COLS}) VALUES \
                  (?1, ?2, ?3, ?4, NULL, NULL, NULL, ?5, ?6, ?7, ?8, ?9, ?10, 0, ?11, \
                   NULL, NULL, NULL, NULL, NULL, NULL, ?12, ?13, ?13, NULL, NULL, NULL, \
-                  0, ?14, ?15, NULL, ?16, ?17, ?18)"
+                  0, ?14, ?15, NULL, ?16, ?17, ?18, ?19)"
             ),
             params![
                 id,
@@ -1392,6 +1483,7 @@ pub fn launch_task_in_run(
                     .as_ref()
                     .map(serde_json::to_string)
                     .transpose()?,
+                input.worker_connection_id,
             ],
         )?;
         record_execution_event(
@@ -1468,6 +1560,128 @@ pub fn attach_execution_dispatch(conn: &Connection, exec_id: &str, job_id: &str)
         params![exec_id, job_id, Utc::now().to_rfc3339()],
     )?;
     Ok(())
+}
+
+/// Result of reserving the non-transactional Git commit boundary for a spawned
+/// CLI worker. The lease is keyed by the immutable dispatch that launched that
+/// process; reassignment refuses while it exists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SpawnedCommitLeaseOutcome {
+    Acquired {
+        lease_id: String,
+    },
+    /// Git completed for this exact dispatch but its lease deletion did not.
+    /// Do not run Git again; the worker can continue to delivery.
+    AlreadySettled,
+    NotCurrent,
+    Busy,
+}
+
+/// No commit process from the previous backend can still be live: startup owns
+/// the data-directory lock before opening SQLite. Clear crash leftovers before
+/// any dispatcher or request handler can observe them.
+pub fn recover_spawned_commit_leases_after_restart(conn: &Connection) -> Result<usize> {
+    Ok(conn.execute("DELETE FROM task_execution_commit_leases", [])?)
+}
+
+pub fn acquire_spawned_commit_lease(
+    conn: &Connection,
+    exec_id: &str,
+    dispatch_job_id: &str,
+) -> Result<SpawnedCommitLeaseOutcome> {
+    in_savepoint(conn, |conn| {
+        let lease_id = Uuid::new_v4().to_string();
+        let inserted = conn.execute(
+            "INSERT OR IGNORE INTO task_execution_commit_leases \
+                 (task_execution_id, dispatch_job_id, lease_id, created_at) \
+             SELECT id, ?2, ?3, ?4 FROM task_executions \
+              WHERE id = ?1 AND status = 'Working' AND dispatch_job_id = ?2",
+            params![exec_id, dispatch_job_id, lease_id, Utc::now().to_rfc3339(),],
+        )?;
+        if inserted == 1 {
+            return Ok(SpawnedCommitLeaseOutcome::Acquired { lease_id });
+        }
+        let current: Option<SpawnedCommitLeaseContext> = conn
+            .query_row(
+                "SELECT e.dispatch_job_id, l.dispatch_job_id, l.lease_id, l.settled_at \
+                 FROM task_executions e \
+                 LEFT JOIN task_execution_commit_leases l ON l.task_execution_id = e.id \
+                 WHERE e.id = ?1 AND e.status = 'Working'",
+                [exec_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+        Ok(match current {
+            Some((current_dispatch, _, _, _)) if current_dispatch != dispatch_job_id => {
+                SpawnedCommitLeaseOutcome::NotCurrent
+            }
+            Some((_, Some(lease_dispatch), _, Some(_))) if lease_dispatch == dispatch_job_id => {
+                SpawnedCommitLeaseOutcome::AlreadySettled
+            }
+            Some((_, Some(lease_dispatch), Some(previous_lease_id), Some(_))) => {
+                // A settled lease belongs to a completed Git operation.  If a
+                // rework attached a new dispatch before cleanup retried, reap
+                // only that old lease and reserve the current dispatch in the
+                // same savepoint.
+                let reaped = conn.execute(
+                    "DELETE FROM task_execution_commit_leases \
+                      WHERE task_execution_id = ?1 AND dispatch_job_id = ?2 \
+                        AND lease_id = ?3 AND settled_at IS NOT NULL",
+                    params![exec_id, lease_dispatch, previous_lease_id],
+                )?;
+                anyhow::ensure!(
+                    reaped == 1,
+                    "settled commit lease changed during replacement"
+                );
+                let acquired = conn.execute(
+                    "INSERT INTO task_execution_commit_leases \
+                         (task_execution_id, dispatch_job_id, lease_id, created_at) \
+                     SELECT id, ?2, ?3, ?4 FROM task_executions \
+                      WHERE id = ?1 AND status = 'Working' AND dispatch_job_id = ?2",
+                    params![exec_id, dispatch_job_id, lease_id, Utc::now().to_rfc3339()],
+                )?;
+                anyhow::ensure!(
+                    acquired == 1,
+                    "current dispatch changed during commit lease replacement"
+                );
+                SpawnedCommitLeaseOutcome::Acquired { lease_id }
+            }
+            Some((_, _, _, None)) => SpawnedCommitLeaseOutcome::Busy,
+            _ => SpawnedCommitLeaseOutcome::NotCurrent,
+        })
+    })
+}
+
+/// Record that Git has returned successfully before attempting the best-effort
+/// lease deletion. This is the only state a reassignment may reclaim: no Git
+/// process remains live once this write is committed.
+pub fn settle_spawned_commit_lease(
+    conn: &Connection,
+    exec_id: &str,
+    dispatch_job_id: &str,
+    lease_id: &str,
+) -> Result<bool> {
+    let updated = conn.execute(
+        "UPDATE task_execution_commit_leases SET settled_at = ?4 \
+          WHERE task_execution_id = ?1 AND dispatch_job_id = ?2 AND lease_id = ?3 \
+            AND settled_at IS NULL",
+        params![exec_id, dispatch_job_id, lease_id, Utc::now().to_rfc3339()],
+    )?;
+    Ok(updated == 1)
+}
+
+pub fn release_spawned_commit_lease(
+    conn: &Connection,
+    exec_id: &str,
+    dispatch_job_id: &str,
+    lease_id: &str,
+) -> Result<bool> {
+    let deleted = conn.execute(
+        "DELETE FROM task_execution_commit_leases \
+          WHERE task_execution_id = ?1 AND dispatch_job_id = ?2 AND lease_id = ?3",
+        params![exec_id, dispatch_job_id, lease_id],
+    )?;
+    Ok(deleted == 1)
 }
 
 pub fn get_execution_for_dispatch(
@@ -1636,6 +1850,47 @@ pub fn escalate_execution_for_dispatch_quota(
         params![execution.id, format!("quota_exhausted:{provider}"), now,],
     )?;
     Ok(Some((execution.id, execution.parent_discussion_id)))
+}
+
+/// KT-515 — the honest availability signal for `agent_list`, launch preflight
+/// and reassignment. True when `provider` (the [`agent_type_to_db`] form, e.g.
+/// `"Codex"`) still has an execution sitting in `Escalated` with the exact
+/// `quota_exhausted:<provider>` marker written by
+/// [`escalate_execution_for_dispatch_quota`]. `Escalated` is also reached by
+/// unrelated watchdog timeouts, so the marker (not the bare status) is what
+/// proves this is a real quota rejection: a transient timeout/transport error
+/// never writes that exact reason, so it never trips this check — Kronn does
+/// not confuse "could not reach the provider this time" with "the account
+/// quota is spent". The flag clears only on real evidence: reassigning the
+/// escalated execution moves it out of `Escalated` (see
+/// `reassign_execution_worker` + the `Escalated -> Working` transition in
+/// `reassign_native_execution`), as does cancelling or otherwise completing
+/// it — never a guessed provider-side reset schedule.
+///
+/// `exclude_exec_id` lets a reassignment of the very execution that raised the
+/// escalation target the same provider again (the human's explicit "quota is
+/// back, retry" signal) without being blocked by its own still-open row; a
+/// fresh `agent_list`/launch preflight for any other task passes `None` and
+/// sees every open escalation for the provider.
+pub fn provider_has_open_quota_exhaustion(
+    conn: &Connection,
+    provider: &str,
+    exclude_exec_id: Option<&str>,
+) -> Result<bool> {
+    let marker = format!("quota_exhausted:{provider}");
+    conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM task_execution_recovery r
+             JOIN task_executions e ON e.id = r.task_execution_id
+             WHERE e.worker_agent_type = ?1
+               AND r.recovery_reason = ?2
+               AND e.status = 'Escalated'
+               AND (?3 IS NULL OR e.id <> ?3)
+         )",
+        params![provider, marker, exclude_exec_id],
+        |row| row.get(0),
+    )
+    .map_err(Into::into)
 }
 
 /// Move an execution to `Blocked` and stamp a human-readable reason plus a structured
@@ -2103,9 +2358,21 @@ pub fn commit_cli_rework_checkpoint(
 /// bare UPDATE), records the queryable `review_requested` obligation and posts the
 /// principal-targeted review request into the PARENT room. Nothing is visible until
 /// commit; any raced move rolls the whole commit back.
+pub enum DeliveryDispatchExpectation<'a> {
+    /// The caller is a joined CLI worker whose durable session identity is the
+    /// authorization boundary. Its execution may still have a native dispatch;
+    /// this variant deliberately imposes no dispatch-column constraint.
+    Unconstrained,
+    Exact(&'a str),
+}
+
 pub struct DeliveryCheckpoint<'a> {
     pub exec_id: &'a str,
     pub attempt_no: u32,
+    /// Spawned CLI workers pin the immutable dispatch that started their
+    /// process. The delivery transaction compares it with the current row so
+    /// an intervening rework cannot accept a stale worker's manifest.
+    pub dispatch_expectation: DeliveryDispatchExpectation<'a>,
     /// The exact HEAD delivered (denormalized onto the delivery row for the DoD-5 check).
     pub head_sha: &'a str,
     /// The full validated DeliveryManifest v1 bytes.
@@ -2153,16 +2420,25 @@ pub fn commit_delivery_checkpoint(
 ) -> Result<DeliveryCheckpointOutcome> {
     use TaskExecutionStatus::*;
     let tx = conn.unchecked_transaction()?;
-    let current: Option<String> = tx
+    let current: Option<(String, Option<String>)> = tx
         .query_row(
-            "SELECT status FROM task_executions WHERE id = ?1",
+            "SELECT status, dispatch_job_id FROM task_executions WHERE id = ?1",
             params![input.exec_id],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?;
-    let Some(current) = current else {
+    let Some((current, dispatch_job_id)) = current else {
         return Ok(DeliveryCheckpointOutcome::ExecutionRaced);
     };
+    let dispatch_matches = match input.dispatch_expectation {
+        DeliveryDispatchExpectation::Unconstrained => true,
+        DeliveryDispatchExpectation::Exact(expected) => {
+            dispatch_job_id.as_deref() == Some(expected)
+        }
+    };
+    if !dispatch_matches {
+        return Ok(DeliveryCheckpointOutcome::ExecutionRaced);
+    }
     let status = TaskExecutionStatus::from_str(&current)?;
 
     match status {
@@ -3431,6 +3707,30 @@ pub fn record_validation_run(
     })
 }
 
+/// A successful validation is immutable evidence for one exact candidate. A
+/// recovery may restart between two commands, so it must not append a second
+/// row for a command that already completed for that same candidate.
+pub fn has_passing_validation_run(
+    conn: &Connection,
+    exec_id: &str,
+    candidate_merge_sha: &str,
+    spec: &ValidationSpec,
+) -> Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM task_execution_validation_runs \
+         WHERE task_execution_id = ?1 AND candidate_merge_sha = ?2 \
+           AND command = ?3 AND quick_exec_id IS ?4 AND exit_code = 0)",
+        params![
+            exec_id,
+            candidate_merge_sha,
+            spec.command,
+            spec.quick_exec_id
+        ],
+        |row| row.get(0),
+    )
+    .map_err(Into::into)
+}
+
 pub fn list_validation_runs(
     conn: &Connection,
     exec_id: &str,
@@ -3469,25 +3769,30 @@ pub fn get_execution_lineage(
             .collect::<Vec<_>>()
             .join(", ")
     );
-    conn.query_row(&sql, params![exec_id], |row| {
-        let execution = row_to_execution(row)?;
-        // EXEC_COLS spans indices 0..=33 (34 columns); the JOIN columns follow.
-        let kind: String = row.get(34)?;
-        let task_number: i64 = row.get(35)?;
-        let task_title: String = row.get(36)?;
-        let workspace_canonical_path: Option<String> = row.get(37)?;
-        Ok(TaskExecutionLineage {
-            parent_discussion_id: execution.parent_discussion_id.clone(),
-            sub_discussion_id: execution.sub_discussion_id.clone(),
-            orchestration_run_kind: OrchestrationRunKind::from_str(&kind).unwrap_or_default(),
-            task_reference: format!("KT-{task_number}"),
-            task_title,
-            workspace_canonical_path,
-            execution,
+    let lineage = conn
+        .query_row(&sql, params![exec_id], |row| {
+            let execution = row_to_execution(row)?;
+            // EXEC_COLS spans indices 0..=34 (35 columns); the JOIN columns follow.
+            let kind: String = row.get(35)?;
+            let task_number: i64 = row.get(36)?;
+            let task_title: String = row.get(37)?;
+            let workspace_canonical_path: Option<String> = row.get(38)?;
+            Ok(TaskExecutionLineage {
+                parent_discussion_id: execution.parent_discussion_id.clone(),
+                sub_discussion_id: execution.sub_discussion_id.clone(),
+                orchestration_run_kind: OrchestrationRunKind::from_str(&kind).unwrap_or_default(),
+                task_reference: format!("KT-{task_number}"),
+                task_title,
+                workspace_canonical_path,
+                execution,
+            })
         })
-    })
-    .optional()
-    .map_err(Into::into)
+        .optional()
+        .map_err(anyhow::Error::from)?;
+    if let Some(lineage) = lineage.as_ref() {
+        validate_worker_connection(conn, &lineage.execution)?;
+    }
+    Ok(lineage)
 }
 
 /// Compact execution-to-discussion edges for sidebar grouping. The relation is
@@ -4013,6 +4318,54 @@ pub fn resume_rebuild_candidate(
 
 /// Replace only the worker coordinates. The sub-discussion, workspace,
 /// deliveries, review history and every Git SHA remain untouched.
+fn restore_reassigned_cli_worker_to_origin(
+    conn: &Connection,
+    execution: &TaskExecution,
+) -> Result<()> {
+    let Some(session_pk) = execution.worker_cli_session_id else {
+        bail!("CLI reassignment has no exact session identity");
+    };
+    let Some(child) = execution.sub_discussion_id.as_deref() else {
+        bail!("CLI reassignment has no child discussion");
+    };
+    if child == execution.parent_discussion_id {
+        return Ok(());
+    }
+    let source: Option<(String, String)> = conn
+        .query_row(
+            "SELECT agent_type, session_id FROM discussion_sessions WHERE id = ?1",
+            [session_pk],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    if let Some((source_agent, source_session_id)) = source {
+        let current = crate::db::disc_source::find_disc_by_source_session(
+            conn,
+            &source_agent,
+            &source_session_id,
+        )?;
+        match current.as_deref() {
+            Some(current) if current == child => crate::db::disc_source::bind_to_source(
+                conn,
+                &execution.parent_discussion_id,
+                &source_agent,
+                &source_session_id,
+            )?,
+            Some(current) if current == execution.parent_discussion_id => {}
+            Some(current) => bail!(
+                "CLI reassignment return refused: session ownership moved from child {child} to {current}"
+            ),
+            None => {}
+        }
+        crate::db::discussion_sessions::move_session_to_discussion(
+            conn,
+            session_pk,
+            &execution.parent_discussion_id,
+        )?;
+    }
+    Ok(())
+}
+
 pub fn reassign_execution_worker(
     conn: &Connection,
     exec_id: &str,
@@ -4065,9 +4418,32 @@ pub fn reassign_execution_worker(
                 execution.status.as_str()
             );
         }
+        // A lease marked settled proves its supervised Git operation already
+        // returned. Reap it before deciding whether a live commit still bars
+        // reassignment; this recovers a transient DELETE failure without ever
+        // crossing a running Git boundary.
+        conn.execute(
+            "DELETE FROM task_execution_commit_leases \
+              WHERE task_execution_id = ?1 AND settled_at IS NOT NULL",
+            [exec_id],
+        )?;
+        let commit_in_progress: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM task_execution_commit_leases \
+              WHERE task_execution_id = ?1)",
+            [exec_id],
+            |row| row.get(0),
+        )?;
+        if commit_in_progress {
+            bail!("execution {exec_id} has a worker commit in progress; retry reassignment after it settles");
+        }
         let run = get_orchestration_run(conn, &execution.orchestration_run_id)?
             .ok_or_else(|| anyhow::anyhow!("orchestration run vanished"))?;
         resolve_campaign_worker(conn, &run, Some(selection))?;
+        if execution.worker_target_kind == Some(MessageTargetKind::Cli)
+            && selection.target.kind != MessageTargetKind::Cli
+        {
+            restore_reassigned_cli_worker_to_origin(conn, &execution)?;
+        }
         if let Some(dispatch_id) = execution.dispatch_job_id.as_deref() {
             crate::db::agent_dispatch::cancel_for_discussion_by_id(
                 conn,
@@ -4077,13 +4453,13 @@ pub fn reassign_execution_worker(
         }
         crate::db::worker_offers::cancel_live_offers_for_execution(conn, exec_id)?;
         let now = Utc::now().to_rfc3339();
-        // Repair rows created by the pre-KT-385 native request_changes path: it persisted the
-        // review on attempt N but forgot to advance the execution before a later reassignment.
-        // Without this guard the next delivery/review would overwrite attempt N's audit rows.
-        // Correct rows already point at N+1, where no review exists yet, so this is idempotent.
+        // Repair historical rework rows that still point at an already-reviewed attempt.
+        // Pre-KT-385 request_changes forgot to advance it; pre-KT-497 validation/integration
+        // send-backs did the same after an approve. In both cases attempt N already owns its
+        // delivery/review/message audit identities, so the next delivery must use N+1.
+        // Correct rows already point at an unreviewed attempt, making this idempotent.
         let repaired_rework_attempt =
-            crate::db::worker_reviews::get_review(conn, exec_id, execution.attempt_no)?
-                .is_some_and(|review| review.decision == "request_changes");
+            crate::db::worker_reviews::get_review(conn, exec_id, execution.attempt_no)?.is_some();
         if repaired_rework_attempt {
             conn.execute(
                 "UPDATE task_executions SET attempt_no = attempt_no + 1, updated_at = ?2 \
@@ -4100,7 +4476,7 @@ pub fn reassign_execution_worker(
                 serde_json::json!({
                     "from_attempt": execution.attempt_no,
                     "to_attempt": execution.attempt_no + 1,
-                    "reason": "request_changes_attempt_was_not_advanced",
+                    "reason": "reviewed_attempt_was_not_advanced",
                 }),
             )?;
         }
@@ -4123,7 +4499,8 @@ pub fn reassign_execution_worker(
         conn.execute(
             "UPDATE task_executions SET worker_target_kind = ?2, worker_cli_session_id = ?3, \
                     worker_agent_type = ?4, worker_model = ?5, worker_model_tier = ?6, \
-                    worker_profile_id = ?7, dispatch_job_id = NULL, updated_at = ?8 \
+                    worker_profile_id = ?7, dispatch_job_id = NULL, updated_at = ?8, \
+                    worker_connection_id = ?9 \
              WHERE id = ?1",
             params![
                 exec_id,
@@ -4134,6 +4511,7 @@ pub fn reassign_execution_worker(
                 selection.target.tier.as_ref().map(model_tier_to_db),
                 selection.profile_id,
                 now,
+                selection.target.connection_id,
             ],
         )?;
         conn.execute(

@@ -31,6 +31,7 @@ already requiring it.
 
 import contextlib
 import hashlib
+import hmac
 import importlib.util
 import json
 import os
@@ -39,6 +40,9 @@ import secrets
 import subprocess
 import sys
 import queue
+import select
+import stat
+import tempfile
 import threading
 import time
 import urllib.error
@@ -49,7 +53,27 @@ import uuid
 
 MAX_DISC_APPEND_ATTACHMENTS = 8
 MAX_DISC_APPEND_ATTACHMENT_BYTES = 10 * 1024 * 1024
-BRIDGE_TOOL_SURFACE_VERSION = "0.3.8"
+BRIDGE_TOOL_SURFACE_VERSION = "0.3.9"
+
+
+class BridgeStaleError(RuntimeError):
+    """Typed fail-closed signal used to schedule one transparent self-reload."""
+
+
+_BRIDGE_RELOAD_STATE = {"status": "idle", "error": None}
+_BRIDGE_RELOAD_READY_ENV = "_KRONN_MCP_RELOADED"
+_BRIDGE_RELOAD_HANDOFF_ENV = "_KRONN_MCP_RELOAD_HANDOFF"
+_BRIDGE_RELOAD_HANDOFF_FD_ENV = "_KRONN_MCP_RELOAD_HANDOFF_FD"
+_BRIDGE_RELOAD_HANDOFF_NONCE_ENV = "_KRONN_MCP_RELOAD_HANDOFF_NONCE"
+_BRIDGE_PREFLIGHT_ENV = "_KRONN_MCP_PREFLIGHT"
+_BRIDGE_SOURCE_ENV = "_KRONN_MCP_SOURCE"
+_BRIDGE_ARTIFACT_FD_ENV = "_KRONN_MCP_ARTIFACT_FD"
+_BRIDGE_ARTIFACT_SHA_ENV = "_KRONN_MCP_ARTIFACT_SHA256"
+_BRIDGE_HANDOFF_VERSION = 3
+_BRIDGE_HANDOFF_MAX_BYTES = 1024 * 1024
+_BRIDGE_PENDING_MAX_BYTES = 256 * 1024
+_BRIDGE_SOURCE_PATH = os.environ.get(_BRIDGE_SOURCE_ENV) or os.path.abspath(__file__)
+_BRIDGE_ARTIFACT_FD = None
 
 
 # ─── Tool catalogue ────────────────────────────────────────────────────────
@@ -66,8 +90,8 @@ def _bridge_script_snapshot():
     cannot make a different tool contract look fresh.
     """
     try:
-        mtime = os.path.getmtime(__file__)
-        with open(__file__, "rb") as script:
+        mtime = os.path.getmtime(_BRIDGE_SOURCE_PATH)
+        with open(_BRIDGE_SOURCE_PATH, "rb") as script:
             digest = hashlib.sha256(script.read()).hexdigest()
         return mtime, digest
     except OSError:
@@ -75,8 +99,9 @@ def _bridge_script_snapshot():
 
 
 _BRIDGE_LOADED_AT = time.time()
-_BRIDGE_SCRIPT_MTIME_AT_LOAD, _BRIDGE_SCRIPT_SHA256_AT_LOAD = (
-    _bridge_script_snapshot()
+_BRIDGE_SCRIPT_MTIME_AT_LOAD, _source_sha256_at_load = _bridge_script_snapshot()
+_BRIDGE_SCRIPT_SHA256_AT_LOAD = (
+    os.environ.get(_BRIDGE_ARTIFACT_SHA_ENV) or _source_sha256_at_load
 )
 
 TOOLS = [
@@ -112,12 +137,10 @@ TOOLS = [
     {
         "name": "bridge_info",
         "description": (
-            "0.9.0 — Health/staleness check of THIS bridge process: script "
-            "path, when it was loaded, and whether the on-disk script is "
-            "NEWER than the loaded copy (`stale: true`). Call it when a tool "
-            "you expect is missing or behaves oddly after a Kronn release. "
-            "If stale, ask the user to reconnect the MCP — BEFORE launching "
-            "anything session-bound (an audit dies with this session)."
+            "Report this bridge's loaded/on-disk identity and reload state. "
+            "`stale: true` makes guarded mutations fail closed and schedule one "
+            "transparent reload; retry once with the same idempotency key, or "
+            "reconnect when reload failed."
         ),
         "inputSchema": {"type": "object", "properties": {}},
     },
@@ -888,11 +911,9 @@ TOOLS = [
     {
         "name": "task_exec_status",
         "description": (
-            "Read one TaskExecution you are a party to. Returns state, typed worker/model, "
-            "branch/SHAs/worktree, duration and honest token telemetry, DoD, delivery/review "
-            "attempts, validations and pending recovery. Use this after reconnect/resume; "
-            "if the execution id was lost, pass its KT task_reference to recover the active "
-            "or latest execution without replaying the launch. Do not infer state from chat."
+            "Read a party-visible TaskExecution and its durable evidence/recovery state. "
+            "After reconnect, use its id or task_reference, obey returned `next_action`, "
+            "and never infer execution state from chat."
         ),
         "inputSchema": {
             "type": "object",
@@ -922,17 +943,37 @@ TOOLS = [
         },
     },
     {
-        "name": "task_exec_reassign",
+        "name": "task_exec_resume",
         "description": (
-            "Reassign an interrupted/blocked execution as principal, preserving its room, "
-            "worktree and evidence. Transport changes must change target.kind; invalid "
-            "pairs are refused before mutation."
+            "Resume only when task_exec_status returns "
+            "`next_action.tool=task_exec_resume`; the guarded checkpoint is retry-safe. "
+            "See tool_manual({tool: \"task_exec_resume\"})."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "task_execution_id": {"type": "string"},
-                "worker": {"type": "object"},
+            },
+            "required": ["task_execution_id"],
+        },
+    },
+    {
+        "name": "task_exec_reassign",
+        "description": (
+            "Reassign an interrupted/blocked execution without losing its room or evidence. "
+            "See tool_manual({tool: \"task_exec_reassign\"})."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_execution_id": {"type": "string"},
+                "worker": {
+                    "type": "object",
+                    "description": (
+                        "Copy from agent_list. Native HTTP workers use discussion_agent; "
+                        "Custom targets require their connection_id."
+                    ),
+                },
                 "reason": {"type": "string"},
             },
             "required": ["task_execution_id", "worker", "reason"],
@@ -941,16 +982,10 @@ TOOLS = [
     {
         "name": "task_exec_accept_worker_offer",
         "description": (
-            "Accept a task-execution worker control offer posted to THIS joined "
-            "CLI session and attach to the task's sub-discussion. Pass ONLY the "
-            "opaque `offer_id` from the offer message: the backend derives your "
-            "identity from this bridge's durable session and verifies you are the "
-            "EXACT session the offer targets (a different session — same provider "
-            "included — is refused). On success your session moves into the "
-            "sub-discussion, the work brief appears there, and this bridge rebinds "
-            "so subsequent calls and `disc_wait_for_peer` operate on the child "
-            "room. A refused offer surfaces an opaque reason (not found / not for "
-            "you) or a specific state (already accepted, expired)."
+            "Attach THIS joined CLI to a task worker offer using only its opaque "
+            "offer_id. The backend verifies the exact session and success rebinds "
+            "this bridge to the child room. See "
+            "tool_manual({tool: \"task_exec_accept_worker_offer\"})."
         ),
         "inputSchema": {
             "type": "object",
@@ -2685,6 +2720,81 @@ def _backend_url():
 # `disc_leave` server calls — way better UX than asking the user to
 # set `KRONN_AGENT_TYPE` env before launching each CLI.
 _CLIENT_INFO = {"name": None, "version": None}
+
+
+def _restore_reload_handoff():
+    """Restore state consumed by exec without requiring a second initialize."""
+    legacy_path = os.environ.pop(_BRIDGE_RELOAD_HANDOFF_ENV, None)
+    raw_fd = os.environ.pop(_BRIDGE_RELOAD_HANDOFF_FD_ENV, None)
+    expected_nonce = os.environ.pop(_BRIDGE_RELOAD_HANDOFF_NONCE_ENV, None)
+    if raw_fd is None:
+        if legacy_path:
+            raise RuntimeError("bridge reload handoff path transport is no longer accepted")
+        return []
+    if (not isinstance(raw_fd, str)
+            or re.fullmatch(r"[1-9][0-9]*", raw_fd) is None):
+        raise RuntimeError("bridge reload handoff descriptor is invalid")
+    fd = int(raw_fd)
+    if fd <= 2:
+        raise RuntimeError("bridge reload handoff descriptor is invalid")
+    try:
+        if (not isinstance(expected_nonce, str)
+                or re.fullmatch(r"[0-9a-f]{64}", expected_nonce) is None):
+            raise RuntimeError("bridge reload handoff authenticator is missing or invalid")
+        opened = os.fstat(fd)
+        if (not stat.S_ISREG(opened.st_mode)
+                or stat.S_IMODE(opened.st_mode) != 0o600
+                or opened.st_uid != os.geteuid()
+                or opened.st_nlink != 0
+                or opened.st_size > _BRIDGE_HANDOFF_MAX_BYTES):
+            raise RuntimeError("bridge reload handoff descriptor failed validation")
+        os.lseek(fd, 0, os.SEEK_SET)
+        raw = os.read(fd, _BRIDGE_HANDOFF_MAX_BYTES + 1)
+        if len(raw) > _BRIDGE_HANDOFF_MAX_BYTES:
+            raise RuntimeError("bridge reload handoff exceeds size limit")
+        state = json.loads(raw.decode("utf-8"))
+        if not isinstance(state, dict) or set(state) != {
+            "version", "client_info", "requests", "cancelled_request_ids",
+            "pending_hex", "stdin_eof", "nonce",
+        } or state.get("version") != _BRIDGE_HANDOFF_VERSION:
+            raise RuntimeError("bridge reload handoff schema is invalid")
+        nonce = state["nonce"]
+        if (not isinstance(nonce, str)
+                or re.fullmatch(r"[0-9a-f]{64}", nonce) is None
+                or not hmac.compare_digest(nonce, expected_nonce)):
+            raise RuntimeError("bridge reload handoff authentication failed")
+        client_info = state["client_info"]
+        queued = state["requests"]
+        cancelled = state["cancelled_request_ids"]
+        pending_hex = state["pending_hex"]
+        stdin_eof = state["stdin_eof"]
+        if (not isinstance(client_info, dict)
+                or set(client_info) != {"name", "version"}
+                or any(value is not None and (not isinstance(value, str) or len(value) > 256)
+                       for value in client_info.values())
+                or not isinstance(queued, list) or len(queued) > 4096
+                or not all(isinstance(item, dict) for item in queued)
+                or not isinstance(cancelled, list) or len(cancelled) > 4096
+                or not all(isinstance(rid, (str, int, float)) and not isinstance(rid, bool)
+                           for rid in cancelled)
+                or not isinstance(pending_hex, str)
+                or len(pending_hex) > _BRIDGE_PENDING_MAX_BYTES * 2
+                or not isinstance(stdin_eof, bool)):
+            raise RuntimeError("bridge reload handoff payload is invalid")
+        try:
+            pending = bytes.fromhex(pending_hex)
+        except ValueError as exc:
+            raise RuntimeError("bridge reload handoff pending buffer is invalid") from exc
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(fd)
+    _CLIENT_INFO.update(name=client_info["name"], version=client_info["version"])
+    _STDIN_PENDING.extend(pending)
+    now = time.monotonic()
+    with _CANCELLED_LOCK:
+        for rid in cancelled:
+            _CANCELLED_REQUEST_IDS[rid] = now
+    return queued + ([None] if stdin_eof else [])
 
 
 def _infer_agent_type_from_client_name(name):
@@ -5161,7 +5271,8 @@ def _spawned_task_worker_context(required=False, tool_name="spawned task worker"
             f"{tool_name}: spawned worker context is invalid"
         ) from error
     required_fields = (
-        "execution_id", "discussion_id", "agent_type", "source_message_id",
+        "execution_id", "discussion_id", "agent_type", "dispatch_job_id",
+        "source_message_id",
     )
     if not isinstance(value, dict) or any(
         not isinstance(value.get(field), str) or not value[field].strip()
@@ -5260,7 +5371,21 @@ def _visible_tools():
             "summary": {"type": "string", "minLength": 1},
         },
     }
-    return [commit, {
+    status = next(item for item in TOOLS if item["name"] == "task_exec_status")
+    status = {
+        **status,
+        "description": (
+            "Read THIS spawned task worker's execution status. Kronn derives "
+            "the execution, child room, provider and dispatch from the runner capability; "
+            "no execution selector is accepted."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {},
+        },
+    }
+    return [status, commit, {
         **delivery,
         "description": (
             "Submit semantic delivery assertions for THIS spawned task worker. "
@@ -5283,6 +5408,43 @@ _TASK_EXEC_MANUAL_HINT = (
     'Read tool_manual({tool: "task_exec_prepare"}) for the exact worker, '
     "worker_scope_intent, worker_scope and validations shapes."
 )
+
+_TASK_EXEC_WORKER_KINDS = ("discussion_agent", "agent", "cli")
+
+
+def _validate_task_exec_worker(worker, tool_name):
+    """Fail closed with a typed, actionable error instead of the backend's raw
+    422 when `worker` is not the flat MessageTarget object `agent_list` hands
+    back verbatim. Catches the classic mistake of wrapping it as the internal
+    `{target: {...}, model, profile_id}` envelope."""
+    if not isinstance(worker, dict):
+        raise RuntimeError(
+            f"{tool_name}: worker must be the typed MessageTarget object copied "
+            f"verbatim from agent_list. {_TASK_EXEC_MANUAL_HINT}"
+        )
+    if "target" in worker and "kind" not in worker:
+        raise RuntimeError(
+            f"{tool_name}: worker must be the flat MessageTarget object itself "
+            '(kind/agent_type/...), not wrapped as {"target": {...}, "model": ..., '
+            '"profile_id": ...}. Copy the `worker` object from agent_list verbatim. '
+            f"{_TASK_EXEC_MANUAL_HINT}"
+        )
+    kind = worker.get("kind")
+    if kind not in _TASK_EXEC_WORKER_KINDS:
+        raise RuntimeError(
+            f"{tool_name}: worker.kind must be one of {_TASK_EXEC_WORKER_KINDS}, "
+            f"got {kind!r}. {_TASK_EXEC_MANUAL_HINT}"
+        )
+    agent_type = worker.get("agent_type")
+    if not isinstance(agent_type, str) or not agent_type.strip():
+        raise RuntimeError(
+            f"{tool_name}: worker.agent_type is required. {_TASK_EXEC_MANUAL_HINT}"
+        )
+    if kind == "cli" and not isinstance(worker.get("cli_session_id"), int):
+        raise RuntimeError(
+            f"{tool_name}: worker.kind=cli requires the exact integer cli_session_id "
+            f"copied from agent_list — never guess it. {_TASK_EXEC_MANUAL_HINT}"
+        )
 
 
 def _task_exec_request(path, body):
@@ -5387,13 +5549,59 @@ def call_task_exec_launch(args):
 
 
 def call_task_exec_status(args):
+    if _spawned_task_worker_mode():
+        context = _spawned_task_worker_context(
+            required=True, tool_name="task_exec_status"
+        )
+        return _unwrap(_http(
+            "POST",
+            f"/api/orchestration/tool/executions/{urllib.parse.quote(context['execution_id'], safe='')}/status",
+            {
+                "spawned_agent": {
+                    "discussion_id": context["discussion_id"],
+                    "agent_type": context["agent_type"],
+                    "dispatch_job_id": context["dispatch_job_id"],
+                    "source_message_id": context["source_message_id"],
+                },
+            },
+        ))
     execution_id = (args.get("task_execution_id") or args.get("task_reference") or "").strip()
     if not execution_id:
         raise RuntimeError("task_exec_status: task_execution_id or task_reference is required")
     source_agent, source_session_id = _task_exec_identity("task_exec_status")
-    return _unwrap(_http(
+    result = _unwrap(_http(
         "POST",
         f"/api/orchestration/tool/executions/{urllib.parse.quote(execution_id, safe='')}/status",
+        {"source_agent": source_agent, "source_session_id": source_session_id},
+    ))
+    execution = ((result.get("lineage") or {}).get("execution") or {})
+    status = execution.get("status")
+    blocked_from = execution.get("blocked_from_status")
+    interrupted_from = execution.get("interrupted_from_status")
+    if (
+        (status == "Blocked" and blocked_from == "Applying")
+        or (
+            status == "Interrupted"
+            and interrupted_from == "Blocked"
+            and blocked_from == "Applying"
+        )
+    ):
+        result["next_action"] = {
+            "tool": "task_exec_resume",
+            "task_execution_id": execution_id,
+            "reason": "Applying-origin checkpoint can be retried after cleaning the parent",
+        }
+    return result
+
+
+def call_task_exec_resume(args):
+    execution_id = (args.get("task_execution_id") or "").strip()
+    if not execution_id:
+        raise RuntimeError("task_exec_resume: task_execution_id is required")
+    source_agent, source_session_id = _task_exec_identity("task_exec_resume")
+    return _unwrap(_http(
+        "POST",
+        f"/api/orchestration/tool/executions/{urllib.parse.quote(execution_id, safe='')}/resume",
         {"source_agent": source_agent, "source_session_id": source_session_id},
     ))
 
@@ -5425,9 +5633,9 @@ def call_task_exec_reassign(args):
         raise RuntimeError(
             "task_exec_reassign: task_execution_id, typed worker and reason are required"
         )
+    _validate_task_exec_worker(worker, "task_exec_reassign")
     source_agent, source_session_id = _task_exec_identity("task_exec_reassign")
-    return _unwrap(_http(
-        "POST",
+    return _task_exec_request(
         f"/api/orchestration/tool/executions/{execution_id}/reassign",
         {
             "source_agent": source_agent,
@@ -5435,7 +5643,7 @@ def call_task_exec_reassign(args):
             "worker": worker,
             "reason": reason,
         },
-    ))
+    )
 
 
 def call_task_exec_accept_worker_offer(args):
@@ -5540,6 +5748,7 @@ def call_task_exec_deliver(args):
             "spawned_agent": {
                 "discussion_id": context["discussion_id"],
                 "agent_type": context["agent_type"],
+                "dispatch_job_id": context["dispatch_job_id"],
                 "source_message_id": context["source_message_id"],
             },
         }))
@@ -5594,6 +5803,7 @@ def call_task_exec_commit(args):
         "spawned_agent": {
             "discussion_id": context["discussion_id"],
             "agent_type": context["agent_type"],
+            "dispatch_job_id": context["dispatch_job_id"],
             "source_message_id": context["source_message_id"],
         },
     }))
@@ -6437,7 +6647,7 @@ def _collect_and_report_telemetry(disc_id, session_id, vendor):
     try:
         spec = importlib.util.spec_from_file_location(
             "cli_token_collector",
-            os.path.join(os.path.dirname(os.path.abspath(__file__)),
+            os.path.join(os.path.dirname(_BRIDGE_SOURCE_PATH),
                          "cli_token_collector.py"),
         )
         collector = importlib.util.module_from_spec(spec)
@@ -9017,6 +9227,30 @@ TOOL_MANUALS = {
         "If a joined runtime lacks these tools after reconnect, reconnect the Kronn MCP and report "
         "the capability gap instead of fabricating a handoff."
     ),
+    "task_exec_resume": (
+        "Call resume only when `task_exec_status` returns the exact "
+        "`next_action.tool: task_exec_resume`. The backend rechecks parent "
+        "cleanliness and checkpoint SHAs, cannot skip provisioning or review, "
+        "and returns the existing terminal result when an Applying-origin "
+        "resume already succeeded. After reconnect, recover with status rather "
+        "than replaying launch."
+    ),
+    "task_exec_reassign": (
+        "Reassignment is principal-only and preserves the execution room, "
+        "worktree and evidence. Pass the flat typed MessageTarget copied from "
+        "`agent_list` (`kind`, `agent_type`, optional exact `cli_session_id` and "
+        "tier), never the internal `{target, model, profile_id}` envelope. A "
+        "transport change must change `worker.kind`. Native HTTP targets do not "
+        "need an internal connection id; a dynamic Custom target does."
+    ),
+    "task_exec_accept_worker_offer": (
+        "Pass only the opaque `offer_id` from the control message. The backend "
+        "derives identity from this bridge's durable session and refuses another "
+        "session even when it uses the same provider. Success moves the session "
+        "into the child discussion, exposes the work brief and rebinds subsequent "
+        "calls and `disc_wait_for_peer`. Refusals distinguish expired/already "
+        "accepted state from an offer that is absent or not addressed to you."
+    ),
     "disc_append": (
         "**BULK transcript import** (cross-agent memory, since 0.8.4) — pass "
         "`messages: [{source_msg_id, role, content, agent_type}, …]` to push a "
@@ -9284,7 +9518,7 @@ def _bridge_freshness():
 def _require_fresh_bridge(tool_name):
     freshness = _bridge_freshness()
     if freshness["stale"]:
-        raise RuntimeError(
+        raise BridgeStaleError(
             f"{tool_name}: refused before changing orchestration state because this "
             "kronn-internal bridge is stale; its loaded tool contract differs from "
             "the script on disk. Reconnect the Kronn MCP, recover the task with "
@@ -9292,20 +9526,40 @@ def _require_fresh_bridge(tool_name):
         )
 
 
+# One classification point for every orchestration action that may mutate
+# execution state. Status is intentionally absent because recovery reads must
+# remain available while a stale bridge is fail-closed.
+_GUARDED_ORCHESTRATION_TOOLS = frozenset({
+    "agent_list",
+    "task_exec_prepare",
+    "task_exec_launch",
+    "task_exec_resume",
+    "task_exec_cancel",
+    "task_exec_reassign",
+    "task_exec_accept_worker_offer",
+    "task_exec_commit",
+    "task_exec_deliver",
+    "task_exec_review",
+})
+
+
 def call_bridge_info(_args):
     freshness = _bridge_freshness()
     mtime_now = freshness["mtime_now"]
     return {
-        "script_path": os.path.abspath(__file__),
+        "script_path": _BRIDGE_SOURCE_PATH,
         "loaded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(_BRIDGE_LOADED_AT)),
         "script_mtime_at_load": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(_BRIDGE_SCRIPT_MTIME_AT_LOAD)),
         "script_mtime_now": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(mtime_now)),
         "script_sha256_at_load": _BRIDGE_SCRIPT_SHA256_AT_LOAD,
         "script_sha256_now": freshness["sha256_now"],
         "stale": freshness["stale"],
+        "reload": dict(_BRIDGE_RELOAD_STATE),
         "hint": (
-            "stale=true: the on-disk bridge differs from this process — ask "
-            "the user to reconnect the MCP before launching session-bound work."
+            "stale=true: the on-disk bridge differs from this process. The next "
+            "guarded mutation schedules one transparent reload; retry it once with "
+            "the same idempotency key. If reload.status is failed, reconnect the "
+            "Kronn MCP manually once."
         ),
     }
 
@@ -9671,6 +9925,7 @@ DISPATCH = {
     "task_exec_prepare": call_task_exec_prepare,
     "task_exec_launch": call_task_exec_launch,
     "task_exec_status": call_task_exec_status,
+    "task_exec_resume": call_task_exec_resume,
     "task_exec_cancel": call_task_exec_cancel,
     "task_exec_reassign": call_task_exec_reassign,
     "task_exec_accept_worker_offer": call_task_exec_accept_worker_offer,
@@ -9810,11 +10065,253 @@ def _send(payload):
     sys.stdout.flush()
 
 
+def _schedule_bridge_reload():
+    """Preflight and schedule at most one self-reexec for this loaded process."""
+    if _BRIDGE_RELOAD_STATE["status"] not in ("idle", "deferred_active_audit"):
+        return dict(_BRIDGE_RELOAD_STATE)
+    with _AUDIT_LOCK:
+        active_audits = sorted(project_id for project_id, entry in _AUDIT_STREAMS.items()
+                               if entry.get("state") in ("launching", "running"))
+    if active_audits:
+        _BRIDGE_RELOAD_STATE.update(
+            status="deferred_active_audit",
+            error="active audit SSE stream(s): " + ", ".join(active_audits),
+        )
+        return dict(_BRIDGE_RELOAD_STATE)
+    global _BRIDGE_ARTIFACT_FD
+    try:
+        artifact_fd, artifact_path = tempfile.mkstemp(
+            prefix="kronn-mcp-artifact-", suffix=".py"
+        )
+        try:
+            # Remove the name before the first write.  From this point on the
+            # artifact is fd-only, so a concurrent replacement of the old
+            # pathname cannot influence preflight or exec.
+            os.unlink(artifact_path)
+            artifact_path = None
+            if os.fstat(artifact_fd).st_nlink != 0:
+                raise RuntimeError("bridge reload artifact could not be unlinked")
+            with open(_BRIDGE_SOURCE_PATH, "rb") as source:
+                artifact_bytes = source.read()
+            with os.fdopen(os.dup(artifact_fd), "wb") as artifact:
+                artifact.write(artifact_bytes)
+                artifact.flush()
+            os.fsync(artifact_fd)
+            os.lseek(artifact_fd, 0, os.SEEK_SET)
+            os.set_inheritable(artifact_fd, True)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.close(artifact_fd)
+            if artifact_path is not None:
+                with contextlib.suppress(OSError):
+                    os.unlink(artifact_path)
+            raise
+        artifact_sha256 = hashlib.sha256(artifact_bytes).hexdigest()
+        artifact_exec_path = f"/dev/fd/{artifact_fd}"
+        checked = subprocess.run(
+            [sys.executable, artifact_exec_path],
+            env={**os.environ, _BRIDGE_PREFLIGHT_ENV: "1",
+                 _BRIDGE_SOURCE_ENV: _BRIDGE_SOURCE_PATH,
+                 _BRIDGE_ARTIFACT_SHA_ENV: artifact_sha256},
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE, text=True, timeout=10,
+            pass_fds=(artifact_fd,),
+        )
+        if checked.returncode != 0:
+            raise RuntimeError((checked.stderr or "bridge preflight failed")[-1000:])
+    except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
+        if locals().get("artifact_path"):
+            with contextlib.suppress(OSError):
+                os.unlink(artifact_path)
+        if "artifact_fd" in locals():
+            with contextlib.suppress(OSError):
+                os.close(artifact_fd)
+        _BRIDGE_RELOAD_STATE.update(status="failed", error=str(exc))
+    else:
+        _BRIDGE_ARTIFACT_FD = artifact_fd
+        _BRIDGE_RELOAD_STATE.update(
+            status="scheduled", error=None, artifact_sha256=artifact_sha256,
+        )
+    return dict(_BRIDGE_RELOAD_STATE)
+
+
+def _perform_scheduled_bridge_reload():
+    """Replace this process while preserving its inherited stdio transport."""
+    if _BRIDGE_RELOAD_STATE["status"] != "scheduled":
+        return False
+    global _BRIDGE_ARTIFACT_FD
+    handoff_path = None
+    handoff_fd = None
+    try:
+        _STDIN_READ_LOCK.acquire()
+        queued = []
+        stdin_eof = False
+        while True:
+            try:
+                item = _REQUEST_QUEUE.get_nowait()
+            except queue.Empty:
+                break
+            if item is None:
+                stdin_eof = True
+            else:
+                queued.append(item)
+        queued_ids = {
+            rid for rid in (item.get("id") for item in queued)
+            if isinstance(rid, (str, int, float)) and not isinstance(rid, bool)
+        }
+        with _CANCELLED_LOCK:
+            cancelled = [
+                rid for rid, ts in _CANCELLED_REQUEST_IDS.items()
+                if rid in queued_ids and time.monotonic() - ts <= _CANCELLATION_TTL_SECS
+            ]
+        handoff_fd, handoff_path = tempfile.mkstemp(prefix="kronn-mcp-reload-", suffix=".json")
+        try:
+            # Same fd-only rule as the executable artifact: never write the
+            # handoff while a pathname can still name its inode.
+            os.unlink(handoff_path)
+            handoff_path = None
+            if os.fstat(handoff_fd).st_nlink != 0:
+                raise RuntimeError("bridge reload handoff could not be unlinked")
+            handoff_nonce = secrets.token_hex(32)
+            with os.fdopen(os.dup(handoff_fd), "w", encoding="utf-8") as handoff:
+                json.dump({
+                    "version": _BRIDGE_HANDOFF_VERSION,
+                    "nonce": handoff_nonce,
+                    "client_info": dict(_CLIENT_INFO),
+                    "requests": queued,
+                    "cancelled_request_ids": cancelled,
+                    "pending_hex": bytes(_STDIN_PENDING).hex(),
+                    "stdin_eof": stdin_eof,
+                }, handoff, separators=(",", ":"))
+                handoff.flush()
+                os.fsync(handoff.fileno())
+                if os.fstat(handoff.fileno()).st_size > _BRIDGE_HANDOFF_MAX_BYTES:
+                    raise RuntimeError("bridge reload handoff exceeds size limit")
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.close(handoff_fd)
+            raise
+        os.lseek(handoff_fd, 0, os.SEEK_SET)
+        os.set_inheritable(handoff_fd, True)
+        # The replacement receives this already-open, unlinked inode.  A
+        # pathname handoff would leave a replacement race between validation
+        # and read, even with O_NOFOLLOW and a nonce.
+        os.environ[_BRIDGE_RELOAD_HANDOFF_FD_ENV] = str(handoff_fd)
+        os.environ[_BRIDGE_RELOAD_HANDOFF_NONCE_ENV] = handoff_nonce
+        os.environ[_BRIDGE_RELOAD_READY_ENV] = "1"
+        expected_sha256 = _BRIDGE_RELOAD_STATE.get("artifact_sha256")
+        if _BRIDGE_ARTIFACT_FD is None:
+            raise RuntimeError("preflighted bridge artifact descriptor is unavailable")
+        os.lseek(_BRIDGE_ARTIFACT_FD, 0, os.SEEK_SET)
+        with os.fdopen(os.dup(_BRIDGE_ARTIFACT_FD), "rb") as artifact:
+            actual_sha256 = hashlib.sha256(artifact.read()).hexdigest()
+        if actual_sha256 != expected_sha256:
+            raise RuntimeError("preflighted bridge artifact changed before exec")
+        os.lseek(_BRIDGE_ARTIFACT_FD, 0, os.SEEK_SET)
+        os.environ[_BRIDGE_SOURCE_ENV] = _BRIDGE_SOURCE_PATH
+        os.environ[_BRIDGE_ARTIFACT_FD_ENV] = str(_BRIDGE_ARTIFACT_FD)
+        os.environ[_BRIDGE_ARTIFACT_SHA_ENV] = expected_sha256
+        artifact_exec_path = f"/dev/fd/{_BRIDGE_ARTIFACT_FD}"
+        os.execv(sys.executable, [sys.executable, artifact_exec_path])
+    except (OSError, TypeError, ValueError, RuntimeError) as exc:
+        os.environ.pop(_BRIDGE_RELOAD_READY_ENV, None)
+        os.environ.pop(_BRIDGE_RELOAD_HANDOFF_ENV, None)
+        os.environ.pop(_BRIDGE_RELOAD_HANDOFF_FD_ENV, None)
+        os.environ.pop(_BRIDGE_RELOAD_HANDOFF_NONCE_ENV, None)
+        os.environ.pop(_BRIDGE_ARTIFACT_FD_ENV, None)
+        if handoff_fd is not None:
+            with contextlib.suppress(OSError):
+                os.close(handoff_fd)
+        if handoff_path:
+            with contextlib.suppress(OSError):
+                os.unlink(handoff_path)
+        _BRIDGE_RELOAD_STATE.pop("artifact_sha256", None)
+        if _BRIDGE_ARTIFACT_FD is not None:
+            with contextlib.suppress(OSError):
+                os.close(_BRIDGE_ARTIFACT_FD)
+            _BRIDGE_ARTIFACT_FD = None
+        for item in queued:
+            _REQUEST_QUEUE.put(item)
+        if stdin_eof:
+            _REQUEST_QUEUE.put(None)
+        if _STDIN_READ_LOCK.locked():
+            _STDIN_READ_LOCK.release()
+        _BRIDGE_RELOAD_STATE.update(status="failed", error=str(exc))
+        return False
+    return True
+
+
+def _close_inherited_reload_artifact():
+    """Close the descriptor used only to bootstrap this process image.
+
+    Python has already read `/dev/fd/<n>` before it reaches `main`, so retaining
+    the inheritable descriptor would serve no purpose and would leak one fd on
+    every hot reload.
+    """
+    raw_fd = os.environ.pop(_BRIDGE_ARTIFACT_FD_ENV, None)
+    if raw_fd is None:
+        return
+    if (not isinstance(raw_fd, str)
+            or re.fullmatch(r"[1-9][0-9]*", raw_fd) is None
+            or int(raw_fd) <= 2):
+        raise RuntimeError("bridge reload artifact descriptor is invalid")
+    fd = int(raw_fd)
+    try:
+        descriptor = os.fstat(fd)
+        if not stat.S_ISREG(descriptor.st_mode):
+            raise RuntimeError("bridge reload artifact descriptor is not a regular file")
+        if descriptor.st_nlink != 0:
+            raise RuntimeError("bridge reload artifact descriptor is still linked")
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(fd)
+
+
+def _bridge_stale_result(rid, tool_name, message):
+    reload_state = _schedule_bridge_reload()
+    failed = reload_state["status"] in ("failed", "deferred_active_audit")
+    payload = {
+        "error_code": "bridge_stale",
+        "tool": tool_name,
+        "mutation_applied": False,
+        "reload": reload_state,
+        "retry": {
+            "allowed": not failed,
+            "same_idempotency_key_required": True,
+            "max_attempts": 1,
+        },
+        "action": (
+            "Wait for the active audit to finish (or stop it explicitly), then retry; "
+            "the bridge will reload without interrupting its SSE stream."
+            if reload_state["status"] == "deferred_active_audit" else
+            "Reconnect the Kronn MCP manually once, recover with task_exec_status, "
+            "then retry once with the same idempotency key."
+            if failed else
+            "The bridge will reload over the existing transport. Retry once with "
+            "the same idempotency key after the tool list refreshes."
+        ),
+        "detail": str(message),
+    }
+    return {
+        "jsonrpc": "2.0",
+        "id": rid,
+        "result": {
+            "isError": True,
+            "content": [{
+                "type": "text",
+                "text": json.dumps(payload, ensure_ascii=False, indent=2),
+            }],
+        },
+    }
+
+
 # KT-189 — requests flow through a queue fed by a reader thread so the
 # bridge can notice `notifications/cancelled` (and any follow-up request)
 # while a tool call is blocked in the bridge-side wait loop. Only the main
 # thread writes to stdout; the reader thread only parses and enqueues.
 _REQUEST_QUEUE: "queue.Queue[dict | None]" = queue.Queue()
+_STDIN_READ_LOCK = threading.Lock()
+_STDIN_PENDING = bytearray()
 # id → monotonic arrival time. Entries expire so a cancellation landing
 # AFTER its response was sent can never poison a later reuse of the id.
 # Guarded by _CANCELLED_LOCK: the reader thread inserts/prunes while the
@@ -9849,35 +10346,72 @@ def _consume_cancellation(rid):
 
 
 def _stdin_reader():
-    for raw in sys.stdin:
-        line = raw.strip()
-        if not line:
-            continue
+    while True:
         try:
-            req = json.loads(line)
-        except json.JSONDecodeError:
-            print(f"kronn-internal: bad JSON-RPC line ignored: {line[:120]}", file=sys.stderr)
+            ready, _, _ = select.select([sys.stdin], [], [], 0.1)
+        except (TypeError, ValueError, OSError):
+            # In-memory streams are used by unit tests and embedders. They do
+            # not participate in reexec, so the ordinary iterator is enough.
+            for raw in sys.stdin:
+                with _STDIN_READ_LOCK:
+                    _consume_stdin_chunk(
+                        raw.encode("utf-8") if isinstance(raw, str) else raw
+                    )
+            _REQUEST_QUEUE.put(None)
+            return
+        if not ready:
             continue
-        if not isinstance(req, dict):
-            continue
-        if (req.get("method") or "") == "notifications/cancelled":
-            params = req.get("params") or {}
-            rid = params.get("requestId")
-            # Generation guard (KT-189 review): a cancellation landing AFTER
-            # its request completed must not poison a legal reuse of the same
-            # JSON-RPC id. Only requests still in flight or still queued can
-            # be cancelled; anything else is a spec-sanctioned no-op.
-            if rid is not None and _cancellation_applies(rid):
-                now = time.monotonic()
-                with _CANCELLED_LOCK:
-                    # Lazy pruning keeps the dict bounded without a timer.
-                    for stale in [k for k, ts in _CANCELLED_REQUEST_IDS.items()
-                                  if now - ts > _CANCELLATION_TTL_SECS]:
-                        _CANCELLED_REQUEST_IDS.pop(stale, None)
-                    _CANCELLED_REQUEST_IDS[rid] = now
-            continue
-        _REQUEST_QUEUE.put(req)
-    _REQUEST_QUEUE.put(None)  # EOF sentinel — client is gone
+        with _STDIN_READ_LOCK:
+            chunk = os.read(sys.stdin.fileno(), 65536)
+            if not chunk:
+                _REQUEST_QUEUE.put(None)
+                return
+            _consume_stdin_chunk(chunk)
+
+
+def _consume_stdin_chunk(chunk):
+    """Consume complete lines while retaining a reexec-safe partial line."""
+    _STDIN_PENDING.extend(chunk)
+    while True:
+        newline = _STDIN_PENDING.find(b"\n")
+        if newline < 0:
+            if len(_STDIN_PENDING) > _BRIDGE_PENDING_MAX_BYTES:
+                raise RuntimeError("partial JSON-RPC line exceeds bridge limit")
+            return
+        raw_line = bytes(_STDIN_PENDING[:newline])
+        del _STDIN_PENDING[:newline + 1]
+        _enqueue_stdin_line(raw_line.decode("utf-8", errors="replace"))
+
+
+def _enqueue_stdin_line(raw):
+    line = raw.strip()
+    if not line:
+        return
+    try:
+        req = json.loads(line)
+    except json.JSONDecodeError:
+        print(f"kronn-internal: bad JSON-RPC line ignored: {line[:120]}", file=sys.stderr)
+        return
+    if not isinstance(req, dict):
+        return
+    if (req.get("method") or "") == "notifications/cancelled":
+        params = req.get("params") or {}
+        rid = params.get("requestId")
+        # Generation guard (KT-189 review): a cancellation landing AFTER
+        # its request completed must not poison a legal reuse of the same
+        # JSON-RPC id. Only requests still in flight or still queued can
+        # be cancelled; anything else is a spec-sanctioned no-op.
+        if rid is not None and _cancellation_applies(rid):
+            now = time.monotonic()
+            with _CANCELLED_LOCK:
+                # Lazy pruning keeps the dict bounded without a timer.
+                for stale in [k for k, ts in _CANCELLED_REQUEST_IDS.items()
+                              if now - ts > _CANCELLATION_TTL_SECS]:
+                    _CANCELLED_REQUEST_IDS.pop(stale, None)
+                _CANCELLED_REQUEST_IDS[rid] = now
+            return
+        return
+    _REQUEST_QUEUE.put(req)
 
 
 def _cancellation_applies(rid):
@@ -9936,7 +10470,7 @@ def _handle(req):
                 "id": rid,
                 "result": {
                     "protocolVersion": "2024-11-05",
-                    "capabilities": {"tools": {}},
+                    "capabilities": {"tools": {"listChanged": True}},
                     "serverInfo": {
                         "name": "kronn-internal",
                         "version": BRIDGE_TOOL_SURFACE_VERSION,
@@ -9972,7 +10506,7 @@ def _handle(req):
             "id": rid,
             "result": {
                 "protocolVersion": "2024-11-05",
-                "capabilities": {"tools": {}},
+                "capabilities": {"tools": {"listChanged": True}},
                 # Tool-surface version, intentionally distinct from the Kronn
                 # app release. Bumping it tells clients that cache tools/list
                 # to refresh after the Planning contract was added.
@@ -10027,7 +10561,7 @@ def _handle(req):
         name = params.get("name") or ""
         args = params.get("arguments") or {}
         if _spawned_task_worker_mode() and name not in {
-            "task_exec_commit", "task_exec_deliver",
+            "task_exec_status", "task_exec_commit", "task_exec_deliver",
         }:
             return {
                 "jsonrpc": "2.0",
@@ -10044,6 +10578,11 @@ def _handle(req):
                 "id": rid,
                 "error": {"code": -32601, "message": f"Unknown tool: {name}"},
             }
+        if name in _GUARDED_ORCHESTRATION_TOOLS:
+            try:
+                _require_fresh_bridge(name)
+            except BridgeStaleError as exc:
+                return _bridge_stale_result(rid, name, exc)
         # Cancelled BEFORE dispatch: never execute — this is the only safe
         # moment to drop a mutation, and a cancelled request gets no reply.
         if rid is not None and _consume_cancellation(rid):
@@ -10101,6 +10640,10 @@ def _handle(req):
                     }],
                 },
             }
+        except BridgeStaleError as e:
+            if was_cancelled and suppress_response_on_cancel:
+                return None
+            return _bridge_stale_result(rid, name, e)
         except Exception as e:
             # The inner finally already consumed the cancellation and purged
             # this call's staged cursors; only the response decision remains.
@@ -10127,8 +10670,19 @@ def _handle(req):
 
 
 def main():
+    _close_inherited_reload_artifact()
+    for request in _restore_reload_handoff():
+        _REQUEST_QUEUE.put(request)
     reader = threading.Thread(target=_stdin_reader, daemon=True, name="stdin-reader")
     reader.start()
+    if os.environ.pop(_BRIDGE_RELOAD_READY_ENV, None) == "1":
+        # Emitted by the NEW process, not the stale one. This is a readiness
+        # barrier: an eager host cannot race a tools/list request into the old
+        # reader thread and lose it when exec replaces that process image.
+        _send({
+            "jsonrpc": "2.0",
+            "method": "notifications/tools/list_changed",
+        })
     while True:
         req = _REQUEST_QUEUE.get()
         if req is None:  # EOF — client closed our stdin
@@ -10136,7 +10690,10 @@ def main():
         resp = _handle(req)
         if resp is not None:
             _send(resp)
+        if _BRIDGE_RELOAD_STATE["status"] == "scheduled":
+            _perform_scheduled_bridge_reload()
 
 
 if __name__ == "__main__":
-    main()
+    if os.environ.pop(_BRIDGE_PREFLIGHT_ENV, None) != "1":
+        main()

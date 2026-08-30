@@ -93,6 +93,7 @@ pub async fn start_briefing(
     // 4. Create discussion
     let now = Utc::now();
     let discussion_id = Uuid::new_v4().to_string();
+    let briefing_tier = req.tier.unwrap_or_default();
     let agent_type = req.agent;
 
     let initial_message = DiscussionMessage {
@@ -144,7 +145,7 @@ pub async fn start_briefing(
         pinned: false,
         workspace_mode: "Direct".into(),
         workspace_path: None,
-        tier: crate::models::ModelTier::Default,
+        tier: briefing_tier,
         model: None,
         pin_first_message: true,
         worktree_branch: None,

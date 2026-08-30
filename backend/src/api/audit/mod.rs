@@ -1,6 +1,6 @@
 // AI Audit pipeline split into one file per concern
 // (TD-20260417-audit-monolith). The big static prompt definitions
-// (`PROMPT_PREAMBLE`, `ANALYSIS_STEPS`, `AUDIT_REDIRECTOR_FILES`)
+// (`PROMPT_PREAMBLE`, `ANALYSIS_STEPS`)
 // live here because every sub-module reads from them, and they are
 // the single source of truth for what "the audit" actually does.
 // Sub-modules are re-exported via `pub use *::*` so every existing
@@ -1228,17 +1228,6 @@ pub(crate) fn kind_to_steps(kind: crate::models::AuditKind) -> &'static [Analysi
     }
 }
 
-/// Files installed by the audit template (to be removed on cancel).
-pub(crate) const AUDIT_REDIRECTOR_FILES: &[&str] = &[
-    "CLAUDE.md",
-    "GEMINI.md",
-    "AGENTS.md",
-    ".cursorrules",
-    ".windsurfrules",
-    ".clinerules",
-    ".github/copilot-instructions.md",
-];
-
 #[cfg(test)]
 mod kind_dispatch_tests {
     use super::*;
@@ -1610,6 +1599,7 @@ mod kind_dispatch_tests {
             serde_json::from_str(json).expect("LaunchAuditRequest must still parse without `kind`");
         assert_eq!(req.kind.unwrap_or_default(), AuditKind::Full);
         assert!(req.custom_prompt.is_none());
+        assert!(req.tier.is_none());
     }
 }
 
@@ -2594,10 +2584,11 @@ mod prompt_tests {
         // the hand-shipped `frontend/src/types/LaunchAuditRequest.ts`
         // (which the ts-rs auto-export sometimes fails to refresh —
         // see B4 in `PLAYWRIGHT_AUDIT_REVIEW.md`).
-        use crate::models::{AgentType, AuditKind, LaunchAuditRequest};
+        use crate::models::{AgentType, AuditKind, LaunchAuditRequest, ModelTier};
         let req: LaunchAuditRequest = serde_json::from_str(
             r#"{
             "agent": "ClaudeCode",
+            "tier": "reasoning",
             "kind": "Rgaa",
             "custom_prompt": null,
             "resume_run_id": "run-abc"
@@ -2605,6 +2596,7 @@ mod prompt_tests {
         )
         .expect("LaunchAuditRequest must accept the current shape");
         assert!(matches!(req.agent, AgentType::ClaudeCode));
+        assert_eq!(req.tier, Some(ModelTier::Reasoning));
         assert_eq!(req.kind, Some(AuditKind::Rgaa));
         assert!(req.custom_prompt.is_none());
         assert_eq!(req.resume_run_id.as_deref(), Some("run-abc"));
@@ -2614,6 +2606,7 @@ mod prompt_tests {
         let legacy: LaunchAuditRequest = serde_json::from_str(r#"{"agent":"ClaudeCode"}"#)
             .expect("minimal shape must still parse");
         assert!(legacy.kind.is_none());
+        assert!(legacy.tier.is_none());
         assert!(legacy.resume_run_id.is_none());
     }
 
@@ -2649,7 +2642,7 @@ mod prompt_tests {
         // (with `?` for Option<T>). The test is intentionally loose
         // on the exact spelling — what matters is that the property
         // name is present and the file imports the right enum types.
-        for field in ["agent", "kind", "custom_prompt", "resume_run_id"] {
+        for field in ["agent", "tier", "kind", "custom_prompt", "resume_run_id"] {
             assert!(content.contains(field),
                 "LaunchAuditRequest.ts is missing field `{}` — update the hand-shipped file to match the Rust struct ({})",
                 field, ts_path.display(),
@@ -2665,6 +2658,10 @@ mod prompt_tests {
         assert!(
             content.contains("AuditKind"),
             "LaunchAuditRequest.ts must reference AuditKind (0.8.4)"
+        );
+        assert!(
+            content.contains("ModelTier"),
+            "LaunchAuditRequest.ts must reference ModelTier"
         );
     }
 

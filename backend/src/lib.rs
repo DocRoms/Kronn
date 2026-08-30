@@ -28,6 +28,31 @@ pub use crate::db::Database;
 pub use crate::models::AppConfig;
 pub use crate::workflows::WorkflowEngine;
 
+/// Persist named connections for legacy provider configuration before runtime
+/// state is constructed. Both standalone and embedded startup paths call this
+/// shared bootstrap after key reconciliation.
+pub async fn bootstrap_external_api_connections(
+    database: &Database,
+    config: &mut AppConfig,
+) -> anyhow::Result<bool> {
+    let legacy_connection_config = config.clone();
+    let runtime_connections = database
+        .with_conn(move |conn| {
+            crate::db::external_api_connections::backfill_legacy_config(
+                conn,
+                &legacy_connection_config,
+            )?;
+            crate::db::external_api_connections::runtime_connections(conn)
+        })
+        .await?;
+    let mut changed = false;
+    for connection in runtime_connections {
+        changed = crate::db::external_api_connections::sync_runtime_config(&connection, config)
+            || changed;
+    }
+    Ok(changed)
+}
+
 // ─── Application State ──────────────────────────────────────────────────────
 
 /// Default maximum concurrent agent processes.
@@ -184,6 +209,10 @@ pub struct AppState {
     /// non-dispatch streams, or a workflow `run_id`. Tokens are inserted when
     /// work starts and removed in its finally-block — see the Registry impl below.
     pub cancel_registry: Arc<Mutex<HashMap<String, tokio_util::sync::CancellationToken>>>,
+    /// Dispatches whose provider runtime has been successfully created and has
+    /// not yet returned. Cancellation registration happens earlier, so it must
+    /// not be used as process-liveness evidence.
+    pub agent_runtime_registry: Arc<Mutex<HashSet<String>>>,
     /// OAuth2 access-token cache for API plugins. Keyed by `mcp_configs.id`,
     /// value is the bearer token + its absolute expiry. In-memory only —
     /// on restart, tokens are lost and re-exchanged on first use (one HTTP
@@ -208,6 +237,9 @@ pub struct AppState {
     /// call time and return a 503 if the bundled/runtime sidecar could
     /// not be started.
     pub docs_sidecar: Arc<crate::core::docs_sidecar::DocsSidecar>,
+    /// Production-only data-directory lock. Spawned Git commits inherit a
+    /// duplicate of this handle so a replacement backend waits for Git/hooks.
+    pub data_dir_lock: Option<Arc<std::fs::File>>,
 }
 
 impl AppState {
@@ -237,11 +269,44 @@ impl AppState {
             audit_tracker: Arc::new(Mutex::new(AuditTracker::default())),
             ws_broadcast: Arc::new(ws_tx),
             cancel_registry: Arc::new(Mutex::new(HashMap::new())),
+            agent_runtime_registry: Arc::new(Mutex::new(HashSet::new())),
             oauth2_cache: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             dependency_update_cache: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             git_language_cache: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             agent_dispatch_notify: Arc::new(tokio::sync::Notify::new()),
             docs_sidecar: Arc::new(crate::core::docs_sidecar::DocsSidecar::new()),
+            data_dir_lock: None,
+        }
+    }
+
+    pub fn with_data_dir_lock(mut self, data_dir_lock: std::fs::File) -> Self {
+        self.data_dir_lock = Some(Arc::new(data_dir_lock));
+        self
+    }
+}
+
+pub struct AgentRuntimeGuard {
+    registry: Arc<Mutex<HashSet<String>>>,
+    key: String,
+}
+
+impl AgentRuntimeGuard {
+    pub fn insert(registry: &Arc<Mutex<HashSet<String>>>, key: impl Into<String>) -> Self {
+        let key = key.into();
+        if let Ok(mut entries) = registry.lock() {
+            entries.insert(key.clone());
+        }
+        Self {
+            registry: registry.clone(),
+            key,
+        }
+    }
+}
+
+impl Drop for AgentRuntimeGuard {
+    fn drop(&mut self) {
+        if let Ok(mut entries) = self.registry.lock() {
+            entries.remove(&self.key);
         }
     }
 }
@@ -984,6 +1049,18 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             "/api/projects/{id}/dependency-updates",
             get(api::projects::dependency_updates).put(api::projects::set_dependency_monitoring),
         )
+        .route(
+            "/api/projects/docker-running",
+            get(api::projects::docker_running_projects),
+        )
+        .route(
+            "/api/projects/{id}/docker",
+            get(api::projects::docker_status).post(api::projects::docker_action),
+        )
+        .route(
+            "/api/projects/{id}/docker/logs",
+            get(api::projects::docker_logs),
+        )
         .route("/api/projects/{id}/git-diff", get(api::projects::git_diff))
         .route(
             "/api/projects/{id}/git-blame",
@@ -1043,6 +1120,7 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         // ── Ollama (local LLM) ──
         .route("/api/ollama/health", get(api::ollama::health))
         .route("/api/ollama/models", get(api::ollama::models))
+        .route("/api/ollama/pull", post(api::ollama::pull))
         .route(
             "/api/ollama/context-override",
             post(api::ollama::set_context_override),
@@ -1060,6 +1138,24 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route(
             "/api/lite-llm/model-failures/retry",
             post(api::lite_llm::retry_model),
+        )
+        // ── External API connections (unified LiteLLM/NVIDIA/Other zone) ──
+        .route(
+            "/api/external-api/connections",
+            get(api::external_api_connections::list).post(api::external_api_connections::create),
+        )
+        .route(
+            "/api/external-api/connections/{id}",
+            put(api::external_api_connections::update)
+                .delete(api::external_api_connections::delete),
+        )
+        .route(
+            "/api/external-api/connections/{id}/reveal",
+            post(api::external_api_connections::reveal_credential),
+        )
+        .route(
+            "/api/external-api/connections/test",
+            post(api::external_api_connections::test),
         )
         // ── Debug (log ringbuffer — backs Settings > Debug viewer) ──
         .route("/api/debug/logs", get(api::debug::get_logs))
@@ -1340,6 +1436,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             delete(api::workflows::delete_batch_run),
         )
         .route(
+            "/api/workflow-runs/{run_id}/retry",
+            post(api::workflows::retry_batch_run),
+        )
+        .route(
             "/api/workflow-runs/{run_id}/resume",
             post(api::workflows::resume_interrupted),
         )
@@ -1477,6 +1577,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route(
             "/api/discussions/{id}/messages/revise",
             post(api::discussions::revise_message),
+        )
+        .route(
+            "/api/discussions/{id}/messages/{message_id}",
+            delete(api::discussions::delete_message),
         )
         .route(
             "/api/discussions/{id}/messages/last",
@@ -1653,6 +1757,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route(
             "/api/orchestration/tool/executions/{id}/status",
             post(api::orchestration::task_exec_status),
+        )
+        .route(
+            "/api/orchestration/tool/executions/{id}/resume",
+            post(api::orchestration::task_exec_resume),
         )
         .route(
             "/api/orchestration/tool/executions/{id}/cancel",
