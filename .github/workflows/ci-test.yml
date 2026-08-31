@@ -54,7 +54,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     outputs:
-      compiled_cache_hit: ${{ steps.cache-backend-hot.outputs.cache-hit }}
+      compiled_cache_hit: ${{ steps.verify-backend-cache.outputs.valid }}
+      compiled_cache_state: ${{ steps.verify-backend-cache.outputs.state }}
     defaults:
       run:
         working-directory: backend
@@ -98,21 +99,51 @@ jobs:
             .ci-cache/backend-compiled
           key: cargo-hot-${{ runner.os }}-${{ hashFiles('backend/Cargo.lock') }}
 
-      - name: Restore bounded compiled backend artifacts
-        if: (github.event_name != 'workflow_dispatch' || inputs.cache_mode == 'hot') && steps.cache-backend-hot.outputs.cache-hit == 'true'
+      - name: Verify bounded compiled backend cache
+        if: github.event_name != 'workflow_dispatch' || inputs.cache_mode == 'hot'
+        id: verify-backend-cache
+        env:
+          ACTION_CACHE_HIT: ${{ steps.cache-backend-hot.outputs.cache-hit }}
         run: |
-          mkdir -p target/debug
-          cp -a ../.ci-cache/backend-compiled/. target/debug/
+          state=miss
+          valid=false
+          if [ "$ACTION_CACHE_HIT" = "true" ]; then
+            state=invalid
+            if [ -f ../.ci-cache/backend-compiled/.kronn-backend-cache-v1 ] \
+              && [ -d ../.ci-cache/backend-compiled/.fingerprint ] \
+              && [ -d ../.ci-cache/backend-compiled/build ] \
+              && [ -d ../.ci-cache/backend-compiled/deps ] \
+              && find ../.ci-cache/backend-compiled/deps -type f -print -quit | grep -q .; then
+              state=hit
+              valid=true
+            fi
+          fi
+          echo "state=$state" >> "$GITHUB_OUTPUT"
+          echo "valid=$valid" >> "$GITHUB_OUTPUT"
+
+      - name: Reject invalid compiled cache hit
+        if: steps.verify-backend-cache.outputs.state == 'invalid'
+        run: |
+          echo '::error::The cache action reported a hit, but no verified compiled backend artifacts were present.'
+          exit 1
+
+      - name: Restore bounded compiled backend artifacts
+        if: steps.verify-backend-cache.outputs.state == 'hit'
+        run: |
+          for directory in .fingerprint build deps; do
+            mkdir -p "../target/debug/$directory"
+            cp -a "../.ci-cache/backend-compiled/$directory/." "../target/debug/$directory/"
+          done
 
       # These visible, mutually exclusive steps are durable evidence in the
       # Actions jobs API. The observer uses them to exclude first-run warmups
       # from historical hot-cache statistics.
       - name: Record compiled cache hit
-        if: (github.event_name != 'workflow_dispatch' || inputs.cache_mode == 'hot') && steps.cache-backend-hot.outputs.cache-hit == 'true'
+        if: steps.verify-backend-cache.outputs.state == 'hit'
         run: echo 'Compiled backend cache restored for this hot measurement.'
 
       - name: Record compiled cache warmup miss
-        if: (github.event_name != 'workflow_dispatch' || inputs.cache_mode == 'hot') && steps.cache-backend-hot.outputs.cache-hit != 'true'
+        if: steps.verify-backend-cache.outputs.state == 'miss'
         run: echo 'Compiled backend cache was not restored; this run is a warmup and is excluded from hot history.'
 
       # A cold measurement may populate an isolated Cargo-download cache, but
@@ -147,12 +178,14 @@ jobs:
         if: github.event_name != 'workflow_dispatch' || inputs.cache_mode == 'hot'
         run: |
           mkdir -p ../.ci-cache/backend-compiled
+          rm -f ../.ci-cache/backend-compiled/.kronn-backend-cache-v1
           for directory in .fingerprint build deps; do
-            if [ -d "target/debug/$directory" ]; then
-              mkdir -p "../.ci-cache/backend-compiled/$directory"
-              cp -a "target/debug/$directory/." "../.ci-cache/backend-compiled/$directory/"
-            fi
+            [ -d "../target/debug/$directory" ]
+            mkdir -p "../.ci-cache/backend-compiled/$directory"
+            cp -a "../target/debug/$directory/." "../.ci-cache/backend-compiled/$directory/"
           done
+          find ../.ci-cache/backend-compiled/deps -type f -print -quit | grep -q .
+          echo 'schema=1' > ../.ci-cache/backend-compiled/.kronn-backend-cache-v1
 
   test-backend-coverage:
     if: github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'ci-test')
@@ -756,4 +789,5 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           CI_CACHE_MODE: ${{ inputs.cache_mode || 'hot' }}
           CI_COMPILED_CACHE_HIT: ${{ needs.test-backend.outputs.compiled_cache_hit }}
+          CI_COMPILED_CACHE_STATE: ${{ needs.test-backend.outputs.compiled_cache_state }}
         run: node scripts/ci/backend_ci_slo.mjs

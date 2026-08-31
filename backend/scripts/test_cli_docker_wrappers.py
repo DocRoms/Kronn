@@ -119,7 +119,14 @@ class E2eContainerWorkflowTests(unittest.TestCase):
         self.assertIn(".ci-cache/backend-compiled", backend)
         self.assertIn("Record compiled cache hit", backend)
         self.assertIn("Record compiled cache warmup miss", backend)
+        self.assertIn("Verify bounded compiled backend cache", backend)
+        self.assertIn("Reject invalid compiled cache hit", backend)
         self.assertIn("Stage bounded compiled backend artifacts", backend)
+        self.assertIn("../target/debug/$directory", backend)
+        self.assertIn(".kronn-backend-cache-v1", backend)
+        self.assertNotIn('"target/debug/$directory"', backend)
+        cargo_config = (ROOT / ".cargo" / "config.toml").read_text()
+        self.assertIn('target-dir = "target"', cargo_config)
         self.assertLess(
             backend.index("cargo test — measured backend critical path"),
             backend.index("Stage bounded compiled backend artifacts"),
@@ -139,6 +146,7 @@ class E2eContainerWorkflowTests(unittest.TestCase):
         ).group("section")
         self.assertIn("cargo check — desktop crate", desktop)
         self.assertIn("CI_COMPILED_CACHE_HIT: ${{ needs.test-backend.outputs.compiled_cache_hit }}", workflow)
+        self.assertIn("CI_COMPILED_CACHE_STATE: ${{ needs.test-backend.outputs.compiled_cache_state }}", workflow)
         hot_cache = re.search(
             r"Cache cargo registry and bounded backend build \(hot\)(?P<section>.*?)(?=^      - |\Z)",
             backend,

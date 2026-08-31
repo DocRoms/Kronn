@@ -56,12 +56,16 @@ The backend performance observer publishes the duration for every eligible run
 and reports a warning rather than failing a green functional run when the hot
 cache SLO exceeds 15 minutes. Hot measurements restore only a bounded staging
 cache of ordinary Cargo debug artifacts alongside Cargo downloads; coverage,
-incremental, temporary, and other target trees are not archived. A hot request
-that misses that cache is published as `warmup/miss` and excluded from
-historical hot statistics. Cold measurements use a unique cache key per run
-attempt, restore no compiled artifacts, and are reported only for their current
-run. Historical hot statistics use only successful same-branch pull-request
-runs whose job records a restored compiled cache. [src: file: .github/workflows/ci-test.yml:84-157] [src: file: scripts/ci/backend_ci_slo.mjs:47-120]
+incremental, temporary, and other target trees are not archived. Cargo's
+repository-level `target-dir` means these artifacts are copied to and from the
+root `target/debug` tree, not `backend/target/debug`. A versioned sentinel and
+the three required artifact directories must be present before an Actions
+cache hit is accepted. A hot request that misses that cache is published as
+`warmup/miss` and excluded from historical hot statistics. Cold measurements
+use a unique cache key per run attempt, restore no compiled artifacts, and are
+reported only for their current run. Historical hot statistics use only
+successful same-branch pull-request runs whose job records a verified restored
+compiled cache. [src: file: .cargo/config.toml:1-2] [src: file: .github/workflows/ci-test.yml:84-188] [src: file: scripts/ci/backend_ci_slo.mjs:47-150]
 The observer's Node unit test runs in the blocking `test-python` gate.
 [src: file: .github/workflows/ci-test.yml:299-324]
 
@@ -86,7 +90,9 @@ duration, so no median or p95 is claimed. [src: user: 2026-08-31: review reports
 Every job in the CI workflow has a 30-minute technical timeout. The required
 aggregate always runs, includes `require-ci-label`, and fails when the label is
 removed or any other gate is skipped or fails. A timeout is a functional
-failure; the SLO observer does not retry, sleep, or mask it.
+failure; the SLO observer does not retry, sleep, or mask it. An SLO breach is a
+warning, while missing, duplicate, incomplete, or contradictory measurement
+evidence fails the observer instead of publishing a misleading timing.
 [src: file: .github/workflows/ci-test.yml:37-55] [src: file: .github/workflows/ci-test.yml:713-740]
 
 ## Test placement

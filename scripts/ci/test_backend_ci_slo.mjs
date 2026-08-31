@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { SLO_MS, comparableSuccessfulHotRuns, effectiveMeasurementMode, formatDuration, hasRestoredCompiledCache, markdown, percentile, summarizeBackendJobs, timingStatus } from "./backend_ci_slo.mjs";
+import { SLO_MS, comparableSuccessfulHotRuns, effectiveMeasurementMode, formatDuration, hasRestoredCompiledCache, markdown, percentile, requireCurrentBackendJob, summarizeBackendJobs, timingStatus, validateCompiledCacheState } from "./backend_ci_slo.mjs";
 
 const at = (minutes) => `2026-08-31T00:${String(minutes).padStart(2, "0")}:00Z`;
 const job = (start, end) => ({ name: "test-backend", started_at: at(start), completed_at: at(end) });
@@ -35,3 +35,18 @@ assert.deepEqual(comparable.map((run) => run.id), [1]);
 assert.equal(hasRestoredCompiledCache({ steps: [{ name: "Record compiled cache hit", conclusion: "success" }] }), true);
 assert.equal(hasRestoredCompiledCache({ steps: [{ name: "Record compiled cache warmup miss", conclusion: "success" }] }), false);
 assert.equal(hasRestoredCompiledCache({ steps: [{ name: "Record compiled cache hit", conclusion: "failure" }] }), false);
+
+const completedJob = { ...job(0, 14), status: "completed" };
+assert.equal(requireCurrentBackendJob([completedJob]).durationMs, 14 * 60 * 1000);
+assert.throws(() => requireCurrentBackendJob([]), /found 0/);
+assert.throws(() => requireCurrentBackendJob([completedJob, completedJob]), /found 2/);
+assert.throws(() => requireCurrentBackendJob([{ ...completedJob, status: "in_progress" }]), /not complete/);
+assert.throws(() => requireCurrentBackendJob([{ ...completedJob, completed_at: null }]), /no valid completed duration/);
+
+validateCompiledCacheState("cold", "", false);
+validateCompiledCacheState("hot", "miss", false);
+validateCompiledCacheState("hot", "hit", true);
+assert.throws(() => validateCompiledCacheState("hot", "", false), /invalid or unavailable/);
+assert.throws(() => validateCompiledCacheState("hot", "invalid", false), /invalid or unavailable/);
+assert.throws(() => validateCompiledCacheState("hot", "hit", false), /outputs disagree/);
+assert.throws(() => validateCompiledCacheState("hot", "miss", true), /outputs disagree/);

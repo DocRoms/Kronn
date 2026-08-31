@@ -67,6 +67,32 @@ export function timingStatus(durationMs) {
   return durationMs > SLO_MS ? "breach" : "within SLO";
 }
 
+export function requireCurrentBackendJob(jobs) {
+  const matches = jobs.filter((job) => job.name === BACKEND_JOB);
+  if (matches.length !== 1) {
+    throw new Error(`Expected exactly one ${BACKEND_JOB} job, found ${matches.length}`);
+  }
+  const job = matches[0];
+  if (job.status && job.status !== "completed") {
+    throw new Error(`${BACKEND_JOB} is not complete (status: ${job.status})`);
+  }
+  const durationMs = milliseconds(job.started_at, job.completed_at);
+  if (durationMs === null) {
+    throw new Error(`${BACKEND_JOB} has no valid completed duration`);
+  }
+  return { ...job, durationMs };
+}
+
+export function validateCompiledCacheState(requestedMode, state, compiledCacheHit) {
+  if (requestedMode === "cold") return;
+  if (state !== "hit" && state !== "miss") {
+    throw new Error(`Compiled backend cache state is invalid or unavailable: ${state || "empty"}`);
+  }
+  if ((state === "hit") !== compiledCacheHit) {
+    throw new Error(`Compiled backend cache outputs disagree (state=${state}, hit=${compiledCacheHit})`);
+  }
+}
+
 async function githubJson(path) {
   const repository = process.env.GITHUB_REPOSITORY;
   const token = process.env.GITHUB_TOKEN;
@@ -98,6 +124,8 @@ async function main() {
   const runId = process.env.GITHUB_RUN_ID;
   const requestedMode = process.env.CI_CACHE_MODE ?? "hot";
   const compiledCacheHit = process.env.CI_COMPILED_CACHE_HIT === "true";
+  const compiledCacheState = process.env.CI_COMPILED_CACHE_STATE ?? "";
+  validateCompiledCacheState(requestedMode, compiledCacheState, compiledCacheHit);
   const mode = effectiveMeasurementMode(requestedMode, compiledCacheHit);
   if (!runId) throw new Error("GITHUB_RUN_ID is required");
   const [currentJobs, currentRun, history] = await Promise.all([
@@ -110,12 +138,15 @@ async function main() {
     : [];
   const priorRunIds = comparableRuns.map((run) => String(run.id));
   const priorJobs = await Promise.all(priorRunIds.map(jobsForRun));
-  const currentSummary = summarizeBackendJobs(currentJobs);
+  const currentJob = requireCurrentBackendJob(currentJobs);
   const summary = summarizeBackendJobs(priorJobs.flat().filter(hasRestoredCompiledCache));
-  const report = markdown(summary, currentSummary.samples[0], mode, compiledCacheHit);
+  const report = markdown(summary, currentJob, mode, compiledCacheHit);
   process.stdout.write(`${report}\n`);
   if (process.env.GITHUB_STEP_SUMMARY) await (await import("node:fs/promises")).appendFile(process.env.GITHUB_STEP_SUMMARY, `${report}\n`);
-  if (currentSummary.samples[0]?.durationMs > SLO_MS) console.log(`::warning title=Backend CI SLO exceeded::${BACKEND_JOB} took ${formatDuration(currentSummary.samples[0].durationMs)} (SLO ${formatDuration(SLO_MS)}); functional gates remain authoritative.`);
+  if (currentJob.durationMs > SLO_MS) console.log(`::warning title=Backend CI SLO exceeded::${BACKEND_JOB} took ${formatDuration(currentJob.durationMs)} (SLO ${formatDuration(SLO_MS)}); functional gates remain authoritative.`);
 }
 
-if (process.argv[1] === new URL(import.meta.url).pathname) main().catch((error) => console.log(`::warning title=Backend CI timing unavailable::${error.message}`));
+if (process.argv[1] === new URL(import.meta.url).pathname) main().catch((error) => {
+  console.error(`::error title=Backend CI timing unavailable::${error.message}`);
+  process.exitCode = 1;
+});
