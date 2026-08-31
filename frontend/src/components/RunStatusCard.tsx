@@ -116,6 +116,8 @@ export function RunStatusCard({ model: initialModel, runId, compact = false }: {
     return () => window.clearInterval(timer);
   }, [active, model?.startedAt, visible]);
 
+  const result = useMemo(() => resultText(model?.result), [model?.result]);
+
   if (!model) return <section ref={rootRef} className="run-status-card" data-testid="run-status-card"><span>{t('run.freshness.unavailable')}</span></section>;
 
   const duration = measuredDuration(model, now);
@@ -123,7 +125,6 @@ export function RunStatusCard({ model: initialModel, runId, compact = false }: {
   const progressPercent = progress && progress.total > 0
     ? Math.min(100, Math.max(0, (progress.completed / progress.total) * 100))
     : null;
-  const result = useMemo(() => resultText(model.result), [model.result]);
 
   return (
     <section ref={rootRef} className="run-status-card" data-status={model.status} data-kind={model.kind} data-testid="run-status-card">

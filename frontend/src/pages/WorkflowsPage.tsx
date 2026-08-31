@@ -3619,12 +3619,9 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                         <RunStatusCard
                           runId={launchQAResult?.runId}
                           model={!launchQAResult ? {
-                            id: launchQAResult?.runId ?? qa.id,
+                            id: qa.id,
                             kind: 'quick_api',
                             status: 'queued',
-                            durationMs: launchQAResult?.durationMs ?? null,
-                            result: launchQAResult?.ok ? launchQAResult.payload : null,
-                            diagnostic: launchQAResult?.ok ? null : launchQAResult?.error ?? null,
                             freshness: 'unavailable',
                           } satisfies RunStatusCardModel : undefined}
                         />
