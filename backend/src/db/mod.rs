@@ -28,6 +28,7 @@ pub mod quick_execs;
 pub mod quick_prompts;
 pub mod review_ledger;
 pub mod run_state;
+pub mod shared_runs;
 pub mod worker_deliveries;
 pub mod worker_offers;
 pub mod worker_reviews;

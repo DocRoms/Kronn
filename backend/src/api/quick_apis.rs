@@ -333,6 +333,7 @@ pub async fn run_qa(
     Path(id): Path<String>,
     Json(req): Json<RunQuickApiRequest>,
 ) -> Json<ApiResponse<RunQuickApiResponse>> {
+    let run_id = Uuid::new_v4().to_string();
     let qa_id = id.clone();
     let qa = match state
         .db
@@ -486,7 +487,40 @@ pub async fn run_qa(
         Some(outcome.result.output)
     };
 
+    let now = Utc::now();
+    let shared = crate::models::SharedRun {
+        id: run_id.clone(),
+        kind: crate::models::SharedRunKind::QuickApi,
+        source_id: id,
+        discussion_id: None,
+        status: if success {
+            crate::models::SharedRunStatus::Success
+        } else {
+            crate::models::SharedRunStatus::Failed
+        },
+        started_at: Some(now - chrono::Duration::milliseconds(outcome.result.duration_ms as i64)),
+        finished_at: Some(now),
+        duration_ms: Some(outcome.result.duration_ms),
+        result: envelope.clone(),
+        diagnostic: error.clone(),
+        created_at: now,
+        updated_at: now,
+    };
+    let saved = shared.clone();
+    if state
+        .db
+        .with_conn(move |conn| crate::db::shared_runs::upsert(conn, &saved))
+        .await
+        .is_ok()
+    {
+        let _ = state
+            .ws_broadcast
+            .send(crate::models::WsMessage::SharedRunUpdated {
+                run_id: run_id.clone(),
+            });
+    }
     Json(ApiResponse::ok(RunQuickApiResponse {
+        run_id,
         success,
         duration_ms: outcome.result.duration_ms,
         envelope,

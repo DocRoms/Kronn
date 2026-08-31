@@ -4534,7 +4534,7 @@ variables?: Record<string, string>, };
  * Response from `POST /api/quick-apis/:id/run`. Mirrors the
  * `/test-api-call` shape so the frontend can reuse the same UI.
  */
-export type RunQuickApiResponse = { success: boolean, duration_ms: number,
+export type RunQuickApiResponse = { run_id: string, success: boolean, duration_ms: number,
 /**
  * Parsed envelope (data/status/summary) on success, `None` on failure.
  */
@@ -4546,7 +4546,7 @@ error: string | null, };
 
 export type RunQuickExecRequest = { variables?: Record<string, string>, };
 
-export type RunQuickExecResponse = { success: boolean, duration_ms: number, data: any, stdout: string | null, stderr: string | null, error: string | null, };
+export type RunQuickExecResponse = { run_id: string, success: boolean, duration_ms: number, data: any, stdout: string | null, stderr: string | null, error: string | null, };
 
 export type RunStatus = "Pending" | "Running" | "Success" | "Partial" | "Failed" | "Cancelled" | "WaitingApproval" | "StoppedByGuard" | "Interrupted";
 
@@ -4900,6 +4900,12 @@ export type SetupStatus = { is_first_run: boolean, current_step: SetupStep, agen
 export type SetupStep = "Agents" | "ScanPaths" | "Detection" | "Complete";
 
 export type ShareDiscussionRequest = { contact_ids: Array<string>, };
+
+export type SharedRun = { id: string, kind: SharedRunKind, source_id: string, discussion_id: string | null, status: SharedRunStatus, started_at: string | null, finished_at: string | null, duration_ms: number | null, result: unknown, diagnostic: string | null, created_at: string, updated_at: string, };
+
+export type SharedRunKind = "quick_prompt" | "quick_api" | "quick_exec" | "workflow";
+
+export type SharedRunStatus = "preflight_failed" | "queued" | "running" | "success" | "failed" | "cancelled" | "timeout";
 
 export type Skill = { id: string, name: string, description: string, icon: string, category: SkillCategory, content: string, is_builtin: boolean,
 /**
@@ -6608,4 +6614,4 @@ step_index: number, total_steps: number,
 /**
  * Step name at `step_index`, or null when between steps.
  */
-current_step: string | null, } | { "type": "partial_response_recovered", discussion_ids: Array<string>, } | { "type": "agent_runs_interrupted", discussion_ids: Array<string>, } | { "type": "audit_finished", project_id: string, status: string, last_completed_step: number, total_steps: number, warned_steps: Array<number>, discussion_id: string | null, };
+current_step: string | null, } | { "type": "shared_run_updated", run_id: string, } | { "type": "partial_response_recovered", discussion_ids: Array<string>, } | { "type": "agent_runs_interrupted", discussion_ids: Array<string>, } | { "type": "audit_finished", project_id: string, status: string, last_completed_step: number, total_steps: number, warned_steps: Array<number>, discussion_id: string | null, };

@@ -276,6 +276,7 @@ pub struct RunQuickExecRequest {
 #[derive(Debug, Serialize, TS)]
 #[ts(export)]
 pub struct RunQuickExecResponse {
+    pub run_id: String,
     pub success: bool,
     pub duration_ms: u64,
     #[ts(type = "any")]
@@ -443,6 +444,7 @@ pub struct RunQuickApiRequest {
 #[derive(Debug, Serialize, TS)]
 #[ts(export)]
 pub struct RunQuickApiResponse {
+    pub run_id: String,
     pub success: bool,
     pub duration_ms: u64,
     /// Parsed envelope (data/status/summary) on success, `None` on failure.

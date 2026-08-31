@@ -26,6 +26,7 @@ import { WorkflowWizard } from '../components/workflows/WorkflowWizard';
 import { QuickPromptForm } from '../components/workflows/QuickPromptForm';
 import { QuickApiForm } from '../components/workflows/QuickApiForm';
 import { QuickExecForm } from '../components/workflows/QuickExecForm';
+import { RunStatusCard, type RunStatusCardModel } from '../components/RunStatusCard';
 import QPHistoryDrawer from '../components/QPHistoryDrawer';
 import QPCardMetricsChip from '../components/QPCardMetricsChip';
 import { parseBatchQAItems } from '../components/workflows/parseBatchQAItems';
@@ -434,7 +435,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   const [launchVarsQA, setLaunchVarsQA] = useState<Record<string, string>>({});
   const [launchingQARun, setLaunchingQARun] = useState(false);
   const launchingQARunRef = useRef(false); // Race-free guard, cf launchingRef.
-  const [launchQAResult, setLaunchQAResult] = useState<{ ok: boolean; payload: unknown; error: string | null } | null>(null);
+  const [launchQAResult, setLaunchQAResult] = useState<{ runId: string; ok: boolean; payload: unknown; error: string | null; durationMs: number | null } | null>(null);
   // Batch state — same pattern as `batchingQP` but for QAs. Items is a
   // newline/comma/semicolon-separated string the user pastes; we parse
   // it into a JSON array (strings if one var on the QA, otherwise prompt
@@ -458,7 +459,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   }, [showAutomationActions]);
   const [runningQE, setRunningQE] = useState<QuickExec | null>(null);
   const [runVarsQE, setRunVarsQE] = useState<Record<string, string>>({});
-  const [runQEState, setRunQEState] = useState<{ busy: boolean; data: unknown | null; error: string | null }>({ busy: false, data: null, error: null });
+  const [runQEState, setRunQEState] = useState<{ runId: string | null; busy: boolean; data: unknown | null; error: string | null; durationMs: number | null }>({ runId: null, busy: false, data: null, error: null, durationMs: null });
   // Lignes du tableau de résultats batch dépliées (Set d'index). On garde
   // un Set plutôt qu'un single index pour permettre la comparaison de
   // plusieurs réponses côte-à-côte. Reset à chaque nouveau batch.
@@ -1232,16 +1233,18 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
 
   const handleRunQE = async (quickExec: QuickExec) => {
     if (runQEState.busy) return;
-    setRunQEState({ busy: true, data: null, error: null });
+    setRunQEState({ runId: null, busy: true, data: null, error: null, durationMs: null });
     try {
       const response = await quickExecsApi.run(quickExec.id, { variables: runVarsQE });
-      setRunQEState({
+        setRunQEState({
+          runId: response.run_id,
         busy: false,
         data: response.data ?? null,
         error: response.success ? null : response.error ?? t('qe.runFailed'),
+        durationMs: response.duration_ms,
       });
     } catch (error) {
-      setRunQEState({ busy: false, data: null, error: userError(error) });
+      setRunQEState({ runId: null, busy: false, data: null, error: userError(error), durationMs: null });
     }
   };
 
@@ -1257,13 +1260,15 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     try {
       const res = await quickApisApi.runQa(qa.id, { variables: launchVarsQA });
       const env = res.envelope as { data?: unknown } | null;
-      setLaunchQAResult({
+        setLaunchQAResult({
+          runId: res.run_id,
         ok: res.success,
         payload: env?.data ?? res.envelope ?? null,
         error: res.error ?? null,
+        durationMs: res.duration_ms,
       });
     } catch (e) {
-      setLaunchQAResult({ ok: false, payload: null, error: String(e) });
+        setLaunchQAResult({ runId: qa.id, ok: false, payload: null, error: String(e), durationMs: null });
     } finally {
       launchingQARunRef.current = false;
       setLaunchingQARun(false);
@@ -3610,20 +3615,18 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                           </button>
                         </div>
                       )}
-                      {/* Result panel — appears under the form once Run fires */}
-                      {launchingQA?.id === qa.id && launchQAResult && (
-                        <div
-                          className={launchQAResult.ok ? 'wf-apicall-success' : 'wf-apicall-error'}
-                          style={{ marginTop: 8, padding: 10, borderRadius: 6, maxHeight: 320, overflow: 'auto' }}
-                        >
-                          {launchQAResult.ok ? (
-                            <pre style={{ margin: 0, fontSize: 11, whiteSpace: 'pre-wrap' }}>
-                              {JSON.stringify(launchQAResult.payload, null, 2)}
-                            </pre>
-                          ) : (
-                            <span>{launchQAResult.error ?? t('qa.runFailed')}</span>
-                          )}
-                        </div>
+                      {launchingQA?.id === qa.id && (launchingQARun || launchQAResult) && (
+                        <RunStatusCard
+                          model={{
+                            id: launchQAResult?.runId ?? qa.id,
+                            kind: 'quick_api',
+                            status: launchingQARun ? 'running' : launchQAResult?.ok ? 'success' : 'failed',
+                            durationMs: launchQAResult?.durationMs ?? null,
+                            result: launchQAResult?.ok ? launchQAResult.payload : null,
+                            diagnostic: launchQAResult?.ok ? null : launchQAResult?.error ?? null,
+                            freshness: 'unavailable',
+                          } satisfies RunStatusCardModel}
+                        />
                       )}
                     </div>
                     {selectedQuickApiId === qa.id && (
@@ -3752,11 +3755,11 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                           onClick={() => {
                             if (isOpen) {
                               setRunningQE(null);
-                              setRunQEState({ busy: false, data: null, error: null });
+                              setRunQEState({ runId: null, busy: false, data: null, error: null, durationMs: null });
                             } else {
                               setRunningQE(quickExec);
                               setRunVarsQE({});
-                              setRunQEState({ busy: false, data: null, error: null });
+                              setRunQEState({ runId: null, busy: false, data: null, error: null, durationMs: null });
                               if (quickExec.variables.length === 0) void handleRunQE(quickExec);
                             }
                           }}
@@ -3789,12 +3792,18 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                               {t('qe.run')}
                             </button>
                           )}
-                          {runQEState.error && <div className="wf-apicall-error">{runQEState.error}</div>}
-                          {runQEState.data !== null && (
-                            <div className="wf-apicall-success qe-run-result">
-                              <strong>{t('qe.result')}</strong>
-                              <pre>{JSON.stringify(runQEState.data, null, 2)}</pre>
-                            </div>
+                          {(runQEState.busy || runQEState.error || runQEState.data !== null) && (
+                            <RunStatusCard
+                              model={{
+                                id: runQEState.runId ?? quickExec.id,
+                                kind: 'quick_exec',
+                                status: runQEState.busy ? 'running' : runQEState.error ? 'failed' : 'success',
+                                durationMs: runQEState.durationMs,
+                                result: runQEState.data,
+                                diagnostic: runQEState.error,
+                                freshness: 'unavailable',
+                              } satisfies RunStatusCardModel}
+                            />
                           )}
                         </div>
                       )}

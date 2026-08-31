@@ -48,6 +48,7 @@ pub mod quick_prompts;
 pub mod rtk;
 pub mod rtk_state;
 pub mod setup;
+pub mod shared_runs;
 pub mod skills;
 pub mod stats;
 pub mod themes;
