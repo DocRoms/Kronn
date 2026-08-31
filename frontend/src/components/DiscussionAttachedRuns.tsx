@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { runsApi } from '../lib/api';
 import { useT } from '../lib/I18nContext';
-import { RunStatusCard, sharedRunStatusCardModel } from './RunStatusCard';
+import { RunStatusCard } from './RunStatusCard';
+import { sharedRunStatusCardModel } from '../lib/runStatusCardModel';
 import type { SharedRun } from '../types/generated';
 
 /** A `shared_run_updated` event, identified by the run it targets, plus a

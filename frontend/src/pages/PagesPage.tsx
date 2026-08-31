@@ -19,7 +19,8 @@ import {
 } from '../lib/live-page-sandbox';
 import { formatRelativeTime } from '../lib/relativeTime';
 import { CopyIdPill } from '../components/CopyIdPill';
-import { RunStatusCard, type RunStatusCardModel } from '../components/RunStatusCard';
+import { RunStatusCard } from '../components/RunStatusCard';
+import type { RunStatusCardModel } from '../lib/runStatusCardModel';
 import { CollectionFavoritesHeader } from '../components/CollectionFavoritesHeader';
 import { CollectionRowActions } from '../components/CollectionRowActions';
 import { CollectionSidebarFooter } from '../components/CollectionSidebarFooter';
