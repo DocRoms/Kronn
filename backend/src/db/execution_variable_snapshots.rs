@@ -59,17 +59,17 @@ pub fn has_live_owner(conn: &Connection, run_kind: &str, run_id: &str) -> Result
             })
             .optional()?
             .is_some(),
-        // QA/QE calls have no separate run table; their snapshot is the
-        // durable execution identity and must remain scoped to a live project.
-        "quick_api" | "quick_api_batch" | "quick_exec" => project_id
-            .as_deref()
-            .map(|id| {
-                conn.query_row("SELECT 1 FROM projects WHERE id=?1", [id], |_| Ok(()))
-                    .optional()
-                    .map(|value| value.is_some())
-            })
-            .transpose()?
-            .unwrap_or(false),
+        // QA/QE calls have no separate run table. A project-backed execution
+        // stays tied to that live project; an intentionally projectless
+        // execution is still inspectable by the authenticated local operator
+        // through its opaque execution id rather than becoming an orphan.
+        "quick_api" | "quick_api_batch" | "quick_exec" => match project_id.as_deref() {
+            Some(id) => conn
+                .query_row("SELECT 1 FROM projects WHERE id=?1", [id], |_| Ok(()))
+                .optional()?
+                .is_some(),
+            None => true,
+        },
         _ => false,
     };
     Ok(entity_exists)
@@ -245,7 +245,16 @@ pub fn extend_retention(
     let Some(previous) = previous else {
         return Ok(false);
     };
-    let new_expiry = now + chrono::Duration::days(i64::from(days));
+    let requested_expiry = now + chrono::Duration::days(i64::from(days));
+    let previous_expiry = previous
+        .as_deref()
+        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+        .map(|value| value.with_timezone(&Utc));
+    // An explicit extension is monotone: it can preserve or lengthen the
+    // existing retention window, never shorten it as a side effect.
+    let new_expiry = previous_expiry
+        .filter(|previous| *previous > requested_expiry)
+        .unwrap_or(requested_expiry);
     conn.execute(
         "UPDATE execution_variable_snapshots SET expires_at=?2,retention_days=?3 WHERE id=?1",
         params![snapshot_id, new_expiry.to_rfc3339(), days],
@@ -381,6 +390,28 @@ mod tests {
             .unwrap();
         assert!(audit.starts_with("operator-1:"));
         assert!(!audit.contains("never-in-audit"));
+    }
+
+    #[test]
+    fn retention_extension_never_shortens_an_existing_window() {
+        let conn = conn();
+        let now = Utc::now();
+        let values = HashMap::from([("token".into(), "retained".into())]);
+        let id = insert(&conn, sample(&values, now), &[9u8; 32]).unwrap();
+        // The original expiry is 30 days away. A one-day extension is an
+        // explicit audit event but must not accidentally reduce retention.
+        assert!(extend_retention(&conn, &id, 1, "operator-1", now).unwrap());
+        let expires: String = conn
+            .query_row(
+                "SELECT expires_at FROM execution_variable_snapshots WHERE id=?1",
+                [&id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let expires = DateTime::parse_from_rfc3339(&expires)
+            .unwrap()
+            .with_timezone(&Utc);
+        assert!(expires >= now + Duration::days(30));
     }
 
     #[test]

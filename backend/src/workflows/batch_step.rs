@@ -491,49 +491,51 @@ async fn execute_batch_quick_prompt_step_with_budget(
     let outcome = match state
         .db
         .with_conn(move |conn| {
-            if let Some(secret) = snapshot_secret.as_deref() {
-                let key = crate::core::crypto::parse_secret(secret).map_err(anyhow::Error::msg)?;
-                if let (Some(parent_values), Some(parent_metadata)) = (
-                    crate::db::execution_variable_snapshots::load_values(
-                        conn,
-                        "workflow",
-                        &parent_snapshot_id,
-                        &key,
-                        chrono::Utc::now(),
-                    )?,
-                    crate::db::execution_variable_snapshots::metadata(
-                        conn,
-                        "workflow",
-                        &parent_snapshot_id,
-                    )?,
-                ) {
-                    for ((discussion_id, item_values), _) in assigned_ids_for_tx
-                        .iter()
-                        .zip(item_variables_for_tx.iter())
-                        .zip(batch_items.iter())
-                    {
-                        let mut values = parent_values.clone();
-                        values.extend(item_values.clone());
-                        crate::db::execution_variable_snapshots::insert(
-                            conn,
-                            crate::db::execution_variable_snapshots::NewSnapshot {
-                                run_kind: "quick_prompt_batch_item",
-                                run_id: discussion_id,
-                                project_id: qp_for_tx.project_id.as_deref(),
-                                environment_ref: "workflow_snapshot",
-                                resolved_at: parent_metadata.resolved_at,
-                                retention_days: snapshot_retention,
-                                expires_at: crate::core::execution_variables::expiry(
-                                    parent_metadata.resolved_at,
-                                    snapshot_retention,
-                                ),
-                                values: &values,
-                                provenance: &parent_metadata.provenance,
-                            },
-                            &key,
-                        )?;
-                    }
-                }
+            let secret = snapshot_secret.as_deref().ok_or_else(|| {
+                anyhow::anyhow!("BatchQuickPrompt variable snapshot key unavailable")
+            })?;
+            let key = crate::core::crypto::parse_secret(secret).map_err(anyhow::Error::msg)?;
+            let parent_values = crate::db::execution_variable_snapshots::load_values(
+                conn,
+                "workflow",
+                &parent_snapshot_id,
+                &key,
+                chrono::Utc::now(),
+            )?
+            .ok_or_else(|| {
+                anyhow::anyhow!("BatchQuickPrompt parent variable snapshot unavailable")
+            })?;
+            let parent_metadata = crate::db::execution_variable_snapshots::metadata(
+                conn,
+                "workflow",
+                &parent_snapshot_id,
+            )?
+            .ok_or_else(|| {
+                anyhow::anyhow!("BatchQuickPrompt parent variable metadata unavailable")
+            })?;
+            for (discussion_id, item_values) in
+                assigned_ids_for_tx.iter().zip(item_variables_for_tx.iter())
+            {
+                let mut values = parent_values.clone();
+                values.extend(item_values.clone());
+                crate::db::execution_variable_snapshots::insert(
+                    conn,
+                    crate::db::execution_variable_snapshots::NewSnapshot {
+                        run_kind: "quick_prompt_batch_item",
+                        run_id: discussion_id,
+                        project_id: qp_for_tx.project_id.as_deref(),
+                        environment_ref: "workflow_snapshot",
+                        resolved_at: parent_metadata.resolved_at,
+                        retention_days: snapshot_retention,
+                        expires_at: crate::core::execution_variables::expiry(
+                            parent_metadata.resolved_at,
+                            snapshot_retention,
+                        ),
+                        values: &values,
+                        provenance: &parent_metadata.provenance,
+                    },
+                    &key,
+                )?;
             }
             crate::db::workflows::create_batch_run_with_identities(
                 conn,

@@ -381,6 +381,13 @@ pub async fn create(
                         disc.model = Some(m);
                     }
                 }
+            }
+            crate::db::discussions::insert_discussion(conn, &disc)?;
+            crate::db::discussions::insert_message(conn, &disc.id, &msg)?;
+            // The card has a foreign key to the discussion through the messages
+            // table. Insert the durable owner first, then add the immutable,
+            // value-free context record in the same transaction.
+            if originating_qp_id.is_some() {
                 crate::db::execution_variable_snapshots::insert_execution_context_message(
                     conn,
                     &disc.id,
@@ -388,8 +395,6 @@ pub async fn create(
                     &disc.id,
                 )?;
             }
-            crate::db::discussions::insert_discussion(conn, &disc)?;
-            crate::db::discussions::insert_message(conn, &disc.id, &msg)?;
             if !initial_targets.is_empty() {
                 crate::db::discussions::replace_message_targets(conn, &msg.id, &initial_targets)?;
             }
