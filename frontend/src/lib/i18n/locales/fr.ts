@@ -3525,6 +3525,7 @@ suggestion KRONN:APPLY ; cela écraserait la vraie valeur par un placeholder
   'run.freshness.live': 'En direct',
   'run.freshness.rehydrated': 'Réhydraté depuis le serveur',
   'run.freshness.unavailable': 'État direct indisponible',
+  'run.attachedHeading': 'Runs rattachés',
   'wf.tokens': 'Tokens',
   'wf.noProject': 'Sans projet',
 

@@ -5622,10 +5622,11 @@ mod tests {
                 let name = name.to_string();
                 move |conn| {
                     let now = chrono::Utc::now();
+                    let path = format!("/tmp/kt-243-test-project-{id}");
                     let project = crate::models::Project {
                         id,
                         name,
-                        path: "/tmp/kt-243-test-project".into(),
+                        path,
                         repo_url: None,
                         token_override: None,
                         ai_config: crate::models::AiConfigStatus {
@@ -5729,8 +5730,20 @@ mod tests {
         insert_test_project(&state, "kt243-proj-b", "Project B").await;
         insert_test_discussion(&state, "kt243-disc-a", "Disc A").await;
         insert_test_discussion(&state, "kt243-disc-b", "Disc B").await;
-        insert_test_shared_run(&state, "kt243-run-a", Some("kt243-proj-a"), Some("kt243-disc-a")).await;
-        insert_test_shared_run(&state, "kt243-run-b", Some("kt243-proj-b"), Some("kt243-disc-b")).await;
+        insert_test_shared_run(
+            &state,
+            "kt243-run-a",
+            Some("kt243-proj-a"),
+            Some("kt243-disc-a"),
+        )
+        .await;
+        insert_test_shared_run(
+            &state,
+            "kt243-run-b",
+            Some("kt243-proj-b"),
+            Some("kt243-disc-b"),
+        )
+        .await;
 
         let req = Request::builder()
             .method("GET")

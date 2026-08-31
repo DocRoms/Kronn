@@ -434,6 +434,13 @@ pub struct BatchRunResponse {
     pub run_id: String,
     pub discussion_ids: Vec<String>,
     pub batch_total: u32,
+    /// Non-fatal shared-run projection failures: the underlying batch/child
+    /// discussions succeeded, but one or more `SharedRun` rows failed to
+    /// persist, so the corresponding `RunStatusCard` may fail to rehydrate.
+    /// Surfaced explicitly rather than silently logged so the caller isn't
+    /// left assuming full observability that doesn't exist.
+    #[serde(default)]
+    pub shared_run_warnings: Vec<String>,
 }
 
 /// POST /api/quick-prompts/:id/batch
@@ -555,7 +562,9 @@ pub async fn batch_run(
                 created_at: now,
                 updated_at: now,
             };
-            if let Err(persist_error) = crate::api::shared_runs::persist_and_broadcast(&state, run).await {
+            if let Err(persist_error) =
+                crate::api::shared_runs::persist_and_broadcast(&state, run).await
+            {
                 tracing::error!(
                     "Failed to persist preflight_failed shared run for QP batch {}: {}",
                     qp_id,
@@ -577,6 +586,7 @@ pub async fn batch_run(
     // One durable shared run per spawned discussion — QP's "run" is the
     // creation + dispatch of its child discussion; the ongoing agent turn
     // is tracked live by the discussion itself, not duplicated here.
+    let mut shared_run_warnings = Vec::new();
     for discussion_id in &outcome.discussion_ids {
         let now = Utc::now();
         let run = crate::models::SharedRun {
@@ -597,14 +607,17 @@ pub async fn batch_run(
         // The child discussion already exists and is reachable via
         // `discussion_ids` below regardless of this write; a failure here
         // only means that one card's rehydration will miss, not that the
-        // batch itself failed, so it's logged rather than turned into a
-        // false "batch failed" response.
-        if let Err(persist_error) = crate::api::shared_runs::persist_and_broadcast(&state, run).await {
+        // batch itself failed. Logged AND surfaced explicitly in the
+        // response so the caller doesn't assume rehydration will work.
+        if let Err(persist_error) =
+            crate::api::shared_runs::persist_and_broadcast(&state, run).await
+        {
             tracing::error!(
                 "Failed to persist shared run for QP batch discussion {}: {}",
                 discussion_id,
                 persist_error
             );
+            shared_run_warnings.push(format!("discussion {discussion_id}: {persist_error}"));
         }
     }
 
@@ -612,6 +625,7 @@ pub async fn batch_run(
         run_id: outcome.run_id,
         discussion_ids: outcome.discussion_ids,
         batch_total: outcome.batch_total,
+        shared_run_warnings,
     }))
 }
 
@@ -864,7 +878,9 @@ pub async fn compare_agents(
                 created_at: now,
                 updated_at: now,
             };
-            if let Err(persist_error) = crate::api::shared_runs::persist_and_broadcast(&state, run).await {
+            if let Err(persist_error) =
+                crate::api::shared_runs::persist_and_broadcast(&state, run).await
+            {
                 tracing::error!(
                     "Failed to persist preflight_failed shared run for QP compare-agents batch {}: {}",
                     qp_id,
@@ -885,6 +901,7 @@ pub async fn compare_agents(
         qp_name_for_log,
     );
 
+    let mut shared_run_warnings = Vec::new();
     for discussion_id in &outcome.discussion_ids {
         let now = Utc::now();
         let run = crate::models::SharedRun {
@@ -905,14 +922,17 @@ pub async fn compare_agents(
         // The child discussion already exists and is reachable via
         // `discussion_ids` below regardless of this write; a failure here
         // only means that one card's rehydration will miss, not that the
-        // batch itself failed, so it's logged rather than turned into a
-        // false "batch failed" response.
-        if let Err(persist_error) = crate::api::shared_runs::persist_and_broadcast(&state, run).await {
+        // batch itself failed. Logged AND surfaced explicitly in the
+        // response so the caller doesn't assume rehydration will work.
+        if let Err(persist_error) =
+            crate::api::shared_runs::persist_and_broadcast(&state, run).await
+        {
             tracing::error!(
                 "Failed to persist shared run for QP batch discussion {}: {}",
                 discussion_id,
                 persist_error
             );
+            shared_run_warnings.push(format!("discussion {discussion_id}: {persist_error}"));
         }
     }
 
@@ -920,6 +940,7 @@ pub async fn compare_agents(
         run_id: outcome.run_id,
         discussion_ids: outcome.discussion_ids,
         batch_total: outcome.batch_total,
+        shared_run_warnings,
     }))
 }
 

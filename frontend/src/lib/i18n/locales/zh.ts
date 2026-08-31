@@ -3419,6 +3419,7 @@ const zh: TranslationDict = {
   "run.freshness.live": "实时",
   "run.freshness.rehydrated": "已从服务器恢复",
   "run.freshness.unavailable": "实时状态不可用",
+  "run.attachedHeading": "关联运行",
   "wf.tokens": "令牌",
   "wf.noProject": "无项目",
   "wiz.createTitle": "创建工作流",

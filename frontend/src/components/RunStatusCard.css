@@ -1,4 +1,4 @@
-.run-status-card { border: 1px solid var(--kr-border-light); border-radius: var(--kr-r-md); background: var(--kr-bg-subtle); padding: 10px; color: var(--kr-text); }
+.run-status-card { border: 1px solid var(--kr-border-light); border-radius: var(--kr-r-md); background: var(--kr-bg-subtle); padding: 10px; color: var(--kr-text-primary); }
 .run-status-card-header, .run-status-card-meta, .run-status-card-progress-label { display: flex; align-items: center; gap: 8px; }
 .run-status-card-header { min-width: 0; }
 .run-status-card-kind { font-size: var(--kr-fs-xs); font-weight: 700; text-transform: uppercase; letter-spacing: .04em; color: var(--kr-text-muted); }

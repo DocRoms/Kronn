@@ -3512,6 +3512,7 @@ KRONN:APPLY; eso sobreescribiría el valor real con un placeholder
   'run.freshness.live': 'En directo',
   'run.freshness.rehydrated': 'Rehidratado desde el servidor',
   'run.freshness.unavailable': 'Estado en directo no disponible',
+  'run.attachedHeading': 'Ejecuciones asociadas',
   'wf.tokens': 'Tokens',
   'wf.noProject': 'Sin proyecto',
 
