@@ -73,7 +73,8 @@ class E2eContainerWorkflowTests(unittest.TestCase):
     def test_ci_jobs_have_a_hard_thirty_minute_timeout(self):
         workflow = CI_WORKFLOW.read_text()
         jobs = (
-            "require-ci-label", "test-backend", "duplication-check", "test-python",
+            "require-ci-label", "test-backend", "test-backend-coverage",
+            "test-backend-quality", "test-desktop-compile", "duplication-check", "test-python",
             "test-docs-sidecar-windows", "test-frontend", "test-e2e", "test-shell",
             "security-scan", "test-backend-portability", "ci-quality-gates",
             "backend-ci-performance",
@@ -96,7 +97,8 @@ class E2eContainerWorkflowTests(unittest.TestCase):
         self.assertIn("backend-ci-performance:", workflow)
         self.assertIn("ci-quality-gates:", workflow)
         for gate in (
-            "test-backend", "duplication-check", "test-python",
+            "test-backend", "test-backend-coverage", "test-backend-quality",
+            "test-desktop-compile", "duplication-check", "test-python",
             "test-docs-sidecar-windows", "test-frontend", "test-e2e",
             "test-shell", "security-scan", "test-backend-portability",
         ):
@@ -118,6 +120,24 @@ class E2eContainerWorkflowTests(unittest.TestCase):
         self.assertIn("Record compiled cache hit", backend)
         self.assertIn("Record compiled cache warmup miss", backend)
         self.assertIn("Stage bounded compiled backend artifacts", backend)
+        self.assertLess(
+            backend.index("cargo test — measured backend critical path"),
+            backend.index("Stage bounded compiled backend artifacts"),
+        )
+        self.assertNotIn("cargo llvm-cov", backend)
+        self.assertNotIn("cargo check — desktop crate", backend)
+        coverage = re.search(
+            r"^  test-backend-coverage:\n(?P<section>.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)",
+            workflow,
+            re.MULTILINE | re.DOTALL,
+        ).group("section")
+        self.assertIn("cargo llvm-cov — enforce coverage floor", coverage)
+        desktop = re.search(
+            r"^  test-desktop-compile:\n(?P<section>.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)",
+            workflow,
+            re.MULTILINE | re.DOTALL,
+        ).group("section")
+        self.assertIn("cargo check — desktop crate", desktop)
         self.assertIn("CI_COMPILED_CACHE_HIT: ${{ needs.test-backend.outputs.compiled_cache_hit }}", workflow)
         hot_cache = re.search(
             r"Cache cargo registry and bounded backend build \(hot\)(?P<section>.*?)(?=^      - |\Z)",

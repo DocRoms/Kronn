@@ -44,12 +44,13 @@ authoritative job graph.
 
 ## Backend CI timing SLO
 
-`test-backend` is the measured backend critical-path job. Its functional gates
-remain blocking: formatting, clippy, Rust tests, coverage floors, generated
-type drift, safety/budget checks, the frontend build needed by the desktop
-compile check, and the desktop compile check itself. The `ci-quality-gates`
-job fails unless every independent quality job succeeds; configure that job as
-the required branch-protection check. [src: file: .github/workflows/ci-test.yml:52-299] [src: file: .github/workflows/ci-test.yml:756-780]
+`test-backend` is the measured backend critical-path job: formatting, clippy,
+and the Rust test suite. It stages the bounded cache immediately after that
+test verdict. Coverage, generated-type drift and project-specific
+lint/budget checks run in `test-backend-coverage` and `test-backend-quality`;
+the frontend build and desktop compilation run in `test-desktop-compile`.
+Those jobs execute in parallel and all remain blocking through
+`ci-quality-gates`. [src: file: .github/workflows/ci-test.yml:52-265] [src: file: .github/workflows/ci-test.yml:713-740]
 
 The backend performance observer publishes the duration for every eligible run
 and reports a warning rather than failing a green functional run when the hot
@@ -62,7 +63,7 @@ attempt, restore no compiled artifacts, and are reported only for their current
 run. Historical hot statistics use only successful same-branch pull-request
 runs whose job records a restored compiled cache. [src: file: .github/workflows/ci-test.yml:84-157] [src: file: scripts/ci/backend_ci_slo.mjs:47-120]
 The observer's Node unit test runs in the blocking `test-python` gate.
-[src: file: .github/workflows/ci-test.yml:383-401]
+[src: file: .github/workflows/ci-test.yml:299-324]
 
 Run `CI Tests` manually with `cache_mode=hot` for a warmed compiled-artifact
 measurement or `cache_mode=cold` for a current-run-only cold measurement.
@@ -70,16 +71,23 @@ Record the published job and step timing table from each run here before
 comparing a change; do not combine cold measurements with historical hot
 statistics or infer timings from a different runner class.
 
-| Measurement | Sample window | Job/step durations | Median | P95 | Consecutive SLO breaches |
-| --- | --- | --- | --- | --- | --- |
-| Before | Pending first representative run | Published in Actions summary | Pending | Pending | Pending |
-| After | Pending first representative run | Published in Actions summary | Pending | Pending | Pending |
+| Measurement | Run | Result | Job/step durations | Median | P95 | Consecutive SLO breaches |
+| --- | --- | --- | --- | --- | --- | --- |
+| Before — cold | [GitHub Actions run 33354549462](https://github.com/DocRoms/Kronn/actions/runs/33354549462) | Failed at a separate flaky test; not an SLO sample | `test-backend`: 19m 46s before coverage/desktop completed; disk cleanup 1m 54s, clippy 3m 03s, library tests 14m 33s | Unavailable | Unavailable | Unavailable |
+| Before — warmup | [GitHub Actions run 33354667035](https://github.com/DocRoms/Kronn/actions/runs/33354667035) | Warmup evidence only; no cache-hit duration supplied | Library tests passed; coverage and desktop remained sequential, so the cache staging step could be pre-empted by the 30-minute timeout | Unavailable | Unavailable | Unavailable |
+| After — cold | Pending protected-branch run after this graph change | Required before accepting SLO evidence | Pending | Unavailable | Unavailable | Unavailable |
+| After — warmup | Pending protected-branch run after this graph change | Must complete and save the bounded cache | Pending | Unavailable | Unavailable | Unavailable |
+| After — hot | Pending protected-branch run after this graph change | Must record an explicit compiled-cache hit | Pending | Unavailable | Unavailable | Unavailable |
+
+The two before rows are reported from the review evidence; the supplied data
+does not contain a successful current cold measurement or a hot cache-hit
+duration, so no median or p95 is claimed. [src: user: 2026-08-31: review reports GitHub Actions runs 33354549462 and 33354667035]
 
 Every job in the CI workflow has a 30-minute technical timeout. The required
 aggregate always runs, includes `require-ci-label`, and fails when the label is
 removed or any other gate is skipped or fails. A timeout is a functional
 failure; the SLO observer does not retry, sleep, or mask it.
-[src: file: .github/workflows/ci-test.yml:37-55] [src: file: .github/workflows/ci-test.yml:756-780]
+[src: file: .github/workflows/ci-test.yml:37-55] [src: file: .github/workflows/ci-test.yml:713-740]
 
 ## Test placement
 

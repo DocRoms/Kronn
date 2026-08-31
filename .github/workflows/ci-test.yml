@@ -61,13 +61,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # ── Reclaim disk before the heavy builds ───────────────────────────
-      # This single job builds the frontend, runs `cargo test` (normal target)
-      # AND `cargo llvm-cov` (a SECOND full build in target/llvm-cov-target/
-      # with -C debuginfo=2 instrumentation). Two complete build trees overrun
-      # the ~14 GB free on ubuntu-latest → the linker dies with
-      # "No space left on device" / "ld terminated with signal 7 [Bus error]".
-      # Dropping the preinstalled Android SDK / .NET / GHC frees ~25-30 GB.
+      # This is deliberately the measured, bounded Rust critical path. Coverage,
+      # desktop compilation, generated types, and budget checks run in separate
+      # required jobs below, so none can prevent a warmup from saving its cache.
       - name: Free disk space
         uses: jlumbroso/free-disk-space@main
         with:
@@ -142,201 +138,11 @@ jobs:
         # No sccache for clippy — cached artifacts can replay stale lint warnings
         # even when the source has changed (sccache hashes deps/flags, not source content)
 
-      # Run the actual backend suite before unrelated desktop/frontend setup.
-      # Previously it sat after apt, pnpm, the production UI build, desktop
-      # check and type generation: any one of those gates could abort the job
-      # before Rust tests ran, leaving a red "test-backend" with no backend-test
-      # verdict at all.
-      - name: cargo test — backend (early verdict)
+      - name: cargo test — measured backend critical path
         run: cargo test
 
-      # ── Desktop crate compile-check ────────────────────────────────────
-      # backend/ and desktop/src-tauri/ are separate crates (no root
-      # workspace). cargo clippy above only covers backend → desktop
-      # could silently drift and only break at release time
-      # (desktop-build.yml runs on v* tags). This check catches the
-      # drift at PR time. The 0.5.0 regression that motivated adding it:
-      # a new field on AppState was added + initialized in backend::main
-      # but forgotten in desktop::main, so the backend crate compiled
-      # fine but `cargo tauri build` broke all 4 desktop OS targets.
-      - name: Install Linux deps for desktop compile check
-        # webkit2gtk-4.1 / libsoup-3.0 / javascriptcoregtk-4.1 are
-        # linked via pkg-config by tauri/glib-sys build scripts. Must
-        # match the set installed in desktop-build.yml so both paths
-        # compile identically.
-        run: |
-          sudo add-apt-repository -y universe
-          sudo apt-get update
-          sudo apt-get install -y \
-            pkg-config \
-            libgtk-3-dev \
-            libwebkit2gtk-4.1-dev \
-            libjavascriptcoregtk-4.1-dev \
-            libsoup-3.0-dev \
-            libappindicator3-dev \
-            librsvg2-dev \
-            libssl-dev \
-            patchelf \
-            file
-
-      # `include_dir!("../../frontend/dist")` in desktop/src-tauri/src/main.rs
-      # is expanded at compile time — Tauri also reads `frontendDist`
-      # from tauri.conf.json during `generate_context!`. Both panic if
-      # the dir doesn't exist, so we need a real frontend build before
-      # the check. We install pnpm + build frontend (production `dist/`).
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 24
-
-      - name: Enable corepack (provides pnpm pinned by package.json)
-        # Node 24 ships corepack — it reads `packageManager` from
-        # `frontend/package.json` (pnpm@11.21.0) and fetches that exact
-        # version on first invocation. Avoids drift between `npm i -g
-        # pnpm` (latest, moving) and the version local devs run.
-        run: corepack enable
-
-      - name: Install frontend dependencies
-        working-directory: frontend
-        run: pnpm install --frozen-lockfile
-
-      - name: Build frontend (produces frontend/dist/)
-        working-directory: frontend
-        run: pnpm build
-
-      - name: cargo check — desktop crate
-        working-directory: desktop/src-tauri
-        run: cargo check --locked
-        # --locked so a drift in Cargo.lock vs Cargo.toml also fails here,
-        # not just at release.
-
-      # C1 (plan 0.9) — typegen drift guard. `generated.ts` is now FULLY
-      # regenerated from the ts-rs bindings; a PR that changes a Rust model
-      # without running `make typegen` fails here on the diff.
-      - name: Types — regenerate generated.ts and fail on drift
-        # NOTE: this job's default working-directory is `backend` (see defaults
-        # at the top of the job) — paths below are relative to it.
-        run: |
-          cargo test export_bindings -- --nocapture
-          node ../frontend/scripts/assemble-generated-types.mjs
-          git diff --exit-code ../frontend/src/types/generated.ts || {
-            echo "::error::frontend/src/types/generated.ts drifted from the Rust models — run 'make typegen' and commit the result."
-            exit 1
-          }
-
-      # ── Anti-regression lints ─────────────────────────────────────────
-      #
-      # These grep-based checks catch patterns that clippy can't:
-      #
-      # 1. std::process::Command::new — On Windows, every Command::new
-      #    spawns a visible console window. All production code MUST use
-      #    crate::core::cmd::{sync_cmd, async_cmd} which apply
-      #    CREATE_NO_WINDOW. Test code (#[cfg(test)]) is exempt.
-      #
-      # 2. .unwrap_or_default() after .parse::<toml::Value>() — This
-      #    was the root cause of a critical bug where Codex config.toml
-      #    was silently replaced with an empty table on parse error,
-      #    destroying [model_providers] and user auth. Use explicit error
-      #    handling (see load_codex_config_for_merge pattern).
-      - name: Lint — no raw Command::new in prod code
-        run: |
-          # On Windows every Command::new flashes a console window. Production
-          # code must use crate::core::cmd::{sync_cmd, async_cmd}.
-          #
-          # Pre-0.8.2 this was a `grep 'Command::new'` bash loop that
-          # false-positived on string literals — the Security audit prompt
-          # mentions the pattern as something to look for in user code, and
-          # the grep saw the literal substring and failed CI.
-          #
-          # The check is now an AST-aware Rust binary (syn-based) — see
-          # examples/lint-no-raw-command.rs. Strings/comments are invisible
-          # to the AST, so the whole class of false positives is gone.
-          # cfg(test) modules / fns are skipped recursively.
-          cargo run --example lint-no-raw-command --quiet
-
-      - name: Lint — no silent TOML unwrap_or_default
-        run: |
-          # Catch the dangerous pattern: .parse::<toml::Value>() ... .unwrap_or_default()
-          # which silently drops user config on parse errors.
-          VIOLATIONS=$(grep -rn 'parse.*toml.*Value' src/ --include='*.rs' -A3 \
-            | grep 'unwrap_or_default' \
-            || true)
-          if [ -n "$VIOLATIONS" ]; then
-            echo "::error::Found .unwrap_or_default() on TOML parse result — handle errors explicitly:"
-            echo "$VIOLATIONS"
-            exit 1
-          fi
-          echo "✓ No silent TOML unwrap_or_default"
-
-      - name: Lint — no unwrap() inside with_conn closures
-        run: |
-          # stab-1 — a panic inside a with_conn closure poisons the shared
-          # DB mutex (recovered since 0.8.11, but still one failed request).
-          # Baseline is ZERO in prod code: keep it that way.
-          python3 scripts/ci/test_lint_with_conn_unwrap.py
-          python3 scripts/ci/lint_with_conn_unwrap.py
-
-      - name: Context Budget Gate — agent bootstrap size
-        run: |
-          # KT-191 — the mandatory bootstrap is paid by EVERY session before any
-          # useful work, so it is a product cost. Ratchet: no growth until the
-          # re-split lands; the remaining debt to target is printed each run.
-          python3 scripts/ci/test_context_budget.py
-          python3 scripts/ci/context_budget.py
-
-      - name: MCP Surface Budget Gate — tool catalogue size
-        run: |
-          # KT-192 — the tool catalogue is injected before any work is exchanged,
-          # so it is the same kind of unconditional cost as the bootstrap. Same
-          # ratchet rule: lower a ceiling when a reduction lands, never raise one
-          # to go green.
-          python3 scripts/ci/test_mcp_surface_budget.py
-          python3 scripts/ci/mcp_surface_budget.py
-
-      - name: Agent task matrix — every task still reaches its content
-        run: |
-          # KT-191 DoD 7 — shrinking the bootstrap is only safe if each
-          # representative task can still reach what it needs. Checks the router
-          # tables, not just whether the text exists somewhere.
-          python3 scripts/ci/agent_task_matrix.py
-
-      # ── Coverage threshold floor ────────────────────────────────
-      # Pinned to the integer floor demonstrated by the 0.12.0 candidate
-      # (Regions 83.95 / Functions 83.66 / Lines 83.48). This keeps a
-      # sub-point margin for harmless instrumentation drift while making
-      # every full percentage point of coverage a durable quality gain.
-      # When a future push raises the real coverage, bump these in
-      # lockstep — DON'T lower them, that defeats the purpose.
-      - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@cargo-llvm-cov
-
-      - name: cargo llvm-cov — enforce coverage floor
-        run: |
-          cargo llvm-cov --lib --tests --summary-only \
-            --fail-under-lines 83 \
-            --fail-under-functions 83 \
-            --fail-under-regions 83
-
-      # Scoped, stricter floor on the encryption-key / config-persistence modules
-      # (2026-06-30 secret-loss hardening). Reuses the instrumented build from the
-      # step above (cargo llvm-cov report, no rebuild). Separate from the repo-wide
-      # floor — a regression that could silently lose the key fails CI here first.
-      - name: cargo llvm-cov — key-management scoped floor
-        # The job's default working-directory is `backend/` — the script lives at
-        # the repo root and handles its own `cd`, so reference it relatively.
-        run: ../scripts/check-keymgmt-coverage.sh
-
-      # ── Desktop compilation check ───────────────────────────────────
-      # The Tauri desktop app (desktop/src-tauri/) imports the backend as
-      # a lib. Signature changes in the backend break the desktop build
-      # but NOT cargo test in backend/. This check catches it early.
-      # `cargo check` only type-checks (no link, no Tauri system deps).
-      - name: cargo check desktop (type-check only)
-        working-directory: desktop/src-tauri
-        run: cargo check --lib 2>/dev/null || cargo check 2>&1 | head -40
-
-      # The cache post-step saves this staging directory, not target/. Keep the
-      # selection deliberately bounded to ordinary Cargo debug artifacts.
+      # Stage before coverage or desktop gates can time out. actions/cache saves
+      # this bounded staging directory during its post-job hook.
       - name: Stage bounded compiled backend artifacts
         if: github.event_name != 'workflow_dispatch' || inputs.cache_mode == 'hot'
         run: |
@@ -347,6 +153,116 @@ jobs:
               cp -a "target/debug/$directory/." "../.ci-cache/backend-compiled/$directory/"
             fi
           done
+
+  test-backend-coverage:
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'ci-test')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          swap-storage: false
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: cargo llvm-cov — enforce coverage floor
+        run: |
+          cargo llvm-cov --lib --tests --summary-only \
+            --fail-under-lines 83 \
+            --fail-under-functions 83 \
+            --fail-under-regions 83
+      - name: cargo llvm-cov — key-management scoped floor
+        run: ../scripts/check-keymgmt-coverage.sh
+
+  test-backend-quality:
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'ci-test')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Types — regenerate generated.ts and fail on drift
+        run: |
+          cargo test export_bindings -- --nocapture
+          node ../frontend/scripts/assemble-generated-types.mjs
+          git diff --exit-code ../frontend/src/types/generated.ts
+      - name: Lint — no raw Command::new in prod code
+        run: cargo run --example lint-no-raw-command --quiet
+      - name: Lint — no silent TOML unwrap_or_default
+        run: |
+          VIOLATIONS=$(grep -rn 'parse.*toml.*Value' src/ --include='*.rs' -A3 | grep 'unwrap_or_default' || true)
+          test -z "$VIOLATIONS" || { echo "$VIOLATIONS"; exit 1; }
+      - name: Lint — no unwrap() inside with_conn closures
+        run: |
+          python3 scripts/ci/test_lint_with_conn_unwrap.py
+          python3 scripts/ci/lint_with_conn_unwrap.py
+      - name: Context Budget Gate — agent bootstrap size
+        run: |
+          python3 scripts/ci/test_context_budget.py
+          python3 scripts/ci/context_budget.py
+      - name: MCP Surface Budget Gate — tool catalogue size
+        run: |
+          python3 scripts/ci/test_mcp_surface_budget.py
+          python3 scripts/ci/mcp_surface_budget.py
+      - name: Agent task matrix — every task still reaches its content
+        run: python3 scripts/ci/agent_task_matrix.py
+
+  test-desktop-compile:
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'ci-test')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          swap-storage: false
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install Linux deps for desktop compile check
+        run: |
+          sudo add-apt-repository -y universe
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libgtk-3-dev libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev libsoup-3.0-dev libappindicator3-dev librsvg2-dev libssl-dev patchelf file
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Enable corepack
+        run: corepack enable
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+      - name: Build frontend (produces frontend/dist/)
+        working-directory: frontend
+        run: pnpm build
+      - name: cargo check — desktop crate
+        working-directory: desktop/src-tauri
+        run: cargo check --locked
 
   # ── Code-duplication ceiling (jscpd, all 3 languages) ──────────────────
   # Copy-paste detector across Rust + TS/TSX + Python. Baseline 2026-05-29 =
@@ -802,6 +718,9 @@ jobs:
     needs:
       - require-ci-label
       - test-backend
+      - test-backend-coverage
+      - test-backend-quality
+      - test-desktop-compile
       - duplication-check
       - test-python
       - test-docs-sidecar-windows
