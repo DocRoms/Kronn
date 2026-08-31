@@ -1,0 +1,126 @@
+/* Storage-weight indicator. Own file so the shared component sheet stays
+   untouched. Colours come from the theme tokens, never hardcoded. */
+
+.disc-weight-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 0 3px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--kr-text-muted, inherit);
+  font-size: 9px;
+  line-height: 1.4;
+  cursor: pointer;
+}
+
+.disc-weight-badge:hover,
+.disc-weight-badge:focus-visible {
+  background: rgba(var(--kr-accent-rgb, 120 120 120), 0.12);
+}
+
+/* Keyboard focus must stay visible inside a dense, clipped row. */
+.disc-weight-badge:focus-visible {
+  outline: 2px solid var(--kr-accent, currentColor);
+  outline-offset: 1px;
+}
+
+.disc-weight-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  background: var(--kr-success);
+}
+
+.disc-weight-badge[data-level='amber'] .disc-weight-dot { background: var(--kr-warning); }
+.disc-weight-badge[data-level='red'] .disc-weight-dot { background: var(--kr-danger); }
+
+/* Pending states carry no number: a dimmed, hollow dot instead, so it can
+   never be misread as a measured zero. */
+.disc-weight-badge--pending {
+  cursor: default;
+}
+
+.disc-weight-badge--pending .disc-weight-dot {
+  background: transparent;
+  border: 1px solid var(--kr-text-muted, currentColor);
+  opacity: 0.55;
+}
+
+.disc-weight-badge--pending[data-state='loading'] .disc-weight-dot {
+  animation: disc-weight-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes disc-weight-pulse {
+  0%, 100% { opacity: 0.25; }
+  50% { opacity: 0.7; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .disc-weight-badge--pending[data-state='loading'] .disc-weight-dot { animation: none; }
+}
+
+.disc-weight-value {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Detail panel — portalled to <body>, so it is positioned in viewport
+   coordinates and cannot be clipped by the row's overflow or swipe transform. */
+.disc-weight-panel-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 900;
+}
+
+.disc-weight-panel {
+  position: fixed;
+  z-index: 901;
+  min-width: 210px;
+  max-width: min(280px, calc(100vw - 24px));
+  padding: 8px 10px;
+  border: 1px solid var(--kr-border, rgba(128, 128, 128, 0.3));
+  border-radius: 8px;
+  background: var(--kr-surface, #fff);
+  color: var(--kr-text, inherit);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  font-size: 11px;
+}
+
+.disc-weight-panel-total {
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.disc-weight-panel-total[data-level='amber'] { color: var(--kr-warning); }
+.disc-weight-panel-total[data-level='red'] { color: var(--kr-danger); }
+
+.disc-weight-panel-rows {
+  margin: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.disc-weight-panel-rows > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.disc-weight-panel-rows dt {
+  color: var(--kr-text-muted, inherit);
+}
+
+.disc-weight-panel-rows dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.disc-weight-panel-hint {
+  margin: 6px 0 0;
+  padding-top: 6px;
+  border-top: 1px solid var(--kr-border, rgba(128, 128, 128, 0.25));
+  color: var(--kr-text-muted, inherit);
+}

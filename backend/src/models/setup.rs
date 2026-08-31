@@ -247,6 +247,10 @@ pub struct ServerConfig {
     /// generated reply. Empty keeps the historical allow-all behaviour.
     #[serde(default)]
     pub agent_handoff_blocked_agents: Vec<AgentType>,
+    /// Sidebar storage-weight indicator. Validation and fallback live in
+    /// `models::discussion_weight`; this is only the persisted field.
+    #[serde(default)]
+    pub discussion_weight: crate::models::DiscussionWeightConfig,
 }
 
 /// Serde default for [`ServerConfig::default_summary_strategy`].
@@ -816,6 +820,9 @@ pub struct ServerConfigPublic {
     pub agent_handoff_paid_limit: u32,
     pub agent_handoff_paid_unlimited: bool,
     pub agent_handoff_blocked_agents: Vec<AgentType>,
+    /// Sidebar storage-weight indicator: lets the frontend skip the batch
+    /// call entirely when disabled, and grade colours without a round-trip.
+    pub discussion_weight: crate::models::DiscussionWeightConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -848,4 +855,7 @@ pub struct UpdateServerConfigRequest {
     pub agent_handoff_paid_unlimited: Option<bool>,
     #[serde(default)]
     pub agent_handoff_blocked_agents: Option<Vec<AgentType>>,
+    /// Whole section at once: the toggle and the pair are persisted together
+    /// so a rejected pair can never leave a half-applied state.
+    pub discussion_weight: Option<crate::models::DiscussionWeightConfig>,
 }

@@ -821,6 +821,7 @@ pub async fn get_server_config(
         agent_handoff_paid_limit: config.server.agent_handoff_paid_limit.min(5),
         agent_handoff_paid_unlimited: config.server.agent_handoff_paid_unlimited,
         agent_handoff_blocked_agents: config.server.agent_handoff_blocked_agents.clone(),
+        discussion_weight: config.server.discussion_weight,
     }))
 }
 
@@ -829,7 +830,18 @@ pub async fn set_server_config(
     State(state): State<AppState>,
     Json(req): Json<UpdateServerConfigRequest>,
 ) -> Json<ApiResponse<()>> {
+    // Validated before any mutation: this handler applies fields one by one,
+    // so refusing late would leave the earlier ones already written.
+    if let Some(weight) = req.discussion_weight {
+        if let Err(e) = weight.with_thresholds(weight.amber_bytes, weight.red_bytes) {
+            return Json(ApiResponse::err(e));
+        }
+    }
+
     let mut config = state.config.write().await;
+    if let Some(weight) = req.discussion_weight {
+        config.server.discussion_weight = weight;
+    }
     if let Some(domain) = req.domain {
         config.server.domain = if domain.is_empty() {
             None
