@@ -5661,6 +5661,23 @@ mod tests {
         project_id: Option<&str>,
         discussion_id: Option<&str>,
     ) {
+        insert_test_shared_run_of_kind(
+            state,
+            id,
+            crate::models::SharedRunKind::QuickApi,
+            project_id,
+            discussion_id,
+        )
+        .await;
+    }
+
+    async fn insert_test_shared_run_of_kind(
+        state: &AppState,
+        id: &str,
+        kind: crate::models::SharedRunKind,
+        project_id: Option<&str>,
+        discussion_id: Option<&str>,
+    ) {
         let project_id = project_id.map(String::from);
         let discussion_id = discussion_id.map(String::from);
         state
@@ -5671,7 +5688,7 @@ mod tests {
                     let now = chrono::Utc::now();
                     let run = crate::models::SharedRun {
                         id,
-                        kind: crate::models::SharedRunKind::QuickApi,
+                        kind,
                         source_id: "qa-kt243".into(),
                         project_id,
                         discussion_id,
@@ -5766,5 +5783,62 @@ mod tests {
         let runs = body["data"].as_array().unwrap();
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0]["id"].as_str().unwrap(), "kt243-run-b");
+    }
+
+    /// HTTP-level matrix (KT-243): `GET /api/runs/:id` and `GET
+    /// /api/runs?kind=` must serve every SharedRun kind identically through
+    /// the real router — this is exactly the read path RunStatusCard and
+    /// DiscussionAttachedRuns rehydrate from, for all four run types
+    /// (QuickPrompt, QuickApi, QuickExec, Workflow).
+    #[tokio::test]
+    async fn shared_runs_get_and_list_cover_all_four_run_kinds() {
+        use crate::models::SharedRunKind;
+        let state = test_state();
+        let kinds = [
+            (SharedRunKind::QuickPrompt, "quick_prompt", "kt243-qp-1"),
+            (SharedRunKind::QuickApi, "quick_api", "kt243-qa-1"),
+            (SharedRunKind::QuickExec, "quick_exec", "kt243-qe-1"),
+            (SharedRunKind::Workflow, "workflow", "kt243-wf-1"),
+        ];
+        for (kind, _label, id) in kinds.iter().cloned() {
+            insert_test_shared_run_of_kind(&state, id, kind, None, None).await;
+        }
+
+        for (_, label, id) in kinds.iter() {
+            let req = Request::builder()
+                .method("GET")
+                .uri(format!("/api/runs/{id}"))
+                .body(Body::empty())
+                .unwrap();
+            let (status, body) = send(state.clone(), false, req).await;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "GET /api/runs/{id} for kind {label}"
+            );
+            assert!(
+                body["success"].as_bool().unwrap(),
+                "kind {label} must be readable by id"
+            );
+            assert_eq!(body["data"]["id"].as_str().unwrap(), *id);
+            assert_eq!(
+                body["data"]["kind"].as_str().unwrap(),
+                *label,
+                "kind must round-trip through the HTTP layer unchanged"
+            );
+
+            let req = Request::builder()
+                .method("GET")
+                .uri(format!("/api/runs?kind={label}"))
+                .body(Body::empty())
+                .unwrap();
+            let (status, body) = send(state.clone(), false, req).await;
+            assert_eq!(status, StatusCode::OK, "GET /api/runs?kind={label}");
+            let runs = body["data"].as_array().unwrap();
+            assert!(
+                runs.iter().any(|r| r["id"].as_str() == Some(*id)),
+                "kind filter {label} must surface its own run"
+            );
+        }
     }
 }

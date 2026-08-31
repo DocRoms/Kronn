@@ -73,7 +73,11 @@ function resultText(result: unknown): string | null {
   }
 }
 
-function serverModel(run: SharedRun, freshness: RunStatusCardModel['freshness']): RunStatusCardModel {
+/** The single SharedRun -> RunStatusCardModel projection. Every consumer
+ * (this card's own rehydration and DiscussionAttachedRuns) must reuse this
+ * exact mapper instead of re-deriving the shape, so href/progress semantics
+ * never drift between call sites. */
+export function sharedRunStatusCardModel(run: SharedRun, freshness: RunStatusCardModel['freshness'] = 'live'): RunStatusCardModel {
   const result = run.result as { progress?: { completed: number; total: number; current_label?: string | null } } | null;
   return {
     id: run.id, kind: run.kind, status: run.status, startedAt: run.started_at,
@@ -87,7 +91,12 @@ function serverModel(run: SharedRun, freshness: RunStatusCardModel['freshness'])
 export function RunStatusCard({ model: initialModel, runId, compact = false }: { model?: RunStatusCardModel; runId?: string; compact?: boolean }) {
   const { t } = useT();
   const rootRef = useRef<HTMLElement>(null);
-  const [visible, setVisible] = useState(true);
+  // Start suspended: without a real IntersectionObserver measurement yet, a
+  // freshly-mounted card must not assume it is on-screen (DoD #6/#7) — a
+  // long timeline mounting N cards would otherwise fire N fetches/sockets
+  // before the first layout pass. Only environments without IO support
+  // (rare/legacy) fall back to always-visible.
+  const [visible, setVisible] = useState(() => typeof IntersectionObserver === 'undefined');
   const [hydrated, setHydrated] = useState<RunStatusCardModel | null>(null);
   const model = hydrated ?? initialModel;
   const [now, setNow] = useState(() => Date.now());
@@ -102,7 +111,7 @@ export function RunStatusCard({ model: initialModel, runId, compact = false }: {
   }, []);
   const hydrate = useCallback(async (freshness: RunStatusCardModel['freshness']) => {
     if (!runId || !visible) return;
-    try { setHydrated(serverModel(await runsApi.get(runId), freshness)); }
+    try { setHydrated(sharedRunStatusCardModel(await runsApi.get(runId), freshness)); }
     catch { setHydrated(current => current ? { ...current, freshness: 'unavailable' } : null); }
   }, [runId, visible]);
   useEffect(() => { void hydrate('rehydrated'); }, [hydrate]);

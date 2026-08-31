@@ -3513,6 +3513,7 @@ suggestion; that would overwrite the real value with a placeholder
   'run.freshness.rehydrated': 'Rehydrated from server',
   'run.freshness.unavailable': 'Live status unavailable',
   'run.attachedHeading': 'Attached runs',
+  'run.persistWarning': 'Some run tracking data failed to save ({0}) — the launch itself succeeded.',
   'wf.tokens': 'Tokens',
   'wf.noProject': 'No project',
 

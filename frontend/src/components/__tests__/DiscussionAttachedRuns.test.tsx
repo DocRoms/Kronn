@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DiscussionAttachedRuns } from '../DiscussionAttachedRuns';
 import { runsApi, getApiBase, getAuthToken } from '../../lib/api';
@@ -82,26 +82,58 @@ describe('DiscussionAttachedRuns', () => {
     expect(cards).toHaveLength(2);
   });
 
-  it('picks up a run attached after mount when the page bumps refreshToken on shared_run_updated (a run started elsewhere)', async () => {
+  it('relists when an unknown run_id event arrives (a run started elsewhere just got attached)', async () => {
     vi.mocked(runsApi.list).mockResolvedValueOnce([]);
-    const { rerender } = render(<DiscussionAttachedRuns discussionId="disc-1" refreshToken={0} />);
+    const { rerender } = render(<DiscussionAttachedRuns discussionId="disc-1" runEvent={undefined} />);
     await waitFor(() => expect(runsApi.list).toHaveBeenCalledTimes(1));
     expect(screen.queryByTestId('disc-attached-runs')).not.toBeInTheDocument();
 
     vi.mocked(runsApi.list).mockResolvedValueOnce([sharedRun({ id: 'run-late' })]);
     vi.mocked(runsApi.get).mockResolvedValue(sharedRun({ id: 'run-late' }));
-    rerender(<DiscussionAttachedRuns discussionId="disc-1" refreshToken={1} />);
+    rerender(<DiscussionAttachedRuns discussionId="disc-1" runEvent={{ runId: 'run-late', seq: 1 }} />);
 
     await waitFor(() => expect(runsApi.list).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(screen.getByTestId('disc-attached-runs')).toBeInTheDocument());
   });
 
-  it('does not duplicate the initial fetch when refreshToken is present from the very first render', async () => {
-    vi.mocked(runsApi.list).mockResolvedValue([]);
-    render(<DiscussionAttachedRuns discussionId="disc-1" refreshToken={0} />);
+  it('does NOT relist for an event targeting an already-known run_id (its own card self-hydrates instead)', async () => {
+    vi.mocked(runsApi.list).mockResolvedValueOnce([sharedRun({ id: 'run-known' })]);
+    vi.mocked(runsApi.get).mockResolvedValue(sharedRun({ id: 'run-known' }));
+    const { rerender } = render(<DiscussionAttachedRuns discussionId="disc-1" runEvent={undefined} />);
     await waitFor(() => expect(runsApi.list).toHaveBeenCalledTimes(1));
-    // No extra fetch fires just because refreshToken was already defined on mount.
-    await new Promise(resolve => setTimeout(resolve, 0));
+    await waitFor(() => expect(screen.getByTestId('disc-attached-runs')).toBeInTheDocument());
+
+    rerender(<DiscussionAttachedRuns discussionId="disc-1" runEvent={{ runId: 'run-known', seq: 1 }} />);
+    // Give the debounce window a chance to fire, if it were (wrongly) scheduled.
+    await new Promise(resolve => setTimeout(resolve, 300));
+    expect(runsApi.list).toHaveBeenCalledTimes(1);
+  });
+
+  it('coalesces a burst of unknown-run_id events into a single debounced relist', async () => {
+    vi.mocked(runsApi.list).mockResolvedValueOnce([]);
+    const { rerender } = render(<DiscussionAttachedRuns discussionId="disc-1" runEvent={undefined} />);
+    await waitFor(() => expect(runsApi.list).toHaveBeenCalledTimes(1));
+
+    vi.mocked(runsApi.list).mockResolvedValue([sharedRun({ id: 'run-x' }), sharedRun({ id: 'run-y' })]);
+    vi.mocked(runsApi.get).mockResolvedValue(sharedRun({ id: 'run-x' }));
+    // Three rapid unknown events for two different new runs — a burst.
+    act(() => { rerender(<DiscussionAttachedRuns discussionId="disc-1" runEvent={{ runId: 'run-x', seq: 1 }} />); });
+    act(() => { rerender(<DiscussionAttachedRuns discussionId="disc-1" runEvent={{ runId: 'run-y', seq: 2 }} />); });
+    act(() => { rerender(<DiscussionAttachedRuns discussionId="disc-1" runEvent={{ runId: 'run-x', seq: 3 }} />); });
+
+    await waitFor(() => expect(runsApi.list).toHaveBeenCalledTimes(2));
+    // Only ONE relist fired for the whole burst, not one per event.
+    await new Promise(resolve => setTimeout(resolve, 300));
+    expect(runsApi.list).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not duplicate the initial fetch when runEvent is present from the very first render', async () => {
+    vi.mocked(runsApi.list).mockResolvedValue([]);
+    render(<DiscussionAttachedRuns discussionId="disc-1" runEvent={{ runId: 'irrelevant', seq: 0 }} />);
+    await waitFor(() => expect(runsApi.list).toHaveBeenCalledTimes(1));
+    // No extra fetch fires just because runEvent was already defined on mount
+    // — seq 0 never advances past the initial baseline.
+    await new Promise(resolve => setTimeout(resolve, 300));
     expect(runsApi.list).toHaveBeenCalledTimes(1);
   });
 

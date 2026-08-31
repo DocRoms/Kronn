@@ -1,33 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { runsApi } from '../lib/api';
 import { useT } from '../lib/I18nContext';
-import { RunStatusCard, type RunStatusCardModel } from './RunStatusCard';
+import { RunStatusCard, sharedRunStatusCardModel } from './RunStatusCard';
 import type { SharedRun } from '../types/generated';
 
-function toCardModel(run: SharedRun): RunStatusCardModel {
-  const result = run.result as
-    | { progress?: { completed: number; total: number; current_label?: string | null } }
-    | null;
-  return {
-    id: run.id,
-    kind: run.kind,
-    status: run.status,
-    startedAt: run.started_at,
-    finishedAt: run.finished_at,
-    durationMs: run.duration_ms,
-    progress: result?.progress
-      ? { ...result.progress, currentLabel: result.progress.current_label }
-      : null,
-    result: run.result,
-    diagnostic: run.diagnostic,
-    freshness: 'live',
-    href: run.discussion_id
-      ? `/discussions/${run.discussion_id}`
-      : run.kind === 'workflow'
-        ? `/workflows/${run.source_id}?run=${run.id}`
-        : `/workflows?kind=${run.kind}&source=${run.source_id}&run=${run.id}`,
-  };
-}
+/** A `shared_run_updated` event, identified by the run it targets, plus a
+ * monotonic sequence so a repeated event for the same run_id (or an event
+ * that arrives before this component has mounted) is never mistaken for a
+ * new one. */
+export type RunEventHint = { runId: string; seq: number };
+
+const RELIST_DEBOUNCE_MS = 250;
 
 /**
  * A run started elsewhere (QP batch, QA/QE launch, Workflow) that gets
@@ -35,14 +18,19 @@ function toCardModel(run: SharedRun): RunStatusCardModel {
  * automatically, through the same server model and card used everywhere
  * else — no discussion-specific rendering logic.
  *
- * `refreshToken` is bumped by the page's single `useWebSocket` subscription
+ * `runEvent` is forwarded by the page's single `useWebSocket` subscription
  * on `shared_run_updated` — this component deliberately does not open its
- * own socket subscription, so a page with N discussions/cards still shares
- * exactly one live connection (no duplicated live logic, DoD #2/#6).
+ * own socket subscription (no duplicated live logic, DoD #2/#6). A known
+ * run_id is already isolated by its own `RunStatusCard` (it self-hydrates
+ * via its own scoped subscription), so only an event for a run_id NOT yet
+ * in the attached list triggers a relist — and a burst of such events is
+ * debounced into a single relist instead of one per event.
  */
-export function DiscussionAttachedRuns({ discussionId, refreshToken }: { discussionId: string; refreshToken?: number }) {
+export function DiscussionAttachedRuns({ discussionId, runEvent }: { discussionId: string; runEvent?: RunEventHint }) {
   const { t } = useT();
   const [runs, setRuns] = useState<SharedRun[]>([]);
+  const knownRunIds = useRef<Set<string>>(new Set());
+  useEffect(() => { knownRunIds.current = new Set(runs.map(run => run.id)); }, [runs]);
 
   const reload = useCallback(() => {
     runsApi
@@ -58,14 +46,25 @@ export function DiscussionAttachedRuns({ discussionId, refreshToken }: { discuss
     reload();
   }, [discussionId, reload]);
 
-  const skipNextRefreshToken = useRef(true);
+  const debounceTimer = useRef<number | null>(null);
+  const scheduleRelist = useCallback(() => {
+    if (debounceTimer.current != null) return;
+    debounceTimer.current = window.setTimeout(() => {
+      debounceTimer.current = null;
+      reload();
+    }, RELIST_DEBOUNCE_MS);
+  }, [reload]);
+  useEffect(() => () => { if (debounceTimer.current != null) window.clearTimeout(debounceTimer.current); }, []);
+
+  const lastSeenSeq = useRef(0);
   useEffect(() => {
-    // The mount effect above already reloads once for the initial
-    // refreshToken value — only react to a real bump after that.
-    if (skipNextRefreshToken.current) { skipNextRefreshToken.current = false; return; }
-    reload();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [refreshToken]);
+    if (!runEvent || runEvent.seq === lastSeenSeq.current) return;
+    lastSeenSeq.current = runEvent.seq;
+    // A known run's own card already reflects this update — relisting here
+    // would only duplicate that live logic. Only an unseen run_id (a brand
+    // new run just attached to this discussion) needs the list refreshed.
+    if (!knownRunIds.current.has(runEvent.runId)) scheduleRelist();
+  }, [runEvent, scheduleRelist]);
 
   if (runs.length === 0) return null;
 
@@ -74,7 +73,7 @@ export function DiscussionAttachedRuns({ discussionId, refreshToken }: { discuss
       <span className="disc-attached-runs-heading">{t('run.attachedHeading')}</span>
       <div className="disc-attached-runs-list">
         {runs.map(run => (
-          <RunStatusCard key={run.id} model={toCardModel(run)} runId={run.id} compact />
+          <RunStatusCard key={run.id} model={sharedRunStatusCardModel(run, 'live')} runId={run.id} compact />
         ))}
       </div>
     </div>
