@@ -442,4 +442,118 @@ mod tests {
         assert_eq!(effective_retention_days(&conn, Some("d"), 30).unwrap(), 0);
         assert_eq!(effective_retention_days(&conn, None, 30).unwrap(), 30);
     }
+
+    #[test]
+    fn new_run_picks_up_a_changed_project_env_value_while_same_run_stays_deterministic() {
+        // DoD 2/9: a new execution resolves the *current* project environment
+        // value through the real authorized loader; a technical resume of the
+        // same run reuses its immutable snapshot even after the environment
+        // changes underneath, and only a genuinely new run refreshes it — all
+        // without editing the declaration template.
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        let secret = crate::core::crypto::generate_secret();
+
+        let server = crate::models::McpServer {
+            id: "srv".into(),
+            name: "S".into(),
+            description: String::new(),
+            transport: crate::models::McpTransport::Stdio {
+                command: "test".into(),
+                args: vec![],
+            },
+            source: crate::models::McpSource::Registry,
+            api_spec: None,
+        };
+        crate::db::mcps::upsert_server(&conn, &server).unwrap();
+
+        let env_v1 = HashMap::from([("TOKEN".to_string(), "v1".to_string())]);
+        let config = crate::models::McpConfig {
+            id: "cfg".into(),
+            server_id: "srv".into(),
+            label: "Global".into(),
+            env_keys: vec!["TOKEN".into()],
+            env_encrypted: crate::db::mcps::encrypt_env(&env_v1, &secret).unwrap(),
+            args_override: None,
+            is_global: true,
+            include_general: true,
+            config_hash: "h".into(),
+            project_ids: vec![],
+            host_sync: crate::models::HostSyncMode::None,
+        };
+        crate::db::mcps::insert_config(&conn, &config).unwrap();
+
+        let declarations = vec![env_var()]; // ProjectEnv <env.TOKEN>, required.
+        let supplied = HashMap::new();
+        let context = HashMap::new();
+
+        let first = prepare(
+            &conn,
+            PrepareRequest {
+                declarations: &declarations,
+                supplied: &supplied,
+                context: &context,
+                project_id: Some("p"),
+                discussion_id: None,
+                environment_ref: "project_mcp_configs",
+                run_kind: "workflow",
+                run_id: "run-A",
+                encryption_secret: &secret,
+                retention_days: 30,
+            },
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(first.resolved.values["token"], "v1");
+
+        // Environment changes underneath after the first run resolved.
+        let env_v2 = HashMap::from([("TOKEN".to_string(), "v2".to_string())]);
+        conn.execute(
+            "UPDATE mcp_configs SET env_encrypted=?1 WHERE id='cfg'",
+            [crate::db::mcps::encrypt_env(&env_v2, &secret).unwrap()],
+        )
+        .unwrap();
+
+        // Same run resumes deterministically on its immutable snapshot.
+        let resumed = prepare(
+            &conn,
+            PrepareRequest {
+                declarations: &declarations,
+                supplied: &supplied,
+                context: &context,
+                project_id: Some("p"),
+                discussion_id: None,
+                environment_ref: "project_mcp_configs",
+                run_kind: "workflow",
+                run_id: "run-A",
+                encryption_secret: &secret,
+                retention_days: 30,
+            },
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(resumed.snapshot_id, first.snapshot_id);
+        assert_eq!(resumed.resolved.values["token"], "v1");
+
+        // A genuinely new run resolves the current value without template edits.
+        let second = prepare(
+            &conn,
+            PrepareRequest {
+                declarations: &declarations,
+                supplied: &supplied,
+                context: &context,
+                project_id: Some("p"),
+                discussion_id: None,
+                environment_ref: "project_mcp_configs",
+                run_kind: "workflow",
+                run_id: "run-B",
+                encryption_secret: &secret,
+                retention_days: 30,
+            },
+        )
+        .unwrap()
+        .unwrap();
+        assert_ne!(second.snapshot_id, first.snapshot_id);
+        assert_eq!(second.resolved.values["token"], "v2");
+    }
 }

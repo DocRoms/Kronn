@@ -30,40 +30,55 @@ pub fn snapshot_id_for_run(
     .map_err(Into::into)
 }
 
-/// Verify that a snapshot still belongs to a durable execution owner. This is
-/// deliberately separate from decryption so API handlers cannot reveal by
+/// Authorize access to a snapshot for the single-operator boundary already
+/// enforced by `auth_middleware`. An opaque run id is not authorization on its
+/// own: the snapshot must still map to a live durable owner AND its recorded
+/// project scope must match that owner's current project. This is what refuses
+/// a cross-project / cross-discussion reveal built from a mismatched id pair.
+///
+/// Deliberately separate from decryption so API handlers cannot reveal by
 /// guessing an otherwise valid snapshot/run id.
 pub fn has_live_owner(conn: &Connection, run_kind: &str, run_id: &str) -> Result<bool> {
-    let project_id: Option<Option<String>> = conn
+    let snapshot_project: Option<Option<String>> = conn
         .query_row(
             "SELECT project_id FROM execution_variable_snapshots WHERE run_kind=?1 AND run_id=?2",
             params![run_kind, run_id],
             |row| row.get(0),
         )
         .optional()?;
-    let Some(project_id) = project_id else {
+    let Some(snapshot_project) = snapshot_project else {
         return Ok(false);
     };
-    let entity_exists = match run_kind {
-        "quick_prompt" | "quick_prompt_batch_item" => conn
-            .query_row(
-                "SELECT 1 FROM discussions WHERE id=?1",
-                [run_id],
-                |_| Ok(()),
-            )
-            .optional()?
-            .is_some(),
-        "workflow" | "quick_prompt_compare" => conn
-            .query_row("SELECT 1 FROM workflow_runs WHERE id=?1", [run_id], |_| {
-                Ok(())
-            })
-            .optional()?
-            .is_some(),
+    let snapshot_project = snapshot_project.as_deref();
+    let authorized = match run_kind {
+        "quick_prompt" | "quick_prompt_batch_item" => {
+            // run_id is the owning discussion. Its project must still match the
+            // project scope recorded on the snapshot.
+            match owner_project(
+                conn,
+                "SELECT project_id FROM discussions WHERE id=?1",
+                run_id,
+            )? {
+                Some(owner_project) => owner_project.as_deref() == snapshot_project,
+                None => false,
+            }
+        }
+        "workflow" | "quick_prompt_compare" => {
+            // run_id is a workflow_run; the project lives on the parent workflow.
+            match owner_project(
+                conn,
+                "SELECT w.project_id FROM workflow_runs r JOIN workflows w ON w.id=r.workflow_id WHERE r.id=?1",
+                run_id,
+            )? {
+                Some(owner_project) => owner_project.as_deref() == snapshot_project,
+                None => false,
+            }
+        }
         // QA/QE calls have no separate run table. A project-backed execution
         // stays tied to that live project; an intentionally projectless
         // execution is still inspectable by the authenticated local operator
         // through its opaque execution id rather than becoming an orphan.
-        "quick_api" | "quick_api_batch" | "quick_exec" => match project_id.as_deref() {
+        "quick_api" | "quick_api_batch" | "quick_exec" => match snapshot_project {
             Some(id) => conn
                 .query_row("SELECT 1 FROM projects WHERE id=?1", [id], |_| Ok(()))
                 .optional()?
@@ -72,7 +87,16 @@ pub fn has_live_owner(conn: &Connection, run_kind: &str, run_id: &str) -> Result
         },
         _ => false,
     };
-    Ok(entity_exists)
+    Ok(authorized)
+}
+
+/// Fetch the (nullable) project id of an owning entity. Returns `None` when the
+/// owning row itself does not exist (a deleted discussion/run), and
+/// `Some(None)` when it exists but is intentionally projectless.
+fn owner_project(conn: &Connection, sql: &str, run_id: &str) -> Result<Option<Option<String>>> {
+    conn.query_row(sql, [run_id], |row| row.get::<_, Option<String>>(0))
+        .optional()
+        .map_err(Into::into)
 }
 
 pub struct NewSnapshot<'a> {
@@ -433,6 +457,93 @@ mod tests {
         assert!(load_values(&conn, "workflow", "run-1", &[4u8; 32], now)
             .unwrap()
             .is_none());
+    }
+
+    fn project_snapshot<'a>(
+        run_kind: &'a str,
+        run_id: &'a str,
+        project_id: Option<&'a str>,
+        values: &'a HashMap<String, String>,
+        now: DateTime<Utc>,
+    ) -> NewSnapshot<'a> {
+        NewSnapshot {
+            run_kind,
+            run_id,
+            project_id,
+            environment_ref: "project_mcp_configs",
+            resolved_at: now,
+            retention_days: 30,
+            expires_at: Some(now + Duration::days(30)),
+            values,
+            provenance: &[],
+        }
+    }
+
+    #[test]
+    fn has_live_owner_refuses_cross_project_and_cross_discussion_ids() {
+        let conn = conn();
+        let now = Utc::now();
+        conn.execute(
+            "INSERT INTO projects (id,name,path,created_at,updated_at) VALUES ('p1','p1','/tmp/p1',?1,?1),('p2','p2','/tmp/p2',?1,?1)",
+            [now.to_rfc3339()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO discussions (id,title,agent,language,created_at,updated_at,project_id) VALUES ('d1','d','Codex','en',?1,?1,'p1')",
+            [now.to_rfc3339()],
+        )
+        .unwrap();
+        let values = HashMap::from([("token".into(), "secret".into())]);
+        // Snapshot recorded for project p2 but the owning discussion belongs to
+        // p1 — a mismatched (run_id, project) pair must not authorize access.
+        insert(
+            &conn,
+            project_snapshot("quick_prompt", "d1", Some("p2"), &values, now),
+            &[1u8; 32],
+        )
+        .unwrap();
+        assert!(!has_live_owner(&conn, "quick_prompt", "d1").unwrap());
+        // A snapshot whose owning discussion does not exist at all is refused.
+        insert(
+            &conn,
+            project_snapshot("quick_prompt", "ghost", Some("p1"), &values, now),
+            &[1u8; 32],
+        )
+        .unwrap();
+        assert!(!has_live_owner(&conn, "quick_prompt", "ghost").unwrap());
+    }
+
+    #[test]
+    fn has_live_owner_authorizes_matching_project_and_projectless_qa_qe() {
+        let conn = conn();
+        let now = Utc::now();
+        conn.execute(
+            "INSERT INTO projects (id,name,path,created_at,updated_at) VALUES ('p1','p1','/tmp/p1',?1,?1)",
+            [now.to_rfc3339()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO discussions (id,title,agent,language,created_at,updated_at,project_id) VALUES ('d1','d','Codex','en',?1,?1,'p1')",
+            [now.to_rfc3339()],
+        )
+        .unwrap();
+        let values = HashMap::from([("token".into(), "secret".into())]);
+        insert(
+            &conn,
+            project_snapshot("quick_prompt", "d1", Some("p1"), &values, now),
+            &[1u8; 32],
+        )
+        .unwrap();
+        assert!(has_live_owner(&conn, "quick_prompt", "d1").unwrap());
+        // A projectless QA/QE execution stays inspectable by the authenticated
+        // local operator through its opaque execution id.
+        insert(
+            &conn,
+            project_snapshot("quick_exec", "qe-run-1", None, &values, now),
+            &[1u8; 32],
+        )
+        .unwrap();
+        assert!(has_live_owner(&conn, "quick_exec", "qe-run-1").unwrap());
     }
 
     #[test]
