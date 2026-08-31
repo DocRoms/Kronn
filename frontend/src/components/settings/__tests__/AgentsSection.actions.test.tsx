@@ -372,6 +372,7 @@ describe('AgentsSection — full-access switch', () => {
     return {
       claude_code: { ...blank },
       codex: { ...blank },
+      open_code: { ...blank },
       gemini_cli: { ...blank },
       kiro: { ...blank },
       vibe: { ...blank },
@@ -380,7 +381,7 @@ describe('AgentsSection — full-access switch', () => {
       lite_llm: { ...blank },
       nvidia: { ...blank },
       model_tiers: {
-        claude_code: { ...blankTier }, codex: { ...blankTier }, gemini_cli: { ...blankTier },
+        claude_code: { ...blankTier }, codex: { ...blankTier }, open_code: { ...blankTier }, gemini_cli: { ...blankTier },
         kiro: { ...blankTier }, vibe: { ...blankTier }, copilot_cli: { ...blankTier }, ollama: { ...blankTier },
         lite_llm: { ...blankTier },
         nvidia: { ...blankTier },

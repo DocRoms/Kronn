@@ -83,6 +83,7 @@ pub fn agent_prompt_budget(agent_type: &AgentType) -> usize {
         AgentType::ClaudeCode => 400_000, // ~100K tokens, 200K+ window
         AgentType::GeminiCli => 800_000,  // ~200K tokens, 1M window
         AgentType::Codex => 200_000,      // ~50K tokens, GPT-5 128K+ window
+        AgentType::OpenCode => 200_000,   // the ACP catalogue supplies the concrete model
         AgentType::Kiro => 400_000,       // ~100K tokens, Claude via AWS Bedrock (200K window)
         AgentType::CopilotCli => 200_000, // ~50K tokens, GPT-4o 128K window
         AgentType::Vibe => 60_000,        // ~15K tokens, Mistral 128K window (API mode)
@@ -101,6 +102,7 @@ pub fn auth_mode_for(agent_type: &AgentType, tokens: &TokensConfig) -> String {
     let provider = match agent_type {
         AgentType::ClaudeCode => "anthropic",
         AgentType::Codex => "openai",
+        AgentType::OpenCode => "",
         AgentType::GeminiCli => "google",
         AgentType::Vibe => "mistral",
         AgentType::Kiro => "aws",
@@ -127,6 +129,7 @@ pub fn agent_display_name(agent_type: &AgentType) -> String {
     match agent_type {
         AgentType::ClaudeCode => "Claude Code".into(),
         AgentType::Codex => "Codex".into(),
+        AgentType::OpenCode => "OpenCode".into(),
         AgentType::Vibe => "Vibe".into(),
         AgentType::GeminiCli => "Gemini CLI".into(),
         AgentType::Kiro => "Kiro".into(),

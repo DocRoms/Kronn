@@ -1097,6 +1097,7 @@ mod tests {
         for agent in &[
             AgentType::ClaudeCode,
             AgentType::Codex,
+            AgentType::OpenCode,
             AgentType::Vibe,
             AgentType::GeminiCli,
             AgentType::Kiro,

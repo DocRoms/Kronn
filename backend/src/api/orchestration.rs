@@ -7724,6 +7724,7 @@ fn worker_label(agent: &AgentType) -> &'static str {
     match agent {
         AgentType::ClaudeCode => "Claude Code",
         AgentType::Codex => "Codex",
+        AgentType::OpenCode => "OpenCode",
         AgentType::Vibe => "Vibe",
         AgentType::GeminiCli => "Gemini CLI",
         AgentType::Kiro => "Kiro",
@@ -8013,12 +8014,13 @@ async fn bounded_cli_worker_preflight(
 /// KT-515 — native/HTTP providers eligible for the `agent_list` catalogue.
 /// Kept in one place so the quota-exhaustion query below and
 /// `build_task_worker_catalogue`'s `native_agents` list can never drift apart.
-const CATALOGUED_PROVIDERS: [AgentType; 9] = [
+const CATALOGUED_PROVIDERS: [AgentType; 10] = [
     AgentType::Ollama,
     AgentType::LiteLlm,
     AgentType::Nvidia,
     AgentType::ClaudeCode,
     AgentType::Codex,
+    AgentType::OpenCode,
     AgentType::GeminiCli,
     AgentType::Kiro,
     AgentType::CopilotCli,

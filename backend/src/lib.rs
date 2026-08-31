@@ -1,7 +1,9 @@
+pub mod acp;
 pub mod agents;
 pub mod api;
 pub mod core;
 pub mod db;
+pub mod delivery;
 pub mod models;
 pub mod workflows;
 

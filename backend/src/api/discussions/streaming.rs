@@ -2842,6 +2842,8 @@ async fn make_agent_stream_inner(
 
                 let tokens_used = if stream_json_tokens > 0 {
                     stream_json_tokens
+                } else if let Some(reported) = process.reported_token_usage() {
+                    reported
                 } else {
                     let (cleaned, count) =
                         runner::parse_token_usage(&agent_type, &full_response, &stderr_lines);
@@ -3924,6 +3926,8 @@ pub(super) async fn run_agent_streaming(
 
     let tokens_used = if stream_tokens > 0 {
         stream_tokens
+    } else if let Some(reported) = process.reported_token_usage() {
+        reported
     } else {
         let (cleaned, count) = runner::parse_token_usage(agent_type, &full_response, &stderr);
         if count > 0 {
