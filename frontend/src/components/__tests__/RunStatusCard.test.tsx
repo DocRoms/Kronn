@@ -1,6 +1,7 @@
 import { act, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { RunStatusCard, workflowRunStatusCardModel } from '../RunStatusCard';
+import { RunStatusCard } from '../RunStatusCard';
+import { workflowRunStatusCardModel } from '../../lib/runStatusCardModel';
 import { runsApi, getApiBase, getAuthToken } from '../../lib/api';
 import { activeWebSocketCountForTests } from '../../hooks/useWebSocket';
 import type { SharedRun } from '../../types/generated';
