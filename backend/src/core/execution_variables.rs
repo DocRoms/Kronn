@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Duration, Utc};
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 
 use crate::models::{PromptVariable, PromptVariableSource};
@@ -17,6 +18,7 @@ pub struct PrepareRequest<'a> {
     pub supplied: &'a HashMap<String, String>,
     pub context: &'a HashMap<String, String>,
     pub project_id: Option<&'a str>,
+    pub discussion_id: Option<&'a str>,
     pub environment_ref: &'a str,
     pub run_kind: &'a str,
     pub run_id: &'a str,
@@ -151,6 +153,26 @@ pub fn expiry(resolved_at: DateTime<Utc>, retention_days: u32) -> Option<DateTim
     (retention_days > 0).then(|| resolved_at + Duration::days(i64::from(retention_days)))
 }
 
+/// Resolve the product retention precedence without reading secret material.
+/// A discussion override, including zero, wins over the global setting.
+pub fn effective_retention_days(
+    conn: &rusqlite::Connection,
+    discussion_id: Option<&str>,
+    global_days: u32,
+) -> anyhow::Result<u32> {
+    let Some(discussion_id) = discussion_id else {
+        return Ok(global_days);
+    };
+    let value = conn
+        .query_row(
+            "SELECT execution_variable_retention_days FROM discussions WHERE id=?1",
+            [discussion_id],
+            |row| row.get::<_, Option<u32>>(0),
+        )
+        .optional()?;
+    Ok(value.flatten().unwrap_or(global_days))
+}
+
 /// Build the allowlisted scalar context available to `<context.NAME>`
 /// declarations. Nested objects and arrays are deliberately excluded.
 pub fn scalar_context(value: &serde_json::Value) -> HashMap<String, String> {
@@ -233,6 +255,8 @@ pub fn prepare(
         Ok(resolved) => resolved,
         Err(failures) => return Ok(Err(failures)),
     };
+    let retention_days =
+        effective_retention_days(conn, request.discussion_id, request.retention_days)?;
     let snapshot_id = crate::db::execution_variable_snapshots::insert(
         conn,
         crate::db::execution_variable_snapshots::NewSnapshot {
@@ -241,7 +265,8 @@ pub fn prepare(
             project_id: request.project_id,
             environment_ref: request.environment_ref,
             resolved_at: resolved.resolved_at,
-            expires_at: expiry(resolved.resolved_at, request.retention_days),
+            retention_days,
+            expires_at: expiry(resolved.resolved_at, retention_days),
             values: &resolved.values,
             provenance: &resolved.provenance,
         },
@@ -373,6 +398,7 @@ mod tests {
                 supplied: &first,
                 context: &context,
                 project_id: None,
+                discussion_id: None,
                 environment_ref: "project_mcp_configs",
                 run_kind: "workflow",
                 run_id: "stable-run",
@@ -389,6 +415,7 @@ mod tests {
                 supplied: &second,
                 context: &context,
                 project_id: None,
+                discussion_id: None,
                 environment_ref: "project_mcp_configs",
                 run_kind: "workflow",
                 run_id: "stable-run",
@@ -400,5 +427,19 @@ mod tests {
         .unwrap();
         assert_eq!(initial.snapshot_id, resumed.snapshot_id);
         assert_eq!(resumed.resolved.values["token"], "first");
+    }
+
+    #[test]
+    fn discussion_retention_override_wins_including_zero() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO discussions (id,title,agent,language,created_at,updated_at,execution_variable_retention_days) VALUES ('d','d','Codex','en',?1,?1,0)",
+            [&now],
+        )
+        .unwrap();
+        assert_eq!(effective_retention_days(&conn, Some("d"), 30).unwrap(), 0);
+        assert_eq!(effective_retention_days(&conn, None, 30).unwrap(), 30);
     }
 }

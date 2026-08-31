@@ -421,6 +421,10 @@ pub struct UpdateDiscussionRequest {
     /// switch, per-agent blocks and structural loop guards still apply.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_handoffs_unlimited: Option<bool>,
+    /// Per-discussion encrypted execution-variable retention override.
+    /// Zero keeps values only for the lifetime of the active run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_variable_retention_days: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

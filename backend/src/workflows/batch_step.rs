@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use crate::models::*;
 use crate::AppState;
 use rusqlite::OptionalExtension;
+use uuid::Uuid;
 
 use super::steps::StepOutcome;
 use super::template::TemplateContext;
@@ -377,12 +378,19 @@ async fn execute_batch_quick_prompt_step_with_budget(
     let mut batch_items: Vec<crate::db::workflows::BatchItemInput> =
         Vec::with_capacity(items.len());
     let mut item_titles: Vec<String> = Vec::with_capacity(items.len());
+    let mut item_variables: Vec<HashMap<String, String>> = Vec::with_capacity(items.len());
     for (idx, item) in items.iter().enumerate() {
         let (vars, title) = item_to_vars_and_title(item, first_var_name.as_deref(), &qp.name, idx);
         item_titles.push(title.clone());
+        item_variables.push(vars);
         batch_items.push(crate::db::workflows::BatchItemInput {
             title,
-            prompt: render_qp_template_vars(&qp.prompt_template, &vars),
+            // Keep the canonical template in SQLite. Project-environment
+            // values belong only to the parent Workflow snapshot and are
+            // hydrated into the dispatch copy below the persistence boundary.
+            // Item variables are ordinary workflow inputs and are already
+            // available from the parent run context.
+            prompt: qp.prompt_template.clone(),
             agent_override: None, // workflow-step batch keeps the QP's default agent
         });
     }
@@ -466,10 +474,68 @@ async fn execute_batch_quick_prompt_step_with_budget(
         .batch_concurrent_limit
         .unwrap_or(DEFAULT_BATCH_CONCURRENT_LIMIT)
         .clamp(1, MAX_BATCH_CONCURRENT_LIMIT);
+    let assigned_discussion_ids: Vec<String> = item_variables
+        .iter()
+        .map(|_| Uuid::new_v4().to_string())
+        .collect();
+    let assigned_ids_for_tx = assigned_discussion_ids.clone();
+    let (snapshot_secret, snapshot_retention) = {
+        let config = state.config.read().await;
+        (
+            config.encryption_secret.clone(),
+            config.server.execution_variable_retention_days,
+        )
+    };
+    let parent_snapshot_id = parent_run_id.to_string();
+    let item_variables_for_tx = item_variables;
     let outcome = match state
         .db
         .with_conn(move |conn| {
-            crate::db::workflows::create_batch_run(
+            if let Some(secret) = snapshot_secret.as_deref() {
+                let key = crate::core::crypto::parse_secret(secret).map_err(anyhow::Error::msg)?;
+                if let (Some(parent_values), Some(parent_metadata)) = (
+                    crate::db::execution_variable_snapshots::load_values(
+                        conn,
+                        "workflow",
+                        &parent_snapshot_id,
+                        &key,
+                        chrono::Utc::now(),
+                    )?,
+                    crate::db::execution_variable_snapshots::metadata(
+                        conn,
+                        "workflow",
+                        &parent_snapshot_id,
+                    )?,
+                ) {
+                    for ((discussion_id, item_values), _) in assigned_ids_for_tx
+                        .iter()
+                        .zip(item_variables_for_tx.iter())
+                        .zip(batch_items.iter())
+                    {
+                        let mut values = parent_values.clone();
+                        values.extend(item_values.clone());
+                        crate::db::execution_variable_snapshots::insert(
+                            conn,
+                            crate::db::execution_variable_snapshots::NewSnapshot {
+                                run_kind: "quick_prompt_batch_item",
+                                run_id: discussion_id,
+                                project_id: qp_for_tx.project_id.as_deref(),
+                                environment_ref: "workflow_snapshot",
+                                resolved_at: parent_metadata.resolved_at,
+                                retention_days: snapshot_retention,
+                                expires_at: crate::core::execution_variables::expiry(
+                                    parent_metadata.resolved_at,
+                                    snapshot_retention,
+                                ),
+                                values: &values,
+                                provenance: &parent_metadata.provenance,
+                            },
+                            &key,
+                        )?;
+                    }
+                }
+            }
+            crate::db::workflows::create_batch_run_with_identities(
                 conn,
                 crate::db::workflows::CreateBatchRunInput {
                     quick_prompt: &qp_for_tx,
@@ -485,6 +551,8 @@ async fn execute_batch_quick_prompt_step_with_budget(
                     chain_batch_items: chain_batch_items_for_tx,
                     group_concurrency_limit: Some(group_concurrency_limit_for_tx),
                 },
+                None,
+                &assigned_ids_for_tx,
             )
         })
         .await
@@ -1026,6 +1094,7 @@ fn render_qp_prompt(template: &str, first_var_name: Option<&str>, value: &str) -
 /// Fill EVERY `{{var}}` placeholder in `template` from the `vars` map. Mirrors
 /// the MCP `qp_batch_run` renderer (`render_qp_template`) so the workflow batch
 /// step and the MCP batch path produce identical prompts from the same vars.
+#[cfg(test)]
 fn render_qp_template_vars(template: &str, vars: &HashMap<String, String>) -> String {
     let mut out = template.to_string();
     for (k, v) in vars {

@@ -1773,6 +1773,17 @@ pub fn update_discussion_summary_strategy(
     Ok(affected > 0)
 }
 
+pub fn update_execution_variable_retention_days(
+    conn: &Connection,
+    id: &str,
+    days: u32,
+) -> Result<bool> {
+    Ok(conn.execute(
+        "UPDATE discussions SET execution_variable_retention_days=?1,updated_at=?2 WHERE id=?3",
+        params![days, Utc::now().to_rfc3339(), id],
+    )? > 0)
+}
+
 /// Update workspace_path and worktree_branch for a discussion (used after worktree creation).
 pub fn update_discussion_workspace(
     conn: &Connection,

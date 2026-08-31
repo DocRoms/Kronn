@@ -7,6 +7,7 @@ CREATE TABLE execution_variable_snapshots (
     project_id TEXT,
     environment_ref TEXT NOT NULL,
     resolved_at TEXT NOT NULL,
+    retention_days INTEGER NOT NULL DEFAULT 30,
     expires_at TEXT,
     values_encrypted TEXT,
     fingerprint TEXT NOT NULL,
@@ -23,6 +24,15 @@ CREATE TABLE execution_variable_reveal_audit (
     variable_name TEXT NOT NULL,
     actor TEXT NOT NULL,
     revealed_at TEXT NOT NULL
+);
+
+CREATE TABLE execution_variable_retention_audit (
+    id TEXT PRIMARY KEY,
+    snapshot_id TEXT NOT NULL REFERENCES execution_variable_snapshots(id) ON DELETE CASCADE,
+    actor TEXT NOT NULL,
+    previous_expires_at TEXT,
+    new_expires_at TEXT NOT NULL,
+    extended_at TEXT NOT NULL
 );
 
 ALTER TABLE discussions ADD COLUMN execution_variable_retention_days INTEGER;

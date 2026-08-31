@@ -172,6 +172,7 @@ pub async fn run(
     let supplied = request.variables.clone();
     let selected_project = item.project_id.clone();
     let execution_id = Uuid::new_v4().to_string();
+    let snapshot_run_id = execution_id.clone();
     let prepared = state
         .db
         .with_conn(move |conn| {
@@ -182,9 +183,10 @@ pub async fn run(
                     supplied: &supplied,
                     context: &std::collections::HashMap::new(),
                     project_id: selected_project.as_deref(),
+                    discussion_id: None,
                     environment_ref: "project_mcp_configs",
                     run_kind: "quick_exec",
-                    run_id: &execution_id,
+                    run_id: &snapshot_run_id,
                     encryption_secret: &secret,
                     retention_days,
                 },
@@ -240,8 +242,21 @@ pub async fn run(
         crate::workflows::exec_step::MAX_COLLECT_OUTPUT_BYTES,
     )
     .await;
+    let terminal_execution_id = execution_id.clone();
+    let _ = state
+        .db
+        .with_conn(move |conn| {
+            crate::db::execution_variable_snapshots::purge_run_lifetime_snapshot(
+                conn,
+                "quick_exec",
+                &terminal_execution_id,
+                Utc::now(),
+            )
+        })
+        .await;
     if outcome.result.status != RunStatus::Success {
         return Json(ApiResponse::ok(RunQuickExecResponse {
+            execution_id,
             success: false,
             duration_ms: outcome.result.duration_ms,
             data: None,
@@ -271,6 +286,7 @@ pub async fn run(
         .map(str::to_string);
     match crate::workflows::collect_api_data_step::quick_exec_value(&raw, item.output_format) {
         Ok(data) => Json(ApiResponse::ok(RunQuickExecResponse {
+            execution_id,
             success: true,
             duration_ms: outcome.result.duration_ms,
             data: Some(data),
@@ -279,6 +295,7 @@ pub async fn run(
             error: None,
         })),
         Err(error) => Json(ApiResponse::ok(RunQuickExecResponse {
+            execution_id,
             success: false,
             duration_ms: outcome.result.duration_ms,
             data: None,

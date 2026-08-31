@@ -180,6 +180,7 @@ pub async fn create(
                         supplied: &supplied,
                         context: &std::collections::HashMap::new(),
                         project_id: project_id.as_deref(),
+                        discussion_id: None,
                         environment_ref: "project_mcp_configs",
                         run_kind: "quick_prompt",
                         run_id: &run_id,
@@ -287,7 +288,7 @@ pub async fn create(
         author_cli_ordinal: None,
         model: None,
         lint_report: None,
-        id: discussion_id,
+        id: Uuid::new_v4().to_string(),
         role: MessageRole::User,
         channel: MessageChannel::Main,
         content: req.initial_prompt,
@@ -322,7 +323,10 @@ pub async fn create(
     let discussion = Discussion {
         awaiting_agent: false,
         agent_running: false,
-        id: Uuid::new_v4().to_string(),
+        // The preflight snapshot is allocated against this durable execution
+        // identity before any discussion side effect. Reuse it as the actual
+        // discussion id so inspection/reveal cannot become orphaned.
+        id: discussion_id.clone(),
         project_id: req.project_id,
         title: req.title,
         agent: req.agent.clone(),
@@ -377,6 +381,12 @@ pub async fn create(
                         disc.model = Some(m);
                     }
                 }
+                crate::db::execution_variable_snapshots::insert_execution_context_message(
+                    conn,
+                    &disc.id,
+                    "quick_prompt",
+                    &disc.id,
+                )?;
             }
             crate::db::discussions::insert_discussion(conn, &disc)?;
             crate::db::discussions::insert_message(conn, &disc.id, &msg)?;
@@ -488,6 +498,7 @@ pub async fn update(
     let no_agent = req.no_agent;
     let agent_handoffs_disabled = req.agent_handoffs_disabled;
     let agent_handoffs_unlimited = req.agent_handoffs_unlimited;
+    let execution_variable_retention_days = req.execution_variable_retention_days;
 
     // Reject conflicting directives on update
     if let Some(ref ids) = directive_ids {
@@ -562,6 +573,11 @@ pub async fn update(
                     &id,
                     agent_handoffs_disabled,
                     agent_handoffs_unlimited,
+                )? || updated;
+            }
+            if let Some(days) = execution_variable_retention_days {
+                updated = crate::db::discussions::update_execution_variable_retention_days(
+                    conn, &id, days,
                 )? || updated;
             }
             Ok(updated)

@@ -2347,6 +2347,7 @@ pub async fn trigger(
                     supplied: &supplied,
                     context: &std::collections::HashMap::new(),
                     project_id: project_id.as_deref(),
+                    discussion_id: None,
                     environment_ref: "project_mcp_configs",
                     run_kind: "workflow",
                     run_id: &snapshot_run_id,

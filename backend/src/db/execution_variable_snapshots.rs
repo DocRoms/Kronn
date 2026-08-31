@@ -30,12 +30,58 @@ pub fn snapshot_id_for_run(
     .map_err(Into::into)
 }
 
+/// Verify that a snapshot still belongs to a durable execution owner. This is
+/// deliberately separate from decryption so API handlers cannot reveal by
+/// guessing an otherwise valid snapshot/run id.
+pub fn has_live_owner(conn: &Connection, run_kind: &str, run_id: &str) -> Result<bool> {
+    let project_id: Option<Option<String>> = conn
+        .query_row(
+            "SELECT project_id FROM execution_variable_snapshots WHERE run_kind=?1 AND run_id=?2",
+            params![run_kind, run_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(project_id) = project_id else {
+        return Ok(false);
+    };
+    let entity_exists = match run_kind {
+        "quick_prompt" | "quick_prompt_batch_item" => conn
+            .query_row(
+                "SELECT 1 FROM discussions WHERE id=?1",
+                [run_id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some(),
+        "workflow" | "quick_prompt_compare" => conn
+            .query_row("SELECT 1 FROM workflow_runs WHERE id=?1", [run_id], |_| {
+                Ok(())
+            })
+            .optional()?
+            .is_some(),
+        // QA/QE calls have no separate run table; their snapshot is the
+        // durable execution identity and must remain scoped to a live project.
+        "quick_api" | "quick_api_batch" | "quick_exec" => project_id
+            .as_deref()
+            .map(|id| {
+                conn.query_row("SELECT 1 FROM projects WHERE id=?1", [id], |_| Ok(()))
+                    .optional()
+                    .map(|value| value.is_some())
+            })
+            .transpose()?
+            .unwrap_or(false),
+        _ => false,
+    };
+    Ok(entity_exists)
+}
+
 pub struct NewSnapshot<'a> {
     pub run_kind: &'a str,
     pub run_id: &'a str,
     pub project_id: Option<&'a str>,
     pub environment_ref: &'a str,
     pub resolved_at: DateTime<Utc>,
+    pub retention_days: u32,
     pub expires_at: Option<DateTime<Utc>>,
     pub values: &'a HashMap<String, String>,
     pub provenance: &'a [VariableProvenance],
@@ -51,7 +97,7 @@ pub fn insert(conn: &Connection, snapshot: NewSnapshot<'_>, key: &[u8; 32]) -> R
         plaintext.as_bytes(),
     );
     let provenance = serde_json::to_string(snapshot.provenance)?;
-    conn.execute("INSERT INTO execution_variable_snapshots (id, run_kind, run_id, project_id, environment_ref, resolved_at, expires_at, values_encrypted, fingerprint, provenance_json) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)", params![id, snapshot.run_kind, snapshot.run_id, snapshot.project_id, snapshot.environment_ref, snapshot.resolved_at.to_rfc3339(), snapshot.expires_at.map(|v| v.to_rfc3339()), encrypted, fingerprint, provenance])?;
+    conn.execute("INSERT INTO execution_variable_snapshots (id, run_kind, run_id, project_id, environment_ref, resolved_at, retention_days, expires_at, values_encrypted, fingerprint, provenance_json) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)", params![id, snapshot.run_kind, snapshot.run_id, snapshot.project_id, snapshot.environment_ref, snapshot.resolved_at.to_rfc3339(), snapshot.retention_days, snapshot.expires_at.map(|v| v.to_rfc3339()), encrypted, fingerprint, provenance])?;
     Ok(id)
 }
 
@@ -64,6 +110,56 @@ pub fn metadata(
         let resolved: String = row.get(1)?; let expires: Option<String> = row.get(2)?; let provenance: String = row.get(3)?;
         Ok(SnapshotMetadata { id: row.get(0)?, resolved_at: DateTime::parse_from_rfc3339(&resolved).map(|v| v.with_timezone(&Utc)).map_err(|e| rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, Box::new(e)))?, expires_at: expires.and_then(|v| DateTime::parse_from_rfc3339(&v).ok()).map(|v| v.with_timezone(&Utc)), provenance: serde_json::from_str(&provenance).unwrap_or_default(), purged: row.get(4)? })
     }).optional().map_err(Into::into)
+}
+
+/// Persist a value-free execution context card in the owning discussion.
+/// The serialized payload contains only names, references and provenance.
+pub fn insert_execution_context_message(
+    conn: &Connection,
+    discussion_id: &str,
+    run_kind: &str,
+    run_id: &str,
+) -> Result<bool> {
+    let Some(metadata) = metadata(conn, run_kind, run_id)? else {
+        return Ok(false);
+    };
+    let content = format!(
+        "execution_context:{}",
+        serde_json::to_string(&serde_json::json!({
+            "run_kind": run_kind,
+            "run_id": run_id,
+            "snapshot_id": metadata.id,
+            "resolved_at": metadata.resolved_at,
+            "expires_at": metadata.expires_at,
+            "variables": metadata.provenance,
+            "purged": metadata.purged,
+        }))?
+    );
+    let message = crate::models::DiscussionMessage {
+        recovered_partial: false,
+        session_tokens_at_message: None,
+        author_cli_ordinal: None,
+        model: None,
+        lint_report: None,
+        id: Uuid::new_v4().to_string(),
+        role: crate::models::MessageRole::System,
+        channel: crate::models::MessageChannel::Main,
+        content,
+        agent_type: None,
+        timestamp: Utc::now(),
+        tokens_used: 0,
+        auth_mode: None,
+        model_tier: None,
+        cost_usd: None,
+        author_pseudo: None,
+        author_avatar_email: None,
+        source_msg_id: None,
+        duration_ms: None,
+        target_agent: None,
+        reply_to_message_id: None,
+    };
+    crate::db::discussions::insert_message(conn, discussion_id, &message)?;
+    Ok(true)
 }
 
 pub fn reveal(
@@ -118,6 +214,49 @@ pub fn purge_expired(conn: &Connection, now: DateTime<Utc>) -> Result<usize> {
     Ok(conn.execute("UPDATE execution_variable_snapshots SET values_encrypted=NULL,purged_at=?1 WHERE values_encrypted IS NOT NULL AND expires_at IS NOT NULL AND expires_at<=?1", [now.to_rfc3339()])?)
 }
 
+/// Purge snapshots configured with retention=0 once their owning execution
+/// reaches a terminal state. Metadata and keyed fingerprint remain.
+pub fn purge_run_lifetime_snapshot(
+    conn: &Connection,
+    run_kind: &str,
+    run_id: &str,
+    now: DateTime<Utc>,
+) -> Result<usize> {
+    Ok(conn.execute(
+        "UPDATE execution_variable_snapshots SET values_encrypted=NULL,purged_at=?3 WHERE run_kind=?1 AND run_id=?2 AND retention_days=0 AND values_encrypted IS NOT NULL",
+        params![run_kind, run_id, now.to_rfc3339()],
+    )?)
+}
+
+pub fn extend_retention(
+    conn: &Connection,
+    snapshot_id: &str,
+    days: u32,
+    actor: &str,
+    now: DateTime<Utc>,
+) -> Result<bool> {
+    let previous: Option<Option<String>> = conn
+        .query_row(
+            "SELECT expires_at FROM execution_variable_snapshots WHERE id=?1 AND values_encrypted IS NOT NULL",
+            [snapshot_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(previous) = previous else {
+        return Ok(false);
+    };
+    let new_expiry = now + chrono::Duration::days(i64::from(days));
+    conn.execute(
+        "UPDATE execution_variable_snapshots SET expires_at=?2,retention_days=?3 WHERE id=?1",
+        params![snapshot_id, new_expiry.to_rfc3339(), days],
+    )?;
+    conn.execute(
+        "INSERT INTO execution_variable_retention_audit (id,snapshot_id,actor,previous_expires_at,new_expires_at,extended_at) VALUES (?1,?2,?3,?4,?5,?6)",
+        params![Uuid::new_v4().to_string(), snapshot_id, actor, previous, new_expiry.to_rfc3339(), now.to_rfc3339()],
+    )?;
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -137,6 +276,7 @@ mod tests {
             project_id: None,
             environment_ref: "project_mcp_configs",
             resolved_at: now,
+            retention_days: 30,
             expires_at: Some(now + Duration::days(30)),
             values,
             provenance: &[],
@@ -223,5 +363,67 @@ mod tests {
             )
             .unwrap();
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn retention_extension_is_explicit_audited_and_value_free() {
+        let conn = conn();
+        let now = Utc::now();
+        let values = HashMap::from([("token".into(), "never-in-audit".into())]);
+        let id = insert(&conn, sample(&values, now), &[3u8; 32]).unwrap();
+        assert!(extend_retention(&conn, &id, 60, "operator-1", now).unwrap());
+        let audit: String = conn
+            .query_row(
+                "SELECT actor || ':' || new_expires_at FROM execution_variable_retention_audit WHERE snapshot_id=?1",
+                [&id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(audit.starts_with("operator-1:"));
+        assert!(!audit.contains("never-in-audit"));
+    }
+
+    #[test]
+    fn zero_retention_is_purged_at_run_lifetime_end() {
+        let conn = conn();
+        let now = Utc::now();
+        let values = HashMap::from([("token".into(), "ephemeral".into())]);
+        let mut snapshot = sample(&values, now);
+        snapshot.retention_days = 0;
+        snapshot.expires_at = None;
+        insert(&conn, snapshot, &[4u8; 32]).unwrap();
+        assert!(load_values(&conn, "workflow", "run-1", &[4u8; 32], now)
+            .unwrap()
+            .is_some());
+        assert_eq!(
+            purge_run_lifetime_snapshot(&conn, "workflow", "run-1", now).unwrap(),
+            1
+        );
+        assert!(load_values(&conn, "workflow", "run-1", &[4u8; 32], now)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn execution_context_card_contains_metadata_but_never_plaintext() {
+        let conn = conn();
+        let now = Utc::now();
+        conn.execute(
+            "INSERT INTO discussions (id,title,agent,language,created_at,updated_at) VALUES ('run-1','run','Codex','en',?1,?1)",
+            [now.to_rfc3339()],
+        )
+        .unwrap();
+        let values = HashMap::from([("token".into(), "card-secret".into())]);
+        insert(&conn, sample(&values, now), &[5u8; 32]).unwrap();
+        assert!(insert_execution_context_message(&conn, "run-1", "workflow", "run-1").unwrap());
+        let content: String = conn
+            .query_row(
+                "SELECT content FROM messages WHERE discussion_id='run-1' AND role='System'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(content.starts_with("execution_context:"));
+        assert!(!content.contains("card-secret"));
     }
 }
