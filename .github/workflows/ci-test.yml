@@ -66,21 +66,7 @@ jobs:
       # desktop compilation, generated types, budget checks, and clippy lint run
       # in separate required jobs below, so none can prevent a warmup from
       # saving its cache or push the measured hot path over the 15-minute SLO.
-      - name: Free disk space
-        uses: jlumbroso/free-disk-space@main
-        with:
-          tool-cache: false
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: false
-          swap-storage: false
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
-
+      #
       # Keep compilation independent from an optional binary cache. The
       # sccache setup action downloads a release asset before any test runs;
       # transient GitHub Releases failures used to abort this whole job and
@@ -121,6 +107,28 @@ jobs:
           fi
           echo "state=$state" >> "$GITHUB_OUTPUT"
           echo "valid=$valid" >> "$GITHUB_OUTPUT"
+
+      # A verified compiled-cache hit restores a small, bounded debug tree, not
+      # a full cold build: the extra headroom this step frees (multi-GB
+      # Android/dotnet/Haskell tool caches) is not needed on that path. Cold
+      # runs and warmup/miss/invalid hot runs still compile from scratch and
+      # keep this step, since `steps.verify-backend-cache` is empty (not
+      # 'hit') whenever it did not run in hot mode.
+      - name: Free disk space
+        if: steps.verify-backend-cache.outputs.state != 'hit'
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          swap-storage: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
 
       - name: Reject invalid compiled cache hit
         if: steps.verify-backend-cache.outputs.state == 'invalid'
@@ -169,9 +177,12 @@ jobs:
         run: cargo test
 
       # Stage before coverage or desktop gates can time out. actions/cache saves
-      # this bounded staging directory during its post-job hook.
+      # this bounded staging directory during its post-job hook. Skip on an
+      # already-verified hit: the cache action only saves on an exact-key
+      # miss, so re-copying identical artifacts on a hit only costs time
+      # without changing what gets persisted.
       - name: Stage bounded compiled backend artifacts
-        if: github.event_name != 'workflow_dispatch' || inputs.cache_mode == 'hot'
+        if: (github.event_name != 'workflow_dispatch' || inputs.cache_mode == 'hot') && steps.verify-backend-cache.outputs.state != 'hit'
         run: |
           mkdir -p ../.ci-cache/backend-compiled
           rm -f ../.ci-cache/backend-compiled/.kronn-backend-cache-v1

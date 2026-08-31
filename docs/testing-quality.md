@@ -54,7 +54,19 @@ Those jobs execute in parallel and all remain blocking through
 real warm run still measured 17m41 against the 15-minute SLO with it inline
 ([run 33368662050](https://github.com/DocRoms/Kronn/actions/runs/33368662050));
 moving it to the parallel, still-required `test-backend-quality` gate keeps
-the lint blocking without holding it on the measured path.
+the lint blocking without holding it on the measured path. After that move, a
+real cache-hit run still measured 17m32 (`cargo test` 11m58, ~4m13 of overhead
+before the test step, 1m17 staging the cache back after it) — a further 2m32
+over the 15-minute SLO
+([cold 33378197164](https://github.com/DocRoms/Kronn/actions/runs/33378197164),
+[hot cache-hit 33378199511](https://github.com/DocRoms/Kronn/actions/runs/33378199511)).
+`Free disk space` and the post-test `Stage bounded compiled backend
+artifacts` step now both skip on a verified compiled-cache hit: a hit
+restores a small bounded debug tree rather than a full cold build, so the
+extra multi-GB tool-cache headroom that step frees is unneeded, and
+`actions/cache` only persists on an exact-key miss anyway, so re-copying
+identical artifacts on a hit changes nothing it saves. Cold runs and
+warmup/miss/invalid hot runs are unaffected and keep both steps.
 [src: file: .github/workflows/ci-test.yml:52-265] [src: file: .github/workflows/ci-test.yml:750-778]
 
 The backend performance observer publishes the duration for every eligible run
@@ -87,17 +99,22 @@ statistics or infer timings from a different runner class.
 | After split, before clippy move — cold | [GitHub Actions run 33358154793](https://github.com/DocRoms/Kronn/actions/runs/33358154793) | Green | `test-backend` (format, clippy, tests, parallel coverage/quality/desktop gates); cold, no compiled-cache restore | Unavailable (single sample) | Unavailable (single sample) | 0 (not a hot sample) |
 | After split, before clippy move — warmup | [GitHub Actions run 33358156450](https://github.com/DocRoms/Kronn/actions/runs/33358156450) | Green; bounded cache saved | `test-backend` warmup/miss; staged the compiled-artifact cache for a subsequent hot run | Unavailable (single sample) | Unavailable (single sample) | 0 (warmup, excluded from hot history) |
 | After split, before clippy move — hot | [GitHub Actions run 33368662050](https://github.com/DocRoms/Kronn/actions/runs/33368662050) | Green; explicit compiled-cache hit | `test-backend`: **17m 41s total, still a 2m 41s SLO breach** with format + clippy + tests sharing one job | Unavailable (single sample) | Unavailable (single sample) | 1 |
-| After clippy moved to `test-backend-quality` — cold/warmup/hot | Pending protected-branch run after this change | Required before accepting the corrected SLO evidence | `test-backend` now measures only format + tests; clippy runs in parallel in `test-backend-quality` | Unavailable | Unavailable | Unavailable |
+| After clippy moved to `test-backend-quality` — cold | [GitHub Actions run 33378197164](https://github.com/DocRoms/Kronn/actions/runs/33378197164) | Green | `test-backend`: 17m 33s total; cold, no compiled-cache restore | Unavailable (single sample) | Unavailable (single sample) | 0 (not a hot sample) |
+| After clippy moved to `test-backend-quality` — hot (cache-hit) | [GitHub Actions run 33378199511](https://github.com/DocRoms/Kronn/actions/runs/33378199511) | Green; explicit compiled-cache hit | `test-backend`: **17m 32s total, still a 2m 32s SLO breach** — `cargo test` 11m 58s, ~4m 13s overhead before the test step (checkout, cache restore, disk cleanup, toolchain install), 1m 17s staging the cache back after the test | Unavailable (single sample) | Unavailable (single sample) | 1 |
+| After conditioning disk cleanup + cache staging on cache miss/warmup — cold/warmup/hot | Pending protected-branch run after this change | Required before accepting the corrected SLO evidence | `test-backend` skips `Free disk space` and `Stage bounded compiled backend artifacts` on a verified cache hit, removing part of the 4m 13s pre-test overhead and all of the 1m 17s post-test staging from the hot measured path | Unavailable | Unavailable | Unavailable |
 
-The three "after split" rows are the real Actions evidence from the parallel
-job graph landed for this task, confirming the split gates all execute in
-parallel and the aggregate stays green. The hot run still exceeded the
-15-minute SLO by 2m 41s with clippy inline, which is why clippy is now moved
-to the parallel `test-backend-quality` gate; the resulting cold/warmup/hot
-measurements for that final change are pending the next protected-branch run,
-since this worker cannot push or trigger Actions itself.
+The five populated rows above are real Actions evidence from this task. The
+17m 32s hot cache-hit run with clippy already moved out still breached the
+15-minute SLO by 2m 32s, split between pre-test overhead (disk cleanup running
+unconditionally even though a cache hit needs less headroom) and post-test
+cache staging that re-copies artifacts `actions/cache` will not re-save on an
+exact-key hit. Both are now conditioned on the verified cache state; the
+resulting cold/warmup/hot measurements for that change are pending the next
+protected-branch run, since this worker cannot push or trigger Actions
+itself.
 [src: user: 2026-08-31: review reports GitHub Actions runs 33354549462 and 33354667035]
 [src: user: 2026-08-31: reassignment reports GitHub Actions runs 33358154793, 33358156450 and 33368662050]
+[src: user: 2026-08-31: escalation reports GitHub Actions runs 33378197164 and 33378199511 with cargo test 11m58, pre-test overhead 4m13, post-test staging 1m17]
 
 Every job in the CI workflow has a 30-minute technical timeout. The required
 aggregate always runs, includes `require-ci-label`, and fails when the label is

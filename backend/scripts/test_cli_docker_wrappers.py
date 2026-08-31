@@ -139,6 +139,28 @@ class E2eContainerWorkflowTests(unittest.TestCase):
         # clippy inline. It now runs in the parallel, still-required
         # `test-backend-quality` gate instead of being removed.
         self.assertNotIn("cargo clippy", backend)
+        # KT-533 — a verified hit restores a small bounded debug tree; skip
+        # freeing disk (only needed by a full cold/miss compile) and skip
+        # re-staging identical artifacts (actions/cache only saves on an
+        # exact-key miss, so re-copying on a hit only costs time).
+        free_disk_index = backend.index("Free disk space")
+        verify_index = backend.index("Verify bounded compiled backend cache")
+        stage_index = backend.index("Stage bounded compiled backend artifacts")
+        self.assertLess(verify_index, free_disk_index)
+        self.assertLess(free_disk_index, backend.index("cargo test — measured backend critical path"))
+        free_disk_section = re.search(
+            r"Free disk space(?P<section>.*?)(?=^      - |\Z)",
+            backend,
+            re.DOTALL,
+        ).group("section")
+        self.assertIn("steps.verify-backend-cache.outputs.state != 'hit'", free_disk_section)
+        stage_section = re.search(
+            r"Stage bounded compiled backend artifacts(?P<section>.*?)(?=^      - |\Z)",
+            backend,
+            re.DOTALL,
+        ).group("section")
+        self.assertIn("steps.verify-backend-cache.outputs.state != 'hit'", stage_section)
+        self.assertLess(verify_index, stage_index)
         coverage = re.search(
             r"^  test-backend-coverage:\n(?P<section>.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)",
             workflow,
