@@ -2273,6 +2273,9 @@ export interface BatchRunResponse {
   run_id: string;
   discussion_ids: string[];
   batch_total: number;
+  /** Non-fatal SharedRun projection failures — the batch itself succeeded,
+   *  but the corresponding RunStatusCard may fail to rehydrate for these. */
+  shared_run_warnings?: string[];
 }
 
 export const quickPrompts = {

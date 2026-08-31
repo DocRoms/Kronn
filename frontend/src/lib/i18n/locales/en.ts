@@ -3512,6 +3512,7 @@ suggestion; that would overwrite the real value with a placeholder
   'run.freshness.live': 'Live',
   'run.freshness.rehydrated': 'Rehydrated from server',
   'run.freshness.unavailable': 'Live status unavailable',
+  'run.attachedHeading': 'Attached runs',
   'wf.tokens': 'Tokens',
   'wf.noProject': 'No project',
 

@@ -150,6 +150,18 @@ describe('RunStatusCard', () => {
     await waitFor(() => expect(workflowCard.querySelector('.run-status-card-link')).toHaveAttribute('href', '/workflows/wf-1?run=run-wf'));
   });
 
+  it('deep-links a standalone QA/QE run (no discussion) to its source in the workflows list', async () => {
+    vi.mocked(runsApi.get).mockResolvedValueOnce(sharedRun({ id: 'run-qa', kind: 'quick_api', status: 'success', source_id: 'qa-7', discussion_id: null }));
+    render(<RunStatusCard runId="run-qa" />);
+    await waitFor(() => expect(screen.getByTestId('run-status-card').querySelector('.run-status-card-link')).toHaveAttribute('href', '/workflows?kind=quick_api&source=qa-7&run=run-qa'));
+
+    vi.mocked(runsApi.get).mockResolvedValueOnce(sharedRun({ id: 'run-qe', kind: 'quick_exec', status: 'failed', source_id: 'qe-3', discussion_id: null }));
+    render(<RunStatusCard runId="run-qe" />);
+    const cards = screen.getAllByTestId('run-status-card');
+    const qeCard = cards[cards.length - 1];
+    await waitFor(() => expect(qeCard.querySelector('.run-status-card-link')).toHaveAttribute('href', '/workflows?kind=quick_exec&source=qe-3&run=run-qe'));
+  });
+
   it('isolates two concurrent runs over one shared WebSocket — each hydrates only on its own SharedRunUpdated event', async () => {
     vi.mocked(runsApi.get).mockImplementation(async (id: string) => {
       if (id === 'run-a') return sharedRun({ id: 'run-a', kind: 'quick_api', status: 'running' });
@@ -205,6 +217,53 @@ describe('RunStatusCard', () => {
       MockWebSocket.instances[0].simulateMessage(JSON.stringify({ type: 'shared_run_updated', run_id: 'run-3' }));
     });
     // No re-fetch: the card suspended its subscription while off-screen.
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(vi.mocked(runsApi.get).mock.calls.length).toBe(callsBefore);
+  });
+
+  it('measures bounded cost on a long list: N off-screen cards share one socket and stop fetching once suspended (DoD #7)', async () => {
+    const CARD_COUNT = 30;
+    vi.mocked(runsApi.get).mockImplementation(async (id: string) =>
+      sharedRun({ id, kind: 'quick_api', status: 'running' }),
+    );
+
+    render(
+      <>
+        {Array.from({ length: CARD_COUNT }, (_, i) => (
+          <RunStatusCard key={i} runId={`bulk-run-${i}`} />
+        ))}
+      </>,
+    );
+
+    // Every card fetches exactly once on mount — no duplicate/looping fetches.
+    await waitFor(() => expect(runsApi.get).toHaveBeenCalledTimes(CARD_COUNT));
+    // Regardless of card count, the process-wide registry shares ONE socket
+    // (hooks/useWebSocket.ts) — this is the measured proof that N live cards
+    // never open N connections.
+    await waitFor(() => expect(MockWebSocket.instances).toHaveLength(1));
+
+    // A long timeline scrolls most cards off-screen: suspend all of them.
+    act(() => {
+      MockIntersectionObserver.instances.forEach(observer => observer.setIntersecting(false));
+    });
+
+    // With zero visible cards left, the shared socket tears down entirely —
+    // an off-screen list of any size costs exactly 0 live connections.
+    await waitFor(() => expect(activeWebSocketCountForTests()).toBe(0));
+
+    const callsBefore = vi.mocked(runsApi.get).mock.calls.length;
+    expect(callsBefore).toBe(CARD_COUNT);
+
+    // A burst of updates for every run, replayed on the now-torn-down socket,
+    // must not cause any suspended card to re-fetch — proves the cost stays
+    // flat (0 extra fetches) rather than O(updates × cards).
+    act(() => {
+      for (let i = 0; i < CARD_COUNT; i += 1) {
+        MockWebSocket.instances[0].simulateMessage(
+          JSON.stringify({ type: 'shared_run_updated', run_id: `bulk-run-${i}` }),
+        );
+      }
+    });
     await new Promise(resolve => setTimeout(resolve, 0));
     expect(vi.mocked(runsApi.get).mock.calls.length).toBe(callsBefore);
   });

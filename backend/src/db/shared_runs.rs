@@ -143,7 +143,13 @@ pub fn list(
          ORDER BY created_at DESC LIMIT ?5",
     )?;
     let rows = statement.query_map(
-        params![kind_filter, source_id, project_id, discussion_id, limit.min(200)],
+        params![
+            kind_filter,
+            source_id,
+            project_id,
+            discussion_id,
+            limit.min(200)
+        ],
         row,
     )?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -154,9 +160,10 @@ pub fn sync_workflow(conn: &Connection, run: &crate::models::WorkflowRun) -> Res
         .query_row(
             "SELECT project_id FROM workflows WHERE id=?1",
             [&run.workflow_id],
-            |row| row.get(0),
+            |row| row.get::<_, Option<String>>(0),
         )
-        .optional()?;
+        .optional()?
+        .flatten();
     let status = match run.status {
         crate::models::RunStatus::Pending => SharedRunStatus::Queued,
         crate::models::RunStatus::Running | crate::models::RunStatus::WaitingApproval => {
@@ -260,7 +267,8 @@ mod tests {
     fn corrupt_values_are_rejected_instead_of_invented() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch("CREATE TABLE discussions(id TEXT PRIMARY KEY); CREATE TABLE projects(id TEXT PRIMARY KEY);").unwrap();
-        conn.execute_batch(include_str!("sql/155_shared_runs.sql")).unwrap();
+        conn.execute_batch(include_str!("sql/155_shared_runs.sql"))
+            .unwrap();
         conn.execute_batch("PRAGMA ignore_check_constraints=ON; INSERT INTO shared_runs(id,kind,source_id,status,created_at,updated_at) VALUES('bad','mystery','x','unknown','not-a-date','not-a-date');").unwrap();
         assert!(get(&conn, "bad").is_err());
     }
@@ -291,21 +299,60 @@ mod tests {
     fn list_isolates_runs_across_projects_and_discussions() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch("CREATE TABLE discussions(id TEXT PRIMARY KEY); CREATE TABLE projects(id TEXT PRIMARY KEY);").unwrap();
-        conn.execute_batch(include_str!("sql/155_shared_runs.sql")).unwrap();
+        conn.execute_batch(include_str!("sql/155_shared_runs.sql"))
+            .unwrap();
         conn.execute("INSERT INTO projects(id) VALUES('proj-a'),('proj-b')", [])
             .unwrap();
-        conn.execute("INSERT INTO discussions(id) VALUES('disc-a'),('disc-b')", [])
-            .unwrap();
+        conn.execute(
+            "INSERT INTO discussions(id) VALUES('disc-a'),('disc-b')",
+            [],
+        )
+        .unwrap();
         upsert(&conn, &run("run-a", Some("proj-a"), Some("disc-a"))).unwrap();
         upsert(&conn, &run("run-b", Some("proj-b"), Some("disc-b"))).unwrap();
 
         let by_project_a = list(&conn, None, None, Some("proj-a"), None, 50).unwrap();
-        assert_eq!(by_project_a.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), vec!["run-a"]);
+        assert_eq!(
+            by_project_a
+                .iter()
+                .map(|r| r.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["run-a"]
+        );
 
         let by_discussion_b = list(&conn, None, None, None, Some("disc-b"), 50).unwrap();
-        assert_eq!(by_discussion_b.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), vec!["run-b"]);
+        assert_eq!(
+            by_discussion_b
+                .iter()
+                .map(|r| r.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["run-b"]
+        );
 
         let cross_scope = list(&conn, None, None, Some("proj-a"), Some("disc-b"), 50).unwrap();
-        assert!(cross_scope.is_empty(), "a project A / discussion B combination that never co-occurred must return nothing");
+        assert!(
+            cross_scope.is_empty(),
+            "a project A / discussion B combination that never co-occurred must return nothing"
+        );
+    }
+
+    /// `upsert` must propagate a genuine DB failure as `Err` rather than
+    /// swallowing it — the QP/QA/QE call sites rely on this to decide
+    /// between a fail-closed error and a silently-missing `SharedRun`
+    /// projection (KT-243 review finding: two QP call sites used to only
+    /// log the error and return success regardless).
+    #[test]
+    fn upsert_propagates_db_error_instead_of_silently_succeeding() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE discussions(id TEXT PRIMARY KEY); CREATE TABLE projects(id TEXT PRIMARY KEY);").unwrap();
+        conn.execute_batch(include_str!("sql/155_shared_runs.sql"))
+            .unwrap();
+        // Simulate a real outage/corruption case: the table is gone.
+        conn.execute_batch("DROP TABLE shared_runs;").unwrap();
+        let result = upsert(&conn, &run("run-x", None, None));
+        assert!(
+            result.is_err(),
+            "upsert against a missing table must return Err, not Ok"
+        );
     }
 }

@@ -388,7 +388,11 @@ async fn execute_run_with_notify_policy(
                     total_steps: total_steps_for_ws,
                     current_step,
                 });
-            let _ = state.ws_broadcast.send(crate::models::WsMessage::SharedRunUpdated { run_id: run_id_for_ws.clone() });
+            let _ = state
+                .ws_broadcast
+                .send(crate::models::WsMessage::SharedRunUpdated {
+                    run_id: run_id_for_ws.clone(),
+                });
         };
 
     let db = state.db.clone();
@@ -2612,7 +2616,11 @@ pub async fn resume_run(
                 total_steps: workflow.steps.len() as u32,
                 current_step: None,
             });
-        let _ = state.ws_broadcast.send(crate::models::WsMessage::SharedRunUpdated { run_id: run.id.clone() });
+        let _ = state
+            .ws_broadcast
+            .send(crate::models::WsMessage::SharedRunUpdated {
+                run_id: run.id.clone(),
+            });
         // Cleanup workspace if it exists.
         if let Some(ws_path) = run.workspace_path.as_ref().map(std::path::PathBuf::from) {
             if ws_path.exists() {
