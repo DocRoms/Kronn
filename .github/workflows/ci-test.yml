@@ -71,10 +71,11 @@ jobs:
       # sccache setup action downloads a release asset before any test runs;
       # transient GitHub Releases failures used to abort this whole job and
       # its post-step then failed again while looking for an undefined binary.
-      # Store only reusable debug artifacts in an explicit staging tree. In
-      # particular, never archive llvm-cov-target, debug/incremental, tmp, or
-      # any other transient target subtree: those can be multi-GB and do not
-      # make a warm critical-path measurement representative.
+      # Cache the reusable debug directories in place. In particular, never
+      # archive llvm-cov-target, debug/incremental, tmp, or any other transient
+      # target subtree: those can be multi-GB and do not make a warm
+      # critical-path measurement representative. Caching the exact bounded
+      # directories avoids a second full copy during both restore and warmup.
       - name: Cache cargo registry and bounded backend build (hot)
         if: github.event_name != 'workflow_dispatch' || inputs.cache_mode == 'hot'
         id: cache-backend-hot
@@ -83,8 +84,11 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            .ci-cache/backend-compiled
-          key: cargo-hot-${{ runner.os }}-${{ hashFiles('backend/Cargo.lock') }}
+            target/debug/.kronn-backend-cache-v2
+            target/debug/.fingerprint
+            target/debug/build
+            target/debug/deps
+          key: cargo-hot-v2-${{ runner.os }}-${{ hashFiles('backend/Cargo.lock') }}
 
       - name: Verify bounded compiled backend cache
         if: github.event_name != 'workflow_dispatch' || inputs.cache_mode == 'hot'
@@ -96,34 +100,17 @@ jobs:
           valid=false
           if [ "$ACTION_CACHE_HIT" = "true" ]; then
             state=invalid
-            if [ -f ../.ci-cache/backend-compiled/.kronn-backend-cache-v1 ] \
-              && [ -d ../.ci-cache/backend-compiled/.fingerprint ] \
-              && [ -d ../.ci-cache/backend-compiled/build ] \
-              && [ -d ../.ci-cache/backend-compiled/deps ] \
-              && find ../.ci-cache/backend-compiled/deps -type f -print -quit | grep -q .; then
+            if [ -f ../target/debug/.kronn-backend-cache-v2 ] \
+              && [ -d ../target/debug/.fingerprint ] \
+              && [ -d ../target/debug/build ] \
+              && [ -d ../target/debug/deps ] \
+              && find ../target/debug/deps -type f -print -quit | grep -q .; then
               state=hit
               valid=true
             fi
           fi
           echo "state=$state" >> "$GITHUB_OUTPUT"
           echo "valid=$valid" >> "$GITHUB_OUTPUT"
-
-      # A verified compiled-cache hit restores a small, bounded debug tree, not
-      # a full cold build: the extra headroom this step frees (multi-GB
-      # Android/dotnet/Haskell tool caches) is not needed on that path. Cold
-      # runs and warmup/miss/invalid hot runs still compile from scratch and
-      # keep this step, since `steps.verify-backend-cache` is empty (not
-      # 'hit') whenever it did not run in hot mode.
-      - name: Free disk space
-        if: steps.verify-backend-cache.outputs.state != 'hit'
-        uses: jlumbroso/free-disk-space@main
-        with:
-          tool-cache: false
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: false
-          swap-storage: false
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -135,14 +122,6 @@ jobs:
         run: |
           echo '::error::The cache action reported a hit, but no verified compiled backend artifacts were present.'
           exit 1
-
-      - name: Restore bounded compiled backend artifacts
-        if: steps.verify-backend-cache.outputs.state == 'hit'
-        run: |
-          for directory in .fingerprint build deps; do
-            mkdir -p "../target/debug/$directory"
-            cp -a "../.ci-cache/backend-compiled/$directory/." "../target/debug/$directory/"
-          done
 
       # These visible, mutually exclusive steps are durable evidence in the
       # Actions jobs API. The observer uses them to exclude first-run warmups
@@ -176,23 +155,17 @@ jobs:
       - name: cargo test — measured backend critical path
         run: cargo test
 
-      # Stage before coverage or desktop gates can time out. actions/cache saves
-      # this bounded staging directory during its post-job hook. Skip on an
-      # already-verified hit: the cache action only saves on an exact-key
-      # miss, so re-copying identical artifacts on a hit only costs time
-      # without changing what gets persisted.
-      - name: Stage bounded compiled backend artifacts
-        if: (github.event_name != 'workflow_dispatch' || inputs.cache_mode == 'hot') && steps.verify-backend-cache.outputs.state != 'hit'
+      # On a warmup miss, validate the exact in-place directories before the
+      # cache action persists them in its post-job hook. Cold measurements do
+      # not run the hot cache action, and hits already carry this marker.
+      - name: Mark bounded compiled backend cache ready
+        if: (github.event_name != 'workflow_dispatch' || inputs.cache_mode == 'hot') && steps.verify-backend-cache.outputs.state == 'miss'
         run: |
-          mkdir -p ../.ci-cache/backend-compiled
-          rm -f ../.ci-cache/backend-compiled/.kronn-backend-cache-v1
           for directory in .fingerprint build deps; do
             [ -d "../target/debug/$directory" ]
-            mkdir -p "../.ci-cache/backend-compiled/$directory"
-            cp -a "../target/debug/$directory/." "../.ci-cache/backend-compiled/$directory/"
           done
-          find ../.ci-cache/backend-compiled/deps -type f -print -quit | grep -q .
-          echo 'schema=1' > ../.ci-cache/backend-compiled/.kronn-backend-cache-v1
+          find ../target/debug/deps -type f -print -quit | grep -q .
+          echo 'schema=2' > ../target/debug/.kronn-backend-cache-v2
 
   test-backend-coverage:
     if: github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'ci-test')

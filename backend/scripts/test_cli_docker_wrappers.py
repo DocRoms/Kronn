@@ -116,20 +116,21 @@ class E2eContainerWorkflowTests(unittest.TestCase):
             workflow,
             re.MULTILINE | re.DOTALL,
         ).group("section")
-        self.assertIn(".ci-cache/backend-compiled", backend)
+        self.assertIn("target/debug/.fingerprint", backend)
+        self.assertIn("target/debug/build", backend)
+        self.assertIn("target/debug/deps", backend)
         self.assertIn("Record compiled cache hit", backend)
         self.assertIn("Record compiled cache warmup miss", backend)
         self.assertIn("Verify bounded compiled backend cache", backend)
         self.assertIn("Reject invalid compiled cache hit", backend)
-        self.assertIn("Stage bounded compiled backend artifacts", backend)
+        self.assertIn("Mark bounded compiled backend cache ready", backend)
         self.assertIn("../target/debug/$directory", backend)
-        self.assertIn(".kronn-backend-cache-v1", backend)
-        self.assertNotIn('"target/debug/$directory"', backend)
+        self.assertIn(".kronn-backend-cache-v2", backend)
         cargo_config = (ROOT / ".cargo" / "config.toml").read_text()
         self.assertIn('target-dir = "target"', cargo_config)
         self.assertLess(
             backend.index("cargo test — measured backend critical path"),
-            backend.index("Stage bounded compiled backend artifacts"),
+            backend.index("Mark bounded compiled backend cache ready"),
         )
         self.assertNotIn("cargo llvm-cov", backend)
         self.assertNotIn("cargo check — desktop crate", backend)
@@ -139,28 +140,21 @@ class E2eContainerWorkflowTests(unittest.TestCase):
         # clippy inline. It now runs in the parallel, still-required
         # `test-backend-quality` gate instead of being removed.
         self.assertNotIn("cargo clippy", backend)
-        # KT-533 — a verified hit restores a small bounded debug tree; skip
-        # freeing disk (only needed by a full cold/miss compile) and skip
-        # re-staging identical artifacts (actions/cache only saves on an
-        # exact-key miss, so re-copying on a hit only costs time).
-        free_disk_index = backend.index("Free disk space")
+        # KT-533 — the measured backend job never spends several minutes
+        # deleting unrelated runner toolchains. The bounded compiled cache is
+        # restored and saved in place, so neither a hit nor a warmup copies the
+        # whole debug tree a second time.
+        self.assertNotIn("Free disk space", backend)
         verify_index = backend.index("Verify bounded compiled backend cache")
-        stage_index = backend.index("Stage bounded compiled backend artifacts")
-        self.assertLess(verify_index, free_disk_index)
-        self.assertLess(free_disk_index, backend.index("cargo test — measured backend critical path"))
-        free_disk_section = re.search(
-            r"Free disk space(?P<section>.*?)(?=^      - |\Z)",
+        mark_index = backend.index("Mark bounded compiled backend cache ready")
+        mark_section = re.search(
+            r"Mark bounded compiled backend cache ready(?P<section>.*?)(?=^      - |\Z)",
             backend,
             re.DOTALL,
         ).group("section")
-        self.assertIn("steps.verify-backend-cache.outputs.state != 'hit'", free_disk_section)
-        stage_section = re.search(
-            r"Stage bounded compiled backend artifacts(?P<section>.*?)(?=^      - |\Z)",
-            backend,
-            re.DOTALL,
-        ).group("section")
-        self.assertIn("steps.verify-backend-cache.outputs.state != 'hit'", stage_section)
-        self.assertLess(verify_index, stage_index)
+        self.assertIn("steps.verify-backend-cache.outputs.state == 'miss'", mark_section)
+        self.assertNotIn("cp -a", backend)
+        self.assertLess(verify_index, mark_index)
         coverage = re.search(
             r"^  test-backend-coverage:\n(?P<section>.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)",
             workflow,
@@ -189,6 +183,8 @@ class E2eContainerWorkflowTests(unittest.TestCase):
         ).group("section")
         self.assertNotIn("backend/target", hot_cache)
         self.assertNotIn("llvm-cov-target", hot_cache)
+        self.assertIn("target/debug/.fingerprint", hot_cache)
+        self.assertIn("cargo-hot-v2-", hot_cache)
         cold_cache = re.search(
             r"Cache cargo registry \(cold, isolated\)(?P<section>.*?)(?=^      - |\Z)",
             backend,

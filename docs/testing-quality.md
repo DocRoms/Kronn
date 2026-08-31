@@ -45,8 +45,10 @@ authoritative job graph.
 ## Backend CI timing SLO
 
 `test-backend` is the measured backend critical-path job: formatting and the
-Rust test suite. It stages the bounded cache immediately after that test
-verdict. Clippy, coverage, generated-type drift and project-specific
+Rust test suite. Its hot cache targets the three reusable Cargo debug
+directories directly; a warmup only validates them and writes a versioned
+marker before the cache action's post-job save. Clippy, coverage,
+generated-type drift and project-specific
 lint/budget checks run in `test-backend-quality` and `test-backend-coverage`;
 the frontend build and desktop compilation run in `test-desktop-compile`.
 Those jobs execute in parallel and all remain blocking through
@@ -60,19 +62,20 @@ before the test step, 1m17 staging the cache back after it) — a further 2m32
 over the 15-minute SLO
 ([cold 33378197164](https://github.com/DocRoms/Kronn/actions/runs/33378197164),
 [hot cache-hit 33378199511](https://github.com/DocRoms/Kronn/actions/runs/33378199511)).
-`Free disk space` and the post-test `Stage bounded compiled backend
-artifacts` step now both skip on a verified compiled-cache hit: a hit
-restores a small bounded debug tree rather than a full cold build, so the
-extra multi-GB tool-cache headroom that step frees is unneeded, and
-`actions/cache` only persists on an exact-key miss anyway, so re-copying
-identical artifacts on a hit changes nothing it saves. Cold runs and
-warmup/miss/invalid hot runs are unaffected and keep both steps.
+The first review warmup proved that conditioning cleanup and staging only on
+a cache hit was insufficient: there is no hit until a warmup survives its
+post-job save. That run spent 6m48 deleting unrelated runner toolchains, then
+copied the debug tree after a successful 21m54 test step and hit the 30-minute
+timeout before the cache could be saved. The measured job therefore performs
+neither operation in any mode. It caches `.fingerprint`, `build` and `deps`
+in place, which removes the second full copy and its temporary disk doubling;
+coverage and desktop jobs retain their own cleanup where they need it.
 [src: file: .github/workflows/ci-test.yml:52-265] [src: file: .github/workflows/ci-test.yml:750-778]
 
 The backend performance observer publishes the duration for every eligible run
 and reports a warning rather than failing a green functional run when the hot
-cache SLO exceeds 15 minutes. Hot measurements restore only a bounded staging
-cache of ordinary Cargo debug artifacts alongside Cargo downloads; coverage,
+cache SLO exceeds 15 minutes. Hot measurements restore only bounded ordinary
+Cargo debug artifacts alongside Cargo downloads; coverage,
 incremental, temporary, and other target trees are not archived. Cargo's
 repository-level `target-dir` means these artifacts are copied to and from the
 root `target/debug` tree, not `backend/target/debug`. A versioned sentinel and
@@ -82,7 +85,9 @@ cache hit is accepted. A hot request that misses that cache is published as
 use a unique cache key per run attempt, restore no compiled artifacts, and are
 reported only for their current run. Historical hot statistics use only
 successful same-branch pull-request runs whose job records a verified restored
-compiled cache. [src: file: .cargo/config.toml:1-2] [src: file: .github/workflows/ci-test.yml:84-188] [src: file: scripts/ci/backend_ci_slo.mjs:47-150]
+compiled cache. The v2 cache key cannot restore the former staging layout, so
+the first run is an explicit warmup rather than an ambiguous hit.
+[src: file: .cargo/config.toml:1-2] [src: file: .github/workflows/ci-test.yml:84-188] [src: file: scripts/ci/backend_ci_slo.mjs:47-150]
 The observer's Node unit test runs in the blocking `test-python` gate.
 [src: file: .github/workflows/ci-test.yml:299-324]
 
@@ -101,20 +106,23 @@ statistics or infer timings from a different runner class.
 | After split, before clippy move — hot | [GitHub Actions run 33368662050](https://github.com/DocRoms/Kronn/actions/runs/33368662050) | Green; explicit compiled-cache hit | `test-backend`: **17m 41s total, still a 2m 41s SLO breach** with format + clippy + tests sharing one job | Unavailable (single sample) | Unavailable (single sample) | 1 |
 | After clippy moved to `test-backend-quality` — cold | [GitHub Actions run 33378197164](https://github.com/DocRoms/Kronn/actions/runs/33378197164) | Green | `test-backend`: 17m 33s total; cold, no compiled-cache restore | Unavailable (single sample) | Unavailable (single sample) | 0 (not a hot sample) |
 | After clippy moved to `test-backend-quality` — hot (cache-hit) | [GitHub Actions run 33378199511](https://github.com/DocRoms/Kronn/actions/runs/33378199511) | Green; explicit compiled-cache hit | `test-backend`: **17m 32s total, still a 2m 32s SLO breach** — `cargo test` 11m 58s, ~4m 13s overhead before the test step (checkout, cache restore, disk cleanup, toolchain install), 1m 17s staging the cache back after the test | Unavailable (single sample) | Unavailable (single sample) | 1 |
-| After conditioning disk cleanup + cache staging on cache miss/warmup — cold/warmup/hot | Pending protected-branch run after this change | Required before accepting the corrected SLO evidence | `test-backend` skips `Free disk space` and `Stage bounded compiled backend artifacts` on a verified cache hit, removing part of the 4m 13s pre-test overhead and all of the 1m 17s post-test staging from the hot measured path | Unavailable | Unavailable | Unavailable |
+| Review warmup with conditional cleanup/staging | [GitHub Actions run 33416135756](https://github.com/DocRoms/Kronn/actions/runs/33416135756) | Timed out; cache post-step skipped | `test-backend`: 30m21s; cleanup 6m48s, `cargo test` 21m54s, staging cancelled after 1m13s; no hot cache seeded | Unavailable | Unavailable | 0 (warmup, excluded) |
+| Review cold measurement | [GitHub Actions run 33416622439](https://github.com/DocRoms/Kronn/actions/runs/33416622439) | Green | `test-backend`: 16m54s; cleanup 1m16s, `cargo test` 15m22s; compiled artifacts intentionally neither restored nor saved | Unavailable (single sample) | Unavailable (single sample) | 0 (cold, excluded) |
+| Direct bounded v2 cache — warmup/hot | Pending protected-branch runs after this change | Required before accepting the corrected SLO evidence | No runner-toolchain cleanup and no debug-tree copy in `test-backend`; warmup validates in-place artifacts, then `actions/cache` saves them in its post-job hook | Unavailable | Unavailable | Unavailable |
 
-The five populated rows above are real Actions evidence from this task. The
+The populated rows above are real Actions evidence from this task. The
 17m 32s hot cache-hit run with clippy already moved out still breached the
 15-minute SLO by 2m 32s, split between pre-test overhead (disk cleanup running
 unconditionally even though a cache hit needs less headroom) and post-test
 cache staging that re-copies artifacts `actions/cache` will not re-save on an
-exact-key hit. Both are now conditioned on the verified cache state; the
-resulting cold/warmup/hot measurements for that change are pending the next
-protected-branch run, since this worker cannot push or trigger Actions
-itself.
+exact-key hit. The subsequent review warmup then proved that both costs also
+prevent the first cache from ever being seeded. The v2 layout removes them
+from the measured job in every mode and now needs one warmup followed by a
+true hit to establish the final median and p95 sample.
 [src: user: 2026-08-31: review reports GitHub Actions runs 33354549462 and 33354667035]
 [src: user: 2026-08-31: reassignment reports GitHub Actions runs 33358154793, 33358156450 and 33368662050]
 [src: user: 2026-08-31: escalation reports GitHub Actions runs 33378197164 and 33378199511 with cargo test 11m58, pre-test overhead 4m13, post-test staging 1m17]
+[src: commit: 87d41331]
 
 Every job in the CI workflow has a 30-minute technical timeout. The required
 aggregate always runs, includes `require-ci-label`, and fails when the label is
