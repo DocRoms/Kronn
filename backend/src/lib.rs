@@ -1162,6 +1162,13 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         // ── Debug (log ringbuffer — backs Settings > Debug viewer) ──
         .route("/api/debug/logs", get(api::debug::get_logs))
         .route("/api/debug/logs/clear", post(api::debug::clear_logs))
+        // ── Discussion storage weight (own endpoint: summing message
+        // content scans the messages table, and the indicator is opt-in) ──
+        .route("/api/discussion-weights", get(api::discussion_weight::list))
+        .route(
+            "/api/discussion-weights/{id}",
+            get(api::discussion_weight::get_one),
+        )
         // ── Secret themes (hidden palette unlock via code) ──
         .route("/api/themes/unlock", post(api::themes::unlock))
         // ── Document generation (5 formats through the Python sidecar) ──

@@ -2048,6 +2048,64 @@ cli_billable_tokens: number | null, cli_sessions: number, cli_sessions_measured:
  */
 cli_sessions_unmeasured: number, };
 
+/**
+ * Where the bytes of one discussion live, ordered by recoverability.
+ */
+export type DiscussionWeight = { discussion_id: string,
+/**
+ * Attachment bytes held on disk. Reclaimable without losing the thread.
+ */
+disk_bytes: number,
+/**
+ * Extracted document text kept in the database. Reclaimable, but the
+ * document search over those files goes with it.
+ */
+extracted_text_bytes: number,
+/**
+ * Message content bytes. Not reclaimable without losing conversation.
+ */
+message_bytes: number, };
+
+/**
+ * Sidebar weight indicator settings.
+ *
+ * Deliberately not an `Option`: an absent section loads straight into a valid
+ * effective state, so no caller has to interpret `None`. Each field carries
+ * its own default too, so a PARTIAL section (`enabled = false` alone) keeps
+ * usable thresholds instead of collapsing them to zero.
+ */
+export type DiscussionWeightConfig = { enabled: boolean, amber_bytes: number, red_bytes: number, };
+
+/**
+ * Batch answer. `weights` is SPARSE and indexed by discussion id: an id that
+ * was requested but holds nothing is absent, which the UI must render as
+ * "empty" rather than as a zero it could confuse with a failed load.
+ */
+export type DiscussionWeightsResponse = { weights: { [key in string]: DiscussionWeightView }, thresholds: WeightThresholds,
+/**
+ * True when the configured pair was unusable and the defaults took over.
+ * Surfaced rather than hidden, so a bad config is visible.
+ */
+thresholds_from_defaults: boolean, };
+
+/**
+ * One discussion's weight with its graded level, as served to the UI.
+ */
+export type DiscussionWeightView = { total_bytes: number, reclaimable_bytes: number, level: WeightLevel, discussion_id: string,
+/**
+ * Attachment bytes held on disk. Reclaimable without losing the thread.
+ */
+disk_bytes: number,
+/**
+ * Extracted document text kept in the database. Reclaimable, but the
+ * document search over those files goes with it.
+ */
+extracted_text_bytes: number,
+/**
+ * Message content bytes. Not reclaimable without losing conversation.
+ */
+message_bytes: number, };
+
 export type DiscussionWorkspace = { id: string, disc_id: string, session_pk: number | null, session_agent_type: string | null, task_id: string | null, task_reference: string | null, project_id: string, workspace_path: string | null, canonical_path: string | null, branch: string, head_sha: string | null, ownership: string, state: string,
 /**
  * Managed-worktree lineage (KT-318, migration 127). Populated only for a
@@ -4791,7 +4849,12 @@ agent_handoff_paid_unlimited: boolean,
  * Agents that cannot be started automatically from another agent's
  * generated reply. Empty keeps the historical allow-all behaviour.
  */
-agent_handoff_blocked_agents: Array<AgentType>, };
+agent_handoff_blocked_agents: Array<AgentType>,
+/**
+ * Sidebar storage-weight indicator. Validation and fallback live in
+ * `models::discussion_weight`; this is only the persisted field.
+ */
+discussion_weight: DiscussionWeightConfig, };
 
 export type ServerConfigPublic = { host: string, port: number, domain: string | null, max_concurrent_agents: number, agent_stall_timeout_min: number, agent_global_timeout_min: number, local_agent_global_timeout_min: number, auth_enabled: boolean, pseudo: string | null, avatar_email: string | null, bio: string | null, debug_mode: boolean,
 /**
@@ -4811,7 +4874,12 @@ default_model_tier: ModelTier,
  * `Off` by default in 0.8.6 onwards. UI surfaces an explanation of
  * when to re-enable (small-context agents without MCP access).
  */
-default_summary_strategy: SummaryStrategy, agent_handoffs_enabled: boolean, agent_handoff_paid_limit: number, agent_handoff_paid_unlimited: boolean, agent_handoff_blocked_agents: Array<AgentType>, };
+default_summary_strategy: SummaryStrategy, agent_handoffs_enabled: boolean, agent_handoff_paid_limit: number, agent_handoff_paid_unlimited: boolean, agent_handoff_blocked_agents: Array<AgentType>,
+/**
+ * Sidebar storage-weight indicator: lets the frontend skip the batch
+ * call entirely when disabled, and grade colours without a round-trip.
+ */
+discussion_weight: DiscussionWeightConfig, };
 
 /**
  * Configurable ceilings for one CLI session.
@@ -5943,6 +6011,10 @@ withheld_by_routing: number, };
  * surface where Kronn owns the runner.
  */
 export type WakeMode = "native_dispatch" | "external_poll";
+
+export type WeightLevel = "green" | "amber" | "red";
+
+export type WeightThresholds = { amber_bytes: number, red_bytes: number, };
 
 /**
  * Lifecycle of a CLI worker control offer (KT-328). `pending` is the published,

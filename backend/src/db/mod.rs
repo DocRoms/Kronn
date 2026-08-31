@@ -9,6 +9,7 @@ pub mod contacts;
 pub mod context_audits;
 pub mod disc_source;
 pub mod discussion_sessions;
+pub mod discussion_weight;
 pub mod discussion_workspaces;
 pub mod discussions;
 pub mod external_api_connections;

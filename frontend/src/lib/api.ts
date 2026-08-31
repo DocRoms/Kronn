@@ -1,4 +1,6 @@
 import type {
+  DiscussionWeightConfig,
+  DiscussionWeightsResponse,
   DiscussionImportProvenance,
   SetupStatus,
   SetScanPathsRequest,
@@ -714,7 +716,15 @@ export const config = {
   restoreRecovery: (passphrase: string, recoveryCode?: string) =>
     api<void>('POST', '/config/recovery/restore', { passphrase, recovery_code: recoveryCode || null }),
   getServerConfig: () => api<ServerConfigPublic>('GET', '/config/server'),
-  setServerConfig: (req: { domain?: string; max_concurrent_agents?: number; agent_stall_timeout_min?: number; agent_global_timeout_min?: number; local_agent_global_timeout_min?: number; pseudo?: string; avatar_email?: string; bio?: string; debug_mode?: boolean; discussion_notes_enabled?: boolean; default_model_tier?: 'economy' | 'default' | 'reasoning'; default_summary_strategy?: 'Auto' | 'OnDemand' | 'Off'; agent_handoffs_enabled?: boolean; agent_handoff_paid_limit?: number; agent_handoff_paid_unlimited?: boolean; agent_handoff_blocked_agents?: AgentType[] }) => api<void>('POST', '/config/server', req),
+  /** Batch storage weight for the discussions currently on screen. Sparse:
+   * an id that holds nothing is absent from `weights`. Never call this to
+   * "get everything" — the endpoint refuses an unbounded request. */
+  discussionWeights: (discussionIds: string[]) =>
+    api<DiscussionWeightsResponse>(
+      'GET',
+      `/discussion-weights?discussion_ids=${encodeURIComponent(discussionIds.join(','))}`,
+    ),
+  setServerConfig: (req: { domain?: string; max_concurrent_agents?: number; agent_stall_timeout_min?: number; agent_global_timeout_min?: number; local_agent_global_timeout_min?: number; pseudo?: string; avatar_email?: string; bio?: string; debug_mode?: boolean; discussion_notes_enabled?: boolean; default_model_tier?: 'economy' | 'default' | 'reasoning'; default_summary_strategy?: 'Auto' | 'OnDemand' | 'Off'; agent_handoffs_enabled?: boolean; agent_handoff_paid_limit?: number; agent_handoff_paid_unlimited?: boolean; agent_handoff_blocked_agents?: AgentType[]; discussion_weight?: DiscussionWeightConfig }) => api<void>('POST', '/config/server', req),
   regenerateAuthToken: () => api<string>('POST', '/config/auth-token/regenerate'),
 };
 

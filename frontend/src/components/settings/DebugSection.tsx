@@ -20,7 +20,7 @@ import type { ToastFn } from '../../hooks/useToast';
 // Note: lucide-react 1.x removed brand icons (Github, Gitlab, …) — use
 // `ExternalLink` for the GitHub-issue CTA. Brand icons live in
 // `simple-icons` if we ever want to re-add them.
-import { AlertTriangle, Bug, Copy, ExternalLink, MessageSquare, Pause, Play, RefreshCw, Trash2 } from 'lucide-react';
+import { AlertTriangle, Bug, Copy, ExternalLink, HardDrive, MessageSquare, Pause, Play, RefreshCw, Trash2 } from 'lucide-react';
 import '../../pages/SettingsPage.css';
 
 export interface DebugSectionProps {
@@ -56,6 +56,62 @@ export function DebugSection({
   const [follow, setFollow] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const viewerRef = useRef<HTMLPreElement | null>(null);
+
+  // Storage-weight indicator. Held locally so this section owns its own
+  // config round-trip instead of widening the parent's props.
+  const MIB = 1024 * 1024;
+  const [weightEnabled, setWeightEnabled] = useState<boolean | null>(null);
+  const [amberMib, setAmberMib] = useState('');
+  const [redMib, setRedMib] = useState('');
+  const [weightSaving, setWeightSaving] = useState(false);
+  const [weightError, setWeightError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    configApi
+      .getServerConfig()
+      .then(cfg => {
+        if (cancelled) return;
+        const weight = cfg.discussion_weight;
+        setWeightEnabled(weight?.enabled ?? true);
+        setAmberMib(String(Math.round((weight?.amber_bytes ?? 0) / MIB)));
+        setRedMib(String(Math.round((weight?.red_bytes ?? 0) / MIB)));
+      })
+      .catch(() => {
+        // Leaving it null keeps the controls out rather than showing a
+        // guessed state the user could then "save" over the real one.
+        if (!cancelled) setWeightEnabled(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /** Persists the whole section at once: a pair is only meaningful together. */
+  const saveWeightConfig = async (next: { enabled: boolean; amber: number; red: number }) => {
+    if (!Number.isFinite(next.amber) || !Number.isFinite(next.red) || next.amber <= 0 || next.amber >= next.red) {
+      setWeightError(t('settings.discWeightInvalid'));
+      return false;
+    }
+    setWeightError(null);
+    setWeightSaving(true);
+    try {
+      await configApi.setServerConfig({
+        discussion_weight: {
+          enabled: next.enabled,
+          amber_bytes: Math.round(next.amber * MIB),
+          red_bytes: Math.round(next.red * MIB),
+        },
+      });
+      return true;
+    } catch (error) {
+      toast(t('common.actionFailed', userError(error)), 'error');
+      return false;
+    } finally {
+      setWeightSaving(false);
+    }
+  };
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -259,6 +315,93 @@ export function DebugSection({
           </div>
           <div className="set-hint-xs">{t('settings.discussionNotesHint')}</div>
         </div>
+
+        {weightEnabled !== null && (
+          <div className="mt-8" data-testid="disc-weight-settings">
+            <div className="flex-row gap-4 mb-3" style={{ alignItems: 'center' }}>
+              <HardDrive size={12} className="text-tertiary" />
+              <span className="label" style={{ marginBottom: 0 }}>{t('settings.discWeightTitle')}</span>
+              <button
+                type="button"
+                role="switch"
+                aria-label={t('settings.discWeightTitle')}
+                aria-checked={weightEnabled}
+                className="set-agent-access-switch"
+                style={{ marginLeft: 'auto' }}
+                disabled={weightSaving}
+                data-testid="disc-weight-toggle"
+                onClick={async () => {
+                  const previous = weightEnabled;
+                  const next = !previous;
+                  setWeightEnabled(next);
+                  const ok = await saveWeightConfig({
+                    enabled: next,
+                    amber: Number(amberMib),
+                    red: Number(redMib),
+                  });
+                  if (!ok) setWeightEnabled(previous);
+                }}
+              >
+                <span className="set-toggle-track" data-on={weightEnabled}>
+                  <span className="set-toggle-thumb" data-on={weightEnabled} style={{ left: weightEnabled ? 16 : 1 }} />
+                </span>
+                <span className={weightEnabled ? 'text-accent' : 'text-muted'}>
+                  {weightEnabled ? t('config.enabled') : t('config.disabled')}
+                </span>
+              </button>
+            </div>
+            <div className="flex-row gap-4" style={{ alignItems: 'flex-end' }}>
+              <label className="flex-col gap-1">
+                <span className="text-2xs text-muted">{t('settings.discWeightAmber')}</span>
+                <input
+                  type="number"
+                  min={1}
+                  className="input input-compact"
+                  style={{ width: 90 }}
+                  value={amberMib}
+                  data-testid="disc-weight-amber"
+                  disabled={!weightEnabled || weightSaving}
+                  onChange={e => setAmberMib(e.target.value)}
+                />
+              </label>
+              <label className="flex-col gap-1">
+                <span className="text-2xs text-muted">{t('settings.discWeightRed')}</span>
+                <input
+                  type="number"
+                  min={1}
+                  className="input input-compact"
+                  style={{ width: 90 }}
+                  value={redMib}
+                  data-testid="disc-weight-red"
+                  disabled={!weightEnabled || weightSaving}
+                  onChange={e => setRedMib(e.target.value)}
+                />
+              </label>
+              <button
+                type="button"
+                className="btn btn-ghost"
+                disabled={!weightEnabled || weightSaving}
+                data-testid="disc-weight-save"
+                onClick={async () => {
+                  const ok = await saveWeightConfig({
+                    enabled: weightEnabled,
+                    amber: Number(amberMib),
+                    red: Number(redMib),
+                  });
+                  if (ok) toast(t('settings.discWeightSaved'), 'success');
+                }}
+              >
+                {t('common.save')}
+              </button>
+            </div>
+            {weightError && (
+              <div className="set-hint-xs text-error" role="alert" data-testid="disc-weight-error">
+                {weightError}
+              </div>
+            )}
+            <div className="set-hint-xs">{t('settings.discWeightHint')}</div>
+          </div>
+        )}
 
         {/* Live viewer — always visible (we capture at info even when
             debug_mode is off, so there's always SOMETHING useful to show). */}
