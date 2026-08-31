@@ -836,6 +836,14 @@ pub async fn delete_message(
             )),
         )
             .into_response(),
+        Ok(Err(crate::db::discussions::TombstoneMessageError::Immutable)) => (
+            StatusCode::CONFLICT,
+            Json(ApiResponse::<()>::err_coded(
+                ApiErrorCode::Conflict,
+                "Execution context cards are immutable and cannot be deleted",
+            )),
+        )
+            .into_response(),
         Ok(Err(error)) => {
             tracing::error!("Failed to tombstone discussion message: {error}");
             (

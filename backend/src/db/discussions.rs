@@ -2582,6 +2582,7 @@ pub fn delete_last_agent_messages(conn: &Connection, discussion_id: &str) -> Res
 pub enum TombstoneMessageError {
     NotFound,
     DispatchInProgress,
+    Immutable,
     Other(anyhow::Error),
 }
 
@@ -2590,6 +2591,10 @@ impl std::fmt::Display for TombstoneMessageError {
         match self {
             Self::NotFound => write!(formatter, "message not found"),
             Self::DispatchInProgress => write!(formatter, "message still has an active dispatch"),
+            Self::Immutable => write!(
+                formatter,
+                "execution context cards are immutable and cannot be deleted"
+            ),
             Self::Other(error) => error.fmt(formatter),
         }
     }
@@ -2620,11 +2625,11 @@ pub fn tombstone_message(
     message_id: &str,
 ) -> std::result::Result<Vec<String>, TombstoneMessageError> {
     let transaction = conn.unchecked_transaction()?;
-    let content = transaction
+    let (content, role) = transaction
         .query_row(
-            "SELECT content FROM messages WHERE id = ?1 AND discussion_id = ?2",
+            "SELECT content, role FROM messages WHERE id = ?1 AND discussion_id = ?2",
             params![message_id, discussion_id],
-            |row| row.get::<_, String>(0),
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
         )
         .optional()?
         .ok_or(TombstoneMessageError::NotFound)?;
@@ -2632,6 +2637,15 @@ pub fn tombstone_message(
     if content.starts_with("[kronn:message-deleted]") {
         transaction.commit()?;
         return Ok(Vec::new());
+    }
+
+    // The execution_context card is the durable, value-free provenance record
+    // for a run's resolved variables. It must never be tombstoned so the audit
+    // surface stays truthful for QP/QA/QE/WF alike. Scope the guard to the
+    // System card so an ordinary message that merely starts with the reserved
+    // text stays deletable.
+    if role == "System" && content.starts_with("execution_context:") {
+        return Err(TombstoneMessageError::Immutable);
     }
 
     let dispatch_active: bool = transaction.query_row(

@@ -65,9 +65,14 @@ pub struct PromptVariable {
 }
 
 impl PromptVariable {
+    /// Only a `UserInput` variable is ever collected from the launcher.
+    /// `allow_manual_override` makes an override *possible* for a
+    /// project-resolved variable, never mandatory: Kronn still resolves the
+    /// value when the launcher leaves the optional override blank, so an
+    /// override-enabled `ProjectEnv`/`KronnContext` declaration must not be
+    /// treated as a required input.
     pub fn requires_user_input(&self) -> bool {
         self.source.clone().unwrap_or_default() == PromptVariableSource::UserInput
-            || self.allow_manual_override
     }
 
     pub fn validate_source(&self) -> Result<(), String> {
@@ -602,6 +607,18 @@ mod tests {
                 .validate_source()
                 .is_err()
         );
+    }
+
+    #[test]
+    fn allowing_an_override_never_makes_a_resolved_variable_a_required_input() {
+        let mut declaration = variable(PromptVariableSource::ProjectEnv, Some("<env.API_TOKEN>"));
+        declaration.allow_manual_override = true;
+        // An override is possible but optional: Kronn still resolves the value
+        // from the project, so the launcher must not be forced to supply one.
+        assert!(!declaration.requires_user_input());
+        let mut context = variable(PromptVariableSource::KronnContext, Some("<context.locale>"));
+        context.allow_manual_override = true;
+        assert!(!context.requires_user_input());
     }
 
     #[test]
