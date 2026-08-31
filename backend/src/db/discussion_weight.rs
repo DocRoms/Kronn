@@ -49,8 +49,7 @@ pub fn for_ids(conn: &Connection, ids: &[String]) -> Result<HashMap<String, Disc
         return Ok(out);
     }
     let ids: Vec<&String> = ids.iter().take(MAX_BATCH_IDS).collect();
-    let placeholders = std::iter::repeat("?")
-        .take(ids.len())
+    let placeholders = std::iter::repeat_n("?", ids.len())
         .collect::<Vec<_>>()
         .join(",");
 
