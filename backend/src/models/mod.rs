@@ -30,6 +30,7 @@ pub mod planning;
 pub mod projects;
 pub mod quick;
 pub mod setup;
+pub mod shared_runs;
 pub mod stats;
 pub mod workflows;
 
@@ -55,6 +56,7 @@ pub use planning::*;
 pub use projects::*;
 pub use quick::*;
 pub use setup::*;
+pub use shared_runs::*;
 pub use stats::*;
 pub use workflows::*;
 

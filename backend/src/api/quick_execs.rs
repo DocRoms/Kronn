@@ -149,6 +149,7 @@ pub async fn run(
     Path(id): Path<String>,
     Json(request): Json<RunQuickExecRequest>,
 ) -> Json<ApiResponse<RunQuickExecResponse>> {
+    let run_id = uuid::Uuid::new_v4().to_string();
     let lookup_id = id.clone();
     let item = match state
         .db
@@ -200,14 +201,17 @@ pub async fn run(
     )
     .await;
     if outcome.result.status != RunStatus::Success {
-        return Json(ApiResponse::ok(RunQuickExecResponse {
+        let response = RunQuickExecResponse {
+            run_id: run_id.clone(),
             success: false,
             duration_ms: outcome.result.duration_ms,
             data: None,
             stdout: None,
             stderr: None,
             error: Some(outcome.result.output),
-        }));
+        };
+        persist_quick_exec_run(&state, &id, &response).await;
+        return Json(ApiResponse::ok(response));
     }
     let Some(envelope) = extract_step_envelope(&outcome.result.output) else {
         return Json(ApiResponse::err("Quick Exec returned no structured result"));
@@ -228,23 +232,65 @@ pub async fn run(
         .get("stderr")
         .and_then(|value| value.as_str())
         .map(str::to_string);
-    match crate::workflows::collect_api_data_step::quick_exec_value(&raw, item.output_format) {
-        Ok(data) => Json(ApiResponse::ok(RunQuickExecResponse {
-            success: true,
-            duration_ms: outcome.result.duration_ms,
-            data: Some(data),
-            stdout,
-            stderr,
-            error: None,
-        })),
-        Err(error) => Json(ApiResponse::ok(RunQuickExecResponse {
-            success: false,
-            duration_ms: outcome.result.duration_ms,
-            data: None,
-            stdout,
-            stderr,
-            error: Some(error),
-        })),
+    let response =
+        match crate::workflows::collect_api_data_step::quick_exec_value(&raw, item.output_format) {
+            Ok(data) => RunQuickExecResponse {
+                run_id,
+                success: true,
+                duration_ms: outcome.result.duration_ms,
+                data: Some(data),
+                stdout,
+                stderr,
+                error: None,
+            },
+            Err(error) => RunQuickExecResponse {
+                run_id,
+                success: false,
+                duration_ms: outcome.result.duration_ms,
+                data: None,
+                stdout,
+                stderr,
+                error: Some(error),
+            },
+        };
+    persist_quick_exec_run(&state, &id, &response).await;
+    Json(ApiResponse::ok(response))
+}
+
+async fn persist_quick_exec_run(
+    state: &AppState,
+    source_id: &str,
+    response: &RunQuickExecResponse,
+) {
+    let now = chrono::Utc::now();
+    let run = crate::models::SharedRun {
+        id: response.run_id.clone(),
+        kind: crate::models::SharedRunKind::QuickExec,
+        source_id: source_id.to_owned(),
+        discussion_id: None,
+        status: if response.success {
+            crate::models::SharedRunStatus::Success
+        } else {
+            crate::models::SharedRunStatus::Failed
+        },
+        started_at: Some(now - chrono::Duration::milliseconds(response.duration_ms as i64)),
+        finished_at: Some(now),
+        duration_ms: Some(response.duration_ms),
+        result: response.data.clone(),
+        diagnostic: response.error.clone(),
+        created_at: now,
+        updated_at: now,
+    };
+    let saved = run.clone();
+    if state
+        .db
+        .with_conn(move |conn| crate::db::shared_runs::upsert(conn, &saved))
+        .await
+        .is_ok()
+    {
+        let _ = state
+            .ws_broadcast
+            .send(crate::models::WsMessage::SharedRunUpdated { run_id: run.id });
     }
 }
 
