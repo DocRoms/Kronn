@@ -335,7 +335,21 @@ pub async fn run_qa(
 ) -> Json<ApiResponse<RunQuickApiResponse>> {
     let run_id = Uuid::new_v4().to_string();
     let created_at = Utc::now();
-    let queued = crate::models::SharedRun { id: run_id.clone(), kind: crate::models::SharedRunKind::QuickApi, source_id: id.clone(), project_id: None, discussion_id: None, status: crate::models::SharedRunStatus::Queued, started_at: None, finished_at: None, duration_ms: None, result: None, diagnostic: None, created_at, updated_at: created_at };
+    let queued = crate::models::SharedRun {
+        id: run_id.clone(),
+        kind: crate::models::SharedRunKind::QuickApi,
+        source_id: id.clone(),
+        project_id: None,
+        discussion_id: None,
+        status: crate::models::SharedRunStatus::Queued,
+        started_at: None,
+        finished_at: None,
+        duration_ms: None,
+        result: None,
+        diagnostic: None,
+        created_at,
+        updated_at: created_at,
+    };
     if let Err(error) = crate::api::shared_runs::persist_and_broadcast(&state, queued).await {
         return Json(ApiResponse::err(format!("DB error: {error}")));
     }
@@ -347,8 +361,25 @@ pub async fn run_qa(
     {
         Ok(Some(q)) => q,
         Ok(None) => {
-            let response = RunQuickApiResponse { run_id: run_id.clone(), success: false, duration_ms: 0, envelope: None, error: Some("Quick API not found".into()) };
-            persist_quick_api_terminal(&state, &id, None, created_at, &response, crate::models::SharedRunStatus::PreflightFailed).await;
+            let response = RunQuickApiResponse {
+                run_id: run_id.clone(),
+                success: false,
+                duration_ms: 0,
+                envelope: None,
+                error: Some("Quick API not found".into()),
+            };
+            if let Err(error) = persist_quick_api_terminal(
+                &state,
+                &id,
+                None,
+                created_at,
+                &response,
+                crate::models::SharedRunStatus::PreflightFailed,
+            )
+            .await
+            {
+                return Json(ApiResponse::err(format!("DB error: {error}")));
+            }
             return Json(ApiResponse::ok(response));
         }
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
@@ -360,8 +391,25 @@ pub async fn run_qa(
         if v.required {
             let val = req.variables.get(&v.name).map(|s| s.trim()).unwrap_or("");
             if val.is_empty() {
-                let response = RunQuickApiResponse { run_id: run_id.clone(), success: false, duration_ms: 0, envelope: None, error: Some(format!("Variable obligatoire manquante : `{}`", v.name)) };
-                persist_quick_api_terminal(&state, &id, shared_project_id.clone(), created_at, &response, crate::models::SharedRunStatus::PreflightFailed).await;
+                let response = RunQuickApiResponse {
+                    run_id: run_id.clone(),
+                    success: false,
+                    duration_ms: 0,
+                    envelope: None,
+                    error: Some(format!("Variable obligatoire manquante : `{}`", v.name)),
+                };
+                if let Err(error) = persist_quick_api_terminal(
+                    &state,
+                    &id,
+                    shared_project_id.clone(),
+                    created_at,
+                    &response,
+                    crate::models::SharedRunStatus::PreflightFailed,
+                )
+                .await
+                {
+                    return Json(ApiResponse::err(format!("DB error: {error}")));
+                }
                 return Json(ApiResponse::ok(response));
             }
         }
@@ -450,7 +498,21 @@ pub async fn run_qa(
         crate::workflows::api_call_executor::ApiCallLogContext::manual_test()
     };
     let running_at = Utc::now();
-    let running = crate::models::SharedRun { id: run_id.clone(), kind: crate::models::SharedRunKind::QuickApi, source_id: id.clone(), project_id: shared_project_id.clone(), discussion_id: None, status: crate::models::SharedRunStatus::Running, started_at: Some(running_at), finished_at: None, duration_ms: None, result: None, diagnostic: None, created_at, updated_at: running_at };
+    let running = crate::models::SharedRun {
+        id: run_id.clone(),
+        kind: crate::models::SharedRunKind::QuickApi,
+        source_id: id.clone(),
+        project_id: shared_project_id.clone(),
+        discussion_id: None,
+        status: crate::models::SharedRunStatus::Running,
+        started_at: Some(running_at),
+        finished_at: None,
+        duration_ms: None,
+        result: None,
+        diagnostic: None,
+        created_at,
+        updated_at: running_at,
+    };
     if let Err(error) = crate::api::shared_runs::persist_and_broadcast(&state, running).await {
         return Json(ApiResponse::err(format!("DB error: {error}")));
     }
@@ -508,14 +570,52 @@ pub async fn run_qa(
         envelope,
         error,
     };
-    persist_quick_api_terminal(&state, &id, shared_project_id, created_at, &response, if success { crate::models::SharedRunStatus::Success } else { crate::models::SharedRunStatus::Failed }).await;
+    let terminal_status = if success {
+        crate::models::SharedRunStatus::Success
+    } else {
+        crate::models::SharedRunStatus::Failed
+    };
+    if let Err(error) = persist_quick_api_terminal(
+        &state,
+        &id,
+        shared_project_id,
+        created_at,
+        &response,
+        terminal_status,
+    )
+    .await
+    {
+        return Json(ApiResponse::err(format!("DB error: {error}")));
+    }
     Json(ApiResponse::ok(response))
 }
 
-async fn persist_quick_api_terminal(state: &AppState, source_id: &str, project_id: Option<String>, created_at: chrono::DateTime<Utc>, response: &RunQuickApiResponse, status: crate::models::SharedRunStatus) {
+async fn persist_quick_api_terminal(
+    state: &AppState,
+    source_id: &str,
+    project_id: Option<String>,
+    created_at: chrono::DateTime<Utc>,
+    response: &RunQuickApiResponse,
+    status: crate::models::SharedRunStatus,
+) -> anyhow::Result<()> {
     let now = Utc::now();
-    let run = crate::models::SharedRun { id: response.run_id.clone(), kind: crate::models::SharedRunKind::QuickApi, source_id: source_id.into(), project_id, discussion_id: None, status, started_at: (response.duration_ms > 0).then_some(now - chrono::Duration::milliseconds(response.duration_ms as i64)), finished_at: Some(now), duration_ms: Some(response.duration_ms), result: response.envelope.clone(), diagnostic: response.error.clone(), created_at, updated_at: now };
-    let _ = crate::api::shared_runs::persist_and_broadcast(state, run).await;
+    let run = crate::models::SharedRun {
+        id: response.run_id.clone(),
+        kind: crate::models::SharedRunKind::QuickApi,
+        source_id: source_id.into(),
+        project_id,
+        discussion_id: None,
+        status,
+        started_at: (response.duration_ms > 0)
+            .then_some(now - chrono::Duration::milliseconds(response.duration_ms as i64)),
+        finished_at: Some(now),
+        duration_ms: Some(response.duration_ms),
+        result: response.envelope.clone(),
+        diagnostic: response.error.clone(),
+        created_at,
+        updated_at: now,
+    };
+    crate::api::shared_runs::persist_and_broadcast(state, run).await
 }
 
 /// POST /api/quick-apis/:id/batch
@@ -531,7 +631,21 @@ pub async fn batch_run_qa(
 ) -> Json<ApiResponse<BatchRunQuickApiResponse>> {
     let run_id = Uuid::new_v4().to_string();
     let created_at = Utc::now();
-    let queued = crate::models::SharedRun { id: run_id.clone(), kind: crate::models::SharedRunKind::QuickApi, source_id: id.clone(), project_id: None, discussion_id: None, status: crate::models::SharedRunStatus::Queued, started_at: None, finished_at: None, duration_ms: None, result: None, diagnostic: None, created_at, updated_at: created_at };
+    let queued = crate::models::SharedRun {
+        id: run_id.clone(),
+        kind: crate::models::SharedRunKind::QuickApi,
+        source_id: id.clone(),
+        project_id: None,
+        discussion_id: None,
+        status: crate::models::SharedRunStatus::Queued,
+        started_at: None,
+        finished_at: None,
+        duration_ms: None,
+        result: None,
+        diagnostic: None,
+        created_at,
+        updated_at: created_at,
+    };
     if let Err(error) = crate::api::shared_runs::persist_and_broadcast(&state, queued).await {
         return Json(ApiResponse::err(format!("DB error: {error}")));
     }
@@ -544,8 +658,25 @@ pub async fn batch_run_qa(
     {
         Ok(Some(q)) => q,
         Ok(None) => {
-            let response = BatchRunQuickApiResponse { run_id: run_id.clone(), status: "ERROR".into(), duration_ms: 0, envelope: None, error: Some("Quick API not found".into()) };
-            persist_batch_qa_terminal(&state, &id, None, created_at, &response, crate::models::SharedRunStatus::PreflightFailed).await;
+            let response = BatchRunQuickApiResponse {
+                run_id: run_id.clone(),
+                status: "ERROR".into(),
+                duration_ms: 0,
+                envelope: None,
+                error: Some("Quick API not found".into()),
+            };
+            if let Err(error) = persist_batch_qa_terminal(
+                &state,
+                &id,
+                None,
+                created_at,
+                &response,
+                crate::models::SharedRunStatus::PreflightFailed,
+            )
+            .await
+            {
+                return Json(ApiResponse::err(format!("DB error: {error}")));
+            }
             return Json(ApiResponse::ok(response));
         }
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
@@ -557,14 +688,48 @@ pub async fn batch_run_qa(
     let items_arr = match &req.items {
         serde_json::Value::Array(arr) => arr,
         _ => {
-            let response = BatchRunQuickApiResponse { run_id: run_id.clone(), status: "ERROR".into(), duration_ms: 0, envelope: None, error: Some("`items` must be a JSON array (of strings or objects).".into()) };
-            persist_batch_qa_terminal(&state, &id, shared_project_id.clone(), created_at, &response, crate::models::SharedRunStatus::PreflightFailed).await;
+            let response = BatchRunQuickApiResponse {
+                run_id: run_id.clone(),
+                status: "ERROR".into(),
+                duration_ms: 0,
+                envelope: None,
+                error: Some("`items` must be a JSON array (of strings or objects).".into()),
+            };
+            if let Err(error) = persist_batch_qa_terminal(
+                &state,
+                &id,
+                shared_project_id.clone(),
+                created_at,
+                &response,
+                crate::models::SharedRunStatus::PreflightFailed,
+            )
+            .await
+            {
+                return Json(ApiResponse::err(format!("DB error: {error}")));
+            }
             return Json(ApiResponse::ok(response));
         }
     };
     if items_arr.is_empty() {
-        let response = BatchRunQuickApiResponse { run_id: run_id.clone(), status: "ERROR".into(), duration_ms: 0, envelope: None, error: Some("`items` is empty — nothing to run.".into()) };
-        persist_batch_qa_terminal(&state, &id, shared_project_id.clone(), created_at, &response, crate::models::SharedRunStatus::PreflightFailed).await;
+        let response = BatchRunQuickApiResponse {
+            run_id: run_id.clone(),
+            status: "ERROR".into(),
+            duration_ms: 0,
+            envelope: None,
+            error: Some("`items` is empty — nothing to run.".into()),
+        };
+        if let Err(error) = persist_batch_qa_terminal(
+            &state,
+            &id,
+            shared_project_id.clone(),
+            created_at,
+            &response,
+            crate::models::SharedRunStatus::PreflightFailed,
+        )
+        .await
+        {
+            return Json(ApiResponse::err(format!("DB error: {error}")));
+        }
         return Json(ApiResponse::ok(response));
     }
 
@@ -584,8 +749,25 @@ pub async fn batch_run_qa(
     let items_literal = match serde_json::to_string(&normalized_items) {
         Ok(s) => s,
         Err(e) => {
-            let response = BatchRunQuickApiResponse { run_id: run_id.clone(), status: "ERROR".into(), duration_ms: 0, envelope: None, error: Some(format!("Could not serialize items: {}", e)) };
-            persist_batch_qa_terminal(&state, &id, shared_project_id.clone(), created_at, &response, crate::models::SharedRunStatus::PreflightFailed).await;
+            let response = BatchRunQuickApiResponse {
+                run_id: run_id.clone(),
+                status: "ERROR".into(),
+                duration_ms: 0,
+                envelope: None,
+                error: Some(format!("Could not serialize items: {}", e)),
+            };
+            if let Err(error) = persist_batch_qa_terminal(
+                &state,
+                &id,
+                shared_project_id.clone(),
+                created_at,
+                &response,
+                crate::models::SharedRunStatus::PreflightFailed,
+            )
+            .await
+            {
+                return Json(ApiResponse::err(format!("DB error: {error}")));
+            }
             return Json(ApiResponse::ok(response));
         }
     };
@@ -658,7 +840,21 @@ pub async fn batch_run_qa(
 
     let ctx = crate::workflows::template::TemplateContext::new();
     let running_at = Utc::now();
-    let running = crate::models::SharedRun { id: run_id.clone(), kind: crate::models::SharedRunKind::QuickApi, source_id: id.clone(), project_id: shared_project_id.clone(), discussion_id: None, status: crate::models::SharedRunStatus::Running, started_at: Some(running_at), finished_at: None, duration_ms: None, result: None, diagnostic: None, created_at, updated_at: running_at };
+    let running = crate::models::SharedRun {
+        id: run_id.clone(),
+        kind: crate::models::SharedRunKind::QuickApi,
+        source_id: id.clone(),
+        project_id: shared_project_id.clone(),
+        discussion_id: None,
+        status: crate::models::SharedRunStatus::Running,
+        started_at: Some(running_at),
+        finished_at: None,
+        duration_ms: None,
+        result: None,
+        diagnostic: None,
+        created_at,
+        updated_at: running_at,
+    };
     if let Err(error) = crate::api::shared_runs::persist_and_broadcast(&state, running).await {
         return Json(ApiResponse::err(format!("DB error: {error}")));
     }
@@ -728,14 +924,47 @@ pub async fn batch_run_qa(
         envelope,
         error,
     };
-    persist_batch_qa_terminal(&state, &id, shared_project_id, created_at, &response, shared_status).await;
+    if let Err(error) = persist_batch_qa_terminal(
+        &state,
+        &id,
+        shared_project_id,
+        created_at,
+        &response,
+        shared_status,
+    )
+    .await
+    {
+        return Json(ApiResponse::err(format!("DB error: {error}")));
+    }
     Json(ApiResponse::ok(response))
 }
 
-async fn persist_batch_qa_terminal(state: &AppState, source_id: &str, project_id: Option<String>, created_at: chrono::DateTime<Utc>, response: &BatchRunQuickApiResponse, status: crate::models::SharedRunStatus) {
+async fn persist_batch_qa_terminal(
+    state: &AppState,
+    source_id: &str,
+    project_id: Option<String>,
+    created_at: chrono::DateTime<Utc>,
+    response: &BatchRunQuickApiResponse,
+    status: crate::models::SharedRunStatus,
+) -> anyhow::Result<()> {
     let now = Utc::now();
-    let run = crate::models::SharedRun { id: response.run_id.clone(), kind: crate::models::SharedRunKind::QuickApi, source_id: source_id.into(), project_id, discussion_id: None, status, started_at: (response.duration_ms > 0).then_some(now - chrono::Duration::milliseconds(response.duration_ms as i64)), finished_at: Some(now), duration_ms: Some(response.duration_ms), result: response.envelope.clone(), diagnostic: response.error.clone(), created_at, updated_at: now };
-    let _ = crate::api::shared_runs::persist_and_broadcast(state, run).await;
+    let run = crate::models::SharedRun {
+        id: response.run_id.clone(),
+        kind: crate::models::SharedRunKind::QuickApi,
+        source_id: source_id.into(),
+        project_id,
+        discussion_id: None,
+        status,
+        started_at: (response.duration_ms > 0)
+            .then_some(now - chrono::Duration::milliseconds(response.duration_ms as i64)),
+        finished_at: Some(now),
+        duration_ms: Some(response.duration_ms),
+        result: response.envelope.clone(),
+        diagnostic: response.error.clone(),
+        created_at,
+        updated_at: now,
+    };
+    crate::api::shared_runs::persist_and_broadcast(state, run).await
 }
 
 /// Normalize a batch items array so each item is a JSON object keyed by

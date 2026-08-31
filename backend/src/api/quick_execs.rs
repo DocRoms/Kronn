@@ -178,15 +178,53 @@ pub async fn run(
     {
         Ok(Some(item)) => item,
         Ok(None) => {
-            let response = RunQuickExecResponse { run_id: run_id.clone(), success: false, duration_ms: 0, data: None, stdout: None, stderr: None, error: Some("Quick Exec not found".into()) };
-            persist_quick_exec_terminal(&state, &id, None, created_at, &response, crate::models::SharedRunStatus::PreflightFailed).await;
+            let response = RunQuickExecResponse {
+                run_id: run_id.clone(),
+                success: false,
+                duration_ms: 0,
+                data: None,
+                stdout: None,
+                stderr: None,
+                error: Some("Quick Exec not found".into()),
+            };
+            if let Err(error) = persist_quick_exec_terminal(
+                &state,
+                &id,
+                None,
+                created_at,
+                &response,
+                crate::models::SharedRunStatus::PreflightFailed,
+            )
+            .await
+            {
+                return Json(ApiResponse::err(format!("DB error: {error}")));
+            }
             return Json(ApiResponse::ok(response));
         }
         Err(error) => return Json(ApiResponse::err(format!("DB error: {error}"))),
     };
     if let Err(error) = validate_variables(&item.variables, &request.variables) {
-        let response = RunQuickExecResponse { run_id: run_id.clone(), success: false, duration_ms: 0, data: None, stdout: None, stderr: None, error: Some(error) };
-        persist_quick_exec_terminal(&state, &id, item.project_id.clone(), created_at, &response, crate::models::SharedRunStatus::PreflightFailed).await;
+        let response = RunQuickExecResponse {
+            run_id: run_id.clone(),
+            success: false,
+            duration_ms: 0,
+            data: None,
+            stdout: None,
+            stderr: None,
+            error: Some(error),
+        };
+        if let Err(error) = persist_quick_exec_terminal(
+            &state,
+            &id,
+            item.project_id.clone(),
+            created_at,
+            &response,
+            crate::models::SharedRunStatus::PreflightFailed,
+        )
+        .await
+        {
+            return Json(ApiResponse::err(format!("DB error: {error}")));
+        }
         return Json(ApiResponse::ok(response));
     }
     let project_id = item.project_id.clone();
@@ -198,8 +236,27 @@ pub async fn run(
         {
             Ok(Some(project)) => project.path,
             Ok(None) => {
-                let response = RunQuickExecResponse { run_id: run_id.clone(), success: false, duration_ms: 0, data: None, stdout: None, stderr: None, error: Some("Quick Exec project not found".into()) };
-                persist_quick_exec_terminal(&state, &id, project_id.clone(), created_at, &response, crate::models::SharedRunStatus::PreflightFailed).await;
+                let response = RunQuickExecResponse {
+                    run_id: run_id.clone(),
+                    success: false,
+                    duration_ms: 0,
+                    data: None,
+                    stdout: None,
+                    stderr: None,
+                    error: Some("Quick Exec project not found".into()),
+                };
+                if let Err(error) = persist_quick_exec_terminal(
+                    &state,
+                    &id,
+                    project_id.clone(),
+                    created_at,
+                    &response,
+                    crate::models::SharedRunStatus::PreflightFailed,
+                )
+                .await
+                {
+                    return Json(ApiResponse::err(format!("DB error: {error}")));
+                }
                 return Json(ApiResponse::ok(response));
             }
             Err(error) => return Json(ApiResponse::err(format!("DB error: {error}"))),
@@ -264,19 +321,27 @@ pub async fn run(
             stderr: None,
             error: Some(outcome.result.output),
         };
-        persist_quick_exec_terminal(&state, &id, project_id.clone(), created_at, &response, status).await;
+        if let Err(error) =
+            persist_quick_exec_terminal(&state, &id, project_id.clone(), created_at, &response, status).await
+        {
+            return Json(ApiResponse::err(format!("DB error: {error}")));
+        }
         return Json(ApiResponse::ok(response));
     }
     let Some(envelope) = extract_step_envelope(&outcome.result.output) else {
         let response = RunQuickExecResponse { run_id: run_id.clone(), success: false, duration_ms: outcome.result.duration_ms, data: None, stdout: None, stderr: None, error: Some("Quick Exec returned no structured result".into()) };
-        persist_quick_exec_terminal(&state, &id, project_id.clone(), created_at, &response, crate::models::SharedRunStatus::Failed).await;
+        if let Err(error) = persist_quick_exec_terminal(&state, &id, project_id.clone(), created_at, &response, crate::models::SharedRunStatus::Failed).await {
+            return Json(ApiResponse::err(format!("DB error: {error}")));
+        }
         return Json(ApiResponse::ok(response));
     };
     let raw: serde_json::Value = match serde_json::from_str(&envelope.data_json) {
         Ok(value) => value,
         Err(error) => {
             let response = RunQuickExecResponse { run_id: run_id.clone(), success: false, duration_ms: outcome.result.duration_ms, data: None, stdout: None, stderr: None, error: Some(format!("Invalid Quick Exec result: {error}")) };
-            persist_quick_exec_terminal(&state, &id, project_id.clone(), created_at, &response, crate::models::SharedRunStatus::Failed).await;
+            if let Err(error) = persist_quick_exec_terminal(&state, &id, project_id.clone(), created_at, &response, crate::models::SharedRunStatus::Failed).await {
+                return Json(ApiResponse::err(format!("DB error: {error}")));
+            }
             return Json(ApiResponse::ok(response));
         }
     };
@@ -315,7 +380,9 @@ pub async fn run(
                 crate::models::SharedRunStatus::Failed,
             ),
         };
-    persist_quick_exec_terminal(&state, &id, project_id, created_at, &response, status).await;
+    if let Err(error) = persist_quick_exec_terminal(&state, &id, project_id, created_at, &response, status).await {
+        return Json(ApiResponse::err(format!("DB error: {error}")));
+    }
     Json(ApiResponse::ok(response))
 }
 
@@ -326,7 +393,7 @@ async fn persist_quick_exec_terminal(
     created_at: chrono::DateTime<Utc>,
     response: &RunQuickExecResponse,
     status: crate::models::SharedRunStatus,
-) {
+) -> anyhow::Result<()> {
     let now = chrono::Utc::now();
     let run = crate::models::SharedRun {
         id: response.run_id.clone(),
@@ -344,7 +411,7 @@ async fn persist_quick_exec_terminal(
         created_at,
         updated_at: now,
     };
-    let _ = crate::api::shared_runs::persist_and_broadcast(state, run).await;
+    crate::api::shared_runs::persist_and_broadcast(state, run).await
 }
 
 pub async fn export(

@@ -540,8 +540,28 @@ pub async fn batch_run(
         Ok(o) => o,
         Err(e) => {
             let now = Utc::now();
-            let run = crate::models::SharedRun { id: Uuid::new_v4().to_string(), kind: crate::models::SharedRunKind::QuickPrompt, source_id: qp_id.clone(), project_id: shared_project_id, discussion_id: None, status: crate::models::SharedRunStatus::PreflightFailed, started_at: None, finished_at: Some(now), duration_ms: Some(0), result: None, diagnostic: Some(e.to_string()), created_at: now, updated_at: now };
-            let _ = crate::api::shared_runs::persist_and_broadcast(&state, run).await;
+            let run = crate::models::SharedRun {
+                id: Uuid::new_v4().to_string(),
+                kind: crate::models::SharedRunKind::QuickPrompt,
+                source_id: qp_id.clone(),
+                project_id: shared_project_id,
+                discussion_id: None,
+                status: crate::models::SharedRunStatus::PreflightFailed,
+                started_at: None,
+                finished_at: Some(now),
+                duration_ms: Some(0),
+                result: None,
+                diagnostic: Some(e.to_string()),
+                created_at: now,
+                updated_at: now,
+            };
+            if let Err(persist_error) = crate::api::shared_runs::persist_and_broadcast(&state, run).await {
+                tracing::error!(
+                    "Failed to persist preflight_failed shared run for QP batch {}: {}",
+                    qp_id,
+                    persist_error
+                );
+            }
             return Json(ApiResponse::err(format!("Failed to create batch: {}", e)));
         }
     };
@@ -574,7 +594,18 @@ pub async fn batch_run(
             created_at: now,
             updated_at: now,
         };
-        let _ = crate::api::shared_runs::persist_and_broadcast(&state, run).await;
+        // The child discussion already exists and is reachable via
+        // `discussion_ids` below regardless of this write; a failure here
+        // only means that one card's rehydration will miss, not that the
+        // batch itself failed, so it's logged rather than turned into a
+        // false "batch failed" response.
+        if let Err(persist_error) = crate::api::shared_runs::persist_and_broadcast(&state, run).await {
+            tracing::error!(
+                "Failed to persist shared run for QP batch discussion {}: {}",
+                discussion_id,
+                persist_error
+            );
+        }
     }
 
     Json(ApiResponse::ok(BatchRunResponse {
@@ -818,8 +849,28 @@ pub async fn compare_agents(
         Ok(o) => o,
         Err(e) => {
             let now = Utc::now();
-            let run = crate::models::SharedRun { id: Uuid::new_v4().to_string(), kind: crate::models::SharedRunKind::QuickPrompt, source_id: qp_id.clone(), project_id: shared_project_id, discussion_id: None, status: crate::models::SharedRunStatus::PreflightFailed, started_at: None, finished_at: Some(now), duration_ms: Some(0), result: None, diagnostic: Some(e.to_string()), created_at: now, updated_at: now };
-            let _ = crate::api::shared_runs::persist_and_broadcast(&state, run).await;
+            let run = crate::models::SharedRun {
+                id: Uuid::new_v4().to_string(),
+                kind: crate::models::SharedRunKind::QuickPrompt,
+                source_id: qp_id.clone(),
+                project_id: shared_project_id,
+                discussion_id: None,
+                status: crate::models::SharedRunStatus::PreflightFailed,
+                started_at: None,
+                finished_at: Some(now),
+                duration_ms: Some(0),
+                result: None,
+                diagnostic: Some(e.to_string()),
+                created_at: now,
+                updated_at: now,
+            };
+            if let Err(persist_error) = crate::api::shared_runs::persist_and_broadcast(&state, run).await {
+                tracing::error!(
+                    "Failed to persist preflight_failed shared run for QP compare-agents batch {}: {}",
+                    qp_id,
+                    persist_error
+                );
+            }
             return Json(ApiResponse::err(format!(
                 "Failed to create compare-agents batch: {}",
                 e
@@ -851,7 +902,18 @@ pub async fn compare_agents(
             created_at: now,
             updated_at: now,
         };
-        let _ = crate::api::shared_runs::persist_and_broadcast(&state, run).await;
+        // The child discussion already exists and is reachable via
+        // `discussion_ids` below regardless of this write; a failure here
+        // only means that one card's rehydration will miss, not that the
+        // batch itself failed, so it's logged rather than turned into a
+        // false "batch failed" response.
+        if let Err(persist_error) = crate::api::shared_runs::persist_and_broadcast(&state, run).await {
+            tracing::error!(
+                "Failed to persist shared run for QP batch discussion {}: {}",
+                discussion_id,
+                persist_error
+            );
+        }
     }
 
     Json(ApiResponse::ok(BatchRunResponse {

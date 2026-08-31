@@ -28,7 +28,11 @@ fn parse_kind(v: String) -> rusqlite::Result<SharedRunKind> {
         "quick_api" => Ok(SharedRunKind::QuickApi),
         "quick_exec" => Ok(SharedRunKind::QuickExec),
         "workflow" => Ok(SharedRunKind::Workflow),
-        _ => Err(rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, format!("unknown shared run kind: {v}").into())),
+        _ => Err(rusqlite::Error::FromSqlConversionFailure(
+            1,
+            rusqlite::types::Type::Text,
+            format!("unknown shared run kind: {v}").into(),
+        )),
     }
 }
 fn parse_status(v: String) -> rusqlite::Result<SharedRunStatus> {
@@ -40,11 +44,27 @@ fn parse_status(v: String) -> rusqlite::Result<SharedRunStatus> {
         "failed" => Ok(SharedRunStatus::Failed),
         "cancelled" => Ok(SharedRunStatus::Cancelled),
         "timeout" => Ok(SharedRunStatus::Timeout),
-        _ => Err(rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, format!("unknown shared run status: {v}").into())),
+        _ => Err(rusqlite::Error::FromSqlConversionFailure(
+            4,
+            rusqlite::types::Type::Text,
+            format!("unknown shared run status: {v}").into(),
+        )),
     }
 }
 fn timestamp(r: &Row<'_>, index: usize) -> rusqlite::Result<Option<DateTime<Utc>>> {
-    r.get::<_, Option<String>>(index)?.map(|value| DateTime::parse_from_rfc3339(&value).map(|date| date.with_timezone(&Utc)).map_err(|error| rusqlite::Error::FromSqlConversionFailure(index, rusqlite::types::Type::Text, Box::new(error)))).transpose()
+    r.get::<_, Option<String>>(index)?
+        .map(|value| {
+            DateTime::parse_from_rfc3339(&value)
+                .map(|date| date.with_timezone(&Utc))
+                .map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        index,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })
+        })
+        .transpose()
 }
 fn row(r: &Row<'_>) -> rusqlite::Result<SharedRun> {
     let result: Option<String> = r.get(9)?;
@@ -60,16 +80,51 @@ fn row(r: &Row<'_>) -> rusqlite::Result<SharedRun> {
         duration_ms: r.get::<_, Option<i64>>(8)?.map(|v| v.max(0) as u64),
         result: result.and_then(|v| serde_json::from_str(&v).ok()),
         diagnostic: r.get(10)?,
-        created_at: timestamp(r, 11)?.ok_or_else(|| rusqlite::Error::InvalidColumnType(11, "created_at".into(), rusqlite::types::Type::Null))?,
-        updated_at: timestamp(r, 12)?.ok_or_else(|| rusqlite::Error::InvalidColumnType(12, "updated_at".into(), rusqlite::types::Type::Null))?,
+        created_at: timestamp(r, 11)?.ok_or_else(|| {
+            rusqlite::Error::InvalidColumnType(11, "created_at".into(), rusqlite::types::Type::Null)
+        })?,
+        updated_at: timestamp(r, 12)?.ok_or_else(|| {
+            rusqlite::Error::InvalidColumnType(12, "updated_at".into(), rusqlite::types::Type::Null)
+        })?,
     })
 }
 pub fn upsert(conn: &Connection, run: &SharedRun) -> Result<()> {
-    conn.execute("INSERT INTO shared_runs(id,kind,source_id,project_id,discussion_id,status,started_at,finished_at,duration_ms,result_json,diagnostic,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13) ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id,discussion_id=excluded.discussion_id,status=excluded.status,started_at=excluded.started_at,finished_at=excluded.finished_at,duration_ms=excluded.duration_ms,result_json=excluded.result_json,diagnostic=excluded.diagnostic,updated_at=excluded.updated_at",params![run.id,kind(&run.kind),run.source_id,run.project_id,run.discussion_id,status(&run.status),run.started_at.map(|v|v.to_rfc3339()),run.finished_at.map(|v|v.to_rfc3339()),run.duration_ms.map(|v|v as i64),run.result.as_ref().map(|v|v.to_string()),run.diagnostic,run.created_at.to_rfc3339(),run.updated_at.to_rfc3339()])?;
+    conn.execute(
+        "INSERT INTO shared_runs(id,kind,source_id,project_id,discussion_id,status,started_at,finished_at,duration_ms,result_json,diagnostic,created_at,updated_at)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)
+         ON CONFLICT(id) DO UPDATE SET
+             project_id=excluded.project_id,
+             discussion_id=excluded.discussion_id,
+             status=excluded.status,
+             started_at=excluded.started_at,
+             finished_at=excluded.finished_at,
+             duration_ms=excluded.duration_ms,
+             result_json=excluded.result_json,
+             diagnostic=excluded.diagnostic,
+             updated_at=excluded.updated_at",
+        params![
+            run.id,
+            kind(&run.kind),
+            run.source_id,
+            run.project_id,
+            run.discussion_id,
+            status(&run.status),
+            run.started_at.map(|v| v.to_rfc3339()),
+            run.finished_at.map(|v| v.to_rfc3339()),
+            run.duration_ms.map(|v| v as i64),
+            run.result.as_ref().map(|v| v.to_string()),
+            run.diagnostic,
+            run.created_at.to_rfc3339(),
+            run.updated_at.to_rfc3339(),
+        ],
+    )?;
     Ok(())
 }
 pub fn get(conn: &Connection, id: &str) -> Result<Option<SharedRun>> {
-    let mut s=conn.prepare("SELECT id,kind,source_id,project_id,discussion_id,status,started_at,finished_at,duration_ms,result_json,diagnostic,created_at,updated_at FROM shared_runs WHERE id=?1")?;
+    let mut s = conn.prepare(
+        "SELECT id,kind,source_id,project_id,discussion_id,status,started_at,finished_at,duration_ms,result_json,diagnostic,created_at,updated_at
+         FROM shared_runs WHERE id=?1",
+    )?;
     Ok(s.query_row([id], row).optional()?)
 }
 pub fn list(
@@ -87,33 +142,82 @@ pub fn list(
            AND (?3 IS NULL OR project_id=?3) AND (?4 IS NULL OR discussion_id=?4)
          ORDER BY created_at DESC LIMIT ?5",
     )?;
-    let rows = statement.query_map(params![kind_filter, source_id, project_id, discussion_id, limit.min(200)], row)?;
+    let rows = statement.query_map(
+        params![kind_filter, source_id, project_id, discussion_id, limit.min(200)],
+        row,
+    )?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
 pub fn sync_workflow(conn: &Connection, run: &crate::models::WorkflowRun) -> Result<()> {
-    let project_id: Option<String> = conn.query_row(
-        "SELECT project_id FROM workflows WHERE id=?1",
-        [&run.workflow_id],
-        |row| row.get(0),
-    ).optional()?;
+    let project_id: Option<String> = conn
+        .query_row(
+            "SELECT project_id FROM workflows WHERE id=?1",
+            [&run.workflow_id],
+            |row| row.get(0),
+        )
+        .optional()?;
     let status = match run.status {
         crate::models::RunStatus::Pending => SharedRunStatus::Queued,
-        crate::models::RunStatus::Running | crate::models::RunStatus::WaitingApproval => SharedRunStatus::Running,
+        crate::models::RunStatus::Running | crate::models::RunStatus::WaitingApproval => {
+            SharedRunStatus::Running
+        }
         crate::models::RunStatus::Success => SharedRunStatus::Success,
         crate::models::RunStatus::Cancelled => SharedRunStatus::Cancelled,
         crate::models::RunStatus::StoppedByGuard => SharedRunStatus::Timeout,
-        crate::models::RunStatus::Partial | crate::models::RunStatus::Failed | crate::models::RunStatus::Interrupted => SharedRunStatus::Failed,
+        crate::models::RunStatus::Partial
+        | crate::models::RunStatus::Failed
+        | crate::models::RunStatus::Interrupted => SharedRunStatus::Failed,
     };
     let now = Utc::now();
-    let duration_ms = run.finished_at.map(|finished| (finished - run.started_at).num_milliseconds().max(0) as u64);
-    let completed = run.step_results.iter().filter(|step| !matches!(step.status, crate::models::RunStatus::Pending | crate::models::RunStatus::Running | crate::models::RunStatus::WaitingApproval)).count();
-    let current = run.step_results.iter().find(|step| matches!(step.status, crate::models::RunStatus::Pending | crate::models::RunStatus::Running | crate::models::RunStatus::WaitingApproval)).map(|step| step.step_name.clone());
+    let duration_ms = run
+        .finished_at
+        .map(|finished| (finished - run.started_at).num_milliseconds().max(0) as u64);
+    let completed = run
+        .step_results
+        .iter()
+        .filter(|step| {
+            !matches!(
+                step.status,
+                crate::models::RunStatus::Pending
+                    | crate::models::RunStatus::Running
+                    | crate::models::RunStatus::WaitingApproval
+            )
+        })
+        .count();
+    let current = run
+        .step_results
+        .iter()
+        .find(|step| {
+            matches!(
+                step.status,
+                crate::models::RunStatus::Pending
+                    | crate::models::RunStatus::Running
+                    | crate::models::RunStatus::WaitingApproval
+            )
+        })
+        .map(|step| step.step_name.clone());
     let shared = SharedRun {
-        id: run.id.clone(), kind: SharedRunKind::Workflow, source_id: run.workflow_id.clone(), project_id,
-        discussion_id: None, status, started_at: Some(run.started_at), finished_at: run.finished_at,
-        duration_ms, result: Some(serde_json::json!({"progress":{"completed":completed,"total":run.step_results.len(),"current_label":current},"steps":run.step_results})),
-        diagnostic: None, created_at: run.started_at, updated_at: now,
+        id: run.id.clone(),
+        kind: SharedRunKind::Workflow,
+        source_id: run.workflow_id.clone(),
+        project_id,
+        discussion_id: None,
+        status,
+        started_at: Some(run.started_at),
+        finished_at: run.finished_at,
+        duration_ms,
+        result: Some(serde_json::json!({
+            "progress": {
+                "completed": completed,
+                "total": run.step_results.len(),
+                "current_label": current,
+            },
+            "steps": run.step_results,
+        })),
+        diagnostic: None,
+        created_at: run.started_at,
+        updated_at: now,
     };
     upsert(conn, &shared)
 }
@@ -125,7 +229,7 @@ mod tests {
     #[test]
     fn round_trips_measured_run_without_inventing_progress() {
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch("CREATE TABLE discussions(id TEXT PRIMARY KEY);")
+        conn.execute_batch("CREATE TABLE discussions(id TEXT PRIMARY KEY); CREATE TABLE projects(id TEXT PRIMARY KEY);")
             .unwrap();
         conn.execute_batch(include_str!("sql/155_shared_runs.sql"))
             .unwrap();
@@ -159,5 +263,49 @@ mod tests {
         conn.execute_batch(include_str!("sql/155_shared_runs.sql")).unwrap();
         conn.execute_batch("PRAGMA ignore_check_constraints=ON; INSERT INTO shared_runs(id,kind,source_id,status,created_at,updated_at) VALUES('bad','mystery','x','unknown','not-a-date','not-a-date');").unwrap();
         assert!(get(&conn, "bad").is_err());
+    }
+
+    fn run(id: &str, project_id: Option<&str>, discussion_id: Option<&str>) -> SharedRun {
+        let now = Utc::now();
+        SharedRun {
+            id: id.into(),
+            kind: SharedRunKind::QuickApi,
+            source_id: "qa-1".into(),
+            project_id: project_id.map(String::from),
+            discussion_id: discussion_id.map(String::from),
+            status: SharedRunStatus::Success,
+            started_at: Some(now),
+            finished_at: Some(now),
+            duration_ms: Some(1),
+            result: None,
+            diagnostic: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    /// A run belonging to project/discussion A must never be visible when a
+    /// client rehydrates by scoping to project/discussion B — this is the
+    /// isolation guarantee the shared list endpoint's scoping depends on.
+    #[test]
+    fn list_isolates_runs_across_projects_and_discussions() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE discussions(id TEXT PRIMARY KEY); CREATE TABLE projects(id TEXT PRIMARY KEY);").unwrap();
+        conn.execute_batch(include_str!("sql/155_shared_runs.sql")).unwrap();
+        conn.execute("INSERT INTO projects(id) VALUES('proj-a'),('proj-b')", [])
+            .unwrap();
+        conn.execute("INSERT INTO discussions(id) VALUES('disc-a'),('disc-b')", [])
+            .unwrap();
+        upsert(&conn, &run("run-a", Some("proj-a"), Some("disc-a"))).unwrap();
+        upsert(&conn, &run("run-b", Some("proj-b"), Some("disc-b"))).unwrap();
+
+        let by_project_a = list(&conn, None, None, Some("proj-a"), None, 50).unwrap();
+        assert_eq!(by_project_a.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), vec!["run-a"]);
+
+        let by_discussion_b = list(&conn, None, None, None, Some("disc-b"), 50).unwrap();
+        assert_eq!(by_discussion_b.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), vec!["run-b"]);
+
+        let cross_scope = list(&conn, None, None, Some("proj-a"), Some("disc-b"), 50).unwrap();
+        assert!(cross_scope.is_empty(), "a project A / discussion B combination that never co-occurred must return nothing");
     }
 }

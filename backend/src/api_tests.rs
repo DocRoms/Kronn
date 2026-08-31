@@ -5611,4 +5611,147 @@ mod tests {
             crate::models::AgentResumeJobStatus::Cancelled
         );
     }
+
+    // ─── KT-243: shared runs — scoping/isolation across project + discussion ──
+
+    async fn insert_test_project(state: &AppState, id: &str, name: &str) {
+        state
+            .db
+            .with_conn({
+                let id = id.to_string();
+                let name = name.to_string();
+                move |conn| {
+                    let now = chrono::Utc::now();
+                    let project = crate::models::Project {
+                        id,
+                        name,
+                        path: "/tmp/kt-243-test-project".into(),
+                        repo_url: None,
+                        token_override: None,
+                        ai_config: crate::models::AiConfigStatus {
+                            detected: false,
+                            configs: vec![],
+                        },
+                        audit_status: crate::models::AiAuditStatus::NoTemplate,
+                        ai_todo_count: 0,
+                        tech_debt_count: 0,
+                        needs_docs_migration: false,
+                        path_exists: true,
+                        write_access: None,
+                        mcp_sync_report: None,
+                        default_skill_ids: vec![],
+                        default_profile_id: None,
+                        briefing_notes: None,
+                        linked_repos: vec![],
+                        created_at: now,
+                        updated_at: now,
+                    };
+                    crate::db::projects::insert_project(conn, &project)?;
+                    Ok(())
+                }
+            })
+            .await
+            .unwrap();
+    }
+
+    async fn insert_test_shared_run(
+        state: &AppState,
+        id: &str,
+        project_id: Option<&str>,
+        discussion_id: Option<&str>,
+    ) {
+        let project_id = project_id.map(String::from);
+        let discussion_id = discussion_id.map(String::from);
+        state
+            .db
+            .with_conn({
+                let id = id.to_string();
+                move |conn| {
+                    let now = chrono::Utc::now();
+                    let run = crate::models::SharedRun {
+                        id,
+                        kind: crate::models::SharedRunKind::QuickApi,
+                        source_id: "qa-kt243".into(),
+                        project_id,
+                        discussion_id,
+                        status: crate::models::SharedRunStatus::Success,
+                        started_at: Some(now),
+                        finished_at: Some(now),
+                        duration_ms: Some(1),
+                        result: None,
+                        diagnostic: None,
+                        created_at: now,
+                        updated_at: now,
+                    };
+                    crate::db::shared_runs::upsert(conn, &run)
+                }
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn shared_runs_list_rejects_unknown_project_scope() {
+        let state = test_state();
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/runs?project_id=does-not-exist")
+            .body(Body::empty())
+            .unwrap();
+        let (status, body) = send(state, false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            !body["success"].as_bool().unwrap(),
+            "an unknown project_id scope must fail closed, not look like an empty-but-valid project"
+        );
+    }
+
+    #[tokio::test]
+    async fn shared_runs_list_rejects_unknown_discussion_scope() {
+        let state = test_state();
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/runs?discussion_id=does-not-exist")
+            .body(Body::empty())
+            .unwrap();
+        let (status, body) = send(state, false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            !body["success"].as_bool().unwrap(),
+            "an unknown discussion_id scope must fail closed, not look like an empty-but-valid discussion"
+        );
+    }
+
+    #[tokio::test]
+    async fn shared_runs_list_isolates_across_projects_and_discussions() {
+        let state = test_state();
+        insert_test_project(&state, "kt243-proj-a", "Project A").await;
+        insert_test_project(&state, "kt243-proj-b", "Project B").await;
+        insert_test_discussion(&state, "kt243-disc-a", "Disc A").await;
+        insert_test_discussion(&state, "kt243-disc-b", "Disc B").await;
+        insert_test_shared_run(&state, "kt243-run-a", Some("kt243-proj-a"), Some("kt243-disc-a")).await;
+        insert_test_shared_run(&state, "kt243-run-b", Some("kt243-proj-b"), Some("kt243-disc-b")).await;
+
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/runs?project_id=kt243-proj-a")
+            .body(Body::empty())
+            .unwrap();
+        let (status, body) = send(state.clone(), false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        let runs = body["data"].as_array().unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0]["id"].as_str().unwrap(), "kt243-run-a");
+
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/runs?discussion_id=kt243-disc-b")
+            .body(Body::empty())
+            .unwrap();
+        let (status, body) = send(state, false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        let runs = body["data"].as_array().unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0]["id"].as_str().unwrap(), "kt243-run-b");
+    }
 }
