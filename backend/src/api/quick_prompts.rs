@@ -510,6 +510,9 @@ pub async fn batch_run(
             "Isolated workspace mode requires a project_id (the Quick Prompt or the batch request must target a git-backed project)"
         ));
     }
+    // Captured before the `move` closure below takes ownership of `qp`/`req` —
+    // used to stamp the shared runs created per child discussion.
+    let shared_project_id = req.project_id.clone().or_else(|| qp.project_id.clone());
 
     let outcome = match state
         .db
@@ -535,7 +538,12 @@ pub async fn batch_run(
         .await
     {
         Ok(o) => o,
-        Err(e) => return Json(ApiResponse::err(format!("Failed to create batch: {}", e))),
+        Err(e) => {
+            let now = Utc::now();
+            let run = crate::models::SharedRun { id: Uuid::new_v4().to_string(), kind: crate::models::SharedRunKind::QuickPrompt, source_id: qp_id.clone(), project_id: shared_project_id, discussion_id: None, status: crate::models::SharedRunStatus::PreflightFailed, started_at: None, finished_at: Some(now), duration_ms: Some(0), result: None, diagnostic: Some(e.to_string()), created_at: now, updated_at: now };
+            let _ = crate::api::shared_runs::persist_and_broadcast(&state, run).await;
+            return Json(ApiResponse::err(format!("Failed to create batch: {}", e)));
+        }
     };
 
     tracing::info!(
@@ -545,6 +553,29 @@ pub async fn batch_run(
         qp_name_for_log,
         batch_name_for_log
     );
+
+    // One durable shared run per spawned discussion — QP's "run" is the
+    // creation + dispatch of its child discussion; the ongoing agent turn
+    // is tracked live by the discussion itself, not duplicated here.
+    for discussion_id in &outcome.discussion_ids {
+        let now = Utc::now();
+        let run = crate::models::SharedRun {
+            id: Uuid::new_v4().to_string(),
+            kind: crate::models::SharedRunKind::QuickPrompt,
+            source_id: qp_id.clone(),
+            project_id: shared_project_id.clone(),
+            discussion_id: Some(discussion_id.clone()),
+            status: crate::models::SharedRunStatus::Success,
+            started_at: Some(now),
+            finished_at: Some(now),
+            duration_ms: Some(0),
+            result: None,
+            diagnostic: None,
+            created_at: now,
+            updated_at: now,
+        };
+        let _ = crate::api::shared_runs::persist_and_broadcast(&state, run).await;
+    }
 
     Json(ApiResponse::ok(BatchRunResponse {
         run_id: outcome.run_id,
@@ -759,6 +790,8 @@ pub async fn compare_agents(
 
     let batch_total = items.len() as u32;
     let qp_name_for_log = qp.name.clone();
+    // Captured before the `move` closure below takes ownership of `qp`/`req`.
+    let shared_project_id = req.project_id.clone().or_else(|| qp.project_id.clone());
     let outcome = match state
         .db
         .with_conn(move |conn| {
@@ -784,10 +817,13 @@ pub async fn compare_agents(
     {
         Ok(o) => o,
         Err(e) => {
+            let now = Utc::now();
+            let run = crate::models::SharedRun { id: Uuid::new_v4().to_string(), kind: crate::models::SharedRunKind::QuickPrompt, source_id: qp_id.clone(), project_id: shared_project_id, discussion_id: None, status: crate::models::SharedRunStatus::PreflightFailed, started_at: None, finished_at: Some(now), duration_ms: Some(0), result: None, diagnostic: Some(e.to_string()), created_at: now, updated_at: now };
+            let _ = crate::api::shared_runs::persist_and_broadcast(&state, run).await;
             return Json(ApiResponse::err(format!(
                 "Failed to create compare-agents batch: {}",
                 e
-            )))
+            )));
         }
     };
 
@@ -797,6 +833,26 @@ pub async fn compare_agents(
         batch_total,
         qp_name_for_log,
     );
+
+    for discussion_id in &outcome.discussion_ids {
+        let now = Utc::now();
+        let run = crate::models::SharedRun {
+            id: Uuid::new_v4().to_string(),
+            kind: crate::models::SharedRunKind::QuickPrompt,
+            source_id: qp_id.clone(),
+            project_id: shared_project_id.clone(),
+            discussion_id: Some(discussion_id.clone()),
+            status: crate::models::SharedRunStatus::Success,
+            started_at: Some(now),
+            finished_at: Some(now),
+            duration_ms: Some(0),
+            result: None,
+            diagnostic: None,
+            created_at: now,
+            updated_at: now,
+        };
+        let _ = crate::api::shared_runs::persist_and_broadcast(&state, run).await;
+    }
 
     Json(ApiResponse::ok(BatchRunResponse {
         run_id: outcome.run_id,

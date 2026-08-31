@@ -203,6 +203,7 @@ import type {
   TaskExecutionObservability,
   ValidationSpec,
   ExternalApiConnectionPreset,
+  SharedRun,
 } from '../types/generated';
 import type { DiscoverKeysResponse, TestModeEnterResult, TestModeExitResponse } from '../types/extensions';
 
@@ -2955,6 +2956,19 @@ export const userContext = {
     api<UserContextFile>('PUT', `/user-context/${encodeURIComponent(name)}`, { content }),
   delete: (name: string) =>
     api<void>('DELETE', `/user-context/${encodeURIComponent(name)}`),
+};
+
+export const runsApi = {
+  get: (id: string) => api<SharedRun>('GET', `/runs/${encodeURIComponent(id)}`),
+  list: (filters: { kind?: string; sourceId?: string; projectId?: string; discussionId?: string; limit?: number } = {}) => {
+    const query = new URLSearchParams();
+    if (filters.kind) query.set('kind', filters.kind);
+    if (filters.sourceId) query.set('source_id', filters.sourceId);
+    if (filters.projectId) query.set('project_id', filters.projectId);
+    if (filters.discussionId) query.set('discussion_id', filters.discussionId);
+    if (filters.limit) query.set('limit', String(filters.limit));
+    return api<SharedRun[]>('GET', `/runs${query.size ? `?${query}` : ''}`);
+  },
 };
 
 // ─── Continual Learning (0.10.0) ───────────────────────────────────────────────

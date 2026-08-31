@@ -296,27 +296,18 @@ export function PagesPage({
     if (!workflow.enabled || runningWorkflowId) return;
     setRunningWorkflowId(workflow.id);
     setWorkflowRunFeedback(null);
-    setPageRunCard({ id: workflow.id, kind: 'workflow', status: 'queued', freshness: 'live' });
+    setPageRunCard({ id: workflow.id, kind: 'workflow', status: 'queued', freshness: 'unavailable' });
     await workflowsApi.triggerStream(
       workflow.id,
-      progress => setPageRunCard(current => current ? {
-        ...current,
-        status: 'running',
-        startedAt: current.startedAt ?? new Date().toISOString(),
-        progress: { completed: progress.step_index, total: progress.total_steps, currentLabel: progress.step_name },
-      } : current),
+      () => undefined,
       () => undefined,
       result => {
         setRunningWorkflowId(null);
-        setPageRunCard(current => current ? {
-          ...current,
-          status: result.status === 'Success' ? 'success' : 'failed',
-          finishedAt: new Date().toISOString(),
-        } : current);
+        setPageRunCard(current => current);
         setWorkflowRunFeedback({
           workflowId: workflow.id,
-          kind: result.status === 'Completed' ? 'success' : 'error',
-          message: result.status === 'Completed'
+          kind: result.status === 'Success' ? 'success' : 'error',
+          message: result.status === 'Success'
             ? t('pages.workflowRunSuccess')
             : t('pages.workflowRunFailed', result.status),
         });
@@ -334,7 +325,7 @@ export function PagesPage({
         ...current,
         id: runId,
         status: 'running',
-        startedAt: new Date().toISOString(),
+        freshness: 'rehydrated',
       } : current),
     );
   }, [loadDetail, runningWorkflowId, selectedId, t]);
@@ -961,7 +952,7 @@ export function PagesPage({
                         </span>
                       )) : <small>{t('pages.noLinkedWorkflows')}</small>}
                     </div>
-                    {pageRunCard && <RunStatusCard model={pageRunCard} />}
+                    {pageRunCard && <RunStatusCard runId={pageRunCard.id === runningWorkflowId ? undefined : pageRunCard.id} model={pageRunCard} />}
 
                     <div className="live-pages-dataset-sizes">
                       <div><Database size={12} /><span>{t('pages.datasetStorage')}</span></div>

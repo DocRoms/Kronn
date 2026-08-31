@@ -1,7 +1,10 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, CheckCircle2, Clock3, ExternalLink, Loader2, XCircle } from 'lucide-react';
 import { useT } from '../lib/I18nContext';
 import { formatDurationCompact } from '../lib/kronnToolParser';
+import { runsApi } from '../lib/api';
+import { useWebSocket } from '../hooks/useWebSocket';
+import type { SharedRun } from '../types/generated';
 import './RunStatusCard.css';
 
 export type RunStatusCardKind = 'quick_prompt' | 'quick_api' | 'quick_exec' | 'workflow';
@@ -70,16 +73,50 @@ function resultText(result: unknown): string | null {
   }
 }
 
-export function RunStatusCard({ model, compact = false }: { model: RunStatusCardModel; compact?: boolean }) {
+function serverModel(run: SharedRun, freshness: RunStatusCardModel['freshness']): RunStatusCardModel {
+  const result = run.result as { progress?: { completed: number; total: number; current_label?: string | null } } | null;
+  return {
+    id: run.id, kind: run.kind, status: run.status, startedAt: run.started_at,
+    finishedAt: run.finished_at, durationMs: run.duration_ms,
+    progress: result?.progress ? { ...result.progress, currentLabel: result.progress.current_label } : null,
+    result: run.result, diagnostic: run.diagnostic, freshness,
+    href: run.discussion_id ? `/discussions/${run.discussion_id}` : run.kind === 'workflow' ? `/workflows/${run.source_id}?run=${run.id}` : `/workflows?kind=${run.kind}&source=${run.source_id}&run=${run.id}`,
+  };
+}
+
+export function RunStatusCard({ model: initialModel, runId, compact = false }: { model?: RunStatusCardModel; runId?: string; compact?: boolean }) {
   const { t } = useT();
+  const rootRef = useRef<HTMLElement>(null);
+  const [visible, setVisible] = useState(true);
+  const [hydrated, setHydrated] = useState<RunStatusCardModel | null>(null);
+  const model = hydrated ?? initialModel;
   const [now, setNow] = useState(() => Date.now());
-  const active = isActive(model.status);
+  const active = model ? isActive(model.status) : false;
 
   useEffect(() => {
-    if (!active || !model.startedAt) return;
+    const node = rootRef.current;
+    if (!node || typeof IntersectionObserver === 'undefined') return;
+    const observer = new IntersectionObserver(entries => setVisible(entries[0]?.isIntersecting ?? false), { rootMargin: '200px' });
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, []);
+  const hydrate = useCallback(async (freshness: RunStatusCardModel['freshness']) => {
+    if (!runId || !visible) return;
+    try { setHydrated(serverModel(await runsApi.get(runId), freshness)); }
+    catch { setHydrated(current => current ? { ...current, freshness: 'unavailable' } : null); }
+  }, [runId, visible]);
+  useEffect(() => { void hydrate('rehydrated'); }, [hydrate]);
+  useWebSocket(message => {
+    if (visible && runId && message.type === 'shared_run_updated' && message.run_id === runId) void hydrate('live');
+  }, () => { if (visible && runId) void hydrate('rehydrated'); }, Boolean(runId && visible && active));
+
+  useEffect(() => {
+    if (!visible || !active || !model?.startedAt) return;
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
-  }, [active, model.startedAt]);
+  }, [active, model?.startedAt, visible]);
+
+  if (!model) return <section ref={rootRef} className="run-status-card" data-testid="run-status-card"><span>{t('run.freshness.unavailable')}</span></section>;
 
   const duration = measuredDuration(model, now);
   const progress = model.progress;
@@ -89,7 +126,7 @@ export function RunStatusCard({ model, compact = false }: { model: RunStatusCard
   const result = useMemo(() => resultText(model.result), [model.result]);
 
   return (
-    <section className="run-status-card" data-status={model.status} data-kind={model.kind} data-testid="run-status-card">
+    <section ref={rootRef} className="run-status-card" data-status={model.status} data-kind={model.kind} data-testid="run-status-card">
       <div className="run-status-card-header">
         <span className="run-status-card-kind">{t(`run.kind.${model.kind}`)}</span>
         <span className="run-status-card-status" data-status={model.status}>
