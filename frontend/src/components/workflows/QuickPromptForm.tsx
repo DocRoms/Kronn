@@ -111,6 +111,7 @@ export function QuickPromptForm({
       const existing = new Map(prev.map(v => [v.name, v]));
       return detected.map(n => existing.get(n) ?? {
         name: n, label: n, placeholder: '', description: null, required: true,
+        source: 'user_input', source_ref: null, allow_manual_override: false,
       });
     });
   }, [template]);

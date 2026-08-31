@@ -470,7 +470,7 @@ describe('WorkflowsPage', () => {
       id: 'qp-summary', name: 'Summarize release', icon: '✍️', description: 'Résumé de livraison',
       pinned: false,
       prompt_template: 'Résume {{changes}}', project_id: null, agent: 'Codex', tier: 'default',
-      variables: [{ name: 'changes', label: 'Changements', placeholder: '', description: null, required: true }],
+      variables: [{ name: 'changes', label: 'Changements', placeholder: '', description: null, required: true, source: 'user_input', source_ref: null, allow_manual_override: false }],
       skill_ids: [], profile_ids: [], directive_ids: [],
       created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z',
     };
@@ -1457,6 +1457,9 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
         placeholder: 'feat: ...',
         description: null,
         required: true,
+        source: 'user_input',
+        source_ref: null,
+        allow_manual_override: false,
       }],
       agent: 'Codex',
       project_id: null,

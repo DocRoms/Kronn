@@ -3712,6 +3712,8 @@ const zh: TranslationDict = {
   "wiz.removeRollbackStep": "移除此回滚步骤",
   "wf.launchModalTitle": "启动「{name}」",
   "wf.launchModalHint": "填写下方变量——它们将在步骤提示中变为`{{name}}`。",
+  "wf.launchInputsTitle": "待填写",
+  "wf.launchProvidedTitle": "由项目提供",
   "wf.launchModalRequired": "缺少必需的变量：{names}",
   "wf.launchModalPattern": "「{name}」不符合预期格式（{pattern}）",
   "wf.triggerFailed": "启动失败：{0}",

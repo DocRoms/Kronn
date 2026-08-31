@@ -2,7 +2,9 @@ import { describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { I18nProvider } from '../../lib/I18nContext';
 
-const reveal = vi.fn().mockResolvedValue('temporary-secret');
+// `vi.mock` is hoisted above module-level declarations, so the mock fn must
+// be created inside `vi.hoisted` to be available when the factory runs.
+const { reveal } = vi.hoisted(() => ({ reveal: vi.fn().mockResolvedValue('temporary-secret') }));
 vi.mock('../../lib/api', async () => {
   const real = await vi.importActual<object>('../../lib/api');
   return {

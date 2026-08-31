@@ -45,6 +45,7 @@ export const API_NAMESPACES = [
   'quickPrompts',
   'quickApis',
   'quickExecs',
+  'executionVariables',
   'skills',
   'profiles',
   'directives',
@@ -101,6 +102,7 @@ interface DefaultMock {
   quickPrompts: Record<string, AnyFn>;
   quickApis: Record<string, AnyFn>;
   quickExecs: Record<string, AnyFn>;
+  executionVariables: Record<string, AnyFn>;
   skills: Record<string, AnyFn>;
   profiles: Record<string, AnyFn>;
   directives: Record<string, AnyFn>;
@@ -496,6 +498,19 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       run: resolve({ success: true, duration_ms: 0, data: null, stdout: '', stderr: '', error: null }),
       export: vi.fn(),
       import: resolve({}),
+    },
+
+    executionVariables: {
+      metadata: resolve({
+        run_kind: 'quick_prompt',
+        run_id: '',
+        resolved_at: null,
+        snapshot_id: null,
+        retention_expires_at: null,
+        variables: [],
+      }),
+      reveal: resolve(''),
+      extend: resolve(undefined),
     },
 
     rtk: {
