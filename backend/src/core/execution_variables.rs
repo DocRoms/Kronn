@@ -305,6 +305,33 @@ mod tests {
     }
 
     #[test]
+    fn absent_project_and_missing_source_group_every_preflight_failure() {
+        // DoD 9: an absent project / missing environment source must fail the
+        // preflight for every required reference at once, so the user fixes all
+        // of them before a single relaunch — never dispatch on a partial set.
+        let mut second = env_var();
+        second.name = "secret".into();
+        second.label = "Secret".into();
+        second.source_ref = Some("<env.SECRET>".into());
+        let declarations = vec![env_var(), second];
+        let supplied = HashMap::new();
+        let context = HashMap::new();
+        // No project / empty environment: nothing resolves.
+        let failures = resolve(
+            &declarations,
+            &supplied,
+            &context,
+            &HashMap::new(),
+            None,
+            "project",
+        )
+        .unwrap_err();
+        assert_eq!(failures.len(), 2);
+        assert!(failures.iter().all(|f| f.cause == "missing_source"));
+        assert!(failures.iter().all(|f| f.project_id.is_none()));
+    }
+
+    #[test]
     fn resolves_current_value_and_rejects_ambiguous_sources() {
         let supplied = HashMap::new();
         let context = HashMap::new();
