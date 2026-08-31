@@ -70,7 +70,7 @@ class AzureDockerWrapperTests(unittest.TestCase):
 
 
 class E2eContainerWorkflowTests(unittest.TestCase):
-    def test_ci_jobs_have_a_hard_thirty_minute_timeout(self):
+    def test_ci_jobs_have_hard_bounded_timeouts(self):
         workflow = CI_WORKFLOW.read_text()
         jobs = (
             "require-ci-label", "test-backend", "test-backend-coverage",
@@ -87,7 +87,8 @@ class E2eContainerWorkflowTests(unittest.TestCase):
             )
             self.assertIsNotNone(match, job)
             section = match.group("section")
-            self.assertIn("timeout-minutes: 30", section, job)
+            expected_timeout = 35 if job == "test-backend" else 30
+            self.assertIn(f"timeout-minutes: {expected_timeout}", section, job)
 
     def test_backend_slo_observer_is_non_blocking_and_uses_hot_cold_measurements(self):
         workflow = CI_WORKFLOW.read_text()
@@ -116,6 +117,7 @@ class E2eContainerWorkflowTests(unittest.TestCase):
             workflow,
             re.MULTILINE | re.DOTALL,
         ).group("section")
+        self.assertIn("timeout-minutes: 35", backend)
         self.assertIn("target/debug/.fingerprint", backend)
         self.assertIn("target/debug/build", backend)
         self.assertIn("target/debug/deps", backend)
