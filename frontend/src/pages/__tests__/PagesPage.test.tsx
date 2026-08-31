@@ -458,11 +458,15 @@ describe('PagesPage', () => {
       expect.any(Function),
       expect.any(Function),
       expect.any(Function),
+      undefined,
+      undefined,
+      undefined,
+      expect.any(Function),
     ));
     expect(sync).toHaveAttribute('data-state', 'running');
     expect(sync.querySelector('.lucide-loader-circle')).toBeInTheDocument();
 
-    await act(async () => { finishRun?.({ status: 'Completed' }); });
+    await act(async () => { finishRun?.({ status: 'Success' }); });
     expect(sync).toHaveAttribute('data-state', 'success');
     expect(screen.getByTestId('live-page-sync-success-icon')).toBeInTheDocument();
     expect(screen.getByRole('status')).toHaveTextContent('pages.workflowRunSuccess');
