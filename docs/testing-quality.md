@@ -44,13 +44,18 @@ authoritative job graph.
 
 ## Backend CI timing SLO
 
-`test-backend` is the measured backend critical-path job: formatting, clippy,
-and the Rust test suite. It stages the bounded cache immediately after that
-test verdict. Coverage, generated-type drift and project-specific
-lint/budget checks run in `test-backend-coverage` and `test-backend-quality`;
+`test-backend` is the measured backend critical-path job: formatting and the
+Rust test suite. It stages the bounded cache immediately after that test
+verdict. Clippy, coverage, generated-type drift and project-specific
+lint/budget checks run in `test-backend-quality` and `test-backend-coverage`;
 the frontend build and desktop compilation run in `test-desktop-compile`.
 Those jobs execute in parallel and all remain blocking through
-`ci-quality-gates`. [src: file: .github/workflows/ci-test.yml:52-265] [src: file: .github/workflows/ci-test.yml:713-740]
+`ci-quality-gates`. Clippy previously ran inside `test-backend` itself, but a
+real warm run still measured 17m41 against the 15-minute SLO with it inline
+([run 33368662050](https://github.com/DocRoms/Kronn/actions/runs/33368662050));
+moving it to the parallel, still-required `test-backend-quality` gate keeps
+the lint blocking without holding it on the measured path.
+[src: file: .github/workflows/ci-test.yml:52-265] [src: file: .github/workflows/ci-test.yml:750-778]
 
 The backend performance observer publishes the duration for every eligible run
 and reports a warning rather than failing a green functional run when the hot
@@ -77,15 +82,22 @@ statistics or infer timings from a different runner class.
 
 | Measurement | Run | Result | Job/step durations | Median | P95 | Consecutive SLO breaches |
 | --- | --- | --- | --- | --- | --- | --- |
-| Before — cold | [GitHub Actions run 33354549462](https://github.com/DocRoms/Kronn/actions/runs/33354549462) | Failed at a separate flaky test; not an SLO sample | `test-backend`: 19m 46s before coverage/desktop completed; disk cleanup 1m 54s, clippy 3m 03s, library tests 14m 33s | Unavailable | Unavailable | Unavailable |
-| Before — warmup | [GitHub Actions run 33354667035](https://github.com/DocRoms/Kronn/actions/runs/33354667035) | Warmup evidence only; no cache-hit duration supplied | Library tests passed; coverage and desktop remained sequential, so the cache staging step could be pre-empted by the 30-minute timeout | Unavailable | Unavailable | Unavailable |
-| After — cold | Pending protected-branch run after this graph change | Required before accepting SLO evidence | Pending | Unavailable | Unavailable | Unavailable |
-| After — warmup | Pending protected-branch run after this graph change | Must complete and save the bounded cache | Pending | Unavailable | Unavailable | Unavailable |
-| After — hot | Pending protected-branch run after this graph change | Must record an explicit compiled-cache hit | Pending | Unavailable | Unavailable | Unavailable |
+| Before — cold (monolithic job) | [GitHub Actions run 33354549462](https://github.com/DocRoms/Kronn/actions/runs/33354549462) | Failed at a separate flaky test; not an SLO sample | `test-backend`: 19m 46s before coverage/desktop completed; disk cleanup 1m 54s, clippy 3m 03s, library tests 14m 33s | Unavailable | Unavailable | Unavailable |
+| Before — warmup (monolithic job) | [GitHub Actions run 33354667035](https://github.com/DocRoms/Kronn/actions/runs/33354667035) | Warmup evidence only; no cache-hit duration supplied | Library tests passed; coverage and desktop remained sequential, so the cache staging step could be pre-empted by the 30-minute timeout | Unavailable | Unavailable | Unavailable |
+| After split, before clippy move — cold | [GitHub Actions run 33358154793](https://github.com/DocRoms/Kronn/actions/runs/33358154793) | Green | `test-backend` (format, clippy, tests, parallel coverage/quality/desktop gates); cold, no compiled-cache restore | Unavailable (single sample) | Unavailable (single sample) | 0 (not a hot sample) |
+| After split, before clippy move — warmup | [GitHub Actions run 33358156450](https://github.com/DocRoms/Kronn/actions/runs/33358156450) | Green; bounded cache saved | `test-backend` warmup/miss; staged the compiled-artifact cache for a subsequent hot run | Unavailable (single sample) | Unavailable (single sample) | 0 (warmup, excluded from hot history) |
+| After split, before clippy move — hot | [GitHub Actions run 33368662050](https://github.com/DocRoms/Kronn/actions/runs/33368662050) | Green; explicit compiled-cache hit | `test-backend`: **17m 41s total, still a 2m 41s SLO breach** with format + clippy + tests sharing one job | Unavailable (single sample) | Unavailable (single sample) | 1 |
+| After clippy moved to `test-backend-quality` — cold/warmup/hot | Pending protected-branch run after this change | Required before accepting the corrected SLO evidence | `test-backend` now measures only format + tests; clippy runs in parallel in `test-backend-quality` | Unavailable | Unavailable | Unavailable |
 
-The two before rows are reported from the review evidence; the supplied data
-does not contain a successful current cold measurement or a hot cache-hit
-duration, so no median or p95 is claimed. [src: user: 2026-08-31: review reports GitHub Actions runs 33354549462 and 33354667035]
+The three "after split" rows are the real Actions evidence from the parallel
+job graph landed for this task, confirming the split gates all execute in
+parallel and the aggregate stays green. The hot run still exceeded the
+15-minute SLO by 2m 41s with clippy inline, which is why clippy is now moved
+to the parallel `test-backend-quality` gate; the resulting cold/warmup/hot
+measurements for that final change are pending the next protected-branch run,
+since this worker cannot push or trigger Actions itself.
+[src: user: 2026-08-31: review reports GitHub Actions runs 33354549462 and 33354667035]
+[src: user: 2026-08-31: reassignment reports GitHub Actions runs 33358154793, 33358156450 and 33368662050]
 
 Every job in the CI workflow has a 30-minute technical timeout. The required
 aggregate always runs, includes `require-ci-label`, and fails when the label is
@@ -93,7 +105,7 @@ removed or any other gate is skipped or fails. A timeout is a functional
 failure; the SLO observer does not retry, sleep, or mask it. An SLO breach is a
 warning, while missing, duplicate, incomplete, or contradictory measurement
 evidence fails the observer instead of publishing a misleading timing.
-[src: file: .github/workflows/ci-test.yml:37-55] [src: file: .github/workflows/ci-test.yml:713-740]
+[src: file: .github/workflows/ci-test.yml:37-55] [src: file: .github/workflows/ci-test.yml:750-778]
 
 ## Test placement
 

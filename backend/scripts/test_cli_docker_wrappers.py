@@ -133,12 +133,25 @@ class E2eContainerWorkflowTests(unittest.TestCase):
         )
         self.assertNotIn("cargo llvm-cov", backend)
         self.assertNotIn("cargo check — desktop crate", backend)
+        # KT-533 — clippy moved off the measured critical path: a warm
+        # `test-backend` run still exceeded the 15-minute SLO (17m41 on
+        # https://github.com/DocRoms/Kronn/actions/runs/33368662050) with
+        # clippy inline. It now runs in the parallel, still-required
+        # `test-backend-quality` gate instead of being removed.
+        self.assertNotIn("cargo clippy", backend)
         coverage = re.search(
             r"^  test-backend-coverage:\n(?P<section>.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)",
             workflow,
             re.MULTILINE | re.DOTALL,
         ).group("section")
         self.assertIn("cargo llvm-cov — enforce coverage floor", coverage)
+        quality = re.search(
+            r"^  test-backend-quality:\n(?P<section>.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)",
+            workflow,
+            re.MULTILINE | re.DOTALL,
+        ).group("section")
+        self.assertIn("components: clippy", quality)
+        self.assertIn("cargo clippy --all-targets -- -D warnings", quality)
         desktop = re.search(
             r"^  test-desktop-compile:\n(?P<section>.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)",
             workflow,
