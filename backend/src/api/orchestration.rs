@@ -16608,13 +16608,16 @@ mod tests {
         let (first, second) = tokio::join!(first, second);
         let first = first.unwrap().0;
         let second = second.unwrap().0;
-        assert!(
-            first.success || second.success,
-            "one approval must be accepted"
-        );
-        assert!(
-            first.success || second.error_code.as_deref() == Some("conflict"),
-            "the competing retry must either win or observe the durable claim"
+        let outcomes = [&first, &second];
+        let accepted = outcomes.iter().filter(|response| response.success).count();
+        let conflicts = outcomes
+            .iter()
+            .filter(|response| response.error_code.as_deref() == Some("conflict"))
+            .count();
+        assert_eq!(accepted, 1, "exactly one approval must be accepted");
+        assert_eq!(
+            conflicts, 1,
+            "the competing retry must observe the durable claim"
         );
 
         let terminal = wait_for_execution_status(&db, &exec_id, TaskExecutionStatus::Done).await;
