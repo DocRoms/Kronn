@@ -1523,6 +1523,7 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
                 .delete(api::quick_execs::delete),
         )
         .route("/api/quick-execs/{id}/run", post(api::quick_execs::run))
+        .route("/api/runs", get(api::shared_runs::list))
         .route("/api/runs/{id}", get(api::shared_runs::get))
         .route(
             "/api/quick-execs/{id}/export",

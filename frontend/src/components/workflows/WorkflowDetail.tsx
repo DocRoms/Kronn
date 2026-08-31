@@ -2361,7 +2361,7 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, onChangeSt
               <ChevronRight size={12} className={expanded ? 'wf-chevron-rotated' : 'wf-chevron'} />
             </button>
             {expanded && (<>
-            <RunStatusCard model={workflowRunStatusCardModel(run)} />
+            <RunStatusCard runId={run.id} model={workflowRunStatusCardModel(run)} />
             <RunDetail
               run={run}
               workflowSteps={workflow.steps}

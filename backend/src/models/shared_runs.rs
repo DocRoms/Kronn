@@ -31,6 +31,7 @@ pub struct SharedRun {
     pub id: String,
     pub kind: SharedRunKind,
     pub source_id: String,
+    pub project_id: Option<String>,
     pub discussion_id: Option<String>,
     pub status: SharedRunStatus,
     pub started_at: Option<DateTime<Utc>>,

@@ -3617,15 +3617,16 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                       )}
                       {launchingQA?.id === qa.id && (launchingQARun || launchQAResult) && (
                         <RunStatusCard
-                          model={{
+                          runId={launchQAResult?.runId}
+                          model={!launchQAResult ? {
                             id: launchQAResult?.runId ?? qa.id,
                             kind: 'quick_api',
-                            status: launchingQARun ? 'running' : launchQAResult?.ok ? 'success' : 'failed',
+                            status: 'queued',
                             durationMs: launchQAResult?.durationMs ?? null,
                             result: launchQAResult?.ok ? launchQAResult.payload : null,
                             diagnostic: launchQAResult?.ok ? null : launchQAResult?.error ?? null,
                             freshness: 'unavailable',
-                          } satisfies RunStatusCardModel}
+                          } satisfies RunStatusCardModel : undefined}
                         />
                       )}
                     </div>
@@ -3794,7 +3795,8 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                           )}
                           {(runQEState.busy || runQEState.error || runQEState.data !== null) && (
                             <RunStatusCard
-                              model={{
+                              runId={runQEState.runId ?? undefined}
+                              model={!runQEState.runId ? {
                                 id: runQEState.runId ?? quickExec.id,
                                 kind: 'quick_exec',
                                 status: runQEState.busy ? 'running' : runQEState.error ? 'failed' : 'success',
@@ -3802,7 +3804,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                                 result: runQEState.data,
                                 diagnostic: runQEState.error,
                                 freshness: 'unavailable',
-                              } satisfies RunStatusCardModel}
+                              } satisfies RunStatusCardModel : undefined}
                             />
                           )}
                         </div>

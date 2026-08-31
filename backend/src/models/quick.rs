@@ -477,6 +477,7 @@ pub struct BatchRunQuickApiRequest {
 #[derive(Debug, Serialize, TS)]
 #[ts(export)]
 pub struct BatchRunQuickApiResponse {
+    pub run_id: String,
     /// Overall status: `OK` (all succeeded), `PARTIAL` (some failed), `ERROR` (all failed).
     pub status: String,
     pub duration_ms: u64,

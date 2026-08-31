@@ -733,7 +733,7 @@ concurrent_limit?: number | null, };
  * envelope produced by the BatchApiCall executor — the frontend renders
  * `envelope.data.items[]` as a per-item result table.
  */
-export type BatchRunQuickApiResponse = {
+export type BatchRunQuickApiResponse = { run_id: string,
 /**
  * Overall status: `OK` (all succeeded), `PARTIAL` (some failed), `ERROR` (all failed).
  */
@@ -4901,7 +4901,7 @@ export type SetupStep = "Agents" | "ScanPaths" | "Detection" | "Complete";
 
 export type ShareDiscussionRequest = { contact_ids: Array<string>, };
 
-export type SharedRun = { id: string, kind: SharedRunKind, source_id: string, discussion_id: string | null, status: SharedRunStatus, started_at: string | null, finished_at: string | null, duration_ms: number | null, result: unknown, diagnostic: string | null, created_at: string, updated_at: string, };
+export type SharedRun = { id: string, kind: SharedRunKind, source_id: string, project_id: string | null, discussion_id: string | null, status: SharedRunStatus, started_at: string | null, finished_at: string | null, duration_ms: number | null, result: unknown, diagnostic: string | null, created_at: string, updated_at: string, };
 
 export type SharedRunKind = "quick_prompt" | "quick_api" | "quick_exec" | "workflow";
 
