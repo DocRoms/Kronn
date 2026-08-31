@@ -257,7 +257,7 @@ export type AgentResumeJobStatus = "pending" | "running" | "completed" | "failed
  */
 export type AgentResumeJobView = { id: string, discussion_id: string, target_agent: AgentType, source_dispatch_job_id: string | null, task_execution_id: string | null, quick_exec_id: string | null, kind: AgentResumeJobKind, status: AgentResumeJobStatus, reason: string, scheduled_at: string, chain_depth: number, wake_budget: number, watchdog_redispatches: number, completion_dispatch_id: string | null, result: QuickExecResult | null, failure_kind: AgentResumeFailureKind | null, started_at: string | null, completed_at: string | null, last_error: string | null, created_at: string, updated_at: string, };
 
-export type AgentsConfig = { claude_code: AgentConfig, codex: AgentConfig, gemini_cli: AgentConfig, kiro: AgentConfig, vibe: AgentConfig, copilot_cli: AgentConfig, ollama: AgentConfig, lite_llm: AgentConfig, nvidia: AgentConfig,
+export type AgentsConfig = { claude_code: AgentConfig, codex: AgentConfig, open_code: AgentConfig, gemini_cli: AgentConfig, kiro: AgentConfig, vibe: AgentConfig, copilot_cli: AgentConfig, ollama: AgentConfig, lite_llm: AgentConfig, nvidia: AgentConfig,
 /**
  * Per-agent model tier overrides (Economy/Reasoning model names).
  */
@@ -273,7 +273,7 @@ model?: string | null,
  */
 tier?: ModelTier | null, reasoning_effort?: string | null, max_tokens?: number | null, };
 
-export type AgentType = "ClaudeCode" | "Codex" | "Vibe" | "GeminiCli" | "Kiro" | "CopilotCli" | "Ollama" | "LiteLlm" | "Nvidia" | "Custom";
+export type AgentType = "ClaudeCode" | "Codex" | "OpenCode" | "Vibe" | "GeminiCli" | "Kiro" | "CopilotCli" | "Ollama" | "LiteLlm" | "Nvidia" | "Custom";
 
 export type AgentUsageSummary = { agent_type: string, total_tokens: number, message_count: number, by_project: Array<AgentProjectUsage>, };
 
@@ -733,7 +733,7 @@ concurrent_limit?: number | null, };
  * envelope produced by the BatchApiCall executor — the frontend renders
  * `envelope.data.items[]` as a per-item result table.
  */
-export type BatchRunQuickApiResponse = {
+export type BatchRunQuickApiResponse = { run_id: string,
 /**
  * Overall status: `OK` (all succeeded), `PARTIAL` (some failed), `ERROR` (all failed).
  */
@@ -2048,6 +2048,64 @@ cli_billable_tokens: number | null, cli_sessions: number, cli_sessions_measured:
  */
 cli_sessions_unmeasured: number, };
 
+/**
+ * Where the bytes of one discussion live, ordered by recoverability.
+ */
+export type DiscussionWeight = { discussion_id: string,
+/**
+ * Attachment bytes held on disk. Reclaimable without losing the thread.
+ */
+disk_bytes: number,
+/**
+ * Extracted document text kept in the database. Reclaimable, but the
+ * document search over those files goes with it.
+ */
+extracted_text_bytes: number,
+/**
+ * Message content bytes. Not reclaimable without losing conversation.
+ */
+message_bytes: number, };
+
+/**
+ * Sidebar weight indicator settings.
+ *
+ * Deliberately not an `Option`: an absent section loads straight into a valid
+ * effective state, so no caller has to interpret `None`. Each field carries
+ * its own default too, so a PARTIAL section (`enabled = false` alone) keeps
+ * usable thresholds instead of collapsing them to zero.
+ */
+export type DiscussionWeightConfig = { enabled: boolean, amber_bytes: number, red_bytes: number, };
+
+/**
+ * Batch answer. `weights` is SPARSE and indexed by discussion id: an id that
+ * was requested but holds nothing is absent, which the UI must render as
+ * "empty" rather than as a zero it could confuse with a failed load.
+ */
+export type DiscussionWeightsResponse = { weights: { [key in string]: DiscussionWeightView }, thresholds: WeightThresholds,
+/**
+ * True when the configured pair was unusable and the defaults took over.
+ * Surfaced rather than hidden, so a bad config is visible.
+ */
+thresholds_from_defaults: boolean, };
+
+/**
+ * One discussion's weight with its graded level, as served to the UI.
+ */
+export type DiscussionWeightView = { total_bytes: number, reclaimable_bytes: number, level: WeightLevel, discussion_id: string,
+/**
+ * Attachment bytes held on disk. Reclaimable without losing the thread.
+ */
+disk_bytes: number,
+/**
+ * Extracted document text kept in the database. Reclaimable, but the
+ * document search over those files goes with it.
+ */
+extracted_text_bytes: number,
+/**
+ * Message content bytes. Not reclaimable without losing conversation.
+ */
+message_bytes: number, };
+
 export type DiscussionWorkspace = { id: string, disc_id: string, session_pk: number | null, session_agent_type: string | null, task_id: string | null, task_reference: string | null, project_id: string, workspace_path: string | null, canonical_path: string | null, branch: string, head_sha: string | null, ownership: string, state: string,
 /**
  * Managed-worktree lineage (KT-318, migration 127). Populated only for a
@@ -3077,7 +3135,7 @@ default?: string | null, reasoning?: string | null, };
 /**
  * Global model tier overrides per agent.
  */
-export type ModelTiersConfig = { claude_code: ModelTierConfig, codex: ModelTierConfig, gemini_cli: ModelTierConfig, kiro: ModelTierConfig, vibe: ModelTierConfig, copilot_cli: ModelTierConfig, ollama: ModelTierConfig, lite_llm: ModelTierConfig, nvidia: ModelTierConfig, };
+export type ModelTiersConfig = { claude_code: ModelTierConfig, codex: ModelTierConfig, open_code: ModelTierConfig, gemini_cli: ModelTierConfig, kiro: ModelTierConfig, vibe: ModelTierConfig, copilot_cli: ModelTierConfig, ollama: ModelTierConfig, lite_llm: ModelTierConfig, nvidia: ModelTierConfig, };
 
 /**
  * Config for the "Multi-agent review" option on an Agent step (see
@@ -4534,7 +4592,7 @@ variables?: Record<string, string>, };
  * Response from `POST /api/quick-apis/:id/run`. Mirrors the
  * `/test-api-call` shape so the frontend can reuse the same UI.
  */
-export type RunQuickApiResponse = { success: boolean, duration_ms: number,
+export type RunQuickApiResponse = { run_id: string, success: boolean, duration_ms: number,
 /**
  * Parsed envelope (data/status/summary) on success, `None` on failure.
  */
@@ -4546,7 +4604,7 @@ error: string | null, };
 
 export type RunQuickExecRequest = { variables?: Record<string, string>, };
 
-export type RunQuickExecResponse = { success: boolean, duration_ms: number, data: any, stdout: string | null, stderr: string | null, error: string | null, };
+export type RunQuickExecResponse = { run_id: string, success: boolean, duration_ms: number, data: any, stdout: string | null, stderr: string | null, error: string | null, };
 
 export type RunStatus = "Pending" | "Running" | "Success" | "Partial" | "Failed" | "Cancelled" | "WaitingApproval" | "StoppedByGuard" | "Interrupted";
 
@@ -4791,7 +4849,12 @@ agent_handoff_paid_unlimited: boolean,
  * Agents that cannot be started automatically from another agent's
  * generated reply. Empty keeps the historical allow-all behaviour.
  */
-agent_handoff_blocked_agents: Array<AgentType>, };
+agent_handoff_blocked_agents: Array<AgentType>,
+/**
+ * Sidebar storage-weight indicator. Validation and fallback live in
+ * `models::discussion_weight`; this is only the persisted field.
+ */
+discussion_weight: DiscussionWeightConfig, };
 
 export type ServerConfigPublic = { host: string, port: number, domain: string | null, max_concurrent_agents: number, agent_stall_timeout_min: number, agent_global_timeout_min: number, local_agent_global_timeout_min: number, auth_enabled: boolean, pseudo: string | null, avatar_email: string | null, bio: string | null, debug_mode: boolean,
 /**
@@ -4811,7 +4874,12 @@ default_model_tier: ModelTier,
  * `Off` by default in 0.8.6 onwards. UI surfaces an explanation of
  * when to re-enable (small-context agents without MCP access).
  */
-default_summary_strategy: SummaryStrategy, agent_handoffs_enabled: boolean, agent_handoff_paid_limit: number, agent_handoff_paid_unlimited: boolean, agent_handoff_blocked_agents: Array<AgentType>, };
+default_summary_strategy: SummaryStrategy, agent_handoffs_enabled: boolean, agent_handoff_paid_limit: number, agent_handoff_paid_unlimited: boolean, agent_handoff_blocked_agents: Array<AgentType>,
+/**
+ * Sidebar storage-weight indicator: lets the frontend skip the batch
+ * call entirely when disabled, and grade colours without a round-trip.
+ */
+discussion_weight: DiscussionWeightConfig, };
 
 /**
  * Configurable ceilings for one CLI session.
@@ -4900,6 +4968,12 @@ export type SetupStatus = { is_first_run: boolean, current_step: SetupStep, agen
 export type SetupStep = "Agents" | "ScanPaths" | "Detection" | "Complete";
 
 export type ShareDiscussionRequest = { contact_ids: Array<string>, };
+
+export type SharedRun = { id: string, kind: SharedRunKind, source_id: string, project_id: string | null, discussion_id: string | null, status: SharedRunStatus, started_at: string | null, finished_at: string | null, duration_ms: number | null, result: unknown, diagnostic: string | null, created_at: string, updated_at: string, };
+
+export type SharedRunKind = "quick_prompt" | "quick_api" | "quick_exec" | "workflow";
+
+export type SharedRunStatus = "preflight_failed" | "queued" | "running" | "success" | "failed" | "cancelled" | "timeout";
 
 export type Skill = { id: string, name: string, description: string, icon: string, category: SkillCategory, content: string, is_builtin: boolean,
 /**
@@ -5938,6 +6012,10 @@ withheld_by_routing: number, };
  */
 export type WakeMode = "native_dispatch" | "external_poll";
 
+export type WeightLevel = "green" | "amber" | "red";
+
+export type WeightThresholds = { amber_bytes: number, red_bytes: number, };
+
 /**
  * Lifecycle of a CLI worker control offer (KT-328). `pending` is the published,
  * unclaimed offer; `accepting` is the CAS-won intermediate held across the
@@ -6608,4 +6686,4 @@ step_index: number, total_steps: number,
 /**
  * Step name at `step_index`, or null when between steps.
  */
-current_step: string | null, } | { "type": "partial_response_recovered", discussion_ids: Array<string>, } | { "type": "agent_runs_interrupted", discussion_ids: Array<string>, } | { "type": "audit_finished", project_id: string, status: string, last_completed_step: number, total_steps: number, warned_steps: Array<number>, discussion_id: string | null, };
+current_step: string | null, } | { "type": "shared_run_updated", run_id: string, } | { "type": "partial_response_recovered", discussion_ids: Array<string>, } | { "type": "agent_runs_interrupted", discussion_ids: Array<string>, } | { "type": "audit_finished", project_id: string, status: string, last_completed_step: number, total_steps: number, warned_steps: Array<number>, discussion_id: string | null, };

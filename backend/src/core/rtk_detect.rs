@@ -95,6 +95,7 @@ fn agent_config_relpath(agent_type: &AgentType) -> Option<&'static Path> {
         // path on the first pass because `config.toml` felt more natural;
         // RTK `--codex` actually injects into AGENTS.md.
         AgentType::Codex => Some(Path::new(".codex/AGENTS.md")),
+        AgentType::OpenCode => None,
         // Gemini CLI hook is detected via the hook-script file existence
         // + GEMINI.md scan — see `gemini_hook_present`. No per-file
         // relpath because we need a 2-source check, not a substring scan.

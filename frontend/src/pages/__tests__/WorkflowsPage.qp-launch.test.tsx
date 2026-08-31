@@ -69,6 +69,7 @@ vi.mock('../../lib/api', () => ({
 const defaultModelTiers = {
   claude_code: { economy: null, reasoning: null },
   codex: { economy: null, reasoning: null },
+  open_code: { economy: null, reasoning: null },
   gemini_cli: { economy: null, reasoning: null },
   kiro: { economy: null, reasoning: null },
   vibe: { economy: null, reasoning: null },
@@ -81,6 +82,7 @@ const defaultModelTiers = {
 const fullConfig: AgentsConfig = {
   claude_code: { path: null, installed: true, version: null, full_access: true },
   codex: { path: null, installed: true, version: null, full_access: true },
+  open_code: { path: null, installed: false, version: null, full_access: true },
   gemini_cli: { path: null, installed: true, version: null, full_access: true },
   kiro: { path: null, installed: false, version: null, full_access: true },
   vibe: { path: null, installed: false, version: null, full_access: true },
@@ -464,6 +466,68 @@ describe('WorkflowsPage — QP launch double-click race', () => {
     expect(onBatchLaunched.mock.calls[0][2]).toBe('compare');
 
     fetchSpy.mockRestore();
+  });
+
+  it('compare-agents surfaces a toast when the run launched but its durable tracking partially failed to persist', async () => {
+    // The launch itself (discussions + agent runs) is NOT at fault here —
+    // `shared_run_warnings` only means the SharedRun projection failed to
+    // save for one or more child discussions. The user must still be told,
+    // instead of the backend silently swallowing it (review finding #3).
+    mockQuickPromptsApi.list.mockResolvedValue([sampleQpNoVar]);
+    mockQuickPromptsApi.compareAgents.mockResolvedValue({
+      run_id: 'run-warn-1',
+      batch_total: 2,
+      discussion_ids: ['d-w1', 'd-w2'],
+      shared_run_warnings: ['discussion d-w1: db locked'],
+    });
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{"success":true,"data":null,"error":null}', { status: 200 }));
+
+    const toast = vi.fn();
+    await wrap(
+      <WorkflowsPage
+        projects={[]}
+        installedAgentTypes={['ClaudeCode', 'Codex']}
+        agentAccess={fullConfig}
+        toast={toast}
+      />
+    );
+
+    await act(async () => { fireEvent.click(await screen.findByText(/Quick Prompts/)); });
+    await act(async () => { fireEvent.click(await screen.findByTestId('qp-compare-agents-btn')); });
+    await act(async () => { fireEvent.click(screen.getByTestId('qp-compare-agents-launch')); });
+    await act(async () => { await new Promise(r => setTimeout(r, 0)); });
+
+    expect(toast).toHaveBeenCalledWith(expect.stringContaining('1'), 'error');
+    vi.mocked(globalThis.fetch).mockRestore();
+  });
+
+  it('compare-agents does NOT toast when there are no shared-run persistence warnings', async () => {
+    mockQuickPromptsApi.list.mockResolvedValue([sampleQpNoVar]);
+    mockQuickPromptsApi.compareAgents.mockResolvedValue({
+      run_id: 'run-nowarn-1',
+      batch_total: 2,
+      discussion_ids: ['d-n1', 'd-n2'],
+      shared_run_warnings: [],
+    });
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{"success":true,"data":null,"error":null}', { status: 200 }));
+
+    const toast = vi.fn();
+    await wrap(
+      <WorkflowsPage
+        projects={[]}
+        installedAgentTypes={['ClaudeCode', 'Codex']}
+        agentAccess={fullConfig}
+        toast={toast}
+      />
+    );
+
+    await act(async () => { fireEvent.click(await screen.findByText(/Quick Prompts/)); });
+    await act(async () => { fireEvent.click(await screen.findByTestId('qp-compare-agents-btn')); });
+    await act(async () => { fireEvent.click(screen.getByTestId('qp-compare-agents-launch')); });
+    await act(async () => { await new Promise(r => setTimeout(r, 0)); });
+
+    expect(toast).not.toHaveBeenCalled();
+    vi.mocked(globalThis.fetch).mockRestore();
   });
 
   it('compare targets can switch model tier before launch', async () => {

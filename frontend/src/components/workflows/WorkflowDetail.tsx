@@ -17,6 +17,8 @@ import { formatDurationCompact } from '../../lib/kronnToolParser';
 import { computeGotoEdges } from '../../lib/stepGraph';
 import { StepBranchMap } from './StepBranchMap';
 import { RunDetail, RunStatusTrail } from './RunDetail';
+import { RunStatusCard } from '../RunStatusCard';
+import { workflowRunStatusCardModel } from '../../lib/runStatusCardModel';
 import { liveStepWaitingKey, runStatusTimeline } from '../../lib/workflowUiUtils';
 import { AgentSwitchPicker } from '../AgentSwitchPicker';
 import { CopyIdPill } from '../CopyIdPill';
@@ -2360,6 +2362,7 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, onChangeSt
               <ChevronRight size={12} className={expanded ? 'wf-chevron-rotated' : 'wf-chevron'} />
             </button>
             {expanded && (<>
+            <RunStatusCard runId={run.id} model={workflowRunStatusCardModel(run)} />
             <RunDetail
               run={run}
               workflowSteps={workflow.steps}

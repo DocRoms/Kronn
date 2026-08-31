@@ -1412,6 +1412,7 @@ pub fn insert_run(conn: &Connection, run: &WorkflowRun) -> Result<()> {
             run.batch_no_response as i64,
         ],
     )?;
+    crate::db::shared_runs::sync_workflow(conn, run)?;
     Ok(())
 }
 
@@ -1689,7 +1690,8 @@ pub fn claim_waiting_run(conn: &Connection, run_id: &str, new_status: &RunStatus
 pub fn update_run(conn: &Connection, run: &WorkflowRun) -> Result<()> {
     // Same Cancelled-stickiness semantics; callers of this convenience
     // wrapper don't act on the raced-cancel signal.
-    update_run_progress(conn, RunProgressSnapshot::from_run(run)).map(|_| ())
+    update_run_progress(conn, RunProgressSnapshot::from_run(run))?;
+    crate::db::shared_runs::sync_workflow(conn, run)
 }
 
 /// Lightweight snapshot of a WorkflowRun for progress updates.
@@ -1784,6 +1786,8 @@ pub fn update_run_progress(conn: &Connection, snap: RunProgressSnapshot) -> Resu
                 "run progress write targets a missing run row"
             ),
         }
+    } else if let Some(run) = get_run(conn, &snap.id)? {
+        crate::db::shared_runs::sync_workflow(conn, &run)?;
     }
     Ok(affected > 0)
 }
