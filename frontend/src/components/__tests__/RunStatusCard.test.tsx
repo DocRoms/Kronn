@@ -131,6 +131,7 @@ describe('RunStatusCard', () => {
     vi.mocked(runsApi.get).mockResolvedValue(sharedRun({ id: 'run-2', kind: 'quick_exec', status: 'success', finished_at: '2026-08-31T10:00:05Z', duration_ms: 5000 }));
 
     render(<RunStatusCard runId="run-2" />);
+    act(() => { MockIntersectionObserver.instances[0].setIntersecting(true); });
 
     await waitFor(() => expect(runsApi.get).toHaveBeenCalledWith('run-2'));
     await waitFor(() => expect(screen.getByTestId('run-status-card')).toHaveAttribute('data-status', 'success'));
@@ -141,10 +142,12 @@ describe('RunStatusCard', () => {
   it('renders a QP run linked to its discussion and a workflow run linked to its detail page', async () => {
     vi.mocked(runsApi.get).mockResolvedValueOnce(sharedRun({ id: 'run-qp', kind: 'quick_prompt', status: 'success', discussion_id: 'disc-9' }));
     render(<RunStatusCard runId="run-qp" />);
+    act(() => { MockIntersectionObserver.instances[0].setIntersecting(true); });
     await waitFor(() => expect(screen.getByTestId('run-status-card').querySelector('.run-status-card-link')).toHaveAttribute('href', '/discussions/disc-9'));
 
     vi.mocked(runsApi.get).mockResolvedValueOnce(sharedRun({ id: 'run-wf', kind: 'workflow', status: 'running', source_id: 'wf-1', discussion_id: null }));
     render(<RunStatusCard runId="run-wf" />);
+    act(() => { MockIntersectionObserver.instances[MockIntersectionObserver.instances.length - 1].setIntersecting(true); });
     const cards = screen.getAllByTestId('run-status-card');
     const workflowCard = cards[cards.length - 1];
     await waitFor(() => expect(workflowCard.querySelector('.run-status-card-link')).toHaveAttribute('href', '/workflows/wf-1?run=run-wf'));
@@ -153,10 +156,12 @@ describe('RunStatusCard', () => {
   it('deep-links a standalone QA/QE run (no discussion) to its source in the workflows list', async () => {
     vi.mocked(runsApi.get).mockResolvedValueOnce(sharedRun({ id: 'run-qa', kind: 'quick_api', status: 'success', source_id: 'qa-7', discussion_id: null }));
     render(<RunStatusCard runId="run-qa" />);
+    act(() => { MockIntersectionObserver.instances[0].setIntersecting(true); });
     await waitFor(() => expect(screen.getByTestId('run-status-card').querySelector('.run-status-card-link')).toHaveAttribute('href', '/workflows?kind=quick_api&source=qa-7&run=run-qa'));
 
     vi.mocked(runsApi.get).mockResolvedValueOnce(sharedRun({ id: 'run-qe', kind: 'quick_exec', status: 'failed', source_id: 'qe-3', discussion_id: null }));
     render(<RunStatusCard runId="run-qe" />);
+    act(() => { MockIntersectionObserver.instances[MockIntersectionObserver.instances.length - 1].setIntersecting(true); });
     const cards = screen.getAllByTestId('run-status-card');
     const qeCard = cards[cards.length - 1];
     await waitFor(() => expect(qeCard.querySelector('.run-status-card-link')).toHaveAttribute('href', '/workflows?kind=quick_exec&source=qe-3&run=run-qe'));
@@ -174,6 +179,7 @@ describe('RunStatusCard', () => {
         <div data-testid="card-b"><RunStatusCard runId="run-b" /></div>
       </>,
     );
+    act(() => { MockIntersectionObserver.instances.forEach(observer => observer.setIntersecting(true)); });
 
     await waitFor(() => expect(runsApi.get).toHaveBeenCalledWith('run-a'));
     await waitFor(() => expect(runsApi.get).toHaveBeenCalledWith('run-b'));
@@ -202,6 +208,7 @@ describe('RunStatusCard', () => {
     vi.mocked(runsApi.get).mockResolvedValue(sharedRun({ id: 'run-3', kind: 'quick_api', status: 'running' }));
 
     render(<RunStatusCard runId="run-3" />);
+    act(() => { MockIntersectionObserver.instances[0].setIntersecting(true); });
     await waitFor(() => expect(runsApi.get).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(MockWebSocket.instances).toHaveLength(1));
 
@@ -221,8 +228,9 @@ describe('RunStatusCard', () => {
     expect(vi.mocked(runsApi.get).mock.calls.length).toBe(callsBefore);
   });
 
-  it('measures bounded cost on a long list: N off-screen cards share one socket and stop fetching once suspended (DoD #7)', async () => {
+  it('measures bounded cost on a long list: only intersecting cards fetch/subscribe, the rest cost nothing until visible (DoD #6/#7)', async () => {
     const CARD_COUNT = 30;
+    const VISIBLE_COUNT = 2;
     vi.mocked(runsApi.get).mockImplementation(async (id: string) =>
       sharedRun({ id, kind: 'quick_api', status: 'running' }),
     );
@@ -235,43 +243,53 @@ describe('RunStatusCard', () => {
       </>,
     );
 
-    // Every card fetches exactly once on mount — no duplicate/looping fetches.
-    await waitFor(() => expect(runsApi.get).toHaveBeenCalledTimes(CARD_COUNT));
-    // Regardless of card count, the process-wide registry shares ONE socket
-    // (hooks/useWebSocket.ts) — this is the measured proof that N live cards
-    // never open N connections.
-    await waitFor(() => expect(MockWebSocket.instances).toHaveLength(1));
+    // Mounting a long list off-screen must not itself cost anything: with no
+    // intersection measured yet, zero cards have fetched or opened a socket.
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(runsApi.get).not.toHaveBeenCalled();
+    expect(MockWebSocket.instances).toHaveLength(0);
 
-    // A long timeline scrolls most cards off-screen: suspend all of them.
+    // Only the 2 cards actually scrolled into view report an intersection.
     act(() => {
-      MockIntersectionObserver.instances.forEach(observer => observer.setIntersecting(false));
+      for (let i = 0; i < VISIBLE_COUNT; i += 1) MockIntersectionObserver.instances[i].setIntersecting(true);
     });
 
-    // With zero visible cards left, the shared socket tears down entirely —
-    // an off-screen list of any size costs exactly 0 live connections.
+    // Exactly the visible cards fetch — the other 28 stay untouched.
+    await waitFor(() => expect(runsApi.get).toHaveBeenCalledTimes(VISIBLE_COUNT));
+    for (let i = 0; i < VISIBLE_COUNT; i += 1) expect(runsApi.get).toHaveBeenCalledWith(`bulk-run-${i}`);
+    // The 2 active visible cards share ONE socket (hooks/useWebSocket.ts) —
+    // the measured proof that N live cards never open N connections.
+    await waitFor(() => expect(MockWebSocket.instances).toHaveLength(1));
+
+    const callsAfterVisible = vi.mocked(runsApi.get).mock.calls.length;
+    expect(callsAfterVisible).toBe(VISIBLE_COUNT);
+
+    // Those 2 cards scroll back off-screen too: the shared socket tears down
+    // entirely — a fully off-screen list of any size costs 0 live connections.
+    act(() => {
+      for (let i = 0; i < VISIBLE_COUNT; i += 1) MockIntersectionObserver.instances[i].setIntersecting(false);
+    });
     await waitFor(() => expect(activeWebSocketCountForTests()).toBe(0));
 
-    const callsBefore = vi.mocked(runsApi.get).mock.calls.length;
-    expect(callsBefore).toBe(CARD_COUNT);
-
-    // A burst of updates for every run, replayed on the now-torn-down socket,
-    // must not cause any suspended card to re-fetch — proves the cost stays
-    // flat (0 extra fetches) rather than O(updates × cards).
+    // A burst of updates for every run, replayed after teardown, must not
+    // cause any suspended card to re-fetch — the cost stays flat (0 extra
+    // fetches) rather than O(updates × cards).
     act(() => {
       for (let i = 0; i < CARD_COUNT; i += 1) {
-        MockWebSocket.instances[0].simulateMessage(
-          JSON.stringify({ type: 'shared_run_updated', run_id: `bulk-run-${i}` }),
-        );
+        if (MockWebSocket.instances[0]) {
+          MockWebSocket.instances[0].simulateMessage(JSON.stringify({ type: 'shared_run_updated', run_id: `bulk-run-${i}` }));
+        }
       }
     });
     await new Promise(resolve => setTimeout(resolve, 0));
-    expect(vi.mocked(runsApi.get).mock.calls.length).toBe(callsBefore);
+    expect(vi.mocked(runsApi.get).mock.calls.length).toBe(callsAfterVisible);
   });
 
   it('rehydrates on WebSocket reconnect (restart) so progress is never invented across a reconnect gap', async () => {
     vi.mocked(runsApi.get).mockResolvedValue(sharedRun({ id: 'run-4', kind: 'workflow', status: 'running' }));
 
     render(<RunStatusCard runId="run-4" />);
+    act(() => { MockIntersectionObserver.instances[0].setIntersecting(true); });
     await waitFor(() => expect(runsApi.get).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(MockWebSocket.instances).toHaveLength(1));
 

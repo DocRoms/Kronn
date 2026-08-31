@@ -263,6 +263,53 @@ mod tests {
         assert_eq!(actual.result, expected.result);
     }
 
+    /// The CHECK constraint on `kind` previously excluded `workflow` (a real
+    /// bug: a Workflow SharedRun write would fail while QP/QA/QE succeeded).
+    /// Round-trip every kind so a future migration regression on any one of
+    /// them is caught, not just QuickApi.
+    #[test]
+    fn round_trips_every_shared_run_kind() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE discussions(id TEXT PRIMARY KEY); CREATE TABLE projects(id TEXT PRIMARY KEY);")
+            .unwrap();
+        conn.execute_batch(include_str!("sql/155_shared_runs.sql"))
+            .unwrap();
+        let now = Utc::now();
+        for (i, kind) in [
+            SharedRunKind::QuickPrompt,
+            SharedRunKind::QuickApi,
+            SharedRunKind::QuickExec,
+            SharedRunKind::Workflow,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = format!("run-kind-{i}");
+            let run = SharedRun {
+                id: id.clone(),
+                kind: kind.clone(),
+                source_id: "source-1".into(),
+                project_id: None,
+                discussion_id: None,
+                status: SharedRunStatus::Success,
+                started_at: Some(now),
+                finished_at: Some(now),
+                duration_ms: Some(1),
+                result: None,
+                diagnostic: None,
+                created_at: now,
+                updated_at: now,
+            };
+            upsert(&conn, &run).unwrap_or_else(|e| panic!("upsert for {kind:?} failed: {e}"));
+            let actual = get(&conn, &id).unwrap().unwrap();
+            assert_eq!(
+                serde_json::to_value(&actual.kind).unwrap(),
+                serde_json::to_value(&kind).unwrap(),
+                "kind must round-trip unchanged for {kind:?}"
+            );
+        }
+    }
+
     #[test]
     fn corrupt_values_are_rejected_instead_of_invented() {
         let conn = Connection::open_in_memory().unwrap();

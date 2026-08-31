@@ -3526,6 +3526,7 @@ suggestion KRONN:APPLY ; cela écraserait la vraie valeur par un placeholder
   'run.freshness.rehydrated': 'Réhydraté depuis le serveur',
   'run.freshness.unavailable': 'État direct indisponible',
   'run.attachedHeading': 'Runs rattachés',
+  'run.persistWarning': 'Certaines données de suivi de run n’ont pas pu être enregistrées ({0}) — le lancement a bien réussi.',
   'wf.tokens': 'Tokens',
   'wf.noProject': 'Sans projet',
 

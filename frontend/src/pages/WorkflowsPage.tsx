@@ -1569,6 +1569,13 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
       // sibling spinners light up in the sidebar AND we don't re-fire
       // a second `/run` on top of the fan-out we just dispatched.
       onBatchLaunched?.(result.discussion_ids, result.run_id, 'compare');
+      // The discussions/agent runs themselves launched fine; a warning here
+      // only means the durable SharedRun projection for one or more child
+      // discussions failed to persist — surface it so the user knows run
+      // tracking may be incomplete, instead of silently swallowing it.
+      if (result.shared_run_warnings?.length) {
+        toastProp?.(t('run.persistWarning', result.shared_run_warnings.length), 'error');
+      }
     } catch (e) {
       console.warn('Compare-agents launch failed:', e);
     } finally {
@@ -1686,6 +1693,12 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
       // `onBatchLaunched` in Dashboard uses `setOpenDiscussionId`
       // which opens without auto-running.
       onBatchLaunched?.(res.discussion_ids, res.run_id);
+      // See the matching comment in the compare-agents handler above: this
+      // only flags a partial SharedRun-tracking persistence failure, not a
+      // failure of the batch launch itself.
+      if (res.shared_run_warnings?.length) {
+        notify(t('run.persistWarning', res.shared_run_warnings.length), 'error');
+      }
       setBatchingQP(null);
       setBatchInputLines('');
     } catch (e) {
