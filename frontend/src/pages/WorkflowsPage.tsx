@@ -1325,19 +1325,6 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showAutomationActions, tab]);
 
-  const renderTemplate = (template: string, vars: Record<string, string>): string => {
-    let rendered = template;
-    // 1. Process conditional sections: {{#var}}content{{/var}} — removed if var is empty
-    rendered = rendered.replace(/\{\{#(\w+)\}\}([\s\S]*?)\{\{\/\1\}\}/g, (_, name, content) => {
-      return vars[name]?.trim() ? content : '';
-    });
-    // 2. Replace remaining {{var}} placeholders
-    rendered = rendered.replace(/\{\{(\w+)\}\}/g, (_, name) => vars[name] ?? '');
-    // 3. Clean up double spaces/commas from removed sections
-    rendered = rendered.replace(/  +/g, ' ').replace(/, ,/g, ',').trim();
-    return rendered;
-  };
-
   /**
    * 0.8.5 follow-up — validate that every variable flagged as required
    * has a non-empty value before firing a launch / compare-agents.

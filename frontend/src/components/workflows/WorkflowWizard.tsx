@@ -3885,6 +3885,9 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                                           placeholder: '',
                                           description: null,
                                           required: true,
+                                          source: 'user_input',
+                                          source_ref: null,
+                                          allow_manual_override: false,
                                         }]);
                                       }}
                                       title={t('wiz.undeclaredAddVarHint').replace('{name}', uv.name)}
@@ -4780,6 +4783,9 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                 placeholder: '',
                 description: null,
                 required: true,
+                source: 'user_input',
+                source_ref: null,
+                allow_manual_override: false,
               }])}
             >
               <Plus size={10} /> {t('wiz.addVariable')}

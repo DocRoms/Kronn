@@ -318,6 +318,9 @@ describe('WorkflowDetail — runs list', () => {
 
   it('offers the secured variable inspector on an expanded run', () => {
     renderDetail({ runs: [mkRun({ id: 'r-secret', status: 'Success' })] });
+    // #6 — terminal runs render collapsed; expand to reach the RunDetail body
+    // where the secured execution-variable inspector lives.
+    fireEvent.click(screen.getByRole('button', { name: /Success/ }));
     expect(screen.getByRole('button', { name: 'Inspect variables' })).toBeInTheDocument();
   });
 
