@@ -14,6 +14,9 @@ pub async fn metadata(
     match state
         .db
         .with_conn(move |conn| {
+            if !crate::db::execution_variable_snapshots::has_live_owner(conn, &run_kind, &run_id)? {
+                return Ok(None);
+            }
             crate::db::execution_variable_snapshots::metadata(conn, &run_kind, &run_id)
         })
         .await
@@ -56,6 +59,9 @@ pub async fn reveal(
     match state
         .db
         .with_conn(move |conn| {
+            if !crate::db::execution_variable_snapshots::has_live_owner(conn, &run_kind, &run_id)? {
+                return Ok(None);
+            }
             let Some(snapshot_id) = crate::db::execution_variable_snapshots::snapshot_id_for_run(
                 conn, &run_kind, &run_id,
             )?
@@ -76,5 +82,60 @@ pub async fn reveal(
         Ok(Some(value)) => Json(ApiResponse::ok(value)),
         Ok(None) => Json(ApiResponse::err("Variable unavailable or expired")),
         Err(error) => Json(ApiResponse::err(format!("Reveal failed: {error}"))),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct ExtendRequest {
+    pub days: u32,
+}
+
+pub async fn extend(
+    State(state): State<AppState>,
+    Path((run_kind, run_id)): Path<(String, String)>,
+    Json(request): Json<ExtendRequest>,
+) -> Json<ApiResponse<()>> {
+    if request.days == 0 {
+        return Json(ApiResponse::err(
+            "Retention extension must be at least one day",
+        ));
+    }
+    let actor = state
+        .config
+        .read()
+        .await
+        .server
+        .pseudo
+        .clone()
+        .unwrap_or_else(|| "local_operator".into());
+    match state
+        .db
+        .with_conn(move |conn| {
+            if !crate::db::execution_variable_snapshots::has_live_owner(conn, &run_kind, &run_id)? {
+                return Ok(false);
+            }
+            let Some(snapshot_id) = crate::db::execution_variable_snapshots::snapshot_id_for_run(
+                conn, &run_kind, &run_id,
+            )?
+            else {
+                return Ok(false);
+            };
+            crate::db::execution_variable_snapshots::extend_retention(
+                conn,
+                &snapshot_id,
+                request.days,
+                &actor,
+                Utc::now(),
+            )
+        })
+        .await
+    {
+        Ok(true) => Json(ApiResponse::ok(())),
+        Ok(false) => Json(ApiResponse::err(
+            "Execution variable snapshot not found or unauthorized",
+        )),
+        Err(error) => Json(ApiResponse::err(format!(
+            "Retention extension failed: {error}"
+        ))),
     }
 }

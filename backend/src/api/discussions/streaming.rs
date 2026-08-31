@@ -17,6 +17,7 @@ use std::time::Duration;
 use axum::response::sse::{Event, Sse};
 use chrono::Utc;
 use futures::StreamExt;
+use rusqlite::OptionalExtension;
 use uuid::Uuid;
 
 use crate::agents::runner::{self, AgentIo};
@@ -823,7 +824,22 @@ fn clear_awaiting_after_terminal(
         // idle window in which the remaining model placeholder disappears.
         return Ok(());
     }
-    crate::db::discussions::set_awaiting_agent(conn, discussion_id, false)
+    crate::db::discussions::set_awaiting_agent(conn, discussion_id, false)?;
+    // retention=0 means run-lifetime only. Once the final dispatch for this
+    // discussion is terminal, irreversibly discard any QP child ciphertext.
+    crate::db::execution_variable_snapshots::purge_run_lifetime_snapshot(
+        conn,
+        "quick_prompt",
+        discussion_id,
+        Utc::now(),
+    )?;
+    crate::db::execution_variable_snapshots::purge_run_lifetime_snapshot(
+        conn,
+        "quick_prompt_batch_item",
+        discussion_id,
+        Utc::now(),
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -2052,6 +2068,33 @@ async fn make_agent_stream_inner(
                                         conn,
                                         kind,
                                         id,
+                                        &key,
+                                        chrono::Utc::now(),
+                                    )?
+                                {
+                                    return Ok(Some(values));
+                                }
+                            }
+                        }
+                        // A BatchQuickPrompt child points at its child batch
+                        // run. Environment variables are resolved once on the
+                        // parent Workflow run, so follow that durable link and
+                        // reuse the immutable parent snapshot on every child
+                        // dispatch/resume.
+                        if let Some(batch_run_id) = workflow_run_id.as_deref() {
+                            let parent_id: Option<String> = conn
+                                .query_row(
+                                    "SELECT parent_run_id FROM workflow_runs WHERE id=?1",
+                                    [batch_run_id],
+                                    |row| row.get(0),
+                                )
+                                .optional()?;
+                            if let Some(parent_id) = parent_id {
+                                if let Some(values) =
+                                    crate::db::execution_variable_snapshots::load_values(
+                                        conn,
+                                        "workflow",
+                                        &parent_id,
                                         &key,
                                         chrono::Utc::now(),
                                     )?

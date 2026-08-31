@@ -1537,6 +1537,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             post(api::execution_variables::reveal),
         )
         .route(
+            "/api/execution-context/{run_kind}/{run_id}/extend",
+            post(api::execution_variables::extend),
+        )
+        .route(
             "/api/discussions/{id}/agent-resume-jobs",
             get(api::agent_jobs::list_for_discussion),
         )

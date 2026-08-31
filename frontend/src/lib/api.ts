@@ -2222,9 +2222,11 @@ export interface ExecutionVariableMetadata {
 
 export const executionVariables = {
   metadata: (runKind: string, runId: string) =>
-    api<ExecutionVariableMetadata>('GET', `/execution-variables/${encodeURIComponent(runKind)}/${encodeURIComponent(runId)}`),
+    api<ExecutionVariableMetadata>('GET', `/execution-context/${encodeURIComponent(runKind)}/${encodeURIComponent(runId)}`),
   reveal: (runKind: string, runId: string, variable: string) =>
-    api<string>('POST', `/execution-variables/${encodeURIComponent(runKind)}/${encodeURIComponent(runId)}/reveal`, { variable }),
+    api<string>('POST', `/execution-context/${encodeURIComponent(runKind)}/${encodeURIComponent(runId)}/reveal`, { variable }),
+  extend: (runKind: string, runId: string, days: number) =>
+    api<void>('POST', `/execution-context/${encodeURIComponent(runKind)}/${encodeURIComponent(runId)}/extend`, { days }),
 };
 
 // ─── Pages vivantes (0.10.0) ──────────────────────────────────────────────

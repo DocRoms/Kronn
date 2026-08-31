@@ -668,6 +668,25 @@ pub fn create_batch_run_with_identities(
         for (index, (disc, msg, batch_item)) in discussions.iter().enumerate() {
             crate::db::discussions::insert_discussion(conn, disc)?;
             let trigger_sort_order = crate::db::discussions::insert_message(conn, &disc.id, msg)?;
+            let context_link = if let Some(parent_id) = input.parent_run_id.as_deref() {
+                ("workflow", parent_id)
+            } else if crate::db::execution_variable_snapshots::snapshot_id_for_run(
+                conn,
+                "quick_prompt_batch_item",
+                &disc.id,
+            )?
+            .is_some()
+            {
+                ("quick_prompt_batch_item", disc.id.as_str())
+            } else {
+                ("quick_prompt_compare", run_id.as_str())
+            };
+            crate::db::execution_variable_snapshots::insert_execution_context_message(
+                conn,
+                &disc.id,
+                context_link.0,
+                context_link.1,
+            )?;
             if let Some(target) = input.items[index].agent_override.as_ref() {
                 let mut message_target = crate::models::MessageTarget::agent(target.agent.clone())
                     .with_tier(target.tier);

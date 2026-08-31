@@ -1349,7 +1349,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   const collectMissingRequiredVars = (qp: QuickPrompt, vars: Record<string, string>): string[] => {
     return qp.variables
       // `required` defaults to true (legacy QPs); only explicitly false skips validation.
-      .filter(v => v.required !== false && !(vars[v.name] ?? '').trim())
+      .filter(v => (v.source ?? 'user_input') === 'user_input' && v.required !== false && !(vars[v.name] ?? '').trim())
       .map(v => v.label || v.name);
   };
 
@@ -2974,7 +2974,8 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                           subset before firing). */}
                       {launchingQP?.id === qp.id && (
                         <div className="qp-launch-form">
-                          {qp.variables.map(v => (
+                          <h3 className="text-xs font-medium">{t('wf.launchInputTitle')}</h3>
+                          {qp.variables.filter(v => (v.source ?? 'user_input') === 'user_input').map(v => (
                             <div key={v.name} className="qp-launch-field">
                               <label className="qp-launch-label">{v.label || v.name}</label>
                               <input
@@ -2991,6 +2992,16 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                               />
                             </div>
                           ))}
+                          {qp.variables.some(v => (v.source ?? 'user_input') !== 'user_input') && <>
+                            <h3 className="text-xs font-medium mt-4">{t('wf.launchProvidedTitle')}</h3>
+                            {qp.variables.filter(v => (v.source ?? 'user_input') !== 'user_input').map(v => (
+                              <div key={v.name} className="qp-launch-field">
+                                <label className="qp-launch-label">{v.label || v.name}</label>
+                                <input className="wf-input flex-1" value="••••••" readOnly aria-label={`${v.label || v.name} masked project value`} />
+                                <p className="text-2xs text-ghost">{v.source_ref} · resolved securely at dispatch</p>
+                              </div>
+                            ))}
+                          </>}
                           {/* Compare targets use the shared agent+tier picker,
                               so this launch surface speaks the same model
                               language as discussions, QPs and workflow steps. */}
@@ -3585,7 +3596,8 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                           clicks Launch again or another QA's button. */}
                       {launchingQA?.id === qa.id && qa.variables.length > 0 && (
                         <div className="qp-launch-form">
-                          {qa.variables.map(v => (
+                          <h3 className="text-xs font-medium">{t('wf.launchInputTitle')}</h3>
+                          {qa.variables.filter(v => (v.source ?? 'user_input') === 'user_input').map(v => (
                             <div key={v.name} className="qp-launch-field">
                               <label className="qp-launch-label">
                                 {v.label || v.name}
@@ -3601,10 +3613,20 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                               />
                             </div>
                           ))}
+                          {qa.variables.some(v => (v.source ?? 'user_input') !== 'user_input') && <>
+                            <h3 className="text-xs font-medium mt-4">{t('wf.launchProvidedTitle')}</h3>
+                            {qa.variables.filter(v => (v.source ?? 'user_input') !== 'user_input').map(v => (
+                              <div key={v.name} className="qp-launch-field">
+                                <label className="qp-launch-label">{v.label || v.name}</label>
+                                <input className="wf-input flex-1" value="••••••" readOnly aria-label={`${v.label || v.name} masked project value`} />
+                                <p className="text-2xs text-ghost">{v.source_ref} · resolved securely at dispatch</p>
+                              </div>
+                            ))}
+                          </>}
                           <button
                             className="qp-launch-go-btn"
                             onClick={() => handleLaunchQA(qa)}
-                            disabled={launchingQARun || qa.variables.some(v => (v.required ?? true) && !(launchVarsQA[v.name] ?? '').trim())}
+                            disabled={launchingQARun || qa.variables.some(v => (v.source ?? 'user_input') === 'user_input' && (v.required ?? true) && !(launchVarsQA[v.name] ?? '').trim())}
                           >
                             {launchingQARun ? <Loader2 size={14} className="spin" /> : <Play size={14} />}
                             {launchingQARun ? '...' : t('qa.runGo')}
@@ -3767,7 +3789,8 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                       </div>
                       {isOpen && (
                         <div className="qp-launch-form qe-run-form">
-                          {quickExec.variables.map(variable => (
+                          <h3 className="text-xs font-medium">{t('wf.launchInputTitle')}</h3>
+                          {quickExec.variables.filter(variable => (variable.source ?? 'user_input') === 'user_input').map(variable => (
                             <div className="qp-launch-field" key={variable.name}>
                               <label className="qp-launch-label">
                                 {variable.label || variable.name}{variable.required && ' *'}
@@ -3780,10 +3803,20 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                               />
                             </div>
                           ))}
+                          {quickExec.variables.some(variable => (variable.source ?? 'user_input') !== 'user_input') && <>
+                            <h3 className="text-xs font-medium mt-4">{t('wf.launchProvidedTitle')}</h3>
+                            {quickExec.variables.filter(variable => (variable.source ?? 'user_input') !== 'user_input').map(variable => (
+                              <div className="qp-launch-field" key={variable.name}>
+                                <label className="qp-launch-label">{variable.label || variable.name}</label>
+                                <input className="wf-input flex-1" value="••••••" readOnly aria-label={`${variable.label || variable.name} masked project value`} />
+                                <p className="text-2xs text-ghost">{variable.source_ref} · resolved securely at dispatch</p>
+                              </div>
+                            ))}
+                          </>}
                           {quickExec.variables.length > 0 && (
                             <button
                               className="qp-launch-go-btn"
-                              disabled={runQEState.busy || quickExec.variables.some(variable => variable.required && !(runVarsQE[variable.name] ?? '').trim())}
+                              disabled={runQEState.busy || quickExec.variables.some(variable => (variable.source ?? 'user_input') === 'user_input' && variable.required && !(runVarsQE[variable.name] ?? '').trim())}
                               onClick={() => void handleRunQE(quickExec)}
                             >
                               {runQEState.busy ? <Loader2 size={14} className="spin" /> : <Play size={14} />}

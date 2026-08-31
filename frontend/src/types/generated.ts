@@ -733,7 +733,7 @@ concurrent_limit?: number | null, };
  * envelope produced by the BatchApiCall executor — the frontend renders
  * `envelope.data.items[]` as a per-item result table.
  */
-export type BatchRunQuickApiResponse = {
+export type BatchRunQuickApiResponse = { execution_id: string,
 /**
  * Overall status: `OK` (all succeeded), `PARTIAL` (some failed), `ERROR` (all failed).
  */
@@ -4561,7 +4561,7 @@ variables?: Record<string, string>, };
  * Response from `POST /api/quick-apis/:id/run`. Mirrors the
  * `/test-api-call` shape so the frontend can reuse the same UI.
  */
-export type RunQuickApiResponse = { success: boolean, duration_ms: number,
+export type RunQuickApiResponse = { execution_id: string, success: boolean, duration_ms: number,
 /**
  * Parsed envelope (data/status/summary) on success, `None` on failure.
  */
@@ -4573,7 +4573,7 @@ error: string | null, };
 
 export type RunQuickExecRequest = { variables?: Record<string, string>, };
 
-export type RunQuickExecResponse = { success: boolean, duration_ms: number, data: any, stdout: string | null, stderr: string | null, error: string | null, };
+export type RunQuickExecResponse = { execution_id: string, success: boolean, duration_ms: number, data: any, stdout: string | null, stderr: string | null, error: string | null, };
 
 export type RunStatus = "Pending" | "Running" | "Success" | "Partial" | "Failed" | "Cancelled" | "WaitingApproval" | "StoppedByGuard" | "Interrupted";
 
@@ -5713,7 +5713,12 @@ agent_handoffs_disabled?: boolean | null,
  * Remove the financial quota for this discussion only. The global master
  * switch, per-agent blocks and structural loop guards still apply.
  */
-agent_handoffs_unlimited?: boolean | null, };
+agent_handoffs_unlimited?: boolean | null,
+/**
+ * Per-discussion encrypted execution-variable retention override.
+ * Zero keeps values only for the lifetime of the active run.
+ */
+execution_variable_retention_days?: number | null, };
 
 export type UpdateLivePageHtmlRequest = { html: string, created_by_agent?: string | null, };
 

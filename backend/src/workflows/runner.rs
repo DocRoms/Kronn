@@ -2418,9 +2418,21 @@ async fn execute_run_with_notify_policy(
     }
 
     let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
+    let terminal_snapshot_run_id = (!paused_for_approval).then(|| run.id.clone());
     let db5 = db.clone();
-    db5.with_conn(move |conn| crate::db::workflows::update_run_progress(conn, snap))
-        .await?;
+    db5.with_conn(move |conn| {
+        let updated = crate::db::workflows::update_run_progress(conn, snap)?;
+        if let Some(run_id) = terminal_snapshot_run_id.as_deref() {
+            crate::db::execution_variable_snapshots::purge_run_lifetime_snapshot(
+                conn,
+                "workflow",
+                run_id,
+                Utc::now(),
+            )?;
+        }
+        Ok(updated)
+    })
+    .await?;
 
     // Emit run done
     emit(RunEvent::RunDone {

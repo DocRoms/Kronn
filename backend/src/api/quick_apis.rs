@@ -366,6 +366,13 @@ pub async fn run_qa(
         .workflow_run_id
         .clone()
         .unwrap_or_else(|| Uuid::new_v4().to_string());
+    let is_workflow_execution = req.workflow_run_id.is_some();
+    let snapshot_run_kind = if is_workflow_execution {
+        "workflow"
+    } else {
+        "quick_api"
+    };
+    let snapshot_run_id = execution_id.clone();
     let prepared = state
         .db
         .with_conn(move |conn| {
@@ -376,9 +383,10 @@ pub async fn run_qa(
                     supplied: &supplied,
                     context: &std::collections::HashMap::new(),
                     project_id: project_id.as_deref(),
+                    discussion_id: None,
                     environment_ref: "project_mcp_configs",
-                    run_kind: "quick_api",
-                    run_id: &execution_id,
+                    run_kind: snapshot_run_kind,
+                    run_id: &snapshot_run_id,
                     encryption_secret: &secret,
                     retention_days,
                 },
@@ -529,7 +537,23 @@ pub async fn run_qa(
         Some(outcome.result.output)
     };
 
+    if !is_workflow_execution {
+        let terminal_execution_id = execution_id.clone();
+        let _ = state
+            .db
+            .with_conn(move |conn| {
+                crate::db::execution_variable_snapshots::purge_run_lifetime_snapshot(
+                    conn,
+                    "quick_api",
+                    &terminal_execution_id,
+                    Utc::now(),
+                )
+            })
+            .await;
+    }
+
     Json(ApiResponse::ok(RunQuickApiResponse {
+        execution_id,
         success,
         duration_ms: outcome.result.duration_ms,
         envelope,
@@ -609,6 +633,7 @@ pub async fn batch_run_qa(
     let declarations = qa.variables.clone();
     let project_id = qa.project_id.clone();
     let execution_id = Uuid::new_v4().to_string();
+    let snapshot_run_id = execution_id.clone();
     let prepared = state
         .db
         .with_conn(move |conn| {
@@ -619,9 +644,10 @@ pub async fn batch_run_qa(
                     supplied: &supplied,
                     context: &std::collections::HashMap::new(),
                     project_id: project_id.as_deref(),
+                    discussion_id: None,
                     environment_ref: "project_mcp_configs",
                     run_kind: "quick_api_batch",
-                    run_id: &execution_id,
+                    run_id: &snapshot_run_id,
                     encryption_secret: &secret,
                     retention_days,
                 },
@@ -778,7 +804,21 @@ pub async fn batch_run_qa(
         None
     };
 
+    let terminal_execution_id = execution_id.clone();
+    let _ = state
+        .db
+        .with_conn(move |conn| {
+            crate::db::execution_variable_snapshots::purge_run_lifetime_snapshot(
+                conn,
+                "quick_api_batch",
+                &terminal_execution_id,
+                Utc::now(),
+            )
+        })
+        .await;
+
     Json(ApiResponse::ok(BatchRunQuickApiResponse {
+        execution_id,
         status,
         duration_ms: outcome.result.duration_ms,
         envelope,
