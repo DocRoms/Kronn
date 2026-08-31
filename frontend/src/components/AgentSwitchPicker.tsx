@@ -87,6 +87,7 @@ export function AgentSwitchPicker({
   const choices = [currentTarget, ...suppliedTargets].filter((target, index, targets) =>
     targets.findIndex(candidate => targetKey(candidate) === targetKey(target)) === index
   );
+  const choiceCount = choices.length;
   const tierChoices: ModelTier[] = ['economy', 'default', 'reasoning'];
   const tierPicker = currentTier !== undefined
     && (onSelectionChange !== undefined || onTargetSelectionChange !== undefined);
@@ -111,7 +112,7 @@ export function AgentSwitchPicker({
     const viewportPadding = 8;
     const compactTierLayout = tierPicker && window.innerWidth < 420;
     const popoverWidth = tierPicker ? 342 : 170;
-    const estimatedHeight = choices.length * (compactTierLayout ? 75 : tierPicker ? 45 : 31) + 8;
+    const estimatedHeight = choiceCount * (compactTierLayout ? 75 : tierPicker ? 45 : 31) + 8;
     const hasRoomBelow = rect.bottom + 5 + estimatedHeight <= window.innerHeight - viewportPadding;
     const top = hasRoomBelow
       ? rect.bottom + 5
@@ -121,7 +122,7 @@ export function AgentSwitchPicker({
       Math.min(rect.left, window.innerWidth - popoverWidth - viewportPadding),
     );
     setPopoverPosition({ top, left });
-  }, [choices.length, tierPicker]);
+  }, [choiceCount, tierPicker]);
 
   const select = async (target: AgentSwitchTarget, tier?: ModelTier) => {
     if (savingRef.current) return;
