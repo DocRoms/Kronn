@@ -4,4 +4,4 @@ import type { ModelTierConfig } from "./ModelTierConfig";
 /**
  * Global model tier overrides per agent.
  */
-export type ModelTiersConfig = { claude_code: ModelTierConfig, codex: ModelTierConfig, gemini_cli: ModelTierConfig, kiro: ModelTierConfig, vibe: ModelTierConfig, };
+export type ModelTiersConfig = { claude_code: ModelTierConfig, codex: ModelTierConfig, open_code: ModelTierConfig, gemini_cli: ModelTierConfig, kiro: ModelTierConfig, vibe: ModelTierConfig, copilot_cli: ModelTierConfig, ollama: ModelTierConfig, lite_llm: ModelTierConfig, nvidia: ModelTierConfig, };

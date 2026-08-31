@@ -426,6 +426,8 @@ pub struct AgentsConfig {
     pub claude_code: AgentConfig,
     pub codex: AgentConfig,
     #[serde(default)]
+    pub open_code: AgentConfig,
+    #[serde(default)]
     pub gemini_cli: AgentConfig,
     #[serde(default)]
     pub kiro: AgentConfig,
@@ -484,6 +486,7 @@ impl HttpEndpoints {
             AgentType::Ollama
             | AgentType::ClaudeCode
             | AgentType::Codex
+            | AgentType::OpenCode
             | AgentType::Vibe
             | AgentType::GeminiCli
             | AgentType::Kiro
@@ -499,6 +502,7 @@ impl AgentsConfig {
         match agent {
             AgentType::ClaudeCode => self.claude_code.full_access,
             AgentType::Codex => self.codex.full_access,
+            AgentType::OpenCode => self.open_code.full_access,
             AgentType::GeminiCli => self.gemini_cli.full_access,
             AgentType::Kiro => self.kiro.full_access,
             AgentType::Vibe => self.vibe.full_access,
@@ -513,6 +517,7 @@ impl AgentsConfig {
     pub fn any_full_access(&self) -> bool {
         self.claude_code.full_access
             || self.codex.full_access
+            || self.open_code.full_access
             || self.gemini_cli.full_access
             || self.kiro.full_access
             || self.vibe.full_access
@@ -526,6 +531,7 @@ impl AgentsConfig {
     pub fn any_installed(&self) -> bool {
         self.claude_code.installed
             || self.codex.installed
+            || self.open_code.installed
             || self.gemini_cli.installed
             || self.kiro.installed
             || self.vibe.installed
@@ -606,6 +612,8 @@ pub struct ModelTiersConfig {
     pub claude_code: ModelTierConfig,
     #[serde(default)]
     pub codex: ModelTierConfig,
+    #[serde(default)]
+    pub open_code: ModelTierConfig,
     #[serde(default)]
     pub gemini_cli: ModelTierConfig,
     #[serde(default)]
@@ -719,6 +727,9 @@ pub enum AgentType {
     #[default]
     ClaudeCode,
     Codex,
+    /// OpenCode uses the ACP transport; it is a CLI identity, never the
+    /// generic `Custom` HTTP connection bucket.
+    OpenCode,
     Vibe,
     GeminiCli,
     Kiro,

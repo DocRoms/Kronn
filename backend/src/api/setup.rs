@@ -682,6 +682,7 @@ pub async fn set_agent_access(
     match req.agent {
         AgentType::ClaudeCode => config.agents.claude_code.full_access = req.full_access,
         AgentType::Codex => config.agents.codex.full_access = req.full_access,
+        AgentType::OpenCode => config.agents.open_code.full_access = req.full_access,
         AgentType::GeminiCli => config.agents.gemini_cli.full_access = req.full_access,
         AgentType::Kiro => config.agents.kiro.full_access = req.full_access,
         AgentType::Vibe => config.agents.vibe.full_access = req.full_access,
@@ -707,6 +708,7 @@ pub async fn set_agent_concurrency(
     let agent = match req.agent {
         AgentType::ClaudeCode => &mut config.agents.claude_code,
         AgentType::Codex => &mut config.agents.codex,
+        AgentType::OpenCode => &mut config.agents.open_code,
         AgentType::GeminiCli => &mut config.agents.gemini_cli,
         AgentType::Kiro => &mut config.agents.kiro,
         AgentType::Vibe => &mut config.agents.vibe,
@@ -754,6 +756,7 @@ pub async fn set_agent_mention_color(
     let agent = match req.agent {
         AgentType::ClaudeCode => &mut config.agents.claude_code,
         AgentType::Codex => &mut config.agents.codex,
+        AgentType::OpenCode => &mut config.agents.open_code,
         AgentType::GeminiCli => &mut config.agents.gemini_cli,
         AgentType::Kiro => &mut config.agents.kiro,
         AgentType::Vibe => &mut config.agents.vibe,

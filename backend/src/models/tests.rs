@@ -79,6 +79,7 @@ fn agent_type_roundtrip() {
     let types = vec![
         AgentType::ClaudeCode,
         AgentType::Codex,
+        AgentType::OpenCode,
         AgentType::Vibe,
         AgentType::GeminiCli,
         AgentType::Kiro,
@@ -378,6 +379,10 @@ fn full_access_for_returns_per_agent_setting() {
             full_access: false,
             ..Default::default()
         },
+        open_code: AgentConfig {
+            full_access: true,
+            ..Default::default()
+        },
         gemini_cli: AgentConfig {
             full_access: true,
             ..Default::default()
@@ -413,6 +418,7 @@ fn full_access_for_returns_per_agent_setting() {
     };
     assert!(config.full_access_for(&AgentType::ClaudeCode));
     assert!(!config.full_access_for(&AgentType::Codex));
+    assert!(config.full_access_for(&AgentType::OpenCode));
     assert!(config.full_access_for(&AgentType::GeminiCli));
     assert!(config.full_access_for(&AgentType::Vibe));
     assert!(config.full_access_for(&AgentType::Ollama));

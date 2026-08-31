@@ -11,6 +11,7 @@ export const AGENT_COLORS: Record<string, string> = {
   ClaudeCode: '#D4714E',
   'Claude Code': '#D4714E',
   Codex: '#10a37f',
+  OpenCode: '#7c3aed',
   Vibe: '#FF7000',
   GeminiCli: '#4285f4',
   'Gemini CLI': '#4285f4',
@@ -25,6 +26,7 @@ export const AGENT_COLORS: Record<string, string> = {
 export const AGENT_LABELS: Record<string, string> = {
   ClaudeCode: 'Claude Code',
   Codex: 'Codex',
+  OpenCode: 'OpenCode',
   Vibe: 'Vibe',
   GeminiCli: 'Gemini CLI',
   Kiro: 'Kiro',
@@ -34,7 +36,7 @@ export const AGENT_LABELS: Record<string, string> = {
   Nvidia: 'NVIDIA',
 };
 
-export const ALL_AGENT_TYPES: AgentType[] = ['ClaudeCode', 'Codex', 'Vibe', 'GeminiCli', 'Kiro', 'CopilotCli', 'Ollama', 'LiteLlm', 'Nvidia'];
+export const ALL_AGENT_TYPES: AgentType[] = ['ClaudeCode', 'Codex', 'OpenCode', 'Vibe', 'GeminiCli', 'Kiro', 'CopilotCli', 'Ollama', 'LiteLlm', 'Nvidia'];
 
 export const MODEL_TIER_ICONS: Record<ModelTier, string> = {
   economy: '⚡',
@@ -45,6 +47,7 @@ export const MODEL_TIER_ICONS: Record<ModelTier, string> = {
 const MODEL_TIER_CONFIG_KEY: Partial<Record<AgentType, keyof ModelTiersConfig>> = {
   ClaudeCode: 'claude_code',
   Codex: 'codex',
+  OpenCode: 'open_code',
   GeminiCli: 'gemini_cli',
   Kiro: 'kiro',
   Vibe: 'vibe',
@@ -82,6 +85,7 @@ export const AGENT_MENTIONS: ReadonlyArray<{
 }> = [
   { trigger: '@claude', type: 'ClaudeCode', label: 'Claude Code' },
   { trigger: '@codex', type: 'Codex', label: 'Codex' },
+  { trigger: '@opencode', type: 'OpenCode', label: 'OpenCode' },
   { trigger: '@vibe', type: 'Vibe', label: 'Vibe' },
   { trigger: '@gemini', type: 'GeminiCli', label: 'Gemini CLI' },
   { trigger: '@kiro', type: 'Kiro', label: 'Kiro' },
@@ -147,6 +151,7 @@ export type AgentMentionColors = Partial<Record<AgentType, string>>;
 const AGENT_CONFIG_KEY: Partial<Record<AgentType, keyof AgentsConfig>> = {
   ClaudeCode: 'claude_code',
   Codex: 'codex',
+  OpenCode: 'open_code',
   Vibe: 'vibe',
   GeminiCli: 'gemini_cli',
   Kiro: 'kiro',

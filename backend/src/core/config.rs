@@ -439,6 +439,7 @@ pub fn default_config() -> AppConfig {
                 mention_color: None,
                 base_url: None,
             },
+            open_code: AgentConfig::default(),
             gemini_cli: AgentConfig::default(),
             kiro: AgentConfig::default(),
             vibe: AgentConfig::default(),

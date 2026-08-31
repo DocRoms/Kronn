@@ -4,6 +4,30 @@ mod tests {
     use crate::models::AgentType;
     use serial_test::serial;
 
+    #[test]
+    fn acp_mcp_registry_uses_only_command_entries_without_environment_values() {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(
+            project.path().join(".mcp.json"),
+            r#"{
+                "mcpServers": {
+                    "safe": {"command": "safe-server", "args": ["--project"]},
+                    "credentialed": {"command": "private-server", "env": {"API_KEY": "secret"}},
+                    "remote": {"url": "https://example.invalid/mcp"}
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let servers = acp_project_mcp_servers(project.path().to_str().unwrap());
+
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].id, "safe");
+        assert_eq!(servers[0].command, "safe-server");
+        assert_eq!(servers[0].args, vec!["--project"]);
+        assert!(servers[0].allowed_tools.is_empty());
+    }
+
     /// Drive the production `forward_chat_line` with Ollama's codec, in the
     /// shape the Ollama tests below were written against. Ollama reports token
     /// counts on the very chunk that ends the stream, so a per-call tally is
@@ -7782,6 +7806,7 @@ sleep 3600
             agent_type: AgentType::ClaudeCode,
             rx,
             stderr_capture: Arc::new(Mutex::new(Vec::new())),
+            usage: Arc::new(Mutex::new(AgentUsage::default())),
             stderr_task: None,
             http_cancel: None,
             pgid,
@@ -7835,5 +7860,34 @@ sleep 3600
             witness.0.try_wait().unwrap().is_none(),
             "the unrelated witness must remain alive"
         );
+    }
+
+    #[tokio::test]
+    async fn agent_process_exposes_structured_transport_usage() {
+        let child = crate::core::cmd::async_cmd("sh")
+            .args(["-c", "exit 0"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let (_tx, rx) = mpsc::channel(1);
+        let process = AgentProcess {
+            child,
+            output_mode: OutputMode::Text,
+            work_dir: std::env::temp_dir(),
+            agent_type: AgentType::OpenCode,
+            rx,
+            stderr_capture: Arc::new(Mutex::new(Vec::new())),
+            usage: Arc::new(Mutex::new(AgentUsage {
+                input_tokens: 3,
+                output_tokens: 5,
+            })),
+            stderr_task: None,
+            http_cancel: None,
+            pgid: None,
+        };
+
+        assert_eq!(process.reported_token_usage(), Some(8));
     }
 }

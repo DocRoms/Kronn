@@ -1196,6 +1196,7 @@ pub(crate) fn agent_can_audit(agent: &crate::models::AgentType) -> bool {
     match agent {
         AgentType::ClaudeCode
         | AgentType::Codex
+        | AgentType::OpenCode
         | AgentType::GeminiCli
         | AgentType::Kiro
         | AgentType::CopilotCli => true,
