@@ -282,6 +282,13 @@ async function parseSSEStream(
   const decoder = new TextDecoder();
   let buffer = '';
   let eventType = '';
+  let terminalEventSeen = false;
+  const dispatchEvent = (type: string, data: unknown) => {
+    handlers.onEvent(type, data);
+    if (['done', 'complete', 'run_done', 'success', 'error'].includes(type)) {
+      terminalEventSeen = true;
+    }
+  };
 
   try {
     while (true) {
@@ -299,7 +306,7 @@ async function parseSSEStream(
           const data = line.slice(5).trim();
           try {
             const parsed = JSON.parse(data);
-            handlers.onEvent(eventType, parsed);
+            dispatchEvent(eventType, parsed);
           } catch { /* ignore non-JSON */ }
         } else if (line.trim() === '') {
           eventType = '';
@@ -316,7 +323,7 @@ async function parseSSEStream(
           const data = line.slice(5).trim();
           try {
             const parsed = JSON.parse(data);
-            handlers.onEvent(eventType, parsed);
+            dispatchEvent(eventType, parsed);
           } catch { /* ignore non-JSON */ }
         } else if (line.trim() === '') {
           eventType = '';
@@ -328,7 +335,13 @@ async function parseSSEStream(
     throw e;
   }
 
-  handlers.onDone();
+  if (terminalEventSeen) {
+    handlers.onDone();
+  } else {
+    handlers.onError(
+      'SSE stream closed before a terminal event; the operation closed before completion.',
+    );
+  }
 }
 
 /**
@@ -1423,7 +1436,7 @@ export const discussions = {
    *  (incl. background/batch children). Polled so a run still working after you
    *  navigate away keeps showing as running, instead of looking dead. */
   getRunning: () => api<string[]>('GET', '/discussions/running'),
-  get: (id: string) => api<Discussion & Partial<Pick<DiscussionDetail, 'active_agent_dispatches' | 'message_targets'>>>(
+  get: (id: string) => api<Discussion & Partial<Pick<DiscussionDetail, 'active_agent_dispatches' | 'message_targets' | 'partial_response'>>>(
     'GET',
     `/discussions/${id}`,
   ),

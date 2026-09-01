@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, act, cleanup, fireEvent, waitFor } from '@testing-library/react';
+import { useRef, useState } from 'react';
 import { I18nProvider } from '../../lib/I18nContext';
 import { loadDraft } from '../../lib/chat-drafts';
 import { clearReplyDraft, loadReplyDraft } from '../../lib/chat-reply-drafts';
@@ -169,6 +170,7 @@ vi.mock('../../hooks/useWebSocket', () => ({
 
 import {
   discussions as discussionsApi,
+  externalApi as externalApiConnections,
   planning as planningApi,
   projects as projectsApi,
 } from '../../lib/api';
@@ -704,6 +706,203 @@ describe('DiscussionsPage', () => {
     expect(screen.queryByTestId('pending-agent-Ollama')).toBeNull();
     expect(screen.getAllByText("Agent en cours d'exécution...")).toHaveLength(1);
     expect(screen.queryByText("En file — en attente d'un créneau agent")).toBeNull();
+  });
+
+  it('renders a checkpointed response after backend restart instead of an empty placeholder', async () => {
+    const fullDisc = {
+      ...makeListDiscussion('d-restart-partial', 1),
+      agent: 'Custom' as const,
+      participants: ['Custom' as const],
+      awaiting_agent: true,
+      messages: [{
+        id: 'u-restart', role: 'User' as const, channel: 'main' as const,
+        content: 'Analyse longtemps', agent_type: null,
+        timestamp: '2026-09-01T09:45:13Z', tokens_used: 0, auth_mode: null,
+      }],
+      active_agent_dispatches: [{
+        id: 'job-restart',
+        trigger_message_id: 'u-restart',
+        agent_type: 'Custom' as const,
+        status: 'Pending',
+        attempts: 2,
+        last_error: 'backend_restarted',
+        connection_id: 'openrouter-main',
+      }],
+      partial_response: {
+        message_id: 'partial-restart',
+        content: 'Les 1 919 caractères déjà analysés restent visibles.',
+        started_at: '2026-09-01T09:46:40Z',
+        agent_type: 'Custom' as const,
+        model: 'claude-sonnet',
+        trigger_message_id: 'u-restart',
+        connection_id: 'openrouter-main',
+        dispatch: {
+          id: 'job-restart',
+          trigger_message_id: 'u-restart',
+          agent_type: 'Custom' as const,
+          status: 'Pending',
+          attempts: 2,
+          last_error: 'backend_restarted',
+          connection_id: 'openrouter-main',
+        },
+      },
+    };
+    vi.mocked(externalApiConnections.list).mockResolvedValueOnce([{
+      id: 'openrouter-main',
+      display_name: 'OpenRouter',
+      mention_alias: 'openrouter',
+      origin_preset: 'open_router',
+    } as never]);
+    vi.mocked(discussionsApi.get).mockResolvedValue(fullDisc);
+
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[fullDisc]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        initialActiveDiscussionId="d-restart-partial"
+        {...liftedProps()}
+      />,
+    );
+
+    const response = await screen.findByTestId('streaming-agent-Custom');
+    expect(response).toHaveTextContent('OpenRouter');
+    expect(response).toHaveTextContent('Les 1 919 caractères déjà analysés restent visibles.');
+    expect(response).toHaveTextContent('Backend redémarré — brouillon sauvegardé');
+    expect(response).not.toHaveTextContent("Agent en cours d'exécution...");
+  });
+
+  it('keeps the latest local chunks visible when an accepted stream disconnects', async () => {
+    const fullDisc = {
+      ...makeListDiscussion('d-stream-disconnect', 1),
+      messages: [{
+        id: 'u-existing', role: 'User' as const, channel: 'main' as const,
+        content: 'Question précédente', agent_type: null,
+        timestamp: '2026-09-01T09:45:13Z', tokens_used: 0, auth_mode: null,
+      }],
+    };
+    let detailFetches = 0;
+    vi.mocked(discussionsApi.get).mockImplementation(async () => {
+      detailFetches += 1;
+      if (detailFetches === 1) return fullDisc;
+      throw new Error('backend restarting');
+    });
+    vi.mocked(discussionsApi.sendMessageStream).mockImplementation(
+      async (_discId, payload, onText, _onDone, onError, _signal, onStart, _onLog, onAccepted) => {
+        onStart?.();
+        onAccepted?.({
+          message_id: payload.client_message_id ?? 'u-new',
+          sort_order: 2,
+          duplicate: false,
+        });
+        onText?.('Analyse locale déjà reçue avant la coupure.');
+        // Same-frame failure: the rAF-backed lifted map has not rendered yet.
+        // The synchronous recovery buffer must still retain this chunk.
+        onError?.('network disconnected');
+      },
+    );
+
+    function StatefulDiscussion() {
+      const [sendingMap, setSendingMap] = useState<Record<string, boolean>>({});
+      const [streamingMap, setStreamingMap] = useState<Record<string, string>>({});
+      const [sendingStartMap, setSendingStartMap] = useState<Record<string, number>>({});
+      const [queuedMap, setQueuedMap] = useState<Record<string, boolean>>({});
+      const abortControllers = useRef<Record<string, AbortController>>({});
+      return (
+        <DiscussionsPage
+          projects={[]}
+          agents={[]}
+          allDiscussions={[fullDisc]}
+          configLanguage="fr"
+          agentAccess={null}
+          refetchDiscussions={noop}
+          refetchProjects={noop}
+          onNavigate={noop}
+          toast={toastFn}
+          initialActiveDiscussionId="d-stream-disconnect"
+          sendingMap={sendingMap}
+          setSendingMap={setSendingMap}
+          queuedMap={queuedMap}
+          setQueuedMap={setQueuedMap}
+          sendingStartMap={sendingStartMap}
+          setSendingStartMap={setSendingStartMap}
+          streamingMap={streamingMap}
+          setStreamingMap={setStreamingMap}
+          noteStreamTick={noop}
+          abortControllers={abortControllers}
+          cleanupStream={(discId) => {
+            setSendingMap(previous => ({ ...previous, [discId]: false }));
+            setStreamingMap(previous => {
+              const { [discId]: _removed, ...rest } = previous;
+              return rest;
+            });
+          }}
+          markDiscussionSeen={noop}
+          onActiveDiscussionChange={noop}
+          lastSeenMsgCount={{}}
+        />
+      );
+    }
+
+    await wrap(<StatefulDiscussion />);
+    const chatInput = document.querySelector('textarea') as HTMLTextAreaElement;
+    await act(async () => {
+      fireEvent.change(chatInput, { target: { value: 'Lancer une longue analyse' } });
+    });
+    await act(async () => {
+      fireEvent.click(document.querySelector('button[aria-label="Send message"]') as HTMLButtonElement);
+      await new Promise(resolve => setTimeout(resolve, 10));
+    });
+
+    await waitFor(() => {
+      expect(document.body).toHaveTextContent('Analyse locale déjà reçue avant la coupure.');
+    });
+    expect(screen.getAllByText('Analyse locale déjà reçue avant la coupure.')).toHaveLength(1);
+    expect(document.body).toHaveTextContent('Connexion au flux interrompue');
+    expect(document.body).not.toHaveTextContent("Agent en cours d'exécution...");
+  });
+
+  it('renders a legacy checkpoint even when no active dispatch row survives', async () => {
+    const fullDisc = {
+      ...makeListDiscussion('d-orphan-checkpoint', 1),
+      messages: [{
+        id: 'u-orphan', role: 'User' as const, channel: 'main' as const,
+        content: 'Analyse interrompue', agent_type: null,
+        timestamp: '2026-09-01T09:45:13Z', tokens_used: 0, auth_mode: null,
+      }],
+      partial_response: {
+        message_id: 'partial-orphan',
+        content: 'Fragment durable sans ligne de dispatch.',
+        agent_type: 'ClaudeCode' as const,
+        trigger_message_id: 'u-orphan',
+      },
+    };
+    vi.mocked(discussionsApi.get).mockResolvedValue(fullDisc);
+
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[fullDisc]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        initialActiveDiscussionId="d-orphan-checkpoint"
+        {...liftedProps()}
+      />,
+    );
+
+    expect(await screen.findByTestId('streaming-agent-ClaudeCode'))
+      .toHaveTextContent('Fragment durable sans ligne de dispatch.');
   });
 
   it('keeps overlapping reply slots attached to their own turns and reorders a late reply', async () => {

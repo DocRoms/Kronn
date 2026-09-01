@@ -2417,27 +2417,49 @@ async fn make_agent_stream_inner(
                 // so a restart-time recovery rebuilds the message with provenance.
                 let checkpoint_agent = agent_type.clone();
                 let checkpoint_model = attempted_model.clone();
-                // Helper: best-effort flush, never propagates DB errors to the agent loop.
+                let checkpoint_dispatch_id = dispatch_job_id.clone();
+                let checkpoint_trigger_message_id = dispatch_trigger_message_id.clone();
+                let checkpoint_connection_id = dispatch_connection_id.clone();
+                // Await each best-effort flush. Serial writes cannot land out
+                // of order or resurrect a stale draft after terminal cleanup.
                 let do_checkpoint = |partial: String| {
                     let did = checkpoint_disc_id.clone();
                     let db = checkpoint_db.clone();
                     let agent = checkpoint_agent.clone();
                     let model = checkpoint_model.clone();
-                    tokio::spawn(async move {
+                    let dispatch_id = checkpoint_dispatch_id.clone();
+                    let trigger_message_id = checkpoint_trigger_message_id.clone();
+                    let connection_id = checkpoint_connection_id.clone();
+                    async move {
                         if let Err(e) = db
                             .with_conn(move |conn| {
-                                crate::db::discussions::set_partial_response(
-                                    conn,
-                                    &did,
-                                    Some(&partial),
-                                    Some((&agent, model.as_deref())),
-                                )
+                                if let (Some(dispatch_id), Some(trigger_message_id)) =
+                                    (dispatch_id.as_deref(), trigger_message_id.as_deref())
+                                {
+                                    crate::db::discussions::set_partial_response_for_dispatch(
+                                        conn,
+                                        &did,
+                                        &partial,
+                                        (&agent, model.as_deref()),
+                                        dispatch_id,
+                                        trigger_message_id,
+                                        connection_id.as_deref(),
+                                    )
+                                    .map(|_| ())
+                                } else {
+                                    crate::db::discussions::set_partial_response(
+                                        conn,
+                                        &did,
+                                        Some(&partial),
+                                        Some((&agent, model.as_deref())),
+                                    )
+                                }
                             })
                             .await
                         {
                             tracing::warn!("partial_response checkpoint failed: {}", e);
                         }
-                    });
+                    }
                 };
 
                 // Stream stderr logs to the client in real-time
@@ -2571,7 +2593,7 @@ async fn make_agent_stream_inner(
                                 if chunks_since_checkpoint >= CHECKPOINT_CHUNKS
                                     || last_checkpoint.elapsed() >= CHECKPOINT_INTERVAL
                                 {
-                                    do_checkpoint(full_response.clone());
+                                    do_checkpoint(full_response.clone()).await;
                                     last_checkpoint = tokio::time::Instant::now();
                                     chunks_since_checkpoint = 0;
                                 }
@@ -2705,7 +2727,7 @@ async fn make_agent_stream_inner(
                         if chunks_since_checkpoint >= CHECKPOINT_CHUNKS
                             || last_checkpoint.elapsed() >= CHECKPOINT_INTERVAL
                         {
-                            do_checkpoint(full_response.clone());
+                            do_checkpoint(full_response.clone()).await;
                             last_checkpoint = tokio::time::Instant::now();
                             chunks_since_checkpoint = 0;
                         }
@@ -3489,15 +3511,25 @@ async fn make_agent_stream_inner(
                 // interruption mid-run stays flagged and the boot reconcile
                 // catches it — no blind window.
                 let did_clear = disc_id.clone();
+                let dispatch_id_for_clear = dispatch_job_id.clone();
                 let _ = state
                     .db
                     .with_conn(move |conn| {
                         // Attempt both clears even if the first fails — a `?` here
                         // would leave the awaiting marker stale on a partial-clear
                         // error and trigger needless boot reconcile work.
-                        let partial = crate::db::discussions::set_partial_response(
-                            conn, &did_clear, None, None,
-                        );
+                        let partial = if let Some(dispatch_id) = dispatch_id_for_clear.as_deref() {
+                            crate::db::discussions::clear_partial_response_for_dispatch(
+                                conn,
+                                &did_clear,
+                                dispatch_id,
+                            )
+                            .map(|_| ())
+                        } else {
+                            crate::db::discussions::set_partial_response(
+                                conn, &did_clear, None, None,
+                            )
+                        };
                         let awaiting =
                             clear_awaiting_after_terminal(conn, &did_clear, tracked_dispatch);
                         partial.and(awaiting)

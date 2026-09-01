@@ -70,12 +70,15 @@ pub async fn get(
                 &id,
                 &discussion.agent,
             )?;
+            let partial_response =
+                crate::db::discussions::get_in_flight_agent_response(conn, &id, &discussion.agent)?;
             let message_targets =
                 crate::db::discussions::list_discussion_message_targets(conn, &id)?;
             Ok(Some(crate::models::DiscussionDetail {
                 discussion,
                 active_agent_dispatches,
                 message_targets,
+                partial_response,
             }))
         })
         .await
@@ -1058,7 +1061,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_discussion_exposes_each_active_dispatch_with_its_trigger_turn() {
+    async fn get_discussion_exposes_restart_checkpoint_and_each_active_dispatch() {
         let state = state_with_disc("d-overlap").await;
         state
             .db
@@ -1094,6 +1097,21 @@ mod tests {
                         group_concurrency_limit: None,
                     },
                 )?;
+                conn.execute(
+                    "UPDATE agent_dispatch_jobs
+                        SET attempts = 2, last_error = 'backend_restarted'
+                      WHERE id = 'job-overlap'",
+                    [],
+                )?;
+                crate::db::discussions::set_partial_response_for_dispatch(
+                    conn,
+                    "d-overlap",
+                    "Analyse déjà produite avant le redémarrage.",
+                    (&crate::models::AgentType::Ollama, Some("qwen:test")),
+                    "job-overlap",
+                    "u-overlap",
+                    None,
+                )?;
                 Ok(())
             })
             .await
@@ -1109,6 +1127,29 @@ mod tests {
         assert_eq!(
             detail.active_agent_dispatches[0].agent_type,
             crate::models::AgentType::Ollama
+        );
+        assert_eq!(detail.active_agent_dispatches[0].attempts, Some(2));
+        assert_eq!(
+            detail.active_agent_dispatches[0].last_error.as_deref(),
+            Some("backend_restarted")
+        );
+        let partial = detail
+            .partial_response
+            .expect("checkpointed response must be exposed while the dispatch resumes");
+        assert_eq!(
+            partial.content,
+            "Analyse déjà produite avant le redémarrage."
+        );
+        assert_eq!(partial.agent_type, Some(crate::models::AgentType::Ollama));
+        assert_eq!(partial.model.as_deref(), Some("qwen:test"));
+        assert!(!partial.message_id.is_empty());
+        let partial_dispatch = partial.dispatch.expect("active dispatch projection");
+        assert_eq!(partial_dispatch.id, "job-overlap");
+        assert_eq!(partial_dispatch.trigger_message_id, "u-overlap");
+        assert_eq!(partial_dispatch.attempts, Some(2));
+        assert_eq!(
+            partial_dispatch.last_error.as_deref(),
+            Some("backend_restarted")
         );
         assert_eq!(
             detail.message_targets.get("u-overlap"),
