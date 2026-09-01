@@ -1804,6 +1804,22 @@ mod tests {
     }
 
     #[test]
+    fn tombstone_message_refuses_an_immutable_execution_context_card() {
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("d-exec-ctx")).unwrap();
+        let mut card = make_message("m-exec-ctx", MessageRole::System, None);
+        card.content = "execution_context:{\"snapshot_id\":\"s1\"}".into();
+        insert_message(&conn, "d-exec-ctx", &card).unwrap();
+
+        let error = tombstone_message(&conn, "d-exec-ctx", "m-exec-ctx").unwrap_err();
+
+        assert!(matches!(error, TombstoneMessageError::Immutable));
+        assert!(list_messages(&conn, "d-exec-ctx").unwrap()[0]
+            .content
+            .starts_with("execution_context:"));
+    }
+
+    #[test]
     fn get_context_files_for_prompt_text_only() {
         let conn = test_conn();
         insert_discussion(&conn, &make_discussion("d-prompt")).unwrap();

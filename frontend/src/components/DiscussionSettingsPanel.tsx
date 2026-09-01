@@ -34,6 +34,7 @@ import type {
   Directive,
   Discussion,
   DiscussionAgentHandoffMode,
+  DiscussionExecutionVariableRetention,
   McpConfigDisplay,
   McpIncompatibility,
   Project,
@@ -78,6 +79,7 @@ export function DiscussionSettingsPanel({
   const [expandedSection, setExpandedSection] = useState<ConfigSection>(null);
   const [mcpSearch, setMcpSearch] = useState('');
   const [handoffMode, setHandoffMode] = useState<DiscussionAgentHandoffMode | null>(null);
+  const [variableRetention, setVariableRetention] = useState<DiscussionExecutionVariableRetention | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -87,6 +89,18 @@ export function DiscussionSettingsPanel({
       })
       .catch(() => {
         if (active) setHandoffMode(null);
+      });
+    return () => { active = false; };
+  }, [discussion.id]);
+
+  useEffect(() => {
+    let active = true;
+    discussionsApi.executionVariableRetention(discussion.id)
+      .then(policy => {
+        if (active) setVariableRetention(policy);
+      })
+      .catch(() => {
+        if (active) setVariableRetention(null);
       });
     return () => { active = false; };
   }, [discussion.id]);
@@ -446,6 +460,45 @@ export function DiscussionSettingsPanel({
               </div>
             )}
           </div>
+
+          <label className="disc-settings-field">
+            <span>{t('disc.executionVariableRetention')}</span>
+            <select
+              className="disc-popover-select"
+              aria-label={t('disc.executionVariableRetention')}
+              value={variableRetention?.override_days == null ? 'inherit' : String(variableRetention.override_days)}
+              disabled={!variableRetention}
+              onChange={async event => {
+                if (!variableRetention) return;
+                const previous = variableRetention;
+                const overrideDays = event.target.value === 'inherit'
+                  ? null
+                  : Number(event.target.value);
+                setVariableRetention({
+                  ...previous,
+                  override_days: overrideDays,
+                  effective_days: overrideDays ?? previous.global_days,
+                });
+                try {
+                  await discussionsApi.update(discussion.id, {
+                    execution_variable_retention_days: overrideDays,
+                  });
+                  onDiscussionUpdated();
+                } catch (cause) {
+                  setVariableRetention(previous);
+                  toast(userError(cause), 'error');
+                }
+              }}
+            >
+              <option value="inherit">{t('disc.executionVariableRetention.inherit', variableRetention?.global_days ?? 30)}</option>
+              <option value="0">{t('disc.executionVariableRetention.activeRun')}</option>
+              <option value="7">{t('disc.executionVariableRetention.days', 7)}</option>
+              <option value="30">{t('disc.executionVariableRetention.days', 30)}</option>
+              <option value="60">{t('disc.executionVariableRetention.days', 60)}</option>
+              <option value="90">{t('disc.executionVariableRetention.days', 90)}</option>
+            </select>
+            <small>{t('disc.executionVariableRetentionHint')}</small>
+          </label>
 
         </section>
 

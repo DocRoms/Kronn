@@ -12,6 +12,7 @@ pub mod discussion_sessions;
 pub mod discussion_weight;
 pub mod discussion_workspaces;
 pub mod discussions;
+pub mod execution_variable_snapshots;
 pub mod external_api_connections;
 pub mod id_resolver;
 pub mod learnings;

@@ -150,7 +150,7 @@ describe('mergeDeclaredAndDetected', () => {
     const wf = wfWith(
       [stepWith({ prompt_template: '{{issue}} + {{branch}}' })],
       [
-        { name: 'issue', label: 'Jira ticket', placeholder: 'ABC-123', description: 'Issue key', required: true },
+        { name: 'issue', label: 'Jira ticket', placeholder: 'ABC-123', description: 'Issue key', required: true, source: 'user_input', source_ref: null, allow_manual_override: false },
       ],
     );
     const merged = mergeDeclaredAndDetected(wf);

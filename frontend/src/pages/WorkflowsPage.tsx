@@ -26,6 +26,7 @@ import { WorkflowWizard } from '../components/workflows/WorkflowWizard';
 import { QuickPromptForm } from '../components/workflows/QuickPromptForm';
 import { QuickApiForm } from '../components/workflows/QuickApiForm';
 import { QuickExecForm } from '../components/workflows/QuickExecForm';
+import { ProvidedVariablesPreview } from '../components/workflows/ProvidedVariablesPreview';
 import { RunStatusCard } from '../components/RunStatusCard';
 import type { RunStatusCardModel } from '../lib/runStatusCardModel';
 import QPHistoryDrawer from '../components/QPHistoryDrawer';
@@ -1331,19 +1332,6 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showAutomationActions, tab]);
 
-  const renderTemplate = (template: string, vars: Record<string, string>): string => {
-    let rendered = template;
-    // 1. Process conditional sections: {{#var}}content{{/var}} — removed if var is empty
-    rendered = rendered.replace(/\{\{#(\w+)\}\}([\s\S]*?)\{\{\/\1\}\}/g, (_, name, content) => {
-      return vars[name]?.trim() ? content : '';
-    });
-    // 2. Replace remaining {{var}} placeholders
-    rendered = rendered.replace(/\{\{(\w+)\}\}/g, (_, name) => vars[name] ?? '');
-    // 3. Clean up double spaces/commas from removed sections
-    rendered = rendered.replace(/  +/g, ' ').replace(/, ,/g, ',').trim();
-    return rendered;
-  };
-
   /**
    * 0.8.5 follow-up — validate that every variable flagged as required
    * has a non-empty value before firing a launch / compare-agents.
@@ -1355,7 +1343,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   const collectMissingRequiredVars = (qp: QuickPrompt, vars: Record<string, string>): string[] => {
     return qp.variables
       // `required` defaults to true (legacy QPs); only explicitly false skips validation.
-      .filter(v => v.required !== false && !(vars[v.name] ?? '').trim())
+      .filter(v => (v.source ?? 'user_input') === 'user_input' && v.required !== false && !(vars[v.name] ?? '').trim())
       .map(v => v.label || v.name);
   };
 
@@ -1373,7 +1361,6 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     launchingRef.current = true;
     setLaunching(true);
     try {
-      const rendered = renderTemplate(qp.prompt_template, launchVars);
       // Build dynamic title with first non-empty variable value
       const firstVal = qp.variables.map(v => launchVars[v.name]).find(v => v?.trim());
       const title = firstVal ? `${qp.name} — ${firstVal}` : qp.name;
@@ -1382,7 +1369,10 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
         title,
         agent: qp.agent,
         language: configLanguage || 'fr',
-        initial_prompt: rendered,
+        // The backend performs canonical rendering after JIT resolution so
+        // project-provided values never cross this launch payload.
+        initial_prompt: qp.prompt_template,
+        launch_variables: launchVars,
         initial_targets: qp.connection_id ? [{
           kind: 'agent',
           agent_type: qp.agent,
@@ -1535,14 +1525,14 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     launchingRef.current = true;
     setLaunching(true);
     try {
-      const rendered = renderTemplate(qp.prompt_template, launchVars);
       const firstVal = qp.variables.map(v => launchVars[v.name]).find(v => v?.trim());
       const stamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
       const batchName = firstVal
         ? `🤝 ${qp.name} — ${firstVal} — ${stamp}`
         : `🤝 ${qp.name} — ${stamp}`;
       const result = await quickPromptsApi.compareAgents(qp.id, {
-        prompt: rendered,
+        prompt: qp.prompt_template,
+        variables: launchVars,
         batch_name: batchName,
         targets,
         project_id: qp.project_id ?? undefined,
@@ -1640,8 +1630,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     try {
       const items = lines.map(line => {
         const vars: Record<string, string> = { [keyVar.name]: line };
-        const prompt = renderTemplate(qp.prompt_template, vars);
-        return { title: `${qp.name} — ${line}`, prompt };
+        return { title: `${qp.name} — ${line}`, prompt: qp.prompt_template, variables: vars };
       });
       const now = new Date();
       const batchName = `${qp.name} — ${now.toLocaleString(configLanguage || 'fr', {
@@ -2992,7 +2981,8 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                           subset before firing). */}
                       {launchingQP?.id === qp.id && (
                         <div className="qp-launch-form">
-                          {qp.variables.map(v => (
+                          <h3 className="text-xs font-medium">{t('wf.launchInputTitle')}</h3>
+                          {qp.variables.filter(v => (v.source ?? 'user_input') === 'user_input').map(v => (
                             <div key={v.name} className="qp-launch-field">
                               <label className="qp-launch-label">{v.label || v.name}</label>
                               <input
@@ -3009,6 +2999,19 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                               />
                             </div>
                           ))}
+                          {qp.variables.some(v => (v.source ?? 'user_input') !== 'user_input') && (
+                            <ProvidedVariablesPreview
+                              variables={qp.variables.filter(v => (v.source ?? 'user_input') !== 'user_input')}
+                              projectId={qp.project_id}
+                              values={launchVars}
+                              onValueChange={(name, value) => setLaunchVars(previous => {
+                                const next = { ...previous };
+                                if (value === undefined) delete next[name];
+                                else next[name] = value;
+                                return next;
+                              })}
+                            />
+                          )}
                           {/* Compare targets use the shared agent+tier picker,
                               so this launch surface speaks the same model
                               language as discussions, QPs and workflow steps. */}
@@ -3603,7 +3606,8 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                           clicks Launch again or another QA's button. */}
                       {launchingQA?.id === qa.id && qa.variables.length > 0 && (
                         <div className="qp-launch-form">
-                          {qa.variables.map(v => (
+                          <h3 className="text-xs font-medium">{t('wf.launchInputTitle')}</h3>
+                          {qa.variables.filter(v => (v.source ?? 'user_input') === 'user_input').map(v => (
                             <div key={v.name} className="qp-launch-field">
                               <label className="qp-launch-label">
                                 {v.label || v.name}
@@ -3619,10 +3623,23 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                               />
                             </div>
                           ))}
+                          {qa.variables.some(v => (v.source ?? 'user_input') !== 'user_input') && (
+                            <ProvidedVariablesPreview
+                              variables={qa.variables.filter(v => (v.source ?? 'user_input') !== 'user_input')}
+                              projectId={qa.project_id}
+                              values={launchVarsQA}
+                              onValueChange={(name, value) => setLaunchVarsQA(previous => {
+                                const next = { ...previous };
+                                if (value === undefined) delete next[name];
+                                else next[name] = value;
+                                return next;
+                              })}
+                            />
+                          )}
                           <button
                             className="qp-launch-go-btn"
                             onClick={() => handleLaunchQA(qa)}
-                            disabled={launchingQARun || qa.variables.some(v => (v.required ?? true) && !(launchVarsQA[v.name] ?? '').trim())}
+                            disabled={launchingQARun || qa.variables.some(v => (v.source ?? 'user_input') === 'user_input' && (v.required ?? true) && !(launchVarsQA[v.name] ?? '').trim())}
                           >
                             {launchingQARun ? <Loader2 size={14} className="spin" /> : <Play size={14} />}
                             {launchingQARun ? '...' : t('qa.runGo')}
@@ -3781,7 +3798,8 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                       </div>
                       {isOpen && (
                         <div className="qp-launch-form qe-run-form">
-                          {quickExec.variables.map(variable => (
+                          <h3 className="text-xs font-medium">{t('wf.launchInputTitle')}</h3>
+                          {quickExec.variables.filter(variable => (variable.source ?? 'user_input') === 'user_input').map(variable => (
                             <div className="qp-launch-field" key={variable.name}>
                               <label className="qp-launch-label">
                                 {variable.label || variable.name}{variable.required && ' *'}
@@ -3794,10 +3812,23 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                               />
                             </div>
                           ))}
+                          {quickExec.variables.some(variable => (variable.source ?? 'user_input') !== 'user_input') && (
+                            <ProvidedVariablesPreview
+                              variables={quickExec.variables.filter(variable => (variable.source ?? 'user_input') !== 'user_input')}
+                              projectId={quickExec.project_id}
+                              values={runVarsQE}
+                              onValueChange={(name, value) => setRunVarsQE(previous => {
+                                const next = { ...previous };
+                                if (value === undefined) delete next[name];
+                                else next[name] = value;
+                                return next;
+                              })}
+                            />
+                          )}
                           {quickExec.variables.length > 0 && (
                             <button
                               className="qp-launch-go-btn"
-                              disabled={runQEState.busy || quickExec.variables.some(variable => variable.required && !(runVarsQE[variable.name] ?? '').trim())}
+                              disabled={runQEState.busy || quickExec.variables.some(variable => (variable.source ?? 'user_input') === 'user_input' && variable.required && !(runVarsQE[variable.name] ?? '').trim())}
                               onClick={() => void handleRunQE(quickExec)}
                             >
                               {runQEState.busy ? <Loader2 size={14} className="spin" /> : <Play size={14} />}
@@ -3864,7 +3895,13 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
               ><X size={12} /></button>
             </div>
             <p className="text-xs text-muted mb-4">{t('wf.launchModalHint')}</p>
-            {(launchingWorkflow.workflow.variables ?? []).map((v, idx) => {
+            {(() => {
+              const declared = launchingWorkflow.workflow.variables ?? [];
+              const manual = declared.filter(v => (v.source ?? 'user_input') === 'user_input');
+              const provided = declared.filter(v => (v.source ?? 'user_input') !== 'user_input');
+              return <>
+              {manual.length > 0 && <h3 className="text-xs font-medium mb-2">{t('wf.launchInputsTitle')}</h3>}
+              {manual.map((v, idx) => {
               const required = v.required ?? true;
               return (
                 <div key={v.name} className="qp-launch-field mb-3">
@@ -3896,7 +3933,24 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                   )}
                 </div>
               );
-            })}
+              })}
+              {provided.length > 0 && (
+                <ProvidedVariablesPreview
+                  variables={provided}
+                  projectId={launchingWorkflow.workflow.project_id}
+                  values={launchingWorkflow.values}
+                  disabled={launchingWorkflow.submitting}
+                  onValueChange={(name, value) => setLaunchingWorkflow(previous => {
+                    if (!previous) return previous;
+                    const values = { ...previous.values };
+                    if (value === undefined) delete values[name];
+                    else values[name] = value;
+                    return { ...previous, values, error: null };
+                  })}
+                />
+              )}
+              </>;
+            })()}
             {launchingWorkflow.error && (
               <div className="text-xs text-error mb-3">{launchingWorkflow.error}</div>
             )}
@@ -3914,7 +3968,8 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                   // Validate required vars are filled.
                   const vars = launchingWorkflow.workflow.variables ?? [];
                   const missing = vars
-                    .filter(v => (v.required ?? true) && !(launchingWorkflow.values[v.name] ?? '').trim())
+                    .filter(v => (v.source ?? 'user_input') === 'user_input'
+                      && (v.required ?? true) && !(launchingWorkflow.values[v.name] ?? '').trim())
                     .map(v => v.label || v.name);
                   if (missing.length > 0) {
                     setLaunchingWorkflow(prev => prev ? {

@@ -681,6 +681,38 @@ async fn execute_run_with_notify_policy(
     if let Some(ref trigger_ctx) = run.trigger_context {
         inject_trigger_context(&mut ctx, trigger_ctx);
     }
+    // Execution variables never transit through trigger_context. Load the
+    // run-scoped encrypted snapshot directly into this in-memory context. A
+    // technical resume uses the same run id and therefore the same snapshot.
+    if !workflow.variables.is_empty() {
+        let secret = state
+            .config
+            .read()
+            .await
+            .encryption_secret
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("Variable snapshot key unavailable"))?;
+        let key = crate::core::crypto::parse_secret(&secret).map_err(anyhow::Error::msg)?;
+        let run_id = run.id.clone();
+        let values = state
+            .db
+            .with_conn(move |conn| {
+                crate::db::execution_variable_snapshots::load_values(
+                    conn,
+                    "workflow",
+                    &run_id,
+                    &key,
+                    Utc::now(),
+                )
+            })
+            .await?
+            .ok_or_else(|| {
+                anyhow::anyhow!("Workflow execution variable snapshot unavailable or expired")
+            })?;
+        for (name, value) in values {
+            ctx.set(name, value);
+        }
+    }
     // 0.7.0 Phase 3 — pre-seed every declared artifact to "" so a step
     // referencing `{{artifacts.review}}` on round 1 (before any step
     // wrote it) renders cleanly rather than leaving the literal
@@ -2391,9 +2423,21 @@ async fn execute_run_with_notify_policy(
     }
 
     let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
+    let terminal_snapshot_run_id = (!paused_for_approval).then(|| run.id.clone());
     let db5 = db.clone();
-    db5.with_conn(move |conn| crate::db::workflows::update_run_progress(conn, snap))
-        .await?;
+    db5.with_conn(move |conn| {
+        let updated = crate::db::workflows::update_run_progress(conn, snap)?;
+        if let Some(run_id) = terminal_snapshot_run_id.as_deref() {
+            crate::db::execution_variable_snapshots::purge_run_lifetime_snapshot(
+                conn,
+                "workflow",
+                run_id,
+                Utc::now(),
+            )?;
+        }
+        Ok(updated)
+    })
+    .await?;
 
     // Emit run done
     emit(RunEvent::RunDone {
@@ -4345,6 +4389,9 @@ mod tests {
                 description: None,
                 required: true,
                 pattern: None,
+                source: Default::default(),
+                source_ref: None,
+                allow_manual_override: false,
             }],
             agent: AgentType::ClaudeCode,
             connection_id: None,

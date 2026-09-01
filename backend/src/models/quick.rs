@@ -12,6 +12,20 @@ use super::{AgentSettings, AgentType, ExtractSpec, ModelTier, PaginationSpec};
 // Quick Prompts (reusable prompt templates with variables)
 // ═══════════════════════════════════════════════════════════════════════════════
 
+/// Where a declared template variable obtains its value at execution time.
+///
+/// The declaration is deliberately a reference only. In particular a
+/// `ProjectEnv` declaration stores `<env.NAME>`, never the secret value.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptVariableSource {
+    #[default]
+    UserInput,
+    KronnContext,
+    ProjectEnv,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct PromptVariable {
@@ -37,6 +51,86 @@ pub struct PromptVariable {
     /// malformed pattern; logged).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pattern: Option<String>,
+    /// Resolution strategy. Omitted legacy definitions remain manual inputs.
+    #[serde(default)]
+    pub source: Option<PromptVariableSource>,
+    /// Declarative source reference (`<env.NAME>` for `ProjectEnv`).
+    /// This field must never carry a resolved value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_ref: Option<String>,
+    /// Project environment variables are read-only unless the template author
+    /// explicitly allows an audited launch-time override.
+    #[serde(default)]
+    pub allow_manual_override: bool,
+}
+
+impl PromptVariable {
+    /// Only a `UserInput` variable is ever collected from the launcher.
+    /// `allow_manual_override` makes an override *possible* for a
+    /// project-resolved variable, never mandatory: Kronn still resolves the
+    /// value when the launcher leaves the optional override blank, so an
+    /// override-enabled `ProjectEnv`/`KronnContext` declaration must not be
+    /// treated as a required input.
+    pub fn requires_user_input(&self) -> bool {
+        self.source.clone().unwrap_or_default() == PromptVariableSource::UserInput
+    }
+
+    pub fn validate_source(&self) -> Result<(), String> {
+        match self.source.clone().unwrap_or_default() {
+            PromptVariableSource::UserInput => Ok(()),
+            PromptVariableSource::KronnContext => self
+                .source_ref
+                .as_deref()
+                .filter(|reference| is_reference(reference, "context"))
+                .map(|_| ())
+                .ok_or_else(|| {
+                    format!(
+                        "Context variable `{}` must reference <context.NAME>",
+                        self.name
+                    )
+                }),
+            PromptVariableSource::ProjectEnv => {
+                let reference = self.source_ref.as_deref().unwrap_or_default();
+                if is_reference(reference, "env") {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "Project environment variable `{}` must reference <env.NAME>",
+                        self.name
+                    ))
+                }
+            }
+        }
+    }
+}
+
+/// A source declaration has no room for a literal.  Keep the accepted syntax
+/// deliberately narrow so persisted definitions can be inspected without
+/// guessing whether a string is a reference or a secret value.
+fn is_reference(reference: &str, namespace: &str) -> bool {
+    let Some(name) = reference
+        .strip_prefix(&format!("<{namespace}."))
+        .and_then(|value| value.strip_suffix('>'))
+    else {
+        return false;
+    };
+    let mut chars = name.chars();
+    matches!(chars.next(), Some(first) if first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Reject invalid declarations at every authoring boundary.  Runtime
+/// resolution can then rely on the declaration shape without ever accepting
+/// a persisted literal as an environment reference.
+pub fn validate_prompt_variables(variables: &[PromptVariable]) -> Result<(), String> {
+    let mut names = std::collections::HashSet::new();
+    for variable in variables {
+        if variable.name.trim().is_empty() || !names.insert(variable.name.trim()) {
+            return Err("Variable names must be non-empty and unique".into());
+        }
+        variable.validate_source()?;
+    }
+    Ok(())
 }
 
 fn default_variable_required() -> bool {
@@ -483,4 +577,63 @@ pub struct BatchRunQuickApiResponse {
     pub duration_ms: u64,
     pub envelope: Option<serde_json::Value>,
     pub error: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn variable(source: PromptVariableSource, source_ref: Option<&str>) -> PromptVariable {
+        PromptVariable {
+            name: "token".into(),
+            label: "Token".into(),
+            placeholder: String::new(),
+            description: None,
+            required: true,
+            pattern: None,
+            source: Some(source),
+            source_ref: source_ref.map(str::to_owned),
+            allow_manual_override: false,
+        }
+    }
+
+    #[test]
+    fn project_environment_variables_keep_only_a_declarative_reference() {
+        let declaration = variable(PromptVariableSource::ProjectEnv, Some("<env.API_TOKEN>"));
+        assert!(declaration.validate_source().is_ok());
+        assert!(!declaration.requires_user_input());
+        assert!(
+            variable(PromptVariableSource::ProjectEnv, Some("secret-value"))
+                .validate_source()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn allowing_an_override_never_makes_a_resolved_variable_a_required_input() {
+        let mut declaration = variable(PromptVariableSource::ProjectEnv, Some("<env.API_TOKEN>"));
+        declaration.allow_manual_override = true;
+        // An override is possible but optional: Kronn still resolves the value
+        // from the project, so the launcher must not be forced to supply one.
+        assert!(!declaration.requires_user_input());
+        let mut context = variable(PromptVariableSource::KronnContext, Some("<context.locale>"));
+        context.allow_manual_override = true;
+        assert!(!context.requires_user_input());
+    }
+
+    #[test]
+    fn context_variables_require_a_source_reference() {
+        assert!(variable(PromptVariableSource::KronnContext, None)
+            .validate_source()
+            .is_err());
+    }
+
+    #[test]
+    fn declarations_reject_literals_and_duplicate_names() {
+        let mut first = variable(PromptVariableSource::ProjectEnv, Some("<env.API_TOKEN>"));
+        let second = first.clone();
+        assert!(validate_prompt_variables(&[first.clone(), second]).is_err());
+        first.source_ref = Some("<env.123bad>".into());
+        assert!(validate_prompt_variables(&[first]).is_err());
+    }
 }

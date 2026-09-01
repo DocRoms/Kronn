@@ -109,6 +109,10 @@ pub struct ServerConfig {
     /// still referenced by a retained child are always preserved.
     #[serde(default)]
     pub run_retention_days: u32,
+    /// Encrypted execution-variable snapshot retention. `0` keeps metadata
+    /// but disables value retention. Product default: 30 days.
+    #[serde(default = "default_execution_variable_retention_days")]
+    pub execution_variable_retention_days: u32,
     /// KT-373 — refuse to provision a worktree below this much free disk, in
     /// GiB. On 2026-08-21 the dev volume hit 100% with seven worktrees each
     /// holding its own Rust `target/`; provisioning kept going until nothing
@@ -276,6 +280,10 @@ pub(crate) const DEFAULT_DISK_CRITICAL_GIB: u64 = 5;
 pub(crate) const DEFAULT_DISK_WARNING_GIB: u64 = 20;
 fn default_disk_critical_gib() -> u64 {
     DEFAULT_DISK_CRITICAL_GIB
+}
+
+fn default_execution_variable_retention_days() -> u32 {
+    30
 }
 fn default_disk_warning_gib() -> u64 {
     DEFAULT_DISK_WARNING_GIB
@@ -823,6 +831,9 @@ pub struct ServerConfigPublic {
     /// Sidebar storage-weight indicator: lets the frontend skip the batch
     /// call entirely when disabled, and grade colours without a round-trip.
     pub discussion_weight: crate::models::DiscussionWeightConfig,
+    /// Default retention for encrypted execution-variable snapshots.
+    /// Zero purges values as soon as the run reaches a terminal state.
+    pub execution_variable_retention_days: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -858,4 +869,8 @@ pub struct UpdateServerConfigRequest {
     /// Whole section at once: the toggle and the pair are persisted together
     /// so a rejected pair can never leave a half-applied state.
     pub discussion_weight: Option<crate::models::DiscussionWeightConfig>,
+    /// Default encrypted execution-variable retention. Zero means that values
+    /// exist only for the lifetime of the active execution.
+    #[serde(default)]
+    pub execution_variable_retention_days: Option<u32>,
 }

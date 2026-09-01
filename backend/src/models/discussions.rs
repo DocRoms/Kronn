@@ -378,6 +378,10 @@ pub struct CreateDiscussionRequest {
     /// `None` = not a QP launch (briefing / manual / etc.).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub originating_qp_id: Option<String>,
+    /// Raw launch inputs for an originating Quick Prompt. The server resolves
+    /// project/context sources and renders the canonical stored template.
+    #[serde(default)]
+    pub launch_variables: std::collections::HashMap<String, String>,
     /// F9 — create a "human-only" disc: the agent runner never spawns on
     /// `send_message`. Used by the contact-click → 1:1 human↔human chat flow.
     #[serde(default)]
@@ -417,6 +421,14 @@ pub struct UpdateDiscussionRequest {
     /// switch, per-agent blocks and structural loop guards still apply.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_handoffs_unlimited: Option<bool>,
+    /// Per-discussion encrypted execution-variable retention override.
+    /// Zero keeps values only for the lifetime of the active run.
+    #[serde(
+        default,
+        deserialize_with = "super::deserialize_optional_field",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub execution_variable_retention_days: Option<Option<u32>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -434,6 +446,17 @@ pub struct DiscussionAgentHandoffMode {
     pub effective_enabled: bool,
     /// `None` means no financial quota; structural loop guards still apply.
     pub paid_limit: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct DiscussionExecutionVariableRetention {
+    /// Global default from server configuration.
+    pub global_days: u32,
+    /// Discussion-specific override. `None` means inherit the global default.
+    pub override_days: Option<u32>,
+    /// Value used for the next execution in this discussion.
+    pub effective_days: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]

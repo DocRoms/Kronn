@@ -277,10 +277,61 @@ impl WorkflowEngine {
     }
 
     /// Create and execute a workflow run in a background task.
-    async fn spawn_run(&self, wf: &Workflow, trigger_ctx: serde_json::Value) -> anyhow::Result<()> {
+    async fn spawn_run(
+        &self,
+        wf: &Workflow,
+        mut trigger_ctx: serde_json::Value,
+    ) -> anyhow::Result<()> {
         let now = Utc::now();
+        let config = self.config().read().await;
+        let tokens = config.tokens.clone();
+        let agents = config.agents.clone();
+        let encryption_secret = config.encryption_secret.clone().ok_or_else(|| {
+            anyhow::anyhow!("Variable preflight unavailable: encryption key missing")
+        })?;
+        let variable_retention_days = config.server.execution_variable_retention_days;
+        drop(config);
+        let run_id = Uuid::new_v4().to_string();
+        let declarations = wf.variables.clone();
+        let project_id = wf.project_id.clone();
+        let context = crate::core::execution_variables::scalar_context(&trigger_ctx);
+        let snapshot_run_id = run_id.clone();
+        let secret_for_prepare = encryption_secret.clone();
+        let prepared = self
+            .db()
+            .with_conn(move |conn| {
+                crate::core::execution_variables::prepare(
+                    conn,
+                    crate::core::execution_variables::PrepareRequest {
+                        declarations: &declarations,
+                        supplied: &std::collections::HashMap::new(),
+                        context: &context,
+                        project_id: project_id.as_deref(),
+                        discussion_id: None,
+                        environment_ref: "project_mcp_configs",
+                        run_kind: "workflow",
+                        run_id: &snapshot_run_id,
+                        encryption_secret: &secret_for_prepare,
+                        retention_days: variable_retention_days,
+                    },
+                )
+            })
+            .await?;
+        let prepared = prepared.map_err(|failures| {
+            anyhow::anyhow!(
+                "preflight_failed:{}",
+                serde_json::to_string(&failures).unwrap_or_default()
+            )
+        })?;
+        if let Some(object) = trigger_ctx.as_object_mut() {
+            object.insert("execution_snapshot_id".into(), prepared.snapshot_id.into());
+            object.insert(
+                "variables_resolved_at".into(),
+                prepared.resolved.resolved_at.to_rfc3339().into(),
+            );
+        }
         let mut run = WorkflowRun {
-            id: Uuid::new_v4().to_string(),
+            id: run_id,
             workflow_id: wf.id.clone(),
             status: RunStatus::Pending,
             trigger_context: Some(trigger_ctx),
@@ -334,11 +385,6 @@ impl WorkflowEngine {
         }
 
         tracing::info!("Spawning workflow run {} for '{}'", run.id, wf.name);
-
-        // Read config for tokens and agents
-        let config = self.config().read().await;
-        let tokens = config.tokens.clone();
-        let agents = config.agents.clone();
 
         let state = self.state.clone();
         let workflow = wf.clone();

@@ -1148,6 +1148,11 @@ tier?: ModelTier,
  */
 originating_qp_id?: string | null,
 /**
+ * Raw launch inputs for an originating Quick Prompt. The server resolves
+ * project/context sources and renders the canonical stored template.
+ */
+launch_variables?: { [key in string]: string },
+/**
  * F9 — create a "human-only" disc: the agent runner never spawns on
  * `send_message`. Used by the contact-click → 1:1 human↔human chat flow.
  */
@@ -1791,6 +1796,20 @@ test_mode_restore_branch?: string | null,
  * `None` when the main repo was clean or the user declined the stash.
  */
 test_mode_stash_ref?: string | null, created_at: string, updated_at: string, };
+
+export type DiscussionExecutionVariableRetention = {
+/**
+ * Global default from server configuration.
+ */
+global_days: number,
+/**
+ * Discussion-specific override. `None` means inherit the global default.
+ */
+override_days: number | null,
+/**
+ * Value used for the next execution in this discussion.
+ */
+effective_days: number, };
 
 export type DiscussionExportEnvelope = { kind: string, version: number, exported_at: string, secret_policy: string, source_discussion_id: string, discussion: Discussion, messages: Array<DiscussionMessage>, attachments: Array<PortableDiscussionAttachment>, revision_events: Array<PortableDiscussionRevisionEvent>, plan: Array<PortableDiscussionPlanItem>,
 /**
@@ -3966,7 +3985,29 @@ required: boolean,
  * regex is treated as "no constraint" (never blocks a launch on a
  * malformed pattern; logged).
  */
-pattern?: string | null, };
+pattern?: string | null,
+/**
+ * Resolution strategy. Omitted legacy definitions remain manual inputs.
+ */
+source: PromptVariableSource | null,
+/**
+ * Declarative source reference (`<env.NAME>` for `ProjectEnv`).
+ * This field must never carry a resolved value.
+ */
+source_ref?: string | null,
+/**
+ * Project environment variables are read-only unless the template author
+ * explicitly allows an audited launch-time override.
+ */
+allow_manual_override: boolean, };
+
+/**
+ * Where a declared template variable obtains its value at execution time.
+ *
+ * The declaration is deliberately a reference only. In particular a
+ * `ProjectEnv` declaration stores `<env.NAME>`, never the secret value.
+ */
+export type PromptVariableSource = "user_input" | "kronn_context" | "project_env";
 
 /**
  * Aggregate over a proposal's item states.
@@ -4691,6 +4732,11 @@ failure_notify_url: string | null,
  */
 run_retention_days: number,
 /**
+ * Encrypted execution-variable snapshot retention. `0` keeps metadata
+ * but disables value retention. Product default: 30 days.
+ */
+execution_variable_retention_days: number,
+/**
  * KT-373 — refuse to provision a worktree below this much free disk, in
  * GiB. On 2026-08-21 the dev volume hit 100% with seven worktrees each
  * holding its own Rust `target/`; provisioning kept going until nothing
@@ -4879,7 +4925,12 @@ default_summary_strategy: SummaryStrategy, agent_handoffs_enabled: boolean, agen
  * Sidebar storage-weight indicator: lets the frontend skip the batch
  * call entirely when disabled, and grade colours without a round-trip.
  */
-discussion_weight: DiscussionWeightConfig, };
+discussion_weight: DiscussionWeightConfig,
+/**
+ * Default retention for encrypted execution-variable snapshots.
+ * Zero purges values as soon as the run reaches a terminal state.
+ */
+execution_variable_retention_days: number, };
 
 /**
  * Configurable ceilings for one CLI session.
@@ -5755,7 +5806,12 @@ agent_handoffs_disabled?: boolean | null,
  * Remove the financial quota for this discussion only. The global master
  * switch, per-agent blocks and structural loop guards still apply.
  */
-agent_handoffs_unlimited?: boolean | null, };
+agent_handoffs_unlimited?: boolean | null,
+/**
+ * Per-discussion encrypted execution-variable retention override.
+ * Zero keeps values only for the lifetime of the active run.
+ */
+execution_variable_retention_days?: number | null | null, };
 
 export type UpdateLivePageHtmlRequest = { html: string, created_by_agent?: string | null, };
 

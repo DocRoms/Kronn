@@ -58,6 +58,9 @@ pub async fn create(
     if req.prompt_template.is_empty() {
         return Json(ApiResponse::err("Prompt template cannot be empty"));
     }
+    if let Err(error) = validate_prompt_variables(&req.variables) {
+        return Json(ApiResponse::err(error));
+    }
 
     let agent = req.agent.unwrap_or(AgentType::ClaudeCode);
     let connection_id = match validate_connection_target(&state, &agent, req.connection_id).await {
@@ -112,6 +115,9 @@ pub async fn update(
         Ok(None) => return Json(ApiResponse::err("Quick prompt not found")),
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
+    if let Err(error) = validate_prompt_variables(&req.variables) {
+        return Json(ApiResponse::err(error));
+    }
 
     let agent = req.agent.unwrap_or(existing.agent.clone());
     let connection_id = match validate_connection_target(&state, &agent, req.connection_id).await {
@@ -407,10 +413,12 @@ pub async fn import_qp(
 /// rendered user prompt. The frontend does the template rendering (it already
 /// has `renderTemplate` from the QP launch flow) so the backend just receives
 /// a list of already-filled prompts.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct BatchItem {
     pub title: String,
     pub prompt: String,
+    #[serde(default)]
+    pub variables: std::collections::HashMap<String, String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -499,15 +507,66 @@ pub async fn batch_run(
     // Delegate to the shared pure fn — same logic as the workflow step executor.
     let batch_name_for_log = req.batch_name.clone();
     let qp_name_for_log = qp.name.clone();
-    let items: Vec<crate::db::workflows::BatchItemInput> = req
-        .items
+    let (secret, retention_days) = {
+        let config = state.config.read().await;
+        let Some(secret) = config.encryption_secret.clone() else {
+            return Json(ApiResponse::err(
+                "Variable preflight unavailable: encryption key missing",
+            ));
+        };
+        (secret, config.server.execution_variable_retention_days)
+    };
+    let effective_project = req.project_id.clone().or(qp.project_id.clone());
+    let declarations = qp.variables.clone();
+    let template = qp.prompt_template.clone();
+    let raw_items = req.items;
+    let prepared_inputs: Vec<_> = raw_items
         .into_iter()
-        .map(|i| crate::db::workflows::BatchItemInput {
-            title: i.title,
-            prompt: i.prompt,
-            agent_override: None, // classic batch mode = same agent for all items
-        })
+        .map(|item| (Uuid::new_v4().to_string(), item))
         .collect();
+    let assigned_discussion_ids: Vec<String> =
+        prepared_inputs.iter().map(|(id, _)| id.clone()).collect();
+    let snapshot_inputs = prepared_inputs.clone();
+    let prepared_items = state
+        .db
+        .with_conn(move |conn| {
+            snapshot_inputs
+                .into_iter()
+                .map(|(execution_id, item)| {
+                    let prepared = crate::core::execution_variables::prepare(
+                        conn,
+                        crate::core::execution_variables::PrepareRequest {
+                            declarations: &declarations,
+                            supplied: &item.variables,
+                            context: &std::collections::HashMap::new(),
+                            project_id: effective_project.as_deref(),
+                            discussion_id: None,
+                            environment_ref: "project_mcp_configs",
+                            run_kind: "quick_prompt_batch_item",
+                            run_id: &execution_id,
+                            encryption_secret: &secret,
+                            retention_days,
+                        },
+                    )?;
+                    prepared.map_err(|failures| {
+                        anyhow::anyhow!(
+                            "preflight_failed:{}",
+                            serde_json::to_string(&failures).unwrap_or_default()
+                        )
+                    })?;
+                    Ok(crate::db::workflows::BatchItemInput {
+                        title: item.title,
+                        prompt: template.clone(),
+                        agent_override: None,
+                    })
+                })
+                .collect::<anyhow::Result<Vec<_>>>()
+        })
+        .await;
+    let items = match prepared_items {
+        Ok(items) => items,
+        Err(error) => return Json(ApiResponse::err(error.to_string())),
+    };
     let workspace_mode = req.workspace_mode.unwrap_or_else(|| "Direct".into());
 
     // Safety: Isolated mode needs a project (git repo) to worktree against.
@@ -524,7 +583,7 @@ pub async fn batch_run(
     let outcome = match state
         .db
         .with_conn(move |conn| {
-            crate::db::workflows::create_batch_run(
+            crate::db::workflows::create_batch_run_with_identities(
                 conn,
                 crate::db::workflows::CreateBatchRunInput {
                     quick_prompt: &qp,
@@ -540,6 +599,8 @@ pub async fn batch_run(
                     chain_batch_items: Vec::new(),
                     group_concurrency_limit: None,
                 },
+                None,
+                &assigned_discussion_ids,
             )
         })
         .await
@@ -655,6 +716,8 @@ pub struct CompareAgentsRequest {
     /// QP variables. We don't re-render here so the same prompt
     /// hits every agent verbatim.
     pub prompt: String,
+    #[serde(default)]
+    pub variables: std::collections::HashMap<String, String>,
     /// Display name for the batch group, e.g.
     /// "Compare · summarise PR #42 · 14:00".
     pub batch_name: String,
@@ -814,7 +877,51 @@ pub async fn compare_agents(
 
     // Build one item per execution target — same prompt, with agent and tier
     // suffixes so same-provider model comparisons remain distinguishable.
-    let prompt = req.prompt.clone();
+    let (secret, retention_days) = {
+        let config = state.config.read().await;
+        let Some(secret) = config.encryption_secret.clone() else {
+            return Json(ApiResponse::err(
+                "Variable preflight unavailable: encryption key missing",
+            ));
+        };
+        (secret, config.server.execution_variable_retention_days)
+    };
+    let declarations = qp.variables.clone();
+    let supplied = req.variables.clone();
+    let effective_project = req.project_id.clone().or(qp.project_id.clone());
+    let execution_id = Uuid::new_v4().to_string();
+    let snapshot_run_id = execution_id.clone();
+    let prepared = state
+        .db
+        .with_conn(move |conn| {
+            crate::core::execution_variables::prepare(
+                conn,
+                crate::core::execution_variables::PrepareRequest {
+                    declarations: &declarations,
+                    supplied: &supplied,
+                    context: &std::collections::HashMap::new(),
+                    project_id: effective_project.as_deref(),
+                    discussion_id: None,
+                    environment_ref: "project_mcp_configs",
+                    run_kind: "quick_prompt_compare",
+                    run_id: &snapshot_run_id,
+                    encryption_secret: &secret,
+                    retention_days,
+                },
+            )
+        })
+        .await;
+    match prepared {
+        Ok(Ok(_)) => {}
+        Ok(Err(failures)) => {
+            return Json(ApiResponse::err(format!(
+                "preflight_failed:{}",
+                serde_json::to_string(&failures).unwrap_or_default()
+            )))
+        }
+        Err(error) => return Json(ApiResponse::err(error.to_string())),
+    }
+    let prompt = qp.prompt_template.clone();
     let qp_display_name = qp.name.clone();
     let items: Vec<crate::db::workflows::BatchItemInput> = resolved_targets
         .into_iter()
@@ -840,7 +947,7 @@ pub async fn compare_agents(
     let outcome = match state
         .db
         .with_conn(move |conn| {
-            crate::db::workflows::create_batch_run(
+            crate::db::workflows::create_batch_run_with_identities(
                 conn,
                 crate::db::workflows::CreateBatchRunInput {
                     quick_prompt: &qp,
@@ -856,6 +963,8 @@ pub async fn compare_agents(
                     chain_batch_items: Vec::new(),
                     group_concurrency_limit: None,
                 },
+                Some(execution_id),
+                &[],
             )
         })
         .await

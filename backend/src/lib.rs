@@ -1540,6 +1540,22 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         )
         .route("/api/quick-execs/import", post(api::quick_execs::import))
         .route(
+            "/api/execution-context/preview",
+            post(api::execution_variables::preview),
+        )
+        .route(
+            "/api/execution-context/{run_kind}/{run_id}",
+            get(api::execution_variables::metadata),
+        )
+        .route(
+            "/api/execution-context/{run_kind}/{run_id}/reveal",
+            post(api::execution_variables::reveal),
+        )
+        .route(
+            "/api/execution-context/{run_kind}/{run_id}/extend",
+            post(api::execution_variables::extend),
+        )
+        .route(
             "/api/discussions/{id}/agent-resume-jobs",
             get(api::agent_jobs::list_for_discussion),
         )
@@ -1572,6 +1588,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route(
             "/api/discussions/{id}/agent-handoffs",
             get(api::discussions::agent_handoff_mode),
+        )
+        .route(
+            "/api/discussions/{id}/execution-variable-retention",
+            get(api::discussions::execution_variable_retention),
         )
         .route(
             "/api/discussions/{id}/export",

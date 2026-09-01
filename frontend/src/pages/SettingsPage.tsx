@@ -297,6 +297,7 @@ export function SettingsPage({
   const [serverStallTimeout, setServerStallTimeout] = useState(5);
   const [serverGlobalTimeout, setServerGlobalTimeout] = useState(30);
   const [serverLocalGlobalTimeout, setServerLocalGlobalTimeout] = useState(240);
+  const [executionVariableRetentionDays, setExecutionVariableRetentionDays] = useState(30);
   const [serverDebugMode, setServerDebugMode] = useState(false);
   const [discussionNotesEnabled, setDiscussionNotesEnabled] = useState(true);
   // True after the user just toggled debug_mode. Shows a "restart required"
@@ -324,6 +325,7 @@ export function SettingsPage({
       setServerLocalGlobalTimeout(cfg.local_agent_global_timeout_min ?? 240);
       setServerDebugMode(cfg.debug_mode ?? false);
       setDiscussionNotesEnabled(cfg.discussion_notes_enabled ?? true);
+      setExecutionVariableRetentionDays(cfg.execution_variable_retention_days ?? 30);
     }
     return cfg;
   }), []);
@@ -1828,6 +1830,34 @@ export function SettingsPage({
               ))}
             </div>
           )}
+
+          <label className="set-db-retention">
+            <span className="set-form-label">{t('config.executionVariableRetention')}</span>
+            <select
+              className="set-input set-input-sm cursor-pointer"
+              value={executionVariableRetentionDays}
+              aria-label={t('config.executionVariableRetention')}
+              onChange={async event => {
+                const value = Number(event.target.value);
+                const previous = executionVariableRetentionDays;
+                setExecutionVariableRetentionDays(value);
+                try {
+                  await configApi.setServerConfig({ execution_variable_retention_days: value });
+                } catch (error) {
+                  setExecutionVariableRetentionDays(previous);
+                  toastActionFailed(error);
+                }
+              }}
+            >
+              <option value={0}>{t('config.executionVariableRetention.activeRun')}</option>
+              <option value={7}>{t('config.executionVariableRetention.days', 7)}</option>
+              <option value={30}>{t('config.executionVariableRetention.days', 30)}</option>
+              <option value={60}>{t('config.executionVariableRetention.days', 60)}</option>
+              <option value={90}>{t('config.executionVariableRetention.days', 90)}</option>
+              <option value={365}>{t('config.executionVariableRetention.days', 365)}</option>
+            </select>
+            <small>{t('config.executionVariableRetentionHint')}</small>
+          </label>
 
           <div className="set-export-warning">
             <AlertTriangle size={14} />

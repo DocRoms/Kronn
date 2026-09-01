@@ -355,6 +355,14 @@ Unified automation system: `Trigger → Steps`. Kronn and OpenAI Symphony overla
 **Token accounting:**
 - Per-step and per-run token totals tracked in `StepResult` and `WorkflowRun`.
 
+**Execution variables:**
+- QP, QA, QE and Workflows share a just-in-time resolver for manual input,
+  allowlisted Kronn context and encrypted project environment references.
+- Project-provided values remain masked in launch forms and are resolved again
+  immediately before dispatch into an encrypted run snapshot. See
+  [`execution-variables.md`](execution-variables.md) for the security, preview,
+  provenance and retention contracts.
+
 **Key design decisions:**
 - Workflows are created step-by-step via the dashboard UI (wizard) and can be exported/imported as Kronn's versioned JSON envelope.
 - The editor keeps its stage/step outline and save/cancel actions visible while
