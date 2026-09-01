@@ -88,7 +88,7 @@ Project-specific terms. For deep dives, follow the linked `docs/architecture/` f
 
 **customized_contexts** — `Vec<String>` of `"slug:projectId"` pairs in `McpOverview` where the context file has been customized (not default template). Used by frontend to color FileText icons.
 
-**AgentType** — Enum: `ClaudeCode`, `Codex`, `Vibe`, `GeminiCli`, `Kiro`, `Custom`. Determines which CLI to spawn. `DeepSeek` and `OpenCode` planned. Kiro uses `--trust-all-tools` (mandatory in `--no-interactive` mode) and `--wrap never` for clean output.
+**AgentType** — Enum: `ClaudeCode`, `Codex`, `OpenCode`, `Vibe`, `GeminiCli`, `Kiro`, `CopilotCli`, `Ollama`, `LiteLlm`, `Nvidia`, `Custom`. Determines which CLI/HTTP runtime to spawn. `DeepSeek` planned. Kiro uses `--trust-all-tools` (mandatory in `--no-interactive` mode) and `--wrap never` for clean output. `[src: file: backend/src/models/setup.rs:725-745]`
 
 **scan_depth** — Configurable depth for git repository scanning (2–10, default 4). Stored in `ScanConfig.scan_depth` in config.toml. Adjustable via UI slider in Config page. API: `GET/POST /api/config/scan-depth`.
 
@@ -179,7 +179,7 @@ Project-specific terms. For deep dives, follow the linked `docs/architecture/` f
 
 **DeepSeek** — Planned agent support (waiting for official CLI).
 
-**OpenCode** — Planned agent support.
+**OpenCode** — SST's CLI coding agent (`opencode` command via `npm install -g opencode-ai`). Runs as a native ACP runtime (`opencode acp`, production default — no adapter, no opt-in toggle needed) rather than a direct-CLI spawn; see `docs/operations/acp-adapters.md` and `docs/design/adr-003-acp-control-plane.md`. Auth: `opencode auth login` (credentials at `~/.local/share/opencode/auth.json`). Color: `#7c3aed`. Models/tiers flow through the KT-531 dynamic catalog (`docs/architecture/model-catalogs.md`) — never a hardcoded model list, including for **OpenCode Zen** (SST's hosted model gateway, optional provider inside OpenCode's own config, models namespaced `opencode/<model-id>`).
 
 **Agent Runner** — `backend/src/agents/runner.rs` — spawns CLI processes and streams stdout. Two output modes: `Text` (line-by-line) and `StreamJson` (Claude Code stream-json with token tracking). Frontend concatenates chunks directly (no separator).
 
