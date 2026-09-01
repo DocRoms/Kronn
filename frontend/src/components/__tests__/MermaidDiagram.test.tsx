@@ -52,6 +52,18 @@ beforeEach(() => { vi.clearAllMocks(); });
 afterEach(() => { cleanup(); });
 
 describe('MermaidDiagram (0.8.3 #289)', () => {
+  it('disables Mermaid global error rendering and keeps failures local', async () => {
+    const src = 'flowchart TD\n  A --> B';
+    const { container } = wrap(<MermaidDiagram source={src} />);
+    await waitFor(() => {
+      expect(container.querySelector('.kronn-mermaid-svg svg')).not.toBeNull();
+    });
+    const mermaid = (await import('mermaid')).default;
+    expect(mermaid.initialize).toHaveBeenCalledWith(expect.objectContaining({
+      suppressErrorRendering: true,
+    }));
+  });
+
   it('renders the SVG returned by mermaid for a valid source', async () => {
     const src = 'sequenceDiagram\n  actor User\n  User->>Server: hi';
     const { container } = wrap(<MermaidDiagram source={src} />);

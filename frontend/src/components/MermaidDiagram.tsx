@@ -52,6 +52,13 @@ function getMermaid() {
         // Disable user-supplied click bindings — security guard against
         // a malicious mermaid block injecting JS via `click <id> "javascript:…"`.
         securityLevel: 'strict',
+        // Mermaid's default parse-error path draws a full-size diagnostic SVG
+        // in its temporary body container before rejecting. Depending on the
+        // parser failure, that temporary node can outlive the render and leak
+        // "Syntax error in text · mermaid version …" at the bottom of the
+        // whole application. We own the local fallback below, so ask Mermaid
+        // to throw without rendering its global error document.
+        suppressErrorRendering: true,
         // Bigger fonts — the default 14px is unreadable on dense graphs.
         themeVariables: { fontSize: '15px' },
       });
