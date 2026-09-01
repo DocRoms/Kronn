@@ -204,6 +204,38 @@ describe('DiscussionAssetsPanel', () => {
       'disc.media.playerLabel:target.mp4',
     );
   });
+  it('scrolls the grid to a requested asset that sits past the first page', async () => {
+    // 45 assets, so the target is on the second page. The open request clears
+    // the search, and that reset used to snap the grid back to page one — the
+    // viewer opened on the right asset but the grid behind it never reached it.
+    const files = Array.from({ length: 45 }, (_, index) => file(index + 1, {
+      filename: `shot-${index + 1}.png`,
+      mime_type: 'image/png',
+      disk_path: `/tmp/shot-${index + 1}.png`,
+      created_at: `2026-08-01T10:${String(59 - index).padStart(2, '0')}:00Z`,
+    }));
+    const baseProps = {
+      discussionId: 'disc-1',
+      files,
+      onClose: vi.fn(),
+      onNavigateMessage: vi.fn(),
+      t,
+    };
+    const { rerender } = render(<DiscussionAssetsPanel {...baseProps} />);
+    expect(screen.getAllByTestId('discussion-asset-card')).toHaveLength(40);
+
+    fireEvent.change(screen.getByLabelText('disc.assets.search'), { target: { value: 'shot-4' } });
+    rerender(
+      <DiscussionAssetsPanel
+        {...baseProps}
+        openAssetRequest={{ assetId: 'file-45', nonce: 1 }}
+      />,
+    );
+
+    await waitFor(() => expect(screen.getAllByTestId('discussion-asset-card')).toHaveLength(45));
+    expect(screen.getAllByTitle('shot-45.png')[0]).toBeInTheDocument();
+  });
+
   it('reaches images and clips filtered out of the grid', async () => {
     // The "images" filter hides the clip from the inventory, but the carousel
     // is a viewer for everything the discussion generated: one sequence,

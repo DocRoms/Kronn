@@ -17,9 +17,12 @@ Release notes for 0.9.3 and earlier are available in the
   Media models are configured as their own slots on a connection — modalities,
   not quality tiers — so a text step can never select "tier Image". A
   generation is launched from a discussion's Assets tab or by an agent through
-  MCP (`media_generate`, `media_job_status`); the running job shows as a live
-  run card in the discussion, and the finished asset is stored server-side and
-  pinned to the message that asked for it. Videos play inline with native
+  MCP (`media_generate`, `media_job_status`); each launch gets its own bubble at
+  its chronological place in the transcript, which turns on the spot from
+  pending into the finished media — or into a stated failure — and comes back
+  the same way after a reload. The launcher is free again the moment the job is
+  accepted, so a video and two images can progress in parallel without mixing
+  up their states. Videos play inline with native
   Picture-in-Picture, and opening any asset browses every image and clip of the
   discussion in one carousel. Media spend is its OWN counter, reported per
   generation from the provider's billed figure, never recomputed from a

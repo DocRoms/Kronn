@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Clapperboard, FileText, Images, Search, Sparkles, X } from 'lucide-react';
 import type { ContextFile } from '../types/generated';
 import type { ExternalApiConnectionView } from '../lib/api';
@@ -50,12 +50,18 @@ export function DiscussionAssetsPanel({
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState<AssetFilter>('all');
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
+  // Floor imposed by a targeted open request, so the grid behind the viewer has
+  // really scrolled to the asset. Kept apart from `visibleCount`: the same
+  // request clears the query and filter, and their own reset would undo it.
+  const [pinnedCount, setPinnedCount] = useState(0);
   const [showGenerate, setShowGenerate] = useState(false);
+  const clearPagination = useCallback(() => setPinnedCount(0), []);
 
   useEffect(() => {
     setQuery('');
     setFilter('all');
     setVisibleCount(PAGE_SIZE);
+    setPinnedCount(0);
     setShowGenerate(false);
   }, [discussionId]);
 
@@ -67,7 +73,7 @@ export function DiscussionAssetsPanel({
     setFilter('all');
     const ordered = [...files].sort((left, right) => right.created_at.localeCompare(left.created_at));
     const index = ordered.findIndex(file => file.id === openAssetRequest.assetId);
-    if (index >= 0) setVisibleCount(Math.max(PAGE_SIZE, index + 1));
+    setPinnedCount(index >= 0 ? index + 1 : 0);
   }, [files, openAssetRequest]);
 
   const counts = useMemo(() => ({
@@ -91,7 +97,9 @@ export function DiscussionAssetsPanel({
       });
   }, [files, filter, query]);
 
-  const visibleFiles = filteredFiles.slice(0, visibleCount);
+  // The floor only ever widens the page, never narrows it.
+  const shownCount = Math.max(visibleCount, pinnedCount);
+  const visibleFiles = filteredFiles.slice(0, shownCount);
   // The carousel walks the whole discussion, not the current page or filter:
   // opening one asset must reach every image and clip that was generated,
   // which is the point of the tab. Same order as the grid above (newest
@@ -169,7 +177,7 @@ export function DiscussionAssetsPanel({
           <input
             type="search"
             value={query}
-            onChange={event => setQuery(event.target.value)}
+            onChange={event => { clearPagination(); setQuery(event.target.value); }}
             placeholder={t('disc.assets.search')}
             aria-label={t('disc.assets.search')}
           />
@@ -182,7 +190,7 @@ export function DiscussionAssetsPanel({
                 key={item.id}
                 type="button"
                 data-active={filter === item.id}
-                onClick={() => setFilter(item.id)}
+                onClick={() => { clearPagination(); setFilter(item.id); }}
               >
                 {Icon && <Icon size={12} aria-hidden="true" />}
                 <span>{item.label}</span>
@@ -205,13 +213,13 @@ export function DiscussionAssetsPanel({
               carouselScope={carouselScope}
               openRequest={openAssetRequest}
             />
-            {visibleCount < filteredFiles.length && (
+            {shownCount < filteredFiles.length && (
               <button
                 type="button"
                 className="btn btn-sm disc-assets-load-more"
-                onClick={() => setVisibleCount(count => count + PAGE_SIZE)}
+                onClick={() => setVisibleCount(shownCount + PAGE_SIZE)}
               >
-                {t('disc.assets.loadMore', filteredFiles.length - visibleCount)}
+                {t('disc.assets.loadMore', filteredFiles.length - shownCount)}
               </button>
             )}
           </>
