@@ -583,6 +583,14 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "153_quick_prompt_external_connection",
         include_str!("sql/153_quick_prompt_external_connection.sql"),
     ),
+    (
+        "154_live_page_workflow_bindings",
+        include_str!("sql/154_live_page_workflow_bindings.sql"),
+    ),
+    (
+        "155_live_page_binding_trigger",
+        include_str!("sql/155_live_page_binding_trigger.sql"),
+    ),
 ];
 
 /// Apply one migration inside the caller-owned transaction.
@@ -689,6 +697,18 @@ const RENAMED_MIGRATIONS: &[(&str, &str)] = &[
     ("111_message_session_tokens", "117_message_session_tokens"),
     ("112_review_ledger", "118_review_ledger"),
     ("113_quick_exec_runs", "119_quick_exec_runs"),
+    // Renumbered when the live-page↔workflow branch rebased onto 0.12.0, which had
+    // already claimed 144/145. Databases that ran the pre-rebase branch carry the
+    // old receipts; migration 155 is a non-idempotent `ALTER TABLE ADD COLUMN`, so
+    // without this mapping it would re-run and fail with "duplicate column name".
+    (
+        "144_live_page_workflow_bindings",
+        "154_live_page_workflow_bindings",
+    ),
+    (
+        "145_live_page_binding_trigger",
+        "155_live_page_binding_trigger",
+    ),
 ];
 
 fn reconcile_renamed_migrations(conn: &Connection) -> Result<()> {

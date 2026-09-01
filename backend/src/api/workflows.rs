@@ -2262,6 +2262,103 @@ pub async fn import_workflow(
     }
 }
 
+/// Create and dispatch a manual run **without** an SSE stream, returning its id.
+///
+/// This is the fire-and-forget sibling of [`trigger`]: same launch-variable
+/// validation, same atomic concurrency-check-then-insert, same detached
+/// `execute_run`, but no event channel — the caller doesn't watch the run, it
+/// just needs the run id (e.g. a Live Page trigger button, where the Page's own
+/// auto-refresh/mirror surfaces progress). The workflow must already be loaded
+/// and its `enabled` flag checked by the caller. Errors are returned as plain
+/// strings so each HTTP surface can map them to its own coded response.
+pub(crate) async fn spawn_detached_run(
+    state: &AppState,
+    wf: crate::models::Workflow,
+    provided_vars: std::collections::HashMap<String, String>,
+) -> Result<String, String> {
+    validate_launch_variables(&wf.variables, &provided_vars)?;
+    let trigger_obj = build_manual_trigger_obj(&provided_vars, Utc::now());
+
+    let now = Utc::now();
+    let run = WorkflowRun {
+        id: Uuid::new_v4().to_string(),
+        workflow_id: wf.id.clone(),
+        status: RunStatus::Pending,
+        trigger_context: Some(serde_json::Value::Object(trigger_obj)),
+        step_results: vec![],
+        tokens_used: 0,
+        workspace_path: None,
+        started_at: now,
+        finished_at: None,
+        run_type: "linear".into(),
+        batch_total: 0,
+        batch_completed: 0,
+        batch_failed: 0,
+        batch_no_response: 0,
+        batch_name: None,
+        parent_run_id: None,
+        state: ::std::collections::HashMap::new(),
+        produced_branches: vec![],
+        parent_workflow_id: None,
+        parent_workflow_name: None,
+        parent_run_started_at: None,
+    };
+
+    // Single transaction: concurrency check + insert atomically (avoids TOCTOU).
+    let r = run.clone();
+    let limit = wf.concurrency_limit;
+    let wf_id_check = wf.id.clone();
+    state
+        .db
+        .with_conn(move |conn| {
+            if let Some(max) = limit {
+                let active = crate::db::workflows::count_active_runs(conn, &wf_id_check)?;
+                if active >= max {
+                    anyhow::bail!("CONCURRENCY_LIMIT:{}/{}", active, max);
+                }
+            }
+            crate::db::workflows::insert_run(conn, &r)?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| {
+            let msg = e.to_string();
+            match msg.strip_prefix("CONCURRENCY_LIMIT:") {
+                Some(rest) => format!("Concurrency limit reached ({rest})"),
+                None => format!("DB error: {msg}"),
+            }
+        })?;
+
+    tracing::info!("Workflow run created (detached): {} for {}", run.id, wf.name);
+
+    let run_id = run.id.clone();
+    let state_for_run = state.clone();
+    let config = state.config.clone();
+    let mut run_exec = run;
+    tokio::spawn(async move {
+        let cfg = config.read().await;
+        let tokens = cfg.tokens.clone();
+        let agents = cfg.agents.clone();
+        drop(cfg);
+        if let Err(e) = crate::workflows::runner::execute_run(
+            state_for_run,
+            &wf,
+            &mut run_exec,
+            &tokens,
+            &agents,
+            None,
+            None,
+            None,
+        )
+        .await
+        {
+            tracing::error!("Workflow run {} failed: {}", run_exec.id, e);
+        }
+    });
+
+    Ok(run_id)
+}
+
 /// POST /api/workflows/:id/trigger — Manual trigger with SSE streaming.
 /// 0.6.0 UX pass — accepts an optional JSON body with `variables` (manual
 /// launch). When the workflow has declared `variables`, required ones
@@ -3050,6 +3147,102 @@ pub struct DecideRunResponse {
     pub new_status: RunStatus,
 }
 
+/// Parse a gate decision string + optional comment into a `GateDecision`.
+/// Case-insensitive (the auto-approve timer historically sent "Approve").
+/// `request_changes` requires a non-empty comment.
+pub(crate) fn parse_gate_decision(
+    decision: &str,
+    comment: Option<String>,
+) -> Result<crate::workflows::runner::GateDecision, String> {
+    use crate::workflows::runner::GateDecision;
+    match decision.to_ascii_lowercase().as_str() {
+        "approve" => Ok(GateDecision::Approve { comment }),
+        "request_changes" => match comment.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
+            Some(c) => Ok(GateDecision::RequestChanges {
+                comment: c.to_string(),
+            }),
+            None => Err("request_changes requires a non-empty `comment`".to_string()),
+        },
+        "reject" => Ok(GateDecision::Reject { comment }),
+        other => Err(format!(
+            "Unknown decision `{other}` (expected approve | request_changes | reject)"
+        )),
+    }
+}
+
+/// Atomically claim a `WaitingApproval` run and resume it in the background with
+/// the given decision. Shared by the workflow-UI (`decide_run`) and the Live
+/// Page (`crate::api::live_pages::decide_gate`) entry points so the audited
+/// TOCTOU-safe claim + background spawn lives in exactly one place.
+pub(crate) async fn resume_with_decision(
+    state: &AppState,
+    run: WorkflowRun,
+    workflow: Workflow,
+    decision: crate::workflows::runner::GateDecision,
+) -> Result<DecideRunResponse, String> {
+    use crate::workflows::runner::GateDecision;
+
+    let new_status = match &decision {
+        GateDecision::Reject { .. } => RunStatus::Failed,
+        _ => RunStatus::Running,
+    };
+
+    // Atomic claim (2026-06-10 audit P1, TOCTOU): the conditional UPDATE
+    // (`… WHERE status = 'WaitingApproval'`) lets exactly ONE caller win, so two
+    // concurrent decisions (double-click, human racing the auto-approve timer,
+    // or the workflow-UI racing a Live Page button) never double-resume.
+    let claim_run_id = run.id.clone();
+    let claim_status = new_status.clone();
+    match state
+        .db
+        .with_conn(move |conn| {
+            crate::db::workflows::claim_waiting_run(conn, &claim_run_id, &claim_status)
+        })
+        .await
+    {
+        Ok(true) => {}
+        Ok(false) => {
+            return Err(
+                "Run was just decided by another caller — decision ignored (no double-resume)"
+                    .to_string(),
+            )
+        }
+        Err(e) => return Err(format!("DB error claiming run: {e}")),
+    }
+
+    // Resume in the background — long-running; the caller just gets the new
+    // status. The UI already polls run state via SSE/refetch.
+    let state_clone = state.clone();
+    let run_for_resume = run.clone();
+    let run_id_for_log = run.id.clone();
+    tokio::spawn(async move {
+        let cfg = state_clone.config.read().await;
+        let tokens = cfg.tokens.clone();
+        let agents = cfg.agents.clone();
+        drop(cfg);
+        let mut run_mut = run_for_resume;
+        if let Err(e) = crate::workflows::runner::resume_run(
+            state_clone.clone(),
+            &workflow,
+            &mut run_mut,
+            decision,
+            &tokens,
+            &agents,
+            None,
+        )
+        .await
+        {
+            tracing::error!("Resume run {} failed: {}", run_id_for_log, e);
+        }
+        crate::core::run_notify::notify_if_failed(&state_clone, &workflow, &run_mut).await;
+    });
+
+    Ok(DecideRunResponse {
+        run_id: run.id,
+        new_status,
+    })
+}
+
 /// POST /api/workflows/:id/runs/:run_id/decide
 ///
 /// Apply an operator's decision to a paused (Gate) run and resume it.
@@ -3059,8 +3252,6 @@ pub async fn decide_run(
     Path((_workflow_id, run_id)): Path<(String, String)>,
     Json(payload): Json<DecideRunRequest>,
 ) -> Json<ApiResponse<DecideRunResponse>> {
-    use crate::workflows::runner::GateDecision;
-
     let run_id_for_db = run_id.clone();
     let run = match state
         .db
@@ -3117,102 +3308,15 @@ pub async fn decide_run(
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
 
-    // Case-insensitive decision parsing (2026-06-10 audit P0): the
-    // auto-approve timer used to send "Approve" and the strict lowercase
-    // match silently rejected it (wrapped in an HTTP 200 envelope).
-    let decision = match payload.decision.to_ascii_lowercase().as_str() {
-        "approve" => GateDecision::Approve {
-            comment: payload.comment.clone(),
-        },
-        "request_changes" => match payload
-            .comment
-            .as_deref()
-            .map(str::trim)
-            .filter(|c| !c.is_empty())
-        {
-            Some(c) => GateDecision::RequestChanges {
-                comment: c.to_string(),
-            },
-            None => {
-                return Json(ApiResponse::err(
-                    "request_changes requires a non-empty `comment`",
-                ))
-            }
-        },
-        "reject" => GateDecision::Reject {
-            comment: payload.comment.clone(),
-        },
-        other => {
-            return Json(ApiResponse::err(format!(
-                "Unknown decision `{}` (expected approve | request_changes | reject)",
-                other
-            )))
-        }
+    let decision = match parse_gate_decision(&payload.decision, payload.comment.clone()) {
+        Ok(d) => d,
+        Err(e) => return Json(ApiResponse::err(e)),
     };
 
-    let new_status = match &decision {
-        GateDecision::Reject { .. } => RunStatus::Failed,
-        _ => RunStatus::Running,
-    };
-
-    // Atomic claim (2026-06-10 audit P1, TOCTOU): the read-then-check above
-    // is advisory only — two concurrent decide calls (double-click, or a
-    // human racing the auto-approve timer) could both pass it and spawn two
-    // concurrent `resume_run`s on the same run. The conditional UPDATE
-    // (`… WHERE status = 'WaitingApproval'`) lets exactly ONE caller win.
-    let claim_run_id = run.id.clone();
-    let claim_status = new_status.clone();
-    match state
-        .db
-        .with_conn(move |conn| {
-            crate::db::workflows::claim_waiting_run(conn, &claim_run_id, &claim_status)
-        })
-        .await
-    {
-        Ok(true) => {} // we won the claim — proceed
-        Ok(false) => {
-            return Json(ApiResponse::err(
-                "Run was just decided by another caller — decision ignored (no double-resume)",
-            ));
-        }
-        Err(e) => return Json(ApiResponse::err(format!("DB error claiming run: {e}"))),
+    match resume_with_decision(&state, run, workflow, decision).await {
+        Ok(resp) => Json(ApiResponse::ok(resp)),
+        Err(e) => Json(ApiResponse::err(e)),
     }
-
-    // Resume in the background — long-running, the operator just gets
-    // back the new status (Running for approve/request_changes, Failed
-    // for reject). The UI already polls run state via SSE/refetch.
-    let state_clone = state.clone();
-    let run_for_resume = run.clone();
-    let run_id_for_log = run.id.clone();
-    tokio::spawn(async move {
-        let cfg = state_clone.config.read().await;
-        let tokens = cfg.tokens.clone();
-        let agents = cfg.agents.clone();
-        drop(cfg);
-        let mut run_mut = run_for_resume;
-        if let Err(e) = crate::workflows::runner::resume_run(
-            state_clone.clone(),
-            &workflow,
-            &mut run_mut,
-            decision,
-            &tokens,
-            &agents,
-            None,
-        )
-        .await
-        {
-            tracing::error!("Resume run {} failed: {}", run_id_for_log, e);
-        }
-        // A gate-resumed run (human approve or the auto-approve timer) that
-        // then fails is exactly as unattended as its scheduled first half —
-        // same webhook contract as the engine-spawn tail.
-        crate::core::run_notify::notify_if_failed(&state_clone, &workflow, &run_mut).await;
-    });
-
-    Json(ApiResponse::ok(DecideRunResponse {
-        run_id: run.id,
-        new_status,
-    }))
 }
 
 /// Response for [`resume_interrupted`].

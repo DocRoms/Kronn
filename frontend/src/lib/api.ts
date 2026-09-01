@@ -185,10 +185,15 @@ import type {
   LivePageDiscussionLink,
   LivePagePublication,
   LivePageRevision,
+  LivePageWorkflowBinding,
   LivePageWorkflowLink,
   LivePagesCapability,
+  PageGateDecisionRequest,
+  PageTriggerRequest,
+  PageTriggerResponse,
   PublishLivePageRequest,
   PublishLivePageResult,
+  UpsertLivePageBindingRequest,
   UpdateLivePageHtmlRequest,
   UpdateLivePageRequest,
   LinkLivePageDiscussionRequest,
@@ -2228,6 +2233,16 @@ export const pages = {
     api<LivePageRevision>('PUT', `/pages/${encodeURIComponent(id)}/html`, request),
   publish: (id: string, request: PublishLivePageRequest) =>
     api<PublishLivePageResult>('POST', `/pages/${encodeURIComponent(id)}/publish`, request),
+  bindings: (id: string) =>
+    api<LivePageWorkflowBinding[]>('GET', `/pages/${encodeURIComponent(id)}/bindings`),
+  upsertBinding: (id: string, request: UpsertLivePageBindingRequest) =>
+    api<LivePageWorkflowBinding>('POST', `/pages/${encodeURIComponent(id)}/bindings`, request),
+  deleteBinding: (id: string, dataset: string) =>
+    api<void>('DELETE', `/pages/${encodeURIComponent(id)}/bindings/${encodeURIComponent(dataset)}`),
+  decideGate: (id: string, request: PageGateDecisionRequest) =>
+    api<DecideRunResponse>('POST', `/pages/${encodeURIComponent(id)}/gate-decision`, request),
+  triggerWorkflow: (id: string, request: PageTriggerRequest) =>
+    api<PageTriggerResponse>('POST', `/pages/${encodeURIComponent(id)}/trigger`, request),
 };
 
 // ─── Quick Prompts ─────────────────────────────────────────────────────────

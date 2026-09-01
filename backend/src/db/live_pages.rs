@@ -7,8 +7,9 @@ use uuid::Uuid;
 use crate::models::{
     CreateLivePageDataset, LivePage, LivePageDataset, LivePageDatasetKind, LivePageDatasetPoint,
     LivePageDatasetView, LivePageDetail, LivePageDiscussionLink, LivePageDiscussionRelation,
-    LivePagePublication, LivePageRevision, LivePageWorkflowLink, LivePageWriteOperation,
-    LivePagesCapability, PublishLivePageRequest, PublishLivePageResult, UpdateLivePageRequest,
+    LivePagePublication, LivePageRevision, LivePageRunSelector, LivePageWorkflowBinding,
+    LivePageWorkflowLink, LivePageWriteOperation, LivePagesCapability, PublishLivePageRequest,
+    PublishLivePageResult, UpdateLivePageRequest, UpsertLivePageBindingRequest,
 };
 
 pub fn list_live_page_workflows(
@@ -628,6 +629,210 @@ pub fn add_live_page_dataset(
     })
 }
 
+fn map_binding(row: &Row<'_>) -> rusqlite::Result<LivePageWorkflowBinding> {
+    let selector: String = row.get(4)?;
+    let allowed: String = row.get(7)?;
+    // NULL column → not triggerable; a stored JSON array → the (possibly empty)
+    // allowlist. Introduced by migration 155, so pre-existing rows read as NULL.
+    let trigger_allowlist: Option<String> = row.get(8)?;
+    Ok(LivePageWorkflowBinding {
+        id: row.get(0)?,
+        page_id: row.get(1)?,
+        workflow_id: row.get(2)?,
+        dataset: row.get(3)?,
+        run_selector: LivePageRunSelector::parse(&selector).ok_or(rusqlite::Error::InvalidQuery)?,
+        phase_map: parse_json_sql(row.get(5)?)?,
+        meta_map: parse_json_sql(row.get(6)?)?,
+        allowed_gate_steps: serde_json::from_str(&allowed)
+            .map_err(|_| rusqlite::Error::InvalidQuery)?,
+        trigger_variable_allowlist: trigger_allowlist
+            .map(|raw| serde_json::from_str(&raw))
+            .transpose()
+            .map_err(|_| rusqlite::Error::InvalidQuery)?,
+        created_at: parse_datetime_sql(row.get(9)?)?,
+        updated_at: parse_datetime_sql(row.get(10)?)?,
+    })
+}
+
+const BINDING_COLUMNS: &str = "id, page_id, workflow_id, dataset, run_selector, \
+     phase_map_json, meta_map_json, allowed_gate_steps_json, \
+     trigger_variable_allowlist_json, created_at, updated_at";
+
+/// List every workflow binding attached to a Page. Returns `None` when the Page
+/// itself does not exist (so the API can answer 404 vs. an empty list).
+pub fn list_live_page_bindings(
+    conn: &Connection,
+    page_id: &str,
+) -> Result<Option<Vec<LivePageWorkflowBinding>>> {
+    let canonical: Option<String> = conn
+        .query_row(
+            "SELECT id FROM live_pages WHERE id = ?1 OR slug = ?1",
+            [page_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(canonical) = canonical else {
+        return Ok(None);
+    };
+    let sql = format!(
+        "SELECT {BINDING_COLUMNS} FROM live_page_workflow_bindings \
+          WHERE page_id = ?1 ORDER BY dataset ASC"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let bindings = stmt
+        .query_map([canonical], map_binding)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(Some(bindings))
+}
+
+/// Create or replace the binding for `(page, dataset)`. Idempotent on that pair:
+/// re-upserting the same dataset updates it in place and preserves `created_at`.
+pub fn upsert_live_page_binding(
+    conn: &Connection,
+    page_id: &str,
+    req: &UpsertLivePageBindingRequest,
+) -> Result<LivePageWorkflowBinding> {
+    validate_dataset_name(&req.dataset)?;
+
+    let tx = conn.unchecked_transaction()?;
+    let canonical_page_id: String = tx
+        .query_row(
+            "SELECT id FROM live_pages WHERE id = ?1 OR slug = ?1",
+            [page_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .ok_or_else(|| anyhow!("Page not found"))?;
+
+    let workflow_exists: bool = tx
+        .query_row(
+            "SELECT 1 FROM workflows WHERE id = ?1",
+            [&req.workflow_id],
+            |_| Ok(true),
+        )
+        .optional()?
+        .unwrap_or(false);
+    if !workflow_exists {
+        bail!("Workflow not found: {}", req.workflow_id);
+    }
+
+    let selector = req.run_selector.unwrap_or(LivePageRunSelector::Latest);
+    let now = Utc::now().to_rfc3339();
+    let phase_map = serde_json::to_string(&req.phase_map)?;
+    let meta_map = serde_json::to_string(&req.meta_map)?;
+    let allowed = serde_json::to_string(&req.allowed_gate_steps)?;
+    // `None` persists as SQL NULL (not triggerable); `Some(list)` as a JSON array.
+    let trigger_allowlist = req
+        .trigger_variable_allowlist
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()?;
+
+    let existing_id: Option<String> = tx
+        .query_row(
+            "SELECT id FROM live_page_workflow_bindings WHERE page_id = ?1 AND dataset = ?2",
+            params![canonical_page_id, req.dataset],
+            |row| row.get(0),
+        )
+        .optional()?;
+
+    let id = match existing_id {
+        Some(id) => {
+            tx.execute(
+                "UPDATE live_page_workflow_bindings
+                    SET workflow_id = ?1, run_selector = ?2, phase_map_json = ?3,
+                        meta_map_json = ?4, allowed_gate_steps_json = ?5,
+                        trigger_variable_allowlist_json = ?6, updated_at = ?7
+                  WHERE id = ?8",
+                params![
+                    req.workflow_id,
+                    selector.as_str(),
+                    phase_map,
+                    meta_map,
+                    allowed,
+                    trigger_allowlist,
+                    now,
+                    id,
+                ],
+            )?;
+            id
+        }
+        None => {
+            let id = Uuid::new_v4().to_string();
+            tx.execute(
+                "INSERT INTO live_page_workflow_bindings (
+                     id, page_id, workflow_id, dataset, run_selector,
+                     phase_map_json, meta_map_json, allowed_gate_steps_json,
+                     trigger_variable_allowlist_json, created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)",
+                params![
+                    id,
+                    canonical_page_id,
+                    req.workflow_id,
+                    req.dataset,
+                    selector.as_str(),
+                    phase_map,
+                    meta_map,
+                    allowed,
+                    trigger_allowlist,
+                    now,
+                ],
+            )?;
+            id
+        }
+    };
+
+    let sql = format!("SELECT {BINDING_COLUMNS} FROM live_page_workflow_bindings WHERE id = ?1");
+    let binding = tx.query_row(&sql, [&id], map_binding)?;
+    tx.commit()?;
+    Ok(binding)
+}
+
+/// Fetch a single binding by `(page, dataset)`. Resolves the page by id or slug.
+/// `None` when the page or the binding does not exist.
+pub fn get_live_page_binding(
+    conn: &Connection,
+    page_id: &str,
+    dataset: &str,
+) -> Result<Option<LivePageWorkflowBinding>> {
+    let canonical: Option<String> = conn
+        .query_row(
+            "SELECT id FROM live_pages WHERE id = ?1 OR slug = ?1",
+            [page_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(canonical) = canonical else {
+        return Ok(None);
+    };
+    let sql = format!(
+        "SELECT {BINDING_COLUMNS} FROM live_page_workflow_bindings \
+          WHERE page_id = ?1 AND dataset = ?2"
+    );
+    Ok(conn
+        .query_row(&sql, params![canonical, dataset], map_binding)
+        .optional()?)
+}
+
+/// Remove the binding for `(page, dataset)`. Returns whether a row was deleted.
+pub fn delete_live_page_binding(conn: &Connection, page_id: &str, dataset: &str) -> Result<bool> {
+    let canonical: Option<String> = conn
+        .query_row(
+            "SELECT id FROM live_pages WHERE id = ?1 OR slug = ?1",
+            [page_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(canonical) = canonical else {
+        return Ok(false);
+    };
+    let affected = conn.execute(
+        "DELETE FROM live_page_workflow_bindings WHERE page_id = ?1 AND dataset = ?2",
+        params![canonical, dataset],
+    )?;
+    Ok(affected > 0)
+}
+
 pub fn pages_capability(conn: &Connection) -> Result<LivePagesCapability> {
     let activated_at: Option<String> = conn
         .query_row(
@@ -1088,6 +1293,108 @@ mod tests {
         assert!(list_live_page_workflows(&conn, &page.slug)
             .unwrap()
             .expect("existing page")
+            .is_empty());
+    }
+
+    fn seed_workflow(conn: &Connection, id: &str, name: &str) {
+        conn.execute(
+            "INSERT INTO workflows (id, name, trigger_json, steps_json, created_at, updated_at)
+             VALUES (?1, ?2, '{\"type\":\"Manual\"}', '[]', ?3, ?3)",
+            params![id, name, Utc::now().to_rfc3339()],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn workflow_binding_upsert_is_idempotent_on_page_dataset() {
+        let conn = test_connection();
+        let page = fixture(&conn);
+        seed_workflow(&conn, "wf-1", "Pipeline");
+        seed_workflow(&conn, "wf-2", "Pipeline v2");
+
+        // Missing page → None (distinct from an existing page with no bindings).
+        assert!(list_live_page_bindings(&conn, "missing-page")
+            .unwrap()
+            .is_none());
+        assert!(list_live_page_bindings(&conn, &page.slug)
+            .unwrap()
+            .expect("existing page")
+            .is_empty());
+
+        let created = upsert_live_page_binding(
+            &conn,
+            &page.slug,
+            &UpsertLivePageBindingRequest {
+                workflow_id: "wf-1".into(),
+                dataset: "pipeline".into(),
+                run_selector: Some(LivePageRunSelector::LatestActive),
+                phase_map: serde_json::json!([{ "name": "Prep", "steps": [{ "step": "a" }] }]),
+                meta_map: serde_json::json!({ "ticket_from": "trigger.jira_ticket_key" }),
+                allowed_gate_steps: vec!["gate_prod".into()],
+                trigger_variable_allowlist: Some(vec!["besoin".into(), "type".into()]),
+            },
+        )
+        .unwrap();
+        assert_eq!(created.workflow_id, "wf-1");
+        assert_eq!(created.run_selector, LivePageRunSelector::LatestActive);
+        assert_eq!(created.allowed_gate_steps, vec!["gate_prod".to_string()]);
+        assert!(created.phase_map.is_array());
+        assert_eq!(
+            created.trigger_variable_allowlist,
+            Some(vec!["besoin".to_string(), "type".to_string()]),
+            "trigger allowlist round-trips"
+        );
+
+        // Re-upsert the SAME (page, dataset) → updates in place, keeps created_at.
+        let updated = upsert_live_page_binding(
+            &conn,
+            &page.id,
+            &UpsertLivePageBindingRequest {
+                workflow_id: "wf-2".into(),
+                dataset: "pipeline".into(),
+                run_selector: None,
+                phase_map: serde_json::json!([]),
+                meta_map: serde_json::json!({}),
+                allowed_gate_steps: vec![],
+                trigger_variable_allowlist: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(updated.id, created.id, "same binding row reused");
+        assert_eq!(updated.workflow_id, "wf-2");
+        assert_eq!(updated.run_selector, LivePageRunSelector::Latest);
+        assert_eq!(updated.created_at, created.created_at);
+        assert_eq!(
+            updated.trigger_variable_allowlist, None,
+            "re-upsert clears the trigger allowlist back to non-triggerable"
+        );
+
+        let bindings = list_live_page_bindings(&conn, &page.slug).unwrap().unwrap();
+        assert_eq!(bindings.len(), 1, "upsert did not create a duplicate");
+
+        // Unknown workflow → rejected.
+        let err = upsert_live_page_binding(
+            &conn,
+            &page.slug,
+            &UpsertLivePageBindingRequest {
+                workflow_id: "nope".into(),
+                dataset: "other".into(),
+                run_selector: None,
+                phase_map: serde_json::json!([]),
+                meta_map: serde_json::json!({}),
+                allowed_gate_steps: vec![],
+                trigger_variable_allowlist: None,
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("Workflow not found"));
+
+        // Delete is idempotent-ish: true once, false after.
+        assert!(delete_live_page_binding(&conn, &page.slug, "pipeline").unwrap());
+        assert!(!delete_live_page_binding(&conn, &page.slug, "pipeline").unwrap());
+        assert!(list_live_page_bindings(&conn, &page.slug)
+            .unwrap()
+            .unwrap()
             .is_empty());
     }
 

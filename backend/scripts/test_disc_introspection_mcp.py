@@ -5816,7 +5816,8 @@ class LivePageToolTests(unittest.TestCase):
         names = [tool["name"] for tool in self.mod.TOOLS]
         for name in [
             "page_list", "page_get", "page_create", "page_update_html",
-            "page_add_dataset",
+            "page_add_dataset", "page_bind_workflow", "page_list_bindings",
+            "page_unbind_workflow",
         ]:
             self.assertIn(name, names)
             self.assertIn(name, self.mod.DISPATCH)
@@ -5969,6 +5970,70 @@ class LivePageToolTests(unittest.TestCase):
             self.mod.call_page_add_dataset({
                 "page_id": "page-1", "name": "auto_reviews", "kind": "bogus",
             })
+
+    def test_page_bind_workflow_defaults_empty_maps_and_forwards_optionals(self):
+        with mock.patch.object(
+            self.mod, "_http", return_value=self._env({"id": "bind-1"}),
+        ) as http:
+            result = self.mod.call_page_bind_workflow({
+                "page_id": "page/one",
+                "workflow_id": "wf-1",
+                "dataset": "pipeline",
+                "run_selector": "latest_active",
+                "allowed_gate_steps": ["gate_prod"],
+            })
+        self.assertEqual(result["id"], "bind-1")
+        http.assert_called_once_with(
+            "POST",
+            "/api/pages/page%2Fone/bindings",
+            {
+                "workflow_id": "wf-1",
+                "dataset": "pipeline",
+                "phase_map": [],
+                "meta_map": {},
+                "run_selector": "latest_active",
+                "allowed_gate_steps": ["gate_prod"],
+            },
+        )
+
+    def test_page_bind_workflow_read_only_bind_needs_only_three_ids(self):
+        with mock.patch.object(
+            self.mod, "_http", return_value=self._env({"id": "bind-2"}),
+        ) as http:
+            self.mod.call_page_bind_workflow({
+                "page_id": "page-1", "workflow_id": "wf-1", "dataset": "pipeline",
+            })
+        body = http.call_args.args[2]
+        self.assertEqual(body["phase_map"], [])
+        self.assertEqual(body["meta_map"], {})
+        self.assertNotIn("run_selector", body)
+        self.assertNotIn("allowed_gate_steps", body)
+
+    def test_page_bind_workflow_validates_ids_and_selector(self):
+        with self.assertRaisesRegex(RuntimeError, "workflow_id"):
+            self.mod.call_page_bind_workflow({"page_id": "p", "dataset": "d"})
+        with self.assertRaisesRegex(RuntimeError, "dataset"):
+            self.mod.call_page_bind_workflow({"page_id": "p", "workflow_id": "wf"})
+        with self.assertRaisesRegex(RuntimeError, "run_selector"):
+            self.mod.call_page_bind_workflow({
+                "page_id": "p", "workflow_id": "wf", "dataset": "d",
+                "run_selector": "bogus",
+            })
+
+    def test_page_list_bindings_returns_the_list(self):
+        with mock.patch.object(
+            self.mod, "_http", return_value=self._env([{"id": "bind-1", "dataset": "pipeline"}]),
+        ) as http:
+            result = self.mod.call_page_list_bindings({"page_id": "page/one"})
+        self.assertEqual(result[0]["dataset"], "pipeline")
+        http.assert_called_once_with("GET", "/api/pages/page%2Fone/bindings")
+
+    def test_page_unbind_workflow_deletes_by_dataset(self):
+        with mock.patch.object(self.mod, "_http", return_value=self._env(None)) as http:
+            self.mod.call_page_unbind_workflow({"page_id": "page/one", "dataset": "pipe/line"})
+        http.assert_called_once_with("DELETE", "/api/pages/page%2Fone/bindings/pipe%2Fline")
+        with self.assertRaisesRegex(RuntimeError, "dataset"):
+            self.mod.call_page_unbind_workflow({"page_id": "page-1"})
 
 
 class WorkflowRunHistoryTests(unittest.TestCase):

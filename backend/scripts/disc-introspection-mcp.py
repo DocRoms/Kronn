@@ -1507,8 +1507,10 @@ TOOLS = [
         "name": "page_create",
         "description": (
             "Create a sandboxed Live Page and its first immutable HTML revision. "
-            "Call `page_list` first. Data arrives through `window.KronnPageData` "
-            "and `kronn:page-data`; use the returned id in PublishPageData. Scope "
+            "Call `page_list` first. A dataset is read at "
+            "`window.KronnPageData.datasets.<name>.current` (NOT top-level "
+            "`window.KronnPageData.<name>`) and the HTML re-renders on the "
+            "`kronn:page-data` event; use the returned id in PublishPageData. Scope "
             "inherits from a bound discussion, while host CLIs may create standalone "
             "Pages. See `tool_manual({tool: \"page_create\"})`."
         ),
@@ -1546,7 +1548,10 @@ TOOLS = [
             "Replace a Live Page's presentation by creating a new immutable "
             "HTML revision. Dataset values and publication history are kept. "
             "Call page_get first, then send the complete self-contained HTML; "
-            "this is a full replacement, not a patch."
+            "this is a full replacement, not a patch. Read datasets at "
+            "`window.KronnPageData.datasets.<name>.current`; if the page mirrors "
+            "a workflow, a gate button calls "
+            "`window.KronnPageActions.decideGate({dataset, runId, decision, comment})`."
         ),
         "inputSchema": {
             "type": "object",
@@ -1575,6 +1580,71 @@ TOOLS = [
                 "max_age_days": {"type": "integer"},
             },
             "required": ["page_id", "name", "kind"],
+        },
+    },
+    {
+        "name": "page_bind_workflow",
+        "description": (
+            "Bind a Page dataset to a workflow so the Page MIRRORS that workflow's "
+            "live run into the dataset (phases/steps/statuses) and, optionally, may "
+            "DECIDE the workflow's gates from the page. Idempotent on (page, "
+            "dataset): re-binding the same dataset updates it in place. "
+            "`run_selector` picks which run to mirror (`latest` or `latest_active`, "
+            "prefer a non-terminal run). `phase_map`/`meta_map` are interpreted "
+            "client-side (how to fold `step_results` into the page's pipeline "
+            "shape). `allowed_gate_steps` lists the gate step names the page may "
+            "decide — an empty list (default) is a read-only mirror. Gate decisions "
+            "are always taken by a HUMAN on the page (a real click); there is no "
+            "agent decide tool by design. See `tool_manual({tool: "
+            "\"page_bind_workflow\"})`."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "page_id": {"type": "string", "description": "Page id or slug from page_list."},
+                "workflow_id": {"type": "string", "description": "Workflow id from workflow_list."},
+                "dataset": {"type": "string", "description": "Dataset name the run is mirrored into (create it with page_add_dataset)."},
+                "run_selector": {"type": "string", "enum": ["latest", "latest_active"]},
+                "phase_map": {"description": "Client-side phase grouping (array); optional."},
+                "meta_map": {"description": "Client-side meta resolution spec (object); optional."},
+                "allowed_gate_steps": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Gate step names the page may decide. Empty = read-only mirror.",
+                },
+            },
+            "required": ["page_id", "workflow_id", "dataset"],
+        },
+    },
+    {
+        "name": "page_list_bindings",
+        "description": (
+            "List the workflow bindings attached to a Page: which datasets mirror "
+            "which workflow, the run_selector and the gates each may decide. Read "
+            "this before re-binding or removing a mirror."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "page_id": {"type": "string", "description": "Page id or slug from page_list."},
+            },
+            "required": ["page_id"],
+        },
+    },
+    {
+        "name": "page_unbind_workflow",
+        "description": (
+            "Remove the workflow binding for a Page dataset (stops the run mirror "
+            "and revokes any gate-decision rights). Returns whether a binding was "
+            "deleted."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "page_id": {"type": "string", "description": "Page id or slug from page_list."},
+                "dataset": {"type": "string", "description": "Dataset name of the binding to remove."},
+            },
+            "required": ["page_id", "dataset"],
         },
     },
     {
@@ -7134,6 +7204,54 @@ def call_page_add_dataset(args):
     return _unwrap(_http("POST", f"/api/pages/{encoded}/datasets", body))
 
 
+def call_page_bind_workflow(args):
+    """Bind a Page dataset to a workflow (mirror + optional gate rights)."""
+    encoded = _page_selector(args, "page_bind_workflow")
+    workflow_id = args.get("workflow_id")
+    dataset = args.get("dataset")
+    if not isinstance(workflow_id, str) or not workflow_id.strip():
+        raise RuntimeError("page_bind_workflow: missing required 'workflow_id'")
+    if not isinstance(dataset, str) or not dataset.strip():
+        raise RuntimeError("page_bind_workflow: missing required 'dataset'")
+    body = {
+        "workflow_id": workflow_id.strip(),
+        "dataset": dataset.strip(),
+        # phase_map / meta_map are optional server-side (default null); default to
+        # the empty shapes so a bare read-only bind needs only the three ids.
+        "phase_map": args.get("phase_map", []),
+        "meta_map": args.get("meta_map", {}),
+    }
+    if "run_selector" in args:
+        selector = args["run_selector"]
+        if selector not in ("latest", "latest_active"):
+            raise RuntimeError(
+                "page_bind_workflow: 'run_selector' must be latest or latest_active"
+            )
+        body["run_selector"] = selector
+    if "allowed_gate_steps" in args:
+        gates = args["allowed_gate_steps"]
+        if not isinstance(gates, list):
+            raise RuntimeError("page_bind_workflow: 'allowed_gate_steps' must be an array")
+        body["allowed_gate_steps"] = gates
+    return _unwrap(_http("POST", f"/api/pages/{encoded}/bindings", body))
+
+
+def call_page_list_bindings(args):
+    """List the workflow bindings attached to a Page."""
+    encoded = _page_selector(args, "page_list_bindings")
+    return _unwrap(_http("GET", f"/api/pages/{encoded}/bindings")) or []
+
+
+def call_page_unbind_workflow(args):
+    """Remove the workflow binding for a Page dataset."""
+    encoded = _page_selector(args, "page_unbind_workflow")
+    dataset = args.get("dataset")
+    if not isinstance(dataset, str) or not dataset.strip():
+        raise RuntimeError("page_unbind_workflow: missing required 'dataset'")
+    encoded_dataset = urllib.parse.quote(dataset.strip(), safe="")
+    return _unwrap(_http("DELETE", f"/api/pages/{encoded}/bindings/{encoded_dataset}"))
+
+
 def call_mcp_list(_args):
     # 0.8.5 — wired MCP configs (the API plugin slug + config id the
     # workflow ApiCall steps need). Drops env values (secrets) and
@@ -9313,8 +9431,33 @@ TOOL_MANUALS = {
         "validation. Retention may be bounded with max_points or max_age_days.\n\n"
         "A bound discussion supplies project scope and is linked as the origin. A host CLI "
         "may omit discussion_id and create a standalone Page. The returned id is the exact "
-        "PublishPageData.page_publish.page_id. HTML reads the initial value from "
-        "window.KronnPageData and listens for the `kronn:page-data` CustomEvent."
+        "PublishPageData.page_publish.page_id.\n\n"
+        "AUTHOR CONTRACT (get this right or the page shows nothing): a dataset is exposed at "
+        "`window.KronnPageData.datasets.<name>.current` — NOT top-level "
+        "`window.KronnPageData.<name>`. A time_series/collection also carries "
+        "`.points`. The HTML must read `.datasets.<name>.current` and re-render inside a "
+        "`window.addEventListener('kronn:page-data', render)` handler (the parent re-pushes "
+        "on every refresh). A Page can also mirror a live workflow run and host gate buttons "
+        "— see `page_bind_workflow` and `tool_manual({tool: \"page_bind_workflow\"})`."
+    ),
+    "page_bind_workflow": (
+        "Turns a Live Page into a two-way surface for a workflow, with ZERO token cost "
+        "(HTTP plumbing + client-side reshape, no agent/LLM). READ path: the parent frame "
+        "reads the bound run and folds its `step_results` into the page's `pipeline` dataset "
+        "on each refresh, so steps validate one-by-one without a reload. WRITE path: the "
+        "page may decide the workflow's gates listed in `allowed_gate_steps`.\n\n"
+        "Prerequisites: create the dataset first (`page_add_dataset`, kind `snapshot`), and "
+        "resolve real ids (`page_list`, `workflow_list`) — never guess. `run_selector`: "
+        "`latest_active` for a live dashboard (prefers a non-terminal run), else `latest`.\n\n"
+        "`phase_map` groups steps into phases the page renders: "
+        "`[{name, emoji?, steps: [{step, tag?, label?, link?}]}]`. `meta_map` resolves KPI "
+        "fields from the run: values are `trigger.<key>`, `run.<field>`, "
+        "`step:<name>:json:<dotpath>`, `step:<name>:re:<regex>`, or a literal.\n\n"
+        "GATES STAY HUMAN. Listing a gate in `allowed_gate_steps` only lets a person click "
+        "Approve/Reject on the page (real user gesture, re-authorized server-side against the "
+        "binding). There is deliberately no agent tool to decide a gate — do not try to "
+        "approve one programmatically. The decision endpoint is destructive-gated, so it is "
+        "unreachable by an anonymous remote caller even when app-wide auth is off."
     ),
     "workflow_create_draft": (
         "The workflow always lands with `enabled:false`; no cron fires until the user "
@@ -9973,6 +10116,9 @@ DISPATCH = {
     "page_create": call_page_create,
     "page_update_html": call_page_update_html,
     "page_add_dataset": call_page_add_dataset,
+    "page_bind_workflow": call_page_bind_workflow,
+    "page_list_bindings": call_page_list_bindings,
+    "page_unbind_workflow": call_page_unbind_workflow,
     "mcp_list": call_mcp_list,
     # 0.8.7 — fetch a Kronn doc convention spec on demand (cheap if not
     # called; lets agents about to author AGENTS.md sections pull the
@@ -10537,7 +10683,7 @@ def _handle(req):
                     "• Workflows (multi-step pipelines): `workflow_list` (compact) · `workflow_get` (FULL, every step) · `workflow_step_schema` (CANONICAL step schema as an untruncatable result — the closed 12 `step_type`s, per-type fields, runtime contracts; call before authoring) · `workflow_create_draft` · `workflow_clone`/`workflow_update`/`workflow_set_enabled` · `workflow_trigger`/`workflow_run_status` · run history `workflow_runs`/`workflow_run_get` · `workflow_active_runs`/`workflow_cancel_run`. Agent-step bindings (full CRUD): `skills_list`/`profiles_list`/`directives_list` enumerate valid ids; `skill_get`/`profile_get`/`directive_get` read FULL bodies; `skill_create`/`skill_update`/`skill_delete` (+ `profile_*`/`directive_*`) author & edit custom ones.\n"
                     "• Quick Prompts (reusable prompt templates): `qp_list` (no body) · `qp_get` (FULL incl `prompt_template` — read this to know what a QP does, or to run it yourself) · `qp_create_draft`/`qp_update`/`qp_delete` · `qp_run`/`qp_batch_run`.\n"
                     "• Quick APIs + API broker: `qa_list`/`qa_run`/`qa_create_draft`/`qa_update` · `mcp_list` → `api_call` (configured plugins, auth injected). Quick Execs: `qe_list`/`qe_run`/`qe_create_draft`/`qe_update` for saved shell-free CLI collectors.\n"
-                    "• Live Pages (shared HTML reports): `page_list` · `page_get` · `page_create` · `page_update_html` · `page_add_dataset`. Resolve or create the Page before authoring a `PublishPageData` step.\n"
+                    "• Live Pages (shared HTML reports): `page_list` · `page_get` · `page_create` · `page_update_html` · `page_add_dataset`. Resolve or create the Page before authoring a `PublishPageData` step. **Author contract:** page HTML reads a dataset at `window.KronnPageData.datasets.<name>.current` (NOT `window.KronnPageData.<name>`) and re-renders on the `kronn:page-data` event. A Page can also **mirror a live workflow run** into a dataset and host **gate buttons** — wire it with `page_bind_workflow`/`page_list_bindings`/`page_unbind_workflow`; the HTML calls `window.KronnPageActions.decideGate({dataset, runId, decision, comment})` on a real user click. Deciding a gate stays a **human action** — there is deliberately no agent tool to approve/reject a gate.\n"
                     "• Docs/conventions: `convention_get`. Continual learning: `learning_propose`.\n"
                     "**Navigation rule:** to understand a CAPABILITY, read the relevant tool's description AND `*_get` a REAL, rich example — never infer what the system can do from a single workflow/QP you happened to open.\n\n"
                     "**API actions — order to avoid burning tokens:** "

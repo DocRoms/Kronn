@@ -17,6 +17,8 @@ import {
   requestRenderedPageHtml,
   runtimeData,
 } from '../lib/live-page-sandbox';
+import { resolveBindingPipelines } from '../lib/live-page-mirror';
+import { type Pipeline } from '../lib/live-page-pipeline';
 import { formatRelativeTime } from '../lib/relativeTime';
 import { CopyIdPill } from '../components/CopyIdPill';
 import { CollectionFavoritesHeader } from '../components/CollectionFavoritesHeader';
@@ -177,6 +179,13 @@ export function PagesPage({
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const linkRelayRef = useRef<ReturnType<typeof createLivePageOpenLinkRelay> | null>(null);
   const [bridgeChannel] = useState(channelId);
+  // Live run mirror for the preview iframe, shared with the published standalone
+  // view so the editor preview shows the real bound run — not just the page's
+  // mock fallback. Kept out of the code editor; it only feeds the preview frame.
+  const [pipelines, setPipelines] = useState<Record<string, Pipeline>>({});
+  // Signature of the last data posted into the preview iframe, so a mirror poll
+  // that returns identical pipelines doesn't rebuild the frame's DOM on a timer.
+  const lastPublishedSig = useRef<string | null>(null);
   const requestedPageIdRef = useRef(initialSelectedPageId);
   const selectionConsumedRef = useRef(onInitialSelectionConsumed);
 
@@ -574,18 +583,36 @@ export function PagesPage({
     () => revisionHtml ? buildSandboxDocument(revisionHtml, bridgeChannel) : '',
     [bridgeChannel, revisionHtml],
   );
-  const publishToFrame = useCallback(() => {
+  const publishToFrame = useCallback((force = false) => {
     if (!detail) return;
     const target = iframeRef.current?.contentWindow ?? null;
     if (!target) return;
     linkRelayRef.current?.connect(target);
+    const data = runtimeData(detail);
+    // Overlay each mirrored pipeline as a snapshot dataset so the preview reads
+    // it exactly like a published dataset (`KronnPageData.datasets.<name>.current`),
+    // showing the live bound run instead of the page's mock fallback.
+    for (const [name, pipeline] of Object.entries(pipelines)) {
+      data.datasets[name] = { kind: 'snapshot', current: pipeline, points: [] };
+    }
+    // Skip re-posting identical data (a mirror poll that returns the same run)
+    // so the preview isn't rebuilt on every tick. `force` is set on frame load.
+    const signature = `${detail.data_revision}|${JSON.stringify(pipelines)}`;
+    if (!force && signature === lastPublishedSig.current) return;
+    lastPublishedSig.current = signature;
     target.postMessage({
       type: 'kronn:page-data',
       version: 1,
       channel_id: bridgeChannel,
-      data: runtimeData(detail),
+      data,
     }, '*');
-  }, [bridgeChannel, detail]);
+  }, [bridgeChannel, detail, pipelines]);
+  // A freshly loaded preview document must always receive the current data,
+  // regardless of the signature guard, so reset it and force this publish.
+  const handleFrameLoad = useCallback(() => {
+    lastPublishedSig.current = null;
+    publishToFrame(true);
+  }, [publishToFrame]);
   useEffect(() => {
     const relay = createLivePageOpenLinkRelay(bridgeChannel);
     linkRelayRef.current = relay;
@@ -595,6 +622,39 @@ export function PagesPage({
     };
   }, [bridgeChannel]);
   useEffect(() => { publishToFrame(); }, [publishToFrame]);
+  // Mirror the selected Page's bound run into the preview on an adaptive cadence
+  // (fast while a bound run is active, idle heartbeat otherwise, paused when the
+  // tab is hidden), so the editor preview validates steps live like the
+  // published standalone view instead of showing only the page's mock fallback.
+  useEffect(() => {
+    const pageId = detail?.id;
+    setPipelines({}); // never carry one page's run into another's preview
+    if (!pageId) return;
+    const id: string = pageId;
+    let active = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let quiet = 0;
+    const ACTIVE_MS = 4_000, IDLE_MS = 30_000, QUIET_BEFORE_IDLE = 3;
+    async function tick(): Promise<void> {
+      if (!active) return;
+      if (globalThis.document?.visibilityState === 'hidden') {
+        timer = setTimeout(() => void tick(), IDLE_MS);
+        return;
+      }
+      try {
+        const mirror = await resolveBindingPipelines(id);
+        if (!active) return;
+        setPipelines(mirror.pipelines);
+        quiet = mirror.active ? 0 : quiet + 1;
+      } catch {
+        // keep the last good mirror on a transient failure
+      }
+      if (!active) return;
+      timer = setTimeout(() => void tick(), quiet >= QUIET_BEFORE_IDLE ? IDLE_MS : ACTIVE_MS);
+    }
+    void tick();
+    return () => { active = false; if (timer) clearTimeout(timer); };
+  }, [detail?.id]);
 
   return (
     <div className="live-pages" data-testid="live-pages-page">
@@ -1137,7 +1197,7 @@ export function PagesPage({
                 title={detail.title}
                 sandbox="allow-scripts"
                 srcDoc={document}
-                onLoad={publishToFrame}
+                onLoad={handleFrameLoad}
                 data-testid="live-page-frame"
               />
             )}

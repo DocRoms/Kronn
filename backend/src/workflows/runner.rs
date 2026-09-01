@@ -121,6 +121,28 @@ fn workflow_requests_workspace(config: Option<&WorkspaceConfig>) -> bool {
     })
 }
 
+/// A SubWorkflow *foreach* step fans its children out INSIDE the parent's
+/// shared worktree: the items file (`sub_workflow_foreach_file`) and each
+/// child's `.kronn/current_task.json` slice both live there. Such a workflow
+/// therefore *structurally* needs a worktree, independent of whether the user
+/// set `workspace_config`.
+///
+/// This existed implicitly before KT-343: every project-linked run got a
+/// worktree, so foreach workflows never had to opt in. Making isolation opt-in
+/// silently broke every such workflow with `workspace_config: null` — the
+/// foreach step fails at runtime with "requires the parent to run in a git
+/// worktree". Deriving the need from the step shape keeps them working and,
+/// crucially, means a teammate who rebases this change doesn't have to
+/// hand-edit each foreach workflow's config to un-break their cron.
+fn workflow_steps_require_worktree(steps: &[WorkflowStep]) -> bool {
+    steps.iter().any(|s| {
+        matches!(s.step_type, StepType::SubWorkflow)
+            && s.sub_workflow_foreach_file
+                .as_deref()
+                .is_some_and(|f| !f.trim().is_empty())
+    })
+}
+
 pub const UNCERTAIN_SIDE_EFFECT_STATE_KEY: &str = "__kronn.uncertain_side_effect";
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -477,7 +499,8 @@ async fn execute_run_with_notify_policy(
     // Hooks are the one compatibility exception: legacy hook-only configs
     // still request a worktree because silently dropping after_create / etc.
     // would be a different behavioral regression.
-    let workspace_requested = workflow_requests_workspace(workflow.workspace_config.as_ref());
+    let workspace_requested = workflow_requests_workspace(workflow.workspace_config.as_ref())
+        || workflow_steps_require_worktree(&workflow.steps);
 
     // Create or attach workspace (if we have a project path). An inherited or
     // resumed workspace remains authoritative even if the workflow definition
@@ -3220,6 +3243,45 @@ mod tests {
             },
             require_isolation: false,
         })));
+    }
+
+    #[test]
+    fn foreach_subworkflow_requires_worktree_even_without_config() {
+        // Regression for KT-343: a foreach fan-out (items file lives in the
+        // shared worktree) must get a worktree even with `workspace_config:
+        // null`, otherwise `review_each` fails "requires the parent to run in
+        // a git worktree" — which silently broke the Cron PR Review workflow.
+        let foreach = WorkflowStep {
+            step_type: StepType::SubWorkflow,
+            sub_workflow_id: Some("child".into()),
+            sub_workflow_foreach_file: Some(".kronn/prs.json".into()),
+            ..WorkflowStep::default()
+        };
+        assert!(workflow_steps_require_worktree(std::slice::from_ref(&foreach)));
+
+        // A single (non-foreach) sub-workflow can create its own worktree, so
+        // it does NOT force one on the parent.
+        let single = WorkflowStep {
+            step_type: StepType::SubWorkflow,
+            sub_workflow_id: Some("child".into()),
+            sub_workflow_foreach_file: None,
+            ..WorkflowStep::default()
+        };
+        assert!(!workflow_steps_require_worktree(std::slice::from_ref(&single)));
+
+        // An empty foreach path is not a real fan-out.
+        let blank = WorkflowStep {
+            step_type: StepType::SubWorkflow,
+            sub_workflow_foreach_file: Some("   ".into()),
+            ..WorkflowStep::default()
+        };
+        assert!(!workflow_steps_require_worktree(std::slice::from_ref(&blank)));
+
+        // Non-subworkflow steps never force a worktree on their own.
+        assert!(!workflow_steps_require_worktree(&[WorkflowStep {
+            step_type: StepType::Exec,
+            ..WorkflowStep::default()
+        }]));
     }
 
     // ─── next_step_index_for_resume — Goto-loop bug fix (0.7.0) ─────────
