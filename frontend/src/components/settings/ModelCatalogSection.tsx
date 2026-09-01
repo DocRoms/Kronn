@@ -6,6 +6,7 @@ import type {
   AgentType,
   CatalogModelEntry,
   ModelCatalogSnapshot,
+  ModelCostHint,
   ModelTier,
 } from '../../types/generated';
 
@@ -17,6 +18,8 @@ interface ManualForm {
   capabilities: string[];
   reasoningModes: string;
   tier: ModelTier | '';
+  costHint: ModelCostHint | '';
+  privacyNote: string;
 }
 
 const blankForm = (snapshot: ModelCatalogSnapshot | null): ManualForm => {
@@ -29,6 +32,8 @@ const blankForm = (snapshot: ModelCatalogSnapshot | null): ManualForm => {
     capabilities: ['chat'],
     reasoningModes: '',
     tier: '',
+    costHint: '',
+    privacyNote: '',
   };
 };
 
@@ -67,6 +72,8 @@ export function ModelCatalogSection() {
       capabilities: entry.capabilities,
       reasoningModes: entry.reasoning_modes.join(', '),
       tier: entry.tier_assignment ?? '',
+      costHint: entry.cost_hint ?? '',
+      privacyNote: entry.privacy_note ?? '',
     });
     setError(null);
   };
@@ -83,6 +90,8 @@ export function ModelCatalogSection() {
       reasoning_modes: form.reasoningModes.split(',').map(value => value.trim()).filter(Boolean),
       default_reasoning_mode: null,
       tier_assignment: form.tier || null,
+      cost_hint: form.costHint || null,
+      privacy_note: form.privacyNote.trim() || null,
     };
     try {
       if (editing) await modelCatalogApi.updateManual(request);
@@ -172,6 +181,19 @@ export function ModelCatalogSection() {
               <span className="set-litellm-label">{t('modelCatalog.reasoningModes')}</span>
               <input className="set-litellm-input" value={form.reasoningModes} placeholder="low, medium, high" onChange={event => setForm(current => current && ({ ...current, reasoningModes: event.target.value }))} />
             </label>
+            <label className="set-litellm-field">
+              <span className="set-litellm-label">{t('modelCatalog.costHintField')}</span>
+              <select className="set-litellm-input" value={form.costHint} onChange={event => setForm(current => current && ({ ...current, costHint: event.target.value as ModelCostHint | '' }))}>
+                <option value="">{t('modelCatalog.noCostHint')}</option>
+                <option value="free">{t('modelCatalog.costHint.free')}</option>
+                <option value="paid">{t('modelCatalog.costHint.paid')}</option>
+                <option value="unknown">{t('modelCatalog.costHint.unknown')}</option>
+              </select>
+            </label>
+            <label className="set-litellm-field">
+              <span className="set-litellm-label">{t('modelCatalog.privacyNoteField')}</span>
+              <input className="set-litellm-input" value={form.privacyNote} onChange={event => setForm(current => current && ({ ...current, privacyNote: event.target.value }))} />
+            </label>
           </div>
           <div className="set-ext-api-test-actions">
             {(['chat', 'image', 'video'] as const).map(capability => (
@@ -217,6 +239,15 @@ export function ModelCatalogSection() {
                     <span>{model.display_alias ?? model.display_name}</span>
                     <small>{model.model_id} · {t(`modelCatalog.provenance.${model.provenance}`)}</small>
                     {model.availability === 'unavailable' && <em>{t('modelCatalog.unavailable')}</em>}
+                    {model.cost_hint && (
+                      <span
+                        className="badge badge-muted"
+                        data-cost-hint={model.cost_hint}
+                        title={model.privacy_note ?? undefined}
+                      >
+                        {t(`modelCatalog.costHint.${model.cost_hint}`)}
+                      </span>
+                    )}
                   </button>
                   {(model.provenance === 'manual' || model.provenance === 'migrated') && (
                     <button type="button" className="set-icon-btn" aria-label={t('common.delete')} onClick={() => void remove(model)}><Trash2 size={10} /></button>

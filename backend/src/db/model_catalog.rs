@@ -13,15 +13,15 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use super::parse_dt;
 use crate::models::{
-    AgentType, CatalogModelEntry, ModelAvailability, ModelProvenance, ModelTier,
+    AgentType, CatalogModelEntry, ModelAvailability, ModelCostHint, ModelProvenance, ModelTier,
     ModelUnavailableReason, UpsertManualModelRequest,
 };
 
 const COLUMNS: &str =
     "id, runtime_target_id, agent_type, model_id, display_name, display_alias, provenance, \
     availability, unavailable_reason, unavailable_detail, capabilities_json, \
-    reasoning_modes_json, default_reasoning_mode, tier_assignment, manual_origin, \
-    first_seen_at, last_seen_at, last_checked_at, created_at, updated_at";
+    reasoning_modes_json, default_reasoning_mode, tier_assignment, cost_hint, privacy_note, \
+    manual_origin, first_seen_at, last_seen_at, last_checked_at, created_at, updated_at";
 
 pub fn canonical_id(runtime_target_id: &str, model_id: &str) -> String {
     let payload = format!("{runtime_target_id}\0{model_id}");
@@ -202,6 +202,23 @@ fn parse_tier(s: &str) -> Option<ModelTier> {
     }
 }
 
+fn format_cost_hint(c: ModelCostHint) -> &'static str {
+    match c {
+        ModelCostHint::Free => "free",
+        ModelCostHint::Paid => "paid",
+        ModelCostHint::Unknown => "unknown",
+    }
+}
+
+fn parse_cost_hint(s: &str) -> Option<ModelCostHint> {
+    match s {
+        "free" => Some(ModelCostHint::Free),
+        "paid" => Some(ModelCostHint::Paid),
+        "unknown" => Some(ModelCostHint::Unknown),
+        _ => None,
+    }
+}
+
 fn row_to_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<CatalogModelEntry> {
     let capabilities_json: String = row.get(10)?;
     let reasoning_modes_json: String = row.get(11)?;
@@ -230,12 +247,17 @@ fn row_to_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<CatalogModelEntry> 
             .get::<_, Option<String>>(13)?
             .as_deref()
             .and_then(parse_tier),
-        manual_origin: row.get::<_, i64>(14)? != 0,
-        first_seen_at: parse_dt(row.get(15)?),
-        last_seen_at: row.get::<_, Option<String>>(16)?.map(parse_dt),
-        last_checked_at: parse_dt(row.get(17)?),
-        created_at: parse_dt(row.get(18)?),
-        updated_at: parse_dt(row.get(19)?),
+        cost_hint: row
+            .get::<_, Option<String>>(14)?
+            .as_deref()
+            .and_then(parse_cost_hint),
+        privacy_note: row.get(15)?,
+        manual_origin: row.get::<_, i64>(16)? != 0,
+        first_seen_at: parse_dt(row.get(17)?),
+        last_seen_at: row.get::<_, Option<String>>(18)?.map(parse_dt),
+        last_checked_at: parse_dt(row.get(19)?),
+        created_at: parse_dt(row.get(20)?),
+        updated_at: parse_dt(row.get(21)?),
     })
 }
 
@@ -303,7 +325,7 @@ pub fn create_manual(
     conn.execute(
         &format!(
             "INSERT INTO model_catalog_entries ({COLUMNS}) VALUES \
-             (?1,?2,?3,?4,?5,NULL,'manual','available',NULL,NULL,?6,?7,?8,?9,1,?10,NULL,?10,?10,?10)"
+             (?1,?2,?3,?4,?5,NULL,'manual','available',NULL,NULL,?6,?7,?8,?9,?11,?12,1,?10,NULL,?10,?10,?10)"
         ),
         params![
             id,
@@ -316,6 +338,8 @@ pub fn create_manual(
             req.default_reasoning_mode,
             req.tier_assignment.map(format_tier),
             now,
+            req.cost_hint.map(format_cost_hint),
+            req.privacy_note,
         ],
     )?;
     if req.tier_assignment.is_some() {
@@ -326,9 +350,13 @@ pub fn create_manual(
 
 /// Update the operator-owned fields of an existing entry. `display_name`,
 /// `capabilities` and `reasoning_modes` are only rewritten for `Manual` and
-/// `Migrated` rows (the operator owns the record); `display_alias` and
-/// `tier_assignment` are overlays that apply regardless of provenance, so
-/// they survive — and can be set on — a `Live`/`Cached` reconciled entry.
+/// `Migrated` rows (the operator owns the record); `display_alias`,
+/// `tier_assignment`, `cost_hint` and `privacy_note` are overlays that apply
+/// regardless of provenance, so they survive — and can be set on — a
+/// `Live`/`Cached` reconciled entry. `cost_hint`/`privacy_note` use
+/// COALESCE, not replace-with-null like `tier_assignment`: a caller that
+/// doesn't send them (`None`) must not silently erase a value reconciliation
+/// or a previous operator edit already set.
 pub fn update_manual(
     conn: &Connection,
     runtime_target_id: &str,
@@ -354,13 +382,16 @@ pub fn update_manual(
         conn.execute(
             "UPDATE model_catalog_entries SET display_name = ?1, capabilities_json = ?2, \
              reasoning_modes_json = ?3, default_reasoning_mode = ?4, tier_assignment = ?5, \
-             updated_at = ?6 WHERE id = ?7",
+             cost_hint = COALESCE(?6, cost_hint), privacy_note = COALESCE(?7, privacy_note), \
+             updated_at = ?8 WHERE id = ?9",
             params![
                 req.display_name,
                 serde_json::to_string(&req.capabilities)?,
                 serde_json::to_string(&req.reasoning_modes)?,
                 req.default_reasoning_mode,
                 req.tier_assignment.map(format_tier),
+                req.cost_hint.map(format_cost_hint),
+                req.privacy_note,
                 now,
                 existing.id,
             ],
@@ -368,10 +399,13 @@ pub fn update_manual(
     } else {
         conn.execute(
             "UPDATE model_catalog_entries SET display_alias = ?1, tier_assignment = ?2, \
-             updated_at = ?3 WHERE id = ?4",
+             cost_hint = COALESCE(?3, cost_hint), privacy_note = COALESCE(?4, privacy_note), \
+             updated_at = ?5 WHERE id = ?6",
             params![
                 Some(req.display_name.clone()),
                 req.tier_assignment.map(format_tier),
+                req.cost_hint.map(format_cost_hint),
+                req.privacy_note,
                 now,
                 existing.id,
             ],
@@ -453,14 +487,50 @@ pub struct DiscoveredModel {
     pub default_reasoning_mode: Option<String>,
 }
 
+/// Structural, non-enumerated detection of an OpenCode Zen-routed model.
+/// OpenCode's own docs qualify every Zen model id as `opencode/<model-id>`
+/// inside its multi-provider config
+/// [src: url: https://opencode.ai/docs/zen/]. Kronn has no live pricing
+/// signal for these: ACP's `session/new` config options carry only
+/// id/name (no cost), and Zen's own `/v1/models` endpoint returns only
+/// `id`/`object`/`created`/`owned_by` — verified empty of pricing fields.
+/// `cost_hint` therefore starts `Unknown`, never a guessed `Paid`/`Free`; the
+/// accompanying note is a structural fact about the third-party gateway, not
+/// per-model text. An operator with current pricing info can still override
+/// both via the manual catalog entry (`update_manual`'s overlay path).
+fn derive_opencode_zen_overlay(
+    runtime_target_id: &str,
+    model_id: &str,
+) -> (Option<ModelCostHint>, Option<String>) {
+    let is_zen_routed = runtime_target_id == agent_runtime_target_id(&AgentType::OpenCode)
+        && model_id
+            .split_once('/')
+            .is_some_and(|(provider, _)| provider == "opencode");
+    if !is_zen_routed {
+        return (None, None);
+    }
+    (
+        Some(ModelCostHint::Unknown),
+        Some(
+            "Routed through OpenCode Zen, a third-party model gateway. Pricing (including any \
+             temporarily free models) and data-handling terms can change at any time — verify \
+             current terms at opencode.ai/zen before sending sensitive data."
+                .to_string(),
+        ),
+    )
+}
+
 /// Reconcile one runtime's live discovery result into the catalog. Idempotent
 /// and safely replayable: reconciling an identical `discovered` set twice
 /// leaves the same rows with only `last_checked_at`/`last_seen_at` advancing.
 ///
-/// - New identities are inserted as `Live`.
+/// - New identities are inserted as `Live`; a first-seen OpenCode Zen model
+///   (KT-543: see `derive_opencode_zen_overlay`) gets an honest `Unknown`
+///   cost hint and a structural privacy note, never a guessed one.
 /// - An identity that already exists (any provenance) is promoted to `Live`;
-///   its `display_alias`, `tier_assignment` and `manual_origin` survive
-///   untouched (KT-531: operator choices outrank live metadata).
+///   its `display_alias`, `tier_assignment`, `cost_hint`, `privacy_note` and
+///   `manual_origin` survive untouched (KT-531: operator choices — and any
+///   value already assigned — outrank live metadata).
 /// - An identity previously `Live`/`Cached` that is absent from `discovered`
 ///   is downgraded to `Cached` (not deleted) so the last known catalogue
 ///   stays visible while clearly flagged as potentially stale.
@@ -497,10 +567,12 @@ pub fn reconcile_live(
                 )?;
             }
             None => {
+                let (cost_hint, privacy_note) =
+                    derive_opencode_zen_overlay(runtime_target_id, &model.model_id);
                 conn.execute(
                     &format!(
                         "INSERT INTO model_catalog_entries ({COLUMNS}) VALUES \
-                         (?1,?2,?3,?4,?5,NULL,'live','available',NULL,NULL,?6,?7,?8,NULL,0,?9,?9,?9,?9,?9)"
+                         (?1,?2,?3,?4,?5,NULL,'live','available',NULL,NULL,?6,?7,?8,NULL,?10,?11,0,?9,?9,?9,?9,?9)"
                     ),
                     params![
                         id,
@@ -512,6 +584,8 @@ pub fn reconcile_live(
                         serde_json::to_string(&model.reasoning_modes)?,
                         model.default_reasoning_mode,
                         now,
+                        cost_hint.map(format_cost_hint),
+                        privacy_note,
                     ],
                 )?;
             }
@@ -741,7 +815,7 @@ pub fn insert_migrated_seed_for_target(
     conn.execute(
         &format!(
             "INSERT INTO model_catalog_entries ({COLUMNS}) VALUES \
-             (?1,?2,?3,?4,?5,NULL,'migrated','available',NULL,NULL,?6,?7,NULL,?8,0,?9,NULL,?9,?9,?9)"
+             (?1,?2,?3,?4,?5,NULL,'migrated','available',NULL,NULL,?6,?7,NULL,?8,NULL,NULL,0,?9,NULL,?9,?9,?9)"
         ),
         params![
             id,
@@ -779,6 +853,8 @@ mod tests {
             reasoning_modes: vec![],
             default_reasoning_mode: None,
             tier_assignment: tier,
+            cost_hint: None,
+            privacy_note: None,
         }
     }
 
@@ -1055,6 +1131,8 @@ mod tests {
             reasoning_modes: vec![],
             default_reasoning_mode: None,
             tier_assignment: Some(ModelTier::Economy),
+            cost_hint: None,
+            privacy_note: None,
             manual_origin: true,
             first_seen_at: now,
             last_seen_at: None,
@@ -1083,5 +1161,205 @@ mod tests {
         assert_ne!(a.id, b.id);
         assert_eq!(a.tier_assignment, Some(ModelTier::Economy));
         assert_eq!(b.tier_assignment, Some(ModelTier::Reasoning));
+    }
+
+    #[test]
+    fn opencode_zen_overlay_is_structural_not_a_model_list() {
+        // Positive: any `opencode/<anything>` id under the OpenCode runtime
+        // target — never a hardcoded model name.
+        for model_id in ["opencode/big-pickle", "opencode/claude-sonnet-5", "opencode/whatever-ships-next"] {
+            let (cost, note) = derive_opencode_zen_overlay("agent:opencode", model_id);
+            assert_eq!(cost, Some(ModelCostHint::Unknown), "{model_id}");
+            assert!(note.is_some(), "{model_id}");
+        }
+    }
+
+    #[test]
+    fn opencode_zen_overlay_ignores_non_zen_opencode_models_and_other_runtimes() {
+        // A model configured directly (not via the opencode/ provider
+        // namespace) on the OpenCode runtime is not Zen-routed.
+        assert_eq!(
+            derive_opencode_zen_overlay("agent:opencode", "anthropic/claude-sonnet-5"),
+            (None, None)
+        );
+        assert_eq!(
+            derive_opencode_zen_overlay("agent:opencode", "gpt-5.6-sol"),
+            (None, None)
+        );
+        // Same-shaped id on a different runtime must not match.
+        assert_eq!(
+            derive_opencode_zen_overlay("agent:codex", "opencode/big-pickle"),
+            (None, None)
+        );
+        assert_eq!(
+            derive_opencode_zen_overlay("http:connection-a", "opencode/big-pickle"),
+            (None, None)
+        );
+    }
+
+    #[test]
+    fn reconcile_live_auto_tags_new_opencode_zen_models() {
+        let conn = test_conn();
+        reconcile_live(
+            &conn,
+            "agent:opencode",
+            &AgentType::OpenCode,
+            &[
+                DiscoveredModel {
+                    model_id: "opencode/big-pickle".into(),
+                    display_name: "Big Pickle".into(),
+                    capabilities: vec!["chat".into()],
+                    reasoning_modes: vec![],
+                    default_reasoning_mode: None,
+                },
+                DiscoveredModel {
+                    model_id: "anthropic/claude-sonnet-5".into(),
+                    display_name: "Claude Sonnet 5".into(),
+                    capabilities: vec!["chat".into()],
+                    reasoning_modes: vec![],
+                    default_reasoning_mode: None,
+                },
+            ],
+        )
+        .unwrap();
+
+        let zen = get(&conn, "agent:opencode", "opencode/big-pickle")
+            .unwrap()
+            .unwrap();
+        assert_eq!(zen.cost_hint, Some(ModelCostHint::Unknown));
+        assert!(zen.privacy_note.is_some());
+
+        let direct = get(&conn, "agent:opencode", "anthropic/claude-sonnet-5")
+            .unwrap()
+            .unwrap();
+        assert_eq!(direct.cost_hint, None);
+        assert_eq!(direct.privacy_note, None);
+    }
+
+    #[test]
+    fn reconcile_live_never_overwrites_an_existing_cost_hint_override() {
+        let conn = test_conn();
+        reconcile_live(
+            &conn,
+            "agent:opencode",
+            &AgentType::OpenCode,
+            &[DiscoveredModel {
+                model_id: "opencode/big-pickle".into(),
+                display_name: "Big Pickle".into(),
+                capabilities: vec![],
+                reasoning_modes: vec![],
+                default_reasoning_mode: None,
+            }],
+        )
+        .unwrap();
+        update_manual(
+            &conn,
+            "agent:opencode",
+            "opencode/big-pickle",
+            &UpsertManualModelRequest {
+                runtime_target_id: "agent:opencode".into(),
+                agent_type: AgentType::OpenCode,
+                cost_hint: Some(ModelCostHint::Free),
+                privacy_note: Some("Operator-confirmed free promo.".into()),
+                ..req("opencode/big-pickle", None)
+            },
+        )
+        .unwrap();
+
+        // Re-running discovery (e.g. next TTL refresh) must not clobber the
+        // operator's correction with the auto-derived Unknown default.
+        reconcile_live(
+            &conn,
+            "agent:opencode",
+            &AgentType::OpenCode,
+            &[DiscoveredModel {
+                model_id: "opencode/big-pickle".into(),
+                display_name: "Big Pickle".into(),
+                capabilities: vec![],
+                reasoning_modes: vec![],
+                default_reasoning_mode: None,
+            }],
+        )
+        .unwrap();
+
+        let entry = get(&conn, "agent:opencode", "opencode/big-pickle")
+            .unwrap()
+            .unwrap();
+        assert_eq!(entry.cost_hint, Some(ModelCostHint::Free));
+        assert_eq!(
+            entry.privacy_note.as_deref(),
+            Some("Operator-confirmed free promo.")
+        );
+    }
+
+    #[test]
+    fn update_manual_coalesces_cost_fields_instead_of_clearing_on_unrelated_edit() {
+        let conn = test_conn();
+        create_manual(
+            &conn,
+            &UpsertManualModelRequest {
+                cost_hint: Some(ModelCostHint::Paid),
+                privacy_note: Some("Billed per token.".into()),
+                ..req("model-a", Some(ModelTier::Economy))
+            },
+        )
+        .unwrap();
+
+        // An unrelated rename that doesn't send cost_hint/privacy_note must
+        // not silently wipe them.
+        update_manual(
+            &conn,
+            "http:connection-a",
+            "model-a",
+            &UpsertManualModelRequest {
+                display_name: "Renamed".into(),
+                ..req("model-a", Some(ModelTier::Economy))
+            },
+        )
+        .unwrap();
+
+        let entry = get(&conn, "http:connection-a", "model-a").unwrap().unwrap();
+        assert_eq!(entry.display_name, "Renamed");
+        assert_eq!(entry.cost_hint, Some(ModelCostHint::Paid));
+        assert_eq!(entry.privacy_note.as_deref(), Some("Billed per token."));
+
+        // An explicit correction still overwrites.
+        update_manual(
+            &conn,
+            "http:connection-a",
+            "model-a",
+            &UpsertManualModelRequest {
+                cost_hint: Some(ModelCostHint::Free),
+                ..req("model-a", Some(ModelTier::Economy))
+            },
+        )
+        .unwrap();
+        let corrected = get(&conn, "http:connection-a", "model-a").unwrap().unwrap();
+        assert_eq!(corrected.cost_hint, Some(ModelCostHint::Free));
+        assert_eq!(
+            corrected.privacy_note.as_deref(),
+            Some("Billed per token."),
+            "an unrelated field in the same request must not clear privacy_note"
+        );
+    }
+
+    #[test]
+    fn create_manual_persists_operator_cost_hint_and_privacy_note() {
+        let conn = test_conn();
+        let created = create_manual(
+            &conn,
+            &UpsertManualModelRequest {
+                cost_hint: Some(ModelCostHint::Unknown),
+                privacy_note: Some("Self-hosted, no third party.".into()),
+                ..req("model-x", None)
+            },
+        )
+        .unwrap()
+        .expect("created");
+        assert_eq!(created.cost_hint, Some(ModelCostHint::Unknown));
+        assert_eq!(
+            created.privacy_note.as_deref(),
+            Some("Self-hosted, no third party.")
+        );
     }
 }
