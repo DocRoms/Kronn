@@ -168,6 +168,11 @@ vi.mock('../../lib/api', () => ({
     // 0.8.6 phase 4 — NewDiscussionForm fetches the default tier on mount.
     getServerConfig: vi.fn().mockResolvedValue({ default_model_tier: 'default' }),
   },
+  // KT-531 — AgentSwitchPicker reads the dynamic model catalog when its
+  // popover opens.
+  modelCatalogApi: {
+    list: vi.fn().mockResolvedValue({ targets: [] }),
+  },
 }));
 
 // Mock useWebSocket hook (WS not available in jsdom)
